@@ -1,7 +1,7 @@
 # The stack ships no Nextcloud. Storage is one of two modes, chosen by
 # `[nextcloud] url` in config.toml:
 #
-#   - local (the default): the workspace is /data/workspace on the state volume.
+#   - local (the default): the workspace is /data/workspace in the state directory.
 #   - full Nextcloud integration: the bot is a user on an existing Nextcloud,
 #     and the workspace is the VM's rclone mount of its files, bound at
 #     /mnt/shared below. The entrypoint refuses to start when /mnt/shared is
@@ -33,6 +33,17 @@ x-workspace-mount: &workspace_mount
 # Read-only for every running service, so the daemon cannot rewrite its own
 # config. `istota setup` and `istota apply` write it from a one-shot container
 # that `istota-stack` starts with ISTOTA_CONFIG_ACCESS=rw.
+# The state at /data: the framework and module databases, the master key, the
+# local workspace. On the VM `istota-stack` sets ISTOTA_DATA_DIR to
+# /srv/app/istota/data, a host directory; anywhere else it is the named volume
+# `data`. Short syntax, because only the short form lets one variable choose
+# between a bind and a volume. A stack started with ISTOTA_CONFIG_DIR but no
+# ISTOTA_DATA_DIR is an istota-stack from before the directory, which the first
+# update to this file runs: it keeps that stack on the volume it has always used,
+# `istota_data`, until the new script's `up` copies it across. Remove that arm
+# and the volume once no VM is left unmigrated.
+x-data-mount: &data_mount ${ISTOTA_DATA_DIR:-${ISTOTA_CONFIG_DIR:+istota_}data}:/data
+
 x-config-mount: &config_mount
   type: bind
   source: ${ISTOTA_CONFIG_DIR:-./config}
@@ -164,7 +175,7 @@ services:
       retries: 90
       start_period: 30s
     volumes:
-      - istota_data:/data
+      - *data_mount
       - *config_mount
       - *workspace_mount
     # The ingress mode and the public name, for the entrypoint's check that
@@ -216,7 +227,7 @@ services:
       daemon:
         condition: service_healthy
     volumes:
-      - istota_data:/data
+      - *data_mount
       - *config_mount
       - *workspace_mount
     # Internal-only — nginx routes /istota/ to web:${WEB_PORT}. To bypass nginx,
@@ -517,12 +528,12 @@ services:
       daemon:
         condition: service_started
     volumes:
-      # The whole data volume, for one directory and one socket in it. Both
+      # The whole state directory, for one directory and one socket in it. Both
       # live beside db_path, which `istota setup` writes as
       # /data/db/istota.db, and both are the daemon's to create — the sidecar
       # dials the socket and Baileys writes the session files, so this
       # container must see the same inodes rather than a copy.
-      - istota_data:/data
+      - *data_mount
     environment:
       # Derived from db_path above rather than configured: the socket name has
       # no config override at all, and session_dir is left unset in the config
@@ -597,5 +608,7 @@ secrets:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_google_workspace_client_secret
 
 volumes:
+  data:
+  # Only for a stack an older istota-stack starts; see x-data-mount.
   istota_data:
   browser_profile:

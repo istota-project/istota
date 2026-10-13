@@ -7,8 +7,10 @@
 #   istota-stack update --unsigned latest
 #                               the tip of main, recorded as main-<commit>
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
-#   istota-stack rollback       back to the previous tag, if its image can run the database;
-#                               reprovisions the host as update does
+#   istota-stack rollback [--force]
+#                               back to the previous tag, if its image can run the database;
+#                               reprovisions the host as update does. --force goes back to a
+#                               release from before /srv/app/istota/data, onto the old volume
 #   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
 #   istota-stack setup --web [--local]
 #                               the first setup in a browser: prints an address and a
@@ -26,7 +28,7 @@
 #   istota-stack retire-bare-metal --namespace NS [--dry-run]
 #                               remove what the old Ansible role installed, once the stack runs
 #   istota-stack localize-workspace [--copy-only] [--resume] [--dry-run] [--no-note] [--accept-skipped]
-#                               move a mounted workspace onto the state volume, offline
+#                               move a mounted workspace into the state directory, offline
 #   istota-stack put-files [--dry-run]
 #                               write secrets/ and config/admins from JSON on stdin, as uid 10001
 #   istota-stack config-apply   apply what the web config editor requested (istota-config-apply.service)
@@ -97,6 +99,10 @@ ENV_FILE="${STACK}/.env"
 HOST_ENV="${STACK}/host.env"
 CONFIG_DIR="${STACK}/config"
 SECRETS_DIR="${STACK}/secrets"
+# The state bound at /data. Releases before it kept the state in a named volume;
+# DATA_COPIED records that `adopt_data_dir` copied one across.
+DATA_DIR="${STACK}/data"
+DATA_COPIED="${STACK}/.data-copied"
 # Beside .env, not in config/: root passes it to `docker compose`, and config/
 # is uid 10001's to write.
 DEVBOX_COMPOSE="${STACK}/compose.devbox.yml"
@@ -113,6 +119,7 @@ PROJECT=istota
 # to `daemon` built it as istota-istota.
 IMAGE=istota
 LEGACY_IMAGE=istota-istota
+LEGACY_DATA_VOLUME="${PROJECT}_istota_data"
 # Overridable so tests/test_istota_stack.py can stand in for a host with AppArmor.
 APPARMOR_SYSFS="${ISTOTA_APPARMOR_SYSFS:-/sys/kernel/security/apparmor}"
 APPARMOR_DIR="${ISTOTA_APPARMOR_DIR:-/etc/apparmor.d}"
@@ -279,6 +286,7 @@ compose() {
         if [ -n "$ignore_orphans" ]; then export COMPOSE_IGNORE_ORPHANS=1; fi
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
+        ISTOTA_DATA_DIR="$DATA_DIR" \
         ISTOTA_MOUNT_DIR="$MOUNT_DIR" \
         ISTOTA_WORKSPACE_FSTYPE="$fstype" \
         ISTOTA_WORKSPACE_MARKER_REQUIRED="$marker" \
@@ -308,7 +316,64 @@ main_service() {
 oneshot() {
     local tty=(-T)
     if [ -t 0 ] && [ -t 1 ]; then tty=(); fi
+    adopt_data_dir
     compose run --rm --no-deps "${tty[@]}" --entrypoint istota-drop "$@"
+}
+
+# The state directory, made on first use, or on a VM from before it, the old
+# state volume copied into it first. Run before anything starts a container. A
+# copy, not a move: the volume is kept, and a copy that fails its check leaves no
+# directory behind, so the next run starts it again.
+adopt_data_dir() {
+    local owner=() tag partial found name
+    if [ "$(id -u)" -eq 0 ]; then owner=(-o "$ISTOTA_UID" -g "$ISTOTA_UID"); fi
+    if [ -e "$DATA_COPIED" ] || ! docker volume inspect "$LEGACY_DATA_VOLUME" >/dev/null 2>&1; then
+        [ -d "$DATA_DIR" ] || install -d -m 0700 ${owner[@]+"${owner[@]}"} "$DATA_DIR"
+        return 0
+    fi
+    if [ -n "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
+        die "REFUSE: ${DATA_DIR} and the ${LEGACY_DATA_VOLUME} volume both hold state, and nothing records which is current. Move ${DATA_DIR} aside and run \`istota-stack up\` to copy the volume, or remove the volume to keep the directory."
+    fi
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "the ${LEGACY_DATA_VOLUME} volume is to be copied into ${DATA_DIR}, and ${ENV_FILE} names no image to copy it with."
+    log "copying the ${LEGACY_DATA_VOLUME} volume into ${DATA_DIR}, once; the stack stops for the copy"
+    compose stop
+    if [ -n "$(docker ps --filter "volume=${LEGACY_DATA_VOLUME}" --format '{{.ID}}')" ]; then
+        die "REFUSE: a container is still running on the ${LEGACY_DATA_VOLUME} volume. Stop it and run \`istota-stack up\`."
+    fi
+    partial="${DATA_DIR}.partial"
+    rm -rf "$partial"
+    install -d -m 0700 "$partial"
+    # As root in the container, so cp -a keeps every owner. It prints which of the
+    # two files a stack cannot start without the volume held, each compared.
+    # shellcheck disable=SC2016
+    if ! found="$(docker run --rm --network none --user 0:0 --entrypoint /bin/sh \
+            -v "${LEGACY_DATA_VOLUME}:/from:ro" -v "${partial}:/to" "${IMAGE}:${tag}" -c \
+            'cp -a /from/. /to/ || exit 1
+             for f in db/istota.db .secret_key; do
+                 [ -e "/from/$f" ] || continue
+                 cmp -s "/from/$f" "/to/$f" || exit 1
+                 echo "$f"
+             done')"; then
+        rm -rf "$partial"
+        die "copying the ${LEGACY_DATA_VOLUME} volume failed. The volume is unchanged and the stack is stopped; \`istota-stack up\` copies it again."
+    fi
+    for name in $found; do
+        if [ -L "${partial}/${name}" ] || [ ! -s "${partial}/${name}" ]; then
+            rm -rf "$partial"
+            die "${name} is missing from the copy of the ${LEGACY_DATA_VOLUME} volume. The volume is unchanged and the stack is stopped."
+        fi
+    done
+    chmod 0700 "$partial"
+    if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "$partial"; fi
+    rmdir "$DATA_DIR" 2>/dev/null || true
+    mv "$partial" "$DATA_DIR"
+    printf '%s\n' "$LEGACY_DATA_VOLUME" > "$DATA_COPIED"
+    log "copied the ${LEGACY_DATA_VOLUME} volume (${found//$'\n'/, }) into ${DATA_DIR}. The volume is kept; once the stack runs as it should, remove it with \`docker volume rm ${LEGACY_DATA_VOLUME}\`."
+    # A devbox mounts its repos from the state; its compose file still names the volume.
+    if [ -s "$DEVBOX_COMPOSE" ]; then
+        render_devbox_compose "$tag" || die "the devbox compose file could not be rendered against ${DATA_DIR}; run \`istota-stack up\` again."
+    fi
 }
 
 # `docker compose exec` into the running daemon container, through `istota-drop`:
@@ -424,6 +489,7 @@ PY
 # apply) are left alone.
 stack_up() {
     local active id service
+    adopt_data_dir
     compose up -d --remove-orphans
     active="$(compose config --services)"
     docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
@@ -551,7 +617,7 @@ render_devbox_compose() {
     local tag="$1" tmp
     [ -f "${CONFIG_DIR}/config.toml" ] || return 0
     tmp="$(mktemp)"
-    if ! WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file > "$tmp"; then
+    if ! WITHOUT_DEVBOX=1 ISTOTA_TAG="$tag" oneshot "$(main_service)" istota devbox compose-file --state-dir "$DATA_DIR" > "$tmp"; then
         rm -f "$tmp"
         log "istota devbox compose-file failed"
         return 1
@@ -680,6 +746,9 @@ provision_outdated() {
 }
 
 cmd_rollback() {
+    local force=""
+    if [ "${1:-}" = "--force" ]; then force=1; shift; fi
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
     local current current_unsigned previous previous_unsigned object rc=0
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
@@ -699,6 +768,16 @@ cmd_rollback() {
         object="$(resolve_unsigned_tag "$previous")"
     else
         object="$(verify_release_tag "$previous")"
+    fi
+    # A release from before the state directory runs on the volume this host
+    # copied out of, as it stood at the copy.
+    if [ -e "$DATA_COPIED" ] && ! verified_git show "${object}^{commit}:docker/docker-compose.yml" 2>/dev/null \
+            | grep -q 'ISTOTA_DATA_DIR'; then
+        if [ -z "$force" ]; then
+            echo "[istota-stack] REFUSE: ${previous} keeps its state in the ${LEGACY_DATA_VOLUME} volume, not ${DATA_DIR}, and would run on the volume as it was when it was copied. \`istota-stack rollback --force\` does that anyway. ${ENV_FILE} still names ${current}." >&2
+            exit 1
+        fi
+        log "WARNING: ${previous} runs on the ${LEGACY_DATA_VOLUME} volume as it was when it was copied, not on ${DATA_DIR}. What it writes stays in the volume, and an update back does not copy it again."
     fi
 
     # Ask the older image whether it can run this database before switching to
@@ -752,7 +831,7 @@ ensure_secret_files() {
 # An install upgraded from the Docker shape keeps its config on the state
 # volume, which the host bind now hides. Copy it out once.
 copy_out_config() {
-    local tag volume="${PROJECT}_istota_data"
+    local tag volume="$LEGACY_DATA_VOLUME"
     [ -e "${CONFIG_DIR}/config.toml" ] && return 0
     docker volume inspect "$volume" >/dev/null 2>&1 || return 0
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"

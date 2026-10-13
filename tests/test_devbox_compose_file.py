@@ -37,8 +37,8 @@ def _config(users=("alice", "bob"), **devbox) -> Config:
     return config
 
 
-def _doc(config: Config) -> dict:
-    text = compose_file.render_devbox_compose(config)
+def _doc(config: Config, state_dir: str | None = None) -> dict:
+    text = compose_file.render_devbox_compose(config, state_dir)
     assert text.startswith("#"), "the generated file says what wrote it"
     return yaml.safe_load(text)
 
@@ -99,7 +99,7 @@ class TestTheMountsAreTheBoundary:
             sources = {m["source"] for m in services[f"devbox-{user}"]["volumes"]}
             assert sources == {
                 f"devbox-home-{user}", f"devbox-exec-{user}", f"devbox-cred-{user}",
-                "istota_data",
+                "data",
             }
             assert not [s for s in sources if s.endswith(f"-{other}")], (
                 f"devbox-{user} mounts a volume of {other}'s"
@@ -115,8 +115,33 @@ class TestTheMountsAreTheBoundary:
 
     def test_the_repos_mount_is_the_users_own_subtree_at_the_same_path(self):
         repos = _targets(_doc(_config())["services"]["devbox-alice"])["/data/repos/alice"]
-        assert repos["source"] == "istota_data"
+        assert repos["source"] == "data"
         assert repos["volume"] == {"subpath": "repos/alice"}
+
+    def test_the_volume_is_the_one_the_shipped_file_falls_back_to(self):
+        shipped = yaml.safe_load(SHIPPED_COMPOSE.read_text())
+        assert compose_file.STATE_VOLUME in shipped["volumes"]
+        assert shipped["services"]["daemon"]["volumes"][0].endswith(
+            "}" + compose_file.STATE_VOLUME + "}:/data")
+
+    def test_with_a_state_directory_the_repos_are_a_bind_below_it(self):
+        """The daemon's /data is that directory on the VM, so the devbox has to
+        bind the same subtree rather than a volume the daemon does not use."""
+        services = _doc(_config(), "/srv/app/istota/data")["services"]
+        for user in ("alice", "bob"):
+            repos = _targets(services[f"devbox-{user}"])[f"/data/repos/{user}"]
+            assert repos == {
+                "type": "bind",
+                "source": f"/srv/app/istota/data/repos/{user}",
+                "target": f"/data/repos/{user}",
+                "bind": {"create_host_path": False},
+            }
+            assert all(m["source"] != compose_file.STATE_VOLUME for m in services[f"devbox-{user}"]["volumes"])
+
+    @pytest.mark.parametrize("state_dir", ["relative/data", "/srv/../etc", "/"])
+    def test_a_state_directory_that_is_not_an_absolute_directory_is_refused(self, state_dir):
+        with pytest.raises(compose_file.ComposeFileError, match="--state-dir"):
+            compose_file.render_devbox_compose(_config(), state_dir)
 
     def test_the_daemon_service_mounts_every_users_sockets_under_the_config_paths(self):
         mounts = _targets(_doc(_config())["services"]["daemon"])
@@ -209,14 +234,23 @@ class TestRefusals:
 
 
 class TestTheCliVerb:
-    def _run(self, tmp_path: Path, body: str) -> subprocess.CompletedProcess:
+    def _run(self, tmp_path: Path, body: str, *extra: str) -> subprocess.CompletedProcess:
         config = tmp_path / "config.toml"
         config.write_text(body)
         env = dict(os.environ, ISTOTA_CONFIG_PATH=str(config))
         return subprocess.run(
-            [sys.executable, "-m", "istota.cli", "-c", str(config), "devbox", "compose-file"],
+            [sys.executable, "-m", "istota.cli", "-c", str(config), "devbox", "compose-file", *extra],
             capture_output=True, text=True, env=env, timeout=120,
         )
+
+    def test_the_state_directory_reaches_the_render(self, tmp_path):
+        result = self._run(tmp_path, (
+            '[developer]\ndevbox_proxy_socket_dir = "/data/devbox/cred"\n'
+            '[developer.container]\nexec_socket_dir = "/data/devbox/exec"\n'
+            '[devbox]\nenabled = true\nusers = ["alice"]\n'
+        ), "--state-dir", "relative/data")
+        assert result.returncode == 1
+        assert "--state-dir" in result.stderr
 
     def test_it_prints_the_rendered_file(self, tmp_path):
         result = self._run(tmp_path, (

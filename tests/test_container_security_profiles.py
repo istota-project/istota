@@ -371,7 +371,7 @@ def test_every_service_on_the_data_volume_runs_as_the_daemon():
     compose = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())
     for name, service in compose["services"].items():
         volumes = [v if isinstance(v, str) else v.get("source", "") for v in service.get("volumes", [])]
-        if not any(str(v).split(":")[0] == "istota_data" for v in volumes):
+        if not any(str(v).endswith(":/data") for v in volumes):
             continue
         if name == "daemon":
             continue

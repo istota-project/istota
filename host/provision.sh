@@ -347,6 +347,9 @@ install -d -m 0755 "$STACK" "${STACK}/certs" "${STACK}/letsencrypt" "${STACK}/ac
 [ -n "$bare_metal_mount" ] || [ -n "$host_folder" ] || install -d -m 0755 "$MOUNT_DIR"
 install -d -m 0750 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/config"
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/secrets"
+# The state, bound at /data. Empty here on a VM from before it; istota-stack's
+# next `up` copies the old volume in.
+install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/data"
 # The web config editor's trigger, bound into web at /data/requests; its
 # existence is what makes istota-stack add docker-compose.config-apply.yml.
 install -d -m 0700 -o "$ISTOTA_UID" -g "$ISTOTA_UID" "${STACK}/requests"

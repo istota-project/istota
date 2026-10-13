@@ -110,6 +110,23 @@ case "$args" in
   *" devbox compose-file"*)
     if [ -n "${STUB_DEVBOX_COMPOSE:-}" ]; then printf '%s\n' "$STUB_DEVBOX_COMPOSE"
     else echo '{"services": {}}'; fi ;;
+  *" volume inspect "*) [ -n "${STUB_LEGACY_VOLUME:-}" ] || exit 1 ;;
+  *" ps --filter volume="*) printf '%b' "${STUB_VOLUME_USERS:-}" ;;
+  *":/from:ro "*)
+    # The state volume's copy: STUB_LEGACY_DIR stands in for the volume, and
+    # the output names what the container's comparison would have.
+    to=""; prev=""
+    for a in "$@"; do
+      if [ "$prev" = -v ] && [ "${a%:/to}" != "$a" ]; then to="${a%:/to}"; fi
+      prev="$a"
+    done
+    [ "${STUB_COPY_RC:-0}" -eq 0 ] || exit "$STUB_COPY_RC"
+    cp -Rp "$STUB_LEGACY_DIR/." "$to/"
+    for f in db/istota.db .secret_key; do
+      if [ -e "$STUB_LEGACY_DIR/$f" ]; then echo "$f"; fi
+    done
+    for f in ${STUB_COPY_DROPS:-}; do rm -f "$to/$f"; done
+    exit 0 ;;
   *" ps -a --filter label=com.docker.compose.project=istota "*) printf '%b' "${STUB_PROJECT_CONTAINERS:-}" ;;
   *" ps -q daemon"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
@@ -918,6 +935,199 @@ class TestRollback:
         tag = calls.index("image tag istota-istota:v0 istota:v0")
         check = next(i for i, call in enumerate(calls) if "--check-schema" in call)
         assert tag < check
+
+
+class TestTheStateDirectory:
+    """The state at /data is /srv/app/istota/data. A VM from before it kept the
+    state in the `istota_istota_data` volume, which the first container start
+    under this script copies across, once, with the stack stopped. A copy, so
+    the volume is there to go back to; the operator removes it."""
+
+    VOLUME = "istota_istota_data"
+    KEY = "k" * 64
+
+    @pytest.fixture
+    def legacy(self, fx, tmp_path) -> Fixture:
+        old = tmp_path / "old-volume"
+        (old / "db").mkdir(parents=True)
+        (old / "db" / "istota.db").write_bytes(b"SQLite format 3\0framework")
+        (old / ".secret_key").write_text(self.KEY)
+        (old / "workspace").mkdir()
+        (old / "workspace" / "notes.md").write_text("notes\n")
+        fx.env.update(STUB_LEGACY_VOLUME="1", STUB_LEGACY_DIR=str(old))
+        return fx
+
+    @staticmethod
+    def _index(calls: list[str], test) -> int | None:
+        return next((i for i, call in enumerate(calls) if test(call)), None)
+
+    def _copy(self, calls: list[str]) -> int | None:
+        return self._index(calls, lambda c: ":/from:ro " in f"{c} ")
+
+    def _up(self, calls: list[str]) -> int | None:
+        return self._index(calls, lambda c: c.endswith("up -d --remove-orphans"))
+
+    def test_compose_is_told_the_directory(self, fx):
+        result = _source(fx, 'docker() { echo "data=${ISTOTA_DATA_DIR}"; }; compose ps')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"data={fx.stack / 'data'}"
+
+    def test_a_vm_without_the_volume_gets_an_empty_private_directory(self, fx):
+        result = fx.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = fx.stack / "data"
+        assert data.is_dir() and list(data.iterdir()) == []
+        assert stat.S_IMODE(data.stat().st_mode) == 0o700
+        calls = fx.docker_calls()
+        assert self._copy(calls) is None
+        assert not any(call.endswith(" stop") for call in calls)
+        assert not (fx.stack / ".data-copied").exists()
+
+    def test_the_volume_is_copied_before_the_stack_starts(self, legacy):
+        result = legacy.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        data = legacy.stack / "data"
+        assert (data / "db" / "istota.db").read_bytes() == b"SQLite format 3\0framework"
+        assert (data / ".secret_key").read_text() == self.KEY
+        assert (data / "workspace" / "notes.md").read_text() == "notes\n"
+        assert stat.S_IMODE(data.stat().st_mode) == 0o700
+        calls = legacy.docker_calls()
+        stop = self._index(calls, lambda c: c.endswith(" stop"))
+        copy, up = self._copy(calls), self._up(calls)
+        assert stop is not None and copy is not None and up is not None, calls
+        assert stop < copy < up
+        assert "--user 0:0" in calls[copy] and "--network none" in calls[copy]
+        assert " istota:v0 " in f" {calls[copy]} ", "copied with the deployed image"
+        assert not any(call.startswith("volume rm") for call in calls)
+        assert f"docker volume rm {self.VOLUME}" in result.stdout
+        assert (legacy.stack / ".data-copied").read_text().strip() == self.VOLUME
+        assert not (legacy.stack / "data.partial").exists()
+
+    def test_it_copies_once(self, legacy):
+        assert legacy.run("up").returncode == 0
+        assert self._copy(legacy.docker_calls()) is not None
+        legacy.calls.unlink()
+        result = legacy.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = legacy.docker_calls()
+        assert self._copy(calls) is None
+        assert not any(call.endswith(" stop") for call in calls)
+
+    def test_an_empty_directory_provision_made_is_filled(self, legacy):
+        (legacy.stack / "data").mkdir()
+        result = legacy.run("up")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (legacy.stack / "data" / ".secret_key").read_text() == self.KEY
+
+    def test_a_one_shot_container_sees_the_copy(self, legacy, tmp_path):
+        """`apply` or `setup` before any `up` under this script would otherwise
+        run against an empty directory and write a new master key there."""
+        plan = tmp_path / "plan.toml"
+        plan.write_text("[config]\n")
+        result = legacy.run("apply", str(plan))
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = legacy.docker_calls()
+        run = self._index(calls, lambda c: " run --rm --no-deps " in c and "istota apply" in c)
+        copy = self._copy(calls)
+        assert copy is not None and run is not None and copy < run, calls
+
+    @pytest.mark.parametrize("env,named", [
+        ({"STUB_COPY_DROPS": ".secret_key"}, ".secret_key"),
+        ({"STUB_COPY_DROPS": "db/istota.db"}, "db/istota.db"),
+        ({"STUB_COPY_RC": "1"}, "copying"),
+    ])
+    def test_a_copy_that_fails_its_check_starts_nothing(self, legacy, env, named):
+        result = legacy.run("up", **env)
+        assert result.returncode != 0
+        assert named in result.stderr
+        assert not (legacy.stack / "data").exists()
+        assert not (legacy.stack / "data.partial").exists()
+        assert not (legacy.stack / ".data-copied").exists()
+        assert self._up(legacy.docker_calls()) is None
+
+    def test_state_in_both_places_is_refused_before_anything_stops(self, legacy):
+        data = legacy.stack / "data"
+        data.mkdir()
+        (data / "istota.db").write_text("other")
+        result = legacy.run("up")
+        assert result.returncode != 0
+        assert "REFUSE" in result.stderr
+        calls = legacy.docker_calls()
+        assert not any(call.endswith(" stop") for call in calls)
+        assert self._copy(calls) is None and self._up(calls) is None
+        assert (data / "istota.db").read_text() == "other"
+
+    def test_a_container_still_on_the_volume_stops_the_copy(self, legacy):
+        result = legacy.run("up", STUB_VOLUME_USERS="c0ffee\\n")
+        assert result.returncode != 0
+        assert "REFUSE" in result.stderr
+        calls = legacy.docker_calls()
+        assert self._copy(calls) is None and self._up(calls) is None
+
+    def test_the_devbox_compose_file_is_rendered_again_against_the_directory(self, legacy):
+        devbox = legacy.stack / "compose.devbox.yml"
+        devbox.write_text('{"services": {"devbox-alice": {}}}\n')
+        devbox.chmod(0o644)
+        result = legacy.run("up", STUB_DEVBOX_COMPOSE='{"services": {"devbox-alice": {"image": "x"}}}')
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = legacy.docker_calls()
+        render = self._index(calls, lambda c: "devbox compose-file" in c)
+        assert render is not None, calls
+        assert calls[render].endswith(f"devbox compose-file --state-dir {legacy.stack / 'data'}")
+        assert self._copy(calls) < render < self._up(calls)
+
+    def test_update_renders_the_devbox_against_the_directory(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        render = [c for c in fx.docker_calls() if "devbox compose-file" in c]
+        assert render and all(c.endswith(f"--state-dir {fx.stack / 'data'}") for c in render)
+
+    def test_a_rollback_to_a_release_from_before_the_directory_is_refused(self, legacy):
+        legacy.commit("v1")
+        legacy.tag("v1", key=legacy.release_key)
+        assert legacy.run("update", "v1").returncode == 0
+        assert (legacy.stack / ".data-copied").exists()
+        env_before, head_before = legacy.env_text(), legacy.head()
+        legacy.calls.unlink()
+        result = legacy.run("rollback")
+        assert result.returncode == 1
+        assert "REFUSE" in result.stderr and "--force" in result.stderr
+        assert legacy.env_text() == env_before
+        assert legacy.head() == head_before
+        assert not any("--check-schema" in call for call in legacy.docker_calls())
+
+    def test_force_goes_back_and_says_where_it_runs(self, legacy):
+        legacy.commit("v1")
+        legacy.tag("v1", key=legacy.release_key)
+        assert legacy.run("update", "v1").returncode == 0
+        result = legacy.run("rollback", "--force")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v0\n" in legacy.env_text()
+        assert "WARNING" in result.stdout and self.VOLUME in result.stdout
+
+    def test_a_rollback_between_releases_with_the_directory_is_not_refused(self, fx):
+        (fx.origin / "docker").mkdir()
+        (fx.origin / "docker" / "docker-compose.yml").write_text(
+            "services:\n  daemon:\n    volumes:\n      - ${ISTOTA_DATA_DIR:-data}:/data\n")
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        for tag in ("v1", "v2"):
+            fx.commit(tag)
+            fx.tag(tag, key=fx.release_key)
+            assert fx.run("update", tag).returncode == 0
+        (fx.stack / ".data-copied").write_text(f"{self.VOLUME}\n")
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+
+    def test_without_the_copy_a_rollback_is_not_refused(self, fx):
+        """A VM that never had the volume has nothing older to go back onto."""
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestTheServiceFollowsTheCheckout:

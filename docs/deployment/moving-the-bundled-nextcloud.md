@@ -5,7 +5,7 @@ Earlier Docker releases ran a Nextcloud inside the istota stack: the `nextcloud`
 An install whose `config.toml` still names `http://nextcloud` is refused at boot when no such host resolves. The log names the two ways forward:
 
 - **Keep the Nextcloud.** Move it, unchanged, into a compose project of its own, and run istota in full Nextcloud integration against it. Talk rooms, OAuth logins and every file stay where they are.
-- **Switch to local storage.** Copy the workspace onto the state volume and drop Nextcloud. Simpler, for an install that does not use Talk or Nextcloud's file access.
+- **Switch to local storage.** Copy the workspace into the state directory and drop Nextcloud. Simpler, for an install that does not use Talk or Nextcloud's file access.
 
 Both start with the stack stopped: `docker compose down` in the old `docker/` directory. Do not pass `--volumes`; the volumes are the data.
 
@@ -58,10 +58,10 @@ The old services used five named volumes, prefixed with the old compose project 
 
 ## Switch to local storage
 
-1. Copy the workspace into the state volume. With the old project name `istota`:
+1. Copy the workspace into the state directory, `/srv/app/istota/data`. With the old project name `istota`:
 
    ```bash
-   docker run --rm -v istota_shared_files:/from:ro -v istota_istota_data:/data alpine \
+   docker run --rm -v istota_shared_files:/from:ro -v /srv/app/istota/data:/data alpine \
        sh -c 'mkdir -p /data/workspace && cp -a /from/. /data/workspace/ && rm -f /data/.ownership-10001'
    ```
 

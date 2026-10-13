@@ -1388,7 +1388,7 @@ istota_config: {}
 #       # DOCKER: the container's config.toml is the operator's own (written once by
 #       # `istota setup`), so these keys are set there like any other. `istota setup`
 #       # writes db_path = "/data/db/istota.db", so the directory resolves to
-#       # /data/db/logs on the istota_data volume, beside the framework database and
+#       # /data/db/logs in the state directory, beside the framework database and
 #       # behind the same sandbox mask.
 #       session_log:
 #         # false = no new files; retention still sweeps existing ones

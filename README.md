@@ -164,7 +164,7 @@ Istota does not hand the model a pile of unrelated integrations. A task receives
 
 Every user has a workspace for notes, configuration, inbox files, memories, scripts, and generated exports. That workspace can be an ordinary local directory or a Nextcloud-backed file tree.
 
-Nextcloud is a first-class integration, not a requirement. When connected, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. Without it, the workspace is a local directory on the stack's state volume and people sign in with email.
+Nextcloud is a first-class integration, not a requirement. When connected, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. Without it, the workspace is a local directory in the stack's state and people sign in with email.
 
 Data stays in formats that can be inspected and moved without Istota: SQLite, Markdown, TOML, JSON, CSV, and Beancount. Module data is stored per user. Online database backups, restore tooling, migration checks, and `istota doctor` cover the operational side of keeping that data on your own server.
 

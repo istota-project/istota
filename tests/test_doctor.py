@@ -1919,12 +1919,12 @@ class TestBackupsOffVolume:
 
     def test_a_local_workspace_on_one_volume_warns(self, make_config, tmp_path):
         # Real devices: the database, the workspace and the default
-        # destination under it all sit in tmp_path, as on `istota_data`.
+        # destination under it all sit in tmp_path, as in `/srv/app/istota/data`.
         config = self._local(make_config, tmp_path)
         r = run_checks(config, only=(self.NAME,))[0]
         assert r.status == WARN
         assert "the database" in r.detail and "the workspace" in r.detail
-        assert "istota_data" in r.remedy and "db_backup_dir" in r.remedy
+        assert "/srv/app/istota/data" in r.remedy and "db_backup_dir" in r.remedy
 
     def test_a_destination_on_another_disk_is_ok(self, make_config, monkeypatch, tmp_path):
         config = self._local(make_config, tmp_path)

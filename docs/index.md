@@ -56,7 +56,7 @@ Every task is confined by bubblewrap, credential isolation, scoped files, an out
 
 Nextcloud is a first-class integration, not the foundation of the system. When connected, it provides files, calendars, contacts, OAuth login, notifications, and Talk while Istota acts as an ordinary Nextcloud user over standard protocols.
 
-Without Nextcloud, the workspace is an ordinary local directory on the stack's state volume, web chat handles conversations, and CalDAV and IMAP can point at other providers. `istota setup` asks which you want. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
+Without Nextcloud, the workspace is an ordinary local directory in the stack's state, web chat handles conversations, and CalDAV and IMAP can point at other providers. `istota setup` asks which you want. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
 
 ## Principles
 

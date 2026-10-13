@@ -2444,13 +2444,13 @@ class StackPool:
 
     #: Under `KEEP`, the volumes that are wiped anyway, by unqualified name.
     #:
-    #: `istota_data` holds the framework database every assertion is read out
+    #: `data` holds the framework database every assertion is read out
     #: of, so keeping it would make session 2's rows depend on session 1's. It
     #: also holds the `_provisioned_rooms` record, whose absence is what puts
     #: room provisioning back on the find-by-name path. The config is not on it:
     #: the testbed binds a fresh one from the session's scratch directory.
     #: `redis_data` is a cache with nothing in it worth a second of boot time.
-    KEEP_WIPES = ("istota_data", "redis_data")
+    KEEP_WIPES = ("data", "redis_data")
 
     def _down(self, args: list[str], *, shape: str) -> None:
         """Tear a stack down, keeping the expensive volumes if asked to.
@@ -2470,7 +2470,7 @@ class StackPool:
         version is `0.0.0.0` (verified by reading `/entrypoint.sh` in
         `nextcloud:30-apache`, not by reasoning). So on a kept volume set the
         hook does not run, the flag never appears, the fixture's health check
-        never passes, and `istota`, which depends on it, never starts. Wiping `istota_data` alone gets the fresh database and the room
+        never passes, and `istota`, which depends on it, never starts. Wiping `data` alone gets the fresh database and the room
         re-provisioning that wiping `shared_files` was supposed to buy.
 
         The second correction is in `_compose_args`: the port has to be
@@ -2510,7 +2510,7 @@ class StackPool:
                 # exit out loud: `-f` already tolerates a missing volume, so a
                 # failure here means one that is still *in use* — a container
                 # from a crashed run, another project holding it. A silently
-                # surviving `istota_data` means the next session reads the
+                # surviving `data` volume means the next session reads the
                 # previous one's framework database and never re-provisions its
                 # rooms, which is a wrong-answer boot a minute later with
                 # nothing in the log.

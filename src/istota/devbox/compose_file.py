@@ -16,9 +16,10 @@ The mounts are where this differs from the role, and they are the boundary:
   only its own, at ``/run/istota-exec`` and ``/run/istota-cred``. Only U's devbox
   can reach U's credential socket, which is how the proxy knows who a client is
   (``devbox/proxy.py``).
-- The repos are the user's own subdirectory of the istota state volume, mounted
-  at the same absolute path on both sides, so a working directory needs no
-  translation.
+- The repos are the user's own subdirectory of the istota state, mounted at the
+  same absolute path on both sides, so a working directory needs no
+  translation: a bind below the host directory ``istota-stack`` names with
+  ``--state-dir``, or without one a ``subpath`` of the state volume.
 
 Both socket directories and the repos root must be under ``/data``: the istota
 container's root phase hands writable mounts under ``/data`` to the daemon's
@@ -45,8 +46,9 @@ ISTOTA_UID = 10001
 #: The daemon service, as `docker/docker-compose.yml` names it.
 DAEMON_SERVICE = "daemon"
 
-#: The daemon container's state volume, as `docker/docker-compose.yml` names it.
-STATE_VOLUME = "istota_data"
+#: The state volume `docker/docker-compose.yml` falls back to where no host
+#: directory is bound at /data.
+STATE_VOLUME = "data"
 STATE_MOUNT = PurePosixPath("/data")
 
 #: Where a devbox sees its own two socket directories. `/run/istota-cred/sock`
@@ -120,8 +122,11 @@ def _volume(source: str, target: str, **extra) -> dict:
     return entry
 
 
-def build_document(config) -> dict:
-    """The compose document as a dict. Raises `ComposeFileError`."""
+def build_document(config, state_dir: str | None = None) -> dict:
+    """The compose document as a dict. Raises `ComposeFileError`.
+
+    `state_dir` is the host directory bound at /data, when there is one.
+    """
     from istota.config import devbox_container_backend
 
     users = devbox_users(config)
@@ -201,10 +206,16 @@ def build_document(config) -> dict:
         }
         if repos_root is not None:
             user_repos = repos_root / user
-            mounts.append(_volume(
-                STATE_VOLUME, str(user_repos),
-                volume={"subpath": str(user_repos.relative_to(STATE_MOUNT))},
-            ))
+            relative = user_repos.relative_to(STATE_MOUNT)
+            if state_dir is None:
+                mounts.append(_volume(STATE_VOLUME, str(user_repos), volume={"subpath": str(relative)}))
+            else:
+                mounts.append({
+                    "type": "bind",
+                    "source": str(_state_dir(state_dir) / relative),
+                    "target": str(user_repos),
+                    "bind": {"create_host_path": False},
+                })
             caches = user_repos / CACHE_ROOT_NAME
             service["environment"] = {
                 "ISTOTA_EXEC_SOCKET": f"{DEVBOX_EXEC_DIR}/exec.sock",
@@ -233,9 +244,18 @@ def build_document(config) -> dict:
     }
 
 
-def render_devbox_compose(config) -> str:
+def render_devbox_compose(config, state_dir: str | None = None) -> str:
     """The text of `compose.devbox.yml`. Raises `ComposeFileError`."""
-    return HEADER + json.dumps(build_document(config), indent=2) + "\n"
+    if state_dir is not None:
+        _state_dir(state_dir)
+    return HEADER + json.dumps(build_document(config, state_dir), indent=2) + "\n"
+
+
+def _state_dir(path: str) -> PurePosixPath:
+    p = PurePosixPath(path)
+    if not p.is_absolute() or ".." in p.parts or p == PurePosixPath("/"):
+        raise ComposeFileError(f"--state-dir {path!r} is not an absolute directory")
+    return p
 
 
 def repos_dirs_to_create(config) -> list[str]:
