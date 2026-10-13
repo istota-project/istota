@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 COMPOSE = REPO / "docker" / "docker-compose.yml"
 SIDECAR = REPO / "docker" / "whatsapp-baileys" / "index.js"
 #: The shipped file's state mount at /data, a host directory or a volume.
-DATA_MOUNT = "${ISTOTA_DATA_DIR:-${ISTOTA_CONFIG_DIR:+istota_}data}:/data"
+DATA_MOUNT = "${ISTOTA_DATA_DIR:-data}:/data"
 
 
 def derive_media_dir(session_dir: str) -> str:

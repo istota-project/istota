@@ -311,18 +311,6 @@ Istota's `/data` is `/srv/app/istota/data` on the VM, a directory owned by uid 1
 
 In full Nextcloud integration and on the local VM the workspace is not in `/data`: it is the VM's rclone mount or the Mac folder, bound at `/mnt/shared`.
 
-### From the state volume to the state directory
-
-Releases before this one kept `/data` in the named volume `istota_istota_data`. The first time the new `istota-stack` starts a container, during `update` or the `up` that `provision.sh` runs after it, it stops the stack, copies the volume into `/srv/app/istota/data` with owners and modes kept, checks that the framework database and the master key arrived intact, and starts the stack on the directory. It does this once, and records it in `/srv/app/istota/.data-copied`.
-
-The volume is kept. Once the stack runs as it should, remove it:
-
-```bash
-docker volume rm istota_istota_data
-```
-
-The copy refuses, and changes nothing, when `/srv/app/istota/data` already holds files: one of the two is out of date, and only you can say which. Move the directory aside to copy the volume again, or remove the volume to keep the directory. `istota-stack rollback` to a release from before the directory refuses without `--force`, since that release would run on the volume as it was when it was copied.
-
 ## Local VM
 
 On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates and controls; the [local install](../getting-started/local-install.md) page covers installing and running it. Inside the VM it is this stack, with three host settings that `create` writes into `host.env`:

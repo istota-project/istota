@@ -145,9 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Istota's state now lives in `/srv/app/istota/data` on the VM rather than in a Docker volume.** The databases, the master key and a local workspace sit in a plain directory you can back up with the VM's own tools, and `docker compose down -v` can no longer delete them. The first `istota-stack update` copies the old `istota_istota_data` volume into the directory once, with the stack stopped, and keeps the volume.
-
-  **Upgrade note:** once the stack runs as it should, remove the old volume with `docker volume rm istota_istota_data`. The copy refuses if `/srv/app/istota/data` already holds files, and `istota-stack rollback` to an earlier release needs `--force`, since that release would run on the volume as it was at the copy.
+- **Istota's state lives in `/srv/app/istota/data` on the VM rather than in a Docker volume.** The databases, the master key and a local workspace sit in a plain directory you can back up with the VM's own tools, and `docker compose down -v` can no longer delete them. A stack started without `istota-stack` keeps the same state in the volume `data`.
 
 - "Nothing here yet" messages look the same across the web UI. They used to come in several sizes, and some sat at the top of the page while others were centred in it. Now each one sits near the top, under the page's toolbar, at one text size. Where there is something to do about it, such as importing a portfolio snapshot or setting up taxes, a centred button sits below the message.
 
@@ -258,9 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The daemon starts again after the update that moved the state to `/srv/app/istota/data`, on a VM with a devbox.** That update made the directory private to the daemon's user, so the container's start-up step could not reach the devbox volumes mounted inside it, and the daemon restarted in a loop. The directory is now searchable by that step, `istota-stack` corrects one that is not, and the step stops with the command to run rather than looping. Updates now run the release's own `istota-stack` once its tag is verified, so a release's changes to the update itself take effect on the update that installs it, and a stack that fails to start still gets the host's scripts provisioned.
-
-  **Upgrade note:** a VM whose last update failed may still have the old `istota-stack` installed. Run `sudo /srv/app/istota/src/host/provision.sh` once before the next update.
+- **`istota-stack update` runs the release's own `istota-stack` once its tag is verified**, so a release's changes to the update itself take effect on the update that installs it rather than the one after, and a stack that fails to start still gets the host's scripts provisioned. If the daemon's start-up step cannot reach `/srv/app/istota/data`, it now stops with the `chmod` to run rather than restarting in a loop.
 
 - `istota-stack localize-workspace` always stops the daemon before it copies the workspace. It sometimes stopped only `web` and copied with the scheduler running, because a `grep -q` on the service list could close the pipe early and, under `pipefail`, read the match as a miss. The same timing could refuse a signed release tag as unsigned, or refuse a rollback to a release that keeps its state in the state directory; the host scripts now test captured text instead.
 - The admin Status page, `istota --version` and the startup log line name the commit a stack runs. A stack updated with `istota-stack update --unsigned latest` showed the last release's number, because the image carries no `.git`; `istota-stack` now builds the commit and its deployed name into the image, and a build from main shows the version with the short commit appended, such as `0.43.0+a1b2c3d`. Takes effect from the first update after this one.
