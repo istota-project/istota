@@ -7,8 +7,15 @@ vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
 vi.mock('$lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api')>()),
   previewChatFile: vi.fn(),
+  previewNextcloudFile: vi.fn(),
 }));
-import { previewChatFile, chatFileUrl, type FilePreview } from '$lib/api';
+import {
+  previewChatFile,
+  previewNextcloudFile,
+  chatFileUrl,
+  nextcloudFileUrl,
+  type FilePreview,
+} from '$lib/api';
 import FileViewerHost from './FileViewerHost.svelte';
 import { viewer } from './store.svelte';
 const preview = vi.mocked(previewChatFile);
@@ -44,6 +51,81 @@ function open(path = '/note.txt') {
   render(FileViewerHost);
   viewer.openFile(path);
 }
+describe('Nextcloud files through the host', () => {
+  const ncPreview = vi.mocked(previewNextcloudFile);
+  const webUrl = 'https://cloud.example.com/index.php/f/11';
+  function openNextcloud(path: string) {
+    render(FileViewerHost);
+    viewer.openFile(path, { kind: 'nextcloud', webUrl });
+  }
+  it('previews through the personal connection and keeps Nextcloud one click away', async () => {
+    ncPreview.mockResolvedValue(text('plan #1.md', '# Plan'));
+    openNextcloud('Notes/plan #1.md');
+    await screen.findByRole('heading', { name: 'Plan' });
+    expect(ncPreview).toHaveBeenCalledWith('Notes/plan #1.md', expect.any(AbortSignal));
+    expect(preview).not.toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute(
+      'href',
+      nextcloudFileUrl('Notes/plan #1.md'),
+    );
+    const external = screen.getByRole('link', { name: 'Open in Nextcloud' });
+    expect(external).toHaveAttribute('href', webUrl);
+    expect(external).toHaveAttribute('target', '_blank');
+  });
+  it('never draws a workspace image from a Nextcloud document', async () => {
+    const image = '/istota/api/chat/files?path=%2FUsers%2Falice%2Fprivate.png';
+    ncPreview.mockResolvedValue(text('shared.md', `# Shared\n\n![x](${image})`));
+    openNextcloud('shared.md');
+    await screen.findByRole('heading', { name: 'Shared' });
+    expect(document.querySelector(`.markdown img[src="${image}"]`)).toBeNull();
+  });
+  it('falls back to download and Nextcloud for a file it cannot preview', async () => {
+    ncPreview.mockResolvedValue({ ...text('model.blend'), kind: 'binary', text: undefined });
+    openNextcloud('model.blend');
+    expect(await screen.findByText('No preview for this file type.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Download' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open in Nextcloud' })).toBeTruthy();
+  });
+  it('reads PDF and image bytes from the Nextcloud endpoint', async () => {
+    ncPreview.mockResolvedValue({ ...text('photo.png'), kind: 'image', text: undefined });
+    openNextcloud('photo.png');
+    await waitFor(() =>
+      expect(document.querySelector('.lightbox img')?.getAttribute('src')).toBe(
+        nextcloudFileUrl('photo.png'),
+      ),
+    );
+  });
+  it('offers a reconnect when the connection is missing or revoked', async () => {
+    ncPreview.mockRejectedValue(
+      Object.assign(new Error('Nextcloud is not connected. Reconnect in Settings.'), {
+        status: 409,
+      }),
+    );
+    openNextcloud('plan.md');
+    expect(await screen.findByText(/Reconnect in Settings/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Reconnect' })).toHaveAttribute(
+      'href',
+      '/istota/settings/connections',
+    );
+    expect(screen.queryByRole('link', { name: 'Download' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Open in Nextcloud' })).toBeTruthy();
+  });
+  it('says a missing file is missing, with no reconnect', async () => {
+    ncPreview.mockRejectedValue(Object.assign(new Error('File not found.'), { status: 404 }));
+    openNextcloud('gone.md');
+    expect(await screen.findByText('File not found.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Reconnect' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Download' })).toBeNull();
+  });
+  it('keeps download after a failed fetch from Nextcloud', async () => {
+    ncPreview.mockRejectedValue(
+      Object.assign(new Error('Nextcloud is not reachable right now.'), { status: 502 }),
+    );
+    openNextcloud('plan.md');
+    expect(await screen.findByText('Nextcloud is not reachable right now.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Download' })).toBeTruthy();
+  });
+});
 describe('workspace file viewer through the host', () => {
   it.each(['text', 'image'] as const)(
     'restores the focused opener after %s closes',

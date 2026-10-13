@@ -38,6 +38,8 @@ Jobs saved in `CRON.md` change at the next CRON.md sync, not at once. A file tha
 
 On a Nextcloud-backed workspace, My files shows a Shared marker when Nextcloud reports a share. Open in Nextcloud appears when the file is shared with your account. If share information is unavailable, browsing still works and a notice explains what is missing. A disconnected Nextcloud folder shows an error instead of an empty listing.
 
+Your connected Nextcloud account appears under Connections. Folders open in Workspace, and files open in the same viewer as your workspace files, read through your personal connection. The viewer and the file's menu both have Download and Open in Nextcloud, so a file type with no preview can still be saved or opened there. If the connection has expired or been revoked, the viewer says so and links to Connections to sign in again. Viewing your own Nextcloud files does not give tasks access to that account.
+
 Google Drive has My Drive and Shared with me views. Open folders to browse them and choose Load more when more items are available. Files open in Google Drive in another tab. If Drive access is off or the connection needs attention, use the Connections link to restore it.
 
 ## Pins

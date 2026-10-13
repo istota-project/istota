@@ -5,10 +5,11 @@ import errno
 import logging
 from dataclasses import asdict
 from pathlib import PurePosixPath
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
@@ -87,6 +88,56 @@ async def api_workspace_list(
         return await asyncio.to_thread(query)
     except (ListingError, OSError) as exc:
         return _filesystem_error(config, exc, place, write=False)
+
+
+@router.get("/nextcloud/preview")
+async def api_workspace_nextcloud_preview(
+    request: Request, path: str, user: dict = Depends(require_auth),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+    try:
+        preview = await asyncio.to_thread(nextcloud_files.preview_file, config, user["username"], parts)
+    except ListingError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return JSONResponse(preview, headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/nextcloud/file")
+async def api_workspace_nextcloud_file(
+    request: Request, path: str, user: dict = Depends(require_auth),
+):
+    """Stream one file from the caller's own Nextcloud account.
+
+    The same response policy as `/chat/files`: `attachment` unless the first
+    bytes are a raster, which is then sent `inline` under its sniffed type,
+    with `nosniff` and a sandbox CSP either way.
+    """
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+    try:
+        download = await asyncio.to_thread(
+            nextcloud_files.open_file, config, user["username"], parts, request.headers.get("range"),
+        )
+    except ListingError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    disposition = "attachment" if download.inline_type is None else "inline"
+    headers = {
+        **download.headers,
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Content-Disposition": f"{disposition}; filename*=utf-8''{quote(download.name, safe='')}",
+    }
+    return StreamingResponse(
+        download.body, status_code=download.status, headers=headers,
+        media_type=nextcloud_files.download_media_type(download),
+        background=BackgroundTask(download.close),
+    )
 
 
 def _add_nextcloud_shares(config, username, directory, payload):
