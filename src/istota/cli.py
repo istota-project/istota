@@ -1970,33 +1970,49 @@ def _group_config(args):
 
 
 def cmd_group_create(args):
-    """Create a group. The id names a directory, so both id checks apply."""
+    from .groups import service
+
     config = _group_config(args)
-    if not db.is_valid_group_id(args.group_id):
-        _group_fail(
-            f"invalid group id {args.group_id!r}: 2-64 characters of a-z, 0-9, "
-            "'.', '_' or '-', starting with a letter or digit"
-        )
     with db.get_db(config.db_path) as conn:
         try:
-            db.create_group(
-                conn, args.group_id, kind=args.kind or "group",
+            result = service.create_group(
+                conn, config, args.group_id, kind=args.kind or "group",
                 display_name=args.name or args.group_id,
-                created_by=_GROUP_OPERATOR,
+                owners=getattr(args, "owners", []), actor_id=_GROUP_OPERATOR,
+                is_operator=True, expected_revision=0,
             )
-        except ValueError as e:
-            _group_fail(str(e))
+        except ValueError as exc:
+            _group_fail(str(exc))
+    print(json.dumps(result, indent=2))
+    if not result["storage_available"]:
+        print("Storage unavailable. The group was created; retry directory seeding with group ensure-storage.")
+
+
+def cmd_group_ensure_storage(args):
     from .storage import ensure_group_directories
 
-    print(f"Created group {args.group_id!r}.")
-    # A group created without its directory is seeded on first use instead
-    # (`executor._load_group_memory`), so a failure here is a note, not an error.
-    if not ensure_group_directories(
-        config, args.group_id, display_name=args.name or args.group_id,
-    ):
-        print("Note: GROUP.md was not created (no workspace mount, or the "
-              "directory is unusable); it is seeded the first time a member's "
-              "task loads the group.")
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        group = db.get_group(conn, args.group_id)
+        if group is None:
+            _group_fail("Group not found")
+    available = ensure_group_directories(config, args.group_id, display_name=group["display_name"])
+    print(json.dumps({"group_id": args.group_id, "storage_available": available}))
+
+
+def cmd_group_update(args):
+    from .groups import service
+
+    config = _group_config(args)
+    with db.get_db(config.db_path) as conn:
+        try:
+            result = service.update_group(
+                conn, args.group_id, actor_id=_GROUP_OPERATOR, is_operator=True,
+                expected_revision=args.revision, display_name=args.name, kind=args.kind,
+            )
+        except ValueError as exc:
+            _group_fail(str(exc))
+    print(json.dumps(result, indent=2))
 
 
 def cmd_group_list(args):
@@ -2023,48 +2039,60 @@ def cmd_group_show(args):
             _group_fail(f"no such group: {args.group_id!r}")
         group["members"] = db.list_group_members(conn, args.group_id)
         group["history"] = db.group_membership_history(conn, args.group_id)
+        group["events"] = [dict(row) for row in conn.execute(
+            "SELECT * FROM group_events WHERE group_id = ? ORDER BY id", (args.group_id,),
+        )]
     print(json.dumps(group, indent=2))
 
 
 def cmd_group_add_member(args):
-    """Add a configured user. A typo'd member is a silent hole in the audience,
-    so a user id the deployment does not know is refused."""
+    from .groups import service
+
     config = _group_config(args)
-    if config.get_user(args.user_id) is None:
-        _group_fail(f"{args.user_id!r} is not a configured user")
     with db.get_db(config.db_path) as conn:
-        already = db.is_group_member(conn, args.group_id, args.user_id)
         try:
-            db.add_group_member(conn, args.group_id, args.user_id,
-                                role=args.role, added_by=_GROUP_OPERATOR)
-        except ValueError as e:
-            _group_fail(str(e))
-    if already:
-        print(f"{args.user_id} is already a member of {args.group_id!r}; "
-              "nothing changed.")
-        return
-    print(f"{args.user_id} is a member of {args.group_id!r}.")
+            result = service.change_membership(
+                conn, config, args.group_id, args.user_id, role=args.role,
+                actor_id=_GROUP_OPERATOR, is_operator=True,
+                expected_revision=args.revision,
+                acknowledge_history=getattr(args, "acknowledge_history", False),
+                replacement_owner=getattr(args, "replacement_owner", None),
+            )
+        except ValueError as exc:
+            _group_fail(str(exc))
+    print(json.dumps(result, indent=2))
 
 
 def cmd_group_remove_member(args):
-    """End a membership and print the retained history: nothing is deleted."""
+    from .groups import service
+
     config = _group_config(args)
     with db.get_db(config.db_path) as conn:
-        if not db.end_group_membership(conn, args.group_id, args.user_id,
-                                       ended_by=_GROUP_OPERATOR):
-            _group_fail(
-                f"{args.user_id!r} has no current membership of {args.group_id!r}"
+        try:
+            result = service.change_membership(
+                conn, config, args.group_id, args.user_id, role=None,
+                actor_id=_GROUP_OPERATOR, is_operator=True, expected_revision=args.revision,
+                replacement_owner=getattr(args, "replacement_owner", None),
             )
-        history = db.group_membership_history(conn, args.group_id)
-    print(json.dumps({"group_id": args.group_id, "history": history}, indent=2))
+        except ValueError as exc:
+            _group_fail(str(exc))
+        result["history"] = db.group_membership_history(conn, args.group_id)
+    print(json.dumps(result, indent=2))
 
 
 def cmd_group_archive(args):
+    from .groups import service
+
     config = _group_config(args)
     with db.get_db(config.db_path) as conn:
-        if not db.archive_group(conn, args.group_id):
-            _group_fail(f"no live group {args.group_id!r} to archive")
-    print(f"Archived group {args.group_id!r}. Its rows stay readable here.")
+        try:
+            result = service.archive_group(
+                conn, args.group_id, actor_id=_GROUP_OPERATOR, is_operator=True,
+                expected_revision=args.revision, confirm=getattr(args, "confirm", False),
+            )
+        except ValueError as exc:
+            _group_fail(str(exc))
+    print(json.dumps(result, indent=2))
 
 
 def _group_kv_value(raw: str):
@@ -5400,8 +5428,7 @@ def main():
     )
     user_remove_parser.add_argument("--name", required=True, help="User ID")
 
-    # group (with subparsers): groups-and-shared-scope. No delete and no
-    # in-band membership management, deliberately; archive is the retire path.
+    # Group administration shares the web application policy and transactions.
     group_parser = subparsers.add_parser("group", help="Group management")
     group_subparsers = group_parser.add_subparsers(dest="group_action", required=True)
     group_create_parser = group_subparsers.add_parser("create", help="Create a group")
@@ -5411,6 +5438,15 @@ def main():
         help="Free-text label (family, team, ...); display only",
     )
     group_create_parser.add_argument("--name", help="Display name (default: the id)")
+    group_create_parser.add_argument("--owner", dest="owners", action="append", required=True,
+                                     help="Initial owner (repeat for multiple owners)")
+    group_update_parser = group_subparsers.add_parser("update", help="Update group metadata")
+    group_update_parser.add_argument("group_id")
+    group_update_parser.add_argument("--revision", type=int, required=True)
+    group_update_parser.add_argument("--name")
+    group_update_parser.add_argument("--kind")
+    group_storage_parser = group_subparsers.add_parser("ensure-storage", help="Retry group directory seeding")
+    group_storage_parser.add_argument("group_id")
     group_list_parser = group_subparsers.add_parser("list", help="List groups")
     group_list_parser.add_argument("--all", action="store_true",
                                    help="Include archived groups")
@@ -5423,13 +5459,21 @@ def main():
     group_add_parser.add_argument("user_id")
     group_add_parser.add_argument("--role", choices=list(db.GROUP_ROLES),
                                   default="member")
+    group_add_parser.add_argument("--revision", type=int, required=True)
+    group_add_parser.add_argument("--acknowledge-history", action="store_true",
+                                  help="New members can read existing group memory")
+    group_add_parser.add_argument("--replacement-owner")
     group_remove_parser = group_subparsers.add_parser(
         "remove-member", help="End a membership (the history is kept)",
     )
     group_remove_parser.add_argument("group_id")
     group_remove_parser.add_argument("user_id")
+    group_remove_parser.add_argument("--revision", type=int, required=True)
+    group_remove_parser.add_argument("--replacement-owner")
     group_archive_parser = group_subparsers.add_parser("archive", help="Archive a group")
     group_archive_parser.add_argument("group_id")
+    group_archive_parser.add_argument("--revision", type=int, required=True)
+    group_archive_parser.add_argument("--confirm", action="store_true")
     group_kv_get_parser = group_subparsers.add_parser(
         "kv-get", help="Read a value from a group's store",
     )
@@ -5851,6 +5895,8 @@ def main():
     elif args.command == "group":
         group_commands = {
             "create": cmd_group_create,
+            "update": cmd_group_update,
+            "ensure-storage": cmd_group_ensure_storage,
             "list": cmd_group_list,
             "show": cmd_group_show,
             "add-member": cmd_group_add_member,

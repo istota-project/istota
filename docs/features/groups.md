@@ -7,7 +7,7 @@ Each group has two stores:
 - **`GROUP.md`**, a prose file at `{mount}/Groups/<group_id>/GROUP.md`. It loads into each member's prompt as `## Group memory` and is readable by a person with no server running.
 - **A key-value store**, `group_kv`, for machine state: counters, last-run stamps, lists several members append to. It is the per-user KV store with a group in its key instead of a user.
 
-The operator creates groups and manages membership. Members write to the stores through the bot, and only when they ask it to.
+Admins create groups and appoint owners. Owners manage membership and group details. Every member can edit the shared notebook in Groups or ask the bot to remember something for the group. Ownership grants no access to another member's personal memory, files or credentials.
 
 ## The charter
 
@@ -17,29 +17,39 @@ Every group store is governed by one rule:
 
 The "future" clause is the one that is easy to miss. Adding a member exposes the whole existing store to them, including what was written before they joined. There is no per-fact audience; the charter is the mechanism. The corollary is the default: when in doubt, a fact goes in the user's own `USER.md`.
 
-The charter appears in three places: as an HTML comment at the top of every seeded `GROUP.md`, in the memory skill's classification gate (the "Group fact" branch the model reads before it writes anything), and on this page.
+The charter appears above the notebook editor, in the seeded `GROUP.md` comment, in the memory skill's classification gate and on this page. Removing the file comment does not remove the editor's explanation.
 
 ## No automatic writer
 
-Nothing writes to a group store on its own. The nightly sleep cycle extracts into a user's dated memories and the knowledge graph, and into a room's `CHANNEL.md`; it never writes `GROUP.md` or `group_kv`, and it never copies something from `USER.md` or the knowledge graph into a group. A test holds this. A group store changes only when a member tells the bot "remember this for the family" or similar, and the bot runs `istota-skill memory append --group <id>` or `istota-skill kv set --group <id>`.
+Nothing writes to a group store on its own. The nightly sleep cycle extracts into a user's dated memories and the knowledge graph, and into a room's `CHANNEL.md`; it never writes `GROUP.md` or `group_kv`, and it never copies something from `USER.md` or the knowledge graph into a group. A test holds this. Members can edit the notebook themselves in Groups. When a member tells the bot "remember this for the family" or similar, the bot runs `istota-skill memory append --group <id>` or `istota-skill kv set --group <id>`.
 
-## Setting up a group
+## Using Groups
 
-Groups are managed with the operator CLI. There is no web UI and no chat command for membership in this version.
+Open **Groups** to see your current memberships. Select a group to open its Memory, Members or Rooms view. Memory is the shared notebook, with an editor, a size warning above 32 KiB and recorded changes. Members shows the current roster. Rooms lists only linked rooms you already belong to; a link does not grant room access. Files opens the group's folder in Workspace, where Group memory and Group members lead back to these views.
+
+`GROUP.md` is the curated notebook. Other files and the `memories/` directory are shared documents browsed through Workspace; they are not automatically recalled or turned into notebook facts. `group_kv` holds structured state. Linking a room leaves its `CHANNEL.md` in that room. Personal memory and knowledge graph facts stay personal.
+
+Owners can change the display name and kind, add existing enabled users, change roles and remove members. Every addition requires acknowledgement that the new member can read existing group memory. The form lists what access it grants. Ordinary linked rooms are not granted. A member may leave, but the last owner must appoint a replacement in the same operation if other members remain. `kind` is only a display label; `owner` grants group management authority.
+
+Admins use **Admin → Groups**, below Users, to create groups, appoint owners, inspect membership history, recover an ownerless group and archive a group. Creation requires at least one enabled owner; the acting admin need not join. Admins outside the group can inspect its metadata and membership but cannot read its notebook through member pages or the file viewer. Older groups without owners remain readable and editable by members and are marked “Needs owner” in administration. Migration does not appoint an owner.
+
+Removing a member ends future access: the group views, Workspace place and file viewer check membership on the next request, and an already-open editor cannot save after removal. Already delivered messages and downloads remain with their recipients. A running task may already hold admitted content or a directory bind; removal does not recall that snapshot.
+
+Membership history keeps departures and rejoins as separate periods. Role changes keep the membership period and record the old and new role. Archiving preserves data and history but removes member access. There is no hard deletion or reuse of an archived id.
+
+## Operator CLI
+
+The CLI and web use the same group management service. A typical setup is:
 
 ```bash
-istota group create family --kind family --name "The Smiths"
-istota group add-member family alice
-istota group add-member family bob --role owner
+istota group create family --kind family --name "Family" --owner alice
 istota group show family
+istota group add-member family bob --revision 1 --acknowledge-history
 ```
 
-- The id is lowercase letters, digits, `.`, `_` and `-`, 2 to 64 characters, starting with a letter or digit. It names a directory, so it is checked before anything is created.
-- `create` makes `Groups/<id>/` with an empty `memories/` directory and seeds `GROUP.md` with the charter and three headings (`Members`, `Conventions`, `Reference`) for the bot to append under.
-- `add-member` refuses a user id that is not a configured Istota user, so a typo cannot quietly leave someone out.
-- `--kind` and `--role` are labels. `kind` is shown and changes no behaviour; `role` (`owner` or `member`) is recorded and nothing reads it yet.
+Use the current `revision` from `show` for each later change; the example assumes the newly created group is still at revision 1. Stale revisions are refused. Repeat `--owner` at creation to choose several owners. `add-member --role owner` can also promote an existing member. Removal or demotion of the last owner can carry `--replacement-owner USER` for another current member in the same operation. Archive requires `--revision N --confirm`.
 
-Membership is a history. `istota group remove-member family bob` ends Bob's membership and keeps the row, so `show` can answer who could see the group's store and when. A re-join adds a new row. Groups are never deleted: `istota group archive family` stops the group loading anywhere and removes it from every member's reach, while its rows stay readable to the operator through `show`, `kv-get` and `kv-list`. An archived group's id cannot be reused.
+The immutable id uses lowercase letters, digits, `.`, `_` and `-`, 2 to 64 characters, starting with a letter or digit; `none` is reserved for room unlinking. Creation seeds `Groups/<id>/GROUP.md` and an empty `memories/` directory after committing membership. If storage setup fails, the group still exists. Restore the workspace and use Retry storage setup in Admin Groups or `istota group ensure-storage ID`; do not create another group. Membership administration remains available during a storage outage.
 
 The full command list is in the [CLI reference](../reference/cli.md#groups).
 
@@ -76,9 +86,13 @@ Any member can write a group's store, and any member's task could have been stee
 
 ## Writes and their trail
 
-- `memory --group` writes go through the same op engine and section routing as `USER.md`, run host-side, and take a file lock shared by every member, so two members' writes cannot interleave. Each write, applied or rejected, is recorded in the group's own store under the reserved `_memory_audit` namespace with the group, the writer, the task and the outcome. Read it with `istota group kv-list <id> _memory_audit`.
-- `kv --group` writes from a sandboxed task are deferred. The scheduler applies them after the task finishes, and only if the task's user is still a member and the group is still in the task's set. Each value records `written_by`.
-- A group can never be a delivery target. A `group` or `group:<id>` entry in an output target or a `CRON.md` job is dropped with a warning.
+The notebook editor checks the revision it loaded. If another member changes the file, saving reports a conflict rather than merging or replacing their changes. Web saves and host-side `memory --group` operations use the same resolved notebook path and file lock under `{db_path.parent}/locks/group-memory`. This directory is shared by the daemon and web processes and is outside task sandbox mounts; neither a per-user deferred directory nor a service's private temporary directory is a suitable substitute.
+
+A genuinely missing notebook under an available, validated group root can be created. An unavailable root, oversized file, invalid UTF-8, symlink, special file or read failure is refused rather than shown as an empty editable notebook. Save reads again under the lock, so a file that becomes unreadable after opening cannot be replaced. An oversized notebook returns 413, invalid encoding or unsafe files return 422, unavailable storage or read I/O returns 503, and lock timeout returns 423. Refused reads supply no content or replacement revision. Restore storage or repair the file before editing again.
+
+Memory operations record applied and rejected outcomes in the group's reserved `_memory_audit` namespace with the writer and task. Web edits record `source="web"`, the actor, timestamp and before/after revision hashes. The notebook's **Recorded changes** view reads this trail newest first; the CLI can read it with `istota group kv-list <id> _memory_audit`. It is not a complete version history and cannot restore old versions. Direct filesystem edits can bypass it because admitted tasks have writable group directories. If the file saves but recording fails, the save succeeds with `audit_recorded=false` and the UI warns that recording failed; retrying the edit would risk duplication.
+
+`kv --group` writes from a sandboxed task are deferred. The scheduler applies them after the task finishes, and only if the task's user is still a member and the group remains in the task's set. Each value records `written_by`. A group can never be a delivery target: a `group` or `group:<id>` entry in an output target or a `CRON.md` job is dropped with a warning.
 
 ## Security notes
 
@@ -89,7 +103,7 @@ Any member can write a group's store, and any member's task could have been stee
 
 ## Not in this version
 
-- Membership from chat or the web UI. The operator CLI is the only write path.
+- Membership commands in chat, external invitations and general uploads or deletion in group folders.
 - An approval queue, or any automatic extraction into a group store.
 - A per-fact audience. The charter is the audience.
 - Sharing `Groups/<id>/` with members' own Nextcloud accounts, so it would appear in their Files app.

@@ -415,3 +415,14 @@ class TestTasksMdLostUpdate:
         first, other, _ = path.read_text().split("\n")
         assert first.startswith(marker) and first.endswith(f"first | {suffix}")
         assert other == "- [~] other...", "a still-running task was marked"
+
+
+def test_explicit_read_refusal_never_calls_writer(config):
+    path = _config_file(config, "USER.md")
+    def write(content):
+        pytest.fail("refused read must not write")
+    result = text_files.save(config, "alice", path, "replacement", text_files.revision(""),
+                             read=lambda: {"status": "refused", "reason": "overlay_not_utf8"},
+                             write=write, max_bytes=1024)
+    assert result.status == "read_refused"
+    assert result.reason == "overlay_not_utf8" and result.revision is None

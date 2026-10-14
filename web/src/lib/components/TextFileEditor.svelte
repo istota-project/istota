@@ -14,6 +14,7 @@
     /** Shown in the empty box while the file is absent and untouched. */
     placeholder?: string;
     loadFailed: string;
+    saveDisabled?: boolean;
     load: (key: string | number) => Promise<T>;
     save: (
       key: string | number,
@@ -37,6 +38,7 @@
     ariaLabel,
     placeholder = '',
     loadFailed,
+    saveDisabled = false,
     load: loadFile,
     save: saveFile,
     loaded = $bindable(null),
@@ -91,9 +93,9 @@
       loadedKey = forKey;
       text = data.content;
       revision = data.revision;
-    } catch {
+    } catch (e) {
       if (forKey !== fileKey) return;
-      error = loadFailed;
+      error = describeError?.(e) ?? loadFailed;
     } finally {
       if (forKey === fileKey) loading = false;
     }
@@ -124,7 +126,7 @@
     // `loadedKey` rather than `fileKey`: the revision in hand belongs to the
     // file that was loaded, so saving against any other is a cross-file write
     // however the two came to disagree.
-    if (saving || !loaded || loadedKey !== fileKey) return;
+    if (saveDisabled || saving || !loaded || loadedKey !== fileKey) return;
     saving = true;
     clearStatus();
     try {
@@ -209,7 +211,11 @@
 
   {#snippet footer()}
     <Button variant="ghost" onclick={onClose}>Close</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!dirty || saving || loading}>
+    <Button
+      variant="primary"
+      onclick={handleSave}
+      disabled={saveDisabled || !dirty || saving || loading}
+    >
       {saving ? 'Saving…' : 'Save'}
     </Button>
   {/snippet}

@@ -3786,6 +3786,63 @@ class TestTheBrainRidesEveryRoomPayload:
 
 @_needs_web_deps
 class TestWorkspaceFileRoots:
+    @pytest.mark.parametrize("change", ["remove", "archive"])
+    async def test_group_access_ends_on_next_request_without_widening_personal_scope(
+        self, chat_client, change,
+    ):
+        import istota.webui.app as mod
+        from istota.groups import service
+
+        config = mod._config
+        with db.get_db(config.db_path) as conn:
+            db.create_group(conn, "team", kind="team", display_name="Team", created_by="bob")
+            db.add_group_member(conn, "team", "bob", role="owner", added_by="bob")
+            db.add_group_member(conn, "team", "alice", added_by="bob")
+        for path, content in (
+            ("Groups/team/GROUP.md", "Shared notebook"),
+            ("Users/alice/note.txt", "Alice's note"),
+            ("Users/bob/note.txt", "Bob's private note"),
+        ):
+            target = config.workspace_path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        cookies = await _login(chat_client, "alice")
+        for member in (True, False):
+            if not member:
+                with db.get_db(config.db_path) as conn:
+                    revision = db.get_group(conn, "team")["revision"]
+                    if change == "remove":
+                        service.change_membership(
+                            conn, config, "team", "alice", actor_id="bob",
+                            expected_revision=revision, role=None,
+                        )
+                    else:
+                        service.archive_group(
+                            conn, "team", actor_id="operator", is_operator=True,
+                            expected_revision=revision, confirm=True,
+                        )
+            places = await chat_client.get("/istota/api/workspace/places", cookies=cookies)
+            assert places.status_code == 200
+            assert ("group:team" in [p["id"] for p in places.json()["places"]]) is member
+            listing = await chat_client.get(
+                "/istota/api/workspace/list", params={"place": "group:team"}, cookies=cookies,
+            )
+            assert listing.status_code == (200 if member else 404)
+            for endpoint in ("files", "files/preview"):
+                for path, expected in (
+                    ("/Groups/team/GROUP.md", 200 if member else 403),
+                    ("/Users/alice/note.txt", 200),
+                    ("/Users/bob/note.txt", 403),
+                ):
+                    response = await chat_client.get(
+                        f"/istota/api/chat/{endpoint}", params={"path": path}, cookies=cookies,
+                    )
+                    assert response.status_code == expected
+                    if expected != 200:
+                        assert "Shared notebook" not in response.text
+                        assert "Bob's private note" not in response.text
+        assert (config.workspace_path / "Groups/team/GROUP.md").read_text() == "Shared notebook"
+
     async def test_room_membership_is_live_for_download_preview_and_links(self, chat_client):
         import istota.webui.app as mod
         from istota.webui.chat_files import check_chat_file_links

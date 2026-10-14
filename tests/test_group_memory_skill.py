@@ -231,3 +231,54 @@ class TestTheLock:
         monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path / "bob-tmp"))
         b = lock_path_for(env.group_md, lock_dir=memory._lock_dir(target))
         assert a == b
+
+
+def test_group_cli_uses_shared_anchor(env):
+    from istota.skills import memory
+    target = memory.Target(env.group_md, memory._GROUP, "fam")
+    assert memory._lock_dir(target) == env.db_path.parent / "locks/group-memory"
+
+
+def test_group_cli_refuses_missing_root(env, capsys):
+    shutil.rmtree(env.group_md.parent)
+    out = _refused(["add-heading", "--group", "fam", "--heading", "Notes", "--line", "new"], capsys)
+    assert out["error"] == "memory_unreadable" and out["reason"] == "storage_unavailable"
+    assert not env.group_md.exists()
+
+
+def test_group_cli_rechecks_membership_after_wait(env, monkeypatch, capsys):
+    from contextlib import contextmanager
+    from istota.skills import memory
+    original = memory.memory_md_lock
+    before = env.group_md.read_bytes()
+    @contextmanager
+    def removed(*args, **kwargs):
+        with original(*args, **kwargs):
+            with db.get_db(env.db_path) as conn:
+                db.end_group_membership(conn, "fam", "alice", ended_by="operator")
+            yield
+    monkeypatch.setattr(memory, "memory_md_lock", removed)
+    out = _refused(["append", "--group", "fam", "--heading", "Conventions", "--line", "new"], capsys)
+    assert out["error"] == "not a member of group 'fam'"
+    assert env.group_md.read_bytes() == before and _group_audit(env) == []
+
+
+@pytest.mark.parametrize("bad", [b"\xff", b"x" * 65], ids=["invalid-utf8", "over-cap"])
+def test_group_cli_preserves_unreadable_notebook(env, capsys, monkeypatch, bad):
+    from istota import storage
+    monkeypatch.setattr(storage, "USER_CONFIG_READ_CAP_BYTES", 64)
+    env.group_md.write_bytes(bad)
+    out = _refused(["add-heading", "--group", "fam", "--heading", "Notes", "--line", "new"], capsys)
+    assert out["error"] == "memory_unreadable"
+    assert env.group_md.read_bytes() == bad
+
+
+def test_cli_reports_audit_failure_without_repeating_write(env, monkeypatch, capsys):
+    from istota.memory.curation import audit
+    def fail(*args, **kwargs):
+        raise OSError("unavailable")
+    monkeypatch.setattr(audit.db, "group_kv_set", fail)
+    memory_main(["append", "--group", "fam", "--heading", "Conventions", "--line", "new"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "ok" and result["audit_recorded"] is False
+    assert env.group_md.read_text().count("- new") == 1

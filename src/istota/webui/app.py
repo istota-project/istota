@@ -1961,6 +1961,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "google_workspace": False,
         "google_workspace_enabled": False,
         "workspace": False,
+        "groups": is_admin,
         "admin": is_admin,
     }
     if _config:
@@ -1971,6 +1972,14 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["briefings"] = _user_has_briefings(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         features["workspace"] = _config.has_workspace
+        if not is_admin:
+            from istota import db
+
+            def _has_groups():
+                with db.get_db(_config.db_path) as conn:
+                    return bool(db.list_user_groups(conn, username))
+
+            features["groups"] = await asyncio.to_thread(_has_groups)
         if not features["workspace"] and _config.google_workspace.enabled:
             from istota import db
             from istota.workspace.places import list_places
@@ -8178,6 +8187,9 @@ _AUX_TS_ABOVE = "tasks.created_at >= datetime(?, '-1 hour')"
 # as the COALESCE fallback source and for `_task_duration_seconds`.
 _AUX_COLUMNS = (
     "SELECT id, prompt, result, status, error, confirmation_prompt, declinable, "
+    "(private_park = 1 AND EXISTS (SELECT 1 FROM whatsapp_skill_requests r "
+    "WHERE r.id = tasks.whatsapp_confirmation_request_id AND r.kind = 'location_share')) "
+    "AS location_private_park, "
     "created_at, actions_taken, execution_trace, started_at, completed_at, "
     f"model_used, attachments, {_AUX_TURN_TS} AS turn_ts FROM tasks "
 )
@@ -8805,7 +8817,7 @@ def _chat_room_messages(
         elif status == "pending_confirmation":
             # An email thread room records the mail; its task's question is
             # the host's private room's, so here it is no turn at all (#665).
-            if thread_room:
+            if thread_room or r["location_private_park"]:
                 continue
             messages.append(_assistant_message_dict(
                 r, r["confirmation_prompt"] or r["result"] or "", status, confirmation=True,
@@ -11408,6 +11420,10 @@ def _chat_confirm_task(
                 detail=(_CONFIRM_PREVIEW_CHANGED if preview_digest is not None
                         else _CONFIRM_UNAVAILABLE),
             )
+        if db.get_task(conn, task.id).status == "cancelled":
+            conn.commit()
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail=confirmations.CANCELLED_APPROVAL_ACK)
 
 
 # Ceiling on an edited draft body. Not a policy about email length — it exists
@@ -16624,6 +16640,17 @@ from istota.webui.workspace_routes import router as _workspace_router
 
 app.include_router(_workspace_router, prefix="/istota/api/workspace", tags=["workspace"])
 app.dependency_overrides[_workspace_require_auth] = _require_api_auth
+
+# Groups is core; administration never grants member content access.
+from istota.groups.routes import require_admin as _groups_require_admin
+from istota.groups.routes import require_auth as _groups_require_auth
+from istota.groups.routes import router as _groups_router
+from istota.groups.routes import verify_origin as _groups_verify_origin
+
+app.include_router(_groups_router, prefix="/istota/api", tags=["groups"])
+app.dependency_overrides[_groups_require_admin] = _require_admin
+app.dependency_overrides[_groups_require_auth] = _require_api_auth
+app.dependency_overrides[_groups_verify_origin] = _verify_origin
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

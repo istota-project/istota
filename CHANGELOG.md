@@ -9,10 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Workspace. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
+- Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
+- Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
+
+- Room location sharing stops when readers or transport identities change, or when the room is archived or switched off. Rejoining or reopening the room requires fresh approval; ordinary roster refreshes keep sharing active. Upgrading older room identities preserves the consent record and requires fresh approval for location sharing.
+
+- Request timed location sharing with a room through a private approval preview. The preview names the readers, precision and duration; approval fixes the expiry, and stopping also cancels pending requests and their approval notices. A stop during execution keeps the private preview out of the room.
+
+- Owners can list and stop their location-sharing permissions, including pending requests. Stopping everywhere returns only a count when requested in a shared room.
+
+- Share one location observation in a shared room, either an exact point or an approximate area. Sharing from a private chat asks for approval and posts the observation shown in the preview, even if your location changes before approval.
 - **Change the setup in a browser.** `istota-stack setup --web --force` opens the setup page over a configured stack, filled in with the current answers. The stack is stopped while the page is open. If you close the page or cancel with `istota-stack setup-cancel`, the previous setup is put back and the stack starts again. On a Mac the same command opens the page in your browser once it is ready, and Ctrl-C cancels it. `istota-stack status` now says when the web page is published on a port other than the one the Mac forwards, rather than blaming Lima.
 
 ### Changed
 
+- Google Workspace setup documentation now covers the operator's OAuth client, consent screen and credential storage. It distinguishes instance setup from each user's account connection and explains common connection failures.
+- New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
 - **The local VM sets up in the browser.** `istota-stack create` on a Mac, and `install.sh --local`, now open the setup page in your browser and finish in one run. `--terminal-setup` keeps the questions in the terminal.
 
 ### Fixed

@@ -13,7 +13,7 @@ import threading
 import pytest
 
 from istota import cli, db, storage
-from istota.config import Config
+from istota.config import Config, UserConfig
 
 
 @pytest.fixture
@@ -70,10 +70,12 @@ class TestTheSeed:
 
     def test_the_operator_cli_seeds_on_create(self, config, capsys, monkeypatch):
         db.init_db(config.db_path)
+        config.users["alice"] = UserConfig()
         monkeypatch.setattr(cli, "load_config", lambda path=None: config)
 
         class Args:
             group_id = "fam"
+            owners = ["alice"]
             kind = "family"
             name = "The Fam"
             config = None
@@ -164,3 +166,24 @@ class TestTheWrite:
         stop.set()
         t.join()
         assert seen <= {a, b}
+
+
+def test_explicit_read_distinguishes_missing_from_unavailable(config):
+    assert storage.read_group_memory_result(config, "fam") == {"status": "refused", "reason": "storage_unavailable"}
+    _group_dir(config).mkdir(parents=True)
+    assert storage.read_group_memory_result(config, "fam") == {"status": "missing"}
+    (_group_dir(config) / "GROUP.md").write_text("  \n")
+    assert storage.read_group_memory_result(config, "fam") == {"status": "readable", "content": "  \n"}
+
+
+def test_cli_storage_retry_does_not_replace_a_missing_workspace(config, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, "fam", kind="family", display_name="Family", created_by="operator")
+    config.workspace_path.rmdir()
+    monkeypatch.setattr(cli, "load_config", lambda path=None: config)
+    cli.cmd_group_ensure_storage(SimpleNamespace(config=None, group_id="fam"))
+    assert '"storage_available": false' in capsys.readouterr().out
+    assert not config.workspace_path.exists()

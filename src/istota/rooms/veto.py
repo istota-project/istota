@@ -257,6 +257,9 @@ def _switch_off(conn, config, policy, person: str, participant_id, reference: st
         "vetoed_by = COALESCE(vetoed_by, ?), veto_on_by = NULL WHERE room_token = ?",
         (participant_id, token),
     )
+    if policy.vetoed_at is None:
+        from istota.location.sharing import invalidate_room_location_shares
+        invalidate_room_location_shares(conn, token, reason="room_off")
     _cancel_queued(conn, token)
     if policy.vetoed_at is not None:
         return VetoOutcome(
@@ -323,8 +326,12 @@ def switch_off_by_removal(conn, room_token: str) -> None:
     The roster frame does not name who removed it, so there is no vetoer row
     and a member's ``on`` brings the room back once the bot is re-added.
     """
-    if room_policy.ensure_policy(conn, room_token) is None:
+    policy = room_policy.ensure_policy(conn, room_token)
+    if policy is None:
         return
+    if policy.vetoed_at is None:
+        from istota.location.sharing import invalidate_room_location_shares
+        invalidate_room_location_shares(conn, room_token, reason="room_off")
     conn.execute(
         "UPDATE room_policy SET vetoed_at = COALESCE(vetoed_at, datetime('now')), "
         "veto_on_by = NULL WHERE room_token = ?",

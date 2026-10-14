@@ -1,0 +1,32 @@
+"""Human group policy; task audience gates remain in rooms.scopes."""
+from istota import db
+
+
+class GroupError(ValueError):
+    def __init__(self, status_code: int, code: str, message: str, **details):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.details = details
+
+
+def group_capabilities(conn, group_id: str, actor_id: str, *, is_admin: bool) -> dict:
+    group = db.get_group(conn, group_id)
+    member = bool(group) and db.is_group_member(conn, group_id, actor_id)
+    row = conn.execute(
+        "SELECT role FROM group_members WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
+        (group_id, actor_id),
+    ).fetchone() if member else None
+    owner = bool(row and row["role"] == "owner")
+    return {
+        "member": member, "owner": owner,
+        "manage": bool(group) and (owner or is_admin),
+        "archive": bool(group) and is_admin,
+        "read_memory": member, "edit_memory": member,
+        "leave": member,
+    }
+
+
+def require_group_member(conn, group_id: str, actor_id: str) -> None:
+    if not db.is_group_member(conn, group_id, actor_id):
+        raise GroupError(404, "group_not_found", "Group not found")

@@ -924,6 +924,7 @@ def record_inbound(
                     conn, room_token=room_token, surface=surface,
                     surface_ref=ref.surface_ref, kind=author_kind,
                     user_id=ref.user_id, display_name=ref.display_name,
+                    is_own_bot=participants.is_the_bot(config, ref),
                 )
         if user_author:
             author_user_id, author_label = resolve_author(

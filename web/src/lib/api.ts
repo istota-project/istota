@@ -172,6 +172,7 @@ export interface User {
     health: boolean;
     briefings: boolean;
     workspace?: boolean;
+    groups?: boolean;
     google_workspace: boolean;
     google_workspace_enabled: boolean;
     admin: boolean;
@@ -5986,4 +5987,227 @@ export async function saveWorkspaceConfigFile(
   if (resp.status === 413 && typeof body.max_bytes === 'number')
     throw new Error(`Too long — the limit is ${Math.floor(body.max_bytes / 1024)} KB.`);
   throw new Error(await errorMessage(resp, body));
+}
+
+export interface GroupCapabilities {
+  member: boolean;
+  owner: boolean;
+  manage: boolean;
+  archive: boolean;
+  read_memory: boolean;
+  edit_memory: boolean;
+  leave: boolean;
+}
+export interface GroupSummary {
+  group_id: string;
+  display_name: string;
+  kind: string;
+  revision: number;
+  role: 'owner' | 'member' | null;
+  capabilities: GroupCapabilities;
+}
+export interface GroupMember {
+  user_id: string;
+  display_name: string;
+  role: 'owner' | 'member';
+}
+export interface GroupDisclosure {
+  memory: string;
+  rooms: string[];
+  briefings: string[];
+}
+export interface GroupDetail extends GroupSummary {
+  members: GroupMember[];
+  rooms: { token: string; name: string; origin: string }[];
+  disclosure: GroupDisclosure;
+}
+export interface GroupMemoryChange {
+  id: string;
+  user_id?: string;
+  ts?: string;
+  source?: string;
+  task_id?: number | null;
+  applied?: { op?: { op?: string }; outcome?: string }[];
+  rejected?: { op?: { op?: string }; outcome?: string; reason?: string }[];
+}
+export interface GroupMemory {
+  group_id: string;
+  status: 'readable' | 'missing';
+  content: string;
+  revision: string;
+  bytes: number;
+  max_bytes: number;
+  large: boolean;
+  last_change: GroupMemoryChange | null;
+}
+export interface GroupMembershipInput {
+  revision: number;
+  role: 'owner' | 'member';
+  acknowledge_history?: boolean;
+  replacement_owner?: string;
+}
+export class GroupApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly reason?: string,
+    readonly disclosure?: GroupDisclosure,
+  ) {
+    super(message);
+    this.name = 'GroupApiError';
+  }
+}
+// Group forms need refusal codes and disclosure; apiFetch retains only a message.
+async function groupRequest<T>(path: string, method = 'GET', payload?: unknown): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${base}/api${path}`, {
+      method,
+      credentials: 'same-origin',
+      ...(payload === undefined
+        ? {}
+        : {
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }),
+    });
+  } catch (error) {
+    noteTransport(false, 'unreachable');
+    throw error;
+  }
+  noteTransport(true);
+  if (response.status === 401) throw new AuthError();
+  const body = await response.json().catch(() => ({}));
+  if (response.ok) return body;
+  throw new GroupApiError(
+    response.status,
+    body.error ?? '',
+    typeof body.message === 'string' ? body.message : await errorMessage(response, body),
+    body.reason,
+    body.disclosure,
+  );
+}
+function groupPath(id: string): string {
+  return `/groups/${encodeURIComponent(id)}`;
+}
+export function getGroups(): Promise<{ groups: GroupSummary[] }> {
+  return groupRequest('/groups');
+}
+export function getGroup(id: string): Promise<GroupDetail> {
+  return groupRequest(groupPath(id));
+}
+export function updateGroup(
+  id: string,
+  payload: { revision: number; display_name?: string; kind?: string },
+): Promise<GroupSummary> {
+  return groupRequest(groupPath(id), 'PATCH', payload);
+}
+export function getGroupUserOptions(
+  id: string,
+): Promise<{ users: { user_id: string; display_name: string }[] }> {
+  return groupRequest(`${groupPath(id)}/user-options`);
+}
+export function putGroupMember(
+  id: string,
+  user: string,
+  payload: GroupMembershipInput,
+): Promise<GroupSummary> {
+  return groupRequest(`${groupPath(id)}/members/${encodeURIComponent(user)}`, 'PUT', payload);
+}
+export function deleteGroupMember(
+  id: string,
+  user: string,
+  payload: { revision: number; replacement_owner?: string },
+): Promise<GroupSummary> {
+  return groupRequest(`${groupPath(id)}/members/${encodeURIComponent(user)}`, 'DELETE', payload);
+}
+export function getGroupMemory(id: string): Promise<GroupMemory> {
+  return groupRequest(`${groupPath(id)}/memory`);
+}
+export async function saveGroupMemory(
+  id: string,
+  content: string,
+  revision: string,
+): Promise<{ status: 'ok'; revision: string; audit_recorded: boolean }> {
+  try {
+    return await groupRequest(`${groupPath(id)}/memory`, 'PUT', { content, revision });
+  } catch (error) {
+    if (error instanceof GroupApiError && error.code === 'memory_conflict')
+      throw new TextFileConflictError();
+    if (error instanceof GroupApiError && error.code === 'memory_locked')
+      throw new TextFileLockedError();
+    throw error;
+  }
+}
+export function getGroupMemoryActivity(
+  id: string,
+  cursor?: string,
+): Promise<{ entries: GroupMemoryChange[]; next_cursor: string | null }> {
+  const query = cursor ? `?${new URLSearchParams({ cursor })}` : '';
+  return groupRequest(`${groupPath(id)}/memory/activity${query}`);
+}
+export function retryGroupStorage(
+  id: string,
+): Promise<{ group_id: string; storage_available: boolean }> {
+  return groupRequest(`/admin/groups/${encodeURIComponent(id)}/storage`, 'POST', {});
+}
+
+export interface AdminGroupSummary extends GroupSummary {
+  created_by: string;
+  created_at: string;
+  archived_at: string | null;
+  needs_owner: boolean;
+}
+export interface AdminGroupDetail extends AdminGroupSummary {
+  members: GroupMember[];
+  disclosure: GroupDisclosure;
+  history: (GroupMember & {
+    added_at: string;
+    added_by: string;
+    ended_at: string | null;
+    ended_by: string | null;
+  })[];
+  events: {
+    id: number;
+    actor_id: string;
+    event_type: string;
+    subject_user_id: string | null;
+    created_at: string;
+    details: Record<string, unknown>;
+  }[];
+}
+export function getAdminGroups(): Promise<{ groups: AdminGroupSummary[] }> {
+  return groupRequest('/admin/groups');
+}
+export function getAdminGroup(id: string): Promise<AdminGroupDetail> {
+  return groupRequest(`/admin${groupPath(id)}`);
+}
+export function getAdminGroupUserOptions(): Promise<{
+  users: { user_id: string; display_name: string }[];
+}> {
+  return groupRequest('/admin/groups/user-options');
+}
+export function createAdminGroup(payload: {
+  revision: 0;
+  group_id: string;
+  display_name: string;
+  kind?: string;
+  owners: string[];
+}): Promise<{ group_id: string; revision: number; storage_available: boolean }> {
+  return groupRequest('/admin/groups', 'POST', payload);
+}
+export function updateAdminGroup(
+  id: string,
+  payload:
+    | { revision: number; display_name?: string; kind?: string }
+    | (Omit<GroupMembershipInput, 'role'> & { user_id: string; role: 'owner' | 'member' | null }),
+): Promise<{ group_id: string; revision: number }> {
+  return groupRequest(`/admin${groupPath(id)}`, 'PATCH', payload);
+}
+export function archiveAdminGroup(
+  id: string,
+  payload: { revision: number; confirm: true },
+): Promise<{ group_id: string; revision: number; archived_at: string }> {
+  return groupRequest(`/admin${groupPath(id)}/archive`, 'POST', payload);
 }
