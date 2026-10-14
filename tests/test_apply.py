@@ -59,7 +59,7 @@ class TestTheExitCodes:
         def fail(*args):
             raise OSError("private credential value")
 
-        monkeypatch.setattr(apply, "_write_config", fail)
+        monkeypatch.setattr(apply, "write_config_with_backup", fail)
         plan = _write_plan(tmp_path / "p.toml")
         code, out, err = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--format", "json")
         result = json.loads(out)

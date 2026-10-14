@@ -940,11 +940,31 @@ new_staging() {
     done
 }
 
+# The root-owned files a `--force` re-run replaces, copied first to
+# backups/setup-<UTC stamp>.<suffix>/ (0700), the newest ten kept. The config
+# and the secrets are 10001's, and the wizard backs up config.toml itself.
+backup_stack_env() {
+    local dir f old=() i
+    install -d -m 0700 "${STACK}/backups"
+    dir="$(mktemp -d "${STACK}/backups/setup-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+    for f in .env host.env rclone.conf; do
+        if [ -f "${STACK}/${f}" ] && [ ! -L "${STACK}/${f}" ]; then
+            cp -p "${STACK}/${f}" "${dir}/${f}"
+        fi
+    done
+    for f in "${STACK}"/backups/setup-*; do
+        if [ -d "$f" ]; then old+=("$f"); fi
+    done
+    for ((i = 0; i < ${#old[@]} - 10; i++)); do rm -rf -- "${old[$i]}"; done
+    log "the current .env, host.env and rclone.conf are in ${dir}"
+}
+
 cmd_setup() {
     case " $* " in *" --web "*) cmd_setup_web "$@" ;; esac
     local tag
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
+    case " $* " in *" --force "*) backup_stack_env ;; esac
     prepare_setup
 
     trap 'rm -rf "${staging:-}"' EXIT
@@ -953,8 +973,10 @@ cmd_setup() {
     # A non-interactive run takes credentials from the environment under the
     # names the daemon reads (ANTHROPIC_API_KEY, ISTOTA_NEXTCLOUD_APP_PASSWORD,
     # ...). `-e NAME` hands each one through by name, so no value is on a
-    # command line.
-    local name var pass=()
+    # command line. ISTOTA_SECRETS_DIR=/nonexistent turns istota-secrets'
+    # export off: the stored files would outrank a value passed here, and the
+    # wizard reads them from /vm/secrets as the current answers.
+    local name var pass=(-e ISTOTA_SECRETS_DIR=/nonexistent)
     for name in $(secret_names); do
         var="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
         if [ -n "${!var:-}" ]; then pass+=(-e "$var"); fi

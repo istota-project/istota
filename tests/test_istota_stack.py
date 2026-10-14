@@ -3602,3 +3602,52 @@ class TestSetupCode:
         during = Path(f"{web.calls}.during").read_text()
         instructions = Path(f"{web.calls}.setup-dir", "instructions").read_text()
         assert during == instructions + "rc=0\n"
+
+
+class TestSetupInTheTerminal:
+    """`istota-stack setup [--force]`: the wizard's one-shot, and what a
+    re-run keeps of the files root owns."""
+
+    @staticmethod
+    def _wizard_call(fx: Fixture) -> str:
+        return next(call for call in fx.docker_calls() if " istota setup --vm-dir /vm" in call)
+
+    def test_the_one_shot_switches_the_secrets_export_off(self, web):
+        result = web.run("setup", "--yes")
+        assert result.returncode == 0, result.stdout + result.stderr
+        call = self._wizard_call(web)
+        assert " -e ISTOTA_SECRETS_DIR=/nonexistent " in f" {call} "
+        assert call.index("ISTOTA_SECRETS_DIR=/nonexistent") < call.index(" istota setup ")
+
+    def test_a_forced_run_backs_up_the_stack_files_first(self, web):
+        (web.stack / "rclone.conf").write_text("[nextcloud]\npass = obscured\n")
+        env_before = (web.stack / ".env").read_bytes()
+        host_before = (web.stack / "host.env").read_bytes()
+
+        result = web.run("setup", "--yes", "--force")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        backups = sorted((web.stack / "backups").glob("setup-*"))
+        assert len(backups) == 1
+        assert stat.S_IMODE(backups[0].stat().st_mode) == 0o700
+        assert (backups[0] / ".env").read_bytes() == env_before
+        assert (backups[0] / "host.env").read_bytes() == host_before
+        assert (backups[0] / "rclone.conf").read_text() == "[nextcloud]\npass = obscured\n"
+        assert str(backups[0]) in result.stdout
+
+    def test_the_newest_ten_backups_are_kept(self, web):
+        backups = web.stack / "backups"
+        backups.mkdir()
+        for day in range(1, 11):
+            (backups / f"setup-202601{day:02d}T000000Z.aaaaaa").mkdir()
+
+        assert web.run("setup", "--yes", "--force").returncode == 0
+
+        kept = sorted(path.name for path in backups.iterdir())
+        assert len(kept) == 10
+        assert "setup-20260101T000000Z.aaaaaa" not in kept
+        assert "setup-20260102T000000Z.aaaaaa" in kept
+
+    def test_a_first_run_takes_no_backup(self, web):
+        assert web.run("setup", "--yes").returncode == 0
+        assert not (web.stack / "backups").exists()

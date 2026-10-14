@@ -1230,6 +1230,274 @@ class TestOneWriterForBothFrontEnds:
         assert calls == [("alice", tmp_path / "data", tmp_path / "vm")]
 
 
+class TestARerunStartsFromTheStack:
+    """#749: a `setup --force` re-run starts from what the stack's files say,
+    not from first-run defaults."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch, _no_credentials_in_env):
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+
+    def test_a_yes_rerun_keeps_the_hostname_and_its_port(self, tmp_path, monkeypatch):
+        assert setup_wizard.run_setup(
+            _args(tmp_path, hostname="localhost:8181", storage="host-folder"), out=lambda *_: None,
+        ) == 0
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY")
+
+        assert setup_wizard.run_setup(
+            _args(tmp_path, force=True, user=None, brain=None, native_model=None),
+            out=lambda *_: None,
+        ) == 0
+
+        env = _env((tmp_path / "vm" / ".env").read_text())
+        assert env["NGINX_PUBLISH"] == "127.0.0.1:8181:80"
+        assert env["DOMAIN"] == "localhost:8181"
+        written = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
+        assert written["site"]["hostname"] == "localhost:8181"
+
+    def test_a_first_run_without_storage_keeps_a_host_folder_vm(self, tmp_path):
+        """With no config there is no prior; host.env's STORAGE is the fallback."""
+        vm = tmp_path / "vm"
+        vm.mkdir()
+        (vm / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\n")
+
+        assert setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None) == 0
+
+        assert _env((vm / "host.env").read_text())["STORAGE"] == "host-folder"
+
+    def test_a_brain_setup_cannot_write_is_refused_by_name(self, tmp_path):
+        setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
+        config = tmp_path / "data" / "config" / "config.toml"
+        config.write_text(config.read_text().replace('kind = "native"', 'kind = "tmux_claude"'))
+        before = config.read_bytes()
+
+        with pytest.raises(setup_wizard.SetupError, match=r"brain\.kind = 'tmux_claude'.*Configuration page"):
+            setup_wizard.run_setup(_args(tmp_path, force=True, brain=None), out=lambda *_: None)
+
+        assert config.read_bytes() == before
+
+    def test_a_profile_setup_does_not_know_is_refused_by_name(self, tmp_path):
+        setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
+        env = tmp_path / "vm" / ".env"
+        env.write_text(env.read_text().replace("COMPOSE_PROFILES=", "COMPOSE_PROFILES=browser,extra-sidecar"))
+
+        with pytest.raises(setup_wizard.SetupError, match="extra-sidecar"):
+            setup_wizard.run_setup(_args(tmp_path, force=True), out=lambda *_: None)
+
+    def test_a_config_that_does_not_parse_falls_back_to_first_run_defaults(self, tmp_path):
+        setup_wizard.run_setup(_args(tmp_path, hostname="localhost:8181"), out=lambda *_: None)
+        config = tmp_path / "data" / "config" / "config.toml"
+        config.write_text("this is [not toml\n")
+        said: list[str] = []
+
+        assert setup_wizard.run_setup(_args(tmp_path, force=True), out=said.append) == 0
+
+        assert any("does not parse" in line and "first-run defaults" in line for line in said)
+        assert tomllib.loads(config.read_text())["site"]["hostname"] == "localhost"
+
+    def test_two_admins_with_user_blocks_are_not_guessed_between(self, tmp_path):
+        setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
+        config_dir = tmp_path / "data" / "config"
+        (config_dir / "admins").write_text("alice\nbob\n")
+        config = config_dir / "config.toml"
+        config.write_text(config.read_text() + '\n[users.bob]\ndisplay_name = "Bob"\n')
+
+        assert setup_wizard.prior_answers(tmp_path / "data", tmp_path / "vm").user_id == ""
+        assert setup_wizard.prior_user_ids(tomllib.loads(config.read_text()), config_dir / "admins") == [
+            "alice", "bob",
+        ]
+        with pytest.raises(setup_wizard.SetupError, match="user id is required"):
+            setup_wizard.run_setup(_args(tmp_path, force=True, user=None), out=lambda *_: None)
+
+    def test_a_rerun_backs_the_config_up_and_keeps_the_newest_ten(self, tmp_path):
+        setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
+        config = tmp_path / "data" / "config" / "config.toml"
+        first = config.read_bytes()
+        for day in range(1, 12):
+            stale = config.with_name(f"config.toml.bak.202601{day:02d}T000000.000000Z")
+            stale.write_text("old\n")
+
+        assert setup_wizard.run_setup(_args(tmp_path, force=True), out=lambda *_: None) == 0
+
+        backups = sorted(config.parent.glob("config.toml.bak.*"))
+        assert len(backups) == 10
+        assert backups[-1].read_bytes() == first
+        assert _mode(backups[-1]) == 0o600
+        assert not config.with_name("config.toml.bak.20260101T000000.000000Z").exists()
+
+    def test_a_first_run_writes_no_backup(self, tmp_path):
+        setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
+        assert not list((tmp_path / "data" / "config").glob("config.toml.bak.*"))
+
+
+#: First-run answer sets for the identity table: (id, answers). Each is
+#: written once, then re-run with no flags; every file must come out the same.
+_FIRST_RUNS = [
+    ("local-host-folder-native", dict(
+        hostname="localhost:8181", ingress="local", host_folder=True, brain_kind="native",
+        native_base_url="https://llm.example.test/v1", native_model="model-x",
+        native_api_key="native-key", profiles=("browser",))),
+    ("local-state-volume-token", dict(
+        hostname="localhost", ingress="local", claude_code_oauth_token="oauth-token",
+        display_name="Alice Example", timezone="Europe/Berlin", user_email="alice@example.test",
+        money_enabled=False, feeds_enabled=False)),
+    ("direct-acme-api-key", dict(
+        hostname="bot.example.test", ingress="direct", tls_cert_source="acme",
+        anthropic_api_key="api-key")),
+    ("direct-files", dict(
+        hostname="bot.example.test", ingress="direct", tls_cert_source="files",
+        claude_code_oauth_token="oauth-token")),
+    ("proxied-self-signed", dict(
+        hostname="bot.example.test", ingress="proxied", upstream_proxy="10.0.0.5",
+        listen_addr="10.0.0.20", listen_port=8443, tls_cert_source="self-signed",
+        claude_code_oauth_token="oauth-token")),
+    ("proxied-plain", dict(
+        hostname="bot.example.test", ingress="proxied", upstream_proxy="10.0.0.5,10.0.0.6",
+        listen_addr="10.0.0.20", listen_port=8080, tls_cert_source="",
+        claude_code_oauth_token="oauth-token")),
+    ("nextcloud-mount-prefix-oauth-signaling", dict(
+        hostname="bot.example.test", ingress="direct", nextcloud_url="https://cloud.example.test",
+        nextcloud_public_url="https://files.example.test", nextcloud_username="zed-bot",
+        nextcloud_app_password="nc-pass", nextcloud_dav_prefix="Shared Files",
+        nextcloud_auto_share_bot_dir=False, oauth_client_id="client-id",
+        oauth_client_secret="client-secret", email_login=False,
+        claude_code_oauth_token="oauth-token", profiles=("signaling", "whatsapp-baileys"))),
+    ("nextcloud-local-workspace-no-talk", dict(
+        hostname="localhost:8080", ingress="local", nextcloud_url="https://cloud.example.test",
+        nextcloud_public_url="https://cloud.example.test", nextcloud_app_password="nc-pass",
+        workspace="local", nextcloud_auto_share_bot_dir=False, talk_enabled=False,
+        claude_code_oauth_token="oauth-token")),
+    ("email-ports-authserv-calendar", dict(
+        hostname="localhost", ingress="local", claude_code_oauth_token="oauth-token",
+        email_enabled=True, imap_host="imap.example.test", imap_port=143,
+        imap_user="zed@example.test", imap_password="imap-pass", smtp_host="smtp.example.test",
+        smtp_port=465, bot_email="bot@example.test", authserv_id="mx.example.test",
+        caldav_url="https://dav.example.test", caldav_username="alice",
+        caldav_password="dav-pass")),
+    ("developer-location-every-module-off", dict(
+        hostname="localhost", ingress="local", claude_code_oauth_token="oauth-token",
+        developer_enabled=True, gitlab_token="gitlab-token", github_token="github-token",
+        location_enabled=True, money_enabled=False, health_enabled=False,
+        feeds_enabled=False, briefings_enabled=False, profiles=("browser", "whatsapp-baileys"))),
+]
+
+
+def _bare_args(tmp_path: Path, **kw) -> SimpleNamespace:
+    """`istota setup --vm-dir … --force` and nothing else: every answer unasked."""
+    return SimpleNamespace(
+        shape="container", vm_dir=str(tmp_path / "vm"), data_dir=str(tmp_path / "data"),
+        force=True, **kw,
+    )
+
+
+class TestARerunWritesWhatIsThere:
+    """The inverse reader held in step with the writer: a re-run with no
+    flags, `--yes` or Enter at every prompt, rewrites every file byte for byte
+    (the new config backup aside). A field the writer gains without the
+    reader fails here."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch, _no_credentials_in_env):
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        # Every module toggle is recorded, whatever extras this venv has.
+        monkeypatch.setattr("istota.modules.module_available", lambda _name: True)
+
+    @staticmethod
+    def _first_run(tmp_path: Path, fields: dict) -> dict[str, bytes]:
+        a = ContainerAnswers(user_id="alice", **fields)
+        assert setup_wizard.validate_container_answers(a) == []
+        setup_wizard.write_container_setup(
+            a, data_dir=tmp_path / "data", vm_dir=tmp_path / "vm", out=lambda *_: None,
+        )
+        return _written(tmp_path)
+
+    @staticmethod
+    def _without_backups(files: dict[str, bytes]) -> dict[str, bytes]:
+        return {name: data for name, data in files.items() if ".bak." not in name}
+
+    @pytest.mark.parametrize(
+        "fields", [case[1] for case in _FIRST_RUNS], ids=[case[0] for case in _FIRST_RUNS],
+    )
+    def test_a_yes_rerun_writes_the_same_bytes(self, tmp_path, fields):
+        before = self._first_run(tmp_path, fields)
+
+        assert setup_wizard.run_setup(_bare_args(tmp_path, yes=True), out=lambda *_: None) == 0
+
+        after = _written(tmp_path)
+        assert self._without_backups(after) == before
+        assert [name for name in after if ".bak." in name] != []
+
+    @pytest.mark.parametrize(
+        "fields", [case[1] for case in _FIRST_RUNS], ids=[case[0] for case in _FIRST_RUNS],
+    )
+    def test_enter_at_every_prompt_writes_the_same_bytes(self, tmp_path, fields):
+        before = self._first_run(tmp_path, fields)
+
+        assert setup_wizard.run_setup(
+            _bare_args(tmp_path, yes=False), input_fn=lambda _prompt: "",
+            getpass_fn=lambda _prompt: "", out=lambda *_: None,
+        ) == 0
+
+        assert self._without_backups(_written(tmp_path)) == before
+
+    def test_the_prompts_offer_the_current_values(self, tmp_path):
+        self._first_run(tmp_path, dict(_FIRST_RUNS[0][1], bot_name="Zed"))
+        prompts: list[str] = []
+        secret_prompts: list[str] = []
+
+        def ask(prompt: str) -> str:
+            prompts.append(prompt)
+            return ""
+
+        def ask_secret(prompt: str) -> str:
+            secret_prompts.append(prompt)
+            return ""
+
+        said: list[str] = []
+        setup_wizard.run_setup(
+            _bare_args(tmp_path, yes=False), input_fn=ask, getpass_fn=ask_secret, out=said.append,
+        )
+
+        assert "Bot name [Zed]: " in prompts
+        assert "Public hostname (as browsers reach it) [localhost:8181]: " in prompts
+        assert "Ingress (direct/proxied/local) [local]: " in prompts
+        assert "Model backend (claude_code/native) [native]: " in prompts
+        assert "Model id [model-x]: " in prompts
+        assert "Run the browser container? [Y/n]: " in prompts
+        assert "API key (Enter keeps the current one): " in secret_prompts
+        # The user is kept and shown, not asked; nor are their settings.
+        assert not any("user id" in p or "Timezone" in p or "money module" in p for p in prompts)
+        assert any("First admin: alice" in line for line in said)
+
+    def test_a_credential_with_nothing_stored_still_says_skip(self, tmp_path):
+        self._first_run(tmp_path, dict(_FIRST_RUNS[1][1]))
+        secret_prompts: list[str] = []
+
+        def ask_secret(prompt: str) -> str:
+            secret_prompts.append(prompt)
+            return ""
+
+        setup_wizard.run_setup(
+            _bare_args(tmp_path, yes=False), input_fn=lambda _prompt: "",
+            getpass_fn=ask_secret, out=lambda *_: None,
+        )
+
+        assert "Claude Code OAuth token (Enter keeps the current one): " in secret_prompts
+        assert not any("Anthropic API key" in p for p in secret_prompts)
+
+    def test_a_new_answer_still_replaces_the_prior(self, tmp_path, monkeypatch):
+        self._first_run(tmp_path, dict(_FIRST_RUNS[0][1]))
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "rotated-key")
+
+        setup_wizard.run_setup(
+            _bare_args(tmp_path, yes=True, hostname="localhost:9090"), out=lambda *_: None,
+        )
+
+        assert (tmp_path / "vm" / "secrets" / "istota_brain_native_api_key").read_text() == "rotated-key"
+        assert _env((tmp_path / "vm" / ".env").read_text())["NGINX_PUBLISH"] == "127.0.0.1:9090:80"
+
+
 class TestTheBrowserPrompt:
     """Decided 2026-10-12: the browser is on by default in the interactive
     wizard; a `--yes` run without `--profile` still runs without it."""
