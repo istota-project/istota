@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-10-14
+
 You can now share your Nextcloud calendars and address books with Istota from Settings, choosing read-only or read and write for each, and Istota can look up and edit contacts in those address books and in Google Contacts. The Workspace sidebar marks which places Istota can reach in your tasks.
 
 Installing and updating no longer need a tag or a signing key: both move to the newest signed release. The Mac install sizes its VM to the Mac, a Debian mirror can be set for the VM and image builds, and the health checks now sign in to Nextcloud as the bot. This release is 53 commits, against 756 in 0.44.0 and 418 in 0.43.0; the rest is small fixes and the removal of the standalone install.
@@ -3263,7 +3265,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.44.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.45.0...main
+[0.45.0]: https://github.com/istota-project/istota/releases/tag/v0.45.0
 [0.44.0]: https://github.com/istota-project/istota/releases/tag/v0.44.0
 [0.43.0]: https://github.com/istota-project/istota/releases/tag/v0.43.0
 [0.42.0]: https://github.com/istota-project/istota/releases/tag/v0.42.0
