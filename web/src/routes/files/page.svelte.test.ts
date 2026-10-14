@@ -10,6 +10,9 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 const openFile = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/fileViewer/store.svelte', () => ({ viewer: { openFile } }));
+vi.mock('$lib/userContext', () => ({
+  getCurrentUser: () => ({ user: { username: 'alice', bot_name: 'Istota' } }),
+}));
 await fillApiDouble(api);
 const actualApi = await vi.importActual<typeof import('$lib/api')>('$lib/api');
 api.chatFileUrl.mockImplementation(actualApi.chatFileUrl);
@@ -60,7 +63,7 @@ beforeEach(() => {
   api.deleteWorkspacePin = vi.fn().mockResolvedValue({ status: 'ok' });
   api.getWorkspaceConfigFiles.mockResolvedValue({ files: configFiles });
   localStorage.clear();
-  __history.reset('/istota/workspace');
+  __history.reset('/istota/files');
   api.getWorkspacePlaces.mockResolvedValue({
     places: [home, room],
     notes: ['Files are stored in a local folder.'],
@@ -85,6 +88,11 @@ afterEach(cleanup);
 async function openSection(label: string) {
   const sidebar = await screen.findByRole('complementary');
   await fireEvent.click(await within(sidebar).findByRole('button', { name: new RegExp(label) }));
+}
+
+async function openView(label: string) {
+  const section = await screen.findByRole('region', { name: 'Istota' });
+  await fireEvent.click(await within(section).findByRole('link', { name: label }));
 }
 
 async function openActions(name: string) {
@@ -116,9 +124,7 @@ it('reserves the folder button height while the listing loads', async () => {
 
 it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
   const { container } = render(Workspace);
-  await openSection('Rooms');
-  await screen.findByRole('link', { name: 'Project room' });
-  const sidebar = screen.getByRole('complementary');
+  const sidebar = await screen.findByRole('complementary');
   expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
   expect(sidebar.querySelector('.badge')).toBeNull();
   expect(container.querySelector('.folder-toolbar')).toHaveTextContent('Read-write');
@@ -138,20 +144,21 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
 it('marks the places a task can reach and describes the mark without renaming the link', async () => {
   render(Workspace);
   const sidebar = await screen.findByRole('complementary');
-  await openSection('Rooms');
-  for (const [label, description] of [
-    ['My files', 'Istota can read and change these files'],
-    ['Project room', 'Istota can read and change these files, in this room only'],
-  ]) {
-    const link = await within(sidebar).findByRole('link', { name: label });
-    expect(link).toHaveAccessibleName(label);
-    expect(link).toHaveAccessibleDescription(description);
-    const describedBy = link.getAttribute('aria-describedby')!;
-    expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(description);
-  }
+  const link = await within(sidebar).findByRole('link', { name: 'My files' });
+  const description = 'Istota can read and change these files';
+  expect(link).toHaveAccessibleName('My files');
+  expect(link).toHaveAccessibleDescription(description);
+  const describedBy = link.getAttribute('aria-describedby')!;
+  expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(description);
   expect(
-    within(sidebar).getByText(
-      'Istota can use these in your tasks, in any of your rooms. A room folder only in its own room.',
+    within(sidebar).getByText('Istota can use these in your tasks, in any of your rooms.'),
+  ).toBeTruthy();
+  await openView('Rooms');
+  const rooms = await screen.findByRole('region', { name: 'Rooms' });
+  expect(within(rooms).getByText('Read-write')).toBeTruthy();
+  expect(
+    within(rooms).getByText(
+      "Each room's folder. A task reaches a room's folder only in that room.",
     ),
   ).toBeTruthy();
 });
@@ -194,9 +201,9 @@ it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () 
     notes: [],
   });
   const { container } = render(Workspace);
-  const sidebar = await screen.findByRole('complementary');
-  await openSection('Rooms');
-  await within(sidebar).findByRole('link', { name: '<b>Project room</b>' });
+  await openView('Rooms');
+  const rooms = await screen.findByRole('region', { name: 'Rooms' });
+  await fireEvent.click(within(rooms).getByRole('link', { name: '<b>Project room</b>' }));
   expect(container.querySelector('b')).toBeNull();
   const breadcrumbs = screen.getByRole('navigation', { name: 'Folder path' });
   expect(within(breadcrumbs).getByRole('link', { name: '<b>Project room</b>' })).toBeTruthy();
@@ -218,12 +225,12 @@ it('navigates encoded folders and breadcrumbs through history, and opens home fi
 });
 
 it('loads the folder from a direct URL and keeps symbolic links and other entries inert', async () => {
-  __history.reset('/istota/workspace?place=home&path=notes%20%26%20drafts');
+  __history.reset('/istota/files?place=home&path=notes%20%26%20drafts');
   const first = render(Workspace);
   await screen.findByRole('button', { name: 'plan #1.md' });
   expect(api.getWorkspaceListing).toHaveBeenCalledWith('home', 'notes & drafts');
   first.unmount();
-  __history.reset('/istota/workspace');
+  __history.reset('/istota/files');
   render(Workspace);
   const link = await screen.findByText('outside');
   expect(link.closest('a,button')).toBeNull();
@@ -254,13 +261,13 @@ it('persists hidden entries and explains partial listings', async () => {
 
 it('keeps files without a viewer root inert', async () => {
   api.getWorkspacePlaces.mockResolvedValue({ places: [{ ...room, view_root: null }], notes: [] });
-  __history.reset('/istota/workspace?place=room%3Asample&path=notes');
+  __history.reset('/istota/files?place=room%3Asample&path=notes');
   render(Workspace);
   expect((await screen.findByText('plan #1.md')).closest('a,button')).toBeNull();
 });
 
 it('shows an unavailable place without falling back to home', async () => {
-  __history.reset('/istota/workspace?place=room%3Aremoved');
+  __history.reset('/istota/files?place=room%3Aremoved');
   render(Workspace);
   await screen.findByText('This place is no longer available.');
   expect(api.getWorkspaceListing).not.toHaveBeenCalled();
@@ -274,7 +281,7 @@ it('keeps a failed folder retryable and ignores a late result after navigation',
     }),
   );
   render(Workspace);
-  await openSection('Rooms');
+  await openView('Rooms');
   await fireEvent.click(await screen.findByRole('link', { name: 'Project room' }));
   await screen.findByRole('link', { name: 'notes & drafts' });
   resolve({
@@ -295,13 +302,13 @@ it('keeps a failed folder retryable and ignores a late result after navigation',
 it('shows the empty state when there are no places', async () => {
   api.getWorkspacePlaces.mockResolvedValue({ places: [], notes: [] });
   render(Workspace);
-  await screen.findByText('No workspace files or connections are available.');
+  await screen.findByText('No files or connections are available.');
 });
 
 it('recovers from a failed places request', async () => {
   api.getWorkspacePlaces.mockRejectedValueOnce(new Error('Unavailable'));
   render(Workspace);
-  await screen.findByText('Could not load your workspace.');
+  await screen.findByText('Could not load your files.');
   await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
   await screen.findByRole('link', { name: 'notes & drafts' });
 });
@@ -336,7 +343,7 @@ it.each([
     places: [{ ...home, id: kind, kind, view_root }],
     notes: [],
   });
-  __history.reset(`/istota/workspace?place=${kind}&path=notes`);
+  __history.reset(`/istota/files?place=${kind}&path=notes`);
   render(Workspace);
   await fireEvent.click(await screen.findByRole('button', { name: 'plan #1.md' }));
   expect(openFile).toHaveBeenCalledWith(`${view_root}/notes/plan #1.md`);
@@ -388,7 +395,7 @@ it('shows folder conflicts in the dialog and hides writes for other places', asy
   await fireEvent.click(screen.getByRole('button', { name: 'Create folder' }));
   await screen.findByText('A file or folder already exists.');
   await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-  await openSection('Rooms');
+  await openView('Rooms');
   await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   expect(screen.queryByRole('button', { name: 'Upload' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull();
@@ -441,7 +448,7 @@ const driveItem = (id: string, name: string, is_folder = false) => ({
 });
 function withDrive() {
   api.getWorkspacePlaces.mockResolvedValue({ places: [home, drivePlace], notes: [] });
-  __history.reset('/istota/workspace?place=drive');
+  __history.reset('/istota/files?place=drive');
 }
 
 it('browses Drive roots and folders, preserves readable breadcrumbs, and opens safe links', async () => {
@@ -557,7 +564,7 @@ it('links to Connections when Google rejects a stored credential', async () => {
 });
 
 it('pins a file from its row and removes it from the Pinned section', async () => {
-  __history.reset('/istota/workspace?place=home&path=notes');
+  __history.reset('/istota/files?place=home&path=notes');
   api.putWorkspacePin.mockImplementation(async (body) => ({
     pin: { ...body, id: 1, available: true, is_dir: false },
   }));
@@ -620,7 +627,7 @@ it('pins a Drive item with its provider metadata', async () => {
     places: [{ ...home, id: 'drive', kind: 'drive', label: 'Google Drive', view_root: null }],
     notes: [],
   });
-  __history.reset('/istota/workspace?place=drive');
+  __history.reset('/istota/files?place=drive');
   const item = {
     id: 'drive_file_123',
     name: '<b>Budget</b>',
@@ -731,8 +738,8 @@ function editorBox(): HTMLTextAreaElement {
 
 it('lists the configuration files with their sizes and keeps a refused one read-only', async () => {
   render(Workspace);
+  await openView('Configuration');
   const section = await screen.findByRole('region', { name: 'Configuration' });
-  await fireEvent.click(within(section).getByRole('button', { name: /Configuration/ }));
   await within(section).findByText('USER.md');
   expect(within(section).getByText('2 KB')).toBeTruthy();
   expect(within(section).getAllByText('Not created yet').length).toBe(2);
@@ -744,7 +751,7 @@ it('lists the configuration files with their sizes and keeps a refused one read-
   expect(api.getWorkspaceConfigFile).not.toHaveBeenCalled();
   await fireEvent.keyDown(refusedEdit, { key: 'Escape' });
   expect(within(section).queryByText('notes')).toBeNull();
-  await fireEvent.click(within(section).getByRole('button', { name: /Skill instructions/ }));
+  await openView('Skill instructions');
   await openActions('skills/notes');
   expect(await screen.findByRole('menuitem', { name: 'Edit' })).not.toHaveAttribute(
     'data-disabled',
@@ -754,7 +761,7 @@ it('lists the configuration files with their sizes and keeps a refused one read-
 it('opens skill instructions from the file menu', async () => {
   api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
   render(Workspace);
-  await openSection('Skill instructions');
+  await openView('Skill instructions');
   await openActions('skills/notes');
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('skills/notes'));
@@ -765,7 +772,7 @@ it('edits CRON.md with the loaded revision and says when the jobs change', async
   api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'rev-0', exists: false });
   api.saveWorkspaceConfigFile.mockResolvedValue({ revision: 'rev-1', applies: 'next_sync' });
   render(Workspace);
-  await openSection('Configuration');
+  await openView('Configuration');
   await openActions('CRON.md');
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('CRON.md'));
@@ -791,7 +798,7 @@ it('keeps the text on a conflict and on validator errors, and lists the errors',
     new actualApi.TextFileInvalidError(['TOML error: expected a value']),
   );
   render(Workspace);
-  await openSection('Configuration');
+  await openView('Configuration');
   await openActions('HEARTBEAT.md');
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   await waitFor(() => expect(editorBox().value).toBe('old\n'));
@@ -815,9 +822,9 @@ it('keeps the text on a conflict and on validator errors, and lists the errors',
 it('reports a failed configuration list without hiding the places', async () => {
   api.getWorkspaceConfigFiles.mockRejectedValue(new Error('network'));
   render(Workspace);
-  await openSection('Configuration');
+  await openView('Configuration');
   await screen.findByText('Could not load your configuration files.');
-  await openSection('Rooms');
+  await openView('Rooms');
   expect(screen.getByRole('link', { name: 'Project room' })).toBeTruthy();
 });
 
@@ -896,7 +903,7 @@ it('clears selection when filtering and never exposes deletion in shared places'
   });
   expect(screen.queryByRole('button', { name: 'a.txt' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled();
-  await openSection('Rooms');
+  await openView('Rooms');
   await fireEvent.click(screen.getByRole('link', { name: 'Project room' }));
   await screen.findByRole('button', { name: 'a.txt' });
   expect(screen.queryByRole('button', { name: 'Delete selected' })).toBeNull();
@@ -989,7 +996,7 @@ it('says plainly, outside any disclosure, that only the user sees the Nextcloud 
   expect(screen.queryByText('Files are stored in your Nextcloud at cloud.example.com.')).toBeNull();
 });
 
-it('puts My files immediately after Pinned and opens only My files by default', async () => {
+it('puts the bot section immediately after Pinned and opens only it by default', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
     places: [
       home,
@@ -1018,16 +1025,10 @@ it('puts My files immediately after Pinned and opens only My files by default', 
   const headings = Array.from(sidebar.querySelectorAll('.cat-label-text')).map(
     (el) => el.textContent,
   );
-  expect(headings).toEqual([
-    'Pinned',
-    'My files',
-    'Configuration',
-    'Skill instructions',
-    'Linked folders',
-    'Rooms',
-    'Groups',
-    'Connections',
-  ]);
+  expect(headings).toEqual(['Pinned', 'Istota', 'Linked folders', 'Connections']);
+  for (const shown of ['Rooms', 'Groups', 'Configuration', 'Skill instructions']) {
+    expect(within(sidebar).getByRole('link', { name: shown })).toBeTruthy();
+  }
   for (const hidden of [
     'Pinned plan',
     'USER.md',
@@ -1040,17 +1041,13 @@ it('puts My files immediately after Pinned and opens only My files by default', 
   }
   for (const [group, item] of [
     ['Pinned', 'Pinned plan'],
-    ['Configuration', 'USER.md'],
-    ['Skill instructions', 'notes'],
     ['Linked folders', 'Shared folder'],
-    ['Rooms', 'Project room'],
-    ['Groups', 'Team folder'],
     ['Connections', 'Nextcloud'],
   ]) {
     await fireEvent.click(within(sidebar).getByRole('button', { name: new RegExp(group) }));
     expect(within(sidebar).getByText(item)).toBeTruthy();
   }
-  await fireEvent.click(within(sidebar).getByRole('button', { name: /My files/ }));
+  await fireEvent.click(within(sidebar).getByRole('button', { name: /Istota/ }));
   expect(within(sidebar).queryByRole('link', { name: 'My files' })).toBeNull();
 });
 
@@ -1130,11 +1127,11 @@ it.each(['USER.md', 'skills/notes'])('reveals %s in its containing folder', asyn
     files: configFiles.map((file) => ({ ...file, exists: true })),
   });
   render(Workspace);
-  await openSection(name.startsWith('skills/') ? 'Skill instructions' : 'Configuration');
+  await openView(name.startsWith('skills/') ? 'Skill instructions' : 'Configuration');
   await openActions(name);
   const reveal = await screen.findByRole('menuitem', { name: 'Reveal' });
   const path = name.startsWith('skills/') ? 'Helper/config/skills' : 'Helper/config';
-  expect(reveal).toHaveAttribute('href', `/workspace?place=home&path=${encodeURIComponent(path)}`);
+  expect(reveal).toHaveAttribute('href', `/files?place=home&path=${encodeURIComponent(path)}`);
   await fireEvent.click(reveal);
   await waitFor(() => expect(api.getWorkspaceListing).toHaveBeenLastCalledWith('home', path));
 });
@@ -1165,21 +1162,16 @@ it('reveals a pinned file in the closest accessible place', async () => {
   );
 });
 
-it('remembers expanded and collapsed sidebar groups after returning to Workspace', async () => {
+it('remembers expanded and collapsed sidebar groups after returning to Files', async () => {
   const first = render(Workspace);
-  await openSection('My files');
-  await openSection('Configuration');
-  await openSection('Skill instructions');
+  await openSection('Istota');
   await openSection('Pinned');
-  await openSection('Rooms');
   first.unmount();
   render(Workspace);
   const sidebar = await screen.findByRole('complementary');
-  await within(sidebar).findByText('USER.md');
-  expect(within(sidebar).getByText('notes')).toBeTruthy();
-  expect(within(sidebar).getByText('Pin a file or folder to keep it here.')).toBeTruthy();
-  expect(within(sidebar).getByRole('link', { name: 'Project room' })).toBeTruthy();
+  await within(sidebar).findByText('Pin a file or folder to keep it here.');
   expect(within(sidebar).queryByRole('link', { name: 'My files' })).toBeNull();
+  expect(within(sidebar).queryByRole('link', { name: 'Rooms' })).toBeNull();
 });
 
 it('reveals a Drive pin using its current parent and keeps lookup errors visible', async () => {
@@ -1303,8 +1295,8 @@ it('leaves a Drive pin unmarked when no Drive place is listed', async () => {
 
 it('says the configuration files are read as instructions', async () => {
   render(Workspace);
+  await openView('Configuration');
   const section = await screen.findByRole('region', { name: 'Configuration' });
-  await openSection('Configuration');
   await within(section).findByText('USER.md');
   expect(within(section).getByText('Istota reads these as instructions.')).toBeTruthy();
 });
@@ -1318,7 +1310,7 @@ it('links a group folder to its notebook and members without adding links to per
     view_root: '/Groups/team.one',
   };
   api.getWorkspacePlaces.mockResolvedValue({ places: [home, group], notes: [] });
-  __history.reset('/workspace?place=group%3Ateam.one&path=memories');
+  __history.reset('/files?place=group%3Ateam.one&path=memories');
   render(Workspace);
   const memory = await screen.findByRole('link', { name: 'Group memory' });
   expect(memory).toHaveAttribute('href', '/groups?group=team.one&view=memory');

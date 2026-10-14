@@ -78,7 +78,7 @@ const TIPS: { text: string; when?: (ctx: TipContext) => boolean }[] = [
   { text: '!memory user shows everything I have remembered about you.' },
   { text: '!skills lists what I can do for you here.' },
   { text: '!cron lists your scheduled jobs, and can switch one off.' },
-  { text: '!export writes the conversation out to a file in your workspace.' },
+  { text: '!export writes the conversation out to a file you can open in Files.' },
   { text: '!room model sets a standing model for a room, so you stop prefixing.' },
   { text: 'Drop a file into the chat box and I will read it.' },
   { text: 'Reply to one message and I answer that one, not the room in general.' },

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
 
-- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Workspace. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
+- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Files. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
 - Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
 - Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
 
@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Workspace page is now called Files and sits before Groups in the navigation; the dashboard has a Groups tile beside it. In the Files sidebar, My files, Rooms, Groups, Configuration and Skill instructions sit under one section named after the assistant, and rooms, groups and config files open as lists in the main page instead of filling the sidebar.
 - Google Workspace setup documentation now covers the operator's OAuth client, consent screen and credential storage. It distinguishes instance setup from each user's account connection and explains common connection failures.
 - New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
 - **The local VM sets up in the browser.** `istota-stack create` on a Mac, and `install.sh --local`, now open the setup page in your browser and finish in one run. `--terminal-setup` keeps the questions in the terminal.

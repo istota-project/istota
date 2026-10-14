@@ -75,7 +75,7 @@
   {/snippet}
   {#snippet caption()}
     {#if mine}
-      Markdown. Saved in your workspace, never shown to the room.
+      Markdown. Saved in My files, never shown to the room.
     {:else}
       Markdown. Saved to <code>CHANNEL.md</code> and read into every task in this room.
     {/if}

@@ -1,12 +1,14 @@
-# Workspace
+# Files
 
-Open Workspace in the main navigation to see the files and connections Istota can reach for you. On a phone, open Places beside the page title to choose a location.
+Open Files in the main navigation to see the files and connections Istota can reach for you. On a phone, open Places beside the page title to choose a location.
 
 ## Places and access
 
 My files is your own workspace folder. Linked folders, room folders and group folders appear when they are available to your account. Room membership is checked again on each request, so leaving a room removes access to its folder.
 
-In the sidebar, a small robot icon marks each place a task in your private room can reach, pinned files and folders included. A room folder carries the icon too, though only that room's own tasks reach it. A place without the icon is visible to you only. A line at the bottom of the sidebar says what the icon means, since a phone shows no hover text.
+The first sidebar section after Pinned is named after the assistant. It holds My files, Rooms, Groups, Configuration and Skill instructions. Rooms and Groups open a list of your room or group folders in the main area, each with its access for a task; choose one to browse it, and the path above the listing leads back to the list. Linked folders and Connections have their own sections below it.
+
+In the sidebar, a small robot icon marks each place a task in your private room can reach, pinned files and folders included. A place without the icon is visible to you only. In the Rooms list, a room folder's access applies only to that room's own tasks. A line at the bottom of the sidebar says what the icon means, since a phone shows no hover text.
 
 The folder toolbar shows the selected place's access for a task in a private room: Read-write, Read-only, Via skill or No access, with the robot icon when a task can reach the place. These badges describe task access; they do not mean that the web page can edit the files. Open “How Istota reaches your files” to see the selected place's access in a private room, on your own turn in a shared room, and on a guest's turn or a task nobody asked for. The disclosure also says what the robot icon means, where files are stored and whether sandboxing limits task access.
 
@@ -26,7 +28,7 @@ In My files, use Upload or drop files onto the listing. Files upload one at a ti
 
 ## Configuration files
 
-The Configuration section in the Files sidebar lists your own config files: `USER.md`, `CRON.md`, `TASKS.md` and `HEARTBEAT.md`, with their sizes. Skill instructions, collapsed below them, has one row per skill you can use. A skill's file is added to that skill's own instructions whenever it loads. Edit opens the file in an editor. You can only reach your own files.
+Configuration, in the assistant's section of the Files sidebar, opens a list of your own config files in the main area: `USER.md`, `CRON.md`, `TASKS.md` and `HEARTBEAT.md`, each with what it does and its size. Skill instructions opens a list with one row per skill you can use. A skill's file is added to that skill's own instructions whenever it loads. Edit opens the file in an editor. You can only reach your own files.
 
 A save checks the file the way Istota reads it, and nothing is written when the check fails:
 
@@ -40,7 +42,7 @@ Jobs saved in `CRON.md` change at the next CRON.md sync, not at once. A file tha
 
 On a Nextcloud-backed workspace, My files shows a Shared marker when Nextcloud reports a share. Open in Nextcloud appears when the file is shared with your account. If share information is unavailable, browsing still works and a notice explains what is missing. A disconnected Nextcloud folder shows an error instead of an empty listing.
 
-Your connected Nextcloud account appears under Connections. Folders open in Workspace, and files open in the same viewer as your workspace files, read through your personal connection. The viewer and the file's menu both have Download and Open in Nextcloud, so a file type with no preview can still be saved or opened there. If the connection has expired or been revoked, the viewer says so and links to Connections to sign in again. Only you can see this view: it uses your personal connection, which tasks never use. The toolbar shows Only you instead of an access badge, and a note above the listing says the same without anything to open. Istota's Nextcloud skill uses the bot's own account. To work on a file with Istota, put a copy in My files.
+Your connected Nextcloud account appears under Connections. Folders open in Files, and files open in the same viewer as your workspace files, read through your personal connection. The viewer and the file's menu both have Download and Open in Nextcloud, so a file type with no preview can still be saved or opened there. If the connection has expired or been revoked, the viewer says so and links to Connections to sign in again. Only you can see this view: it uses your personal connection, which tasks never use. The toolbar shows Only you instead of an access badge, and a note above the listing says the same without anything to open. Istota's Nextcloud skill uses the bot's own account. To work on a file with Istota, put a copy in My files.
 
 Google Drive has My Drive and Shared with me views. Open folders to browse them and choose Load more when more items are available. Files open in Google Drive in another tab. If Drive access is off or the connection needs attention, use the Connections link to restore it.
 

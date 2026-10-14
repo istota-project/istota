@@ -38,7 +38,17 @@
     type WorkspaceConfigFile,
   } from '$lib/api';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
-  import ConfigFileList from '$lib/components/workspace/ConfigFileList.svelte';
+  import BotSection from '$lib/components/workspace/BotSection.svelte';
+  import ConfigIndex from '$lib/components/workspace/ConfigIndex.svelte';
+  import PlaceIndex from '$lib/components/workspace/PlaceIndex.svelte';
+  import { configFileDescription } from '$lib/components/workspace/configFiles';
+  import {
+    INDEX_VIEW_LABELS,
+    indexViewForKind,
+    parseIndexView,
+    type IndexView,
+  } from '$lib/components/workspace/indexViews';
+  import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
@@ -98,7 +108,11 @@
     }
   }
 
+  const identity = getCurrentUser();
+  const botName = $derived(identity.user?.bot_name || 'Istota');
+
   let configFiles = $state<WorkspaceConfigFile[]>([]);
+  let configLoading = $state(true);
   let configError = $state('');
   let editing = $state<WorkspaceConfigFile | null>(null);
   let editorOpen = $state(false);
@@ -109,6 +123,8 @@
       if (active) configFiles = result.files;
     } catch {
       if (active) configError = 'Could not load your configuration files.';
+    } finally {
+      configLoading = false;
     }
   }
   function editConfigFile(file: WorkspaceConfigFile) {
@@ -131,19 +147,8 @@
           : undefined,
     };
   }
-  const configDescriptions: Record<string, string> = {
-    'USER.md': 'What the assistant remembers about you, read at the start of every task.',
-    'CRON.md': 'Your scheduled jobs.',
-    'TASKS.md': 'Tasks the assistant picks up from a checklist.',
-    'HEARTBEAT.md': 'Checks the assistant runs on a schedule and alerts you about.',
-  };
-  function editorDescription(file: WorkspaceConfigFile) {
-    if (file.kind === 'skill')
-      return `Your instructions for the ${file.name.slice('skills/'.length)} skill, added to its own whenever it loads.`;
-    return configDescriptions[file.name] ?? '';
-  }
-
-  type Selection = { place: string; path: string };
+  // A view shows an index in the main area; place and path are then empty.
+  type Selection = { place: string; path: string; view?: IndexView };
   let places = $state<WorkspacePlace[]>([]);
   let notes = $state<string[]>([]);
   let loading = $state(true);
@@ -151,6 +156,20 @@
   let sidebarOpen = $state(false);
   let selected = $state<Selection | null>(null);
   let place = $derived(places.find((item) => item.id === selected?.place));
+  let view = $derived(selected?.view ?? null);
+  let botViews = $derived(
+    (['rooms', 'groups', 'config', 'skills'] as IndexView[]).filter((item) => {
+      if (item === 'rooms') return places.some((p) => p.kind === 'room');
+      if (item === 'groups') return places.some((p) => p.kind === 'group');
+      if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
+      return true;
+    }),
+  );
+  let parentView = $derived(indexViewForKind(place?.kind));
+  const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
+  let botCurrent = $derived<IndexView | 'home' | null>(
+    view ?? (place?.kind === 'home' ? 'home' : indexViewForKind(place?.kind)),
+  );
   let listing = $state<WorkspaceListing | null>(null);
   let driveListing = $state<DriveListing | null>(null);
   let moreLoading = $state(false);
@@ -263,26 +282,47 @@
   let active = true;
   const selection = createUrlSelection<Selection>({
     key: 'workspace',
-    params: ['place', 'path'],
-    encode: (value) => ({ place: value.place, ...(value.path ? { path: value.path } : {}) }),
-    decode: (params) => ({
-      place: params.place || places[0]?.id || 'home',
-      path: params.path || '',
-    }),
+    params: ['place', 'path', 'view'],
+    encode: (value): Record<string, string> =>
+      value.view
+        ? { view: value.view }
+        : { place: value.place, ...(value.path ? { path: value.path } : {}) },
+    decode: (params) => {
+      const view = parseIndexView(params.view);
+      if (view) return { place: '', path: '', view };
+      return { place: params.place || places[0]?.id || 'home', path: params.path || '' };
+    },
     read: () => selected,
     apply: loadFolder,
   });
   selection.start();
 
   function href(place: string, path = '') {
-    return `${base}/workspace?${new URLSearchParams({ place, ...(path ? { path } : {}) })}`;
+    return `${base}/files?${new URLSearchParams({ place, ...(path ? { path } : {}) })}`;
+  }
+  function viewHref(view: IndexView) {
+    return `${base}/files?${new URLSearchParams({ view })}`;
+  }
+  function plainClick(event: MouseEvent) {
+    return !(
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    );
   }
   function navigate(event: MouseEvent, place: string, path = '') {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-      return;
+    if (!plainClick(event)) return;
     event.preventDefault();
     sidebarOpen = false;
     selection.push({ place, path });
+  }
+  function navigateView(event: MouseEvent, view: IndexView) {
+    if (!plainClick(event)) return;
+    event.preventDefault();
+    sidebarOpen = false;
+    selection.push({ place: '', path: '', view });
   }
   function driveFolder(path: string) {
     return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
@@ -364,6 +404,7 @@
     moreError = '';
     listingError = '';
     listingLoading = false;
+    if (value.view) return;
     if (!places.find((item) => item.id === value.place)?.browsable) return;
     listingLoading = true;
     try {
@@ -397,7 +438,7 @@
       notes = result.notes;
       if (places.length) void loadFolder(selection.current()!);
     } catch {
-      error = 'Could not load your workspace.';
+      error = 'Could not load your files.';
     } finally {
       loading = false;
     }
@@ -416,7 +457,7 @@
 <AppShell>
   {#snippet header()}
     <ShellHeader
-      title="Workspace"
+      title="Files"
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
       titleActionLabel="open files"
     >
@@ -441,32 +482,26 @@
           {href}
           onNavigate={navigate}
         />
+        <BotSection
+          label={botName}
+          home={places.find((place) => place.kind === 'home')}
+          views={botViews}
+          current={botCurrent}
+          {href}
+          {viewHref}
+          onNavigate={navigate}
+          onNavigateView={navigateView}
+        />
         <PlaceList
-          places={places.filter((place) => place.kind === 'home')}
+          places={places.filter((place) => sidebarKinds.includes(place.kind))}
           selected={selected?.place || ''}
           {href}
           onNavigate={navigate}
         />
-        <ConfigFileList
-          files={configFiles}
-          error={configError}
-          onEdit={editConfigFile}
-          onRetry={loadConfigFiles}
-          {revealAction}
-        />
-        <PlaceList
-          places={places.filter((place) => place.kind !== 'home')}
-          selected={selected?.place || ''}
-          {href}
-          onNavigate={navigate}
-        />
-        {#if places.some((place) => reachesTasks(place.reach.private))}
+        {#if places.some((place) => (place.kind === 'home' || sidebarKinds.includes(place.kind)) && reachesTasks(place.reach.private))}
           <p class="caption reach-legend">
-            <Bot size={14} aria-hidden="true" />{places.some(
-              (place) => place.kind === 'room' && reachesTasks(place.reach.private),
-            )
-              ? 'Istota can use these in your tasks, in any of your rooms. A room folder only in its own room.'
-              : 'Istota can use these in your tasks, in any of your rooms.'}
+            <Bot size={14} aria-hidden="true" />{botName} can use these in your tasks, in any of your
+            rooms.
           </p>
         {/if}
       </Sidebar>
@@ -482,20 +517,76 @@
     </div>
   {/if}
   {#if loading}
-    <div class="center-msg">Loading workspace…</div>
+    <div class="center-msg">Loading files…</div>
   {:else if error}
     <div class="center-msg error">
       <p>{error}</p>
       <Button variant="secondary" onclick={load}>Retry</Button>
     </div>
   {:else if !places.length}
-    <EmptyState>No workspace files or connections are available.</EmptyState>
+    <EmptyState>No files or connections are available.</EmptyState>
+  {:else if view}
+    <div class="folder-toolbar">
+      <nav aria-label="Folder path">
+        <ol>
+          <li>
+            <a
+              href={viewHref(view)}
+              onclick={(event) => navigateView(event, view!)}
+              aria-current="page">{INDEX_VIEW_LABELS[view]}</a
+            >
+          </li>
+        </ol>
+      </nav>
+    </div>
+    {#if view === 'rooms'}
+      <PlaceIndex
+        label="Rooms"
+        caption="Each room's folder. A task reaches a room's folder only in that room."
+        empty="You have no room folders."
+        places={places.filter((item) => item.kind === 'room')}
+        {href}
+        onNavigate={navigate}
+      />
+    {:else if view === 'groups'}
+      <PlaceIndex
+        label="Groups"
+        caption="Folders shared with the groups you belong to."
+        empty="You have no group folders."
+        places={places.filter((item) => item.kind === 'group')}
+        {href}
+        onNavigate={navigate}
+      />
+    {:else}
+      <ConfigIndex
+        label={INDEX_VIEW_LABELS[view]}
+        caption={view === 'config'
+          ? `${botName} reads these as instructions.`
+          : "Added to a skill's instructions whenever it loads."}
+        empty={view === 'config'
+          ? 'No configuration files are available.'
+          : 'No skills take instructions from you.'}
+        files={configFiles.filter((file) => file.kind === (view === 'config' ? 'config' : 'skill'))}
+        loading={configLoading}
+        error={configError}
+        onEdit={editConfigFile}
+        onRetry={loadConfigFiles}
+        {revealAction}
+      />
+    {/if}
   {:else if !place}
     <EmptyState>This place is no longer available.</EmptyState>
   {:else}
     <div class="folder-toolbar">
       <nav aria-label="Folder path">
         <ol>
+          {#if parentView}
+            <li>
+              <a href={viewHref(parentView)} onclick={(event) => navigateView(event, parentView!)}
+                >{INDEX_VIEW_LABELS[parentView]}</a
+              ><span class="muted" aria-hidden="true">/</span>
+            </li>
+          {/if}
           <li>
             <a
               href={href(place.id)}
@@ -695,7 +786,7 @@
     bind:open={editorOpen}
     fileKey={editing.name}
     title={editing.name}
-    description={editorDescription(editing)}
+    description={configFileDescription(editing)}
     ariaLabel={`${editing.name} (markdown)`}
     placeholder="This file is empty."
     loadFailed="Couldn't load this file."
@@ -704,7 +795,7 @@
     onClose={closeEditor}
   >
     {#snippet caption()}
-      Markdown. Saved in your workspace config folder.
+      Markdown. Saved in your config folder.
     {/snippet}
   </TextFileEditor>
 {/if}

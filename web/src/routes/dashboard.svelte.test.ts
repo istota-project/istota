@@ -208,15 +208,15 @@ describe('the dashboard with a connection', () => {
   });
 });
 
-describe('the workspace dashboard card', () => {
-  it('links to Workspace when enabled', async () => {
+describe('the files dashboard card', () => {
+  it('links to Files when enabled', async () => {
     getMe.mockResolvedValue(person({ workspace: true }));
     render(DashboardInLayout);
 
     const card = await screen.findByRole('link', {
-      name: 'Workspace Browse your files and pinned items',
+      name: 'Files Browse your files and pinned items',
     });
-    expect(card.getAttribute('href')).toBe(`${base}/workspace`);
+    expect(card.getAttribute('href')).toBe(`${base}/files`);
   });
 
   it.each([false, undefined])('hides the card when workspace is %s', async (workspace) => {
@@ -235,7 +235,29 @@ describe('the workspace dashboard card', () => {
     render(DashboardInLayout);
 
     expect(
-      await screen.findByRole('link', { name: 'Workspace Browse your files and pinned items' }),
+      await screen.findByRole('link', { name: 'Files Browse your files and pinned items' }),
     ).toBeTruthy();
+  });
+});
+
+describe('the groups dashboard card', () => {
+  it('links to Groups after Files when enabled', async () => {
+    getMe.mockResolvedValue(person({ workspace: true, groups: true }));
+    render(DashboardInLayout);
+
+    const card = await screen.findByRole('link', {
+      name: 'Groups Shared notebooks, members and rooms',
+    });
+    expect(card.getAttribute('href')).toBe(`${base}/groups/`);
+    const files = screen.getByRole('link', { name: 'Files Browse your files and pinned items' });
+    expect(files.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([false, undefined])('hides the card when groups is %s', async (groups) => {
+    getMe.mockResolvedValue(person({ groups }));
+    render(DashboardInLayout);
+    await screen.findByText('Talk to Istota in the app');
+
+    expect(screen.queryByText('Shared notebooks, members and rooms')).toBeNull();
   });
 });

@@ -75,7 +75,7 @@ This applies only when the optional Ansible management role manages the VM. Then
 
 ## After the move
 
-Users reach their files in the web UI, under Workspace. Their bot folder in Nextcloud stays as it was on the day of the move, and the share that showed it to them is left in place. A change made there after the move does not reach Istota.
+Users reach their files in the web UI, under Files. Their bot folder in Nextcloud stays as it was on the day of the move, and the share that showed it to them is left in place. A change made there after the move does not reach Istota.
 
 Back up `/srv/app/istota/data`, which now holds the workspace as well as the databases. See [Backing up a local install](running-the-stack.md#backing-up-a-local-install).
 

@@ -9,6 +9,7 @@
     MessageSquare,
     Newspaper,
     Rss,
+    Users,
     Wallet,
   } from '@lucide/svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
@@ -99,9 +100,15 @@
         </a>
       {/if}
       {#if user.features.workspace}
-        <a href="{base}/workspace" class="feature-card">
-          <div class="feature-title"><FolderOpen aria-hidden="true" />Workspace</div>
+        <a href="{base}/files" class="feature-card">
+          <div class="feature-title"><FolderOpen aria-hidden="true" />Files</div>
           <div class="feature-desc">Browse your files and pinned items</div>
+        </a>
+      {/if}
+      {#if user.features.groups}
+        <a href="{base}/groups/" class="feature-card">
+          <div class="feature-title"><Users aria-hidden="true" />Groups</div>
+          <div class="feature-desc">Shared notebooks, members and rooms</div>
         </a>
       {/if}
       {#if user.features.briefings}

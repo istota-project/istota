@@ -72,7 +72,7 @@ it('opens memory by default and saves through the shared editor with the audienc
   expect(screen.queryByRole('link', { name: 'Briefings' })).toBeNull();
   expect(screen.getByRole('link', { name: 'Files' })).toHaveAttribute(
     'href',
-    '/workspace?place=group%3Ateam',
+    '/files?place=group%3Ateam',
   );
   await edit();
   await fireEvent.click(screen.getByRole('button', { name: 'Save' }));

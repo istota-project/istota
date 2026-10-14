@@ -431,3 +431,23 @@ it.each([true, false, undefined])(
     expect(Boolean(screen.queryByRole('menuitem', { name: 'Groups' }))).toBe(Boolean(visible));
   },
 );
+
+it('puts Files before Groups in the nav and the menu', async () => {
+  const user = person();
+  user.features.groups = true;
+  user.features.workspace = true;
+  getMe.mockResolvedValue(user);
+  render(Layout, { children });
+  await screen.findByText('Alice');
+  const links = screen.getAllByRole('link').map((a) => a.textContent?.trim());
+  expect(links.indexOf('Files')).toBeGreaterThan(-1);
+  expect(links.indexOf('Files')).toBeLessThan(links.indexOf('Groups'));
+  expect(screen.getByRole('link', { name: 'Files' })).toHaveAttribute(
+    'href',
+    expect.stringMatching(/\/files$/),
+  );
+  await fireEvent.keyDown(screen.getByRole('button', { name: 'Open menu' }), { key: 'Enter' });
+  await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
+  const items = screen.getAllByRole('menuitem').map((a) => a.textContent?.trim());
+  expect(items.indexOf('Files')).toBeLessThan(items.indexOf('Groups'));
+});

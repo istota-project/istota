@@ -53,7 +53,7 @@ const sidebars: SidebarsConfig = {
         'features/contacts',
         'features/wordpress',
         'features/web-interface',
-        'features/workspace',
+        'features/files',
         'features/search',
         'features/notifications',
         'features/relay',

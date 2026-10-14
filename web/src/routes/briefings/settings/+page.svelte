@@ -1281,7 +1281,7 @@
                                               {#if source.kind === 'todos' || source.kind === 'reminders' || source.kind === 'notes'}
                                                 <SettingsField
                                                   label="File path"
-                                                  hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's workspace. Required — no default."
+                                                  hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's folder. Required — no default."
                                                 >
                                                   <AutocompleteInput
                                                     value={(sourceDraft.config.path as string) ??

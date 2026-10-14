@@ -1,0 +1,168 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
+import { __history } from '../../../vitest-stubs/app-navigation';
+import type { WorkspacePlace } from '$lib/api';
+import Files from './+page.svelte';
+
+const api = vi.hoisted(() => ({}) as ApiDouble);
+const identity = vi.hoisted(() => ({ user: { username: 'alice', bot_name: 'Helper' } }));
+vi.mock('$lib/api', () => api);
+vi.mock('$lib/fileViewer/store.svelte', () => ({ viewer: { openFile: vi.fn() } }));
+vi.mock('$lib/userContext', () => ({ getCurrentUser: () => identity }));
+await fillApiDouble(api);
+
+const reach = { private: 'rw', shared_member: 'rw', restricted: 'none', note: null } as const;
+const home: WorkspacePlace = {
+  id: 'home',
+  kind: 'home',
+  label: 'My files',
+  browsable: true,
+  view_root: '/Users/alice',
+  reach: { ...reach },
+};
+const room: WorkspacePlace = {
+  ...home,
+  id: 'room:sample',
+  kind: 'room',
+  label: 'Project room',
+  view_root: '/Channels/sample',
+};
+const group: WorkspacePlace = {
+  ...home,
+  id: 'group:team',
+  kind: 'group',
+  label: 'Team',
+  view_root: '/Groups/team',
+  reach: { ...reach, private: 'none' },
+};
+const linked: WorkspacePlace = {
+  ...home,
+  id: 'linked:1',
+  kind: 'linked',
+  label: 'Shared docs',
+  view_root: '/linked',
+};
+const configFiles = [
+  { name: 'USER.md', kind: 'config', exists: true, size: 2048, editable: true },
+  { name: 'CRON.md', kind: 'config', exists: false, size: null, editable: true },
+  { name: 'skills/notes', kind: 'skill', exists: false, size: null, editable: true },
+].map((file) => ({ ...file, view_path: `/Users/alice/Helper/config/${file.name}` }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  localStorage.clear();
+  __history.reset('/istota/files');
+  api.getWorkspacePins.mockResolvedValue({ pins: [] });
+  api.getWorkspaceConfigFiles.mockResolvedValue({ files: configFiles });
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, room, group, linked], notes: [] });
+  api.getWorkspaceListing.mockImplementation(async (place, path) => ({
+    place,
+    path,
+    entries: [],
+    truncated: false,
+    skipped_names: 0,
+  }));
+  api.getWorkspaceConfigFile.mockResolvedValue({ content: '', revision: 'r1', exists: true });
+});
+afterEach(cleanup);
+
+async function botSection() {
+  return screen.findByRole('region', { name: 'Helper' });
+}
+
+it('collects the bot folder entries under one section named for the bot', async () => {
+  render(Files);
+  const section = await botSection();
+  const labels = within(section)
+    .getAllByRole('link')
+    .map((link) => link.querySelector('.view-name')?.textContent);
+  expect(labels).toEqual(['My files', 'Rooms', 'Groups', 'Configuration', 'Skill instructions']);
+  const sidebar = screen.getByRole('complementary');
+  expect(within(sidebar).queryByRole('link', { name: 'Project room' })).toBeNull();
+  expect(within(sidebar).queryByRole('link', { name: 'Team' })).toBeNull();
+  expect(within(sidebar).queryByText('USER.md')).toBeNull();
+  expect(within(sidebar).queryByText('notes')).toBeNull();
+  expect(within(sidebar).getByRole('button', { name: /Linked folders/ })).toBeTruthy();
+});
+
+it('leaves out the entries with nothing behind them', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home], notes: [] });
+  api.getWorkspaceConfigFiles.mockResolvedValue({
+    files: configFiles.filter((file) => file.kind === 'config'),
+  });
+  render(Files);
+  const section = await botSection();
+  await waitFor(() =>
+    expect(
+      within(section)
+        .getAllByRole('link')
+        .map((link) => link.querySelector('.view-name')?.textContent),
+    ).toEqual(['My files', 'Configuration']),
+  );
+});
+
+it('opens the rooms index in the main area, then a room with a way back', async () => {
+  render(Files);
+  const section = await botSection();
+  await fireEvent.click(within(section).getByRole('link', { name: 'Rooms' }));
+  expect(window.location.search).toBe('?view=rooms');
+  const index = await screen.findByRole('region', { name: 'Rooms' });
+  expect(within(index).getByText('Read-write')).toBeTruthy();
+  expect(within(index).queryByText('Team')).toBeNull();
+  expect(api.getWorkspaceListing).not.toHaveBeenCalledWith('room:sample', '');
+
+  await fireEvent.click(within(index).getByRole('link', { name: 'Project room' }));
+  await waitFor(() => expect(api.getWorkspaceListing).toHaveBeenCalledWith('room:sample', ''));
+  const crumbs = screen.getByRole('navigation', { name: 'Folder path' });
+  expect(within(crumbs).getByRole('link', { name: 'Project room' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  expect(within(section).getByRole('link', { name: 'Rooms' })).toHaveClass('active');
+
+  await fireEvent.click(within(crumbs).getByRole('link', { name: 'Rooms' }));
+  expect(await screen.findByRole('region', { name: 'Rooms' })).toBeTruthy();
+});
+
+it('lists groups in their own index', async () => {
+  __history.reset('/istota/files?view=groups');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Groups' });
+  expect(within(index).getByRole('link', { name: 'Team' })).toHaveAttribute(
+    'href',
+    expect.stringMatching(/\/files\?place=group%3Ateam$/),
+  );
+  expect(within(index).getByText('No access')).toBeTruthy();
+  expect(within(index).queryByText('Project room')).toBeNull();
+});
+
+it('opens configuration from a deep link with descriptions and the editor', async () => {
+  __history.reset('/istota/files?view=config');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Configuration' });
+  expect(await within(index).findByText('USER.md')).toBeTruthy();
+  expect(within(index).getByText('Your scheduled jobs.')).toBeTruthy();
+  expect(within(index).getByText('Not created yet')).toBeTruthy();
+  expect(within(index).queryByText('notes')).toBeNull();
+  await fireEvent.click(within(index).getByRole('button', { name: 'USER.md' }));
+  await waitFor(() => expect(api.getWorkspaceConfigFile).toHaveBeenCalledWith('USER.md'));
+});
+
+it('lists skill instructions by skill name', async () => {
+  __history.reset('/istota/files?view=skills');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Skill instructions' });
+  expect(await within(index).findByRole('button', { name: 'notes' })).toBeTruthy();
+  expect(within(index).queryByText('USER.md')).toBeNull();
+});
+
+it('keeps a failed configuration load retryable in the main area', async () => {
+  api.getWorkspaceConfigFiles.mockRejectedValueOnce(new Error('down'));
+  __history.reset('/istota/files?view=config');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Configuration' });
+  expect(await within(index).findByText('Could not load your configuration files.')).toBeTruthy();
+  await fireEvent.click(within(index).getByRole('button', { name: 'Retry' }));
+  expect(await within(index).findByText('USER.md')).toBeTruthy();
+});

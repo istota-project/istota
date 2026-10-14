@@ -25,15 +25,15 @@ Nothing writes to a group store on its own. The nightly sleep cycle extracts int
 
 ## Using Groups
 
-Open **Groups** to see your current memberships. Select a group to open its Memory, Members or Rooms view. Memory is the shared notebook, with an editor, a size warning above 32 KiB and recorded changes. Members shows the current roster. Rooms lists only linked rooms you already belong to; a link does not grant room access. Files opens the group's folder in Workspace, where Group memory and Group members lead back to these views.
+Open **Groups** to see your current memberships. Select a group to open its Memory, Members or Rooms view. Memory is the shared notebook, with an editor, a size warning above 32 KiB and recorded changes. Members shows the current roster. Rooms lists only linked rooms you already belong to; a link does not grant room access. Files opens the group's folder in Files, where Group memory and Group members lead back to these views.
 
-`GROUP.md` is the curated notebook. Other files and the `memories/` directory are shared documents browsed through Workspace; they are not automatically recalled or turned into notebook facts. `group_kv` holds structured state. Linking a room leaves its `CHANNEL.md` in that room. Personal memory and knowledge graph facts stay personal.
+`GROUP.md` is the curated notebook. Other files and the `memories/` directory are shared documents browsed through Files; they are not automatically recalled or turned into notebook facts. `group_kv` holds structured state. Linking a room leaves its `CHANNEL.md` in that room. Personal memory and knowledge graph facts stay personal.
 
 Owners can change the display name and kind, add existing enabled users, change roles and remove members. Every addition requires acknowledgement that the new member can read existing group memory. The form lists what access it grants. Ordinary linked rooms are not granted. A member may leave, but the last owner must appoint a replacement in the same operation if other members remain. `kind` is only a display label; `owner` grants group management authority.
 
 Admins use **Admin → Groups**, below Users, to create groups, appoint owners, inspect membership history, recover an ownerless group and archive a group. Creation requires at least one enabled owner; the acting admin need not join. Admins outside the group can inspect its metadata and membership but cannot read its notebook through member pages or the file viewer. Older groups without owners remain readable and editable by members and are marked “Needs owner” in administration. Migration does not appoint an owner.
 
-Removing a member ends future access: the group views, Workspace place and file viewer check membership on the next request, and an already-open editor cannot save after removal. Already delivered messages and downloads remain with their recipients. A running task may already hold admitted content or a directory bind; removal does not recall that snapshot.
+Removing a member ends future access: the group views, Files place and file viewer check membership on the next request, and an already-open editor cannot save after removal. Already delivered messages and downloads remain with their recipients. A running task may already hold admitted content or a directory bind; removal does not recall that snapshot.
 
 Membership history keeps departures and rejoins as separate periods. Role changes keep the membership period and record the old and new role. Archiving preserves data and history but removes member access. There is no hard deletion or reuse of an archived id.
 

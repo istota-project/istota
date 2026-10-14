@@ -1,6 +1,6 @@
 <script lang="ts">
   import { CategoryGroup } from '$lib/components/ui';
-  import { Folder, House, MessageSquare, Users, Cloud, Paperclip } from '@lucide/svelte';
+  import { Folder, Cloud, Paperclip } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import TaskReachIcon from './TaskReachIcon.svelte';
   import { reachesTasks } from './reach';
@@ -15,11 +15,9 @@
     href: (place: string, path?: string) => string;
     onNavigate: (event: MouseEvent, place: string, path?: string) => void;
   } = $props();
+  // My files, rooms and groups live in the bot section and its index views.
   const groups = [
-    { label: 'My files', kinds: ['home'], icon: House },
     { label: 'Linked folders', kinds: ['linked'], icon: Folder },
-    { label: 'Rooms', kinds: ['room'], icon: MessageSquare },
-    { label: 'Groups', kinds: ['group'], icon: Users },
     { label: 'Connections', kinds: ['drive', 'nextcloud', 'talk'], icon: Cloud },
   ];
 </script>
@@ -30,7 +28,7 @@
     <CategoryGroup
       label={group.label}
       collapsible
-      defaultOpen={group.kinds[0] === 'home'}
+      defaultOpen={false}
       storageKey={`workspace:section:${group.kinds[0]}`}
     >
       {#each items as place (place.id)}
@@ -46,11 +44,7 @@
         >
           {#if place.kind === 'talk'}<Paperclip size={14} />{:else}<group.icon size={14} />{/if}
           <span class="view-name" title={place.label}>{place.label}</span>
-          <TaskReachIcon
-            access={place.reach.private}
-            id={`task-reach-${place.id}`}
-            room={place.kind === 'room'}
-          />
+          <TaskReachIcon access={place.reach.private} id={`task-reach-${place.id}`} />
         </a>
       {/each}
     </CategoryGroup>

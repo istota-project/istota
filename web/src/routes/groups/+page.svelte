@@ -49,7 +49,7 @@
             active: selected!.view === view,
           })),
           {
-            href: `${base}/workspace?${new URLSearchParams({ place: `group:${selected.group}` })}`,
+            href: `${base}/files?${new URLSearchParams({ place: `group:${selected.group}` })}`,
             label: 'Files',
             active: false,
           },
