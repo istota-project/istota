@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1202,9 +1202,9 @@ name = "garminconnect"
 version = "0.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "curl-cffi", marker = "python_full_version >= '3.12'" },
-    { name = "requests", marker = "python_full_version >= '3.12'" },
-    { name = "ua-generator", marker = "python_full_version >= '3.12'" },
+    { name = "curl-cffi" },
+    { name = "requests" },
+    { name = "ua-generator" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/dd/d9/7ad240d86453de083f0c460ee328e8209232d9d0ee099dcf49439d90be7a/garminconnect-0.3.3.tar.gz", hash = "sha256:f608193d7a90079fa1fd1d86e8d10e88b871b6ab2500372a9dc48358f8c2d386", size = 52234, upload-time = "2026-04-22T12:57:24.79Z" }
 wheels = [
@@ -1468,6 +1468,7 @@ all = [
     { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "twilio" },
     { name = "uvicorn" },
+    { name = "vobject" },
     { name = "weasyprint" },
     { name = "websockets" },
     { name = "yfinance" },
@@ -1475,6 +1476,9 @@ all = [
 calendar = [
     { name = "caldav" },
     { name = "icalendar" },
+]
+contacts = [
+    { name = "vobject" },
 ]
 dev = [
     { name = "pytest" },
@@ -1561,6 +1565,7 @@ test = [
     { name = "timezonefinder" },
     { name = "twilio" },
     { name = "uvicorn" },
+    { name = "vobject" },
     { name = "weasyprint" },
     { name = "websockets" },
     { name = "yfinance" },
@@ -1628,6 +1633,8 @@ requires-dist = [
     { name = "istota", extras = ["calendar"], marker = "extra == 'all'" },
     { name = "istota", extras = ["calendar"], marker = "extra == 'local'" },
     { name = "istota", extras = ["calendar"], marker = "extra == 'test'" },
+    { name = "istota", extras = ["contacts"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["contacts"], marker = "extra == 'test'" },
     { name = "istota", extras = ["email"], marker = "extra == 'all'" },
     { name = "istota", extras = ["email"], marker = "extra == 'local'" },
     { name = "istota", extras = ["email"], marker = "extra == 'test'" },
@@ -1682,12 +1689,13 @@ requires-dist = [
     { name = "twilio", marker = "extra == 'sms'", specifier = ">=9.11.1" },
     { name = "uvicorn", marker = "extra == 'location'", specifier = ">=0.20.0" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.20.0" },
+    { name = "vobject", marker = "extra == 'contacts'", specifier = ">=0.9.8" },
     { name = "weasyprint", marker = "extra == 'money'", specifier = ">=62.0" },
     { name = "websockets", marker = "extra == 'signaling'", specifier = ">=14.0" },
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
     { name = "yfinance", marker = "extra == 'money'", specifier = ">=0.2.0" },
 ]
-provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "signaling", "location", "web", "money", "feeds", "garmin", "local", "all", "test", "sms", "vault", "whatsapp"]
+provides-extras = ["dev", "calendar", "contacts", "email", "markets", "transcribe", "memory-search", "whisper", "signaling", "location", "web", "money", "feeds", "garmin", "local", "all", "test", "sms", "vault", "whatsapp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3756,13 +3764,13 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "filelock", marker = "sys_platform == 'darwin'" },
-    { name = "fsspec", marker = "sys_platform == 'darwin'" },
-    { name = "jinja2", marker = "sys_platform == 'darwin'" },
-    { name = "networkx", marker = "sys_platform == 'darwin'" },
-    { name = "setuptools", marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
-    { name = "sympy", marker = "sys_platform == 'darwin'" },
-    { name = "typing-extensions", marker = "sys_platform == 'darwin'" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "setuptools", marker = "python_full_version >= '3.12'" },
+    { name = "sympy" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.10.0-1-cp311-none-macosx_11_0_arm64.whl", hash = "sha256:0826ac8e409551e12b2360ac18b4161a838cbd111933e694752f351191331d09", upload-time = "2026-02-06T16:27:14Z" },
@@ -3798,13 +3806,13 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "filelock", marker = "sys_platform != 'darwin'" },
-    { name = "fsspec", marker = "sys_platform != 'darwin'" },
-    { name = "jinja2", marker = "sys_platform != 'darwin'" },
-    { name = "networkx", marker = "sys_platform != 'darwin'" },
-    { name = "setuptools", marker = "python_full_version >= '3.12' and sys_platform != 'darwin'" },
-    { name = "sympy", marker = "sys_platform != 'darwin'" },
-    { name = "typing-extensions", marker = "sys_platform != 'darwin'" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "jinja2" },
+    { name = "networkx" },
+    { name = "setuptools", marker = "python_full_version >= '3.12'" },
+    { name = "sympy" },
+    { name = "typing-extensions" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.10.0%2Bcpu-cp311-cp311-linux_aarch64.whl", hash = "sha256:ce5c113d1f55f8c1f5af05047a24e50d11d293e0cbbb5bf7a75c6c761edd6eaa", upload-time = "2026-01-23T15:10:11Z" },
@@ -3989,6 +3997,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/32/ce/eeb58ae4ac36fe09e3842eb02e0eb676bf2c53ae062b98f1b2531673efdd/uvicorn-0.41.0.tar.gz", hash = "sha256:09d11cf7008da33113824ee5a1c6422d89fbc2ff476540d69a34c87fab8b571a", size = 82633, upload-time = "2026-02-16T23:07:24.1Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/83/e4/d04a086285c20886c0daad0e026f250869201013d18f81d9ff5eada73a88/uvicorn-0.41.0-py3-none-any.whl", hash = "sha256:29e35b1d2c36a04b9e180d4007ede3bcb32a85fbdfd6c6aeb3f26839de088187", size = 68783, upload-time = "2026-02-16T23:07:22.357Z" },
+]
+
+[[package]]
+name = "vobject"
+version = "0.9.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "pytz" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/8a/15c34b3d27c43fc81a467d0f66577afc5542326804c42f30557e31c3259e/vobject-0.9.9.tar.gz", hash = "sha256:ac44e5d7e2079d84c1d52c50a615b9bec4b1ba958608c4c7fe40cbf33247b38e", size = 1208905, upload-time = "2024-12-16T07:29:39.178Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/20/6bba813bbd498c28edbbcf8253a6398cf4266ecf7bfa6129835c0a2bfbb1/vobject-0.9.9-py2.py3-none-any.whl", hash = "sha256:0fbdb982065cf4d1843a5d5950c88510041c6de026bda49c3502721de1c6ac3d", size = 47526, upload-time = "2024-12-16T07:31:08.493Z" },
 ]
 
 [[package]]
