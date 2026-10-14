@@ -25,7 +25,7 @@ from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places
 from istota.workspace.reach import deployment_notes, place_reach
-from istota.workspace import config_files, text_files
+from istota.workspace import config_files, scripts, text_files
 from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
 logger = logging.getLogger(__name__)
@@ -311,6 +311,37 @@ _SAVE_REFUSALS = {
     "too_large": (413, "This file is too large."),
     "failed": (500, "Could not save this file."),
 }
+
+
+@router.get("/scripts")
+async def api_workspace_scripts(request: Request, user: dict = Depends(require_auth)):
+    config = getattr(request.app.state, "istota_config", None)
+    refusal = _no_workspace(config)
+    if refusal is not None:
+        return refusal
+
+    def query():
+        with db.get_db(config.db_path) as conn:
+            index = scripts.scripts_index(config, conn, user["username"])
+        if index is None:
+            return None
+        return {
+            "scripts_view_path": index.scripts_view_path,
+            "files": [{
+                **asdict(file),
+                "referenced_by": [asdict(ref) for ref in index.referenced_by.get(file.path, [])],
+                "mentioned_in": [asdict(ref) for ref in index.mentioned_in.get(file.path, [])],
+            } for file in index.files],
+            "broken": [{"path": path, "referenced_by": [asdict(ref) for ref in refs]}
+                       for path, refs in sorted(index.broken.items())],
+            "truncated": index.truncated,
+            "sources": index.sources,
+        }
+
+    payload = await asyncio.to_thread(query)
+    if payload is None:
+        return JSONResponse({"error": "No workspace is configured."}, status_code=503)
+    return payload
 
 
 @router.get("/config-files")

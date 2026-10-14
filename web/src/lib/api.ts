@@ -5953,6 +5953,37 @@ export function deleteWorkspacePin(id: number): Promise<{ status: string }> {
   return apiFetch(`/workspace/pins/${id}`, { method: 'DELETE' });
 }
 
+export interface WorkspaceScriptRef {
+  source: 'cron' | 'heartbeat';
+  name: string;
+  field: 'command' | 'prompt_file' | 'prompt';
+  kind: 'runs' | 'prompt_file' | 'mentions';
+  state: 'enabled' | 'disabled' | 'suspended' | 'not_synced' | 'admin_only';
+}
+export interface WorkspaceScript {
+  path: string;
+  kind: 'script' | 'prompt';
+  size: number;
+  modified: string;
+  description: string | null;
+  referenced_by: WorkspaceScriptRef[];
+  mentioned_in: WorkspaceScriptRef[];
+}
+export interface WorkspaceScriptsIndex {
+  scripts_view_path: string;
+  files: WorkspaceScript[];
+  broken: { path: string; referenced_by: WorkspaceScriptRef[] }[];
+  truncated: boolean;
+  sources: {
+    cron: 'ok' | 'missing' | 'error';
+    heartbeat: 'ok' | 'missing' | 'error';
+    scripts: 'ok' | 'refused';
+  };
+}
+export function getWorkspaceScripts(): Promise<WorkspaceScriptsIndex> {
+  return apiFetch('/workspace/scripts');
+}
+
 /** One of the user's own config files: USER.md, CRON.md, TASKS.md,
  * HEARTBEAT.md, or `skills/<skill>` for a skill's overlay. */
 export interface WorkspaceConfigFile {
