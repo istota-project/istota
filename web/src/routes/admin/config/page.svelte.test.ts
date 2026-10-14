@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { page } from '$app/state';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { configField, configPreview, configRequest, configView } from '$lib/test/adminConfig';
