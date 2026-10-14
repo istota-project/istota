@@ -32,19 +32,20 @@ def context(handler, scopes=("contacts", "contacts.other.readonly")):
     }, client=httpx.Client(transport=httpx.MockTransport(handler)))
 
 
-def test_search_warms_each_source_and_normalizes():
+def test_search_warms_each_source_and_normalizes(monkeypatch):
     calls = []
     def handler(req):
         calls.append(req)
         assert req.headers["authorization"] == "Bearer test-token"
         person = OTHER if req.url.path.endswith("otherContacts:search") else PERSON
         return httpx.Response(200, json={"results": [{"person": person}]})
+    monkeypatch.setattr(google, "sleep", lambda seconds: None, raising=False)
     ctx = context(handler)
     assert [(b.key, b.writable) for b in google.books(ctx)] == [("google", True), ("google-other", False)]
     found = google.search(ctx, "Alice", limit=20)
     assert [(r.url.path, r.url.params["query"]) for r in calls] == [
-        ("/v1/people:searchContacts", ""), ("/v1/people:searchContacts", "Alice"),
-        ("/v1/otherContacts:search", ""), ("/v1/otherContacts:search", "Alice"),
+        ("/v1/people:searchContacts", ""), ("/v1/otherContacts:search", ""),
+        ("/v1/people:searchContacts", "Alice"), ("/v1/otherContacts:search", "Alice"),
     ]
     assert found[0].id == "google:people/c123" and found[0].etag == "source-etag"
     assert found[0].birthday == "--01-15" and found[0].emails == [ContactField("alice@example.com", "work")]
@@ -185,3 +186,17 @@ def test_setup_and_availability_use_stored_grants(tmp_path, monkeypatch, grant, 
     specs = {s.var: s for s in index["contacts"].env_specs}
     assert specs["GOOGLE_CONTACTS_TOKEN"].sensitive
     assert specs["GOOGLE_CONTACTS_SCOPES"].sensitive
+
+
+def test_search_waits_after_warming_sources(monkeypatch):
+    events = []
+    def handler(req):
+        events.append((req.url.path, req.url.params["query"]))
+        return httpx.Response(200, json={"results": []})
+    monkeypatch.setattr(google, "sleep", lambda seconds: events.append(("sleep", seconds)), raising=False)
+    assert google.search(context(handler), "Alice", limit=20) == []
+    assert events == [
+        ("/v1/people:searchContacts", ""), ("/v1/otherContacts:search", ""),
+        ("sleep", 5),
+        ("/v1/people:searchContacts", "Alice"), ("/v1/otherContacts:search", "Alice"),
+    ]

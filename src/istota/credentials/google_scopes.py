@@ -270,7 +270,9 @@ def resolve_selection(
         want = max_level if unset else chosen.get(svc.key, LEVEL_OFF)
         if _LEVEL_RANK[want] > _LEVEL_RANK[max_level]:
             want = max_level
-        scopes.extend(svc.scopes_for(want))
+        for scope in svc.scopes_for(want):
+            if not missing_scopes([scope], ceiling_list):
+                scopes.append(scope)
 
     scopes.extend(unoffered_scopes(ceiling_list))
     return scopes

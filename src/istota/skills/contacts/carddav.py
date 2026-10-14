@@ -163,7 +163,8 @@ def _owner(prop) -> str | None:
     parts = urlsplit(value.strip())
     if parts.query or parts.fragment:
         return None
-    match = re.fullmatch(r"(?:/[^/]+)*/principals/users/([^/]+)/?", parts.path)
+    path = "/" + parts.path if parts.path.startswith("principals/users/") else parts.path
+    match = re.fullmatch(r"(?:/[^/]+)*/principals/users/([^/]+)/?", path)
     if not match:
         return None
     user = unquote(match[1])

@@ -45,7 +45,7 @@ The bot asks for confirmation before deleting contacts or modifying contacts you
 
 Nextcloud matches text substrings and phone digits when the query contains at least four digits. It searches locally within each book; books above 5,000 cards or 20 MiB use a server-side text query and appear in `truncated_books`. Phone digit matching may miss differently formatted numbers in that fallback. Malformed cards are skipped and counted in `skipped_cards`.
 
-Google searches word prefixes, with at most 30 results per Google source. It does not support arbitrary phone digit substring matching. Showing an Other contacts ID scans up to ten pages of 1,000 records without storing them. If that bound prevents a complete lookup, the command returns `lookup_limit`.
+Google searches word prefixes, with at most 30 results per Google source. A search waits five seconds after warming the selected Google sources so the search cache can refresh. It does not support arbitrary phone digit substring matching. Showing an Other contacts ID scans up to ten pages of 1,000 records without storing them. If that bound prevents a complete lookup, the command returns `lookup_limit`.
 
 A successful response can have `partial: true` and an `errors` list when one source fails. Those results do not cover every source. Reconnect Google for `google_token_invalid` or `google_scope_insufficient`; ask the operator to enable the People API for `google_api_disabled`. `not_found` also covers books outside your access.
 

@@ -265,3 +265,12 @@ def test_response_cap_stops_stream_and_falls_back(context, monkeypatch):
     ctx = context(handler)
     assert len(carddav.search(ctx, 'Alice', limit=20)) == 1
     assert consumed == [0, 1] and ctx.truncated_books == [KEY]
+
+
+@pytest.mark.parametrize("owner,admitted", [("alice", True), ("%61lice", True), ("bob", False), ("alice%2Fextra", False)])
+def test_nextcloud_relative_owner_principal(context, owner, admitted):
+    props = ('<d:resourcetype><c:addressbook/></d:resourcetype>'
+             f'<oc:owner-principal>principals/users/{owner}</oc:owner-principal>'
+             '<d:owner><d:href>/remote.php/dav/principals/users/alice/</d:href></d:owner>')
+    books = carddav.books(context(lambda req: httpx.Response(207, text=multistatus(response(BOOK, props)))))
+    assert bool(books) == admitted

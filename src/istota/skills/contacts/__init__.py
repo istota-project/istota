@@ -81,11 +81,13 @@ def _collect(args, *, query=None):
     for backend, ctx in found:
         if getattr(args, "source", None) and args.source not in _sources(backend):
             continue
+        failures = []
         try:
             if query is None:
                 items = backend.books(ctx)
+            elif backend is google:
+                items = backend.search(ctx, query, limit=100, source=getattr(args, "source", None))
             else:
-                # A source filter must not lose matches to the other Google source.
                 items = backend.search(ctx, query, limit=100)
             if backend is carddav and not items and (query is None or not backend.books(ctx)):
                 extra["hint"] = _hint(ctx)
@@ -96,8 +98,12 @@ def _collect(args, *, query=None):
             if getattr(ctx, "truncated_books", []):
                 extra.setdefault("truncated_books", []).extend(ctx.truncated_books)
         except Exception as exc:
+            if not getattr(ctx, "errors", []):
+                failures.append((getattr(args, "source", None) or _sources(backend)[0], exc))
+        failures.extend(getattr(ctx, "errors", []))
+        for source, exc in failures:
             detail = _error(exc)
-            errors.append({"source": _sources(backend)[0],
+            errors.append({"source": source,
                            **{key: detail[key] for key in ("reason", "status_code", "needs", "error") if key in detail}})
     if not answered:
         if errors:

@@ -92,6 +92,7 @@ def test_output_frames_long_fields_and_notes(dav, capsys):
 
 def test_merge_partial_and_total_failure(monkeypatch, capsys):
     from tests.test_contacts_google import BASE_SCOPE, PERSON, OTHER
+    monkeypatch.setattr(contacts.google, "sleep", lambda seconds: None, raising=False)
     calls = []
     state = {"google_status": 200}
     def handler(req):
@@ -194,3 +195,33 @@ def test_module_entrypoint_reports_missing_source():
                             env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 1
     assert json.loads(result.stdout)["reason"] == "no_contact_source"
+
+
+@pytest.mark.parametrize("source,failed", [(None, "google-other"), (None, "google"), ("google", "google-other"), ("google-other", "google")])
+@pytest.mark.parametrize("phase", ["warmup", "search"])
+def test_google_source_filter_and_partial_failure(monkeypatch, capsys, source, failed, phase):
+    from tests.test_contacts_google import BASE_SCOPE, PERSON, OTHER
+    calls = []
+    def handler(req):
+        actual = "google-other" if req.url.path.endswith("otherContacts:search") else "google"
+        calls.append(actual)
+        if actual == failed and bool(req.url.params["query"]) == (phase == "search"):
+            return httpx.Response(503, json={})
+        return httpx.Response(200, json={"results": [{"person": OTHER if actual == "google-other" else PERSON}]})
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(contacts.google, "sleep", lambda seconds: None, raising=False)
+    monkeypatch.delenv("CARDDAV_URL", raising=False)
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("GOOGLE_CONTACTS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CONTACTS_SCOPES", BASE_SCOPE + "contacts " + BASE_SCOPE + "contacts.other.readonly")
+    argv = ("search", "Alice") + (("--source", source) if source else ())
+    result = invoke(capsys, *argv)
+    assert [item["source"] for item in result["contacts"]] == ["google" if failed == "google-other" else "google-other"]
+    assert result["partial"] == (source is None)
+    if source:
+        assert set(calls) == {source}
+        assert result["errors"] == []
+    else:
+        assert result["errors"][0]["source"] == failed
+        assert result["errors"][0]["reason"] == "server_error"

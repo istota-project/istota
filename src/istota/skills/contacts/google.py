@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 import os
 import re
+from time import sleep
 
 import httpx
 
@@ -20,6 +21,7 @@ MAX_OTHER_PAGES = 10
 class BackendContext:
     env: Mapping[str, str] = field(default_factory=lambda: dict(os.environ), repr=False)
     client: httpx.Client | None = field(default=None, repr=False)
+    errors: list[tuple[str, "GoogleError"]] = field(default_factory=list)
 
 
 class GoogleError(Exception):
@@ -103,19 +105,39 @@ def _request(ctx, method, path, *, params=None, body=None):
         raise GoogleError("invalid_response", status) from None
 
 
-def search(ctx, query, *, limit):
+def search(ctx, query, *, limit, source=None):
     if not query.strip():
         raise GoogleError("empty_query")
-    result = []
-    for book in books(ctx):
+    ctx.errors.clear()
+    selected = [book for book in books(ctx) if source is None or book.source == source]
+    if not selected:
+        raise GoogleError("no_contact_source")
+    ready = []
+    for book in selected:
         other = book.source == "google-other"
         path = "otherContacts:search" if other else "people:searchContacts"
         params = {"readMask": OTHER_FIELDS if other else READ_FIELDS, "pageSize": 30, "query": ""}
-        _request(ctx, "GET", path, params=params)
+        try:
+            _request(ctx, "GET", path, params=params)
+            ready.append((book, path, params))
+        except GoogleError as exc:
+            ctx.errors.append((book.source, exc))
+    # Google's search cache refreshes lazily after the warm-up request.
+    if ready:
+        sleep(5)
+    result = []
+    answered = 0
+    for book, path, params in ready:
         params["query"] = query
-        data = _request(ctx, "GET", path, params=params)
-        for item in data.get("results", []):
-            result.append(contact_from_person(item["person"], source=book.source, writable=book.writable))
+        try:
+            data = _request(ctx, "GET", path, params=params)
+            for item in data.get("results", []):
+                result.append(contact_from_person(item["person"], source=book.source, writable=book.writable))
+            answered += 1
+        except GoogleError as exc:
+            ctx.errors.append((book.source, exc))
+    if not answered and ctx.errors:
+        raise ctx.errors[0][1]
     result.sort(key=lambda c: (-match_score(c, query), c.name.casefold(), c.id))
     return result[:limit]
 

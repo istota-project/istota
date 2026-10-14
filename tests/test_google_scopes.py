@@ -401,3 +401,10 @@ def test_documented_default_ceiling_matches_runtime(example):
         assert scopes_line is not None
         scopes = yaml.safe_load(scopes_line[1])
     assert scopes == GoogleWorkspaceConfig().scopes
+
+
+@pytest.mark.parametrize("ceiling", [CONTACTS_RO, CONTACTS_FULL, CONTACTS_OTHER_RO])
+@pytest.mark.parametrize("selection", [None, {}, {"contacts": "full"}, {"contacts": "readonly"}])
+def test_contacts_selection_respects_each_ceiling_scope(ceiling, selection):
+    expected = CONTACTS_RO if ceiling == CONTACTS_FULL and selection == {"contacts": "readonly"} else ceiling
+    assert gs.resolve_selection(selection, [ceiling]) == [expected]

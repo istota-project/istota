@@ -31,6 +31,6 @@ Only address books the user owns and shared with the bot are available. If none 
 
 Pass the etag from the last read when editing or deleting. On `changed_since_read`, show the contact again and retry once after checking the change is still appropriate. Never guess a different ID or book after `not_found`.
 
-Google searches word prefixes rather than arbitrary substrings or phone digit substrings. Each Google source returns at most 30 matches. Google Contacts is writable only with a read-write grant; Other contacts is always read-only. Reconnect Google if the token is invalid or the required contacts scope is missing. If the People API is disabled, the operator must enable it in the Google Cloud project.
+Google searches word prefixes rather than arbitrary substrings or phone digit substrings. Each Google source returns at most 30 matches. Searches wait five seconds after warming the selected Google sources. Google Contacts is writable only with a read-write grant; Other contacts is always read-only. Reconnect Google if the token is invalid or the required contacts scope is missing. If the People API is disabled, the operator must enable it in the Google Cloud project.
 
 Showing an Other contacts ID scans up to 10 pages of 1,000 records without storing them. A lookup that reaches this bound returns `lookup_limit`, not `not_found`. Google updates check the contact source etag. Google deletes compare the supplied etag before deleting, but the API cannot protect against an edit between that check and the delete.
