@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The group management API lets owners edit metadata and membership, and lets admins create groups, recover owners and inspect membership history. Adding a member requires acknowledgement of access to existing shared memory; member views show only rooms the caller already belongs to.
 - The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
 - Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
