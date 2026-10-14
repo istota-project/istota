@@ -69,6 +69,7 @@ it('opens memory by default and saves through the shared editor with the audienc
   expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Groups');
   expect(screen.queryByRole('heading', { name: 'Team' })).toBeNull();
   expect(screen.getByText(/current and future group members/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Source' })).toBeNull();
   expect(screen.queryByRole('link', { name: 'Briefings' })).toBeNull();
   expect(screen.getByRole('link', { name: 'Files' })).toHaveAttribute(
     'href',

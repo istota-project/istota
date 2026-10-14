@@ -15,12 +15,15 @@
     source = $bindable(false),
     fill = false,
     untrusted = false,
+    controls = true,
   }: {
     name: string;
     text: string;
     source?: boolean;
     fill?: boolean;
     untrusted?: boolean;
+    /** Show the Rendered/Source toggle. Off where an editor already shows the source. */
+    controls?: boolean;
   } = $props();
   let presentation = $derived(presentationFor(name));
   let split = $derived(splitFrontmatter(text));
@@ -33,7 +36,7 @@
 </script>
 
 <div class="text-preview" class:fill>
-  {#if presentation.kind === 'markdown'}
+  {#if presentation.kind === 'markdown' && controls}
     <div class="view-controls" role="group" aria-label="Document view">
       <Button variant={source ? 'secondary' : 'primary'} onclick={() => (source = false)}
         >Rendered</Button
