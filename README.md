@@ -232,12 +232,13 @@ WhatsApp and SMS carry the answer rather than the conversation: the exchange sta
 
 Istota has one deployment, the same on a server and on a Mac: a stack of containers (the scheduler, the web app and nginx) on a Debian 13 machine dedicated to it, with every task in a bubblewrap sandbox with its own cgroup. `istota-stack` is the one command that installs updates, changes settings and controls it. Nextcloud is optional; without it, storage is local.
 
-Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It verifies the release tag against the signing key, provisions the machine, builds the images there and starts the setup in your browser, which starts the stack when it finishes (`--terminal-setup` runs the setup wizard in the terminal instead). `istota-stack` manages it afterwards.
+Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It picks the newest release, verifies its tag against the project's release signing key, provisions the machine, builds the images there and starts the setup in your browser, which starts the stack when it finishes (`--terminal-setup` runs the setup wizard in the terminal instead). `istota-stack` manages it afterwards.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
-  | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash -s -- --server
 ```
+
+`--tag vX.Y.Z` installs a specific release instead, and `--signing-key` names another key, for a fork's releases. `sudo istota-stack update` later installs the newest signed release.
 
 On an Apple silicon Mac, `install.sh --local` runs the same stack in a Lima VM, with a folder in your home as the workspace, and the Mac's `istota-stack` forwards every command into it; see the [local install](https://istota.cynium.com/docs/getting-started/local-install/). An optional Ansible role exists for machines managed from an estate inventory; nothing in an install needs it. Read an installer before piping it into a shell. For prerequisites, setup choices and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
 

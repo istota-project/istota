@@ -16,6 +16,24 @@ If you run without the sandbox, you accept that:
 - Claude has access to the full filesystem visible to the istota service account, not just the per-user subtree.
 - The credential proxy and network proxy still run, but their effectiveness drops without the sandbox boundary (Claude can read arbitrary files, including ones holding the credentials the proxy exists to hide).
 
+## Release signing
+
+Every release is a git tag signed with the project's SSH release key. The public key is in the repository at `host/release-signing-key.pub`:
+
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM8wnX7YSjgMETMV8EOf/hQ6J5HpZsw9WfY/r0Glfq4z istota-releases
+```
+
+Its fingerprint is `SHA256:msQ02X7UFfotEHfGWtElonM/WEQxCXCMBdLhBAjsX88`. The installer, `host/cloud-init.yaml` and the Mac's `istota-stack create` use this key unless you give another with `--signing-key`. The first install writes it to `/srv/app/istota/host.env`, and `provision.sh` writes it to `/srv/app/istota/allowed_signers`. From then on that file decides which tags the machine accepts. `install.sh --server` run later with a different key is refused rather than swapped in; to change the key, edit `RELEASE_SIGNING_KEY` in `host.env` and run `provision.sh`.
+
+`install.sh` and `istota-stack update` check the tag with `git verify-tag` against `allowed_signers` alone, with git's global and system configuration not read and OpenPGP and X.509 verification switched off. They refuse a branch, a lightweight tag, an unsigned tag, a tag signed by another key and a tag ref pointing at another release's tag object, before anything from the checkout runs. With no tag named, both pick the newest `vX.Y.Z` tag and check it the same way; when it fails, they stop and never fall back to an older tag. `istota-stack update --unsigned` is the only way past the check, and only for the run that asks for it.
+
+The installer itself comes from `main` and is not covered by a signature. It carries the key, so a copy fetched from somewhere other than this repository can name a different one. To check the key a machine trusts out of band, compare its fingerprint with the one above:
+
+```bash
+awk '{print $3, $4}' /srv/app/istota/allowed_signers | ssh-keygen -lf -
+```
+
 ## Clean environment
 
 Every Claude Code subprocess gets a minimal environment built by `build_clean_env()`: only PATH, HOME, PYTHONUNBUFFERED, and configured passthrough vars (`LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`). Task-specific variables (Nextcloud credentials, CalDAV, email, etc.) are added per-task.
