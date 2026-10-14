@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
+  import { MessageSquare } from '@lucide/svelte';
   import { CountPill, EmptyState } from '$lib/components/ui';
   import { SettingsCard } from '$lib/components/settings';
   import { getChatRooms, type ChatRoom, type GroupDetail } from '$lib/api';
@@ -33,10 +34,13 @@
 
 <SettingsCard title="Rooms" description="Linked chat rooms you can open, most recent first.">
   {#if ordered.length}
-    <ul class="rooms prose">
+    <ul class="rooms">
       {#each ordered as room (room.token)}
         <li>
-          <a href="{base}/chat?room={encodeURIComponent(room.token)}">{room.name}</a>
+          <span class="entry-icon" aria-hidden="true"><MessageSquare size={16} /></span>
+          <a class="name" href="{base}/chat?room={encodeURIComponent(room.token)}" title={room.name}
+            >{room.name}</a
+          >
           {#if room.chat?.last_activity}<span
               class="caption"
               title={formatDateTime(room.chat.last_activity)}
@@ -57,7 +61,7 @@
   }
   .rooms li {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--space-2);
     padding-block: var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
@@ -65,9 +69,22 @@
   .rooms li:last-child {
     border-bottom: none;
   }
-  .rooms a {
+  /* The Files table's name cell: an amber icon, the name in the body colour. */
+  .entry-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--accent-amber);
+  }
+  .name {
     flex: 1;
     min-width: 0;
-    overflow-wrap: anywhere;
+    color: var(--text-primary);
+    text-decoration: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .name:hover {
+    text-decoration: underline;
   }
 </style>

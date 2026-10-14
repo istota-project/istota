@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { File, Folder } from '@lucide/svelte';
+  import { Folder } from '@lucide/svelte';
   import { Button, EmptyState } from '$lib/components/ui';
   import { SettingsCard } from '$lib/components/settings';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
+  import { fileIcon } from '$lib/components/workspace/filePresentation';
   import { formatDateTime, formatRelative } from '$lib/dateFormat';
 
   const RECENT = 6;
@@ -55,20 +56,24 @@
   {#if loading}<p class="caption">Loading files…</p>
   {:else if error}<p class="banner error">{error}</p>
   {:else if entries.length}
-    <ul class="files prose">
+    <ul class="files">
       {#each entries as entry (entry.name)}
         {@const target = entry.kind === 'file' ? ref(entry) : null}
+        {@const EntryIcon = fileIcon(entry.name)}
         <li>
-          {#if entry.kind === 'dir'}<Folder aria-hidden="true" />{:else}<File
-              aria-hidden="true"
-            />{/if}
-          {#if entry.kind === 'dir'}<a class="name" href={folderHref(entry)}>{entry.name}</a>
+          <span class="entry-icon" aria-hidden="true"
+            >{#if entry.kind === 'dir'}<Folder size={16} />{:else}<EntryIcon size={16} />{/if}</span
+          >
+          {#if entry.kind === 'dir'}<a class="name" href={folderHref(entry)} title={entry.name}
+              >{entry.name}</a
+            >
           {:else if target}<button
               type="button"
-              class="name link-button"
+              class="name"
+              title={entry.name}
               onclick={() => viewer.openFile(target)}>{entry.name}</button
             >
-          {:else}<span class="name">{entry.name}</span>{/if}
+          {:else}<span class="name" title={entry.name}>{entry.name}</span>{/if}
           <span class="caption" title={formatDateTime(iso(entry))}
             >{formatRelative(iso(entry))}</span
           >
@@ -94,28 +99,32 @@
   .files li:last-child {
     border-bottom: none;
   }
-  .files :global(svg) {
-    flex: none;
-    width: 1.1em;
-    height: 1.1em;
+  /* The Files table's name cell: an amber icon, the name in the body colour. */
+  .entry-icon {
+    display: flex;
+    flex-shrink: 0;
     color: var(--accent-amber);
   }
   .name {
     flex: 1;
     min-width: 0;
-    overflow-wrap: anywhere;
+    color: var(--text-primary);
+    text-decoration: none;
     text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .link-button {
-    font: inherit;
-    line-height: inherit;
-    color: var(--link);
+  button.name {
     background: none;
     border: none;
     padding: 0;
+    font: inherit;
+    line-height: inherit;
     cursor: pointer;
   }
-  .link-button:hover {
+  a.name:hover,
+  button.name:hover {
     text-decoration: underline;
   }
 </style>
