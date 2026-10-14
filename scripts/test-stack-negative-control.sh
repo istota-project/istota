@@ -229,6 +229,7 @@ setup_no_restore() {
     run_setup_web setup-no-restore "$copy" \
         "${STACK_TESTS}::TestSetupWebRerun::test_without_the_marker_the_previous_setup_is_put_back" \
         "${STACK_TESTS}::TestSetupWebRerun::test_a_signal_during_the_wait_puts_the_previous_setup_back_at_once" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_a_second_signal_does_not_cut_the_restore_short" \
         "${STACK_TESTS}::TestSetupWebRerun::test_a_failed_restore_leaves_the_stack_stopped_and_names_the_snapshot" \
         "${STACK_TESTS}::TestSetupCancel::test_a_cancel_during_a_re_run_puts_the_previous_setup_back"
 }

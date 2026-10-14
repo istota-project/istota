@@ -139,7 +139,8 @@ staging=""
 EXIT_REFUSED_TAG=65
 LATEST_BRANCH=main
 
-log() { echo "[istota-stack] $*"; }
+# A lost terminal must not end the caller between two steps of a cleanup.
+log() { echo "[istota-stack] $*" 2>/dev/null || true; }
 die() { echo "[istota-stack] $*" >&2; exit 1; }
 refuse_tag() { echo "[istota-stack] REFUSE: $*" >&2; exit "$EXIT_REFUSED_TAG"; }
 
@@ -1064,7 +1065,17 @@ drop_rerun_snapshot() {
 # from the snapshot, then the stack starts on them under the lock still held.
 # A failed restore leaves the stack stopped. The caller's exit status stands.
 put_previous_setup_back() {
-    local up_rc
+    local up_rc f
+    # A die inside install_setup_staging can leave a new .env beside the old
+    # host.env; the backup is from before anything was minted.
+    if [ -n "$STACK_ENV_BACKUP" ]; then
+        for f in .env host.env rclone.conf; do
+            if [ -f "${STACK_ENV_BACKUP}/${f}" ]; then
+                cp -p "${STACK_ENV_BACKUP}/${f}" "${STACK}/${f}" \
+                    || log "WARNING: could not put ${f} back from ${STACK_ENV_BACKUP}"
+            fi
+        done
+    fi
     if ! ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${SECRETS_DIR}:/vm/secrets" \
             "$(main_service)" istota setup --restore "/data/config/${RERUN_SNAPSHOT}" --vm-dir /vm; then
         log "the previous setup could not be put back (above). Its config and credentials are in ${CONFIG_DIR}/${RERUN_SNAPSHOT}${STACK_ENV_BACKUP:+, and .env, host.env and rclone.conf in ${STACK_ENV_BACKUP}}. The stack was not started."
@@ -1087,7 +1098,10 @@ put_previous_setup_back() {
 # setup --web's one exit path, for a return, a die and a signal alike.
 setup_web_exit() {
     local rc=$?
-    trap - EXIT HUP INT TERM
+    # Ignored, not reset: a second Ctrl-C or a dropped session must not cut
+    # the restore or the start short.
+    trap - EXIT
+    trap '' HUP INT TERM PIPE
     if [ -n "$setup_server_pid" ] || [ -n "$setup_abort" ]; then
         docker rm -f "$SETUP_CONTAINER" >/dev/null 2>&1 || true
     fi
@@ -1105,6 +1119,7 @@ setup_web_exit() {
 }
 
 setup_web_signal() {
+    trap '' HUP INT TERM PIPE
     log "setup --web was interrupted."
     exit "$1"
 }
@@ -1357,6 +1372,7 @@ cmd_setup_web() {
     trap 'setup_web_signal 129' HUP
     trap 'setup_web_signal 130' INT
     trap 'setup_web_signal 143' TERM
+    trap 'setup_web_signal 141' PIPE
     rm -f "${SETUP_DIR}/code" "${SETUP_DIR}/cert.pem" "${SETUP_DIR}/key.pem" "${SETUP_DIR}/instructions"
 
     prepare_setup

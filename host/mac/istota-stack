@@ -830,7 +830,7 @@ watch_setup_page() {
 # A signal while the VM's setup runs: ask the VM to end it, so its abort branch
 # puts the previous setup back even where the signal does not cross limactl.
 cancel_web_setup() {
-    log "cancelling the setup in the VM"
+    log "cancelling the setup in the VM" 2>/dev/null || true
     vm_stack setup-cancel </dev/null >&2 || true
 }
 
@@ -847,7 +847,7 @@ web_setup() {
         watch_setup_page "$out" &
         watcher=$!
     fi
-    trap cancel_web_setup INT TERM
+    trap cancel_web_setup HUP INT TERM
     # A job and `wait`, so a trap runs at once rather than when the run ends
     # (up to an idle hour). Its stdin is kept, so with a terminal limactl
     # gives the VM's run a pty and Ctrl-C reaches it there too.
@@ -860,7 +860,7 @@ web_setup() {
         # Still there (or not yet reaped): a trap interrupted the wait.
         kill -0 "$pid" 2>/dev/null || break
     done
-    trap - INT TERM
+    trap - HUP INT TERM
     if [ -n "$watcher" ]; then
         kill "$watcher" 2>/dev/null || true
         wait "$watcher" 2>/dev/null || true

@@ -94,6 +94,7 @@ case "$args" in
     exit "${STUB_SNAPSHOT_RC:-0}" ;;
   *" setup --restore "*)
     echo "restore read-only=${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS"
+    if [ -n "${STUB_SLOW_RESTORE:-}" ]; then touch "$STUB_CALLS.restoring"; sleep 2; fi
     [ "${STUB_RESTORE_SNAPSHOT_RC:-0}" != 0 ] || rm -rf "$ISTOTA_CONFIG_DIR/.setup-rerun"
     exit "${STUB_RESTORE_SNAPSHOT_RC:-0}" ;;
   *" rm -f istota-setup-web ")
@@ -3782,6 +3783,30 @@ class TestSetupWebRerun:
         restore = _first(calls, RESTORE_CALL)
         assert remove < restore < _ups(calls)[0] < calls.index(WATCHDOG_START), calls
         assert "the previous setup is back" in output
+
+    def test_a_second_signal_does_not_cut_the_restore_short(self, rerun):
+        restoring = Path(f"{rerun.calls}.restoring")
+        serving = Path(f"{rerun.calls}.serving")
+        proc = subprocess.Popen(
+            ["bash", str(SCRIPT), "setup", "--web", "--force"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL,
+            env={**rerun.env, "STUB_SLOW_RESTORE": "1",
+                 "STUB_DURING": f'touch "{serving}"; sleep 20'},
+        )
+        for marker in (serving, restoring):
+            deadline = time.monotonic() + 30
+            while not marker.exists():
+                if proc.poll() is not None or time.monotonic() > deadline:
+                    proc.kill()
+                    raise AssertionError(f"never reached {marker.name}: {proc.communicate()}")
+                time.sleep(0.05)
+            proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=60)
+        assert proc.returncode == 143, out + err
+        calls = rerun.docker_calls()
+        assert _ups(calls) and _ups(calls)[0] > _first(calls, RESTORE_CALL), calls
+        assert WATCHDOG_START in calls
+        assert "the previous setup is back" in out
 
     def test_a_failure_after_the_install_neither_restores_nor_starts(self, rerun):
         result = rerun.run("setup", "--web", "--force", **_finished(

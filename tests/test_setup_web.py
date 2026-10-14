@@ -1859,6 +1859,27 @@ class TestACredentialFollowsItsHost:
         fields = _fields(_validate(client, "connections"))
         assert [f for f, _m in fields] == ["imap_password"]
 
+    def test_a_changed_smtp_server_drops_the_imap_password_too(self, rerun):
+        # The SMTP password falls back to the IMAP one.
+        app, client = rerun
+        _draft(client, smtp_host="smtp.elsewhere.test")
+        assert app.state.setup.draft["imap_password"] == ""
+        fields = _fields(_validate(client, "connections"))
+        assert [f for f, _m in fields] == ["imap_password"]
+
+    def test_a_changed_model_endpoint_drops_the_native_key(self, dirs, clock, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        state = app.state.setup
+        assert state.draft["native_api_key"] == "native-key"
+
+        _draft(client, native_base_url="https://other.example.test/v1")
+
+        assert state.draft["native_api_key"] == ""
+        fields = _fields(_validate(client, "model"))
+        assert "native_api_key" in [f for f, _m in fields]
+
     def test_moving_back_does_not_bring_it_back(self, rerun):
         app, client = rerun
         _draft(client, imap_host="mail.elsewhere.test")

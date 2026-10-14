@@ -1246,7 +1246,7 @@ class TestTheSetupVerb:
         assert rc == 0, output
         assert list(running.root.glob("istota-setup.*")) == []
 
-    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
     def test_a_signal_cancels_the_vms_setup(self, running, sig):
         """Where a signal does not cross limactl, `setup-cancel` ends the VM's
         run, whose abort branch puts the old setup back; its status comes back."""

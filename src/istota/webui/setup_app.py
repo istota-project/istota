@@ -135,10 +135,12 @@ _RERUN_UNPARSEABLE = (
 )
 #: A re-run's stored credential, by the field holding the host it was stored
 #: for. A changed host drops it from the draft (`_drop_moved_credentials`).
-_CREDENTIAL_HOSTS: dict[str, str] = {
-    "nextcloud_app_password": "nextcloud_url",
-    "imap_password": "imap_host",
-    "caldav_password": "caldav_url",
+# The SMTP password falls back to the IMAP one, so either host moves it.
+_CREDENTIAL_HOSTS: dict[str, tuple[str, ...]] = {
+    "nextcloud_app_password": ("nextcloud_url",),
+    "imap_password": ("imap_host", "smtp_host"),
+    "caldav_password": ("caldav_url",),
+    "native_api_key": ("native_base_url",),
 }
 _CODE_REFUSED = (
     "That setup code is not valid, or it has already been used. To get a new one, "
@@ -461,10 +463,12 @@ def _same_host(value: object) -> str:
 def _host_moved(state: SetupState, credential: str, draft: dict) -> bool:
     """Whether the draft names another host than the one ``credential`` was
     stored for. A host the draft does not hold is the prior's."""
-    host = _CREDENTIAL_HOSTS[credential]
-    if state.prior is None or host not in draft:
+    if state.prior is None:
         return False
-    return _same_host(draft[host]) != _same_host(getattr(state.prior, host))
+    return any(
+        host in draft and _same_host(draft[host]) != _same_host(getattr(state.prior, host))
+        for host in _CREDENTIAL_HOSTS[credential]
+    )
 
 
 def _drop_moved_credentials(state: SetupState) -> None:
@@ -484,6 +488,7 @@ def _moved_credential_errors(state: SetupState, a: setup_wizard.ContainerAnswers
     in_use = {
         "nextcloud_app_password": a.uses_nextcloud,
         "imap_password": a.email_enabled,
+        "native_api_key": a.brain_kind == "native",
         # The shared validator already asks for a calendar's password.
         "caldav_password": False,
     }
