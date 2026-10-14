@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Groups now has a member home for the shared notebook, recorded changes, members and linked rooms. Owners can manage membership and group details, and members can leave with a replacement owner when needed.
+
 - Group members can read and edit their shared notebook through the web API and inspect recorded changes. Web and bot edits share a lock, stale edits are refused, and unreadable notebooks keep their original contents.
 
 - The group management API lets owners edit metadata and membership, and lets admins create groups, recover owners and inspect membership history. Adding a member requires acknowledgement of access to existing shared memory; member views show only rooms the caller already belongs to.

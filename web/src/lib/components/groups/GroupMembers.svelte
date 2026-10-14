@@ -1,0 +1,312 @@
+<script lang="ts">
+  import {
+    Button,
+    Field,
+    Input,
+    Select,
+    Modal,
+    ConfirmDialog,
+    KebabMenu,
+  } from '$lib/components/ui';
+  import {
+    getGroupUserOptions,
+    putGroupMember,
+    deleteGroupMember,
+    updateGroup,
+    GroupApiError,
+    AuthError,
+    type GroupDetail,
+    type GroupMember,
+    type GroupDisclosure,
+  } from '$lib/api';
+  import { getCurrentUser } from '$lib/userContext';
+  let { group, onChanged }: { group: GroupDetail; onChanged: (left?: boolean) => Promise<void> } =
+    $props();
+  const current = getCurrentUser();
+  const user = $derived(current.user);
+  let busy = $state(false);
+  let error = $state('');
+  let memberOpen = $state(false);
+  let metadataOpen = $state(false);
+  let removeOpen = $state(false);
+  let target = $state<GroupMember | null>(null);
+  let userId = $state('');
+  let role = $state<'member' | 'owner'>('member');
+  let replacement = $state('');
+  let acknowledged = $state(false);
+  let users = $state<{ user_id: string; display_name: string }[]>([]);
+  let disclosure = $state<GroupDisclosure | null>(null);
+  let displayName = $state('');
+  let kind = $state('');
+  const replacements = $derived([
+    { value: '', label: 'No replacement' },
+    ...group.members
+      .filter((m) => m.user_id !== userId)
+      .map((m) => ({ value: m.user_id, label: m.display_name })),
+  ]);
+  const options = $derived(
+    users
+      .filter((u) => !group.members.some((m) => m.user_id === u.user_id))
+      .map((u) => ({ value: u.user_id, label: u.display_name })),
+  );
+
+  function report(e: unknown) {
+    if (e instanceof AuthError) current.expireSession();
+    error = e instanceof Error ? e.message : 'Could not save this change.';
+    if (e instanceof GroupApiError && e.disclosure) disclosure = e.disclosure;
+  }
+  async function openMember(member: GroupMember | null) {
+    target = member;
+    userId = member?.user_id ?? '';
+    role = member?.role ?? 'member';
+    replacement = '';
+    acknowledged = false;
+    disclosure = group.disclosure;
+    error = '';
+    memberOpen = true;
+    if (!member) {
+      busy = true;
+      users = [];
+      try {
+        users = (await getGroupUserOptions(group.group_id)).users;
+        userId = options[0]?.value ?? '';
+      } catch (e) {
+        report(e);
+      } finally {
+        busy = false;
+      }
+    }
+  }
+  async function saveMember() {
+    if (busy || !userId || (!target && !acknowledged)) return;
+    busy = true;
+    error = '';
+    try {
+      await putGroupMember(group.group_id, userId, {
+        revision: group.revision,
+        role,
+        ...(!target ? { acknowledge_history: acknowledged } : {}),
+        ...(replacement ? { replacement_owner: replacement } : {}),
+      });
+      memberOpen = false;
+      await onChanged();
+    } catch (e) {
+      report(e);
+    } finally {
+      busy = false;
+    }
+  }
+  function openRemove(member: GroupMember) {
+    target = member;
+    userId = member.user_id;
+    replacement = '';
+    error = '';
+    removeOpen = true;
+  }
+  async function removeMember() {
+    if (busy) return;
+    busy = true;
+    error = '';
+    try {
+      await deleteGroupMember(group.group_id, userId, {
+        revision: group.revision,
+        ...(replacement ? { replacement_owner: replacement } : {}),
+      });
+      removeOpen = false;
+      await onChanged(userId === user.username);
+    } catch (e) {
+      report(e);
+    } finally {
+      busy = false;
+    }
+  }
+  function openMetadata() {
+    displayName = group.display_name;
+    kind = group.kind;
+    error = '';
+    metadataOpen = true;
+  }
+  async function saveMetadata() {
+    if (busy) return;
+    busy = true;
+    error = '';
+    try {
+      await updateGroup(group.group_id, {
+        revision: group.revision,
+        display_name: displayName,
+        kind,
+      });
+      metadataOpen = false;
+      await onChanged();
+    } catch (e) {
+      report(e);
+    } finally {
+      busy = false;
+    }
+  }
+</script>
+
+<div class="members">
+  <div class="actions">
+    {#if group.capabilities.manage}
+      <Button onclick={() => openMember(null)}>Add member</Button>
+      <Button onclick={openMetadata}>Edit group details</Button>
+    {/if}
+    {#if group.capabilities.leave}
+      <Button
+        variant="danger"
+        onclick={() => {
+          const self = group.members.find((m) => m.user_id === user.username);
+          if (self) openRemove(self);
+        }}>Leave group</Button
+      >
+    {/if}
+  </div>
+  <ul class="member-list">
+    {#each group.members as member (member.user_id)}
+      <li>
+        <span>{member.display_name} <span class="caption">{member.role}</span></span>
+        {#if group.capabilities.manage}<KebabMenu
+            ariaLabel={`Actions for ${member.display_name}`}
+            items={[
+              { label: 'Change role', onSelect: () => openMember(member) },
+              { label: 'Remove member', danger: true, onSelect: () => openRemove(member) },
+            ]}
+          />{/if}
+      </li>
+    {/each}
+  </ul>
+  <p class="caption">
+    Removal ends future access. Messages and downloads already received remain with their
+    recipients.
+  </p>
+</div>
+
+<Modal bind:open={memberOpen} title={target ? 'Change member role' : 'Add member'}>
+  <div class="form-fields">
+    {#if target}<p>{target.display_name}</p>{:else}
+      <Field label="User" labelled={false}
+        ><Select bind:value={userId} {options} ariaLabel="User" fullWidth disabled={busy} /></Field
+      >
+      {#if !busy && !options.length}<p class="caption">
+          Every available user is already a member.
+        </p>{/if}
+    {/if}
+    <Field label="Role" labelled={false}
+      ><Select
+        bind:value={role}
+        options={[
+          { value: 'member', label: 'Member' },
+          { value: 'owner', label: 'Owner' },
+        ]}
+        ariaLabel="Role"
+        fullWidth
+      /></Field
+    >
+    {#if target}
+      <Field
+        label="Replacement owner"
+        labelled={false}
+        warning="If this would leave other members without an owner, choose a replacement in the same change."
+        ><Select
+          bind:value={replacement}
+          options={replacements}
+          ariaLabel="Replacement owner"
+          fullWidth
+        /></Field
+      >
+    {:else if disclosure}
+      <p>This person will be able to read the existing shared material:</p>
+      <ul>
+        <li>{disclosure.memory}</li>
+        {#each disclosure.rooms as room}<li>
+            {room}
+          </li>{/each}{#each disclosure.briefings as briefing}<li>{briefing}</li>{/each}
+      </ul>
+      <Field label="I acknowledge access to this existing history" checkbox
+        ><input type="checkbox" bind:checked={acknowledged} /></Field
+      >
+    {/if}
+    {#if error}<p class="banner error">{error}</p>
+      <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
+  </div>
+  {#snippet footer()}<Button variant="ghost" onclick={() => (memberOpen = false)} disabled={busy}
+      >Cancel</Button
+    ><Button
+      variant="primary"
+      onclick={saveMember}
+      loading={busy}
+      disabled={!userId || (!target && !acknowledged)}>{target ? 'Save role' : 'Add member'}</Button
+    >{/snippet}
+</Modal>
+<Modal bind:open={metadataOpen} title="Edit group details">
+  <div class="form-fields">
+    <Field label="Name"><Input bind:value={displayName} /></Field>
+    <Field label="Kind" hint="A display label, such as family or team."
+      ><Input bind:value={kind} /></Field
+    >
+    <p class="caption">Group ID: {group.group_id}</p>
+    {#if error}<p class="banner error">{error}</p>
+      <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
+  </div>
+  {#snippet footer()}<Button variant="ghost" onclick={() => (metadataOpen = false)} disabled={busy}
+      >Cancel</Button
+    ><Button variant="primary" onclick={saveMetadata} loading={busy} disabled={!displayName.trim()}
+      >Save details</Button
+    >{/snippet}
+</Modal>
+<ConfirmDialog
+  bind:open={removeOpen}
+  title={userId === user.username ? 'Leave group' : 'Remove member'}
+  confirmLabel={userId === user.username ? 'Leave' : 'Remove'}
+  confirmDisabled={busy}
+  onConfirm={removeMember}
+>
+  {#snippet body()}
+    <p>
+      Are you sure you want to {userId === user.username
+        ? 'leave this group'
+        : `remove ${target?.display_name}`}? Future access ends. Already delivered messages and
+      downloads remain with recipients.
+    </p>
+    <Field
+      label="Replacement owner"
+      labelled={false}
+      warning="Choose a replacement if this would leave other members without an owner."
+      ><Select
+        bind:value={replacement}
+        options={replacements}
+        ariaLabel="Replacement owner"
+        fullWidth
+      /></Field
+    >
+    {#if error}<p class="banner error">{error}</p>
+      <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
+  {/snippet}
+</ConfirmDialog>
+
+<style>
+  .members,
+  .form-fields {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .member-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .member-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid var(--border-subtle);
+    padding-block: var(--space-2);
+  }
+</style>
