@@ -42,17 +42,17 @@ The page asks one topic per screen: the assistant's name, your name, email and t
 After the page finishes, `istota-stack` installs `.env` and `host.env`, builds what the answers need and the images lack (the browser image, or Claude Code for a subscription), runs `provision.sh` again when the host settings changed, and starts `istota-stack.service`. The first start takes a few minutes when something has to be built.
 
 - `istota-stack setup-code` prints the address, code and fingerprint again while a setup is running.
-- `--local` serves plain HTTP on `127.0.0.1:8080` with no certificate, for the [local VM](#local-vm) or your own SSH tunnel.
+- `--local` serves plain HTTP on `127.0.0.1` with no certificate, for the [local VM](#local-vm) or your own SSH tunnel. The port is `LOCAL_FORWARD_PORT` from `host.env`, the port Lima forwards, which the Mac writes; 8080 when it is empty.
 - `ISTOTA_SETUP_PUBLISH=0.0.0.0:8443` moves the page off port 443 when something else holds it.
-- The first browser to use the code gets the only session. To start over, stop the running setup (Ctrl-C, or `sudo systemctl stop istota-setup`) and run `istota-stack setup --web` again, which mints a new code.
+- The first browser to use the code gets the only session. To start over, stop the running setup (Ctrl-C, `istota-stack setup-cancel`, or `sudo systemctl stop istota-setup`) and run `istota-stack setup --web` again, which mints a new code.
 - A setup that does not finish installs nothing on the host; if Finish failed partway, the run names any config or secret files it left so you can remove them. After an hour with no request the page stops, and so does the run. Fifty wrong codes stop it too.
 - With `--local` the page answers only at `localhost`, `127.0.0.1` or `[::1]`.
 - On a cloud machine behind its provider's NAT, the printed address is the private one; open the public address instead, and the code still works.
-- It refuses when `config.toml` exists. Change a configured stack by editing `config.toml`, with `istota-stack apply`, or with `istota-stack setup --force`.
+- It refuses when `config.toml` exists. Change a configured stack on the admin Configuration page, by editing `config.toml`, with `istota-stack apply`, or by [running setup again](#running-setup-again).
 
 `istota-setup.service` runs `istota-stack setup --web` as a unit. `provision.sh` installs it and never enables it, and it is skipped once `config.toml` exists. `host/cloud-init.yaml` starts it after the first build and prints `istota-stack setup-code` to the console, which a VPS provider's web console shows; `install.sh --server` does the same and prints them in the terminal. `journalctl -u istota-setup` has the same lines.
 
-The page leaves out the operator features: WhatsApp, the Talk signaling server, the developer skill, devboxes, Nextcloud login, the DAV prefix and the auto-share setting. Set those up afterwards in `config.toml` or with the terminal setup.
+The page leaves out the operator features: WhatsApp, the Talk signaling server, the developer skill, devboxes, Nextcloud login, the DAV prefix and the auto-share setting. Set those up afterwards in `config.toml` or with the terminal setup. A browser re-run keeps them as they are.
 
 ### In the terminal
 
@@ -61,6 +61,32 @@ istota-stack setup
 ```
 
 This runs `istota setup` in the image and asks every question, operator settings included. Unlike the web setup it stops after writing the files: run `istota-stack check-image || istota-stack update <tag>`, then `provision.sh`, then `systemctl enable --now istota-stack`. The browser question defaults to yes; a scripted `--yes` run without `--profile browser` still leaves the browser off.
+
+### Running setup again
+
+```bash
+istota-stack setup --web --force    # in the browser
+istota-stack setup --force          # in the terminal
+```
+
+Both start from what the stack's files say now. Each question, and each field on the page, holds the current answer, and finishing without a change writes the same files back. A credential you do not retype is kept. Neither changes the user setup made, nor their name, email, time zone or module choices: those live in the user's profile, which Settings changes. The page shows them read-only and has no password screen.
+
+A re-run writes the whole `config.toml` from its answers, so a setting setup does not ask about goes back to its default. For one setting, use the [configuration editor](../configuration/web-editor.md) or `istota-stack apply`. Before it writes, the current `config.toml` is copied to `config/config.toml.bak.<time>`, and `.env`, `host.env` and `rclone.conf` to `/srv/app/istota/backups/setup-<time>/` (root only); the newest ten of each are kept.
+
+Setup refuses, by name, a value it could not write back: a `[brain] kind` other than `claude_code` or `native`, or a `COMPOSE_PROFILES` entry it does not know. Change that on the configuration page first. The browser re-run also refuses a `config.toml` that does not parse, and a stack where the user is not one id both in `config/admins` and with a `[users.<id>]` block; the terminal asks those questions as on a first run instead.
+
+In the browser, the run goes in this order:
+
+1. It backs up the files above and copies `config.toml`, `config/managed.json` and the secret files aside into `config/.setup-rerun/`.
+2. It pauses `istota-browser-watchdog.timer` and stops the stack's containers. The page's address could otherwise reach the running web UI, which is already set up.
+3. It prints the address and code, and the page runs as on a first run, filled in.
+4. Finish writes the new files. `istota-stack` installs `.env` and `host.env`, builds what the answers need, runs `provision.sh` when the host settings changed, and starts the stack and the watchdog timer again. The page then goes to the sign-in page.
+
+A run that does not finish puts the previous setup back: on Ctrl-C, `istota-stack setup-cancel`, an hour with no request, fifty wrong codes, or a failure before step 4 installs anything, it removes the setup container, restores the copied files and starts the stack on them. Once the new `.env` and `host.env` are installed the change is committed: a build that fails after that leaves the stack stopped, and the message names the `istota-stack update <tag>` that builds it again.
+
+A stored credential is dropped from the page when the server it belongs to changes, so you enter it again: the Nextcloud app password when the Nextcloud address changes, the email password when the IMAP server changes, the calendar password when the CalDAV address changes. A new Nextcloud address also turns Nextcloud login off; the terminal setup turns it back on.
+
+In `direct` ingress your domain has sent browsers a year of HSTS, so they refuse a self-signed certificate there. A browser re-run uses the Let's Encrypt certificate when the machine has one and prints only the domain's address. Without one it prints only the IP address and says why the domain is left out.
 
 ## Configuration
 
@@ -337,19 +363,20 @@ In full Nextcloud integration and on the local VM the workspace is not in `/data
 
 ## Local VM
 
-On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates and controls; the [local install](../getting-started/local-install.md) page covers installing and running it. Inside the VM it is this stack, with three host settings that `create` writes into `host.env`:
+On a Mac the stack runs in a Lima VM that the Mac's own `istota-stack` creates and controls; the [local install](../getting-started/local-install.md) page covers installing and running it. Inside the VM it is this stack, with host settings that `create` writes into `host.env`:
 
 | `host.env` | Value | Effect |
 |---|---|---|
 | `STORAGE` | `host-folder` | the workspace is the Mac folder at `/srv/mount/host-folder`; `provision.sh` makes `istota-stack.service` require that mount, and never creates, chmods or chowns the folder |
 | `INGRESS` | `local` | nginx on the VM's loopback, which Lima forwards to the Mac's `localhost:<port>` |
 | `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | `1`, `192.168.5.2`, empty | containers cannot reach the Mac's loopback except DNS and the ports listed ([Security](security.md#the-local-vm)) |
+| `LOCAL_FORWARD_PORT` | the Mac's `--port`, `8080` by default | the port Lima forwards; setup refuses a `local` hostname on another port, defaults to `localhost:<port>`, and publishes nginx and the setup page on it |
 
-Every command on this page works from the Mac: `istota-stack <verb>` there runs the VM's `istota-stack <verb>` as root, and `istota` runs the CLI in the daemon container. `apply` and `import-bare-metal` take a path on the Mac. Paths such as `/srv/app/istota/config/config.toml` are in the VM; `istota-stack shell` opens a shell there.
+Every command on this page works from the Mac: `istota-stack <verb>` there runs the VM's `istota-stack <verb>` as root, and `istota` runs the CLI in the daemon container. `setup` writes `LOCAL_FORWARD_PORT` first when it differs, and `setup --web` adds `--local` and opens the page. `apply` and `import-bare-metal` take a path on the Mac. Paths such as `/srv/app/istota/config/config.toml` are in the VM; `istota-stack shell` opens a shell there.
 
 What differs from a server:
 
-- **First run.** The Mac's `istota-stack create` runs the terminal setup with storage, ingress and hostname set. `istota-stack setup --web --local` after `create --no-setup` is the browser route; it keeps the host folder as the workspace. Either way setup writes `[scheduler] cron_max_staleness_minutes = 720` for local ingress, so work missed while the Mac slept runs once after wake.
+- **First run.** The Mac's `istota-stack create` runs the browser setup and opens the page once it answers; it keeps the host folder as the workspace. `create --terminal-setup` runs the terminal setup with storage, ingress and hostname set. Either way setup writes `[scheduler] cron_max_staleness_minutes = 720` for local ingress, so work missed while the Mac slept runs once after wake.
 - **Releases.** The VM verifies the tag as a server does. After each `update` the Mac's `istota-stack` copies itself, the `istota` shim and the Lima template out of the VM's verified checkout.
 - **Backups.** The database snapshots and the config copies land in the Mac folder, and `istota-stack update`, `setup`, `apply` and `import-standalone` copy `.env` and `host.env` there too (`Backups/config/<date>/`, once a `config.toml` exists). The master key goes to the Mac's login Keychain. `istota-stack restore` on the Mac rebuilds a lost VM from the two; in the VM, `istota-stack restore` is the half that runs `istota migrate restore-workspace` with the key on stdin, onto a stack that was never set up.
 - **The folder's marker.** The daemon will not start without `.istota-workspace` at the folder's root, and `istota doctor`'s `runtime.mount_liveness` fails without it on a running stack. A folder that is renamed or on an unplugged volume reads as an empty `virtiofs` mount, and the marker is how the stack tells.

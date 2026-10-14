@@ -76,16 +76,16 @@ The [local VM](../getting-started/local-install.md) has the same shape as a serv
 ```bash
 export ISTOTA_LIMA_INSTANCE=istota-try
 export ISTOTA_MAC_BIN_DIR="$(mktemp -d)"   # keeps an installed istota-stack from being replaced
-host/mac/istota-stack create --repo "$PWD" --workspace ~/IstotaTry --no-setup
-host/mac/istota-stack setup --web --local     # or `setup` for the terminal wizard
-host/mac/istota-stack create                  # finishes: Keychain copy of the key
+host/mac/istota-stack create --repo "$PWD" --workspace ~/IstotaTry --port 8181
 ```
 
-`create` copies the VM's `istota-stack`, `istota` and Lima template over an install it finds in `~/.local/bin`, even when run from a checkout; the empty `ISTOTA_MAC_BIN_DIR` keeps it away from an install you already run. `--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes. The web setup listens on the Mac's port 8080, so another install must not hold that port; an existing local install on a different `--port` is fine. Each VM takes 4 GiB of memory unless you pass `--memory`.
+`create` copies the VM's `istota-stack`, `istota` and Lima template over an install it finds in `~/.local/bin`, even when run from a checkout; the empty `ISTOTA_MAC_BIN_DIR` keeps it away from an install you already run. `--repo` installs from the checkout rather than a signed release ([developing on a checkout](../getting-started/local-install.md#developing-on-a-checkout)). The first `create` builds the images and takes several minutes, then opens the setup page in the browser; `--terminal-setup` asks the questions in the terminal instead. Give the VM a `--port` no other install holds (8181 above; `create` refuses a held one). The setup page and the web UI both use that port. Each VM takes 4 GiB of memory unless you pass `--memory`.
+
+To try the re-run, `host/mac/istota-stack setup --web --force` opens the page again over the configured stack, and Ctrl-C in the middle should put the previous setup back and start the stack. That signal crossing `limactl shell` is the one part no test reaches.
 
 Remove it with `host/mac/istota-stack destroy --purge`, which asks you to type the instance name and deletes the VM, the workspace folder, the Keychain item (service `istota.local`, account `secret-key-istota-try`) and the state file `~/.config/istota-stack/istota-try.env`. A plain `destroy` leaves the last three.
 
-This is a manual run. The `vm` test tier (`scripts/test-vm.sh`, instance `istota-vm-1`) is the automated one and does not go through the browser.
+This is a manual run. The `vm` test tier (`scripts/test-vm.sh`, instance `istota-vm-1`) is the automated one. It creates its VM with `limactl` rather than the Mac's `create`, so it never drives the Mac half; `tests/vm/test_web_setup.py` runs the VM's `setup --web` and `setup --web --force` through the setup page's API.
 
 ## Initialize by hand
 

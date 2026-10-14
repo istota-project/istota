@@ -5608,10 +5608,16 @@ export type SetupPhase = 'locked' | 'open' | 'finishing' | 'configured';
 
 export interface SetupState {
   phase: SetupPhase;
+  /** A re-run over a configured stack (`istota setup --web --force`). */
+  rerun?: boolean;
+  /** A re-run's username, sent only to the open session. */
+  user_id?: string;
   /** Plain HTTP on this machine (`--local`) rather than the TLS setup port. */
   local?: boolean;
   /** The `Host` the browser used, for the web address screen. */
   host?: string;
+  /** Where "Only on this computer" answers: `localhost:<the port the VM forwards>`. */
+  local_address?: string;
   /** The module toggles this image can offer; `field` is the answer's name. */
   modules_available?: { field: string; module: string }[];
   memory_total_mib?: number;
@@ -5673,7 +5679,8 @@ export interface SetupValidation {
 }
 export interface SetupFinished {
   login_url: string;
-  email: string;
+  /** Absent on a re-run, which signs nobody in afresh. */
+  email?: string;
 }
 
 const SETUP_UNREACHABLE = "Can't reach the setup service.";

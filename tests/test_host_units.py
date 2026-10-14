@@ -1444,14 +1444,15 @@ class TestBootstrapFiles:
         assert result.returncode == 1, (result.stdout, result.stderr)
         assert "--terminal-stup" in result.stderr
 
-    def test_terminal_setup_is_parsed_and_belongs_to_the_server_path(self):
-        server = _run_installer_offline("--server", "--terminal-setup")
-        # Parsed: the run gets as far as its root check (or, as root, its
-        # Debian or tag check) rather than refusing the flag.
-        assert "--terminal-setup" not in server.stderr
-        local = _run_installer_offline("--local", "--terminal-setup")
-        assert local.returncode == 1
-        assert "--terminal-setup" in local.stderr
+    def test_terminal_setup_is_parsed_for_both_paths(self):
+        """The server takes it as its own; the local install hands it to
+        `istota-stack create`, whose default is the browser too (#732)."""
+        for mode in ("--server", "--local"):
+            # Parsed: the run gets as far as its own checks (root, the machine,
+            # Lima, the tag) rather than refusing the flag.
+            result = _run_installer_offline(mode, "--terminal-setup")
+            assert result.returncode != 0, mode
+            assert "--terminal-setup" not in result.stderr, (mode, result.stderr)
 
     def test_standalone_is_refused_naming_what_replaced_it(self):
         """The standalone install is deleted; the flag stays only to say where

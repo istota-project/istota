@@ -21,10 +21,20 @@
     internet: boolean;
     /** The workspace is the VM's rclone mount of the bot's Nextcloud files. */
     nextcloudMount: boolean;
+    /** A re-run: the stack was running before and is starting again. */
+    rerun?: boolean;
   }
 
-  let { botName, loginUrl, email, browser, subscription, internet, nextcloudMount }: Props =
-    $props();
+  let {
+    botName,
+    loginUrl,
+    email,
+    browser,
+    subscription,
+    internet,
+    nextcloudMount,
+    rerun = false,
+  }: Props = $props();
 
   let ready = $state(false);
   let longWait = $state(false);
@@ -71,19 +81,25 @@
 </script>
 
 <div class="step">
-  <p>Your settings are saved and {botName} is starting.</p>
+  <p>Your settings are saved and {botName} is {rerun ? 'restarting' : 'starting'}.</p>
   <ol class="progress" aria-live="polite">
     <li class="done"><span class="mark" aria-hidden="true">✓</span>Settings saved</li>
     <li class={ready ? 'done' : 'busy'}>
       <span class="mark" aria-hidden="true"
         >{#if ready}✓{:else}<span class="spinner"></span>{/if}</span
-      >Starting {botName}
+      >{rerun ? 'Restarting' : 'Starting'}
+      {botName}
     </li>
     <li class={ready ? 'done' : 'todo'}>
       <span class="mark" aria-hidden="true">{ready ? '✓' : ''}</span>Ready
     </li>
   </ol>
-  {#if slowParts.length}
+  {#if rerun}
+    <p class="muted">
+      This usually takes a minute or two, longer when {botName} has something new to download. You sign
+      in as before once it is back.
+    </p>
+  {:else if slowParts.length}
     <p class="muted">
       This usually takes a few minutes the first time, while {botName}
       {slowParts.join(' and ')}.

@@ -4,12 +4,14 @@
   import { Button } from '$lib/components/ui';
   import { SettingsCard } from '$lib/components/settings';
   import SetupSteps from './SetupSteps.svelte';
-  import type { SetupStepId } from './setupDraft.svelte';
+  import type { SetupStepId, SetupStepList } from './setupDraft.svelte';
 
   interface Props {
     botName: string;
     /** The step indicator's position; none on the unlock and configured screens. */
     step?: SetupStepId | null;
+    /** The screens the indicator counts; a first run's when omitted. */
+    steps?: SetupStepList;
     title: string;
     description?: string;
     /** Omitted on the first step, which has nowhere to go back to. */
@@ -26,6 +28,7 @@
   let {
     botName,
     step = null,
+    steps,
     title,
     description,
     onBack,
@@ -50,7 +53,7 @@
     <h1>{botName}</h1>
   </header>
 
-  {#if step}<SetupSteps current={step} />{/if}
+  {#if step}<SetupSteps current={step} {steps} />{/if}
 
   <SettingsCard {title} {description}>
     {@render children()}

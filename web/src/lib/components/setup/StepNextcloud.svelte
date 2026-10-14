@@ -15,9 +15,11 @@
     botName: string;
     /** Set when a test failed, so the page offers "Continue without testing". */
     offerSkip?: boolean;
+    /** A re-run: the username belongs to the existing account and stays. */
+    rerun?: boolean;
   }
 
-  let { draft, errors, botName, offerSkip = $bindable(false) }: Props = $props();
+  let { draft, errors, botName, offerSkip = $bindable(false), rerun = false }: Props = $props();
 
   const OPTIONS = [
     {
@@ -102,12 +104,14 @@
     if (next === 'nextcloud') {
       // With Nextcloud, the username is the user's Nextcloud id, which the
       // email cannot suggest: the field starts empty rather than wrong.
-      draft.scratch[LOCAL_USERNAME] = draft.text('user_id');
-      draft.set('user_id', '');
+      if (!rerun) {
+        draft.scratch[LOCAL_USERNAME] = draft.text('user_id');
+        draft.set('user_id', '');
+      }
       draft.setDefault('nextcloud_username', 'istota');
       draft.setDefault('workspace', 'mount');
       if (!talkAvailable) draft.set('talk_enabled', false);
-    } else {
+    } else if (!rerun) {
       draft.set(
         'user_id',
         draft.scratch[LOCAL_USERNAME] || deriveUsername(draft.text('user_email')),
@@ -255,14 +259,17 @@
           />
           <Field
             label="Your own Nextcloud username"
-            hint={workspace === 'local'
-              ? 'Istota invites this account to chats.'
-              : 'Istota shares its folder with this account and invites it to chats.'}
+            hint={rerun
+              ? 'The username of the account this setup belongs to, which a change keeps.'
+              : workspace === 'local'
+                ? 'Istota invites this account to chats.'
+                : 'Istota shares its folder with this account and invites it to chats.'}
             error={shown.user_id}
           >
             <Input
               value={draft.text('user_id')}
               monospace
+              readonly={rerun}
               autocapitalize="none"
               spellcheck={false}
               invalid={!!shown.user_id}

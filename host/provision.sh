@@ -36,6 +36,9 @@
 #   HOST_GATEWAY_ADDR    the host gateway's IPv4 address, for that block
 #   HOST_LOOPBACK_ALLOW  TCP ports on it containers may still reach, separated
 #                        by spaces or commas
+#   LOCAL_FORWARD_PORT   the Mac port Lima forwards to this VM, written by the
+#                        Mac's istota-stack and empty on a server; setup
+#                        publishes nginx and its setup page on it
 set -euo pipefail
 # The checkout it clones is what the images are built from: under a hardened
 # umask (027) it would be root-only, and out of uid 10001's reach in them.

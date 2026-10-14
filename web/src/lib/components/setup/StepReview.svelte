@@ -5,6 +5,7 @@
     BROWSER_PROFILE,
     applyFeatureDefaults,
     moduleTitle,
+    setupSteps,
     stepInfo,
     type SetupDraftStore,
     type SetupStepId,
@@ -17,9 +18,11 @@
     modules?: { field: string; module: string }[];
     /** Back to a screen, from its Edit link. */
     onEdit: (step: SetupStepId) => void;
+    /** A re-run: no password screen, and the username is always the account's. */
+    rerun?: boolean;
   }
 
-  let { draft, botName, models, modules = [], onEdit }: Props = $props();
+  let { draft, botName, models, modules = [], onEdit, rerun = false }: Props = $props();
 
   // A Finish reached without passing Features keeps its defaults.
   function open() {
@@ -62,7 +65,7 @@
       { label: 'Your email', value: draft.text('user_email') },
       { label: 'Time zone', value: draft.text('timezone') },
     ];
-    if (!nextcloud) welcome.push(username);
+    if (rerun || !nextcloud) welcome.push(username);
 
     const model: Row[] = [{ label: 'AI service', value: service() }];
     if (subscription) {
@@ -107,7 +110,7 @@
         },
         { label: 'Assistant’s Nextcloud username', value: draft.text('nextcloud_username') },
         { label: 'App password', value: secret('nextcloud_app_password') },
-        username,
+        ...(rerun ? [] : [username]),
         {
           label: 'Chat in Nextcloud Talk',
           value: draft.flag('talk_enabled', false) ? 'Yes' : 'No',
@@ -150,7 +153,8 @@
     const features: Row[] = [{ label: 'On', value: on.join(', ') || 'Nothing' }];
     if (off.length) features.push({ label: 'Off', value: off.join(', ') });
 
-    return [
+    const shown = setupSteps(rerun).map((s) => s.id);
+    const all: Group[] = [
       { step: 'welcome', rows: welcome },
       { step: 'account', rows: [{ label: 'Password', value: secret('password') }] },
       { step: 'model', rows: model },
@@ -159,11 +163,15 @@
       { step: 'connections', rows: connections },
       { step: 'features', rows: features },
     ];
+    return all.filter((g) => shown.includes(g.step));
   });
 </script>
 
 <div class="step">
-  <p>Check your answers, then finish. {botName} starts once setup is done.</p>
+  <p>
+    Check your answers, then finish. {botName}
+    {rerun ? 'stops and starts again with them' : 'starts once setup is done'}.
+  </p>
   {#each groups as group (group.step)}
     {@const title = stepInfo(group.step).title}
     <section class="review-group" aria-label={title} data-review-step={group.step}>

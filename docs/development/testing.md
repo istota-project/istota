@@ -196,13 +196,15 @@ ISTOTA_IMAGE_TAG=istota-test/no-forge:control uv run pytest -m image -n0 tests/i
 
 A clean run there is the failure.
 
-`host/istota-stack` has its controls in `scripts/test-stack-negative-control.sh`. Each breaks one property in a copy of the script and hands the copy to the default suite's `tests/test_istota_stack.py` through `ISTOTA_STACK_SCRIPT`, so most of them need neither Docker nor a VM. With no argument it runs the two release-integrity controls, `skip-verify` and `user-keyring`. `setup-web` runs three controls for `istota-stack setup --web`, and each must turn exactly its named node ids red, with every other test in the setup classes green:
+`host/istota-stack` has its controls in `scripts/test-stack-negative-control.sh`. Each breaks one property in a copy of the script and hands the copy to the default suite's `tests/test_istota_stack.py` through `ISTOTA_STACK_SCRIPT`, so most of them need neither Docker nor a VM. With no argument it runs the two release-integrity controls, `skip-verify` and `user-keyring`. `setup-web` runs five controls for `istota-stack setup --web`, and each must turn exactly its named node ids red, with every other test in the setup classes green:
 
 | Control | Breaks | Turns red |
 |---|---|---|
-| `setup-unmarked` | installs staging without checking the `setup-done` marker | the five `TestSetupWebUnfinished` tests and `TestSetupWebFinished::test_a_linked_marker_is_not_a_finished_setup` |
+| `setup-unmarked` | installs staging without checking the `setup-done` marker | the five `TestSetupWebUnfinished` tests and `TestSetupWebFinished::test_a_linked_marker_is_not_a_finished_setup`, plus the four re-run tests that end without the marker (`TestSetupWebRerun`'s no-marker, failed-restore and failed-start tests, and the cancel test) |
 | `setup-mint-in-staging` | mints the code, certificate and key into staging instead of root's own `.setup/`, then copies them back, so only the staged files' mode is wrong | `TestSetupWebMints::test_the_code_and_certificate_are_root_s_and_the_copies_read_only` |
 | `setup-no-lock` | skips the setup lock, so `setup-code` says no setup is running (a second run is still refused, by the stack lock) | `TestSetupCode::test_during_a_setup_it_prints_the_instructions` |
+| `setup-no-restore` | starts the stack after an abandoned `--force` re-run without putting the snapshot back | `TestSetupWebRerun`'s no-marker, signal and failed-restore tests, and `TestSetupCancel::test_a_cancel_during_a_re_run_puts_the_previous_setup_back` |
+| `setup-server-in-foreground` | runs the setup server in the foreground, so a signal waits for the server to exit | the two signal tests, in `TestSetupWebRerun` and `TestSetupWebFirstRunSignal` |
 
 `mac-purge` runs two controls for the Mac script's `destroy --purge` the same way, handing a broken copy of `host/mac/istota-stack` to `tests/test_mac_istota_stack.py` through `ISTOTA_MAC_STACK_SCRIPT`, each required to turn exactly its named `TestDestroyPurge` tests red:
 
