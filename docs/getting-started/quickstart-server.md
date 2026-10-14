@@ -7,7 +7,6 @@ The machine has to be dedicated to this install. The stack grants its container 
 ## Requirements
 
 - A fresh Debian 13 machine and root on it
-- A release tag and the release signing key (one line of an SSH public key). The installer and `istota-stack update <tag>` check every tag against that key, and refuse a branch, an unsigned tag or a tag signed by another key. Only `istota-stack update --unsigned` skips the check, and only when you ask for it ([below](#day-to-day)).
 - A model backend: a Claude Code OAuth token, or any OpenAI-compatible endpoint through the [native brain](../configuration/native-brain.md)
 - Optional: an existing Nextcloud, with a user and app password for the bot, for full Nextcloud integration with Talk. Without one the workspace is a local directory.
 
@@ -16,23 +15,34 @@ The machine has to be dedicated to this install. The stack grants its container 
 As root, on the machine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
-  | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash -s -- --server
 ```
+
+This installs the newest release: the highest `vX.Y.Z` tag in the repository. The installer checks the tag's signature against the project's release signing key, which it carries (`host/release-signing-key.pub`), and refuses a branch, an unsigned tag or a tag signed by another key. If the newest tag fails that check, it stops and installs nothing; it never falls back to an older one. Two flags override the defaults: `--tag vX.Y.Z` installs a specific release, and `--signing-key 'ssh-ed25519 AAAA...'` names another key, for a fork's releases. The key is written to `/srv/app/istota/host.env` on the first run, and every later update is checked against that key.
 
 Read the installer before piping it into a shell:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
 less install.sh
-sudo bash install.sh --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+sudo bash install.sh --server
 ```
 
-It clones the repository into `/srv/app/istota/src`, verifies the tag's signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, and starts the setup in the browser (`istota-setup.service`). It ends by printing the address to open, a one-use setup code and the certificate's fingerprint; `sudo istota-stack setup-code` prints them again. When the page finishes, the machine builds what your answers need, runs `provision.sh` again and starts `istota-stack.service`. See [First-run setup](../deployment/running-the-stack.md#first-run-setup).
+It clones the repository into `/srv/app/istota/src`, picks the newest release tag, verifies its signature before running anything from it, runs `host/provision.sh` (Docker Engine, the AppArmor and seccomp profiles, zram, the journald cap, the systemd units), builds the images with `istota-stack update <tag>`, and starts the setup in the browser (`istota-setup.service`). It ends by printing the address to open, a one-use setup code and the certificate's fingerprint; `sudo istota-stack setup-code` prints them again. When the page finishes, the machine builds what your answers need, runs `provision.sh` again and starts `istota-stack.service`. See [First-run setup](../deployment/running-the-stack.md#first-run-setup).
 
 To set up in the terminal instead, add `--terminal-setup`. The installer then runs the setup wizard with `istota-stack setup`, rebuilds the images when `istota-stack check-image` reports the new config needs Claude Code (the first build ran before the config existed), runs `provision.sh` again for the wizard's host settings, and starts `istota-stack.service`. Without a terminal that path stops after the build and prints the rest.
 
-For a cloud VM, `host/cloud-init.yaml` does the same as user data: fill in the signing key, the repository and the tag. It prints the setup's address, code and fingerprint to the console, which a VPS provider's web console shows.
+For a cloud VM, `host/cloud-init.yaml` does the same as user data, as it is: it carries the project's key and installs the newest release. Set `TAG` in it for a specific release, or the repository and the key for a fork. It prints the setup's address, code and fingerprint to the console, which a VPS provider's web console shows.
+
+### Checking the release key
+
+The key's fingerprint is `SHA256:msQ02X7UFfotEHfGWtElonM/WEQxCXCMBdLhBAjsX88`. To compare it with the key the machine verifies against:
+
+```bash
+awk '{print $3, $4}' /srv/app/istota/allowed_signers | ssh-keygen -lf -
+```
+
+`ssh-keygen -lf` cannot read `allowed_signers` itself, so the command takes the key out of it first. [Security](../deployment/security.md#release-signing) says what the key protects.
 
 ## What the wizard asks
 
@@ -45,7 +55,7 @@ It writes `config.toml` and the admins file under `/srv/app/istota/config/`, one
 ## Day to day
 
 ```bash
-istota-stack update vX.Y.Z      # verify, build and switch to a new release
+istota-stack update             # the newest signed release
 istota-stack update --unsigned latest   # follow main instead: deploy its tip, unsigned
 istota-stack rollback           # back to the previous release, when its image can read the database
 istota-stack apply plan.toml    # write config.toml from a plan; restarts the stack when it changed
@@ -58,6 +68,18 @@ The `istota` command on the machine runs the CLI inside the daemon container as 
 
 `update --unsigned latest` installs the current tip of `main` without a signature check and records it as `main-<commit>`, a name that keeps pointing at that commit, so `rollback` works as it does after a release. Use it only if you trust the repository's `main` branch as much as a release.
 
+## Updating
+
+```bash
+sudo istota-stack update          # the newest signed release
+sudo istota-stack update vX.Y.Z   # a specific release
+sudo istota-stack rollback        # back to the release before
+```
+
+`update` fetches the repository's tags and picks the newest `vX.Y.Z`. When the stack already runs it, the command says so and changes nothing. Otherwise it checks the tag's signature against the key in `/srv/app/istota/allowed_signers`, which came from the key given at the first install, and refuses a tag that fails the check without trying an older one. Then it builds the images on the machine from that tag and restarts the stack on them, which takes a few minutes. The config, the credentials and the data in `/srv/app/istota/data` are kept. A build that fails leaves the running stack as it was.
+
+`update vX.Y.Z` names the release, and rebuilds even when the stack already runs it. `rollback` goes back one release, the one `update` replaced, as long as that release's image can read the database. [Running the stack](../deployment/running-the-stack.md#upgrading-an-existing-deployment) has the details.
+
 The stack's state (the databases, the master key and, with local storage, the workspace) is the directory `/srv/app/istota/data`, bound at `/data` in the containers. Back it up. See [State and volumes](../deployment/running-the-stack.md#state-and-volumes).
 
 To change a setting, edit `/srv/app/istota/config/config.toml` and restart with `istota-stack down && istota-stack up`, or, as an admin, change it in the web UI's Configuration pane, which hands the change to the machine to apply ([Changing configuration from the web](../configuration/web-editor.md)). The running services read `config/` read-only. A credential is a file under `/srv/app/istota/secrets/`; replace it and restart.
@@ -69,8 +91,7 @@ The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose
 On an Apple silicon Mac the same stack runs in a Lima VM dedicated to it, with a folder in your home (`~/Istota`) as the workspace. `install.sh --local` installs a Mac-side `istota-stack` that creates the VM, runs this page's sequence inside it and forwards every command above to it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
-  | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --local
 ```
 
 Run it as yourself, without `sudo`. [Local install](local-install.md) covers the requirements, the workspace folder, the browser setup, backups to the Keychain and the folder, and moving a standalone install in.

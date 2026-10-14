@@ -322,6 +322,73 @@ class TestARefusedTagChangesNothing:
         _assert_unchanged(fx, fx.run("update", "v9"), *before)
 
 
+def _builds(fx: Fixture) -> list[str]:
+    return [call for call in fx.docker_calls() if " build" in call or " up " in f"{call} "]
+
+
+class TestUpdateToTheNewestRelease:
+    """`istota-stack update` with no tag: the newest vX.Y.Z tag, verified as a
+    named tag is, and nothing at all when the stack already runs it."""
+
+    def release(self, fx: Fixture, name: str, **kwargs) -> None:
+        fx.commit(name)
+        fx.tag(name, **kwargs)
+
+    def test_it_installs_the_newest_signed_release(self, fx):
+        for name in ("v0.9.0", "v0.10.0", "v0.2.0"):
+            self.release(fx, name, key=fx.release_key)
+        _git(fx.origin, "tag", "-a", "v0.11.0-rc1", "-m", "candidate", env=fx.env)
+        result = fx.run("update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v0.10.0\n" in fx.env_text()
+        assert "ISTOTA_PREVIOUS_TAG=v0\n" in fx.env_text()
+        assert fx.head() == _git(fx.origin, "rev-parse", "v0.10.0^{commit}", env=fx.env)
+        assert any(" build " in f"{c} " for c in fx.docker_calls())
+
+    def test_already_on_the_newest_it_builds_nothing(self, fx):
+        self.release(fx, "v0.10.0", key=fx.release_key)
+        assert fx.run("update", "v0.10.0").returncode == 0
+        fx.calls.unlink()
+        before = fx.env_text(), fx.head()
+        result = fx.run("update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "already on v0.10.0, the newest release" in result.stdout
+        assert (fx.env_text(), fx.head()) == before
+        assert _builds(fx) == []
+
+    def test_the_newest_installed_unsigned_is_installed_again_verified(self, fx):
+        self.release(fx, "v0.10.0", key=fx.release_key)
+        assert fx.run("update", "--unsigned", "v0.10.0").returncode == 0
+        result = fx.run("update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v0.10.0\n" in fx.env_text()
+        assert "ISTOTA_TAG_UNSIGNED=\n" in fx.env_text()
+        assert any(" build " in f"{c} " for c in fx.docker_calls())
+
+    def test_an_unsigned_newest_tag_is_refused_without_falling_back(self, fx):
+        self.release(fx, "v0.9.0", key=fx.release_key)
+        self.release(fx, "v0.10.0")
+        before = fx.env_text(), fx.head()
+        result = fx.run("update")
+        _assert_unchanged(fx, result, *before)
+        assert "v0.10.0" in result.stderr
+        assert "istota-stack update <tag>" in result.stderr
+        assert "v0.9.0" not in fx.env_text()
+
+    def test_no_release_tag_changes_nothing(self, fx):
+        before = fx.env_text(), fx.head()
+        result = fx.run("update")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "istota-stack update <tag>" in result.stderr
+        assert (fx.env_text(), fx.head()) == before
+        assert _builds(fx) == []
+
+    def test_unsigned_still_needs_a_tag(self, fx):
+        result = fx.run("update", "--unsigned")
+        assert result.returncode == 64
+        assert fx.docker_calls() == []
+
+
 class TestUpdateBuildCleanup:
     cache_prune = "builder prune --all --force --keep-storage 2GB"
     image_prune = "image prune --force --filter label=com.docker.compose.project=istota"

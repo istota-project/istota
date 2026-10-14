@@ -2,11 +2,13 @@
 # istota-stack on the Mac: the local VM's command. Run as yourself, never sudo.
 #
 #   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB]
-#                       (--tag TAG --signing-key KEY | --repo DIR [--tag TAG]) [--adopt]
+#                       ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt]
 #                       [--no-setup]
 #                               make the workspace folder and the VM, then set up the
 #                               stack in it; a re-run continues where one stopped;
-#                               --no-setup stops before the setup questions
+#                               --no-setup stops before the setup questions. A release
+#                               is the newest one unless --tag names it, verified
+#                               against the project's key unless --signing-key gives one
 #   istota-stack start          start the VM
 #   istota-stack stop           stop the stack, then the VM
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
@@ -16,7 +18,8 @@
 #                               start the VM when you log in, or not
 #   istota-stack allow-host-port N | deny-host-port N
 #                               let containers reach TCP port N on the Mac's loopback, or not
-#   istota-stack update [args]  the VM's `update`, then these scripts from its checkout
+#   istota-stack update [tag]   the VM's `update` (no tag: the newest release), then
+#                               these scripts from its checkout
 #   istota-stack destroy [--force] [--purge]
 #                               delete the VM; the folder and the Keychain key stay;
 #                               --purge deletes them too, with the saved settings
@@ -73,6 +76,11 @@ STATE_FILE="${STATE_DIR}/${INSTANCE}.env"
 # Where the first releases of this script kept it. Read only when it holds
 # nothing but state, and never written, moved or removed.
 OLD_STATE_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/istota/${INSTANCE}.env"
+# Where a release with no --tag is looked up; the VM clones the same repository.
+REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
+# host/release-signing-key.pub, which is authoritative; tests/test_host_units.py
+# holds this copy equal to it.
+DEFAULT_SIGNING_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM8wnX7YSjgMETMV8EOf/hQ6J5HpZsw9WfY/r0Glfq4z istota-releases'
 VM_STACK=/srv/app/istota
 VM_SRC="${VM_STACK}/src"
 KEYCHAIN_SERVICE=istota.local
@@ -391,6 +399,31 @@ check_tag_name() {
     esac
 }
 
+# --- newest release ---
+# The newest release among the tag names on stdin, one bare name per line: the
+# highest vX.Y.Z by number (v0.10.0 is newer than v0.9.9). Prints nothing and
+# fails when no name is one. It only picks: the caller verifies the tag. Not
+# `sort -V`, which macOS's sort lacks.
+newest_release_tag() {
+    local newest
+    newest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" || true
+    [ -n "$newest" ] || return 1
+    echo "v${newest}"
+}
+# --- end newest release ---
+
+# The newest release in REPO_URL, read without a clone. It is only a name: the
+# VM verifies the tag before anything from it runs.
+newest_remote_release_tag() {
+    local listing tag
+    listing="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" \
+        || fail 1 "could not list the release tags at ${REPO_URL}. Name the release with --tag."
+    tag="$(sed 's|^.*refs/tags/||' <<<"$listing" | newest_release_tag)" \
+        || fail 1 "${REPO_URL} has no release tag (vX.Y.Z). Name the release with --tag."
+    printf '%s\n' "$tag"
+}
+
 # --- the scripts and the key -------------------------------------------------
 
 template_path() {
@@ -568,6 +601,14 @@ create_settings() {
         CREATE_REPO="$(state_get REPO)"
     fi
     [ -n "$CREATE_KEY" ] || CREATE_KEY="$(state_get SIGNING_KEY)"
+    # Nothing given and nothing recorded: the newest release.
+    if [ -z "$CREATE_REPO" ] && [ -z "$CREATE_TAG" ]; then
+        if [ -n "$(state_get DEPLOYED_TAG)" ] && [ -z "$(state_get DEPLOYED_UNSIGNED)" ]; then
+            CREATE_TAG="$(state_get DEPLOYED_TAG)"
+        else
+            CREATE_TAG="$(newest_remote_release_tag)"
+        fi
+    fi
     if ! valid_port "$CREATE_PORT" || [ "$CREATE_PORT" -lt 1024 ]; then
         usage_error "--port takes a port from 1024 to 65535, not '${CREATE_PORT}'"
     fi
@@ -581,11 +622,10 @@ create_settings() {
         [ -z "$CREATE_TAG" ] || check_tag_name "$CREATE_TAG"
         [ -f "${CREATE_REPO}/host/lima/istota.yaml" ] || usage_error "${CREATE_REPO} is not an istota checkout"
         CREATE_REPO="$(cd "$CREATE_REPO" && pwd -P)"
-    elif [ -n "$CREATE_TAG" ]; then
+    else
         CREATE_SOURCE=release
         check_tag_name "$CREATE_TAG"
-    else
-        usage_error "give --tag and --signing-key (a release), or --repo (a checkout)"
+        [ -n "$CREATE_KEY" ] || CREATE_KEY="$DEFAULT_SIGNING_KEY"
     fi
 }
 
@@ -597,12 +637,8 @@ create_template() {
     fi
 }
 
-# What making a new VM needs beyond the options' form: a release's signing
-# key and the template.
+# What making a new VM needs beyond the options' form: the template.
 require_new_vm_inputs() {
-    if [ "$CREATE_SOURCE" = release ] && [ -z "$CREATE_KEY" ]; then
-        usage_error "a release needs the key its tag is signed by: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)"
-    fi
     local template
     template="$(create_template)"
     [ -f "$template" ] || fail 1 "no Lima template at ${template}; run install.sh --local again."
@@ -643,6 +679,8 @@ cmd_create() {
             # The template names both mounts; a release has no checkout to share.
             expression="${expression} | del(.mounts[] | select(.mountPoint == \"/mnt/istota-repo\"))"
             args+=("--param=ISTOTA_TAG=${tag}" "--param=RELEASE_SIGNING_KEY=${key}")
+            # The template's own default otherwise, which is REPO_URL's.
+            [ -z "${ISTOTA_REPO_URL:-}" ] || args+=("--param=ISTOTA_REPO_URL=${REPO_URL}")
         fi
         args+=(--set "$expression" "$template")
         run_step "create the VM" "limactl create --name=${INSTANCE} ..." limactl "${args[@]}"

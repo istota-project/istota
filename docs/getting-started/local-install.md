@@ -17,7 +17,6 @@ login Keychain: istota.local / secret-key-istota (a copy of the master key)
 
 - A Mac with Apple silicon. An Intel Mac is refused.
 - Lima 2.0 or later: `brew install lima`. The installer does not install Homebrew or Lima for you.
-- A release tag and the release signing key (one line of an SSH public key). The VM checks the tag's signature before it runs anything from it, as a server does.
 - A model backend: a Claude Code OAuth token, an API key, or an OpenAI-compatible server through the [native brain](../configuration/native-brain.md). A model server on the Mac itself needs one more step, [below](#reaching-a-service-on-your-mac).
 - Room for the VM: 4 CPUs, 4 GiB of memory and a 40 GiB disk by default.
 
@@ -26,11 +25,12 @@ login Keychain: istota.local / secret-key-istota (a copy of the master key)
 As yourself, not with `sudo`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
-  | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --local
 ```
 
-`--tag` and `--signing-key` are both required. The installer refuses to run as root, on anything but an Apple silicon Mac, or without `limactl` (exit 69, with the `brew install lima` line). It installs `istota-stack` and `istota` into `~/.local/bin` and the Lima template into `~/.local/share/istota/istota.yaml`, prints the `PATH` line to add if `~/.local/bin` is not on yours, and runs `istota-stack create` with the tag, the key and every other flag you gave it:
+This installs the newest release, the highest `vX.Y.Z` tag in the repository. The VM checks the tag's signature against the project's release signing key before it runs anything from it, as a server does, and installs nothing when the check fails. `--tag vX.Y.Z` installs a specific release instead, and `--signing-key 'ssh-ed25519 AAAA...'` names another key, for a fork's releases. The key's fingerprint is `SHA256:msQ02X7UFfotEHfGWtElonM/WEQxCXCMBdLhBAjsX88`; `istota-stack shell`, then `awk '{print $3, $4}' /srv/app/istota/allowed_signers | ssh-keygen -lf -`, prints the one the VM uses.
+
+The installer refuses to run as root, on anything but an Apple silicon Mac, or without `limactl` (exit 69, with the `brew install lima` line). It installs `istota-stack` and `istota` into `~/.local/bin` and the Lima template into `~/.local/share/istota/istota.yaml`, prints the `PATH` line to add if `~/.local/bin` is not on yours, and runs `istota-stack create` with the tag and every other flag you gave it:
 
 | Flag | Default | What it sets |
 |---|---|---|
@@ -61,7 +61,7 @@ If a step fails, `create` prints the step, the command it ran in the VM, its exi
 The [web setup](../deployment/running-the-stack.md#in-the-browser) works in the local VM too. It asks fewer questions than the terminal wizard, and can test an API key before saving it:
 
 ```bash
-istota-stack create --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases' --no-setup
+istota-stack create --no-setup
 istota-stack setup --web --local
 ```
 
@@ -103,7 +103,7 @@ istota-stack stop              # stop the stack (at most 60 s), then the VM
 istota-stack start             # start the VM; the stack starts with it
 istota-stack autostart on      # start the VM when you log in (off turns it back off)
 istota-stack shell             # a shell in the VM
-istota-stack update vX.Y.Z     # verify, build and switch to a release, then refresh the Mac scripts
+istota-stack update            # the newest signed release, then refresh the Mac scripts
 istota task "..." -u alice -x  # the istota CLI, in the daemon container as uid 10001
 ```
 
@@ -114,6 +114,18 @@ Every other verb is the VM's own `istota-stack`, run as root in the VM with its 
 The VM is the Lima instance `istota`, in Lima's default home, so `limactl list` shows it. If you already have an instance of that name, set `ISTOTA_LIMA_INSTANCE` to another name for every `istota-stack` call.
 
 To change a setting, edit `/srv/app/istota/config/config.toml` in the VM (`istota-stack shell`, then `sudo -e` it) or use `istota-stack apply plan.toml` with a plan on the Mac, and restart with `istota-stack down && istota-stack up`.
+
+### Updating
+
+```bash
+istota-stack update            # the newest signed release
+istota-stack update vX.Y.Z     # a specific release
+istota-stack rollback          # back to the release before
+```
+
+These run in the VM, without `sudo` on the Mac. `update` picks the newest `vX.Y.Z` tag; when the stack already runs it, the command says so and changes nothing. Otherwise the VM checks the tag's signature against the key it was created with, and refuses a tag that fails the check without trying an older one. Then it builds the images in the VM from that tag and restarts the stack on them, which takes a few minutes. The config, the credentials, the databases and the folder are kept. After a successful update the Mac scripts are replaced with the copies from the verified checkout.
+
+`update vX.Y.Z` names the release, and rebuilds even when the stack already runs it. `rollback` goes back one release, the one `update` replaced, as long as that release's image can read the database.
 
 ### Reaching a service on your Mac
 
@@ -167,8 +179,8 @@ Credentials you stored through the web UI or `istota secret` are in the database
 The standalone install (`~/.istota`, run by `istota serve`) was removed. `import-standalone` moves one into a new local VM, with its history:
 
 ```bash
-istota-stack import-standalone --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases' --dry-run
-istota-stack import-standalone --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+istota-stack import-standalone --dry-run
+istota-stack import-standalone
 ```
 
 Stop `istota serve` first; the import refuses while it runs. `--from DIR` and `--config FILE` name a standalone install and config other than `~/.istota` and `~/.config/istota/config.toml`, and the import takes `create`'s options for the new VM. `--dry-run` needs a running VM and changes nothing.

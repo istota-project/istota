@@ -41,6 +41,7 @@ TEMPLATE = REPO / "host" / "lima" / "istota.yaml"
 BASH = "/bin/bash" if Path("/bin/bash").exists() else "bash"
 
 KEY = "7f" * 32
+PROJECT_KEY = (REPO / "host" / "release-signing-key.pub").read_text().rstrip("\n")
 SIGNING_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIStageSixTestKeyOnly releases"
 
 STUB = r'''#!{python}
@@ -83,6 +84,10 @@ if name == "lsof":
 
 if name == "open":
     sys.exit(0)
+
+if name == "git":
+    out(state.get("ls_remote", ""))
+    sys.exit(state.get("ls_remote_rc", 0))
 
 if name == "security":
     keychain = state.setdefault("keychain", {})
@@ -320,7 +325,7 @@ def mac(tmp_path) -> Mac:
     stub = stubs / "stub"
     stub.write_text(STUB.replace("{python}", sys.executable))
     stub.chmod(0o755)
-    for name in ("limactl", "security", "lsof", "open", "uname"):
+    for name in ("limactl", "security", "lsof", "open", "uname", "git"):
         (stubs / name).symlink_to(stub)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"key": KEY}))
@@ -358,6 +363,12 @@ class TestForwarding:
             "shell", "--workdir", "/", "istota", "sudo", "istota-stack",
             "exec", "sh", "-c", "grep -E '^Uid:' /proc/self/status",
         ]
+
+    def test_a_bare_update_reaches_the_vms_newest_release_update(self, mac):
+        mac.set(instance={"name": "istota", "status": "Running"})
+        result = mac.run("update")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [c for c in mac.stack_calls() if c[:1] == ["update"]] == [["update"]]
 
     def test_the_vms_exit_status_comes_back_unchanged(self, mac):
         mac.set(instance={"name": "istota", "status": "Running"}, forward_rc=3)
@@ -697,10 +708,45 @@ class TestCreate:
         result = _create(mac)
         assert result.returncode == 69, result.stdout + result.stderr
 
-    def test_a_release_needs_its_signing_key(self, mac):
+    def test_a_release_without_a_signing_key_takes_the_projects(self, mac):
         result = mac.run("create", "--tag", "v1.2.0")
-        assert result.returncode == 64, result.stdout + result.stderr
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"--param=RELEASE_SIGNING_KEY={PROJECT_KEY}" in _limactl_create(mac)
+        state = (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+        assert f"SIGNING_KEY={PROJECT_KEY}\n" in state
+
+    def test_with_no_tag_it_installs_the_newest_release(self, mac):
+        mac.set(ls_remote="".join(f"{i:040x}\trefs/tags/{name}\n" for i, name in
+                                  enumerate(["v1.2.0", "v1.10.0", "v1.11.0-rc1", "v1.9.3"])))
+        result = mac.run("create")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.calls("git") == [
+            ["ls-remote", "--tags", "--refs", "https://github.com/istota-project/istota.git", "v*"]]
+        create = _limactl_create(mac)
+        assert "--param=ISTOTA_TAG=v1.10.0" in create
+        assert f"--param=RELEASE_SIGNING_KEY={PROJECT_KEY}" in create
+        assert not any(a.startswith("--param=ISTOTA_REPO_URL=") for a in create)
+        assert ["update", "v1.10.0"] in mac.stack_calls()
+
+    def test_a_repo_url_is_asked_and_handed_to_the_vm(self, mac):
+        mac.set(ls_remote=f"{0:040x}\trefs/tags/v2.0.0\n")
+        result = mac.run("create", ISTOTA_REPO_URL="https://example.com/fork.git")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.calls("git")[0][3] == "https://example.com/fork.git"
+        assert "--param=ISTOTA_REPO_URL=https://example.com/fork.git" in _limactl_create(mac)
+
+    @pytest.mark.parametrize(("listing", "rc"), [("", 128), ("", 0), ("abc\trefs/tags/v1.2\n", 0)])
+    def test_with_no_release_to_find_it_says_to_name_one(self, mac, listing, rc):
+        mac.set(ls_remote=listing, ls_remote_rc=rc)
+        result = mac.run("create")
+        assert result.returncode != 0
+        assert "--tag" in result.stderr
         assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
+
+    def test_a_rerun_asks_no_remote(self, mac):
+        assert _create(mac).returncode == 0
+        assert mac.run("create").returncode == 0
+        assert mac.calls("git") == []
 
     def test_a_checkout_create_mounts_it_and_follows_main(self, mac):
         result = mac.run("create", "--repo", str(REPO))
@@ -1278,13 +1324,13 @@ class TestRestore:
         assert result.returncode == 64, result.stdout + result.stderr
         assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
 
-    def test_a_release_without_its_signing_key_is_refused_before_the_old_vm_goes(self, mac):
+    def test_a_release_without_its_signing_key_takes_the_projects(self, mac):
         assert mac.run("create", "--repo", str(REPO)).returncode == 0
         _back_up(mac)
         mac.calls_path.unlink()
         result = mac.run("restore", "--tag", "v1.3.0", stdin="istota\n")
-        assert result.returncode == 64, result.stdout + result.stderr
-        assert not any(c[:1] in (["delete"], ["create"]) for c in mac.calls("limactl"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"--param=RELEASE_SIGNING_KEY={PROJECT_KEY}" in _limactl_create(mac)
 
     def test_a_missing_template_is_refused_before_the_old_vm_goes(self, made):
         result = made.run("restore", stdin="istota\n", ISTOTA_LIMA_TEMPLATE="/nowhere/istota.yaml")
