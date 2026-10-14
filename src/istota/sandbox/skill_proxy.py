@@ -408,6 +408,10 @@ class SkillProxy:
         #
         # Locked because `unix_server` runs one thread per connection.
         self._vault_fetches = 0
+        # `(private channel?, request type, name)` this attempt has been served
+        # in full. A repeat of one is not charged (ISSUE-743); see
+        # `_spend_vault_fetch`.
+        self._vault_served: set[tuple[bool, str, str]] = set()
         # Names this attempt created with vault_create. They have no grant by
         # design (later tasks start narrow), but the task that made one may
         # fill it, which is the documented create-then-sign-up flow.
@@ -892,20 +896,36 @@ class SkillProxy:
         # Commit before sending: a disconnected reader still spends this fill.
         self._send_response(conn, {"fields": grant.fields, "bound_hosts": grant.bound_hosts})
 
-    def _spend_vault_fetch(self) -> tuple[int, bool]:
-        """Charge one fetch to this attempt's budget. ``(count, within)``.
+    def _spend_vault_fetch(
+        self, private: bool, request_type: str, name: str,
+    ) -> tuple[int, bool]:
+        """Charge a fetch unless this is a repeat. ``(count, within)``.
 
-        **Counted per request, not per distinct name, and counted whether or
-        not the name resolves.** Counting only successful lookups makes probing
-        for absent names free, which is the enumeration the cap exists to
-        bound; counting distinct names lets a loop over one name run for ever,
-        which is the case it does not need to bound and cannot distinguish.
+        **The cap counts credentials, not reads** (ISSUE-743). A request for a
+        name already served in full this attempt, on the same channel, is free:
+        the reader already holds the value, so a repeat discloses nothing. The
+        channel is part of the key because the private channel's reader is a
+        skill subprocess and never the model; a value served there is not one
+        the model holds. Every other request is charged, whether or not the
+        name resolves, because counting only successful lookups would make
+        probing for absent names free, which is the enumeration the cap exists
+        to bound. A free repeat still runs every check after this one, so a
+        grant revoked mid-attempt still refuses. Two concurrent first reads of
+        one name are both charged, since the mark lands only after a full
+        serve; that overcharges and never undercharges.
         """
         with self._vault_fetch_lock:
+            if (private, request_type, name) in self._vault_served:
+                return self._vault_fetches, True
             self._vault_fetches += 1
             count = self._vault_fetches
         limit = self.vault_fetch_limit
         return count, not limit or count <= limit
+
+    def _mark_vault_served(self, private: bool, request_type: str, name: str) -> None:
+        """Record a read answered in full, after every check passed."""
+        with self._vault_fetch_lock:
+            self._vault_served.add((private, request_type, name))
 
     def _refuse_fetch_limit(self, conn: socket.socket, request_type: str, count: int) -> None:
         """The over-budget answer, the same for every name and both read types.
@@ -1364,7 +1384,7 @@ class SkillProxy:
         # unflattened one can forge a record in the daemon's own log.
         label = label_for_display(name)
 
-        count, within = self._spend_vault_fetch()
+        count, within = self._spend_vault_fetch(trusted_skill, "vault_credential", name)
         if not within:
             self._refuse_fetch_limit(conn, "vault_credential", count)
             return
@@ -1438,15 +1458,16 @@ class SkillProxy:
         )
         if request.get("binding") is not True:
             reply.pop("bound_hosts", None)
+        self._mark_vault_served(trusted_skill, "vault_credential", name)
         self._send_response(conn, reply)
 
     def _serve_vault_otp(self, conn: socket.socket, request: dict) -> None:
         """Compute a bound code for a private skill read; never return the seed."""
-        count, within = self._spend_vault_fetch()
+        name = str(request.get("name", ""))
+        count, within = self._spend_vault_fetch(True, "vault_otp", name)
         if not within:
             self._refuse_fetch_limit(conn, "vault_otp", count)
             return
-        name = str(request.get("name", ""))
         label = label_for_display(name)
 
         def refuse(reason: str, message: str | None = None) -> None:
@@ -1543,6 +1564,7 @@ class SkillProxy:
             _, end = window(params, now)
         code = code_at(params, now)
         logger.info("credential_otp name=%s", label_for_display(owner))
+        self._mark_vault_served(True, "vault_otp", name)
         self._send_response(conn, {"code": code, "expires_at": end, "bound_hosts": hosts})
 
     def _serve_vault_entry(
@@ -1567,7 +1589,7 @@ class SkillProxy:
             mode = VAULT_MODE_DEFAULT
         label = label_for_display(name)
 
-        count, within = self._spend_vault_fetch()
+        count, within = self._spend_vault_fetch(trusted_skill, "vault_entry", name)
         if not within:
             self._refuse_fetch_limit(conn, "vault_entry", count)
             return
@@ -1640,6 +1662,7 @@ class SkillProxy:
         reply = {"fields": entry_fields(name, values), "bound_hosts": hosts}
         if has_otp:
             reply["otp"] = True
+        self._mark_vault_served(trusted_skill, "vault_entry", name)
         self._send_response(conn, reply)
 
     @staticmethod

@@ -201,6 +201,16 @@ def test_otp_budget_shared_with_value_reads(config, sock_path, otp):
         assert server._vault_fetches == 4
 
 
+def test_otp_repeat_for_one_entry_is_charged_once(config, sock_path, otp):
+    """A login retried after a stale code asks again; the seed is the same
+    credential, so the second code costs nothing (ISSUE-743)."""
+    with proxy(config, sock_path, vault_fetch_limit=1) as server:
+        first = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        second = ask(server, sock_path, {"type": "vault_otp", "name": "acme"}, True)
+        assert server._vault_fetches == 1
+    assert "code" in first and "code" in second
+
+
 @pytest.mark.parametrize("case,reason", [
     ("no_seed", "credential_has_no_otp"), ("withheld", "vault_credential_not_present"),
     ("unknown", "vault_credential_not_present"), ("vanished", "vault_credential_not_present"),

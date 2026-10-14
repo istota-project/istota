@@ -1627,8 +1627,10 @@ class SecurityConfig:
     # Read by `SkillProxy` alone, and enforced there rather than in the shim
     # the model calls: that program sits in a directory the model can
     # overwrite, and the socket answers a hand-rolled client just as readily.
-    # Counted per request whether or not the name resolves, so probing for
-    # absent names is not free; `vault_list` is not counted.
+    # Counts distinct credentials: a name already served this attempt is free
+    # to read again (ISSUE-743). Every other request is charged whether or not
+    # the name resolves, so probing for absent names is not free; `vault_list`
+    # is not counted.
     vault_fetch_limit_per_task: int = 10
     # This is a capability gate: 0 disables model-requested vault writes.
     # Unlike the fetch limit above, it never means unlimited.

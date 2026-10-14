@@ -108,7 +108,7 @@ class TestThePublicRead:
         self, config, sock_path,
     ):
         with entry_proxy(sock_path, config, vault_fetch_limit=1):
-            request(sock_path, {"type": "vault_entry", "name": "acme"})
+            request(sock_path, {"type": "vault_entry", "name": "github_pat"})
             present = request(sock_path, {"type": "vault_entry", "name": "acme"})
             absent = request(sock_path, {"type": "vault_entry", "name": "absent"})
             field = request(sock_path, {"type": "vault_credential", "name": "acme"})
@@ -120,7 +120,7 @@ class TestThePublicRead:
         with entry_proxy(sock_path, config, vault_fetch_limit=2):
             assert "value" in request(sock_path, {"type": "vault_credential", "name": "github_pat"})
             assert "fields" in request(sock_path, {"type": "vault_entry", "name": "acme"})
-            reply = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+            reply = request(sock_path, {"type": "vault_credential", "name": "acme_api_key"})
         assert reply["reason"] == "vault_credential_limit"
 
     def test_no_value_reaches_the_log(self, config, sock_path, caplog):
@@ -208,6 +208,60 @@ class TestThePrivateSkillRead:
         assert out["custom"] == ["api_key", "password", "url", "username"]
         assert out["hosts"] == ["acme.example"]
         assert ACME["acme"] not in out["repr"]
+
+    def test_repeat_skill_calls_on_one_entry_charge_it_once(self, config, sock_path, skill_program):
+        """ISSUE-743: a WordPress session resolves its site's entry on every
+        call. Three calls, each its own subprocess and private channel, fit a
+        budget of one."""
+        skill_program(ENTRY_SKILL)
+        with db.get_db(config.db_path) as conn:
+            grants.put_grant(conn, "alice", "acme", scope_mode="all")
+        task_id = granted_task(config)
+        with start_proxy(sock_path, config=config, user_id="alice", task_id=task_id,
+                         vault_fetch_limit=1) as server:
+            server.vault_credentials = dict(SNAPSHOT)
+            responses = [request(sock_path, {"skill": "probe", "args": []}) for _ in range(3)]
+            other = request(sock_path, {"type": "vault_entry", "name": "github_pat"})
+            assert server._vault_fetches == 2
+        for response in responses:
+            assert response["returncode"] == 0, response["stderr"]
+        assert other["reason"] == "vault_credential_limit"
+
+    def test_an_entry_a_skill_was_given_is_not_free_to_the_model(
+        self, config, sock_path, skill_program,
+    ):
+        """The private channel's reader is never the model, so a value served
+        there is charged again when the model asks for it on its own socket."""
+        skill_program(ENTRY_SKILL)
+        with db.get_db(config.db_path) as conn:
+            grants.put_grant(conn, "alice", "acme", scope_mode="all")
+        task_id = granted_task(config)
+        with start_proxy(sock_path, config=config, user_id="alice", task_id=task_id,
+                         vault_fetch_limit=1) as server:
+            server.vault_credentials = dict(SNAPSHOT)
+            response = request(sock_path, {"skill": "probe", "args": []})
+            assert response["returncode"] == 0, response["stderr"]
+            public = request(sock_path, {"type": "vault_entry", "name": "acme"})
+            assert server._vault_fetches == 2
+        assert public["reason"] == "vault_credential_limit"
+        for value in ACME.values():
+            if value != ACME["acme_url"]:
+                assert value not in json.dumps(public)
+
+    def test_an_entry_refused_by_its_grant_is_charged_every_time(
+        self, config, sock_path, skill_program,
+    ):
+        skill_program(ENTRY_SKILL)
+        task_id = granted_task(config)
+        with start_proxy(sock_path, config=config, user_id="alice", task_id=task_id,
+                         vault_fetch_limit=2) as server:
+            server.vault_credentials = dict(SNAPSHOT)
+            for _ in range(2):
+                response = request(sock_path, {"skill": "probe", "args": []})
+                assert "credential_not_granted" in response["stdout"] + response["stderr"]
+            third = request(sock_path, {"skill": "probe", "args": []})
+            assert server._vault_fetches == 3
+        assert "fetch limit" in third["stdout"]
 
     def test_an_ungranted_entry_is_refused(self, config, sock_path, skill_program):
         skill_program(ENTRY_SKILL)

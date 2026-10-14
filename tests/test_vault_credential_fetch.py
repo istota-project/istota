@@ -285,15 +285,16 @@ class TestTheFetchLog:
 
 
 class TestTheFetchCap:
-    def test_the_eleventh_fetch_is_refused_at_a_limit_of_ten(self, sock_path):
-        with proxy(sock_path, vault_fetch_limit=10):
-            for _ in range(10):
+    def test_the_eleventh_credential_is_refused_at_a_limit_of_ten(self, sock_path):
+        many = {f"cred_{index}": f"vaultvalue-{index}" for index in range(11)}
+        with proxy(sock_path, vault_fetch_limit=10, vault_credentials=many):
+            for index in range(10):
                 reply = request(sock_path, {
-                    "type": "vault_credential", "name": "github_pat",
+                    "type": "vault_credential", "name": f"cred_{index}",
                 })
-                assert reply == {"value": VAULT["github_pat"]}
+                assert reply == {"value": many[f"cred_{index}"]}
             refused = request(sock_path, {
-                "type": "vault_credential", "name": "github_pat",
+                "type": "vault_credential", "name": "cred_10",
             })
         assert refused["reason"] == "vault_credential_limit"
 
@@ -301,7 +302,7 @@ class TestTheFetchCap:
         """A refusal that named one would make the cap an enumeration oracle:
         a present name and an absent one would answer differently past it."""
         with proxy(sock_path, vault_fetch_limit=1):
-            request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+            request(sock_path, {"type": "vault_credential", "name": "home_assistant_url"})
             present = request(sock_path, {
                 "type": "vault_credential", "name": "github_pat",
             })
@@ -327,16 +328,53 @@ class TestTheFetchCap:
             })
         assert after["reason"] == "vault_credential_limit"
 
-    def test_repeating_one_name_spends_the_budget(self, sock_path):
-        """Counted per request, not per distinct name: a loop over one name is
-        the case the cap cannot distinguish from a legitimate one."""
-        with proxy(sock_path, vault_fetch_limit=2):
+    def test_a_name_already_served_is_read_again_without_a_charge(self, sock_path):
+        """ISSUE-743: the cap counts credentials, not reads. A second read of a
+        value this attempt already holds discloses nothing the first did not."""
+        with proxy(sock_path, vault_fetch_limit=1) as live:
+            replies = [
+                request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+                for _ in range(5)
+            ]
+            assert live._vault_fetches == 1
+        assert replies == [{"value": VAULT["github_pat"]}] * 5
+
+    def test_a_served_name_stays_readable_once_the_budget_is_spent(self, sock_path):
+        with proxy(sock_path, vault_fetch_limit=1):
             request(sock_path, {"type": "vault_credential", "name": "github_pat"})
-            request(sock_path, {"type": "vault_credential", "name": "github_pat"})
-            third = request(sock_path, {
-                "type": "vault_credential", "name": "github_pat",
+            other = request(sock_path, {
+                "type": "vault_credential", "name": "home_assistant_token",
             })
-        assert third["reason"] == "vault_credential_limit"
+            again = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+        assert other["reason"] == "vault_credential_limit"
+        assert again == {"value": VAULT["github_pat"]}
+
+    def test_an_absent_name_is_charged_on_every_repeat(self, sock_path):
+        """Only a name served successfully is free, so probing stays priced."""
+        with proxy(sock_path, vault_fetch_limit=2) as live:
+            for _ in range(2):
+                reply = request(sock_path, {"type": "vault_credential", "name": "absent"})
+                assert reply["reason"] == "vault_credential_not_present"
+            after = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+            assert live._vault_fetches == 3
+        assert after["reason"] == "vault_credential_limit"
+
+    def test_a_name_refused_at_the_limit_does_not_become_free(self, sock_path):
+        with proxy(sock_path, vault_fetch_limit=1):
+            request(sock_path, {"type": "vault_credential", "name": "absent"})
+            first = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+            second = request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+        assert first["reason"] == second["reason"] == "vault_credential_limit"
+
+    def test_a_free_repeat_is_still_logged(self, sock_path, caplog):
+        with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
+            with proxy(sock_path, vault_fetch_limit=1):
+                request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+                request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+        reads = [r.getMessage() for r in caplog.records
+                 if r.getMessage().startswith("vault_credential task_id")]
+        assert len(reads) == 2
+        assert all("count=1" in line for line in reads)
 
     def test_listing_does_not_count(self, sock_path):
         """Interleaved, so the assertion is about the listing rather than about
@@ -364,7 +402,7 @@ class TestTheFetchCap:
         `build_task_runtime` constructs one proxy per attempt, so a retry gets
         a fresh budget."""
         with proxy(sock_path, vault_fetch_limit=1):
-            request(sock_path, {"type": "vault_credential", "name": "github_pat"})
+            request(sock_path, {"type": "vault_credential", "name": "home_assistant_url"})
             assert request(sock_path, {
                 "type": "vault_credential", "name": "github_pat",
             })["reason"] == "vault_credential_limit"
@@ -383,16 +421,17 @@ class TestTheFetchCap:
         monkeypatch.setattr("istota.sandbox.skill_proxy.LISTEN_BACKLOG", client_count)
         results: list[dict] = []
         lock = threading.Lock()
+        many = {f"cred_{index}": f"vaultvalue-{index}" for index in range(client_count)}
 
-        def _fetch():
+        def _fetch(name):
             reply = request(sock_path, {
-                "type": "vault_credential", "name": "github_pat",
+                "type": "vault_credential", "name": name,
             })
             with lock:
                 results.append(reply)
 
-        with proxy(sock_path, vault_fetch_limit=4):
-            threads = [threading.Thread(target=_fetch) for _ in range(client_count)]
+        with proxy(sock_path, vault_fetch_limit=4, vault_credentials=many):
+            threads = [threading.Thread(target=_fetch, args=(name,)) for name in many]
             for t in threads:
                 t.start()
             for t in threads:
@@ -408,7 +447,7 @@ class TestTheFetchCap:
         with caplog.at_level(logging.INFO, logger="istota.sandbox.skill_proxy"):
             with proxy(sock_path, vault_fetch_limit=1):
                 request(sock_path, {
-                    "type": "vault_credential", "name": "github_pat",
+                    "type": "vault_credential", "name": "home_assistant_url",
                 })
                 request(sock_path, {
                     "type": "vault_credential", "name": "github_pat",
@@ -1114,8 +1153,7 @@ class TestThePromptGate:
 
 
 class TestThePromptStatesTheFetchBudget:
-    """A model that cannot see the cap spends it one `run` per command, each
-    re-resolving the same names, and finds out at the refusal."""
+    """A model that cannot see the cap finds out at the refusal."""
 
     def _system(self, tmp_path, limit: int) -> str:
         config = broker_off(Config(
@@ -1138,13 +1176,13 @@ class TestThePromptStatesTheFetchBudget:
 
     def test_the_configured_limit_is_named(self, tmp_path):
         system = self._system(tmp_path, 7)
-        assert "budget of 7 fetches for this task" in system
-        assert "inside one `run ... -- sh -c '...'`" in system
+        assert "at most 7 different shared credentials" in system
+        assert "using one again costs nothing" in system
 
     def test_unlimited_says_nothing_about_a_budget(self, tmp_path):
         system = self._system(tmp_path, 0)
         assert "istota-credential run TOKEN=" in system
-        assert "budget of" not in system
+        assert "different shared credentials" not in system
 
 
 def test_placeholder_prints_only_inert_text_and_host_metadata(sock_path, tmp_path, monkeypatch, capsys):
