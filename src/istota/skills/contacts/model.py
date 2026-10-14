@@ -253,3 +253,102 @@ def match_score(contact: Contact, query: str) -> int:
         if value and query in _normalized(value):
             return 1
     return 0
+
+
+def contact_from_person(person: dict, *, source: str, writable: bool) -> Contact:
+    def first(key):
+        return next(iter(person.get(key, [])), {})
+
+    name = first("names")
+    emails = [ContactField(one_line(item.get("value", "")), item.get("type"))
+              for item in person.get("emailAddresses", [])]
+    phones = [ContactField(one_line(item.get("value", "")), item.get("type"))
+              for item in person.get("phoneNumbers", [])]
+    display = name.get("displayName") or name.get("unstructuredName")
+    display = display or " ".join(filter(None, (name.get("givenName"), name.get("familyName"))))
+    birthday = first("birthdays").get("date", {})
+    date = None
+    if birthday.get("month") and birthday.get("day"):
+        year = f'{birthday["year"]:04d}' if birthday.get("year") else "-"
+        date = f'{year}-{birthday["month"]:02d}-{birthday["day"]:02d}'
+    sources = person.get("metadata", {}).get("sources", [])
+    contact_source = next((item for item in sources if item.get("type") == "CONTACT"), {})
+    return Contact(
+        id=source + ":" + person["resourceName"], source=source,
+        book="Other contacts" if source == "google-other" else "Google Contacts",
+        name=one_line(display or (emails[0].value if emails else "(no name)")),
+        given=one_line(name.get("givenName", "")) or None,
+        family=one_line(name.get("familyName", "")) or None,
+        nickname=first("nicknames").get("value"), emails=emails, phones=phones,
+        org=first("organizations").get("name"), title=first("organizations").get("title"),
+        addresses=[ContactField(one_line(item.get("formattedValue", "")), item.get("type"))
+                   for item in person.get("addresses", [])],
+        birthday=date, note=first("biographies").get("value"),
+        writable=writable and source == "google",
+        etag=contact_source.get("etag") or person.get("etag"),
+    )
+
+
+def person_from_input(changes: ContactInput, existing: dict | None = None) -> dict:
+    """Return only edited People API fields; the caller uses them as the mask."""
+    from copy import deepcopy
+    from datetime import date
+
+    existing = existing or {}
+    result = {}
+    if any(value is not None for value in (changes.name, changes.given, changes.family)):
+        name = deepcopy(next(iter(existing.get("names", [])), {}))
+        for key in ("metadata", "displayName", "displayNameLastFirst"):
+            name.pop(key, None)
+        if changes.name:
+            # A free-form rename must not leave old structured parts in control.
+            name = {"unstructuredName": one_line(changes.name)}
+        elif changes.name is not None:
+            name.pop("unstructuredName", None)
+        for attr, key in (("given", "givenName"), ("family", "familyName")):
+            if getattr(changes, attr) is not None:
+                name[key] = one_line(getattr(changes, attr))
+                if changes.name is None:
+                    name.pop("unstructuredName", None)
+        if not any(str(value).strip() for key, value in name.items()
+                   if key in {"unstructuredName", "givenName", "familyName", "middleName"}):
+            raise ValueError("name_required")
+        result["names"] = [name]
+    for attr, key in (("emails", "emailAddresses"), ("phones", "phoneNumbers")):
+        additions = getattr(changes, attr) + getattr(changes, "add_" + attr)
+        removals = getattr(changes, "remove_" + attr)
+        if additions or removals:
+            entries = [deepcopy(item) for item in existing.get(key, []) if item.get("value") not in removals]
+            for item in additions:
+                entries.append({"value": one_line(item.value), **({"type": item.kind} if item.kind else {})})
+            result[key] = entries
+    if changes.org is not None or changes.title is not None:
+        entries = deepcopy(existing.get("organizations", [])) or [{}]
+        for attr, key in (("org", "name"), ("title", "title")):
+            value = getattr(changes, attr)
+            if value is not None:
+                if value:
+                    entries[0][key] = one_line(value)
+                else:
+                    entries[0].pop(key, None)
+        result["organizations"] = [item for item in entries if any(k != "metadata" for k in item)]
+    for attr, key in (("nickname", "nicknames"), ("note", "biographies")):
+        value = getattr(changes, attr)
+        if value is not None:
+            result[key] = ([{"value": value, "contentType": "TEXT_PLAIN"}] if attr == "note"
+                           else [{"value": one_line(value)}]) if value else []
+    if changes.birthday is not None:
+        result["birthdays"] = []
+        if changes.birthday:
+            raw = changes.birthday
+            try:
+                parsed = date.fromisoformat("2000" + raw[1:] if raw.startswith("--") else raw)
+            except ValueError:
+                raise ValueError("invalid_birthday") from None
+            birthday = {"month": parsed.month, "day": parsed.day}
+            if not raw.startswith("--"):
+                birthday["year"] = parsed.year
+            result["birthdays"] = [{"date": birthday}]
+    if not result:
+        raise ValueError("nothing_to_change")
+    return result

@@ -374,7 +374,15 @@ def effective_disabled_skills(
         disabled |= set(user_config.disabled_skills)
     disabled |= capability_disabled_skills(skill_index, config.available_capabilities())
     if "contacts" in skill_index and not config.carddav_url:
-        disabled.add("contacts")
+        from istota import db
+        from istota.credentials.google_scopes import levels_from_scopes
+
+        contacts_granted = False
+        if config.google_workspace.enabled and config.db_path.exists():
+            with db.get_db(config.db_path) as conn:
+                contacts_granted = "contacts" in levels_from_scopes(db.get_google_scopes(conn, user_id) or [])
+        if not contacts_granted:
+            disabled.add("contacts")
     disabled |= set(withheld_scopes) & set(skill_index)
     return disabled
 

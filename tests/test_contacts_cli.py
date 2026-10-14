@@ -1,14 +1,11 @@
 """Contacts CLI through the HTTP boundary."""
 import json
-from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from istota.config import Config, NextcloudConfig
 from istota.skills import contacts
-from istota.skills.contacts import carddav
-from istota.skills.contacts.model import Contact
 from istota.skills._loader import effective_disabled_skills, eligible_skill_names, load_skill_index
 from tests.test_contacts_carddav import BASE, KEY, CARD, book, card, multistatus
 
@@ -93,21 +90,65 @@ def test_output_frames_long_fields_and_notes(dav, capsys):
     assert item["org"].startswith("[UNTRUSTED CONTACT")
 
 
-def test_merge_partial_and_total_failure(dav, monkeypatch, capsys):
-    # Coarse backend double; the Google HTTP adapter lands in stage 5.
-    second = SimpleNamespace(__name__="contacts.google", BackendContext=carddav.BackendContext,
-        available=lambda ctx: True,
-        search=lambda ctx, query, limit: [Contact("google:people/one", "google", "Google Contacts", "Alice")])
-    monkeypatch.setattr(contacts, "BACKENDS", (carddav, second))
-    assert invoke(capsys, "search", "Alice", "--limit", "1")["contacts"][0]["source"] == "google"
-    def fail(ctx, query, limit):
-        raise carddav.CardDAVError("server_error", 503)
-    second.search = fail
+def test_merge_partial_and_total_failure(monkeypatch, capsys):
+    from tests.test_contacts_google import BASE_SCOPE, PERSON, OTHER
+    calls = []
+    state = {"google_status": 200}
+    def handler(req):
+        calls.append(req)
+        if req.url.host == "people.googleapis.com":
+            if state["google_status"] != 200:
+                return httpx.Response(state["google_status"], json={"error": {"message": "private server detail"}})
+            person = OTHER if req.url.path.endswith("otherContacts:search") else PERSON
+            return httpx.Response(200, json={"results": [{"person": person}]})
+        if req.method == "PROPFIND":
+            return httpx.Response(207, text=multistatus(book()))
+        assert req.method == "REPORT"
+        return httpx.Response(207, text=multistatus(card()))
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    for key, value in {"ISTOTA_USER_ID": "alice", "CARDDAV_URL": BASE, "CARDDAV_USERNAME": "bot",
+                       "GOOGLE_CONTACTS_TOKEN": "test-token",
+                       "GOOGLE_CONTACTS_SCOPES": BASE_SCOPE + "contacts " + BASE_SCOPE + "contacts.other.readonly"}.items():
+        monkeypatch.setenv(key, value)
+    merged = invoke(capsys, "search", "Alice")
+    assert {item["source"] for item in merged["contacts"]} == {"nextcloud", "google", "google-other"}
+    assert "[UNTRUSTED CONTACT" in next(c for c in merged["contacts"] if c["source"] == "google")["note"]
+    assert len(invoke(capsys, "search", "Alice", "--limit", "1")["contacts"]) == 1
+    filtered = invoke(capsys, "search", "Alice", "--source", "google-other")
+    assert [c["source"] for c in filtered["contacts"]] == ["google-other"]
+    state["google_status"] = 503
     partial = invoke(capsys, "search", "Alice")
     assert partial["partial"] is True and partial["contacts"][0]["source"] == "nextcloud"
     assert partial["errors"][0]["reason"] == "server_error"
+    assert "private server detail" not in json.dumps(partial)
     monkeypatch.delenv("CARDDAV_URL")
     assert invoke(capsys, "search", "Alice", code=1)["reason"] == "server_error"
+
+
+def test_google_cli_round_trip(monkeypatch, capsys):
+    from tests.test_contacts_google import BASE_SCOPE, PERSON
+    calls = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json=PERSON if req.method != "DELETE" else {})
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.delenv("CARDDAV_URL", raising=False)
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("GOOGLE_CONTACTS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CONTACTS_SCOPES", BASE_SCOPE + "contacts")
+    assert invoke(capsys, "books")["books"] == [
+        {"key": "google", "source": "google", "label": "Google Contacts", "writable": True}]
+    ident = invoke(capsys, "create", "--book", "google", "--name", "Alice Example")["contact"]["id"]
+    assert invoke(capsys, "show", ident)["contact"]["etag"] == "source-etag"
+    invoke(capsys, "update", ident, "--etag", "source-etag", "--remove-email", "alice@example.com")
+    assert json.loads(calls[-1].content)["emailAddresses"] == []
+    assert invoke(capsys, "delete", ident, "--etag", "source-etag")["status"] == "ok"
+    monkeypatch.setenv("GOOGLE_CONTACTS_SCOPES", BASE_SCOPE + "contacts.readonly")
+    calls.clear()
+    assert invoke(capsys, "update", ident, "--note", "hello", code=1)["reason"] == "read_only"
+    assert not calls
 
 
 def test_contact_selection_requires_a_source(tmp_path):

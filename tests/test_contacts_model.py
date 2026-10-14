@@ -156,3 +156,46 @@ def test_line_breaks_collapse_in_names_emails_and_phones():
     assert contact.name == "Jane Doe"
     assert contact.emails[0].value == "jane @example.com"
     assert contact.phones[0].value == "555 0100"
+
+
+def test_google_normalization_and_edits_preserve_unedited_data():
+    from copy import deepcopy
+    from istota.skills.contacts.model import contact_from_person, person_from_input
+    from tests.test_contacts_google import PERSON
+
+    original = deepcopy(PERSON)
+    original["names"][0]["displayName"] = "Alice\u2028Example"
+    original["phoneNumbers"] = [{"value": "555\n0100", "type": "mobile"}]
+    original["addresses"] = [{"formattedValue": "1 Main St\nExample City", "type": "home"}]
+    original["nicknames"] = [{"value": "Al"}]
+    contact = contact_from_person(original, source="google", writable=True)
+    assert contact.name == "Alice Example"
+    assert contact.phones == [ContactField("555 0100", "mobile")]
+    assert contact.addresses == [ContactField("1 Main St Example City", "home")]
+    assert contact.nickname == "Al"
+    before = deepcopy(original)
+    body = person_from_input(ContactInput(remove_emails=["alice@example.com"], birthday="--02-29", nickname="", org=""), original)
+    assert body["emailAddresses"] == [] and body["nicknames"] == []
+    assert body["birthdays"] == [{"date": {"month": 2, "day": 29}}]
+    assert body["organizations"] == [{"title": "Engineer", "department": "Research"}]
+    assert original == before
+    rename = person_from_input(ContactInput(name="Bob Example"), original)
+    assert rename["names"] == [{"unstructuredName": "Bob Example"}]
+    structured = person_from_input(ContactInput(given="Bob"), original)
+    assert structured["names"] == [{"givenName": "Bob", "familyName": "Example"}]
+    for fields, reason in [(ContactInput(), "nothing_to_change"), (ContactInput(given="", family=""), "name_required"),
+                           (ContactInput(birthday="2023-02-29"), "invalid_birthday")]:
+        with pytest.raises(ValueError, match=reason):
+            person_from_input(fields, original)
+    assert person_from_input(ContactInput(birthday="2000-01-15"))["birthdays"] == [
+        {"date": {"year": 2000, "month": 1, "day": 15}}]
+
+
+def test_google_clear_free_form_name_keeps_structured_name():
+    from istota.skills.contacts.model import person_from_input
+    from tests.test_contacts_google import PERSON
+
+    assert person_from_input(ContactInput(name=""), PERSON)["names"] == [
+        {"givenName": "Alice", "familyName": "Example"}]
+    with pytest.raises(ValueError, match="name_required"):
+        person_from_input(ContactInput(name=""), {"names": [{"unstructuredName": "Alice"}]})

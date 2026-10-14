@@ -1,11 +1,11 @@
 ---
 name: contacts
 triggers: [contact, contacts, address book, phone number, email address, carddav, vcard]
-description: Look up and edit contacts in Nextcloud address books shared with the bot
+description: Look up and edit the user's Nextcloud and Google contacts
 cli: true
 companion_skills: [untrusted_input]
 dependencies: [vobject]
-env: [{"var":"CARDDAV_URL","from":"config","config_path":"carddav_url","when":"carddav_url"},{"var":"CARDDAV_USERNAME","from":"config","config_path":"carddav_username","when":"carddav_url"},{"var":"CARDDAV_PASSWORD","from":"config","config_path":"carddav_password","when":"carddav_url","sensitive":true}]
+env: [{"var":"CARDDAV_URL","from":"config","config_path":"carddav_url","when":"carddav_url"},{"var":"CARDDAV_USERNAME","from":"config","config_path":"carddav_username","when":"carddav_url"},{"var":"CARDDAV_PASSWORD","from":"config","config_path":"carddav_password","when":"carddav_url","sensitive":true},{"var":"GOOGLE_CONTACTS_TOKEN","from":"setup_env","sensitive":true},{"var":"GOOGLE_CONTACTS_SCOPES","from":"setup_env","sensitive":true}]
 ---
 
 # Contacts
@@ -30,3 +30,7 @@ Create accepts `--given`, `--family`, `--nickname`, repeated `--email ADDR[:kind
 Only address books the user owns and shared with the bot are available. If none appear, ask the user to share an address book with the bot account named in the hint from the Contacts app. A read-only book cannot be edited. Confirm before deleting contacts or modifying contacts the user created, as required by `sensitive_actions`. Creating a contact is a record and does not require separate confirmation.
 
 Pass the etag from the last read when editing or deleting. On `changed_since_read`, show the contact again and retry once after checking the change is still appropriate. Never guess a different ID or book after `not_found`.
+
+Google searches word prefixes rather than arbitrary substrings or phone digit substrings. Each Google source returns at most 30 matches. Google Contacts is writable only with a read-write grant; Other contacts is always read-only. Reconnect Google if the token is invalid or the required contacts scope is missing. If the People API is disabled, the operator must enable it in the Google Cloud project.
+
+Showing an Other contacts ID scans up to 10 pages of 1,000 records without storing them. A lookup that reaches this bound returns `lookup_limit`, not `not_found`. Google updates check the contact source etag. Google deletes compare the supplied etag before deleting, but the API cannot protect against an edit between that check and the delete.
