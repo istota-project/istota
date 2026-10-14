@@ -413,11 +413,17 @@ class TestTheRun:
         # Every opt-out module asked about, whatever extras this venv has.
         monkeypatch.setattr("istota.modules.module_available", lambda _name: True)
         args = _args(tmp_path, yes=False, user=None, brain=None, native_model=None)
+        output = []
+
+        def answer(_prompt):
+            assert output[0] == setup_wizard.setup_banner()
+            return next(answers)
 
         assert setup_wizard.run_setup(
-            args, input_fn=lambda _prompt: next(answers),
-            getpass_fn=lambda _prompt: next(secrets), out=lambda *_: None,
+            args, input_fn=answer,
+            getpass_fn=lambda _prompt: next(secrets), out=output.append,
         ) == 0
+        assert output.count(setup_wizard.setup_banner()) == 1
 
         doc = tomllib.loads((tmp_path / "data" / "config" / "config.toml").read_text())
         assert doc["users"]["carol"]["display_name"] == "Carol"
@@ -428,6 +434,24 @@ class TestTheRun:
         secrets_dir = tmp_path / "vm" / "secrets"
         assert (secrets_dir / "istota_nextcloud_app_password").read_text() == "nc-pass"
         assert (secrets_dir / "claude_code_oauth_token").read_text() == "oauth-token"
+
+    def test_noninteractive_setup_has_no_banner(self, tmp_path):
+        output = []
+        assert setup_wizard.run_setup(_args(tmp_path), out=output.append) == 0
+        assert "Setup complete." in output
+        assert not any("Your personal AI" in line for line in output)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "ascii"])
+def test_setup_banner_is_printable_and_fits_a_terminal(encoding):
+    banner = setup_wizard.setup_banner(encoding)
+    banner.encode(encoding)
+    assert "istota" in banner
+    assert "Your personal AI, self-hosted." in banner
+    assert "Setup" in banner
+    assert max(map(len, banner.splitlines())) <= 72
+    assert "\x1b" not in banner
+    assert ("█" in banner) == (encoding == "utf-8")
 
 
 class TestTheStackFiles:

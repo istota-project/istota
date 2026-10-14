@@ -20,6 +20,7 @@ import getpass
 import logging
 import os
 import secrets
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,52 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #: The same model as `DEFAULT_ANTHROPIC_MODEL`, by OpenRouter's name for it.
 DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
+
+
+# Reduced from web/static/octopus-sigil.webp; no image assets needed at runtime.
+_SETUP_OCTOPUS = """\
+          ▄▄▄████▄▄▄
+       ▄██████████████▄
+      ██████████████████
+     ████████████████████
+    ▄████████████████████
+     ████▀▀████████▀▀████
+     ████  ▄██████▄  ███▀
+      ██████████████████
+       ▀██████████████▀
+        █████████████▄
+████▄███████████████████▄████▄
+  ▀▀▀▀▀████████████████▀▀▀▀▀
+     ▄███▀ ███  ███ ▀███▄▄
+    ███▀   ██▀  ▀██   ▀███
+          ▀▀▀    ▀█▀"""
+
+_SETUP_OCTOPUS_ASCII = r'''
+          .-""""-.
+        .'        '.
+       /            \
+      |    o    o    |
+       \            /
+    _   '.        .'   _
+   ( '-._ '------' _.-' )
+    '._  '--....--'  _.'
+     .' .-._  _.-. '.
+    (_.' / /  \ \ '._)
+         '-'  '-'
+'''.strip("\n")
+
+
+def setup_banner(encoding: str = "utf-8") -> str:
+    logo = _SETUP_OCTOPUS
+    try:
+        logo.encode(encoding)
+    except UnicodeEncodeError:
+        logo = _SETUP_OCTOPUS_ASCII
+    labels = {5: "istota", 7: "Your personal AI, self-hosted.", 9: "Setup"}
+    lines = []
+    for index, line in enumerate(logo.splitlines()):
+        lines.append(f"  {line:<30}  {labels.get(index, '')}".rstrip())
+    return "\n" + "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +342,8 @@ def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
         return setup_app.serve(args, out=out)
 
     setup_shape(args)
+    if not getattr(args, "yes", False):
+        out(setup_banner(getattr(sys.stdout, "encoding", None) or "ascii"))
     return run_container_setup(
         args, input_fn=input_fn, out=out,
         getpass_fn=getpass_fn or getpass.getpass,
