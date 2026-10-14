@@ -91,7 +91,6 @@ ROOT_ALLOWLIST = frozenset({
     "status_writer",
     "storage",
     "tasks_file_poller",
-    "updater",
     "user_briefings",  # config.load_config, so every process (see "geo")
     "user_profiles",
 })

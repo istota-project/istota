@@ -1251,8 +1251,8 @@ def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> s
     function knows that. See `_MASK_EXPOSED` / `_MASK_UNKNOWN`.
 
     **Two axes, and both are reported.** Whether a mask is emitted at all, and
-    where it would land if it were. They are independent — the standalone
-    install fails both at once — and neither pre-empts the other, because an
+    where it would land if it were. They are independent — a config with the
+    sandbox off and its database in the workspace fails both at once — and neither pre-empts the other, because an
     operator who reads one reason and fixes it would otherwise be told nothing
     about the second and would still have unmasked transcripts. Availability
     leads: whether a mask exists outranks where it would go.
@@ -1269,8 +1269,8 @@ def _session_log_mask_finding(config: "Config", log_dir: Path, probe: bool) -> s
 
     **This asks ``_mask_dir``'s own question rather than a copy of it.** "Is the
     resolved directory under ``db_path.parent``" is the tempting predicate and it
-    is wrong in the one case that matters: it answers True on the standalone
-    install, where ``db_path.parent`` *is* the workspace, ``mask_shadowed_by``
+    is wrong in the one case that matters: it answers True on a config whose
+    ``db_path.parent`` *is* the workspace, ``mask_shadowed_by``
     is non-empty and the mask is refused — so the check would report the
     property holding while the directory sat outside every mask. That is the
     ``map_basemap`` two-consumers failure, which is why ``mask_shadowed_by``
@@ -1419,8 +1419,8 @@ def _sandbox_mask_availability(
     """
     if not getattr(config.security, "sandbox_enabled", False):
         # Not "the mask covers it": there is no mask. Reported as its own reason
-        # rather than skipped, because the standalone install ships this way and
-        # the whole point of the check is to say which condition a deployment is
+        # rather than skipped, because a checkout running `istota serve` runs
+        # this way and the whole point of the check is to say which condition a deployment is
         # in. `runtime.bwrap` answers a different question — whether bubblewrap
         # could work here — and SKIPs on the same setting.
         return False, (
@@ -1503,9 +1503,9 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
     """Where native-brain session transcripts land, and what protects them.
 
     The boundary is that nothing binds the directory into any sandbox; the
-    database mask is defence in depth behind it, and on two shipped shapes there
-    is no mask at all — the standalone install refuses it, and the Docker stack
-    never emits one because the bwrap probe fails there. Which condition a
+    database mask is defence in depth behind it, and on some shapes there is no
+    mask at all — the sandbox builder refuses one over a workspace that holds the
+    database, and the Docker stack never emits one where the bwrap probe fails. Which condition a
     deployment is in is not visible from a config file, so this check says it,
     and says every one that holds rather than the first.
 
@@ -1533,8 +1533,8 @@ def check_session_log_dir(config: "Config", probe: bool) -> CheckResult:
 
     **The two arms are composed, not raced.** Returning at the first was the
     first draft and it made the retention arm unreachable on precisely the
-    deployments that most need it: the standalone shape's mask refusal and an
-    operator-set ``dir`` are both *permanent* conditions, so a check that
+    deployments that most need it: a refused mask and an operator-set ``dir``
+    are both *permanent* conditions, so a check that
     returned on either could never go on to say that the ceiling was what
     actually bound. Both facts land in one result.
     """
@@ -2021,7 +2021,7 @@ def _control_mask_finding(
     **A mask the builder refuses is not a mask.** ``mask_shadowed_by`` is the
     sandbox builder's own predicate rather than a copy of it, for the reason
     its docstring gives: "is the tree under ``db_path.parent``" answers True on
-    the standalone install, where ``db_path.parent`` is the workspace and
+    a config whose ``db_path.parent`` is the workspace, where
     ``_mask_dir`` refuses outright, so a copy would report a mask that is never
     emitted.
 
@@ -2635,8 +2635,8 @@ def _probe_user(config: "Config") -> str:
     several), which is why it falls through rather than picking.
 
     Deliberately not :attr:`Config.local_user_id`, which puts ``users`` ahead of
-    ``admin_users`` because it answers a different question — the sole user of
-    the no-auth standalone shape, where there is one by construction.
+    ``admin_users`` because it answers a different question — the sole user
+    under ``[web] auth = "none"``, where there is one by construction.
 
     A narrowing from the two probes this replaces, which ran as the invoking
     user and as the heartbeat check's owner respectively. Deliberate, and not a
@@ -3044,9 +3044,8 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     Nothing said so. The failure is silent in the direction that reads as
     normal — ``_native_key_holders`` calls ``secret_key_available()`` and
     reports *0 holders* rather than an error, so "credentials cannot work
-    here" rendered as "nobody has configured a credential". The standalone
-    wizard generated no key at all for seven weeks and no surface anywhere
-    reported it.
+    here" rendered as "nobody has configured a credential". A setup wizard once
+    generated no key at all for seven weeks and no surface anywhere reported it.
 
     The floor and the presence test are the secrets store's own. A second copy
     of ``_MIN_KEY_LEN`` here is precisely the drift this check exists to catch,
@@ -3062,9 +3061,9 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
     deployment.
 
     **There is a fourth arm between those two, and it is the one the marker
-    list cannot reach.** On standalone the key lives in ``istota.env``, and
-    ``cmd_serve`` is the only thing in the tree that sources it — so ``istota
-    doctor`` in an operator's shell is a process that carries none of the three
+    list cannot reach.** Under ``istota serve`` the key can live in
+    ``istota.env``, and ``cmd_serve`` is the only thing in the tree that sources
+    it — so ``istota doctor`` in an operator's shell is a process that carries none of the three
     markers *and* has never read the file, and taking its own environment as
     the answer meant a FAIL and an exit 1 about an install whose key was
     exactly where it belonged, with a remedy telling the operator to add a line
@@ -3110,7 +3109,7 @@ def check_secret_key(config: "Config", probe: bool) -> CheckResult:
             remedy=_secret_key_remedy(config),
         )
 
-    # Not in this process's environment — which on the standalone shape says
+    # Not in this process's environment — which under `istota serve` says
     # nothing, because only `cmd_serve` sources `istota.env` and `istota
     # doctor` is a separate process that does not. Reading absence as the
     # answer there reported FAIL, and exited 1, about an install whose key was
@@ -3239,7 +3238,7 @@ def _stored_secret_count(config: "Config") -> int:
 
 
 def _secret_key_env_file(config: "Config") -> Path | None:
-    """The secrets env file a standalone daemon sources, if one is derivable.
+    """The secrets env file ``istota serve`` sources, if one is derivable.
 
     Mirrors ``cli._default_env_file``: a sibling of the config that was
     actually loaded. Restated rather than imported because ``doctor`` sits
@@ -3262,9 +3261,10 @@ def _secret_key_from_env_file(config: "Config", var: str) -> tuple[Path | None, 
     if env_file is None:
         return None, ""
     try:
-        from .setup_wizard import _read_env_values  # noqa: PLC0415
+        from .serve import parse_env_text  # noqa: PLC0415
 
-        return env_file, _read_env_values(env_file).get(var, "").strip()
+        text = env_file.read_text(encoding="utf-8")
+        return env_file, parse_env_text(text).get(var, "").strip()
     except Exception:  # pragma: no cover - defensive; a check never raises
         return env_file, ""
 
@@ -3275,24 +3275,18 @@ def _secret_key_remedy(config: "Config") -> str:
         'generate one with `python3 -c "import secrets; '
         'print(secrets.token_hex(32))"`'
     )
-    if config.is_standalone:
-        # The real path, not the default one: `istota setup -c` puts the env
-        # file beside whatever config it was given, and an operator told to
-        # edit a file that does not exist has been sent the wrong way.
-        env_file = _secret_key_env_file(config) or Path(
-            "~/.config/istota/istota.env"
-        )
-        return (
-            f"Add an ISTOTA_SECRET_KEY line to {env_file} beside the session "
-            f"secret ({generate}); `istota setup` writes one for a fresh "
-            f"install. Existing stored credentials, if any, were encrypted "
-            f"under a key that is gone and will not come back."
-        )
-    return (
+    remedy = (
         f"Set ISTOTA_SECRET_KEY in the daemon's environment ({generate}). "
         f"The stack's entrypoint keeps one in /data/.secret_key, or reads the "
         f"`istota_secret_key` secrets file when the VM holds it there."
     )
+    # The real path, not a default: `istota serve` reads the env file beside
+    # whatever config it was given. Only a checkout running `auth = "none"`
+    # is served that way; on the stack nothing reads that file.
+    env_file = _secret_key_env_file(config)
+    if env_file is not None and config.web.has_method("none"):
+        remedy += f" `istota serve` on a checkout also reads it from {env_file}."
+    return remedy
 
 
 #: How much of a user id a vault finding may carry. The ids come from
@@ -3734,8 +3728,8 @@ def check_room_scope_confinement(config: "Config", probe: bool) -> CheckResult:
     menu, the proxy's allowlist, credentials, the host-path roots and the
     sandbox mounts. The last is the only one that keeps a file out of reach of
     a shell command, and it exists only where tasks run in bubblewrap.
-    Elsewhere (the shipped Docker stack, macOS, the standalone install) a
-    guest's turn can still read the host's workspace from disk.
+    Elsewhere (the shipped Docker stack, macOS, a checkout running ``istota
+    serve``) a guest's turn can still read the host's workspace from disk.
 
     Every arm says the same of email thread rooms, which have no guest turn:
     a correspondent's admitted mail runs as the host at full reach, bounded by
@@ -3962,8 +3956,7 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
     twice per load.
 
     **Gated on the pairing, not on the proxy alone.** Both switches off together
-    is the single-user install's deliberate trust decision — ``setup_wizard``
-    writes the pair, the task runs unconfined as the daemon user, and removing a
+    is a deliberate trust decision for a single user — the task runs unconfined as the daemon user, and removing a
     variable from an environment it can read out of ``/proc`` anyway is
     decorative. That shape stays silent here as it does in the warning.
 
@@ -4033,7 +4026,7 @@ def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
         remedy=(
             "Enable the skill proxy ([security] skill_proxy_enabled = true) so "
             "credentials are injected per call, or turn the sandbox off if this "
-            "is a trusted single-user install."
+            "is a trusted single-user checkout."
         ),
     )
 

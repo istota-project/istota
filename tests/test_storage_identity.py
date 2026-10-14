@@ -28,7 +28,7 @@ class TestStorageIdentity:
 
     def test_backend_independent_of_web_auth(self):
         # Storage vocabulary must track only what backs the files, never the
-        # web-auth axis — this is the "not is_standalone" decision, locked in.
+        # web-auth axis.
         none_auth = Config(
             web=WebConfig(auth="none"),
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),

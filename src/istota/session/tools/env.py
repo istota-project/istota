@@ -154,8 +154,8 @@ class ToolEnv:
         # return. That used to be insurance against a hypothetical caller and
         # now has a real one: ``execute_task`` seeds the task control directory
         # onto ``fs_write_denied_roots`` *outside* its
-        # ``native_fs_confinement_active`` branch, so on macOS, the standalone
-        # install and the shipped Docker stack a ``ToolEnv`` arrives with a deny
+        # ``native_fs_confinement_active`` branch, so on macOS, with the sandbox
+        # off and on the shipped Docker stack a ``ToolEnv`` arrives with a deny
         # root and no ``read_roots`` at all. Those are precisely the shapes with
         # no bwrap re-bind behind that directory, so this is the only thing
         # standing between the model and a ``Write`` over the standing

@@ -11,11 +11,8 @@
 #               Installs the Mac's istota-stack and istota into ~/.local/bin and
 #               runs `istota-stack create`. Needs Lima (brew install lima); no root.
 #
-#   Standalone  Single-user install on your own machine (macOS or Linux). No
-#               server, no Nextcloud, no login, no sandbox. You chat through
-#               the local web UI and the REPL; everything runs as your user in
-#               one process (istota serve). Deprecated, and kept until the
-#               desktop install replaces it. Only give it content you trust.
+#   The standalone install (--standalone) was removed. An existing one moves
+#   into the local VM with `istota-stack import-standalone`.
 #
 # Server (as root, on the machine that will run it):
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
@@ -25,11 +22,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
 #       | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
 #
-# Standalone (WITHOUT sudo; it installs into your user):
-#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --standalone
-#
 # Usage:
-#   install.sh [--server | --local | --standalone] [other flags...]
+#   install.sh [--server | --local] [other flags...]
 #     --server             Server install (needs root, Debian 13)
 #       --tag TAG          the signed release tag to install (or ISTOTA_RELEASE_TAG)
 #       --signing-key KEY  the release signing key, one line of an SSH public key
@@ -39,7 +33,6 @@
 #     --local              Local VM install on an Apple silicon Mac (no root); takes
 #                          --tag and --signing-key too, and forwards every other flag
 #                          to `istota-stack create` (--workspace, --port, --cpus, ...)
-#     --standalone         Local single-user install (uv tool install + istota setup)
 #     --help               Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
 #   and no terminal, --server is used.
@@ -58,16 +51,10 @@
 # `systemctl enable --now istota-stack`. Without a terminal that path stops
 # after the build and prints the rest.
 #
-# Standalone forwards every other flag to `istota setup` (--yes, --force,
-# --workspace, --port, ...). With a non-Anthropic (native) brain:
-#   ... --standalone --brain native --native-model <id> --native-api-key <key>
-# The key is written to ~/.config/istota/istota.env, never to config.toml.
-#
 # Environment overrides:
 #   ISTOTA_REPO_URL     Repo to clone (default: https://github.com/istota-project/istota.git)
-#   ISTOTA_REPO_BRANCH  Branch or tag the standalone clone takes (default: main)
-#   ISTOTA_CLONE_DIR    Where standalone clones the repo (default:
-#                       ${XDG_DATA_HOME:-~/.local/share}/istota/src)
+#   ISTOTA_REPO_BRANCH  Branch --local fetches the Mac scripts from when not run
+#                       from a checkout (default: main)
 #   ISTOTA_RAW_URL      Where --local fetches the Mac scripts when not run from a
 #                       checkout (default: raw.githubusercontent.com, this branch)
 
@@ -75,7 +62,6 @@ set -euo pipefail
 
 REPO_URL="${ISTOTA_REPO_URL:-https://github.com/istota-project/istota.git}"
 REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
-CLONE_DIR="${ISTOTA_CLONE_DIR:-}"
 RELEASE_TAG="${ISTOTA_RELEASE_TAG:-}"
 SIGNING_KEY="${RELEASE_SIGNING_KEY:-}"
 
@@ -99,7 +85,7 @@ show_help() {
 }
 
 # Parse only the flags this script cares about; everything else forwards to
-# `istota setup` on the standalone path.
+# `istota-stack create` on the local path.
 MODE="server"
 MODE_EXPLICIT=false
 SETUP_IN_TERMINAL=false
@@ -107,7 +93,11 @@ FORWARD_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --server)     MODE="server";     MODE_EXPLICIT=true; shift ;;
-        --standalone) MODE="standalone"; MODE_EXPLICIT=true; shift ;;
+        --standalone)
+            die "--standalone is gone: the standalone install was removed.
+  On an Apple silicon Mac, install the local VM: --local --tag <release> --signing-key '<key>'.
+  An existing standalone install moves into it with \`istota-stack import-standalone\`
+  (docs/getting-started/local-install.md)." ;;
         --local)      MODE="local";      MODE_EXPLICIT=true; shift ;;
         --tag)
             [ $# -ge 2 ] || die "--tag needs a value"
@@ -124,7 +114,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# A standalone install from a checkout uses that checkout rather than cloning.
+# --local run from a checkout installs that checkout's Mac scripts.
 script_path="${BASH_SOURCE[0]:-}"
 if [ -n "$script_path" ] && [ -f "$script_path" ]; then
     SCRIPT_DIR="$(cd "$(dirname "$script_path")" && pwd)"
@@ -151,31 +141,6 @@ reattach_tty_if_needed() {
     if [ -e /dev/tty ] && (exec < /dev/tty) 2>/dev/null; then
         exec < /dev/tty
     fi
-}
-
-ensure_repo() {
-    [ -n "$REPO_ROOT" ] && return 0
-
-    info "Fetching istota repo (curl-pipe mode)"
-    if ! command -v git >/dev/null 2>&1; then
-        if [ "$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq git
-        else
-            die "git is required but not installed. Install git and re-run."
-        fi
-    fi
-
-    if [ -d "$CLONE_DIR/.git" ]; then
-        info "Updating existing clone at $CLONE_DIR"
-        git -C "$CLONE_DIR" fetch origin --tags --quiet
-        git -C "$CLONE_DIR" reset --hard "origin/$REPO_BRANCH" --quiet
-    else
-        rm -rf "$CLONE_DIR"
-        info "Cloning $REPO_URL ($REPO_BRANCH) → $CLONE_DIR"
-        git clone --depth 1 --branch "$REPO_BRANCH" --quiet "$REPO_URL" "$CLONE_DIR"
-    fi
-    REPO_ROOT="$CLONE_DIR"
-    ok "Repo ready at $REPO_ROOT"
 }
 
 # --- Server ------------------------------------------------------------------
@@ -434,173 +399,6 @@ run_local() {
     exit "$rc"
 }
 
-# --- Standalone (local single-user) helpers --------------------------------
-
-ensure_uv() {
-    if command -v uv >/dev/null 2>&1; then
-        ok "uv available ($(uv --version 2>/dev/null))"
-        return 0
-    fi
-    info "Installing uv (Python package/tool manager)"
-    if command -v curl >/dev/null 2>&1; then
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO- https://astral.sh/uv/install.sh | sh
-    else
-        die "uv is required but not installed, and neither curl nor wget is available to fetch it.
-  Install uv manually (https://docs.astral.sh/uv/) and re-run."
-    fi
-    # uv's installer drops the binary in ~/.local/bin by default.
-    export PATH="$HOME/.local/bin:$PATH"
-    command -v uv >/dev/null 2>&1 \
-        || die "uv installed but not on PATH. Open a new shell (or run '. ~/.local/bin/env') and re-run."
-    ok "uv installed"
-}
-
-# A source-clone install has no pre-built web UI assets; the wheel only ships
-# them when src/istota/web_static exists (a PyPI/wheel install would already
-# carry them). Best-effort build so the web UI isn't blank. The REPL works
-# regardless.
-write_install_record() {
-    # Record install provenance for `istota update` (standalone only). JSON with
-    # the source checkout, the extras string, the git ref, and the method — the
-    # updater re-runs `git fetch/reset` here + `uv tool install --reinstall`.
-    #
-    # Path matches where `istota setup` writes config.toml and where load_config /
-    # the updater look ($HOME/.config/istota — the codebase hardcodes ~/.config,
-    # so do NOT honor XDG_CONFIG_HOME here or the updater won't find this file).
-    local source="$1" extras="$2" ref="$3"
-    # Prefer the checkout's actual branch over the clone-time default, so an
-    # install from a local checkout on a feature branch doesn't get yanked onto
-    # main on the first update. Detached HEAD / failure falls back to the arg.
-    local actual_ref
-    actual_ref="$(git -C "$source" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    if [ -n "$actual_ref" ] && [ "$actual_ref" != "HEAD" ]; then
-        ref="$actual_ref"
-    fi
-    # Update channel: track tagged releases by default. A checkout on a non-main
-    # feature branch is a developer install — track that branch instead so
-    # `istota update` doesn't reset it onto an unrelated release tag. Override
-    # with ISTOTA_UPDATE_CHANNEL=main|stable.
-    local channel="${ISTOTA_UPDATE_CHANNEL:-stable}"
-    if [ -z "${ISTOTA_UPDATE_CHANNEL:-}" ] && [ "$ref" != "main" ]; then
-        channel="main"
-    fi
-    local config_dir="$HOME/.config/istota"
-    mkdir -p "$config_dir"
-    cat > "$config_dir/install.json" <<EOF
-{
-  "method": "checkout",
-  "source": "$source",
-  "extras": "$extras",
-  "ref": "$ref",
-  "channel": "$channel"
-}
-EOF
-    ok "Recorded install provenance at $config_dir/install.json (channel: $channel)"
-}
-
-maybe_build_web_static() {
-    local root="$1"
-    if [ -d "$root/src/istota/web_static" ] && [ -n "$(ls -A "$root/src/istota/web_static" 2>/dev/null)" ]; then
-        return 0
-    fi
-    if [ ! -f "$root/scripts/build-web-static.sh" ]; then
-        return 0
-    fi
-    if command -v npm >/dev/null 2>&1; then
-        info "Building the web UI assets (npm — this can take a minute)"
-        if bash "$root/scripts/build-web-static.sh"; then
-            ok "Web UI assets built"
-        else
-            warn "Web UI asset build failed — the web UI may be blank."
-            warn "The REPL ('istota repl') still works. Re-run scripts/build-web-static.sh later, then re-install."
-        fi
-    else
-        warn "npm not found — skipping web UI asset build; the web UI will have no assets."
-        warn "Use 'istota repl', or install Node.js, run scripts/build-web-static.sh, and re-install."
-    fi
-}
-
-run_standalone() {
-    # Root check FIRST — before touching the terminal or anything else. Standalone
-    # installs into your own user account (uv tool + ~/.config/istota); running it
-    # as root would install into root's home and is almost never what the user
-    # wants. This must error+exit immediately (it needs no terminal), so a user who
-    # piped the Server command through sudo and picked Standalone gets a clear
-    # message instead of proceeding wrong (or, historically, hanging).
-    if [ "$(id -u)" -eq 0 ]; then
-        local hint=""
-        if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
-            hint="
-  You ran this with sudo — re-run it as ${SUDO_USER}, without sudo."
-        fi
-        die "Standalone mode installs into your own user account and must not run as root.${hint}
-  Re-run WITHOUT sudo:  curl -fsSL <install-url> | bash -s -- --standalone
-  (Only the Server install needs root.)"
-    fi
-
-    # Non-root: give `istota setup` a real terminal in the curl-pipe case. Safe
-    # here (the dispatch case above is already fully read) and paired with the
-    # explicit exit at the end so bash doesn't read on from the swapped-in tty.
-    reattach_tty_if_needed
-
-    section "Standalone install"
-    ensure_uv
-
-    # No PyPI release yet, so install from the repo: use the local checkout if
-    # we're already in one, otherwise clone it (ensure_repo sets REPO_ROOT).
-    # The clone must be DURABLE, not /tmp: `istota update` re-fetches + reinstalls
-    # from this exact directory, and a /tmp clone is wiped on reboot (which would
-    # break every update after the first). Land it under XDG data home.
-    : "${CLONE_DIR:=${XDG_DATA_HOME:-$HOME/.local/share}/istota/src}"
-    ensure_repo
-    { [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/pyproject.toml" ]; } \
-        || die "Could not locate the istota source (looked at '$REPO_ROOT')."
-
-    maybe_build_web_static "$REPO_ROOT"
-
-    # Install every module the local shape ships. These are all light on disk —
-    # money adds beancount/beanquery/weasyprint, location adds geopy — so there's
-    # nothing to gate at install time. What's actually *enabled* is a config
-    # choice made in `istota setup` below, not a packaging one. (weasyprint's
-    # native libs are only needed for invoice-PDF rendering, and only then; on
-    # macOS that one command needs `brew install pango`.)
-    local extras="local,money,location"
-
-    # --reinstall (implies --refresh) forces a fresh build. Without it, uv can
-    # reuse a cached wheel keyed on the package version — and this project ships
-    # code to `main` between version bumps, so a same-version reinstall would
-    # silently install stale bits from a prior run.
-    info "Installing istota[${extras}] from $REPO_ROOT"
-    uv tool install --force --reinstall "${REPO_ROOT}[${extras}]"
-    export PATH="$HOME/.local/bin:$PATH"
-    command -v istota >/dev/null 2>&1 \
-        || die "istota installed but not on PATH. Run 'uv tool update-shell' (or add ~/.local/bin to PATH), open a new shell, then: istota setup"
-    ok "istota installed"
-
-    section "Running setup"
-    istota setup "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
-
-    # Record install provenance so `istota update` knows where to pull from — a
-    # uv-tool-installed package retains no pointer back to its source checkout.
-    write_install_record "$REPO_ROOT" "$extras" "$REPO_BRANCH"
-
-    section "Done"
-    ok "Standalone install complete"
-    echo
-    echo -e "  ${_BOLD}Start it:${_RESET}  istota serve"
-    echo -e "             ${_DIM}then open the printed http://127.0.0.1:<port>/istota URL (no login)${_RESET}"
-    echo -e "  ${_BOLD}REPL:${_RESET}      istota repl"
-    echo -e "  ${_BOLD}Docs:${_RESET}      docs/getting-started/standalone-install.md"
-    echo
-    echo -e "  ${_DIM}Standalone runs unsandboxed as your user — only give it content you trust.${_RESET}"
-    echo
-    # Explicit: run_standalone reattached stdin to /dev/tty (for `istota setup`),
-    # so exit rather than let bash try to read another command from the terminal.
-    exit 0
-}
-
 # --- Interactive mode selection --------------------------------------------
 
 # When no mode flag was given and we have a terminal, ask which install shape
@@ -638,17 +436,10 @@ prompt_install_mode() {
     echo "     sandbox included, with ~/Istota as its workspace. Needs Lima,"
     echo "     --tag and --signing-key."
     echo
-    echo -e "  ${_BOLD}3) Standalone${_RESET}${root_note}"
-    echo "     Single-user install on your own machine (macOS or Linux). No"
-    echo "     server, no Nextcloud, no login, no sandbox. You chat through the"
-    echo "     local web UI and the REPL; everything runs as you in one process."
-    echo "     Unsandboxed: only give it content and instructions you trust."
-    echo
     local choice=""
-    read -rp "  Choose [1/2/3, default 1]: " choice < "$tty_src" || true
+    read -rp "  Choose [1/2, default 1]: " choice < "$tty_src" || true
     case "$choice" in
         2|l|L|local|Local)           MODE="local" ;;
-        3|s|S|standalone|Standalone) MODE="standalone" ;;
         ""|1|server|Server)          MODE="server" ;;
         *) warn "Unrecognized choice '$choice'; defaulting to Server."; MODE="server" ;;
     esac
@@ -665,6 +456,5 @@ fi
 case "$MODE" in
     server)     run_server ;;
     local)      run_local ;;
-    standalone) run_standalone ;;
     *)          die "Unknown mode: $MODE" ;;
 esac

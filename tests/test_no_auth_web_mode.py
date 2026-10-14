@@ -1,9 +1,9 @@
-"""Stage 1 tests for the local single-user install: config + no-auth web mode.
+"""Config and web behaviour for ``[web] auth = "none"``, development on a checkout.
 
-Covers the new ``[web] auth`` field + ``ISTOTA_WEB_AUTH`` override, the
-``[caldav]`` explicit-override fields, ``Config.is_standalone`` /
-``local_user_id``, the web-app no-auth branches + loopback guard, and the
-``/api/admin/stats`` standalone ``runtime`` block.
+Covers the ``[web] auth`` field + ``ISTOTA_WEB_AUTH`` override, the
+``[caldav]`` explicit-override fields, ``local_user_id``, the web-app no-auth
+branches + loopback guard, and the ``/api/admin/stats`` models and storage
+sections.
 """
 
 
@@ -130,11 +130,9 @@ class TestCaldavConfig:
         one credential in the tree with no way into the process except the
         config file. Every other one has an `_env_secret_overrides` row, which
         is what `EnvironmentFile=` on a server, `secrets.env` under Ansible and
-        the sibling `istota.env` on a standalone install all resolve through.
+        the stack's secret files all resolve through.
 
-        Without the row the wizard had to write the password into
-        `config.toml`, under a generated header whose second line says secrets
-        live in `istota.env` and never here.
+        Without the row a password could only be written into `config.toml`.
         """
         p = tmp_path / "config.toml"
         p.write_text(
@@ -203,26 +201,11 @@ class TestCaldavConfig:
 
 
 # ---------------------------------------------------------------------------
-# Config: is_standalone / local_user_id
+# Config: local_user_id
 # ---------------------------------------------------------------------------
 
 
-class TestStandaloneHelpers:
-    def test_is_standalone_true(self):
-        cfg = Config(web=WebConfig(auth="none"))
-        assert cfg.is_standalone is True
-
-    def test_is_standalone_false_with_nc_url(self):
-        cfg = Config(
-            web=WebConfig(auth="none"),
-            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-        )
-        assert cfg.is_standalone is False
-
-    def test_is_standalone_false_with_nextcloud_auth(self):
-        cfg = Config(web=WebConfig(auth="nextcloud"))
-        assert cfg.is_standalone is False
-
+class TestLocalUserId:
     def test_local_user_id_single_user(self):
         cfg = Config(users={"alice": UserConfig()})
         assert cfg.local_user_id == "alice"
@@ -271,7 +254,7 @@ if _has_web_deps:
     from httpx import ASGITransport, AsyncClient
 
 
-def _standalone_config(tmp_path):
+def _no_auth_config(tmp_path):
     # Mirrors the lean local defaults: no Nextcloud, Talk + email off, no-auth.
     return Config(
         db_path=tmp_path / "istota.db",
@@ -313,7 +296,7 @@ class TestLoopbackGuard:
 class TestNoAuthWebMode:
     @pytest.fixture
     def app(self, tmp_path):
-        cfg = _standalone_config(tmp_path)
+        cfg = _no_auth_config(tmp_path)
         return _patch_app(cfg)
 
     @pytest.fixture
@@ -334,7 +317,7 @@ class TestNoAuthWebMode:
         # In no-auth mode _verify_origin is a no-op even with no Origin header
         # (which would normally raise a 403 "missing origin").
         import istota.webui.app as mod
-        mod._config = _standalone_config(tmp_path)
+        mod._config = _no_auth_config(tmp_path)
 
         class _FakeReq:
             headers: dict = {}
@@ -344,7 +327,7 @@ class TestNoAuthWebMode:
 
     async def test_require_api_auth_returns_local_user_directly(self, tmp_path):
         import istota.webui.app as mod
-        cfg = _standalone_config(tmp_path)
+        cfg = _no_auth_config(tmp_path)
         mod._config = cfg
 
         class _FakeReq:
@@ -385,57 +368,6 @@ class TestNextcloudAuthRegression:
     async def test_api_me_returns_401_without_session(self, client):
         resp = await client.get("/istota/api/me")
         assert resp.status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# Admin notice: runtime block derived caveats
-# ---------------------------------------------------------------------------
-
-
-@_needs_web_deps
-class TestAdminRuntimeSection:
-    def _run(self, cfg):
-        import istota.webui.app as mod
-        mod._config = cfg
-        return mod._admin_runtime_section()
-
-    def test_server_mode_when_not_standalone(self, tmp_path):
-        cfg = Config(
-            db_path=tmp_path / "istota.db",
-            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            web=WebConfig(auth="nextcloud"),
-        )
-        out = self._run(cfg)
-        assert out["mode"] == "server"
-        assert out["caveats"] == []
-
-    def test_standalone_lean_caveats(self, tmp_path):
-        cfg = _standalone_config(tmp_path)
-        out = self._run(cfg)
-        assert out["mode"] == "standalone"
-        titles = {c["title"] for c in out["caveats"]}
-        assert "No sandbox isolation" in titles  # always present
-        assert "No Nextcloud" in titles
-        assert "Email polling is off" in titles
-        assert "Nextcloud Talk is disabled" in titles
-        assert "GPS location tracking is off" in titles
-
-    def test_enabling_email_drops_email_caveat(self, tmp_path):
-        from istota.config import EmailConfig
-        cfg = _standalone_config(tmp_path)
-        cfg.email = EmailConfig(enabled=True)
-        out = self._run(cfg)
-        titles = {c["title"] for c in out["caveats"]}
-        assert "Email polling is off" not in titles
-        # Security caveat is still always present in standalone mode.
-        assert "No sandbox isolation" in titles
-
-    def test_security_caveat_always_present_standalone(self, tmp_path):
-        cfg = _standalone_config(tmp_path)
-        # Even if someone flips sandbox_enabled True, locally the caveat is
-        # gated on the real value — assert the derived behaviour.
-        out = self._run(cfg)
-        assert any(c["title"] == "No sandbox isolation" for c in out["caveats"])
 
 
 class TestAdminModelsSection:
@@ -533,10 +465,10 @@ class TestAdminStorageSection:
         mod._config = cfg
         return mod._admin_storage_section(cfg.db_path)
 
-    def test_standalone_reports_nextcloud_not_configured(self, tmp_path):
+    def test_no_nextcloud_reports_nextcloud_not_configured(self, tmp_path):
         # No nextcloud.url → the mount status is meaningless; the frontend
         # hides the row on this flag.
-        out = self._run(_standalone_config(tmp_path))
+        out = self._run(_no_auth_config(tmp_path))
         assert out["nextcloud_configured"] is False
 
     def test_server_reports_nextcloud_configured(self, tmp_path):

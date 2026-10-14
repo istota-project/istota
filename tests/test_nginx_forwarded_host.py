@@ -38,14 +38,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: Every place the repo writes a `proxy_set_header Host`. Two are configs the
-#: stack runs; two are documentation an operator copies into their own nginx,
-#: which is a source of the same defect in a deployment this repo never sees.
+#: Every place the repo writes a `proxy_set_header Host`: the two configs the
+#: stack runs. The docs carry no nginx example to copy any more; they say the
+#: stack's nginx routes everything and an outer proxy forwards the whole host.
 HOST_HEADER_SOURCES = {
     "docker": REPO / "docker" / "nginx" / "istota.conf.template",
     "testbed-nextcloud": REPO / "testbed" / "compose" / "nextcloud-locations.conf",
-    "docs-web": REPO / "docs" / "features" / "web-interface.md",
-    "docs-location": REPO / "docs" / "features" / "location.md",
 }
 
 HOST_HEADER = re.compile(r"proxy_set_header\s+Host\s+(\S+?)\s*;")
@@ -73,6 +71,15 @@ class TestTheProxiesForwardThePort:
         with the rest."""
         direct = (REPO / "docker" / "nginx" / "direct-http.conf").read_text()
         assert "return 301 https://$host$request_uri;" in direct
+
+    def test_the_bare_prefix_redirect_is_relative(self):
+        """nginx answers `/istota` with its own 301 to `/istota/`, built from
+        `$host` and the container's port, so `localhost:8181/istota` landed on
+        `localhost/istota/`. A relative `Location` keeps the client's port."""
+        text = HOST_HEADER_SOURCES["docker"].read_text()
+        block = re.search(r"location /istota/ \{(.*?)\n\}", text, re.S)
+        assert block, "no `location /istota/` block"
+        assert "absolute_redirect off;" in block.group(1)
 
 
 try:

@@ -2298,8 +2298,7 @@ class Config:
         A URL and ``workspace_mount_path`` both set. A URL alone is a Nextcloud
         install with a local workspace, which is described as a workspace, not
         as Nextcloud. Selects storage vocabulary and every path that only makes
-        sense when the files are in Nextcloud. Deliberately not
-        ``is_standalone``, which folds in web auth.
+        sense when the files are in Nextcloud.
         """
         return self.nextcloud_enabled and self.workspace_mount_path is not None
 
@@ -2572,18 +2571,8 @@ class Config:
         return self.nextcloud.app_password
 
     @property
-    def is_standalone(self) -> bool:
-        """Whether this instance is running the slimmed-down local single-user shape.
-
-        Config-derived (no stored flag): blank ``[nextcloud] url`` AND
-        ``[web] auth == "none"``. This is the single home for the rule so the
-        admin standalone-mode notice and any other caveat surface agree.
-        """
-        return (not self.nextcloud.url) and self.web.auth == ["none"]
-
-    @property
     def local_user_id(self) -> str:
-        """The single local user id for the no-auth (standalone) shape.
+        """The single local user id for ``[web] auth = "none"``.
 
         Prefers the sole configured user, else the sole admin user, else
         ``"local"``. Only meaningful in no-auth mode where there is exactly one
@@ -2792,9 +2781,9 @@ class Config:
         it. A skill declaring ``requires_capability: [name]`` in its frontmatter
         is folded into the effective disabled set when its capability isn't
         listed here (see skills._loader.effective_disabled_skills). These
-        default off — notably in the standalone install, which deploys neither
-        the headless browser nor the devbox container — so their skills drop out
-        of selection and the on-demand menu automatically. Adding a new
+        default off, so on an install that deploys neither the headless browser
+        nor the devbox container their skills drop out of selection and the
+        on-demand menu automatically. Adding a new
         service-backed skill = declare the capability here + in its frontmatter.
         """
         caps: set[str] = set()
@@ -2804,8 +2793,7 @@ class Config:
             caps.add("devbox")
         if self.whatsapp.enabled:
             caps.add("whatsapp")
-        # A standalone local install has no Nextcloud at all, and every verb
-        # of the nextcloud skill would fail there.
+        # Without a Nextcloud every verb of the nextcloud skill would fail.
         if self.nextcloud_enabled:
             caps.add("nextcloud")
         return caps
@@ -2837,46 +2825,7 @@ class Config:
         file must not silently make every user a shared-content writer.
         Returns True iff ``admin_users`` is non-empty and ``user_id`` is in it.
         Do not collapse this into ``is_admin``.
-
-        One exception, in the spirit of the one ``web_app._user_is_web_admin``
-        carries: on the standalone shape the single local user is a shared
-        writer even though no admins file names them. Without it a standalone
-        install could not write a shared briefing block at all, since the
-        wizard wrote no admins file to be named in. The wizard writes one now,
-        so on a fresh install this never fires — it is strictly the backstop
-        for an install made before that, and the three conditions are what
-        keep it that way rather than making it the primary route.
-
-        ``not self.admin_users`` is the first, and it is what makes the
-        sentence above true: an install with a real admins file is decided by
-        that file, so a standalone operator who edits themselves *out* of it is
-        refused rather than silently overridden. Without this clause the
-        exemption answers first on every fresh install and the allowlist is
-        never consulted for the local user — the opposite of a backstop.
-
-        ``len(self.users) <= 1`` is the second. :attr:`local_user_id` falls
-        back to ``sorted(self.users)[0]`` when several are configured, and its
-        own docstring says it is "only meaningful in no-auth mode where there
-        is exactly one user by construction" — so on a two-user local
-        deployment the exemption would hand shared-write authority to whichever
-        id sorts first. Non-web surfaces (email, cron, skill CLIs) reach this
-        gate without passing through no-auth web login, so "everyone is the
-        local user anyway" does not cover it.
-
-        :attr:`is_standalone` is the third — blank ``[nextcloud] url`` **and**
-        ``[web] auth == "none"`` — rather than the ``[web] auth`` axis alone
-        the way ``_user_is_web_admin``'s is. That is deliberate and narrower: a
-        deployment with Nextcloud storage and auth switched off is not the
-        single-user shape, it has other users' content in it, and it must not
-        silently gain a shared-content writer.
         """
-        if (
-            not self.admin_users
-            and len(self.users) <= 1
-            and self.is_standalone
-            and user_id.casefold() == self.local_user_id.casefold()
-        ):
-            return True
         return self.is_named_admin(user_id)
 
 
@@ -4474,13 +4423,10 @@ SECRET_ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
     # path. Same convention as docker-compose env vars — single source of truth
     # for "where does this credential come from" across all deploy paths.
     ("ISTOTA_NEXTCLOUD_APP_PASSWORD", "nextcloud", "app_password"),
-    # `[caldav]` is the section written for the shape with no Nextcloud, so
-    # this is that shape's calendar credential — and it was the only one in
-    # the tree reachable by no route but the config file. The standalone
-    # wizard had to write it into `config.toml` under a generated header
-    # whose own second line says secrets live in the sibling `istota.env`
-    # and never here. Redaction needs no companion entry: `password` is
-    # caught by `admin_config_view.SECRET_NAME_PATTERNS` on its name.
+    # `[caldav]` is the calendar credential of an install with no Nextcloud,
+    # and without this row the config file would be its only route in.
+    # Redaction needs no companion entry: `password` is caught by
+    # `admin_config_view.SECRET_NAME_PATTERNS` on its name.
     ("ISTOTA_CALDAV_PASSWORD", "caldav", "password"),
     ("ISTOTA_EMAIL_IMAP_PASSWORD", "email", "imap_password"),
     ("ISTOTA_EMAIL_SMTP_PASSWORD", "email", "smtp_password"),
@@ -4538,8 +4484,7 @@ ENV_OVERRIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # rides the same env channel as the other web knobs so the compose file can
     # default the demo stack to encrypted without templating TOML).
     ("ISTOTA_WEB_TOKEN_STORAGE", ("web", "token_storage")),
-    # Web auth-mode override (local single-user installs set ISTOTA_WEB_AUTH=none
-    # instead of templating TOML). Same validation as the TOML parse.
+    # Web auth-mode override. Same validation as the TOML parse.
     ("ISTOTA_WEB_AUTH", ("web", "auth")),
 )
 """``(env var, path)``: non-secret settings the environment sets over the file.
@@ -4611,8 +4556,8 @@ def _default_broker_to_boundary(data: dict, config: Config) -> None:
 
     Without the sandbox and the network proxy a placeholder has nowhere to be
     substituted, and broker mode never falls back to a raw value, so a default
-    of on would break git, the forge CLIs and every vault read on the
-    standalone install. bwrap exists only on Linux, and a Linux daemon whose
+    of on would break git, the forge CLIs and every vault read on an install
+    without them (a checkout running ``istota serve``). bwrap exists only on Linux, and a Linux daemon whose
     sandbox cannot be built refuses to start, so the platform is the probe
     this path may not spawn. A value the operator wrote is kept as written.
     """
@@ -4908,9 +4853,8 @@ def load_config(
         # fails loudly on its own, which is why it does not lead.
         #
         # Both switches off together is a different shape and is deliberately
-        # not warned about: `setup_wizard` writes that pair for the single-user
-        # install, the task then runs unconfined as the daemon user, and there is
-        # no boundary for an environment variable to cross. See ISSUE-393.
+        # not warned about: the task then runs unconfined as the daemon user, and
+        # there is no boundary for an environment variable to cross. See ISSUE-393.
         #
         # "inside the sandbox" is the *requested* flag, not the effective one:
         # `effective_sandboxing` reads false where the bwrap probe fails, which
@@ -4933,7 +4877,7 @@ def load_config(
                 "rather than injected per call; and skill CLIs will run inside "
                 "the sandbox, where the databases they read are masked out. "
                 "Enable the skill proxy, or disable the sandbox for a trusted "
-                "single-user install."
+                "single-user checkout."
             )
 
     # Read off the loaded config rather than off `data`, so it fires whichever

@@ -301,8 +301,8 @@ host_bwrap_failure() {
 # under a home this script cannot guess; what it can check is the two
 # search-order paths from
 # `config.py` that are absolute or HOME-relative. `~/.config/istota/config.toml`
-# is what `istota setup` writes (`setup_wizard.DEFAULT_CONFIG_PATH`) and is the
-# shape most likely to be on a Linux workstation, where it has no unit at all.
+# is where the removed standalone install kept its config, and is the shape
+# most likely to be on a Linux workstation, where it has no unit at all.
 #
 # The third arm is the Docker shape, whose config lives inside a volume and
 # whose units are nowhere. `docker ps` is guarded on the binary being present

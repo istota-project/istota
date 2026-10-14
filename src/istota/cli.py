@@ -357,10 +357,10 @@ def cmd_repl(args):
 
 
 def _default_env_file(args) -> Path:
-    """Where ``serve``/``setup`` read/write the secrets env file.
+    """Where ``serve`` reads a secrets env file from, if there is one.
 
-    Sibling to an explicit ``-c`` config file, else the standard
-    ``~/.config/istota/istota.env`` (where ``istota setup`` writes it).
+    Sibling to an explicit ``-c`` config file, else
+    ``~/.config/istota/istota.env``.
     """
     if getattr(args, "config", None):
         return Path(args.config).expanduser().parent / "istota.env"
@@ -508,7 +508,7 @@ def cmd_migrate(args):
 
 
 def cmd_setup(args):
-    """First-run installer: the container shape, or the standalone install."""
+    """First-run setup of the stack, inside the image."""
     from . import setup_wizard
 
     try:
@@ -551,24 +551,6 @@ def cmd_serve(args):
         sys.exit(1)
     except KeyboardInterrupt:  # pragma: no cover - interactive
         sys.exit(0)
-
-
-def cmd_update(args):
-    """Self-update a standalone (local) install to the latest code."""
-    from . import updater
-
-    config_path = Path(args.config) if args.config else None
-    config = load_config(config_path)
-    record_path = updater.install_record_path(config_path)
-    try:
-        rc = updater.run_update(
-            config, record_path=record_path, config_path=config_path,
-            force=args.force, channel=args.channel,
-        )
-    except updater.UpdateError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    sys.exit(rc)
 
 
 def cmd_run(args):
@@ -5116,25 +5098,22 @@ def main():
     run_parser.add_argument("--briefings", action="store_true", help="Check and queue briefings first")
     run_parser.add_argument("--dry-run", action="store_true", help="Don't actually execute tasks")
 
-    # setup (interactive first-run installer for the local single-user shape)
+    # setup (first-run setup of the stack, inside the image)
     setup_parser = subparsers.add_parser(
-        "setup", help="First-run installer (the container, or a standalone install)",
+        "setup", help="First-run setup of the stack (inside the istota image)",
     )
     setup_parser.add_argument(
         "--workspace",
-        help="Standalone: workspace directory (default ~/.istota). Container, with "
-        "--nextcloud-url: mount (the rclone mount, the default) or local",
+        help="With --nextcloud-url: mount (the rclone mount, the default) or local",
     )
     setup_parser.add_argument(
         "--brain", choices=["claude_code", "native"], help="Model backend (skip detection)",
     )
     setup_parser.add_argument("--native-base-url", help="Native brain API base URL")
     setup_parser.add_argument("--native-model", help="Native brain model id")
-    setup_parser.add_argument("--native-api-key", help="Native brain API key (written to istota.env)")
-    setup_parser.add_argument("--user", help="User id (default OS username)")
+    setup_parser.add_argument("--user", help="The first admin's user id")
     setup_parser.add_argument("--display-name", help="Display name")
-    setup_parser.add_argument("--timezone", help="Timezone (default from system)")
-    setup_parser.add_argument("--port", type=int, help="Web port (default 8766)")
+    setup_parser.add_argument("--timezone", help="Timezone (default UTC)")
     setup_parser.add_argument("--email", action="store_true", help="Enable email surface")
     setup_parser.add_argument("--location", action="store_true", help="Enable GPS/location tracking")
     setup_parser.add_argument(
@@ -5155,11 +5134,11 @@ def main():
     )
     setup_parser.add_argument("--yes", action="store_true", help="Non-interactive; take defaults + flags")
     setup_parser.add_argument("--force", action="store_true", help="Overwrite an existing config")
-    # The container half (the one deployment shape). Credentials for a --yes
-    # run come from the environment, under the names the daemon reads.
+    # Credentials for a --yes run come from the environment, under the names
+    # the daemon reads.
     setup_parser.add_argument(
-        "--shape", choices=["standalone", "container"],
-        help="Which install to set up (default: container inside the image, else standalone)",
+        "--shape", choices=["container"],
+        help="The install to set up; the image sets ISTOTA_SETUP_SHAPE=container",
     )
     setup_parser.add_argument(
         "--vm-dir", help="Also write the stack's .env, host.env and secrets/ here (container)",
@@ -5225,27 +5204,12 @@ def main():
 
     # serve (combined local launcher: scheduler + web in one process)
     serve_parser = subparsers.add_parser(
-        "serve", help="Run the scheduler loop and web server in one process (local install)",
+        "serve", help="Run the scheduler loop and web server in one process (development on a checkout)",
     )
     serve_parser.add_argument("--host", help="Web bind host (default 127.0.0.1)")
     serve_parser.add_argument("--port", type=int, help="Web port (default from [web] port)")
     serve_parser.add_argument(
         "--env-file", help="Path to a KEY=VALUE secrets env file to source before start",
-    )
-
-    # update (standalone/local install self-update)
-    update_parser = subparsers.add_parser(
-        "update", help="Update a standalone (local) install to the latest code",
-    )
-    update_parser.add_argument(
-        "--force", action="store_true",
-        help="Update even if the install checkout has uncommitted changes",
-    )
-    update_parser.add_argument(
-        "--channel", choices=["stable", "main"], default=None,
-        help="Update channel: 'stable' tracks the latest release, 'main' tracks "
-             "the development branch. The choice is remembered for future runs "
-             "(default: stable for new installs).",
     )
 
     # repl
@@ -5863,7 +5827,6 @@ def main():
         "repl": cmd_repl,
         "serve": cmd_serve,
         "setup": cmd_setup,
-        "update": cmd_update,
     }
 
     if args.command == "user":

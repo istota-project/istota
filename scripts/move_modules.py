@@ -91,6 +91,8 @@ STAGES: dict[str, int] = {
     "adjacent": 11,
 }
 
+# A module deleted after its move leaves the table: with neither path on disk
+# its row reads as inconsistent, and there is nothing left to rewrite to.
 MOVES: list[tuple[str, str, str]] = [
     # (stage, old dotted path, new dotted path)
     ("lib", "istota.atomic_write", "istota.lib.atomic_write"),
@@ -107,7 +109,6 @@ MOVES: list[tuple[str, str, str]] = [
     ("lib", "istota.retry_after", "istota.lib.retry_after"),
     ("lib", "istota.timestamps", "istota.lib.timestamps"),
     ("lib", "istota.ocr_leaf", "istota.lib.ocr_leaf"),
-    ("lib", "istota.rclone_client", "istota.lib.rclone_client"),
     ("rooms_relay", "istota.room_policy", "istota.rooms.policy"),
     ("rooms_relay", "istota.room_scopes", "istota.rooms.scopes"),
     ("rooms_relay", "istota.room_veto", "istota.rooms.veto"),
@@ -140,14 +141,12 @@ MOVES: list[tuple[str, str, str]] = [
     ("sandbox", "istota.forge_cli", "istota.sandbox.forge_cli"),
     ("sandbox", "istota.forge_bin", "istota.sandbox.forge_bin"),
     ("credentials", "istota.secrets_store", "istota.credentials.store"),
-    ("credentials", "istota.secrets_vault", "istota.credentials.vault"),
     ("credentials", "istota.secret_schema", "istota.credentials.schema"),
     ("credentials", "istota.local_credentials", "istota.credentials.local"),
     ("credentials", "istota.google_scopes", "istota.credentials.google_scopes"),
     ("credentials", "istota.credential_broker", "istota.credentials.broker"),  # a package
     ("devbox", "istota.devbox_exec_client", "istota.devbox.exec_client"),
     ("devbox", "istota.devbox_exec_protocol", "istota.devbox.exec_protocol"),
-    ("devbox", "istota.devbox_peer", "istota.devbox.peer"),
     ("devbox", "istota.devbox_proxy", "istota.devbox.proxy"),
     ("devbox", "istota.devbox_proxy_protocol", "istota.devbox.proxy_protocol"),
     ("notifications", "istota.notifications", "istota.notifications.delivery"),

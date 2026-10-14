@@ -305,8 +305,8 @@ def default_media_dir(config: "Config") -> Path:
     empty read-only tmpfs after every other mount, so on both shapes this
     directory is bound into no sandbox at any path.
 
-    The standalone residual is stated rather than hidden: `setup_wizard` puts
-    `db_path`, `workspace_path` and `temp_dir` in one directory, where
+    One residual is stated rather than hidden: a config may put `db_path`,
+    `workspace_path` and `temp_dir` in one directory, where
     `_mask_dir` refuses outright, so there this sits inside `workspace_path`
     and a `user_resources` row naming the workspace root reaches it. It is the
     residual `baileys_bridge.default_pairing_relay_path` already carries, and

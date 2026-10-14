@@ -129,7 +129,7 @@ def _members_own_schedule(
     The job lives in the user's workspace and names this room as where its
     answer is read, which is the member asking in advance. Under bwrap a
     guest's turn and a restricted task cannot write that file. Without it
-    (Docker, macOS, standalone) a guest's tools can, but such a job could
+    (Docker, macOS, a checkout running ``istota serve``) a guest's tools can, but such a job could
     already be aimed at the host's private room at full reach, so this adds
     nothing a guest could not reach before. A ``scheduled`` task must point at
     a job row owned by its user; a briefing is only ever created by the

@@ -2622,29 +2622,10 @@ const mockAdminStats = {
     db_size_bytes: 119447552,
     backups_count: 14,
     last_backup: new Date(Date.now() - 18 * 3600_000).toISOString(),
-    // Mock represents a standalone (local) install — no Nextcloud, so the
-    // mount row is hidden in the UI.
+    // Mock represents an install with no Nextcloud, so the mount row is
+    // hidden in the UI.
     nextcloud_configured: false,
     nextcloud_mount_healthy: false,
-  },
-  runtime: {
-    mode: 'standalone',
-    caveats: [
-      {
-        title: 'No sandbox isolation',
-        detail:
-          "The agent runs with your user account's full privileges. Only give this instance content and instructions you trust.",
-      },
-      {
-        title: 'No Nextcloud',
-        detail:
-          'The workspace is a local folder (~/.istota); file sharing and CalDAV-from-Nextcloud are unavailable.',
-      },
-      {
-        title: 'Email polling is off',
-        detail: 'Inbound/outbound email is disabled.',
-      },
-    ],
   },
   models: {
     brain_kind: 'native',

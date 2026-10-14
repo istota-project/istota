@@ -241,7 +241,7 @@ curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.
 
 On an Apple silicon Mac, `install.sh --local` runs the same stack in a Lima VM, with a folder in your home as the workspace, and the Mac's `istota-stack` forwards every command into it; see the [local install](https://istota.cynium.com/docs/getting-started/local-install/). An optional Ansible role exists for machines managed from an estate inventory; nothing in an install needs it. Read an installer before piping it into a shell. For prerequisites, setup choices and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
 
-The older standalone single-user install is deprecated. Existing installs keep working, and `istota-stack import-standalone` moves one into the local VM; see the [standalone page](https://istota.cynium.com/docs/getting-started/standalone-install/).
+The older standalone single-user install was removed. `istota-stack import-standalone` moves an existing one into the local VM; see [moving from the standalone install](https://istota.cynium.com/docs/getting-started/local-install/#moving-from-the-standalone-install).
 
 ## Configuration
 

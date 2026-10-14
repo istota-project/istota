@@ -36,7 +36,7 @@ Boundaries and operations:
 - `devbox.md` — the development container: what it is, the exec transport, the proxy
 - `maintenance.md` — backups, migrators, the worktree and cache sweepers, host pressure, session transcripts
 - `doctor.md` — the runtime self-check registry, and what each check may and may not do
-- `install.md` — the standalone single-user install: the wizard's boundaries and the updater
+- `install.md` — the container's `istota setup`: the terminal wizard, the shared validator and the web setup server
 - `deployment.md` — the Docker stack, the dedicated VM (`host/`, `istota-stack`, signed-tag updates, the schema stamp), the optional management role in `ansible/`, the Nextcloud rclone mount
 - `testbed.md` — `testbed/`: the two compose shapes, profiles, the `Service` protocol, session-scoped reset, the prompt goldens
 - `testing.md` — why each verification rule below is what it is
@@ -57,8 +57,7 @@ src/istota/
 │   └── session_log_read.py  # Reading a transcript back: one set of parsing rules, two consumers → maintenance.md
 ├── cli.py                # Local CLI (task, resource, briefing, secret, user, run, serve, setup, …)
 ├── serve.py              # Combined local launcher (`istota serve`): scheduler thread + uvicorn in one process
-├── setup_wizard.py       # Interactive first-run installer (`istota setup`) → install.md
-├── updater.py            # `istota update` self-update for the standalone install → install.md
+├── setup_wizard.py       # First-run setup of the stack (`istota setup`, inside the image) → install.md
 ├── config.py             # TOML loader + DB-overlay (user_profiles / user_resources / briefing_configs)
 ├── config_mapper.py      # Maps a parsed TOML document onto the `Config` dataclass tree → leaf-modules.md
 ├── apply.py              # `istota apply -f plan`: config.toml and the settings plan's other sections, exit 0/2/1 → config.md

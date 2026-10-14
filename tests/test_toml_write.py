@@ -64,12 +64,6 @@ def test_the_testbed_writes_with_it():
     assert stack.toml_dumps is toml_write.dumps
 
 
-def test_the_wizard_escapes_with_it():
-    from istota import setup_wizard
-
-    assert setup_wizard._toml_str is toml_write.toml_string
-
-
 _SECOND_WRITER = re.compile(r"^\s*(import tomli_w|from tomli_w import)|^def _?toml_(str|string|dumps|value)\(", re.M)
 #: Writers of documents that are not istota's config, which predate this module.
 _OTHER_DOCUMENTS = {

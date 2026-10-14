@@ -188,7 +188,6 @@ class TestCallerTypesSurvive:
 #: acts on the answer immediately.
 _SINGLE_SHOT = {
     "maintenance/db_restore.py",
-    "updater.py",
     "scheduler.py",
 }
 

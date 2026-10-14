@@ -79,7 +79,7 @@ class SkillMeta:
     dependencies: list[str] = field(default_factory=list)
     # Backing-service capabilities this skill needs (e.g. "browser", "devbox").
     # When a required capability isn't available in the loaded config — the
-    # service isn't deployed, the default in the standalone install — the skill
+    # service isn't deployed, the default on a fresh install — the skill
     # is folded into the effective disabled set (dropped from selection AND the
     # on-demand menu). Config.available_capabilities() maps names to config
     # flags; the gate is resolved by effective_disabled_skills().

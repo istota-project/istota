@@ -12,14 +12,7 @@
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import {
-    Avatar,
-    AvatarPicker,
-    EmptyState,
-    Field,
-    NoticeBanner,
-    StatTile,
-  } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, EmptyState, Field, StatTile } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -39,7 +32,6 @@
   let error = $state('');
   let expandedJobs: Record<number, boolean> = $state({});
   let modulesExpanded = $state(false);
-  let standaloneCollapsed = $state(true);
 
   const REFRESH_MS = 60_000;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -395,25 +387,6 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if stats}
-    {#if stats.runtime?.mode === 'standalone'}
-      <NoticeBanner
-        title="Running in standalone (local single-user) mode"
-        bind:collapsed={standaloneCollapsed}
-      >
-        <p class="standalone-lead">
-          This instance runs the slimmed-down local shape. What that means here:
-        </p>
-        <ul class="standalone-caveats">
-          {#each stats.runtime.caveats as caveat}
-            <li>
-              <span class="caveat-title">{caveat.title}</span>
-              <span class="caveat-detail">{caveat.detail}</span>
-            </li>
-          {/each}
-        </ul>
-      </NoticeBanner>
-    {/if}
-
     <!-- System banner -->
     <section class="card system-banner card-grid">
       <div class="banner-cell">
@@ -1074,40 +1047,6 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-align: right;
-  }
-
-  /* Standalone-mode notice content — rendered inside the NoticeBanner slot at
-     the top of the page. The banner chrome (border, toggle, title) lives in the
-     NoticeBanner component, and so does the body type size: this slot used to
-     restate 0.9rem/0.85rem here, which put the one banner a reader meets on a
-     fresh local install a step above every other banner in the app. Nothing
-     here sets a font-size — only the list's own layout, weight and dimming. */
-  .standalone-lead {
-    margin: 0 0 var(--space-2);
-    opacity: 0.85;
-  }
-
-  .standalone-caveats {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .standalone-caveats li {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-  }
-
-  .caveat-title {
-    font-weight: 600;
-  }
-
-  .caveat-detail {
-    opacity: 0.8;
   }
 
   /* `.settings .card` (from settings.css) sets `display: flex; flex-direction:

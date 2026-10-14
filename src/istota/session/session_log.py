@@ -275,8 +275,8 @@ def resolve_session_log_dir(db_path: Path | str | None, configured: str = "") ->
     would be worse than a WAL database there), it is the state directory that
     already holds ``modules/``, ``backups/`` and ``subscription_usage.json``,
     and on the Ansible shape it is behind the read-only tmpfs
-    ``build_bwrap_cmd`` masks ``db_path.parent`` with. On the standalone shape
-    that mask is refused — ``db_path.parent`` *is* the workspace there — and on
+    ``build_bwrap_cmd`` masks ``db_path.parent`` with. Where ``db_path.parent``
+    *is* the workspace that mask is refused, and on
     the shipped Docker stack the path is under what the mask would cover but no
     mask is ever emitted, because that compose file grants neither
     ``seccomp:unconfined`` nor ``systempaths=unconfined`` and the bwrap probe
@@ -329,8 +329,8 @@ def resolve_session_log_dir(db_path: Path | str | None, configured: str = "") ->
     a config that sets neither key resolves to ``data/logs``, followed against
     each process's own working directory — the same property a configured
     relative ``dir`` has, arrived at without anybody configuring anything. Every
-    shipped installer writes an absolute ``db_path`` (the Ansible template, the
-    Docker render, and ``setup_wizard``'s workspace-derived path), so this is
+    shipped installer writes an absolute ``db_path`` (the Ansible template and
+    the container's ``istota setup``), so this is
     reachable from a hand-written config rather than from a deployment. It costs
     consistency rather than data: the writer and the sweep both run in the
     daemon and agree, while ``istota doctor`` from a shell inspects whatever

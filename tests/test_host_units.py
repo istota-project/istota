@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1317,6 +1318,19 @@ printf 'Open this address in your browser to set up Istota:\\n\\n  https://192.0
     return result, log.read_text()
 
 
+def _run_installer_offline(*args: str) -> subprocess.CompletedProcess:
+    """Run the root installer for a test that expects a refusal or an early
+    stop. A regression that lets it through must not reach the developer's
+    own home, tools or terminal, so it gets an empty HOME, a PATH without
+    ~/.local/bin or uv, and no controlling tty."""
+    with tempfile.TemporaryDirectory() as home:
+        return subprocess.run(
+            ["bash", str(REPO / "install.sh"), *args],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+            env={"HOME": home, "PATH": "/usr/bin:/bin"}, start_new_session=True,
+        )
+
+
 class TestBootstrapFiles:
     def test_cloud_init_verifies_the_tag_before_running_anything(self):
         doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
@@ -1426,36 +1440,35 @@ class TestBootstrapFiles:
     def test_the_server_path_refuses_a_flag_it_does_not_know(self):
         """A mistyped --terminal-setup used to be dropped silently on the server
         path, which would now mean the other setup."""
-        result = subprocess.run(
-            ["bash", str(REPO / "install.sh"), "--server", "--terminal-stup"],
-            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
-        )
+        result = _run_installer_offline("--server", "--terminal-stup")
         assert result.returncode == 1, (result.stdout, result.stderr)
         assert "--terminal-stup" in result.stderr
 
     def test_terminal_setup_is_parsed_and_belongs_to_the_server_path(self):
-        server = subprocess.run(
-            ["bash", str(REPO / "install.sh"), "--server", "--terminal-setup"],
-            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
-        )
+        server = _run_installer_offline("--server", "--terminal-setup")
         # Parsed: the run gets as far as its root check (or, as root, its
         # Debian or tag check) rather than refusing the flag.
         assert "--terminal-setup" not in server.stderr
-        standalone = subprocess.run(
-            ["bash", str(REPO / "install.sh"), "--standalone", "--terminal-setup"],
-            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
-        )
-        assert standalone.returncode == 1
-        assert "--terminal-setup" in standalone.stderr
+        local = _run_installer_offline("--local", "--terminal-setup")
+        assert local.returncode == 1
+        assert "--terminal-setup" in local.stderr
+
+    def test_standalone_is_refused_naming_what_replaced_it(self):
+        """The standalone install is deleted; the flag stays only to say where
+        to go instead, before anything is fetched or installed."""
+        result = _run_installer_offline("--standalone")
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "--local" in result.stderr
+        assert "import-standalone" in result.stderr
+        script = (REPO / "install.sh").read_text()
+        for gone in ("uv tool install", "install.json", "build-web-static"):
+            assert gone not in script, gone
 
     def test_the_root_installer_has_no_bare_metal_or_docker_arm(self):
         """The old --bare arm ran the deleted deploy/install.sh; --docker printed
         hand steps the stack replaced. Both are refused by name now."""
         for flag in ("--bare", "--docker"):
-            result = subprocess.run(
-                ["bash", str(REPO / "install.sh"), flag],
-                capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
-            )
+            result = _run_installer_offline(flag)
             assert result.returncode == 1, (flag, result.stdout, result.stderr)
             assert "--server" in result.stderr
         assert "deploy/install.sh" not in (REPO / "install.sh").read_text()
