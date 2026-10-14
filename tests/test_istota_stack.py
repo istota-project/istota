@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import time
@@ -69,8 +70,11 @@ case "$args" in
     cp -Rp "$ISTOTA_STACK_DIR/.setup" "$STUB_CALLS.setup-dir"
     if [ -n "${STUB_DURING:-}" ]; then
       # Unset for the child: a second setup run that is not refused must not
-      # start a third.
-      env -u STUB_DURING bash -c "$STUB_DURING" > "$STUB_CALLS.during" 2>&1
+      # start a third. Its pid is the "container": `rm -f istota-setup-web`
+      # kills it, as removing the real one ends the server.
+      env -u STUB_DURING bash -c "$STUB_DURING" > "$STUB_CALLS.during" 2>&1 &
+      echo "$!" > "$STUB_CALLS.server-pid"
+      wait "$!"
       echo "rc=$?" >> "$STUB_CALLS.during"
     fi
     if [ -n "${STUB_CONFIG:-}" ]; then printf '%s' "$STUB_CONFIG" > "$ISTOTA_CONFIG_DIR/config.toml"; fi
@@ -80,6 +84,25 @@ case "$args" in
       : > "$vm/setup-done"
     fi
     exit "${STUB_SETUP_RC:-0}" ;;
+  *" setup --snapshot "*)
+    echo "snapshot read-only=${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS"
+    # What a re-run did before its snapshot: the stack-env backup.
+    for d in "$ISTOTA_STACK_DIR"/backups/setup-*; do
+      if [ -d "$d" ]; then echo "snapshot after a backup" >> "$STUB_CALLS"; break; fi
+    done
+    [ "${STUB_SNAPSHOT_RC:-0}" != 0 ] || mkdir "$ISTOTA_CONFIG_DIR/.setup-rerun"
+    exit "${STUB_SNAPSHOT_RC:-0}" ;;
+  *" setup --restore "*)
+    echo "restore read-only=${ISTOTA_CONFIG_READ_ONLY:-unset}" >> "$STUB_CALLS"
+    [ "${STUB_RESTORE_SNAPSHOT_RC:-0}" != 0 ] || rm -rf "$ISTOTA_CONFIG_DIR/.setup-rerun"
+    exit "${STUB_RESTORE_SNAPSHOT_RC:-0}" ;;
+  *" rm -f istota-setup-web ")
+    if [ -f "$STUB_CALLS.server-pid" ]; then kill "$(cat "$STUB_CALLS.server-pid")" 2>/dev/null; fi
+    exit 0 ;;
+  *" container inspect istota-setup-web ") exit "${STUB_NO_SETUP_CONTAINER:-0}" ;;
+  *" stop ")
+    # Whether a code was minted while the stack still held the port.
+    if [ -e "$ISTOTA_STACK_DIR/.setup/code" ]; then echo "stopped after the mint" >> "$STUB_CALLS"; fi ;;
   *" migrate restore-workspace"*)
     cat > "$STUB_CALLS.stdin"
     vm=""; prev=""
@@ -3282,8 +3305,21 @@ class TestSetupWebRefuses:
         assert web.docker_calls() == []
         assert not (web.stack / ".setup").exists()
 
-    def test_force_does_not_go_with_web(self, web):
+    def test_the_refusal_names_the_browser_re_run(self, web):
+        (web.stack / "config" / "config.toml").write_text(NATIVE_CONFIG)
+        result = web.run("setup", "--web")
+        assert "istota-stack setup --web --force" in result.stderr
+
+    def test_force_with_no_config_has_nothing_to_change(self, web):
         result = web.run("setup", "--web", "--force")
+        assert result.returncode == 1
+        assert "nothing to change" in result.stderr
+        assert "istota-stack setup --web`" in result.stderr
+        assert web.docker_calls() == []
+        assert not (web.stack / "backups").exists()
+
+    def test_an_unknown_argument_is_a_usage_error(self, web):
+        result = web.run("setup", "--web", "--yes")
         assert result.returncode == 64
         assert web.docker_calls() == []
 
@@ -3380,7 +3416,8 @@ class TestSetupWebMints:
         assert web.run("setup", "--web", **_finished()).returncode == 0
         call = _setup_call(web)
         assert re.search(
-            r"run --rm --no-deps -T --entrypoint istota-drop -p 0\.0\.0\.0:443:8443 "
+            r"run --rm --no-deps -T --entrypoint istota-drop --name istota-setup-web -p 0\.0\.0\.0:443:8443 "
+            r"-e ISTOTA_SECRETS_DIR=/nonexistent "
             rf"-v \S+/\.setup\.\w+:/vm -v {re.escape(str(web.stack))}/secrets:/vm/secrets "
             r"daemon istota setup --web --vm-dir /vm$", call), call
         assert "read-only=false" in web.docker_calls()
@@ -3622,6 +3659,259 @@ class TestSetupCode:
         during = Path(f"{web.calls}.during").read_text()
         instructions = Path(f"{web.calls}.setup-dir", "instructions").read_text()
         assert during == instructions + "rc=0\n"
+
+
+def _first(calls: list[str], needle: str) -> int:
+    return next(i for i, call in enumerate(calls) if needle in call)
+
+
+def _ups(calls: list[str]) -> list[int]:
+    return [i for i, call in enumerate(calls) if " up -d " in f"{call} "]
+
+
+SNAPSHOT_CALL = " setup --snapshot /data/config/.setup-rerun --vm-dir /vm"
+RESTORE_CALL = " setup --restore /data/config/.setup-rerun --vm-dir /vm"
+WATCHDOG_STOP = "systemctl stop istota-browser-watchdog.timer"
+WATCHDOG_START = "systemctl start istota-browser-watchdog.timer"
+REMOVE_SERVER = "rm -f istota-setup-web"
+
+
+@pytest.fixture
+def rerun(web) -> Fixture:
+    """A configured, running stack: `setup --web --force` changes it."""
+    (web.stack / "config" / "config.toml").write_text(NATIVE_CONFIG)
+    return web
+
+
+def _term_while_serving(fx: Fixture, *args: str, **env: str):
+    """Run istota-stack, and SIGTERM it while the setup server is serving.
+    The server would serve twenty seconds more; the run must not wait for it."""
+    serving = Path(f"{fx.calls}.serving")
+    during = f'touch "{serving}"; sleep 20; echo "server finished" >> "$STUB_CALLS"'
+    proc = subprocess.Popen(
+        ["bash", str(SCRIPT), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**fx.env, "STUB_DURING": during, **env}, stdin=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 30
+    while not serving.exists():
+        if proc.poll() is not None or time.monotonic() > deadline:
+            proc.kill()
+            raise AssertionError(f"the server never started: {proc.communicate()}")
+        time.sleep(0.05)
+    signalled = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=60)
+    return proc.returncode, out + err, time.monotonic() - signalled
+
+
+@needs_openssl
+class TestSetupWebRerun:
+    """`setup --web --force`: the browser over a configured stack, stopped for
+    the run, and put back as it was when the run does not finish."""
+
+    def test_backup_snapshot_watchdog_and_stop_come_before_the_mint(self, rerun):
+        result = rerun.run("setup", "--web", "--force", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = rerun.docker_calls()
+        snapshot = _first(calls, SNAPSHOT_CALL)
+        assert calls[snapshot + 1:snapshot + 3] == ["snapshot read-only=false", "snapshot after a backup"], calls
+        stop = next(i for i, call in enumerate(calls) if call.endswith(" stop"))
+        server = calls.index(_setup_call(rerun))
+        assert snapshot < calls.index(WATCHDOG_STOP) < stop < server, calls
+        assert "stopped after the mint" not in calls
+
+    def test_the_server_is_named_and_reads_no_exported_secrets(self, rerun):
+        assert rerun.run("setup", "--web", "--force", **_finished()).returncode == 0
+        call = _setup_call(rerun)
+        assert " --name istota-setup-web " in call
+        assert " -e ISTOTA_SECRETS_DIR=/nonexistent " in call
+        assert call.endswith("daemon istota setup --web --force --vm-dir /vm"), call
+
+    def test_local_passes_both_flags(self, rerun):
+        assert rerun.run("setup", "--web", "--force", "--local", **_finished()).returncode == 0
+        assert _setup_call(rerun).endswith("daemon istota setup --web --force --vm-dir /vm --local")
+
+    def test_a_finished_run_installs_and_starts_the_stack_again(self, rerun):
+        env_before = (rerun.stack / ".env").read_bytes()
+        result = rerun.run("setup", "--web", "--force", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert rerun.env_text() == STAGED_ENV + "ISTOTA_TAG=v0\n"
+        assert (rerun.stack / "host.env").read_text() == STAGED_HOST_ENV
+        calls = rerun.docker_calls()
+        server = calls.index(_setup_call(rerun))
+        ups = _ups(calls)
+        assert ups and ups[0] > server, calls
+        assert calls.index(WATCHDOG_START) > ups[-1]
+        assert "systemctl enable --now istota-stack" not in calls
+        assert not [call for call in calls if RESTORE_CALL in call]
+        assert not (rerun.stack / "config" / ".setup-rerun").exists()
+        assert not (rerun.stack / ".setup").exists()
+        assert list(rerun.stack.glob(".setup.*")) == []
+        backups = list((rerun.stack / "backups").glob("setup-*"))
+        assert len(backups) == 1 and (backups[0] / ".env").read_bytes() == env_before
+
+    def test_without_the_marker_the_previous_setup_is_put_back(self, rerun):
+        env_before = rerun.env_text()
+        host_before = (rerun.stack / "host.env").read_text()
+        result = rerun.run("setup", "--web", "--force", STUB_SETUP_RC="3",
+                           STUB_STAGED_ENV="COMPOSE_PROFILES=evil\n")
+        assert result.returncode == 3, result.stdout + result.stderr
+        calls = rerun.docker_calls()
+        server = calls.index(_setup_call(rerun))
+        remove = calls.index(REMOVE_SERVER, server)
+        restore = _first(calls, RESTORE_CALL)
+        assert calls[restore + 1] == "restore read-only=false"
+        ups = _ups(calls)
+        assert remove < restore < ups[0] < calls.index(WATCHDOG_START), calls
+        assert rerun.env_text() == env_before
+        assert (rerun.stack / "host.env").read_text() == host_before
+        backup = next((rerun.stack / "backups").glob("setup-*"))
+        assert "the previous setup is back" in result.stdout
+        assert str(backup) in result.stdout
+        assert "istota-stack setup --web --force" in result.stdout
+        assert "before setting up again" not in result.stdout
+        assert not (rerun.stack / ".setup").exists()
+
+    def test_a_signal_during_the_wait_puts_the_previous_setup_back_at_once(self, rerun):
+        rc, output, elapsed = _term_while_serving(rerun, "setup", "--web", "--force")
+        assert rc == 143, output
+        assert elapsed < 10, f"the run waited {elapsed:.0f}s for the server"
+        calls = rerun.docker_calls()
+        assert "server finished" not in calls
+        remove = calls.index(REMOVE_SERVER, calls.index(_setup_call(rerun)))
+        restore = _first(calls, RESTORE_CALL)
+        assert remove < restore < _ups(calls)[0] < calls.index(WATCHDOG_START), calls
+        assert "the previous setup is back" in output
+
+    def test_a_failure_after_the_install_neither_restores_nor_starts(self, rerun):
+        result = rerun.run("setup", "--web", "--force", **_finished(
+            STUB_SERVICES="daemon\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0", STUB_BUILD_RC="1"))
+        assert result.returncode == 1
+        assert "config is in place" in result.stderr
+        calls = rerun.docker_calls()
+        assert not [call for call in calls if RESTORE_CALL in call]
+        assert _ups(calls) == []
+        assert WATCHDOG_START not in calls
+        assert "watchdog is paused" in result.stdout
+        # Committed: the new .env stays, and the snapshot is gone.
+        assert rerun.env_text() == STAGED_ENV + "ISTOTA_TAG=v0\n"
+        assert not (rerun.stack / "config" / ".setup-rerun").exists()
+
+    def test_a_failed_restore_leaves_the_stack_stopped_and_names_the_snapshot(self, rerun):
+        result = rerun.run("setup", "--web", "--force", STUB_SETUP_RC="1", STUB_RESTORE_SNAPSHOT_RC="1")
+        assert result.returncode == 1
+        calls = rerun.docker_calls()
+        assert _ups(calls) == []
+        assert WATCHDOG_START not in calls
+        assert f"{rerun.stack}/config/.setup-rerun" in result.stdout
+
+    def test_a_failed_start_after_the_restore_says_to_run_up(self, rerun):
+        result = rerun.run("setup", "--web", "--force", STUB_SETUP_RC="3", STUB_UP_RC="1")
+        assert result.returncode == 3
+        assert "the previous setup is back" in result.stdout
+        assert "istota-stack up" in result.stdout
+
+    def test_a_failed_snapshot_stops_nothing(self, rerun):
+        result = rerun.run("setup", "--web", "--force", STUB_SNAPSHOT_RC="1")
+        assert result.returncode == 1
+        assert "nothing was changed" in result.stderr
+        calls = rerun.docker_calls()
+        assert not [call for call in calls if call.endswith(" stop") or " setup --web " in f"{call} "], calls
+        assert WATCHDOG_STOP not in calls
+        assert not [call for call in calls if RESTORE_CALL in call]
+
+    def test_provision_runs_unlocked_and_the_start_takes_the_lock_again(self, rerun):
+        script = rerun.src / "host" / "provision.sh"
+        script.parent.mkdir()
+        script.write_text(
+            "#!/bin/bash\n"
+            'if [ "${1:-}" = "--digest" ]; then echo new; exit 0; fi\n'
+            'echo "provision ran" >> "$STUB_CALLS"\n' + STACK_UP_PROBE)
+        script.chmod(0o755)
+        result = rerun.run("setup", "--web", "--force", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = rerun.docker_calls()
+        assert calls.index("provision ran") < calls.index("up rc=0") < _ups(calls)[-1], calls
+        assert "systemctl enable --now istota-stack" not in calls
+
+
+@needs_openssl
+class TestSetupWebFirstRunSignal:
+    def test_a_signal_removes_the_server_and_restores_nothing(self, web):
+        rc, output, elapsed = _term_while_serving(web, "setup", "--web")
+        assert rc == 143, output
+        assert elapsed < 10
+        calls = web.docker_calls()
+        assert REMOVE_SERVER in calls[calls.index(_setup_call(web)):]
+        assert not [call for call in calls if RESTORE_CALL in call]
+        assert _ups(calls) == []
+        assert not (web.stack / ".setup").exists()
+
+
+@needs_openssl
+class TestSetupWebRerunDirect:
+    """In direct ingress the domain has served this stack, whose nginx sends a
+    year of HSTS: a self-signed certificate cannot be clicked through there."""
+
+    @pytest.fixture
+    def direct(self, rerun):
+        (rerun.stack / "host.env").write_text(
+            "INGRESS=direct\nDOMAIN=istota.example.com\nTLS_CERT_SOURCE=acme\n")
+        return rerun
+
+    def test_the_acme_certificate_is_used_and_only_the_domain_printed(self, direct):
+        live = direct.stack / "letsencrypt" / "live" / "istota.example.com"
+        live.mkdir(parents=True)
+        (live / "fullchain.pem").write_text("the chain\n")
+        (live / "privkey.pem").write_text("the key\n")
+        result = direct.run("setup", "--web", "--force", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        staged = _staged(direct)
+        assert (staged / "cert.pem").read_text() == "the chain\n"
+        assert (staged / "key.pem").read_text() == "the key\n"
+        code = (staged / "setup-code").read_text().strip()
+        assert f"  https://istota.example.com/istota/setup#code={code}\n" in result.stdout
+        assert "203.0.113.5" not in result.stdout
+        assert "not private" not in result.stdout and "fingerprint" not in result.stdout
+
+    def test_without_a_certificate_only_the_address_is_printed(self, direct):
+        result = direct.run("setup", "--web", "--force", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        code = (_staged(direct) / "setup-code").read_text().strip()
+        assert f"  https://203.0.113.5/istota/setup#code={code}\n" in result.stdout
+        assert "https://istota.example.com/" not in result.stdout
+        assert "istota.example.com is left out" in result.stdout
+
+
+class TestSetupCancel:
+    def test_it_removes_the_server_without_waiting_for_the_lock(self, web):
+        held = HeldLock(web.stack / ".stack.lock", "setup --web")
+        try:
+            started = time.monotonic()
+            result = web.run("setup-cancel", ISTOTA_STACK_LOCK_WAIT="30")
+            elapsed = time.monotonic() - started
+        finally:
+            held.release()
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert elapsed < 15
+        assert REMOVE_SERVER in web.docker_calls()
+
+    def test_with_no_setup_running_it_says_so(self, web):
+        result = web.run("setup-cancel", STUB_NO_SETUP_CONTAINER="1")
+        assert result.returncode == 1
+        assert "no browser setup is running" in result.stderr
+        assert REMOVE_SERVER not in web.docker_calls()
+
+    @needs_openssl
+    def test_a_cancel_during_a_re_run_puts_the_previous_setup_back(self, rerun):
+        result = rerun.run("setup", "--web", "--force", STUB_DURING=(
+            f'bash "{SCRIPT}" setup-cancel; sleep 20; echo "server finished" >> "$STUB_CALLS"'))
+        assert result.returncode == 1, result.stdout + result.stderr
+        calls = rerun.docker_calls()
+        assert "server finished" not in calls
+        restore = _first(calls, RESTORE_CALL)
+        assert restore < _ups(calls)[0], calls
+        assert "the previous setup is back" in result.stdout
 
 
 class TestSetupInTheTerminal:

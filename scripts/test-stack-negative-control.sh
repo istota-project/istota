@@ -9,10 +9,12 @@
 #   scripts/test-stack-negative-control.sh user-keyring
 #   scripts/test-stack-negative-control.sh no-drop    # row 5's wrapper half, image tier
 #   scripts/test-stack-negative-control.sh rollback   # the upgrade tier's rollback case
-#   scripts/test-stack-negative-control.sh setup-web  # the three setup --web controls
+#   scripts/test-stack-negative-control.sh setup-web  # the five setup --web controls
 #   scripts/test-stack-negative-control.sh setup-unmarked
 #   scripts/test-stack-negative-control.sh setup-mint-in-staging
 #   scripts/test-stack-negative-control.sh setup-no-lock
+#   scripts/test-stack-negative-control.sh setup-no-restore
+#   scripts/test-stack-negative-control.sh setup-server-in-foreground
 #   scripts/test-stack-negative-control.sh mac-purge  # the two destroy --purge folder guards
 #   scripts/test-stack-negative-control.sh mac-purge-unmarked
 #   scripts/test-stack-negative-control.sh mac-purge-default-folder
@@ -52,6 +54,10 @@ SETUP_WEB=(
     "${STACK_TESTS}::TestSetupWebUnfinished"
     "${STACK_TESTS}::TestSetupWebFinished"
     "${STACK_TESTS}::TestSetupCode"
+    "${STACK_TESTS}::TestSetupWebRerun"
+    "${STACK_TESTS}::TestSetupWebFirstRunSignal"
+    "${STACK_TESTS}::TestSetupWebRerunDirect"
+    "${STACK_TESTS}::TestSetupCancel"
 )
 
 mutate() {
@@ -166,7 +172,11 @@ setup_unmarked() {
         "${STACK_TESTS}::TestSetupWebUnfinished::test_a_timeout_says_so_and_keeps_its_code" \
         "${STACK_TESTS}::TestSetupWebUnfinished::test_a_lockout_says_to_run_again_and_keeps_its_code" \
         "${STACK_TESTS}::TestSetupWebUnfinished::test_a_secret_written_before_the_failure_is_named" \
-        "${STACK_TESTS}::TestSetupWebFinished::test_a_linked_marker_is_not_a_finished_setup"
+        "${STACK_TESTS}::TestSetupWebFinished::test_a_linked_marker_is_not_a_finished_setup" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_without_the_marker_the_previous_setup_is_put_back" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_a_failed_restore_leaves_the_stack_stopped_and_names_the_snapshot" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_a_failed_start_after_the_restore_says_to_run_up" \
+        "${STACK_TESTS}::TestSetupCancel::test_a_cancel_during_a_re_run_puts_the_previous_setup_back"
 }
 
 setup_mint_in_staging() {
@@ -175,7 +185,7 @@ setup_mint_in_staging() {
     # back, so printing and setup-code still work and the witness is the
     # staged files' mode, not a file missing from .setup/.
     local copy
-    copy="$(mutate setup-mint-in-staging '    mint_setup_files "$publish" "$local_mode"
+    copy="$(mutate setup-mint-in-staging '    mint_setup_files "$publish" "$local_mode" "$setup_rerun"
     new_staging
     install -m 0400 "${SETUP_DIR}/code" "${staging}/setup-code"
     if [ -z "$local_mode" ]; then
@@ -184,7 +194,7 @@ setup_mint_in_staging() {
     fi
 =>
     new_staging
-    SETUP_DIR="$staging" mint_setup_files "$publish" "$local_mode"
+    SETUP_DIR="$staging" mint_setup_files "$publish" "$local_mode" "$setup_rerun"
     mv "${staging}/code" "${staging}/setup-code"
     cp "${staging}/setup-code" "${SETUP_DIR}/code"
     for f in instructions cert.pem key.pem; do
@@ -205,6 +215,38 @@ setup_no_lock() {
 ')"
     run_setup_web setup-no-lock "$copy" \
         "${STACK_TESTS}::TestSetupCode::test_during_a_setup_it_prints_the_instructions"
+}
+
+setup_no_restore() {
+    # An abandoned re-run starts the stack without putting the snapshot back,
+    # so it would run whatever config a Finish that failed partway wrote.
+    local copy
+    copy="$(mutate setup-no-restore '    if ! ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${SECRETS_DIR}:/vm/secrets" \
+            "$(main_service)" istota setup --restore "/data/config/${RERUN_SNAPSHOT}" --vm-dir /vm; then
+=>
+    if ! true; then
+')"
+    run_setup_web setup-no-restore "$copy" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_without_the_marker_the_previous_setup_is_put_back" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_a_signal_during_the_wait_puts_the_previous_setup_back_at_once" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_a_failed_restore_leaves_the_stack_stopped_and_names_the_snapshot" \
+        "${STACK_TESTS}::TestSetupCancel::test_a_cancel_during_a_re_run_puts_the_previous_setup_back"
+}
+
+setup_server_in_foreground() {
+    # The server in the foreground: bash holds a trapped signal until the
+    # foreground command returns, so a Ctrl-C or a stop waits for the server,
+    # up to an idle hour, and nothing removes its container.
+    local copy
+    copy="$(mutate setup-server-in-foreground '"$(main_service)" istota setup --web "${force_arg[@]}" --vm-dir /vm "${local_arg[@]}" &
+    setup_server_pid=$!
+    wait "$setup_server_pid" || rc=$?
+=>
+"$(main_service)" istota setup --web "${force_arg[@]}" --vm-dir /vm "${local_arg[@]}" || rc=$?
+')"
+    run_setup_web setup-server-in-foreground "$copy" \
+        "${STACK_TESTS}::TestSetupWebRerun::test_a_signal_during_the_wait_puts_the_previous_setup_back_at_once" \
+        "${STACK_TESTS}::TestSetupWebFirstRunSignal::test_a_signal_removes_the_server_and_restores_nothing"
 }
 
 run_mac_purge() {
@@ -285,10 +327,12 @@ case "$mode" in
     skip-verify) skip_verify ;;
     user-keyring) user_keyring ;;
     no-drop) no_drop ;;
-    setup-web) setup_unmarked; setup_mint_in_staging; setup_no_lock ;;
+    setup-web) setup_unmarked; setup_mint_in_staging; setup_no_lock; setup_no_restore; setup_server_in_foreground ;;
     setup-unmarked) setup_unmarked ;;
     setup-mint-in-staging) setup_mint_in_staging ;;
     setup-no-lock) setup_no_lock ;;
+    setup-no-restore) setup_no_restore ;;
+    setup-server-in-foreground) setup_server_in_foreground ;;
     mac-purge) mac_purge_unmarked; mac_purge_default_folder ;;
     mac-purge-unmarked) mac_purge_unmarked ;;
     mac-purge-default-folder) mac_purge_default_folder ;;

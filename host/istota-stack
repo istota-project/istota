@@ -15,7 +15,11 @@
 #   istota-stack setup --web [--local]
 #                               the first setup in a browser: prints an address and a
 #                               one-use code, then installs, builds and starts the stack
+#   istota-stack setup --web --force [--local]
+#                               change the setup in a browser: the stack is stopped for
+#                               the run, and put back as it was if the run does not finish
 #   istota-stack setup-code     print the address and code of a setup --web in progress
+#   istota-stack setup-cancel   end a setup --web in progress
 #   istota-stack apply <plan> [--secrets-file FILE] [--no-restart] [istota apply's options]
 #                               `istota apply` a plan; prints its JSON result, and restarts
 #                               the stack once when a committed change needs it, this
@@ -947,6 +951,7 @@ backup_stack_env() {
     local dir f old=() i
     install -d -m 0700 "${STACK}/backups"
     dir="$(mktemp -d "${STACK}/backups/setup-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+    STACK_ENV_BACKUP="$dir"
     for f in .env host.env rclone.conf; do
         if [ -f "${STACK}/${f}" ] && [ ! -L "${STACK}/${f}" ]; then
             cp -p "${STACK}/${f}" "${dir}/${f}"
@@ -1004,8 +1009,104 @@ cmd_setup() {
 
 refuse_if_set_up() {
     if [ -e "${CONFIG_DIR}/config.toml" ]; then
-        die "istota is already set up (${CONFIG_DIR}/config.toml exists). Change it on the admin Configuration page, or replace it with \`istota-stack setup --force\`."
+        die "istota is already set up (${CONFIG_DIR}/config.toml exists). Change it on the admin Configuration page, in a browser with \`istota-stack setup --web --force\`, or in the terminal with \`istota-stack setup --force\`."
     fi
+}
+
+# The setup server's container, named so an abandoned run and `setup-cancel`
+# can remove it: it holds the port nginx needs and the inherited lock.
+SETUP_CONTAINER=istota-setup-web
+# A re-run's rollback snapshot, under config/ and so uid 10001's: what Finish
+# may change, put back by `istota setup --restore` when the run does not finish.
+RERUN_SNAPSHOT=.setup-rerun
+WATCHDOG_TIMER=istota-browser-watchdog.timer
+
+# What setup --web's exit handler reads. setup_abort is armed while a re-run
+# has stopped the stack and nothing new is installed.
+setup_rerun=""
+setup_abort=""
+setup_server_pid=""
+setup_watchdog_paused=""
+STACK_ENV_BACKUP=""
+
+# The watchdog runs every minute and is gated only on istota-stack.service
+# being active, which it stays across a `compose stop`: it would start the
+# browser again and send alerts during the run.
+pause_watchdog() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    if systemctl is-active --quiet "$WATCHDOG_TIMER" 2>/dev/null; then
+        systemctl stop "$WATCHDOG_TIMER"
+        setup_watchdog_paused=1
+    fi
+}
+
+# Only while enabled: a provision.sh run for a config without the browser
+# disables it.
+resume_watchdog() {
+    [ -n "$setup_watchdog_paused" ] || return 0
+    setup_watchdog_paused=""
+    if systemctl is-enabled --quiet "$WATCHDOG_TIMER" 2>/dev/null; then
+        systemctl start "$WATCHDOG_TIMER" || log "WARNING: could not start ${WATCHDOG_TIMER} again"
+    fi
+}
+
+# As uid 10001, whose directory it is: root acts on nothing under config/.
+drop_rerun_snapshot() {
+    local drop=()
+    if [ "$(id -u)" -eq 0 ]; then
+        drop=(setpriv "--reuid=${ISTOTA_UID}" "--regid=${ISTOTA_UID}" --clear-groups --no-new-privs)
+    fi
+    ${drop[@]+"${drop[@]}"} rm -rf -- "${CONFIG_DIR}/${RERUN_SNAPSHOT}" \
+        || log "WARNING: could not remove ${CONFIG_DIR}/${RERUN_SNAPSHOT}; remove it before the next \`istota-stack setup --web --force\`."
+}
+
+# A re-run that did not finish: the files Finish may have written go back
+# from the snapshot, then the stack starts on them under the lock still held.
+# A failed restore leaves the stack stopped. The caller's exit status stands.
+put_previous_setup_back() {
+    local up_rc
+    if ! ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${SECRETS_DIR}:/vm/secrets" \
+            "$(main_service)" istota setup --restore "/data/config/${RERUN_SNAPSHOT}" --vm-dir /vm; then
+        log "the previous setup could not be put back (above). Its config and credentials are in ${CONFIG_DIR}/${RERUN_SNAPSHOT}${STACK_ENV_BACKUP:+, and .env, host.env and rclone.conf in ${STACK_ENV_BACKUP}}. The stack was not started."
+        return 0
+    fi
+    log "the previous setup is back${STACK_ENV_BACKUP:+; .env, host.env and rclone.conf as they were are also in ${STACK_ENV_BACKUP}}."
+    # set -e is ignored on the left of || and in an if, and cmd_up relies on it.
+    set +e
+    ( set -e; cmd_up )
+    up_rc=$?
+    set -e
+    if [ "$up_rc" -eq 0 ]; then
+        resume_watchdog
+        log "the stack is starting on the previous setup."
+    else
+        log "the stack did not start (above); run \`istota-stack up\`."
+    fi
+}
+
+# setup --web's one exit path, for a return, a die and a signal alike.
+setup_web_exit() {
+    local rc=$?
+    trap - EXIT HUP INT TERM
+    if [ -n "$setup_server_pid" ] || [ -n "$setup_abort" ]; then
+        docker rm -f "$SETUP_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$setup_server_pid" ]; then
+        wait "$setup_server_pid" 2>/dev/null || true
+    fi
+    if [ -n "$setup_abort" ]; then
+        put_previous_setup_back
+    fi
+    if [ -n "$setup_watchdog_paused" ]; then
+        log "the browser watchdog is paused: \`systemctl start ${WATCHDOG_TIMER}\` once the stack runs again."
+    fi
+    rm -rf "${staging:-}" "$SETUP_DIR"
+    exit "$rc"
+}
+
+setup_web_signal() {
+    log "setup --web was interrupted."
+    exit "$1"
 }
 
 # The setup lock is what `setup-code` asks, so its question never touches the
@@ -1063,9 +1164,15 @@ primary_address() {
 # .setup/, which is root's. Sixteen random bytes, of which the first 100 bits
 # are written as four groups of five Crockford base32 characters, read off a
 # console and typed. In a subshell for the umask: every file here is 0600.
+#
+# A re-run in direct ingress has served its domain with a year of HSTS
+# (docker/nginx/listen-direct.conf), where a browser will not let anyone past a
+# self-signed certificate: it uses the ACME certificate when there is one, and
+# otherwise leaves the domain out.
 mint_setup_files() (
     umask 077
-    local publish="$1" local_mode="$2" code port suffix addr domain names fingerprint urls=() url
+    local publish="$1" local_mode="$2" rerun="${3:-}" code port suffix addr domain names fingerprint urls=() url
+    local trusted="" left_out="" live
     python3 -I -c '
 import secrets
 alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -1085,32 +1192,51 @@ print("-".join(chars[i:i + 5] for i in range(0, 20, 5)))
         addr="$(primary_address)"
         domain="$(env_get "$HOST_ENV" DOMAIN)"
         domain="${domain%%:*}"
-        names=""
-        if [ -n "$addr" ]; then
-            names="IP:${addr}"
-            case "$addr" in
-                *:*) urls+=("https://[${addr}]${suffix}/istota/setup#code=${code}") ;;
-                *) urls+=("https://${addr}${suffix}/istota/setup#code=${code}") ;;
-            esac
+        if [ -n "$rerun" ] && [ -n "$domain" ] && [ "$(env_get "$HOST_ENV" INGRESS)" = direct ]; then
+            live="${STACK}/letsencrypt/live/${domain}"
+            if [ -s "${live}/fullchain.pem" ] && [ -s "${live}/privkey.pem" ]; then
+                cat "${live}/fullchain.pem" > "${SETUP_DIR}/cert.pem"
+                cat "${live}/privkey.pem" > "${SETUP_DIR}/key.pem"
+                trusted=1
+                urls=("https://${domain}${suffix}/istota/setup#code=${code}")
+            else
+                left_out="$domain"
+                domain=""
+            fi
         fi
-        if [ -n "$domain" ]; then
-            names="${names:+${names},}DNS:${domain}"
-            urls+=("https://${domain}${suffix}/istota/setup#code=${code}")
+        if [ -z "$trusted" ]; then
+            names=""
+            if [ -n "$addr" ]; then
+                names="IP:${addr}"
+                case "$addr" in
+                    *:*) urls+=("https://[${addr}]${suffix}/istota/setup#code=${code}") ;;
+                    *) urls+=("https://${addr}${suffix}/istota/setup#code=${code}") ;;
+                esac
+            fi
+            if [ -n "$domain" ]; then
+                names="${names:+${names},}DNS:${domain}"
+                urls+=("https://${domain}${suffix}/istota/setup#code=${code}")
+            fi
+            if [ "${#urls[@]}" -eq 0 ]; then
+                urls=("https://<this server's address>${suffix}/istota/setup#code=${code}")
+            fi
+            openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 2 -nodes \
+                -subj /CN=istota-setup -addext "subjectAltName=${names:-DNS:istota-setup}" \
+                -keyout "${SETUP_DIR}/key.pem" -out "${SETUP_DIR}/cert.pem" 2>/dev/null
+            fingerprint="$(openssl x509 -in "${SETUP_DIR}/cert.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
         fi
-        if [ "${#urls[@]}" -eq 0 ]; then
-            urls=("https://<this server's address>${suffix}/istota/setup#code=${code}")
-        fi
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -days 2 -nodes \
-            -subj /CN=istota-setup -addext "subjectAltName=${names:-DNS:istota-setup}" \
-            -keyout "${SETUP_DIR}/key.pem" -out "${SETUP_DIR}/cert.pem" 2>/dev/null
-        fingerprint="$(openssl x509 -in "${SETUP_DIR}/cert.pem" -noout -fingerprint -sha256 | cut -d= -f2)"
     fi
     {
         echo "Open this address in your browser to set up Istota:"
         echo
         for url in "${urls[@]}"; do echo "  ${url}"; done
         echo
-        if [ -z "$local_mode" ]; then
+        if [ -n "$left_out" ]; then
+            echo "${left_out} is left out: it has no certificate here, and browsers that"
+            echo "have visited it refuse a self-signed one there."
+            echo
+        fi
+        if [ -z "$local_mode" ] && [ -z "$trusted" ]; then
             echo "Your browser will warn that the connection is not private. That is expected"
             echo "for setup. Before you continue, check that the certificate's SHA-256"
             echo "fingerprint is:"
@@ -1127,9 +1253,19 @@ print("-".join(chars[i:i + 5] for i in range(0, 20, 5)))
 
 # The setup server stopped without writing setup-done, so nothing was
 # installed. Says why, names what it wrote in the config directory, and exits
-# with its code.
+# with its code. A re-run's exit handler puts the previous setup back instead.
 setup_did_not_finish() {
     local rc="$1" path
+    if [ -n "$setup_rerun" ]; then
+        case "$rc" in
+            3) log "setup timed out after an hour without a request." ;;
+            4) log "setup stopped after too many wrong setup codes." ;;
+            *) log "setup did not finish." ;;
+        esac
+        log "Nothing new was installed; the previous setup is put back. Run \`istota-stack setup --web --force\` again to change it."
+        if [ "$rc" -eq 0 ]; then rc=1; fi
+        exit "$rc"
+    fi
     if [ "$rc" -eq 3 ]; then
         log "setup timed out after an hour without a request; nothing was installed on the host. Run \`istota-stack setup --web\` again."
     elif [ "$rc" -eq 4 ]; then
@@ -1168,20 +1304,33 @@ build_what_setup_needs() {
     fi
 }
 
-# `setup --web [--local]`: cmd_setup with the setup server in the middle, and
-# the steps cmd_setup leaves to the operator done after it. Never returns.
+# `setup --web [--force] [--local]`: cmd_setup with the setup server in the
+# middle, and the steps cmd_setup leaves to the operator done after it. Never
+# returns.
+#
+# With --force, over a configured stack: the root-owned env files are backed
+# up, config/ and secrets/ are snapshotted by uid 10001, the watchdog is
+# paused and the stack stopped (under the lock this holds, so nothing waits on
+# it), and only then is the code minted, so the address cannot reach the
+# running app. Until the staged files are installed, any exit puts the
+# snapshot back and starts the stack again; after that the run is committed.
 cmd_setup_web() {
-    local local_mode="" arg tag publish forward inner rc=0 local_arg=()
+    local local_mode="" arg tag publish forward inner rc=0 local_arg=() force_arg=()
     for arg in "$@"; do
         case "$arg" in
             --web) ;;
             --local) local_mode=1 ;;
+            --force) setup_rerun=1; force_arg=(--force) ;;
             *) usage >&2; exit 64 ;;
         esac
     done
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
-    refuse_if_set_up
+    if [ -z "$setup_rerun" ]; then
+        refuse_if_set_up
+    elif [ ! -e "${CONFIG_DIR}/config.toml" ]; then
+        die "nothing to change: there is no ${CONFIG_DIR}/config.toml. Set istota up with \`istota-stack setup --web\`."
+    fi
     if [ -n "$local_mode" ]; then
         # The port Lima forwards, which the Mac writes; the page must answer there.
         forward="$(env_get "$HOST_ENV" LOCAL_FORWARD_PORT)"
@@ -1204,12 +1353,28 @@ cmd_setup_web() {
     install -d -m 0700 "$SETUP_DIR"
     exec 8>>"${SETUP_DIR}/lock"
     setup_lock take || die "could not take ${SETUP_DIR}/lock; nothing was done."
-    trap 'rm -rf "${staging:-}" "$SETUP_DIR"' EXIT
+    trap setup_web_exit EXIT
+    trap 'setup_web_signal 129' HUP
+    trap 'setup_web_signal 130' INT
+    trap 'setup_web_signal 143' TERM
     rm -f "${SETUP_DIR}/code" "${SETUP_DIR}/cert.pem" "${SETUP_DIR}/key.pem" "${SETUP_DIR}/instructions"
 
     prepare_setup
-    refuse_if_set_up
-    mint_setup_files "$publish" "$local_mode"
+    if [ -z "$setup_rerun" ]; then
+        refuse_if_set_up
+    else
+        backup_stack_env
+        ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${SECRETS_DIR}:/vm/secrets" \
+            "$(main_service)" istota setup --snapshot "/data/config/${RERUN_SNAPSHOT}" --vm-dir /vm \
+            || die "the setup files could not be copied aside (above); nothing was changed."
+        setup_abort=1
+        pause_watchdog
+        log "stopping the stack for the setup; it starts again when the setup finishes or is abandoned"
+        compose stop
+    fi
+    # A container left by a run that died outright would hold the name.
+    docker rm -f "$SETUP_CONTAINER" >/dev/null 2>&1 || true
+    mint_setup_files "$publish" "$local_mode" "$setup_rerun"
     new_staging
     install -m 0400 "${SETUP_DIR}/code" "${staging}/setup-code"
     if [ -z "$local_mode" ]; then
@@ -1219,9 +1384,16 @@ cmd_setup_web() {
     chown -R "$ISTOTA_UID:$ISTOTA_UID" "$staging"
     cat "${SETUP_DIR}/instructions"
 
-    ISTOTA_CONFIG_READ_ONLY=false oneshot -p "${publish}:${inner}" \
+    # In the background, then `wait`: bash runs a trap only between foreground
+    # commands, so a signal would otherwise wait for the server, up to an idle
+    # hour, while it still held the port and the lock.
+    ISTOTA_CONFIG_READ_ONLY=false oneshot --name "$SETUP_CONTAINER" -p "${publish}:${inner}" \
+        -e ISTOTA_SECRETS_DIR=/nonexistent \
         -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
-        "$(main_service)" istota setup --web --vm-dir /vm "${local_arg[@]}" || rc=$?
+        "$(main_service)" istota setup --web "${force_arg[@]}" --vm-dir /vm "${local_arg[@]}" &
+    setup_server_pid=$!
+    wait "$setup_server_pid" || rc=$?
+    setup_server_pid=""
     # Nothing running as 10001 may change staging while root reads it.
     chown root:root "$staging"
     chmod 0700 "$staging"
@@ -1232,9 +1404,31 @@ cmd_setup_web() {
     install_setup_staging "$staging"
     # The wizard owns .env's keys but not this script's.
     env_set "ISTOTA_TAG=${tag}"
+    if [ -n "$setup_rerun" ]; then
+        # Committed: .env and host.env now go with the new config, so a later
+        # failure leaves the stack stopped rather than putting anything back.
+        setup_abort=""
+        drop_rerun_snapshot
+    fi
     render_devbox_compose "$tag"
     build_what_setup_needs "$tag"
     copy_stack_env_out
+    if [ -n "$setup_rerun" ]; then
+        # The unit stays active across `compose stop`, so the stack starts
+        # with `up` under the lock rather than through systemd, whose ExecStop
+        # and ExecStart take it. provision.sh runs `istota-stack up` itself.
+        if provision_outdated; then
+            log "host.env changed what this host provisions; running ${SRC}/host/provision.sh"
+            release_stack_lock
+            "${SRC}/host/provision.sh" \
+                || die "provision.sh failed. The config is in place: fix it, run ${SRC}/host/provision.sh, then \`istota-stack up\`."
+            take_stack_lock "setup --web"
+        fi
+        cmd_up
+        resume_watchdog
+        log "changed, and the stack is starting. The setup page goes to the sign-in page once it answers."
+        exit 0
+    fi
     # Both steps below start `istota-stack up`: provision.sh directly, and the
     # unit's ExecStart in a process systemd starts. That `up` opens the lock
     # afresh, so either would wait on the one this process holds. The setup
@@ -1254,6 +1448,17 @@ cmd_setup_web() {
     # file, and bash reads the rest of a script from the file as it goes. The
     # EXIT trap removes staging and .setup/.
     exit 0
+}
+
+# Ends a `setup --web` in progress by removing its server's container; that
+# run then sees the server gone, and a re-run puts the previous setup back and
+# starts the stack. No lock: the run being cancelled holds it.
+cmd_setup_cancel() {
+    [ "$#" -eq 0 ] || { usage >&2; exit 64; }
+    docker container inspect "$SETUP_CONTAINER" >/dev/null 2>&1 \
+        || die "no browser setup is running (there is no ${SETUP_CONTAINER} container)."
+    docker rm -f "$SETUP_CONTAINER" >/dev/null || die "could not remove the ${SETUP_CONTAINER} container (above)."
+    log "stopped the browser setup. A re-run puts the previous setup back and starts the stack again."
 }
 
 cmd_setup_code() {
@@ -2354,6 +2559,7 @@ main() {
         rollback) cmd_rollback "$@" ;;
         setup) cmd_setup "$@" ;;
         setup-code) cmd_setup_code "$@" ;;
+        setup-cancel) cmd_setup_cancel "$@" ;;
         apply) cmd_apply "$@" ;;
         import-bare-metal) cmd_import_bare_metal "$@" ;;
         restore) cmd_restore "$@" ;;
