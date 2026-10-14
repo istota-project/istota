@@ -1303,6 +1303,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_skill_request_room_kinds(conn)
     _migrate_skill_request_purchase_kind(conn)
     _rebuild_skill_request_kinds(conn, "recovery_fill")
+    _rebuild_skill_request_kinds(conn, "location_share")
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -7890,7 +7891,7 @@ _SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -7957,6 +7958,10 @@ def _rebuild_skill_request_kinds(conn: sqlite3.Connection, kind: str) -> None:
         if row is None or kind in (row[0] or ""):
             return
         cols = [r[1] for r in conn.execute("PRAGMA table_info(whatsapp_skill_requests)")]
+        attached = [r[0] for r in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='whatsapp_skill_requests' "
+            "AND type IN ('index','trigger') AND sql IS NOT NULL"
+        )]
         conn.commit()
         foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
         conn.execute("PRAGMA foreign_keys=OFF")
@@ -7976,6 +7981,8 @@ def _rebuild_skill_request_kinds(conn: sqlite3.Connection, kind: str) -> None:
                     "ALTER TABLE whatsapp_skill_requests_rebuild "
                     "RENAME TO whatsapp_skill_requests"
                 )
+                for statement in attached:
+                    conn.execute(statement)
                 for statement in _SKILL_REQUESTS_INDEXES:
                     conn.execute(statement)
                 violations = conn.execute(

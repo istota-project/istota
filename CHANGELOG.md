@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Owners can list and stop their location-sharing permissions, including pending requests. Stopping everywhere returns only a count when requested in a shared room.
+
 - Share one location observation in a shared room, either an exact point or an approximate area. Sharing from a private chat asks for approval and posts the observation shown in the preview, even if your location changes before approval.
 
 ## [0.45.0] - 2026-10-14

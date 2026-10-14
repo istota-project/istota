@@ -25,10 +25,10 @@ REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 #: room writing to its principal privately (the name predates ISSUE-608 and is
 #: kept to avoid a CHECK rebuild), `room_post` a private-room task's post into
 #: a shared room, held for the member's approval.
-KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase", "recovery_fill")
+KINDS = ("self_send", "relay_question", "side_whisper", "room_post", "purchase", "recovery_fill", "location_share")
 ROOM_KINDS = ("side_whisper", "room_post")
-_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase", "recovery_fill")
-_HELD_KINDS = ("relay_question", "room_post", "purchase", "recovery_fill")
+_SELF_KINDS = ("self_send", "side_whisper", "room_post", "purchase", "recovery_fill", "location_share")
+_HELD_KINDS = ("relay_question", "room_post", "purchase", "recovery_fill", "location_share")
 
 
 class RequestError(ValueError):

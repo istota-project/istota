@@ -240,3 +240,41 @@ def test_storage_error_has_no_path_or_partial_payload(setup, monkeypatch):
     monkeypatch.setattr(location_db, "connect", unavailable)
     with pytest.raises(RequestError, match="^location_temporarily_unavailable$"):
         share(config, ident)
+
+
+def test_owner_management_cli_scopes_shared_list_and_all_stop(setup, monkeypatch, capsys):
+    from istota.skills import location as cli
+    from tests.test_location_grants import held, activate
+
+    config, shared, private, _ = setup
+    ident = turn(config, shared)
+    with db.get_db(config.db_path) as conn:
+        grant, _ = held(conn, shared)
+        activate(conn, grant, datetime.now(timezone.utc))
+        other, _ = held(conn, private)
+        activate(conn, other, datetime.now(timezone.utc))
+    config.users["alice"].disabled_modules = ["location"]
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(ident))
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
+    monkeypatch.setattr("istota.config.load_config", lambda: config)
+    cli.cmd_sharing(cli.build_parser().parse_args(["sharing"]))
+    result = json.loads(capsys.readouterr().out)
+    assert [s["room_token"] for s in result["shares"]] == [shared]
+    cli.cmd_unshare(cli.build_parser().parse_args(["unshare", "--all"]))
+    assert json.loads(capsys.readouterr().out) == {"stopped": 2}
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["share", "--request-key", "share", "--for", "1h"])
+
+
+def test_owner_management_refuses_forged_task(setup, monkeypatch):
+    from istota.skills import location as cli
+
+    config, shared, _, _ = setup
+    ident = turn(config, shared)
+    monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(ident))
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
+    monkeypatch.setattr("istota.config.load_config", lambda: config)
+    with pytest.raises(RequestError, match="task_unavailable"):
+        cli.cmd_unshare(cli.build_parser().parse_args(["unshare", "--all"]))

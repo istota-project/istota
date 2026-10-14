@@ -111,6 +111,55 @@ def cmd_share(args):
     print(json.dumps(result))
 
 
+def _manage_sharing(args, *, stop):
+    from istota import db
+    from istota.config import load_config
+    from istota.location import sharing
+    from istota.relay.requests import RequestError
+    from istota.rooms import private_replies
+    from istota.rooms.scopes import canonical_token
+
+    actor = os.environ.get("ISTOTA_USER_ID", "")
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not actor or not task_id.isdecimal() or not path:
+        raise RequestError("task_unavailable")
+    try:
+        with db.get_db(Path(path)) as conn:
+            task = sharing._interactive_task(
+                conn, load_config(), actor_user_id=actor, task_id=int(task_id))
+            own = canonical_token(conn, task.conversation_token)
+            shared = private_replies.is_shared_room(conn, own, is_group_chat=task.is_group_chat)
+            now = datetime.now(timezone.utc)
+            if not stop:
+                result = sharing.list_location_shares(
+                    conn, actor_user_id=actor, room_token=own if shared else None, now=now)
+            else:
+                target = None
+                if not args.all:
+                    if shared:
+                        target = own
+                        if args.room and private_replies._post_target(conn, task, actor, args.room) != own:
+                            raise RequestError("private_turn_required")
+                    else:
+                        if not args.room:
+                            raise RequestError("no_target_room")
+                        target = private_replies._post_target(conn, task, actor, args.room)
+                result = sharing.revoke_location_shares(
+                    conn, actor_user_id=actor, room_token=target, all_rooms=args.all, now=now)
+    except sqlite3.Error:
+        raise RequestError("location_temporarily_unavailable") from None
+    print(json.dumps(result))
+
+
+def cmd_sharing(args):
+    _manage_sharing(args, stop=False)
+
+
+def cmd_unshare(args):
+    _manage_sharing(args, stop=True)
+
+
 def cmd_current(args):
     from istota.location.logic import location_current
 
@@ -799,6 +848,12 @@ def build_parser():
 
     sub.add_parser("current", aliases=["last"], help="Current location and visit")
 
+    sub.add_parser("sharing", help="List your location sharing")
+    unshare = sub.add_parser("unshare", help="Stop sharing your location")
+    scope = unshare.add_mutually_exclusive_group()
+    scope.add_argument("--room", default=None)
+    scope.add_argument("--all", action="store_true")
+
     share = sub.add_parser("share", help="Share one location observation in a room")
     share.add_argument("--request-key", required=True)
     share.add_argument("--room", default=None)
@@ -905,6 +960,8 @@ def main():
 
     commands = {
         "share": cmd_share,
+        "sharing": cmd_sharing,
+        "unshare": cmd_unshare,
         "current": cmd_current,
         "last": cmd_current,  # alias — natural name an LLM reaches for
         "history": cmd_history,

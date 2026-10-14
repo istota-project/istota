@@ -2,10 +2,12 @@
 
 import json
 import sqlite3
+import uuid
+from datetime import timedelta, timezone
 
 from istota import db, location
 from istota.location.logic import location_snapshot
-from istota.relay.requests import RequestError, _question_response, _validate_input
+from istota.relay.requests import RequestError, _question_response, _validate_input, write_transaction
 from istota.rooms import private_replies
 from istota.rooms.scopes import canonical_token, is_current_member
 
@@ -117,3 +119,105 @@ def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key
         request_key=request_key, room=target, text=_snapshot_text(snapshot),
         request_context=context, require_confirmation=True,
     )
+
+
+def _grant_timestamp(now):
+    return now.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def _expire_location_grants(conn, *, now):
+    conn.execute(
+        "UPDATE location_share_grants SET state='expired', closed_at=?, close_reason='expired' "
+        "WHERE state='active' AND expires_at<=?",
+        (_grant_timestamp(now), _grant_timestamp(now)),
+    )
+
+
+def _hold_location_grant(conn, *, owner_user_id, origin_task_id, request_key,
+                         room_token, precision, duration_seconds, audience,
+                         binding_fingerprint, room_epoch, now):
+    """Persist validated terms; only the future private-approval service calls this."""
+    _validate_input(request_key, "location share")
+    if precision not in {"exact", "area"}:
+        raise RequestError("invalid_precision")
+    if type(duration_seconds) is not int or not 300 <= duration_seconds <= 86400:
+        raise RequestError("invalid_duration")
+    with write_transaction(conn):
+        row = conn.execute(
+            "SELECT * FROM location_share_grants WHERE owner_user_id=? "
+            "AND origin_task_id=? AND request_key=?",
+            (owner_user_id, origin_task_id, request_key),
+        ).fetchone()
+        if row is not None:
+            if (row["room_token"] != room_token or row["precision"] != precision
+                    or row["duration_seconds"] != duration_seconds):
+                raise RequestError("request_conflict")
+            return dict(row)
+        ident = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO location_share_grants "
+            "(id,owner_user_id,origin_task_id,request_key,room_token,precision,duration_seconds,"
+            "audience_json,binding_fingerprint,room_epoch,state,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,'held',?)",
+            (ident, owner_user_id, origin_task_id, request_key, room_token, precision,
+             duration_seconds, json.dumps(audience), binding_fingerprint, room_epoch,
+             _grant_timestamp(now)),
+        )
+        return dict(conn.execute("SELECT * FROM location_share_grants WHERE id=?", (ident,)).fetchone())
+
+
+def _activate_location_grant(conn, *, grant_id, now):
+    """Internal state transition after approval validates identity and frozen terms."""
+    with write_transaction(conn):
+        _expire_location_grants(conn, now=now)
+        row = conn.execute("SELECT * FROM location_share_grants WHERE id=?", (grant_id,)).fetchone()
+        if row is None or row["state"] not in {"held", "active"}:
+            raise RequestError("grant_unavailable")
+        if row["state"] == "active":
+            return dict(row)
+        conn.execute(
+            "UPDATE location_share_grants SET state='revoked', closed_at=?, close_reason='replaced' "
+            "WHERE owner_user_id=? AND room_token=? AND state='active'",
+            (_grant_timestamp(now), row["owner_user_id"], row["room_token"]),
+        )
+        conn.execute(
+            "UPDATE location_share_grants SET state='active', approved_at=?, expires_at=? WHERE id=?",
+            (_grant_timestamp(now), _grant_timestamp(now + timedelta(seconds=row["duration_seconds"])), grant_id),
+        )
+        return dict(conn.execute("SELECT * FROM location_share_grants WHERE id=?", (grant_id,)).fetchone())
+
+
+def list_location_shares(conn, *, actor_user_id, room_token=None, now):
+    with write_transaction(conn):
+        _expire_location_grants(conn, now=now)
+        rows = conn.execute(
+            "SELECT id,room_token,precision,duration_seconds,state,created_at,approved_at,expires_at "
+            "FROM location_share_grants WHERE owner_user_id=? AND state IN ('held','active') "
+            "AND (? IS NULL OR room_token=?) ORDER BY created_at,id",
+            (actor_user_id, room_token, room_token),
+        ).fetchall()
+        return {"shares": [dict(row) for row in rows]}
+
+
+def revoke_location_shares(conn, *, actor_user_id, room_token=None, all_rooms=False, now):
+    if (not room_token and not all_rooms) or (room_token and all_rooms):
+        raise RequestError("no_target_room")
+    with write_transaction(conn):
+        _expire_location_grants(conn, now=now)
+        rows = conn.execute(
+            "SELECT id,request_id FROM location_share_grants WHERE owner_user_id=? "
+            "AND state IN ('held','active') AND (? IS NULL OR room_token=?)",
+            (actor_user_id, room_token, room_token),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE location_share_grants SET state=CASE WHEN state='held' THEN 'cancelled' "
+                "ELSE 'revoked' END, closed_at=?, close_reason='owner_stop' WHERE id=?",
+                (_grant_timestamp(now), row["id"]),
+            )
+            conn.execute(
+                "UPDATE whatsapp_skill_requests SET state='cancelled', error_code='owner_stop', "
+                "closed_at=?, updated_at=? WHERE id=? AND state='held'",
+                (_grant_timestamp(now), _grant_timestamp(now), row["request_id"]),
+            )
+        return {"stopped": len(rows)}
