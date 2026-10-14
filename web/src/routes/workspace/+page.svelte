@@ -13,6 +13,7 @@
     FileDropZone,
     HeaderNav,
     EmptyState,
+    Badge,
     type KebabItem,
   } from '$lib/components/ui';
   import {
@@ -43,6 +44,8 @@
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';
+  import { placeForRef, reachesTasks } from '$lib/components/workspace/reach';
+  import { Bot, BotOff } from '@lucide/svelte';
   import PinnedList from '$lib/components/workspace/PinnedList.svelte';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
 
@@ -296,14 +299,7 @@
       if (!drive) return unavailable;
       return { label: 'Reveal', onSelect: () => void revealDrive(ref, drive.id) };
     }
-    const place = places
-      .filter(
-        (place) =>
-          place.browsable &&
-          place.view_root &&
-          (ref === place.view_root || ref.startsWith(place.view_root + '/')),
-      )
-      .sort((a, b) => b.view_root!.length - a.view_root!.length)[0];
+    const place = placeForRef(places, ref);
     if (!place) return unavailable;
     const relative = ref.slice(place.view_root!.length).replace(/^\//, '');
     const path = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
@@ -464,6 +460,15 @@
           {href}
           onNavigate={navigate}
         />
+        {#if places.some((place) => reachesTasks(place.reach.private))}
+          <p class="caption reach-legend">
+            <Bot size={14} aria-hidden="true" />{places.some(
+              (place) => place.kind === 'room' && reachesTasks(place.reach.private),
+            )
+              ? 'Istota can use these in your tasks, in any of your rooms. A room folder only in its own room.'
+              : 'Istota can use these in your tasks, in any of your rooms.'}
+          </p>
+        {/if}
       </Sidebar>
     {/if}
   {/snippet}
@@ -512,7 +517,13 @@
         </ol>
       </nav>
       <div class="folder-actions">
-        {#if place.kind !== 'nextcloud'}<ReachBadge access={place.reach.private} />{/if}
+        {#if place.kind === 'nextcloud'}
+          <Badge size="sm"
+            ><span class="only-you"><BotOff size={12} aria-hidden="true" />Only you</span></Badge
+          >
+        {:else}
+          <ReachBadge access={place.reach.private} />
+        {/if}
         {#if place.kind === 'drive'}
           <HeaderNav
             ariaLabel="Drive location"
@@ -716,6 +727,21 @@
 </Modal>
 
 <style>
+  .reach-legend {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    padding: 0 var(--space-2);
+  }
+  .reach-legend :global(svg) {
+    flex-shrink: 0;
+  }
+  .only-you {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
   .pin-error {
     padding: var(--space-2) var(--space-3);
     display: flex;

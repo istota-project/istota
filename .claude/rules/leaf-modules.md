@@ -288,3 +288,9 @@ Hardened reading of a DAV response: `parse_multistatus` (href and the props of e
 - `safe_segment` refuses `%` outright, so an id or a name cannot carry an escape that an intermediary decodes a second time.
 
 stdlib-only leaf, imports nothing from istota.
+
+## lib/unreachable.py
+
+Why a host could not be reached, as a fixed plain message: `unreachable_message`, `timed_out_message`, `host_of`, and the cause-chain walkers under them. Moved unchanged out of `webui/setup_checks.py` so the doctor check can give the same reasons without importing from `webui/`. The failure's type and text only choose among fixed messages; none of the text is returned. `seconds` is a required argument, because the deadline is the caller's constant (`setup_checks.CHECK_SECONDS`) and this module imports nothing from istota.
+
+`is_read_timeout` says the connection was made and the answer did not come in time, matched on httpx's class name (`ReadTimeout`) so the leaf takes no httpx import. That is what a Nextcloud brute-force throttle looks like (ISSUE-414): `_http` reports it as `OcsError(http_status=None)`, the same as a refusal, and `nextcloud/capabilities.sign_in` reads this to call it `slow` instead of `unreachable`. `chain_class_names` gives doctor's `nextcloud.connection` the class names along a cause chain for its log line, with no exception text. stdlib-only leaf, never raises.

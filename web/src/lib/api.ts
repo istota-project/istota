@@ -1145,9 +1145,9 @@ export interface AdminPairingState {
   qr_available: boolean;
 }
 
-/** One deployment-level connection. WhatsApp is the only member today. */
-export interface AdminConnection {
-  id: string;
+/** The deployment's WhatsApp link, as `GET /admin/connections` lists it. */
+export interface AdminWhatsAppConnection {
+  id: 'whatsapp';
   label: string;
   enabled: boolean;
   provider: string;
@@ -1162,6 +1162,36 @@ export interface AdminConnection {
   /** Why a start would be refused before it is attempted, or `null`. */
   pairing_blocked_reason: string | null;
 }
+
+/**
+ * The daemon's last `nextcloud.connection` check, redacted again by the web
+ * process. `stale` means the report is older than the Health pane's bound.
+ */
+export interface AdminNextcloudCheck {
+  status: 'ok' | 'warn' | 'fail' | 'skip';
+  detail: string;
+  remedy: string;
+  at: string | null;
+  stale: boolean;
+}
+
+/** The Nextcloud instance the bot signs in to. Never carries the app password. */
+export interface AdminNextcloudConnection {
+  id: 'nextcloud';
+  label: string;
+  configured: boolean;
+  /** The base URL with any userinfo removed; empty when unconfigured. */
+  url: string;
+  username: string;
+  talk_enabled: boolean;
+  talk_bot_username: string;
+  storage: 'nextcloud' | 'local';
+  /** Null when the daemon has recorded no such check yet. */
+  check: AdminNextcloudCheck | null;
+}
+
+/** One deployment-level connection: Nextcloud first, then WhatsApp. */
+export type AdminConnection = AdminNextcloudConnection | AdminWhatsAppConnection;
 
 export interface AdminBrowsers {
   status: 'ok' | 'disabled' | 'unavailable';

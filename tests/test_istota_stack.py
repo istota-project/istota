@@ -2373,6 +2373,32 @@ class TestTheClaudeCodePin:
         assert result.stdout.strip() == "pin=2.1.296"
 
 
+class TestTheAptMirror:
+    """host.env's APT_MIRROR reaches the builds as a build arg (test_apt_mirror.py
+    has the Dockerfiles and provision.sh)."""
+
+    def _mirror(self, fx, value: str | None) -> subprocess.CompletedProcess:
+        text = "INGRESS=local\n" + ("" if value is None else f"APT_MIRROR={value}\n")
+        (fx.stack / "host.env").write_text(text)
+        return _source(fx, 'docker() { echo "mirror=${APT_MIRROR-unset}"; }; compose build')
+
+    def test_a_mirror_is_passed(self, fx):
+        result = self._mirror(fx, "http://mirror.example.net/debian")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "mirror=http://mirror.example.net/debian"
+
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_no_mirror_leaves_the_dockerfiles_default(self, fx, value):
+        assert self._mirror(fx, value).stdout.strip() == "mirror=unset"
+
+    def test_an_invalid_mirror_is_a_warning_and_not_passed(self, fx):
+        """It is interpolated into a sed expression in the Dockerfiles."""
+        result = self._mirror(fx, "http://mirror.example.net/debian#x")
+        assert result.returncode == 0, result.stderr
+        assert "mirror=unset" in result.stdout
+        assert "WARNING: APT_MIRROR" in result.stdout + result.stderr
+
+
 class TestTheWrapperPassesStdin:
     def test_stdin_reaches_the_exec(self, fx, tmp_path):
         """`istota secret ensure --value-stdin` reads the value through every
@@ -2415,6 +2441,24 @@ class TestHostEnv:
 
     def test_a_mix_of_reads_and_writes_is_a_usage_error(self, fx):
         assert fx.run("host-env", "INGRESS=local", "STORAGE").returncode == 64
+
+    def test_setting_the_release_key_writes_allowed_signers(self, fx):
+        """The Mac's create on a VM that has no key yet: the signed build
+        that follows reads allowed_signers, not host.env."""
+        signers = fx.stack / "allowed_signers"
+        signers.unlink(missing_ok=True)
+        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostEnvTestKeyOnly releases"
+        result = fx.run("host-env", f"RELEASE_SIGNING_KEY={key}")
+        assert result.returncode == 0, result.stderr
+        assert f"RELEASE_SIGNING_KEY={key}\n" in (fx.stack / "host.env").read_text()
+        assert signers.read_text() == f'releases namespaces="git" {key}\n'
+        assert signers.stat().st_mode & 0o777 == 0o644
+
+    def test_other_keys_leave_allowed_signers_alone(self, fx):
+        signers = fx.stack / "allowed_signers"
+        before = signers.read_text()
+        assert fx.run("host-env", "INGRESS=local").returncode == 0
+        assert signers.read_text() == before
 
 
 class TestStaging:

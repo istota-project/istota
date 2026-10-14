@@ -62,6 +62,9 @@ istota_listen_port: 8080
 # after the apply, an image lacking what the config needs (or at another pin)
 # is rebuilt at the same tag.
 istota_claude_code_version: ""
+# A Debian mirror (http(s)://host/.../debian) for the host's apt and the
+# image builds, in place of deb.debian.org. Empty keeps deb.debian.org.
+istota_apt_mirror: ""
 # direct with acme only. An empty ACME server is Let's Encrypt.
 istota_acme_email: ""
 istota_acme_server: ""
@@ -88,6 +91,7 @@ istota_host_env:
   LISTEN_PORT: "{{ (istota_listen_port or 8080) if istota_ingress == 'proxied' else '' }}"
   RELEASE_SIGNING_KEY: "{{ istota_release_signing_key }}"
   CLAUDE_CODE_VERSION: "{{ istota_claude_code_version }}"
+  APT_MIRROR: "{{ istota_apt_mirror }}"
   ACME_EMAIL: "{{ istota_acme_email }}"
   ACME_SERVER: "{{ istota_acme_server }}"
   RCLONE_REMOTE: "{{ istota_rclone_remote }}"

@@ -23,8 +23,21 @@ FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512
 ENV PYTHONUNBUFFERED=1
 ENV LANG=C.UTF-8
 
+# APT_MIRROR is host.env's, passed by istota-stack: a Debian mirror in place
+# of deb.debian.org, whose CDN stalls some connections. The cache mounts keep
+# downloaded packages between builds; zz-build-cache moves them out of the
+# directory the base image's docker-clean empties, and is gone again before
+# the layer is written. tests/test_apt_mirror.py holds the three Dockerfiles
+# that run apt to this.
+ARG APT_MIRROR=
+
 # System deps (including weasyprint/tesseract requirements for all extras)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,id=istota-apt-archives,target=/var/cache/apt-build,sharing=locked \
+    --mount=type=cache,id=istota-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "$APT_MIRROR" ]; then sed -i -E "s#^(URIs: )https?://deb\.debian\.org/debian\$#\1${APT_MIRROR}#" /etc/apt/sources.list.d/debian.sources; fi \
+    && mkdir -p /var/cache/apt-build/partial \
+    && echo 'Dir::Cache::Archives "/var/cache/apt-build";' > /etc/apt/apt.conf.d/zz-build-cache \
+    && apt-get update && apt-get install -y --no-install-recommends \
     curl git sqlite3 \
     # tmux — required by the tmux_claude brain (drives the interactive claude TUI)
     tmux \
@@ -37,12 +50,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # pdftotext / pdftoppm (health module: text-native PDF extraction and
     # page rasterising for OCR)
     poppler-utils \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
 # Node.js 20 (for Claude Code)
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+RUN --mount=type=cache,id=istota-apt-archives,target=/var/cache/apt-build,sharing=locked \
+    --mount=type=cache,id=istota-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    mkdir -p /var/cache/apt-build/partial \
+    && echo 'Dir::Cache::Archives "/var/cache/apt-build";' > /etc/apt/apt.conf.d/zz-build-cache \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
 # Claude Code, for the claude_code and tmux_claude brains only, at a pinned
 # version. Proprietary, so the operator's own build fetches it and no artifact
