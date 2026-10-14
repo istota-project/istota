@@ -5570,8 +5570,130 @@ const mockGroup = {
   },
 };
 const mockGroupMemory = '# Team\n\nShared notes for the team.\n';
+// The admin view of three groups, one in each state the page draws.
+const mockAdminGroups = [
+  {
+    ...mockGroup,
+    created_by: 'alice',
+    created_at: '2026-09-02 14:10:00',
+    archived_at: null,
+    needs_owner: false,
+  },
+  {
+    ...mockGroup,
+    group_id: 'household',
+    display_name: 'Household',
+    kind: 'family',
+    role: null,
+    created_by: 'alice',
+    created_at: '2026-08-11 09:00:00',
+    archived_at: null,
+    needs_owner: true,
+  },
+  {
+    ...mockGroup,
+    group_id: 'book-club',
+    display_name: 'Book club',
+    kind: 'group',
+    role: null,
+    created_by: 'alice',
+    created_at: '2026-05-20 18:30:00',
+    archived_at: '2026-09-30 08:00:00',
+    needs_owner: false,
+  },
+];
+function mockAdminGroupDetail(id: string) {
+  const summary = mockAdminGroups.find((g) => g.group_id === id);
+  if (!summary) return undefined;
+  const archived = summary.archived_at !== null;
+  return {
+    ...summary,
+    capabilities: {
+      ...summary.capabilities,
+      manage: !archived,
+      archive: !archived,
+      read_memory: summary.role !== null,
+    },
+    members: archived
+      ? []
+      : [
+          {
+            user_id: 'carol',
+            display_name: 'Carol',
+            role: summary.needs_owner ? 'member' : 'owner',
+          },
+          { user_id: 'dave', display_name: 'Dave', role: 'member' },
+        ],
+    disclosure: {
+      memory: `Groups/${id}/GROUP.md`,
+      rooms: ['Project room'],
+      briefings: [],
+    },
+    history: [
+      {
+        user_id: 'carol',
+        display_name: 'Carol',
+        role: 'owner',
+        added_at: summary.created_at,
+        added_by: 'alice',
+        ended_at: archived ? summary.archived_at : null,
+        ended_by: archived ? 'alice' : null,
+      },
+      {
+        user_id: 'erin',
+        display_name: 'Erin',
+        role: 'member',
+        added_at: '2026-09-04 10:00:00',
+        added_by: 'carol',
+        ended_at: '2026-09-20 16:45:00',
+        ended_by: 'carol',
+      },
+    ],
+    events: [
+      {
+        id: 3,
+        actor_id: 'carol',
+        event_type: 'member_removed',
+        subject_user_id: 'erin',
+        created_at: '2026-09-20 16:45:00',
+        details: { old_role: 'member' },
+      },
+      {
+        id: 2,
+        actor_id: 'carol',
+        event_type: 'member_added',
+        subject_user_id: 'erin',
+        created_at: '2026-09-04 10:00:00',
+        details: {
+          role: 'member',
+          acknowledge_history: true,
+          disclosure: { memory: `Groups/${id}/GROUP.md`, rooms: ['Project room'] },
+        },
+      },
+      {
+        id: 1,
+        actor_id: 'alice',
+        event_type: 'created',
+        subject_user_id: null,
+        created_at: summary.created_at,
+        details: { owners: ['carol'] },
+      },
+    ],
+  };
+}
 function mockGroups(path: string, method: string) {
   if (method !== 'GET') return undefined;
+  if (path === '/istota/api/admin/groups') return { groups: mockAdminGroups };
+  if (path === '/istota/api/admin/groups/user-options')
+    return {
+      users: [
+        { user_id: 'carol', display_name: 'Carol' },
+        { user_id: 'dave', display_name: 'Dave' },
+        { user_id: 'erin', display_name: 'Erin' },
+      ],
+    };
+  const adminMatch = path.match(/^\/istota\/api\/admin\/groups\/([^/]+)$/);
+  if (adminMatch) return mockAdminGroupDetail(decodeURIComponent(adminMatch[1]));
   if (path === '/istota/api/groups') return { groups: [mockGroup] };
   if (path === '/istota/api/groups/team')
     return {
@@ -5580,7 +5702,11 @@ function mockGroups(path: string, method: string) {
         { user_id: 'carol', display_name: 'Carol', role: 'owner' },
         { user_id: 'dave', display_name: 'Dave', role: 'member' },
       ],
-      rooms: [{ token: 'project', name: 'Project room', origin: 'web' }],
+      // Tokens of mocked chat rooms, so the overview's Rooms card has activity to sort by.
+      rooms: [
+        { token: 'web-carol-general', name: 'general', origin: 'web' },
+        { token: 'talk-design-review', name: 'design review', origin: 'talk' },
+      ],
       disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
     };
   if (path === '/istota/api/groups/team/memory')

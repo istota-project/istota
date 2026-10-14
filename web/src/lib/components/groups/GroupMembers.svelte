@@ -7,7 +7,9 @@
     Modal,
     ConfirmDialog,
     KebabMenu,
+    Badge,
   } from '$lib/components/ui';
+  import UserCell from '$lib/admin/UserCell.svelte';
   import {
     getGroupUserOptions,
     getAdminGroupUserOptions,
@@ -166,15 +168,18 @@
 <div class="members">
   <div class="actions">
     {#if group.capabilities.manage}
-      <Button onclick={() => openMember(null)}>Add member</Button>
+      <Button size="sm" onclick={() => openMember(null)}>Add member</Button>
       {#if administration && 'needs_owner' in group && group.needs_owner}
-        <Button onclick={() => openMember(null, 'owner')}>Assign owner</Button>
+        <Button size="sm" variant="primary" onclick={() => openMember(null, 'owner')}
+          >Assign owner</Button
+        >
       {/if}
-      <Button onclick={openMetadata}>Edit group details</Button>
+      <Button size="sm" onclick={openMetadata}>Edit group details</Button>
     {/if}
     {#if !administration && group.capabilities.leave}
       <Button
         variant="danger"
+        size="sm"
         onclick={() => {
           const self = group.members.find((m) => m.user_id === user.username);
           if (self) openRemove(self);
@@ -185,7 +190,12 @@
   <ul class="member-list">
     {#each group.members as member (member.user_id)}
       <li>
-        <span>{member.display_name} <span class="caption">{member.role}</span></span>
+        <span class="member-name"
+          ><UserCell userId={member.user_id} displayName={member.display_name} /></span
+        >
+        <Badge variant={member.role === 'owner' ? 'info' : 'neutral'} size="sm"
+          >{member.role === 'owner' ? 'Owner' : 'Member'}</Badge
+        >
         {#if group.capabilities.manage}<KebabMenu
             ariaLabel={`Actions for ${member.display_name}`}
             items={[
@@ -239,13 +249,14 @@
         /></Field
       >
     {:else if disclosure}
-      <p>This person will be able to read the existing shared material:</p>
-      <ul>
-        <li>{disclosure.memory}</li>
-        {#each disclosure.rooms as room}<li>
-            {room}
-          </li>{/each}{#each disclosure.briefings as briefing}<li>{briefing}</li>{/each}
-      </ul>
+      <div class="disclosure">
+        <p>This person will be able to read the existing shared material:</p>
+        <ul>
+          <li>{disclosure.memory}</li>
+          {#each disclosure.rooms as room}<li>{room}</li>{/each}
+          {#each disclosure.briefings as briefing}<li>{briefing}</li>{/each}
+        </ul>
+      </div>
       <Field label="I acknowledge access to this existing history" checkbox
         ><input type="checkbox" bind:checked={acknowledged} /></Field
       >
@@ -253,8 +264,10 @@
     {#if error}<p class="banner error">{error}</p>
       <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
   </div>
-  {#snippet footer()}<Button variant="ghost" onclick={() => (memberOpen = false)} disabled={busy}
-      >Cancel</Button
+  {#snippet footer()}<Button
+      variant="secondary"
+      onclick={() => (memberOpen = false)}
+      disabled={busy}>Cancel</Button
     ><Button
       variant="primary"
       onclick={saveMember}
@@ -272,8 +285,10 @@
     {#if error}<p class="banner error">{error}</p>
       <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
   </div>
-  {#snippet footer()}<Button variant="ghost" onclick={() => (metadataOpen = false)} disabled={busy}
-      >Cancel</Button
+  {#snippet footer()}<Button
+      variant="secondary"
+      onclick={() => (metadataOpen = false)}
+      disabled={busy}>Cancel</Button
     ><Button variant="primary" onclick={saveMetadata} loading={busy} disabled={!displayName.trim()}
       >Save details</Button
     >{/snippet}
@@ -328,8 +343,36 @@
   .member-list li {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
     padding-block: var(--space-2);
+  }
+  .member-list li:last-child {
+    border-bottom: none;
+  }
+  .member-name {
+    flex: 1;
+    min-width: 0;
+  }
+  .form-fields p {
+    margin: 0;
+  }
+  /* The default p and ul margins stacked on the column gap and left a blank band above the list. */
+  .disclosure {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    font-size: var(--text-sm);
+  }
+  .disclosure ul {
+    margin: 0;
+    padding-left: var(--space-4);
+  }
+  .disclosure li {
+    overflow-wrap: anywhere;
   }
 </style>

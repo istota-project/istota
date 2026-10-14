@@ -178,11 +178,14 @@ describe('workspace file viewer through the host', () => {
     expect(source).toHaveValue('hello <world>');
     expect(source).toHaveAttribute('readonly');
     expect(source).not.toBeDisabled();
+    expect(screen.queryByRole('group', { name: 'Document view' })).toBeNull();
   });
   it('renders markdown, frontmatter, and source', async () => {
     preview.mockResolvedValue(text('note.md', '---\ntitle: Note\n---\n# Hello'));
     open('/note.md');
     expect(await screen.findByRole('heading', { name: 'Hello' })).toBeTruthy();
+    const toggle = screen.getByRole('group', { name: 'Document view' });
+    expect(toggle.closest('.ui-viewer-header')).not.toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
     const source = screen.getByRole('textbox', { name: 'Source of note.md' });
     expect(source).toHaveValue('---\ntitle: Note\n---\n# Hello');

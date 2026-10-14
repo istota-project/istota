@@ -305,7 +305,7 @@
   {#if conflict}
     <div class="money-notice-bar">
       <NoticeBanner title={conflict} variant="warn" />
-      <Button variant="ghost" onclick={reloadFromConflict}>Reload</Button>
+      <Button variant="secondary" onclick={reloadFromConflict}>Reload</Button>
     </div>
   {/if}
 

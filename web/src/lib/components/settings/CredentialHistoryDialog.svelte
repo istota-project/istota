@@ -69,7 +69,7 @@
       disabled={!rows.length}
       onclick={() => (action = { kind: 'history_purge' })}>Purge history</Button
     >
-    <Button variant="ghost" onclick={onClose}>Close</Button>
+    <Button variant="secondary" onclick={onClose}>Close</Button>
   {/snippet}
 </Modal>
 {#if action}

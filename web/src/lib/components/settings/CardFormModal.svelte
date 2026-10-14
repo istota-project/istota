@@ -124,7 +124,7 @@
     {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
   </fieldset>
   {#snippet footer()}
-    <Button variant="ghost" onclick={close} disabled={busy}>Cancel</Button>
+    <Button variant="secondary" onclick={close} disabled={busy}>Cancel</Button>
     <Button variant="primary" onclick={save} loading={busy}
       >{start ? 'Save details' : 'Add card'}</Button
     >

@@ -224,7 +224,7 @@
       </span>
       {#if permalink}
         <Button
-          variant="ghost"
+          variant="secondary"
           href={permalink}
           target="_blank"
           rel="noopener"

@@ -179,10 +179,10 @@
       <Button variant="primary" onclick={syncNow} disabled={busy}>
         {busy ? 'Working…' : 'Sync health data'}
       </Button>
-      <Button variant="subtle" onclick={importTracks} disabled={busy}>
+      <Button variant="secondary" onclick={importTracks} disabled={busy}>
         {busy ? 'Working…' : 'Import GPS tracks'}
       </Button>
-      <Button variant="ghost" onclick={doDisconnect} disabled={busy}>Disconnect</Button>
+      <Button variant="secondary" onclick={doDisconnect} disabled={busy}>Disconnect</Button>
     </div>
   {:else if mode === 'mfa'}
     <SettingsField label="MFA code" hint="6-digit code from your Garmin authenticator app">
@@ -198,7 +198,7 @@
       <Button variant="primary" onclick={submitMfa} disabled={busy || !mfaCodeInput}>
         {busy ? 'Verifying…' : 'Verify'}
       </Button>
-      <Button variant="ghost" onclick={() => (mode = 'idle')} disabled={busy}>Cancel</Button>
+      <Button variant="secondary" onclick={() => (mode = 'idle')} disabled={busy}>Cancel</Button>
     </div>
   {:else}
     <SettingsField label="Email">

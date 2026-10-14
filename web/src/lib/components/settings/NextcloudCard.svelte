@@ -323,7 +323,7 @@
     <div class="banner error">{disconnectError}</div>
   {/if}
   {#snippet footer()}
-    <Button variant="ghost" onclick={() => (confirmingDisconnect = false)} disabled={busy}>
+    <Button variant="secondary" onclick={() => (confirmingDisconnect = false)} disabled={busy}>
       Cancel
     </Button>
     <Button variant="secondary" onclick={() => disconnect(false)} disabled={busy}>

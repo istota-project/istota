@@ -264,7 +264,7 @@
         <Button variant="secondary" onclick={connect} disabled={busy || nothingRequested}>
           Reconnect
         </Button>
-        <Button variant="ghost" onclick={() => (confirmingDisconnect = true)} disabled={busy}>
+        <Button variant="secondary" onclick={() => (confirmingDisconnect = true)} disabled={busy}>
           Disconnect
         </Button>
       {:else}

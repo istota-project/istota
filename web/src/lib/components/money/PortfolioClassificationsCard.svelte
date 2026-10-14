@@ -349,7 +349,7 @@
                   >
                     Save
                   </Button>
-                  <Button variant="ghost" size="sm" onclick={() => (editingSymbol = '')}>
+                  <Button variant="secondary" size="sm" onclick={() => (editingSymbol = '')}>
                     Cancel
                   </Button>
                 </div>

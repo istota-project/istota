@@ -5,6 +5,7 @@ import { __history } from '../../../../vitest-stubs/app-navigation';
 import Groups from './+page.svelte';
 import Layout from '../+layout.svelte';
 import { createRawSnippet } from 'svelte';
+import { formatDate } from '$lib/dateFormat';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 const identity = vi.hoisted(() => ({
@@ -79,10 +80,12 @@ afterEach(cleanup);
 it('shows owner recovery, membership history and events without loading notebook content', async () => {
   render(Groups);
   await screen.findByRole('heading', { name: 'Team' });
+  expect(screen.getByRole('button', { name: 'Team' })).toHaveAttribute('aria-current', 'true');
   expect(screen.getAllByText('Needs owner').length).toBeGreaterThan(0);
   const history = screen.getByRole('table', { name: 'Membership history' });
   expect(within(history).getByText('Bob')).toBeTruthy();
-  expect(within(history).getByText(/2026-10-03/)).toBeTruthy();
+  expect(within(history).getByText(formatDate('2026-10-03'))).toBeTruthy();
+  expect(within(history).getByText('by alice')).toBeTruthy();
   expect(screen.getByText('Role changed')).toBeTruthy();
   expect(screen.getByText('Role: owner → member')).toBeTruthy();
   expect(screen.queryByRole('link', { name: 'Open group notebook' })).toBeNull();

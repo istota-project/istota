@@ -14,6 +14,7 @@
   import { formatDateTime } from '$lib/dateFormat';
   import { viewer, type FileSource } from './store.svelte';
   import PdfPreview from './PdfPreview.svelte';
+  import { presentationFor } from './presentation';
 
   let {
     path,
@@ -29,6 +30,7 @@
   let canDownload = $state(true);
   let source = $state(false);
   let name = $derived(preview?.name ?? path.split('/').pop() ?? 'File');
+  let markdown = $derived(preview?.kind === 'text' && presentationFor(name).kind === 'markdown');
   $effect(() => {
     const requested = path;
     const controller = new AbortController();
@@ -80,6 +82,16 @@
     {/if}
   {/snippet}
   {#snippet actions()}
+    {#if markdown}<div class="view-toggle" role="group" aria-label="Document view">
+        <Button
+          size="sm"
+          variant={source ? 'secondary' : 'primary'}
+          onclick={() => (source = false)}>Rendered</Button
+        >
+        <Button size="sm" variant={source ? 'primary' : 'secondary'} onclick={() => (source = true)}
+          >Source</Button
+        >
+      </div>{/if}
     {#if reconnect}<Button size="sm" variant="secondary" href={`${base}/settings/connections`}
         >Reconnect</Button
       >{/if}
@@ -114,13 +126,18 @@
           />
         </div>
       {:else if preview.kind === 'text'}
-        <TextPreview {name} text={preview.text ?? ''} bind:source fill untrusted={nextcloud} />
+        <TextPreview {name} text={preview.text ?? ''} {source} fill untrusted={nextcloud} />
       {/if}
     {/if}
   </div>
 </Modal>
 
 <style>
+  .view-toggle {
+    display: flex;
+    gap: var(--space-1);
+    margin-right: var(--space-2);
+  }
   .file-content {
     height: 100%;
     display: flex;

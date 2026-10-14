@@ -578,7 +578,7 @@
     <div class="pin-error" role="alert">
       <span class="form-error">{pinError}</span>{#if pinError === 'Could not load pins.'}<Button
           size="sm"
-          variant="ghost"
+          variant="secondary"
           onclick={loadPins}>Retry pins</Button
         >{/if}
     </div>
@@ -704,12 +704,8 @@
             ariaLabel="Group"
             items={[
               {
-                label: 'Group memory',
-                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length), view: 'memory' })}`,
-              },
-              {
-                label: 'Group members',
-                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length), view: 'members' })}`,
+                label: 'Group overview',
+                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length) })}`,
               },
             ]}
           />
@@ -759,7 +755,7 @@
         <div class="upload-heading">
           <span class="micro-label">Uploads</span>
           {#if !uploads.some((row) => row.state === 'waiting' || row.state === 'uploading')}
-            <Button size="sm" variant="ghost" onclick={() => (uploads = [])}>Dismiss</Button>
+            <Button size="sm" variant="secondary" onclick={() => (uploads = [])}>Dismiss</Button>
           {/if}
         </div>
         <ul>

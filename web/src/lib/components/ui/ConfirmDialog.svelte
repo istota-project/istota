@@ -89,7 +89,7 @@
   {/if}
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={cancel}>{cancelLabel}</Button>
+    <Button variant="secondary" onclick={cancel}>{cancelLabel}</Button>
     <Button variant={confirmVariant} onclick={confirm} disabled={!canConfirm}>{confirmLabel}</Button
     >
   {/snippet}

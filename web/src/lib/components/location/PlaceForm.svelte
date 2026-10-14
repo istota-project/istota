@@ -170,9 +170,9 @@
     {#if editing && onDelete}
       <button class="delete-link" type="button" onclick={handleDelete}>Delete</button>
     {/if}
-    <Button variant="ghost" onclick={onCancel}>Cancel</Button>
+    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
     {#if !editing && onDismiss}
-      <Button variant="ghost" onclick={handleDismiss} title="Don't show this cluster again">
+      <Button variant="secondary" onclick={handleDismiss} title="Don't show this cluster again">
         Dismiss
       </Button>
     {/if}

@@ -1318,13 +1318,10 @@ it('links a group folder to its notebook and members without adding links to per
   api.getWorkspacePlaces.mockResolvedValue({ places: [home, group], notes: [] });
   __history.reset('/files?place=group%3Ateam.one&path=memories');
   render(Workspace);
-  const memory = await screen.findByRole('link', { name: 'Group memory' });
-  expect(memory).toHaveAttribute('href', '/groups?group=team.one&view=memory');
-  expect(screen.getByRole('link', { name: 'Group members' })).toHaveAttribute(
+  expect(await screen.findByRole('link', { name: 'Group overview' })).toHaveAttribute(
     'href',
-    '/groups?group=team.one&view=members',
+    '/groups?group=team.one',
   );
   await fireEvent.click(screen.getByRole('link', { name: 'My files' }));
-  await waitFor(() => expect(screen.queryByRole('link', { name: 'Group memory' })).toBeNull());
-  expect(screen.queryByRole('link', { name: 'Group members' })).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'Group overview' })).toBeNull());
 });

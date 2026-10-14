@@ -135,14 +135,14 @@
     {#if document}
       <nav class="pdf-controls" aria-label="PDF pages" bind:clientHeight={controlsHeight}>
         <Button
-          variant="ghost"
+          variant="secondary"
           ariaLabel="Previous page"
           disabled={pageNumber === 1}
           onclick={() => pageNumber--}>Previous</Button
         >
         <span aria-live="polite">Page {pageNumber} of {document.numPages}</span>
         <Button
-          variant="ghost"
+          variant="secondary"
           ariaLabel="Next page"
           disabled={pageNumber === document.numPages}
           onclick={() => pageNumber++}>Next</Button

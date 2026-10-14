@@ -394,7 +394,7 @@
                 </span>
                 {#if editable && problem.action === 'unset'}
                   <Button
-                    variant="ghost"
+                    variant="secondary"
                     size="sm"
                     disabled={!formEditable}
                     onclick={() => toggleRemoval(problem)}

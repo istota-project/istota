@@ -221,7 +221,7 @@
   {/if}
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={onClose}>Cancel</Button>
+    <Button variant="secondary" onclick={onClose}>Cancel</Button>
     <Button variant="secondary" onclick={load} disabled={loading}>Check again</Button>
     <Button variant="primary" onclick={apply} disabled={!canApply}>Apply…</Button>
   {/snippet}

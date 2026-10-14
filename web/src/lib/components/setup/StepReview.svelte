@@ -178,7 +178,7 @@
       <div class="card-head">
         <h3 class="micro-label">{title}</h3>
         <Button
-          variant="ghost"
+          variant="secondary"
           size="sm"
           ariaLabel="Edit {title}"
           onclick={() => onEdit(group.step)}>Edit</Button

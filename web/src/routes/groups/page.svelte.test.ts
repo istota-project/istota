@@ -2,11 +2,12 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { __history } from '../../../vitest-stubs/app-navigation';
+import { viewer } from '$lib/fileViewer/store.svelte';
 import Groups from './+page.svelte';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 const identity = vi.hoisted(() => ({
-  user: { username: 'alice', is_admin: false },
+  user: { username: 'alice', is_admin: false, features: { workspace: true } },
   reload: vi.fn(),
 }));
 vi.mock('$lib/api', () => api);
@@ -55,6 +56,17 @@ beforeEach(() => {
   api.getGroupUserOptions.mockResolvedValue({
     users: [{ user_id: 'carol', display_name: 'Carol' }],
   });
+  api.getChatRooms.mockResolvedValue({ rooms: [] });
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'group:team',
+    path: '',
+    entries: [],
+    truncated: false,
+    skipped_names: 0,
+  });
+  api.getWorkspacePlaces.mockResolvedValue({ places: [], notes: [] });
+  identity.user.features.workspace = true;
+  viewer.close();
 });
 afterEach(cleanup);
 async function edit() {
@@ -63,14 +75,15 @@ async function edit() {
   await fireEvent.input(box, { target: { value: 'Updated plans' } });
   return box;
 }
-it('opens memory by default and saves through the shared editor with the audience charter', async () => {
+it('opens the notebook on the overview and saves through the shared editor with the audience charter', async () => {
   render(Groups);
   await screen.findByText('Shared plans');
   expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Groups');
   expect(screen.queryByRole('heading', { name: 'Team' })).toBeNull();
   expect(screen.getByText(/current and future group members/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Source' })).toBeNull();
   expect(screen.queryByRole('link', { name: 'Briefings' })).toBeNull();
-  expect(screen.getByRole('link', { name: 'Files' })).toHaveAttribute(
+  expect(await screen.findByRole('link', { name: 'Open in Files' })).toHaveAttribute(
     'href',
     '/files?place=group%3Ateam',
   );
@@ -123,19 +136,87 @@ it('allows creating a confirmed missing notebook and reports a failed audit as a
     /Saved, but this change could not be recorded/,
   );
 });
-it('lists only returned rooms and members', async () => {
+it('shows every card on one overview, from a pre-overview view link too', async () => {
   __history.reset('/istota/groups/?group=team&view=rooms');
-  const first = render(Groups);
+  render(Groups);
   expect(await screen.findByRole('link', { name: 'Planning' })).toHaveAttribute(
     'href',
     '/chat?room=room1',
   );
-  first.unmount();
-  __history.reset('/istota/groups/?group=team&view=members');
-  render(Groups);
+  for (const name of ['Notebook', 'Members', 'Rooms', 'Shared files'])
+    expect(screen.getByRole('heading', { name })).toBeTruthy();
+  expect(screen.queryByRole('navigation', { name: 'Group view' })).toBeNull();
   await screen.findByText('Bob');
+  for (const role of ['Owner', 'Member'])
+    expect(screen.getByText(role).classList.contains('badge')).toBe(true);
   expect(screen.queryByRole('button', { name: 'Add member' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Leave group' })).toBeTruthy();
+});
+it('orders linked rooms by latest activity and shows unread counts', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    rooms: [
+      { token: 'old', name: 'Quiet room', origin: 'web' },
+      { token: 'new', name: 'Busy room', origin: 'web' },
+      { token: 'gone', name: 'Unlisted room', origin: 'talk' },
+    ],
+  });
+  api.getChatRooms.mockResolvedValue({
+    rooms: [
+      { token: 'old', last_activity: '2026-10-01T10:00:00Z', unread_count: 0 },
+      { token: 'new', last_activity: '2026-10-13T10:00:00Z', unread_count: 3 },
+    ],
+  });
+  render(Groups);
+  const card = (await screen.findByRole('heading', { name: 'Rooms' })).closest('section')!;
+  await within(card).findByText('3');
+  expect(
+    within(card)
+      .getAllByRole('link')
+      .map((link) => link.textContent),
+  ).toEqual(['Busy room', 'Quiet room', 'Unlisted room']);
+});
+it('lists the newest shared files and opens one in the viewer', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [{ id: 'group:team', view_root: 'Groups/team' }],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'group:team',
+    path: '',
+    entries: [
+      { name: 'old.md', kind: 'file', size: 1, modified: 1000, hidden: false },
+      { name: 'plans', kind: 'dir', size: null, modified: 3000, hidden: false },
+      { name: 'new.md', kind: 'file', size: 1, modified: 2000, hidden: false },
+      { name: '.secret', kind: 'file', size: 1, modified: 4000, hidden: true },
+    ],
+    truncated: false,
+    skipped_names: 0,
+  });
+  render(Groups);
+  const card = (await screen.findByRole('heading', { name: 'Shared files' })).closest('section')!;
+  await within(card).findByText('new.md');
+  expect(within(card).queryByText('.secret')).toBeNull();
+  expect(within(card).getByRole('link', { name: 'plans' })).toHaveAttribute(
+    'href',
+    '/files?place=group%3Ateam&path=plans',
+  );
+  const names = [...card.querySelectorAll('.name')].map((el) => el.textContent);
+  expect(names).toEqual(['plans', 'new.md', 'old.md']);
+  await fireEvent.click(within(card).getByRole('button', { name: 'new.md' }));
+  expect(viewer.state).toEqual({
+    mode: 'file',
+    path: 'Groups/team/new.md',
+    source: { kind: 'workspace' },
+  });
+  expect(api.getWorkspaceListing).toHaveBeenCalledWith('group:team');
+});
+it('leaves the files card out without the workspace feature', async () => {
+  identity.user.features.workspace = false;
+  render(Groups);
+  await screen.findByText('Shared plans');
+  expect(screen.queryByRole('heading', { name: 'Shared files' })).toBeNull();
+  expect(api.getWorkspaceListing).not.toHaveBeenCalled();
 });
 it('paginates recorded outcomes without claiming a complete history', async () => {
   api.getGroupMemoryActivity
@@ -181,7 +262,7 @@ it.each([false, true])('renders a private empty state (admin=%s)', async (admin)
   expect(api.getGroup).not.toHaveBeenCalled();
 });
 it('requires history acknowledgement before an owner adds a member', async () => {
-  __history.reset('/istota/groups/?group=team&view=members');
+  __history.reset('/istota/groups/?group=team');
   api.getGroup.mockResolvedValue({
     ...group,
     role: 'owner',
@@ -206,7 +287,7 @@ it('requires history acknowledgement before an owner adds a member', async () =>
 });
 
 it('lets a member leave with confirmation and refreshes navigation', async () => {
-  __history.reset('/istota/groups/?group=team&view=members');
+  __history.reset('/istota/groups/?group=team');
   api.deleteGroupMember.mockResolvedValue({ ...group, role: null });
   render(Groups);
   await fireEvent.click(await screen.findByRole('button', { name: 'Leave group' }));
@@ -218,7 +299,7 @@ it('lets a member leave with confirmation and refreshes navigation', async () =>
   expect(identity.reload).toHaveBeenCalled();
 });
 it('edits owner metadata with the current revision', async () => {
-  __history.reset('/istota/groups/?group=team&view=members');
+  __history.reset('/istota/groups/?group=team');
   api.getGroup.mockResolvedValue({
     ...group,
     capabilities: { ...group.capabilities, manage: true },
@@ -239,7 +320,7 @@ it('edits owner metadata with the current revision', async () => {
   );
 });
 it('offers replacement ownership and reports the backend last-owner refusal in place', async () => {
-  __history.reset('/istota/groups/?group=team&view=members');
+  __history.reset('/istota/groups/?group=team');
   api.getGroup.mockResolvedValue({
     ...group,
     capabilities: { ...group.capabilities, manage: true },
@@ -298,7 +379,7 @@ it('shows the large warning and lets only an admin retry storage', async () => {
 });
 
 it('selects a remaining group after leaving the group named in the URL', async () => {
-  __history.reset('/istota/groups/?group=team&view=members');
+  __history.reset('/istota/groups/?group=team');
   const other = { ...group, group_id: 'other', display_name: 'Other team' };
   api.deleteGroupMember.mockResolvedValue({ ...group, role: null });
   render(Groups);
@@ -328,7 +409,7 @@ it('refuses an editor reload after the notebook became unreadable', async () => 
 });
 
 it('keeps an owner metadata draft when reloading a revision conflict', async () => {
-  __history.reset('/istota/groups/?group=team&view=members');
+  __history.reset('/istota/groups/?group=team');
   const owned = { ...group, capabilities: { ...group.capabilities, manage: true } };
   api.getGroup.mockResolvedValue(owned);
   api.updateGroup.mockRejectedValueOnce(

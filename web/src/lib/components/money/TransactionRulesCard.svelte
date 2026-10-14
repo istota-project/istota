@@ -620,7 +620,7 @@
                   >
                     Save
                   </Button>
-                  <Button variant="ghost" size="sm" onclick={() => (editingId = null)}>
+                  <Button variant="secondary" size="sm" onclick={() => (editingId = null)}>
                     Cancel
                   </Button>
                 </div>

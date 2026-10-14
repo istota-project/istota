@@ -222,9 +222,9 @@
                     >{user.identity?.email ?? '—'}</td
                   >
                   <td class="access">
-                    {#if user.identity?.disabled}<Badge variant="partial">Disabled</Badge>{:else}
-                      <span>{signInStateLabel(user.identity, user.state)}</span>
-                    {/if}
+                    <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
+                      >{signInStateLabel(user.identity, user.state)}</Badge
+                    >
                   </td>
                   <td class="last-login"
                     >{user.identity
@@ -286,7 +286,7 @@
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
     <div class="form-actions dialog-actions">
-      <Button variant="ghost" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
+      <Button variant="secondary" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
       <Button
         type="submit"
         variant="primary"

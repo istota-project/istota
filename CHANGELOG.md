@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
 
-- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Files. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
+- Groups has a member overview: the shared notebook, members, linked rooms ordered by latest activity, and the newest shared files, as cards on one page. Files links back to it. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
 - Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
 - Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
 
@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Buttons and toggle chips in the web UI are visible before you hover them. Lesser actions such as Cancel used to render as bare text that looked like an offset link, and toggle chips disappeared against cards and dialogs; both now have a fill or outline at rest, including when disabled.
+- Markdown files open in the viewer as a readable page: headings at their own sizes, a comfortable line length, and frontmatter in a small collapsed panel set apart from the document. The Rendered and Source switch moved into the viewer's header beside Download.
 - The Workspace page is now called Files and sits before Groups in the navigation; the dashboard has a Groups tile beside it. In the Files sidebar, My files, Rooms, Groups, Configuration and Skill instructions sit under one section named after the assistant, and rooms, groups and config files open as lists in the main page instead of filling the sidebar.
 - Google Workspace setup documentation now covers the operator's OAuth client, consent screen and credential storage. It distinguishes instance setup from each user's account connection and explains common connection failures.
 - New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
@@ -35,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a phone, the file editor and the plain-text file view now show text at the same size as on a desktop, rather than enlarged. The page still does not zoom in when you tap into the text.
 - Cancelling browser setup on a Mac now returns the VM setup result even when it finishes while cancellation is being acknowledged.
 
 - **Re-running setup in the terminal keeps your answers.** `istota-stack setup --force` used to offer first-run defaults, so pressing Enter could change the address and move the local VM's web page off the port it is reached on. Every question now defaults to the current value, stored credentials are kept unless you enter new ones, and the previous config and stack files are backed up first.

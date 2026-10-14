@@ -102,8 +102,17 @@ describe('the admin user editor', () => {
     expect(addresses).toBeDisabled();
     expect(within(dialog).getAllByText('Set by deployment')).toHaveLength(2);
     expect(within(dialog).getByRole('button', { name: 'feeds' })).toBeDisabled();
-    expect(within(dialog).getByRole('button', { name: 'browse' })).not.toBeDisabled();
+    expect(within(dialog).getByRole('combobox', { name: 'Disabled skills' })).not.toBeDisabled();
     expect(within(dialog).getByRole('textbox', { name: /Display name/ })).not.toBeDisabled();
+  });
+
+  it('shows managed disabled skills as chips with no way to change them', async () => {
+    const managed = detail({ managed: ['disabled_skills'] });
+    managed.profile.disabled_skills = ['browse'];
+    const { dialog } = await open(managed);
+    expect(within(dialog).getByText('browse')).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Remove browse' })).toBeNull();
+    expect(within(dialog).queryByRole('combobox', { name: 'Disabled skills' })).toBeNull();
   });
 
   it('marks the field a 409 names and keeps the draft', async () => {
@@ -120,9 +129,13 @@ describe('the admin user editor', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('toggles a disabled skill as a chip', async () => {
+  it('turns a skill off by picking it from the search list, and back on from its chip', async () => {
     const { dialog } = await open();
-    await fireEvent.click(within(dialog).getByRole('button', { name: 'browse' }));
+    const search = within(dialog).getByRole('combobox', { name: 'Disabled skills' });
+    await fireEvent.input(search, { target: { value: 'brow' } });
+    await fireEvent.keyDown(search, { key: 'ArrowDown' });
+    await fireEvent.keyDown(search, { key: 'Enter' });
+    await within(dialog).findByRole('button', { name: 'Remove browse' });
     await fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await waitFor(() =>
       expect(api.updateAdminUser).toHaveBeenCalledWith('bob', { disabled_skills: ['browse'] }),

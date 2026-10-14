@@ -304,7 +304,7 @@
 {:else}
   <SettingsCard title="This device" description="Background tracking on this phone.">
     {#snippet actions()}
-      <Button variant="ghost" size="sm" onclick={refresh} disabled={busy}>Refresh</Button>
+      <Button variant="secondary" size="sm" onclick={refresh} disabled={busy}>Refresh</Button>
     {/snippet}
 
     {#if error}<p class="tracker-error">{error}</p>{/if}
@@ -378,7 +378,7 @@
               </Button>
             {/if}
             {#if status.authorization !== 'always'}
-              <Button variant="ghost" size="sm" onclick={askPermission} disabled={busy}>
+              <Button variant="secondary" size="sm" onclick={askPermission} disabled={busy}>
                 {status.authorization === 'whenInUse' ? 'Allow always' : 'Allow location'}
               </Button>
             {/if}
@@ -462,7 +462,7 @@
       <div class="tracker-actions">
         <Button variant="secondary" size="sm" onclick={flush} disabled={busy}>Send now</Button>
         {#if canScan}
-          <Button variant="ghost" size="sm" onclick={scan} disabled={busy}>Rescan code</Button>
+          <Button variant="secondary" size="sm" onclick={scan} disabled={busy}>Rescan code</Button>
         {/if}
       </div>
     {/if}

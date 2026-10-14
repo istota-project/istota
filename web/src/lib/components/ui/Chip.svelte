@@ -48,7 +48,10 @@
     user-select: none;
     cursor: pointer;
     color: var(--text-muted);
-    background: var(--surface-card);
+    /* Outlined at rest: a --surface-card fill matched the card or dialog it
+       sat on and left the label looking like plain text. */
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-default);
   }
 
   .chip.icon {
@@ -57,17 +60,20 @@
 
   .chip:hover:not(:disabled) {
     color: var(--text-primary);
-    background: var(--surface-raised);
-  }
-
-  .chip:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    box-shadow: inset 0 0 0 1px var(--border-hover);
   }
 
   .chip.checked {
     background: var(--surface-raised);
+    box-shadow: inset 0 0 0 1px var(--border-hover);
     color: var(--text-primary);
+  }
+
+  /* Dimmed rather than faded out: a toggle the deployment owns still shows
+     its outline and its state. */
+  .chip:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
   }
 
   @media (max-width: 640px) {

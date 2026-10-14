@@ -188,7 +188,7 @@
                     : 'Login & save cookies'}
               </Button>
               {#if loginChallenge}
-                <Button variant="ghost" size="sm" disabled={loginBusy} onclick={resetLogin}>
+                <Button variant="secondary" size="sm" disabled={loginBusy} onclick={resetLogin}>
                   Start over
                 </Button>
               {/if}

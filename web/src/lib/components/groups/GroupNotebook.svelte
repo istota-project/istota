@@ -3,6 +3,9 @@
   import { Button, EmptyState, NoticeBanner } from '$lib/components/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
+  import { SettingsCard } from '$lib/components/settings';
+  import { formatBytes } from '$lib/format';
+  import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import {
     getGroupMemory,
     saveGroupMemory,
@@ -123,67 +126,86 @@
 </script>
 
 <div class="notebook">
-  <NoticeBanner variant="info" title={charter} />
-  {#if loading}
-    <p class="center-msg">Loading notebook…</p>
-  {:else if error}
-    <p class="center-msg error">{error}</p>
-    <div class="actions">
-      <Button onclick={loadNotebook}>Reload notebook</Button>
-      {#if user.is_admin && storageUnavailable}<Button onclick={retryStorage}
-          >Retry storage setup</Button
+  {#if notebook?.large}<NoticeBanner variant="warn" title="Large notebook" collapsed={false}
+      >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
+    >{/if}
+  {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
+  <SettingsCard title="Notebook" description={charter}>
+    {#snippet status()}{#if notebook}<span class="caption">{formatBytes(notebook.bytes)}</span
+        >{/if}{/snippet}
+    {#snippet actions()}{#if notebook}
+        <Button size="sm" onclick={openActivity}>Recorded changes</Button>
+        <Button size="sm" variant="primary" onclick={() => (editorOpen = true)}
+          >Edit notebook</Button
+        >
+      {/if}{/snippet}
+    {#if loading}<p class="caption">Loading notebook…</p>
+    {:else if error}
+      <p class="banner error">{error}</p>
+      <div class="actions">
+        <Button size="sm" onclick={loadNotebook}>Reload notebook</Button>
+        {#if user.is_admin && storageUnavailable}<Button size="sm" onclick={retryStorage}
+            >Retry storage setup</Button
+          >{/if}
+      </div>
+    {:else if notebook}
+      {#if notebook.content.trim()}<div class="reading">
+          <TextPreview name="GROUP.md" text={notebook.content} untrusted />
+        </div>
+      {:else}<EmptyState size="sm"
+          >The shared notebook is empty. Add facts you want the group to remember.</EmptyState
         >{/if}
-    </div>
-  {:else if notebook}
-    <div class="actions">
-      <Button onclick={() => (editorOpen = true)}>Edit notebook</Button>
-      <Button onclick={openActivity}>Recorded changes</Button>
-    </div>
-    {#if notebook.large}<NoticeBanner variant="warn" title="Large notebook" collapsed={false}
-        >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
-      >{/if}
-    {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
-    <p class="caption">
-      {notebook.bytes.toLocaleString()} bytes{#if notebook.last_change}
-        · Last recorded change: {notebook.last_change.user_id || 'Unknown actor'} · {notebook
-          .last_change.ts || 'Unknown time'}{/if}
-    </p>
-    {#if notebook.content.trim()}<TextPreview name="GROUP.md" text={notebook.content} untrusted />
-    {:else}<EmptyState size="sm"
-        >The shared notebook is empty. Add facts you want the group to remember.</EmptyState
-      >{/if}
-  {/if}
+      {#if notebook.last_change}<p class="caption last-change">
+          Last changed by {notebook.last_change.user_id ||
+            'an unknown actor'}{#if notebook.last_change.ts}
+            <span title={formatDateTime(notebook.last_change.ts)}
+              >{formatRelative(notebook.last_change.ts)}</span
+            >{/if}
+        </p>{/if}
+    {/if}
+  </SettingsCard>
   {#if activityOpen}
-    <section aria-label="Recorded changes">
-      <h2>Recorded changes</h2>
-      <p class="caption">
-        Direct file edits may not appear here. These records are not restorable versions.
-      </p>
-      {#each entries as entry (entry.id)}
-        <article>
-          <p>
-            {entry.user_id || 'Unknown actor'} · {entry.ts || 'Unknown time'}{#if entry.source}
-              · {entry.source}{/if}
-          </p>
-          <ul>
-            {#each entry.applied ?? [] as outcome}<li>
-                {outcome.op?.op || 'change'}: {outcome.outcome || 'applied'}
-              </li>{/each}
-            {#each entry.rejected ?? [] as outcome}<li>
-                {outcome.op?.op || 'change'}: {outcome.outcome || 'rejected'}{#if outcome.reason}
-                  — {outcome.reason}{/if}
-              </li>{/each}
-          </ul>
-        </article>
-      {/each}
+    <SettingsCard
+      title="Recorded changes"
+      description="Direct file edits may not appear here. These records are not restorable versions."
+    >
+      {#if entries.length}
+        <ol class="changes">
+          {#each entries as entry (entry.id)}
+            <li class="change">
+              <div class="change-head">
+                <span class="change-actor">{entry.user_id || 'Unknown actor'}</span>
+                <span class="caption" title={formatDateTime(entry.ts)}
+                  >{entry.ts ? formatRelative(entry.ts) : 'Unknown time'}{#if entry.source}
+                    · {entry.source}{/if}</span
+                >
+              </div>
+              <ul class="change-outcomes">
+                {#each entry.applied ?? [] as outcome}<li>
+                    {outcome.op?.op || 'change'}: {outcome.outcome || 'applied'}
+                  </li>{/each}
+                {#each entry.rejected ?? [] as outcome}<li class="rejected">
+                    {outcome.op?.op || 'change'}: {outcome.outcome ||
+                      'rejected'}{#if outcome.reason}
+                      — {outcome.reason}{/if}
+                  </li>{/each}
+              </ul>
+            </li>
+          {/each}
+        </ol>
+      {/if}
       {#if activityError}<p class="banner error">{activityError}</p>
-        <Button onclick={() => loadActivity()}>Retry recorded changes</Button>
+        <div class="actions">
+          <Button size="sm" onclick={() => loadActivity()}>Retry recorded changes</Button>
+        </div>
       {:else if !entries.length && !activityBusy}<EmptyState size="sm"
           >No recorded changes yet.</EmptyState
         >{/if}
       {#if activityBusy}<p class="caption">Loading recorded changes…</p>
-      {:else if cursor}<Button onclick={() => loadActivity(true)}>Load older changes</Button>{/if}
-    </section>
+      {:else if cursor}<div class="actions">
+          <Button size="sm" onclick={() => loadActivity(true)}>Load older changes</Button>
+        </div>{/if}
+    </SettingsCard>
   {/if}
 </div>
 <TextFileEditor
@@ -203,19 +225,68 @@
 <style>
   .notebook {
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: var(--space-3);
+  }
+  /* Takes only spare height, so on the overview the card fills a grid row a
+     taller neighbour set, and anywhere else it keeps its natural size. */
+  .notebook > :global(.card) {
+    flex-grow: 1;
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
   }
-  h2 {
-    font-size: var(--text-lg);
+  /* Capped so a long notebook scrolls in its card rather than pushing every
+     other card on the overview off the screen. */
+  .reading {
+    max-height: 28rem;
+    overflow: auto;
+    padding: var(--space-4);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-base);
   }
-  article {
-    border-bottom: 1px solid var(--border-subtle);
+  .reading :global(.markdown > :first-child) {
+    margin-top: 0;
+  }
+  .reading :global(.markdown > :last-child) {
+    margin-bottom: 0;
+  }
+  .last-change {
+    margin: var(--space-2) 0 0;
+  }
+  .changes {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .change {
     padding-block: var(--space-2);
+    border-bottom: 1px solid var(--border-subtle);
+    overflow-wrap: anywhere;
+  }
+  .change:last-child {
+    border-bottom: none;
+  }
+  .change-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-3);
+  }
+  .change-actor {
+    font-weight: 500;
+  }
+  .change-outcomes {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+  .change-outcomes .rejected {
+    color: var(--status-danger-fg);
   }
 </style>
