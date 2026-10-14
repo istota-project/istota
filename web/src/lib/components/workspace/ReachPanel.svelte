@@ -14,8 +14,9 @@
     <div class="reach-body">
       <p class="reach-legend">
         <Bot size={14} role="img" aria-label="The robot icon" /> in the sidebar means your tasks can reach
-        that place, in any of your rooms, or for a room folder, only in that room. Places without it are
-        visible to you only.
+        that place, in any of your rooms. A room folder is reached only in that room, and a group folder
+        in a shared room only when everyone there is in the group. Places without it are visible to you
+        only.
       </p>
       {#each notes as note}<p>{note}</p>{/each}
       <dl>
@@ -37,7 +38,7 @@
     border-bottom: 1px solid var(--border-subtle);
     padding: var(--space-3);
     font-size: var(--text-sm);
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
   .reach-notice {
     margin: 0;

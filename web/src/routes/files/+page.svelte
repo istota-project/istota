@@ -30,6 +30,7 @@
     createWorkspaceFolder,
     deleteWorkspaceEntry,
     uploadWorkspaceFile,
+    type WorkspaceAccess,
     type WorkspacePlace,
     type WorkspaceListing,
     getWorkspaceScripts,
@@ -59,8 +60,13 @@
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';
-  import { placeForRef, reachesTasks } from '$lib/components/workspace/reach';
-  import { Bot, BotOff } from '@lucide/svelte';
+  import {
+    placeForRef,
+    sharedAccess,
+    taskReachNote,
+    type TaskReachScope,
+  } from '$lib/components/workspace/reach';
+  import { BotOff } from '@lucide/svelte';
   import PinnedList from '$lib/components/workspace/PinnedList.svelte';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
 
@@ -201,24 +207,28 @@
       },
     ),
   );
+  // Configuration, skills, scripts and prompts all live in the user's own folder, so they reach as it does.
+  let botReach = $derived.by(() => {
+    const result: Partial<Record<IndexView, { access: WorkspaceAccess; scope?: TaskReachScope }>> =
+      {};
+    const homeAccess = places.find((item) => item.kind === 'home')?.reach.private;
+    if (homeAccess) {
+      for (const item of ['config', 'skills', 'scripts', 'prompts'] as IndexView[]) {
+        result[item] = { access: homeAccess };
+      }
+    }
+    const roomAccess = sharedAccess(places.filter((item) => item.kind === 'room'));
+    if (roomAccess) result.rooms = { access: roomAccess, scope: 'rooms' };
+    const groupAccess = sharedAccess(places.filter((item) => item.kind === 'group'));
+    if (groupAccess) result.groups = { access: groupAccess, scope: 'group' };
+    return result;
+  });
+  function indexReachNote(item: IndexView): string | null {
+    const entry = botReach[item];
+    return entry ? taskReachNote(entry.access, botName, entry.scope) : null;
+  }
   let parentView = $derived(indexViewForKind(place?.kind));
   const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
-  // Pins resolve to any place, rooms included, so the legend has to speak for them too.
-  let pinPlaces = $derived(
-    pins
-      .filter((pin) => pin.available && pin.provider === 'workspace')
-      .map((pin) => placeForRef(places, pin.ref))
-      .filter((item): item is WorkspacePlace => !!item && reachesTasks(item.reach.private)),
-  );
-  let legendRoomPin = $derived(pinPlaces.some((item) => item.kind === 'room'));
-  let legendShown = $derived(
-    pinPlaces.length > 0 ||
-      places.some(
-        (item) =>
-          (item.kind === 'home' || sidebarKinds.includes(item.kind)) &&
-          reachesTasks(item.reach.private),
-      ),
-  );
   let botCurrent = $derived<IndexView | 'home' | null>(
     view ?? (place?.kind === 'home' ? 'home' : indexViewForKind(place?.kind)),
   );
@@ -553,12 +563,6 @@
           {href}
           onNavigate={navigate}
         />
-        {#if legendShown}
-          <p class="caption reach-legend">
-            <Bot size={14} aria-hidden="true" />{botName} can use these in your tasks, in any of your
-            rooms.{legendRoomPin ? ' A pinned room file only in its own room.' : ''}
-          </p>
-        {/if}
       </Sidebar>
     {/if}
   {/snippet}
@@ -599,7 +603,8 @@
       {#if view === 'rooms'}
         <PlaceIndex
           label="Rooms"
-          caption="Each room's folder. A task reaches a room's folder only in that room."
+          caption="Each room's folder."
+          reachNote={indexReachNote('rooms')}
           empty="You have no room folders."
           places={places.filter((item) => item.kind === 'room')}
           {href}
@@ -609,6 +614,7 @@
         <PlaceIndex
           label="Groups"
           caption="Folders shared with the groups you belong to."
+          reachNote={indexReachNote('groups')}
           empty="You have no group folders."
           places={places.filter((item) => item.kind === 'group')}
           {href}
@@ -622,6 +628,7 @@
             ? `Programs in your scripts folder. ${botName} runs them from scheduled jobs and checks.`
             : 'Prompts in your scripts folder that scheduled jobs read as their instructions.'}
           empty={view === 'scripts' ? 'No scripts yet.' : 'No prompt files yet.'}
+          reachNote={indexReachNote(view)}
           index={scriptsIndex}
           loading={scriptsLoading}
           error={scriptsError}
@@ -638,6 +645,7 @@
           empty={view === 'config'
             ? 'No configuration files are available.'
             : 'No skills take instructions from you.'}
+          reachNote={indexReachNote(view)}
           files={configFiles.filter(
             (file) => file.kind === (view === 'config' ? 'config' : 'skill'),
           )}
@@ -904,18 +912,6 @@
 </Modal>
 
 <style>
-  .reach-legend {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin: var(--space-3) 0 0;
-    padding: var(--space-3) var(--space-2) 0;
-    border-top: 1px solid var(--border-subtle);
-  }
-  .reach-legend :global(svg) {
-    flex-shrink: 0;
-    color: var(--accent-blue);
-  }
   .only-you {
     display: inline-flex;
     align-items: center;

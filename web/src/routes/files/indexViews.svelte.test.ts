@@ -93,6 +93,56 @@ it('collects the bot folder entries under one section named for the bot', async 
   expect(within(sidebar).getByRole('button', { name: /Linked folders/ })).toBeTruthy();
 });
 
+async function openIndex(name: string) {
+  const section = await botSection();
+  await fireEvent.click(within(section).getByRole('link', { name }));
+  return screen.findByRole('region', { name });
+}
+
+it('marks only My files in the bot section and puts the reach on each index', async () => {
+  render(Files);
+  const section = await botSection();
+  await within(section).findByRole('link', { name: 'Configuration' });
+  const marked = within(section)
+    .getAllByRole('link')
+    .filter((link) => link.querySelector('.task-reach'))
+    .map((link) => link.querySelector('.view-name')?.textContent);
+  expect(marked).toEqual(['My files']);
+
+  const config = await openIndex('Configuration');
+  expect(
+    within(config).getByText('Helper can read and change these files, in any of your rooms.'),
+  ).toBeTruthy();
+  const rooms = await openIndex('Rooms');
+  expect(
+    within(rooms).getByText('Helper can read and change these files, each only in its own room.'),
+  ).toBeTruthy();
+  // The fixture's group is not reachable from a private room, so its index claims nothing.
+  const groups = await openIndex('Groups');
+  expect(groups.querySelector('.reach-note')).toBeNull();
+});
+
+it('says when a group folder reaches a shared room', async () => {
+  const shared = { ...group, reach: { ...reach } };
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, room, shared], notes: [] });
+  render(Files);
+  const groups = await openIndex('Groups');
+  expect(
+    within(groups).getByText(
+      'Helper can read and change these files, in a shared room only when everyone there is in the group.',
+    ),
+  ).toBeTruthy();
+});
+
+it('claims no reach for an index whose folders differ in access', async () => {
+  const other = { ...group, id: 'group:other', label: 'Other', reach: { ...reach } };
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, room, group, other], notes: [] });
+  render(Files);
+  const groups = await openIndex('Groups');
+  await within(groups).findByText('Other');
+  expect(groups.querySelector('.reach-note')).toBeNull();
+});
+
 it('leaves out the entries with nothing behind them', async () => {
   api.getWorkspacePlaces.mockResolvedValue({ places: [home], notes: [] });
   api.getWorkspaceConfigFiles.mockResolvedValue({
@@ -230,26 +280,4 @@ it('keeps a file dropped on an index view from navigating the tab', async () => 
     dataTransfer: { files: [], types: ['Files'] },
   });
   expect(notCancelled).toBe(false);
-});
-
-it('explains a pinned room file in the legend', async () => {
-  api.getWorkspacePins.mockResolvedValue({
-    pins: [
-      {
-        id: 1,
-        provider: 'workspace',
-        ref: '/Channels/sample/notes.md',
-        name: 'Room notes',
-        available: true,
-        is_dir: false,
-      },
-    ],
-  });
-  render(Files);
-  const sidebar = await screen.findByRole('complementary');
-  expect(
-    await within(sidebar).findByText(
-      'Helper can use these in your tasks, in any of your rooms. A pinned room file only in its own room.',
-    ),
-  ).toBeTruthy();
 });

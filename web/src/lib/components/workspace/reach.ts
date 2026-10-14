@@ -40,11 +40,42 @@ export function reachesTasks(access: WorkspaceAccess): boolean {
 }
 
 // An access kind this client does not know gets no description, so no icon claims reach it may not have.
-// A room folder is bound only for that room's own tasks, so its description says so.
-export function taskReachDescription(access: WorkspaceAccess, room = false): string | null {
+// Where a folder reaches less than every room, its description says so: a room folder is bound
+// only for that room's own tasks, a group folder in a shared room only when every reader belongs.
+export type TaskReachScope = 'room' | 'rooms' | 'group';
+
+const SCOPE_SUFFIXES: Record<TaskReachScope, string> = {
+  room: 'in this room only',
+  rooms: 'each only in its own room',
+  group: 'in a shared room only when everyone there is in the group',
+};
+
+export function taskReachDescription(
+  access: WorkspaceAccess,
+  scope?: TaskReachScope,
+): string | null {
   if (!Object.hasOwn(TASK_REACH_DESCRIPTIONS, access)) return null;
   const description = TASK_REACH_DESCRIPTIONS[access];
-  return description && room ? `${description}, in this room only` : description;
+  return description && scope ? `${description}, ${SCOPE_SUFFIXES[scope]}` : description;
+}
+
+// The index caption's version of the icon, for a list whose every entry shares one reach.
+// Only read and read-write are spelled out; any other access leaves the caption without a note.
+export function taskReachNote(
+  access: WorkspaceAccess,
+  botName: string,
+  scope?: TaskReachScope,
+): string | null {
+  const verb = access === 'rw' ? 'can read and change' : access === 'ro' ? 'can read' : null;
+  if (!verb) return null;
+  return `${botName} ${verb} these files, ${scope ? SCOPE_SUFFIXES[scope] : 'in any of your rooms'}.`;
+}
+
+// An index's places share one icon only when they share one access; a mixed set claims none.
+export function sharedAccess(places: WorkspacePlace[]): WorkspaceAccess | null {
+  const first = places[0]?.reach.private;
+  if (!first) return null;
+  return places.every((place) => place.reach.private === first) ? first : null;
 }
 
 export function placeForRef(places: WorkspacePlace[], ref: string): WorkspacePlace | null {

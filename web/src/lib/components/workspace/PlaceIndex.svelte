@@ -1,4 +1,5 @@
 <script lang="ts">
+  import IndexCaption from './IndexCaption.svelte';
   import { MessageSquare, Users } from '@lucide/svelte';
   import { EmptyState } from '$lib/components/ui';
   import type { WorkspacePlace } from '$lib/api';
@@ -7,6 +8,7 @@
   let {
     label,
     caption,
+    reachNote = null,
     empty,
     places,
     href,
@@ -14,6 +16,8 @@
   }: {
     label: string;
     caption: string;
+    /** The bot icon's sentence for the whole list, when every entry shares one reach. */
+    reachNote?: string | null;
     empty: string;
     places: WorkspacePlace[];
     href: (place: string, path?: string) => string;
@@ -23,7 +27,7 @@
 
 <section class="index" aria-label={label}>
   {#if places.length}
-    <p class="caption index-caption">{caption}</p>
+    <IndexCaption {caption} {reachNote} />
     <ul>
       {#each places as place (place.id)}
         <li class="index-row">
@@ -52,10 +56,6 @@
     list-style: none;
     margin: 0;
     padding: 0;
-  }
-  .index-caption {
-    margin: 0;
-    padding: var(--space-3);
   }
   .index-row {
     display: flex;

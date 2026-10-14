@@ -1,4 +1,5 @@
 <script lang="ts">
+  import IndexCaption from './IndexCaption.svelte';
   import { Button, EmptyState, KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { WorkspaceConfigFile } from '$lib/api';
   import { configFileDescription, configFileDetail, configFileLabel } from './configFiles';
@@ -6,6 +7,7 @@
   let {
     label,
     caption,
+    reachNote = null,
     empty,
     files,
     loading,
@@ -16,6 +18,8 @@
   }: {
     label: string;
     caption: string;
+    /** The bot icon's sentence for the whole list, when every entry shares one reach. */
+    reachNote?: string | null;
     empty: string;
     files: WorkspaceConfigFile[];
     loading: boolean;
@@ -39,7 +43,7 @@
   {:else if loading}
     <div class="center-msg">Loading…</div>
   {:else if files.length}
-    <p class="caption index-caption">{caption}</p>
+    <IndexCaption {caption} {reachNote} />
     <ul>
       {#each files as file (file.name)}
         <li class="index-row">
@@ -74,10 +78,6 @@
     list-style: none;
     margin: 0;
     padding: 0;
-  }
-  .index-caption {
-    margin: 0;
-    padding: var(--space-3);
   }
   .index-row {
     display: flex;

@@ -142,7 +142,7 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
   expect(screen.getByText('No access')).toBeTruthy();
   const legend = container.querySelector('details .reach-legend')!;
   expect(legend).toHaveTextContent(
-    'in the sidebar means your tasks can reach that place, in any of your rooms, or for a room folder, only in that room. Places without it are visible to you only.',
+    'in the sidebar means your tasks can reach that place, in any of your rooms. A room folder is reached only in that room, and a group folder in a shared room only when everyone there is in the group. Places without it are visible to you only.',
   );
   expect(within(legend as HTMLElement).getByRole('img', { name: 'The robot icon' })).toBeTruthy();
 });
@@ -156,20 +156,17 @@ it('marks the places a task can reach and describes the mark without renaming th
   expect(link).toHaveAccessibleDescription(description);
   const describedBy = link.getAttribute('aria-describedby')!;
   expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(description);
-  expect(
-    within(sidebar).getByText('Istota can use these in your tasks, in any of your rooms.'),
-  ).toBeTruthy();
+  expect(sidebar.querySelector('.reach-legend')).toBeNull();
   await openView('Rooms');
   const rooms = await screen.findByRole('region', { name: 'Rooms' });
   expect(within(rooms).getByText('Read-write')).toBeTruthy();
+  expect(within(rooms).getByText("Each room's folder.")).toBeTruthy();
   expect(
-    within(rooms).getByText(
-      "Each room's folder. A task reaches a room's folder only in that room.",
-    ),
+    within(rooms).getByText('Istota can read and change these files, each only in its own room.'),
   ).toBeTruthy();
 });
 
-it('leaves the Nextcloud row unmarked and drops the legend when nothing is reachable', async () => {
+it('leaves the Nextcloud row unmarked', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
     places: [
       {
@@ -196,9 +193,6 @@ it('leaves the Nextcloud row unmarked and drops the legend when nothing is reach
   const link = await within(sidebar).findByRole('link', { name: 'Nextcloud' });
   expect(link).not.toHaveAttribute('aria-describedby');
   expect(link.querySelector('.task-reach')).toBeNull();
-  expect(
-    within(sidebar).queryByText('Istota can use these in your tasks, in any of your rooms.'),
-  ).toBeNull();
 });
 
 it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () => {
