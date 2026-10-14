@@ -223,6 +223,11 @@ def revoke_location_shares(conn, *, actor_user_id, room_token=None, all_rooms=Fa
         return {"stopped": len(rows)}
 
 
+def invalidate_room_location_shares(conn, room_token, *, reason="audience_changed"):
+    """Invalidate consent without committing the caller's room mutation."""
+    db._invalidate_room_location_shares(conn, room_token, reason=reason)
+
+
 def _timed_room_terms(conn, config, room_token, owner_user_id):
     """Freeze actual readers separately from the owner's current membership."""
     from istota.transport import ParticipantRef

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Room location sharing stops when readers or transport identities change, or when the room is archived or switched off. Rejoining or reopening the room requires fresh approval; ordinary roster refreshes keep sharing active.
+
 - Request timed location sharing with a room through a private approval preview. The preview names the readers, precision and duration; approval fixes the expiry, and stopping also cancels pending requests.
 
 - Owners can list and stop their location-sharing permissions, including pending requests. Stopping everywhere returns only a count when requested in a shared room.

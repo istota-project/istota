@@ -4942,6 +4942,36 @@ def register_bound_room(
     return None
 
 
+def _invalidate_room_location_shares(
+    conn: sqlite3.Connection, room_token: str, *, reason: str = "audience_changed",
+) -> None:
+    """Close room consent inside the roster writer's existing transaction."""
+    # Older databases run roster migrations before schema.sql creates grants.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='location_share_grants'",
+    ).fetchone() is None:
+        return
+    rows = conn.execute(
+        "UPDATE location_share_grants SET state=CASE WHEN state='held' THEN 'cancelled' "
+        "ELSE 'revoked' END, closed_at=datetime('now'), close_reason=? "
+        "WHERE room_token=? AND state IN ('held','active') RETURNING request_id",
+        (reason, room_token),
+    ).fetchall()
+    for row in rows:
+        task = conn.execute(
+            "SELECT id FROM tasks WHERE whatsapp_confirmation_request_id=? "
+            "AND status='pending_confirmation'",
+            (row["request_id"],),
+        ).fetchone()
+        if task is not None:
+            cancel_task(conn, task["id"])
+        conn.execute(
+            "UPDATE whatsapp_skill_requests SET state='cancelled', error_code=?, "
+            "closed_at=datetime('now'), updated_at=datetime('now') WHERE id=? AND state='held'",
+            (reason, row["request_id"]),
+        )
+
+
 def add_room_member(
     conn: sqlite3.Connection, room_token: str, user_id: str,
     *, acknowledged: bool = False,
@@ -4959,6 +4989,7 @@ def add_room_member(
         (room_token, user_id),
     )
     if joining:
+        _invalidate_room_location_shares(conn, room_token)
         note_audience_join(
             conn, room_token, f"u:{user_id}", audience,
             reason="member_add", acknowledged=acknowledged,
@@ -4974,16 +5005,18 @@ def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) 
     row left present would keep `room_is_shared` true for a room they left.
     """
     room_token = _canonical_room_token(conn, room_token, cross_surface=False)
-    conn.execute(
+    removed = conn.execute(
         "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
         (room_token, user_id),
     )
-    conn.execute(
+    departed = conn.execute(
         "UPDATE room_participants SET left_at = datetime('now') "
         "WHERE room_token = ? AND surface = 'web' AND user_id = ? "
         "AND left_at IS NULL",
         (room_token, user_id),
     )
+    if removed.rowcount or departed.rowcount:
+        _invalidate_room_location_shares(conn, room_token)
 
 
 def is_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
@@ -5163,6 +5196,7 @@ def upsert_room_participant(
     user_id: str | None = None,
     display_name: str | None = None,
     acknowledged: bool = False,
+    is_own_bot: bool = False,
 ) -> int:
     """Record a participant as present in a room; the row's id.
 
@@ -5179,11 +5213,12 @@ def upsert_room_participant(
     """
     if kind not in PARTICIPANT_KINDS:
         raise ValueError(f"unknown participant kind: {kind!r}")
-    joining = kind != "agent" and conn.execute(
-        "SELECT 1 FROM room_participants WHERE room_token = ? AND surface = ? "
+    previous = conn.execute(
+        "SELECT kind, user_id FROM room_participants WHERE room_token = ? AND surface = ? "
         "AND surface_ref = ? AND left_at IS NULL",
         (room_token, surface, surface_ref),
-    ).fetchone() is None
+    ).fetchone()
+    joining = kind != "agent" and previous is None
     audience = audience_persons(conn, room_token) if joining else set()
     row = conn.execute(
         "INSERT INTO room_participants "
@@ -5196,6 +5231,10 @@ def upsert_room_participant(
         "RETURNING id",
         (room_token, surface, surface_ref, user_id or None, kind, display_name or None),
     ).fetchone()
+    if ((previous is None and not (is_own_bot and kind == "agent"))
+            or (previous is not None and (previous["kind"] != kind
+                or (user_id and previous["user_id"] != user_id)))):
+        _invalidate_room_location_shares(conn, room_token)
     if joining:
         note_audience_join(
             conn, room_token,
@@ -5231,6 +5270,8 @@ def sync_room_roster(
         f"AND kind != 'agent' {exclusion}",
         (room_token, surface, *present),
     )
+    if cur.rowcount:
+        _invalidate_room_location_shares(conn, room_token)
     return cur.rowcount or 0
 
 
@@ -5583,10 +5624,12 @@ def list_rooms(
 
 
 def set_room_archived(conn: sqlite3.Connection, token: str, archived: bool) -> None:
-    conn.execute(
-        "UPDATE rooms SET archived = ? WHERE token = ?",
-        (1 if archived else 0, token),
+    cur = conn.execute(
+        "UPDATE rooms SET archived = ? WHERE token = ? AND archived != ?",
+        (1 if archived else 0, token, 1 if archived else 0),
     )
+    if cur.rowcount:
+        _invalidate_room_location_shares(conn, token, reason="room_archived")
 
 
 def archive_orphaned_talk_rooms(
@@ -5614,9 +5657,7 @@ def archive_orphaned_talk_rooms(
     archived = 0
     for row in rows:
         if row["talk_ref"] not in live_tokens:
-            conn.execute(
-                "UPDATE rooms SET archived = 1 WHERE token = ?", (row["token"],)
-            )
+            set_room_archived(conn, row["token"], True)
             archived += 1
     return archived
 
@@ -5828,6 +5869,7 @@ def add_room_binding(
         (room_token, surface, surface_ref),
     )
     if cur.rowcount > 0:
+        _invalidate_room_location_shares(conn, room_token, reason="binding_changed")
         return True
     row = conn.execute(
         "SELECT room_token FROM room_bindings WHERE surface = ? AND surface_ref = ?",
@@ -5885,6 +5927,8 @@ def replace_room_binding(
             "WHERE room_token = ? AND surface = ? AND surface_ref = ?",
             (surface_ref, room_token, surface, expected_ref),
         )
+    if cur.rowcount > 0 and expected_ref != surface_ref:
+        _invalidate_room_location_shares(conn, room_token, reason="binding_changed")
     return cur.rowcount > 0
 
 

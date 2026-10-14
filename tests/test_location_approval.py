@@ -278,7 +278,9 @@ def test_replay_is_immutable_and_second_hold_rolls_back(env):
         assert conn.execute("SELECT count(*) FROM location_share_grants").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM whatsapp_skill_requests").fetchone()[0] == 1
         db.add_web_room_member(conn, room, "carol")
-        assert request(conn, config, ident) == first
+        replay = request(conn, config, ident)
+        assert replay["status"] == "cancelled"
+        assert replay["request_id"] == first["request_id"]
         assert "carol" not in first["preview"]
 
 
@@ -345,7 +347,8 @@ def test_changed_approval_reports_refusal_and_commits_cancellation(env, monkeypa
     config, room = env
     task, grant = park(env)
     with db.get_db(config.db_path) as conn:
-        db.add_web_room_member(conn, room, "carol")
+        # Bypass invalidation to exercise approval's frozen-audience backstop.
+        conn.execute("INSERT INTO room_members(room_token,user_id) VALUES (?, 'carol')", (room,))
     if surface == "web":
         from istota.webui import app
         monkeypatch.setattr(app, "_config", config)
