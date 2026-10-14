@@ -430,3 +430,28 @@ class TestAGuestsTurn:
         host_dir = str((config.temp_dir / "alice").resolve())
         argv = seen["argv"]
         assert host_dir in [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
+
+
+def test_contacts_guest_scope_refuses_a_direct_proxy_call(config, tmp_path):
+    import json
+    import socket
+    from istota.sandbox.skill_proxy import SkillProxy
+
+    room = _room(config, shared=True)
+    member = _run(config, room)
+    assert "contacts" in member["allowed_skills"]
+    guest = _run(config, room, guest=True)
+    assert "contacts" in guest["disabled"]
+    assert "contacts" not in guest["allowed_skills"]
+    proxy = SkillProxy(tmp_path / "unused.sock", {}, guest["proxy_base_env"],
+                       allowed_skills=frozenset(guest["allowed_skills"]))
+    server, client = socket.socketpair()
+    try:
+        client.sendall(b'{"skill":"contacts","args":["books"]}\n')
+        proxy._handle_connection(server)
+        response = json.loads(client.recv(65536))
+        assert response["returncode"] == 1
+        assert response["reason"] == "unknown_skill"
+    finally:
+        server.close()
+        client.close()

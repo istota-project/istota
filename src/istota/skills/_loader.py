@@ -373,6 +373,8 @@ def effective_disabled_skills(
     if user_config:
         disabled |= set(user_config.disabled_skills)
     disabled |= capability_disabled_skills(skill_index, config.available_capabilities())
+    if "contacts" in skill_index and not config.carddav_url:
+        disabled.add("contacts")
     disabled |= set(withheld_scopes) & set(skill_index)
     return disabled
 

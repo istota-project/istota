@@ -316,3 +316,10 @@ def test_the_shipped_safe_set_is_exactly_the_reviewed_one(tmp_path):
     index = load_skill_index(empty)
     safe = {name for name, meta in index.items() if meta.shared_room == "safe"}
     assert safe == {"sensitive_actions", "untrusted_input", "room"}
+
+
+def test_contacts_are_withheld_on_a_guest_turn(tmp_path, make_task):
+    index = load_skill_index(tmp_path)
+    assert "contacts" in room_scopes.scope_names(index)
+    task = make_task(user_id="alice", conversation_token="room-1", guest_participant_id=7)
+    assert "contacts" in room_scopes.withheld_for_task(None, task, skill_index=index)
