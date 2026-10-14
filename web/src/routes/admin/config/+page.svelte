@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/state';
   import {
     getAdminConfig,
     listConfigRequests,
@@ -43,6 +44,17 @@
   let loading = $state(true);
   let error = $state('');
   let filter = $state('');
+  let appliedSection: string | null | undefined;
+
+  // Apply a navigation hint once, after the section list arrives. Reloads and
+  // filter edits must not restore a hint the admin has cleared or changed.
+  $effect(() => {
+    const section = page.url.searchParams.get('section');
+    if (!view || section === appliedSection) return;
+    appliedSection = section;
+    filter = view.sections.find((item) => item.key === section)?.key ?? '';
+  });
+
   let readOnlyCollapsed = $state(true);
   let draft = $state<ConfigDraft>(emptyDraft());
   let reviewing = $state(false);

@@ -250,6 +250,7 @@ if verb == "shell":
     if stack[:1] == ["setup-cancel"]:
         state["cancelled"] = True
         save()
+        time.sleep(state.get("cancel_reply_sleep", 0))
         sys.exit(0)
     if stack[:2] == ["setup", "--web"]:
         code = "ABCDE-FGHJK-MNPQR-STVWX"
@@ -1389,7 +1390,7 @@ class TestTheSetupVerb:
     def test_a_signal_cancels_the_vms_setup(self, running, sig):
         """Where a signal does not cross limactl, `setup-cancel` ends the VM's
         run, whose abort branch puts the old setup back; its status comes back."""
-        running.set(setup_web_sleep=30, cancel_rc=1)
+        running.set(setup_web_sleep=30, cancel_rc=1, cancel_reply_sleep=0.3)
         proc = subprocess.Popen(
             [BASH, str(MAC_CLI), "setup", "--web", "--force"], stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=running.env,

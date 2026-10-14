@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { configField, configPreview, configRequest, configView } from '$lib/test/adminConfig';
@@ -21,6 +22,10 @@ function mount(view: AdminConfigView, history: ConfigRequest[] = []) {
 }
 
 const imapHost = configField({ path: ['email', 'imap_host'], value: 'old', in_file: true });
+
+beforeEach(() => {
+  page.url = new URL('http://localhost/istota/admin/config');
+});
 
 afterEach(() => {
   cleanup();
@@ -327,4 +332,204 @@ describe('history', () => {
       }),
     );
   });
+});
+
+const googleFields = [
+  configField({
+    path: ['google_workspace', 'enabled'],
+    value: false,
+    default: false,
+    type: 'bool',
+    editor: 'bool',
+  }),
+  configField({ path: ['google_workspace', 'client_id'] }),
+  configField({
+    path: ['google_workspace', 'client_secret'],
+    secret: true,
+    set: true,
+    value: null,
+    editor: 'secret',
+    credential: { kind: 'file', name: 'istota_google_workspace_client_secret' },
+  }),
+  configField({
+    path: ['google_workspace', 'scopes'],
+    type: 'list',
+    editor: 'list',
+    value: ['https://www.googleapis.com/auth/drive.readonly'],
+    default: ['https://www.googleapis.com/auth/drive.readonly'],
+  }),
+];
+
+describe('section navigation', () => {
+  it('opens all Google fields, including defaults absent from the file, and can be cleared', async () => {
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
+    mount(configView([imapHost, ...googleFields]));
+    expect(await screen.findByLabelText('Filter settings')).toHaveValue('google_workspace');
+    expect(screen.queryByLabelText('imap_host')).toBeNull();
+    expect(screen.getByLabelText('enabled')).not.toBeChecked();
+    expect(screen.getByLabelText('client_id')).toHaveValue('');
+    expect(screen.getByLabelText('client_secret')).toHaveValue('');
+    expect(screen.getByLabelText('scopes')).toHaveAttribute(
+      'placeholder',
+      'https://www.googleapis.com/auth/drive.readonly',
+    );
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+    await fireEvent.input(screen.getByLabelText('Filter settings'), { target: { value: '' } });
+    expect(screen.getByLabelText('imap_host')).toBeInTheDocument();
+    expect(screen.getByLabelText('client_id')).toBeInTheDocument();
+  });
+
+  it.each(['', '?section=unknown', '?section=google', '?section=Google_workspace'])(
+    'leaves the editor unfiltered for %s',
+    async (query) => {
+      page.url = new URL(`http://localhost/istota/admin/config${query}`);
+      mount(configView([imapHost, ...googleFields]));
+      expect(await screen.findByLabelText('Filter settings')).toHaveValue('');
+      expect(screen.getByLabelText('imap_host')).toBeInTheDocument();
+      expect(screen.getByLabelText('client_id')).toBeInTheDocument();
+    },
+  );
+
+  it('changes sections on a retained page without losing either part of a draft', async () => {
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
+    mount(configView([imapHost, ...googleFields]));
+    await fireEvent.input(await screen.findByLabelText('client_id'), {
+      target: { value: 'replacement-client' },
+    });
+    await fireEvent.input(screen.getByLabelText('client_secret'), {
+      target: { value: 'replacement-secret' },
+    });
+    page.url = new URL('http://localhost/istota/admin/config?section=email');
+    expect(await screen.findByLabelText('imap_host')).toBeInTheDocument();
+    expect(screen.queryByLabelText('client_id')).toBeNull();
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
+    expect(await screen.findByLabelText('client_id')).toHaveValue('replacement-client');
+    expect(screen.getByLabelText('client_secret')).toHaveValue('replacement-secret');
+
+    // An unrelated URL change must not reapply a hint the admin has cleared.
+    await fireEvent.input(screen.getByLabelText('Filter settings'), { target: { value: '' } });
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace&other=1');
+    await waitFor(() => expect(screen.getByLabelText('Filter settings')).toHaveValue(''));
+    expect(screen.getByLabelText('imap_host')).toBeInTheDocument();
+    expect(screen.getByText('2 changes')).toBeInTheDocument();
+
+    page.url = new URL('http://localhost/istota/admin/config?section=email');
+    await waitFor(() => expect(screen.getByLabelText('Filter settings')).toHaveValue('email'));
+    page.url = new URL('http://localhost/istota/admin/config?section=unknown');
+    await waitFor(() => expect(screen.getByLabelText('Filter settings')).toHaveValue(''));
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
+    await waitFor(() =>
+      expect(screen.getByLabelText('Filter settings')).toHaveValue('google_workspace'),
+    );
+    page.url = new URL('http://localhost/istota/admin/config');
+    await waitFor(() => expect(screen.getByLabelText('Filter settings')).toHaveValue(''));
+    expect(api.getAdminConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the edited filter when a review conflict reloads configuration', async () => {
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
+    mount(configView([imapHost, ...googleFields]));
+    await fireEvent.input(await screen.findByLabelText('client_id'), {
+      target: { value: 'replacement-client' },
+    });
+    await fireEvent.input(screen.getByLabelText('Filter settings'), {
+      target: { value: 'client' },
+    });
+    api.previewConfigChange.mockRejectedValue(
+      new api.ConfigChangeError('changed', 409, 'config_changed', { digest: 'digest-2' }),
+    );
+    api.getAdminConfig.mockResolvedValue(
+      configView([imapHost, ...googleFields], { document_digest: 'digest-2' }),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await screen.findByText(/your changes are kept/);
+    expect(screen.getByLabelText('Filter settings')).toHaveValue('client');
+    expect(screen.getByLabelText('client_id')).toHaveValue('replacement-client');
+  });
+});
+
+describe('Google configuration review', () => {
+  beforeEach(() => {
+    page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
+  });
+
+  it('reviews the client ID and replacement secret together without submitting them', async () => {
+    mount(configView([imapHost, ...googleFields]));
+    await fireEvent.input(await screen.findByLabelText('client_id'), {
+      target: { value: 'replacement-client' },
+    });
+    await fireEvent.input(screen.getByLabelText('client_secret'), {
+      target: { value: 'replacement-secret' },
+    });
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenCalledWith({
+        base_digest: 'digest-1',
+        ops: [{ op: 'set', path: ['google_workspace', 'client_id'], value: 'replacement-client' }],
+        raw: null,
+        secrets: { istota_google_workspace_client_secret: 'replacement-secret' },
+      }),
+    );
+    expect(api.submitConfigChange).not.toHaveBeenCalled();
+  });
+
+  it('leaves an untouched secret unchanged and requires an explicit clear', async () => {
+    mount(configView(googleFields));
+    await fireEvent.input(await screen.findByLabelText('client_id'), {
+      target: { value: 'replacement-client' },
+    });
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ secrets: {} }),
+      ),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Clear stored client_secret' }));
+    expect(screen.getByText('Will be cleared.')).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ secrets: { istota_google_workspace_client_secret: '' } }),
+      ),
+    );
+  });
+
+  it('keeps Google settings read-only without a host applier', async () => {
+    mount(
+      configView(googleFields, {
+        editable: false,
+        applier: { kind: 'none', available: false, reason: 'This install has no config applier.' },
+      }),
+    );
+    await fireEvent.click(await screen.findByText('Read-only: changes are made on the host'));
+    expect(screen.getByText('This install has no config applier.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '[google_workspace]' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('client_id')).toBeNull();
+    expect(screen.queryByLabelText('client_secret')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Review changes' })).toBeNull();
+  });
+
+  it.each(['environment', 'managed'] as const)(
+    'keeps %s Google fields read-only',
+    async (source) => {
+      const reason = source === 'environment' ? 'Set by the environment.' : 'Managed by ansible.';
+      const view = configView(
+        googleFields.map((field) => ({ ...field, editor: 'readonly', read_only_reason: reason })),
+      );
+      if (source === 'managed') {
+        view.managed.config = { managed: true, source: 'ansible', at: null };
+        view.managed.secrets = { managed: true, source: 'ansible', at: null };
+      }
+      mount(view);
+      expect((await screen.findAllByText(reason)).length).toBe(4);
+      expect(screen.queryByLabelText('client_id')).toBeNull();
+      expect(screen.queryByLabelText('client_secret')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Clear stored client_secret' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+      expect(api.previewConfigChange).not.toHaveBeenCalled();
+    },
+  );
 });
