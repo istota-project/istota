@@ -465,8 +465,8 @@
             <Bot size={14} aria-hidden="true" />{places.some(
               (place) => place.kind === 'room' && reachesTasks(place.reach.private),
             )
-              ? 'Istota can use these in your private room, and a room folder in that room.'
-              : 'Istota can use these in your private room.'}
+              ? 'Istota can use these in your tasks, in any of your rooms. A room folder only in its own room.'
+              : 'Istota can use these in your tasks, in any of your rooms.'}
           </p>
         {/if}
       </Sidebar>

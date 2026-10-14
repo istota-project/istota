@@ -629,9 +629,11 @@ class TestCreate:
         assert create[-1] == str(TEMPLATE)
         assert ["start", "--tty=false", "istota"] in mac.calls("limactl")
 
-        assert mac.stack_calls()[:6] == [
+        assert mac.stack_calls()[:7] == [
+            ["host-env", "RELEASE_SIGNING_KEY"],
             ["host-env", "STORAGE=host-folder", "INGRESS=local",
-             "HOST_LOOPBACK_BLOCK=1", "HOST_GATEWAY_ADDR=192.168.5.2"],
+             "HOST_LOOPBACK_BLOCK=1", "HOST_GATEWAY_ADDR=192.168.5.2",
+             f"RELEASE_SIGNING_KEY={SIGNING_KEY}"],
             ["update", "v1.2.0"],
             ["setup", "--storage", "host-folder", "--ingress", "local", "--hostname", "localhost:8181"],
             ["check-image"],
@@ -727,6 +729,25 @@ class TestCreate:
         assert f"--param=RELEASE_SIGNING_KEY={PROJECT_KEY}" in _limactl_create(mac)
         state = (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
         assert f"SIGNING_KEY={PROJECT_KEY}\n" in state
+
+    def test_an_existing_vm_with_no_key_is_given_one_before_the_build(self, mac):
+        """A VM made from a checkout, or before the key was recorded, has no
+        allowed_signers; the signed build refused with 65."""
+        mac.set(instance={"name": "istota", "status": "Running"})
+        result = mac.run("create", "--tag", "v1.2.0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
+        calls = mac.stack_calls()
+        write = next(c for c in calls if c[:1] == ["host-env"] and len(c) > 2)
+        assert f"RELEASE_SIGNING_KEY={PROJECT_KEY}" in write
+        assert calls.index(write) < calls.index(["update", "v1.2.0"])
+
+    def test_a_recorded_key_is_not_replaced(self, mac):
+        mac.set(instance={"name": "istota", "status": "Running"},
+                vm={"host_env": {"RELEASE_SIGNING_KEY": SIGNING_KEY}})
+        result = mac.run("create", "--tag", "v1.2.0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.state()["vm"]["host_env"]["RELEASE_SIGNING_KEY"] == SIGNING_KEY
 
     def test_with_no_tag_it_installs_the_newest_release(self, mac):
         mac.set(ls_remote="".join(f"{i:040x}\trefs/tags/{name}\n" for i, name in
@@ -1281,7 +1302,7 @@ class TestCreateWithoutSetup:
         result = _create(mac, "--no-setup")
         assert result.returncode == 0, result.stdout + result.stderr
         verbs = [c[0] for c in mac.stack_calls()]
-        assert verbs == ["host-env", "update"]
+        assert verbs == ["host-env", "host-env", "update"]
         vm = mac.vm_calls()
         assert ["/srv/app/istota/src/host/provision.sh"] in vm
         assert ["systemctl", "enable", "--now", "istota-stack"] not in vm

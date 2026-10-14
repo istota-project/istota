@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
 - Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
-- The Workspace sidebar marks each place Istota can use in your private room with a small robot icon, pinned files and folders included (a room folder's icon says only that room's tasks reach it), and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you. Selecting your Nextcloud view now says so without opening anything, and how to hand Istota a file.
+- The Workspace sidebar marks each place Istota can use in your tasks, in any of your rooms, with a small robot icon, pinned files and folders included (a room folder's icon says only that room's tasks reach it), and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you. Selecting your Nextcloud view now says so without opening anything, and how to hand Istota a file.
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 
@@ -93,6 +93,7 @@ Shared rooms are friendlier by default: a cheap model decides whether a group tu
 
 ### Fixed
 
+- `install.sh --local` on a Mac whose VM already exists now installs a signed release. The VM is given the release key when it has none recorded, instead of every signed tag being refused.
 - The admin Logs, Health, Browsers and backup views, location pings, SMS callbacks, web cancel and notices to WhatsApp all work on the Docker stack again.
 - The image now includes `gws`, `gitleaks` and `pdftotext`, so Google Workspace, unattended commits and PDF reading work.
 - `istota-stack update`, `rollback`, `setup` and `localize-workspace` are more reliable. Updates reclaim build cache, rollback restores the host scripts, and the stack logs to the journal.
