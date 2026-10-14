@@ -2556,6 +2556,20 @@ class Config:
         return self.nextcloud.app_password
 
     @property
+    def carddav_url(self) -> str:
+        if not self.nextcloud.url:
+            return ""
+        return f"{self.nextcloud.url.rstrip('/')}/remote.php/dav"
+
+    @property
+    def carddav_username(self) -> str:
+        return self.nextcloud.username
+
+    @property
+    def carddav_password(self) -> str:
+        return self.nextcloud.app_password
+
+    @property
     def is_standalone(self) -> bool:
         """Whether this instance is running the slimmed-down local single-user shape.
 
