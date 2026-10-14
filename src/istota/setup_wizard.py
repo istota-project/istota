@@ -39,34 +39,34 @@ DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6"
 
 # Reduced from web/static/octopus-sigil.webp; no image assets needed at runtime.
 _SETUP_OCTOPUS = """\
-          ▄▄▄████▄▄▄
-       ▄██████████████▄
-      ██████████████████
-     ████████████████████
-    ▄████████████████████
-     ████▀▀████████▀▀████
-     ████  ▄██████▄  ███▀
-      ██████████████████
-       ▀██████████████▀
-        █████████████▄
-████▄███████████████████▄████▄
-  ▀▀▀▀▀████████████████▀▀▀▀▀
-     ▄███▀ ███  ███ ▀███▄▄
-    ███▀   ██▀  ▀██   ▀███
-          ▀▀▀    ▀█▀"""
+      ▄▄████▄▄
+    ▄██████▓▓▓▓▄
+   ███████▓▓▓▓▓▓▄
+   ███  ██▓▓  ▓▓▓
+   ▀██▄▄██▓▓▄▄▓▓▀
+    ▀███▓▓▓▓▓▒▒▀
+▄▄  ▄██▓▓▓▓▒▒▒▄▄  ▄
+▀▀▀▀▀▓▓▓▓▓▒▒▒▒▒▀▀▀▀▀
+   ▄▓▓ ▓▓  ▒▄▀▒▒▄
+   ▀   ▓▀  ▀▒   ▀"""
 
 _SETUP_OCTOPUS_ASCII = r'''
-          .-""""-.
-        .'        '.
-       /            \
-      |    o    o    |
-       \            /
-    _   '.        .'   _
-   ( '-._ '------' _.-' )
-    '._  '--....--'  _.'
-     .' .-._  _.-. '.
-    (_.' / /  \ \ '._)
-         '-'  '-'
+      .-""""-.
+     /      .:\
+    |  o  o .::|
+     \    .:::/
+  _   '......'   _
+ ( '-._      _.-' )
+  '._  ''--''  _.'
+    / /| || |\ \
+   (_/ (_)(_) \_)
+'''.strip("\n")
+
+_SETUP_WORDMARK = r'''
+ _     _       _
+(_)___| |_ ___| |_ __ _
+| (_-<|  _/ _ \  _/ _` |
+|_/__/ \__\___/\__\__,_|
 '''.strip("\n")
 
 
@@ -76,10 +76,11 @@ def setup_banner(encoding: str = "utf-8") -> str:
         logo.encode(encoding)
     except UnicodeEncodeError:
         logo = _SETUP_OCTOPUS_ASCII
-    labels = {5: "istota", 7: "Your personal AI, self-hosted.", 9: "Setup"}
+    labels = dict(enumerate(_SETUP_WORDMARK.splitlines(), start=1))
+    labels.update({6: "Your personal AI, self-hosted.", 8: "Setup"})
     lines = []
     for index, line in enumerate(logo.splitlines()):
-        lines.append(f"  {line:<30}  {labels.get(index, '')}".rstrip())
+        lines.append(f"  {line:<20}  {labels.get(index, '')}".rstrip())
     return "\n" + "\n".join(lines) + "\n"
 
 

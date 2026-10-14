@@ -446,12 +446,14 @@ class TestTheRun:
 def test_setup_banner_is_printable_and_fits_a_terminal(encoding):
     banner = setup_wizard.setup_banner(encoding)
     banner.encode(encoding)
-    assert "istota" in banner
+    assert r"|_/__/ \__\___/\__\__,_|" in banner
     assert "Your personal AI, self-hosted." in banner
     assert "Setup" in banner
-    assert max(map(len, banner.splitlines())) <= 72
+    assert max(map(len, banner.splitlines())) <= 56
+    assert len(banner.strip("\n").splitlines()) <= 10
     assert "\x1b" not in banner
     assert ("█" in banner) == (encoding == "utf-8")
+    assert ("▓" in banner and "▒" in banner) == (encoding == "utf-8")
 
 
 class TestTheStackFiles:
