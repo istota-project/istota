@@ -7,46 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+You can now share where you are with a shared room, as one observation or for a set time, after approving a private preview that names who will see it and how precisely. Room members can ask where someone sharing with them is, and sharing stops by itself when the room's readers change. Groups have an overview page with the shared notebook, members, rooms and newest files, and administrators can create, recover and archive groups from the web.
+
+Files, the renamed Workspace page, lists the assistant's scripts and prompt files and says under each list what a task can do with the files in it. On a Mac, creating the local VM and changing an existing setup both happen in the browser, and re-running setup keeps your current answers. The web UI's buttons, loading states and Markdown viewer are easier to read. This release is 66 commits, against 55 in 0.45.0 and 756 in 0.44.0; the rest is setup fixes on the Mac.
+
+**Before you upgrade.**
+
+- Scripts that change groups with `istota group` must now pass the group's current `--revision`, and `add-member` needs `--acknowledge-history` (`docs/features/groups.md`).
+- `istota-stack create` and `install.sh --local` now open browser setup. Pass `--terminal-setup` to answer in the terminal (`docs/getting-started/local-install.md`).
+
 ### Added
 
-- While the web app restarts after an update, the browser shows a "Starting up" page in the login page's style instead of nginx's bare 502. It reloads itself once the app answers, and says so if the wait runs long.
-
-- Files now has Scripts and Prompt files entries under the assistant's section, listing each file with its description and the scheduled jobs or heartbeat checks that reference it. Missing targets are listed above the files and flagged in the sidebar; choosing a file previews it and Reveal opens its folder.
-
-- Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
-
-- Groups has a member overview: the shared notebook, members, linked rooms ordered by latest activity, and the newest shared files, as cards on one page. Files links back to it. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
-- Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
-- Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
-
-- Room location sharing stops when readers or transport identities change, or when the room is archived or switched off. Rejoining or reopening the room requires fresh approval; ordinary roster refreshes keep sharing active. Upgrading older room identities preserves the consent record and requires fresh approval for location sharing.
-
-- Request timed location sharing with a room through a private approval preview. The preview names the readers, precision and duration; approval fixes the expiry, and stopping also cancels pending requests and their approval notices. A stop during execution keeps the private preview out of the room.
-
-- Owners can list and stop their location-sharing permissions, including pending requests. Stopping everywhere returns only a count when requested in a shared room.
-
-- Share one location observation in a shared room, either an exact point or an approximate area. Sharing from a private chat asks for approval and posts the observation shown in the preview, even if your location changes before approval.
-- **Change the setup in a browser.** `istota-stack setup --web --force` opens the setup page over a configured stack, filled in with the current answers. The stack is stopped while the page is open. If you close the page or cancel with `istota-stack setup-cancel`, the previous setup is put back and the stack starts again. On a Mac the same command opens the page in your browser once it is ready, and Ctrl-C cancels it. `istota-stack status` now says when the web page is published on a port other than the one the Mac forwards, rather than blaming Lima.
+- **Share your location with a room.** Share one observation, exact or approximate, or share for a set time. Each share is approved from a private preview naming the readers, precision and duration. Members can ask for a sharer's location, and owners can list and stop their shares. See docs/features/location.md.
+- **Group overview and administration.** Groups has a page with the shared notebook, members, linked rooms and newest shared files. Administrators can create groups with chosen owners, recover ownerless ones, see membership history and archive groups. See docs/features/groups.md.
+- **Scripts and prompt files in Files.** Two new lists show each file with its description and the scheduled jobs or heartbeat checks that use it, with missing targets flagged.
+- **Change the setup in a browser.** `istota-stack setup --web --force` opens the setup page over a configured stack, filled in with the current answers; closing or cancelling it puts the previous setup back. See docs/getting-started/local-install.md.
+- **Google Workspace status in Admin → Connections**, with the callback URL, allowed services and a link to its settings. The setup docs now cover the OAuth client and common connection failures. See docs/features/google-workspace.md.
+- While the web app restarts after an update, the browser shows a "Starting up" page that reloads once the app answers.
 
 ### Changed
 
-- Each list under the assistant's section in Files (Rooms, Groups, Configuration, Skill instructions, Scripts, Prompt files) now says under its caption what a task can do with the files in it, and where: a room folder only in its own room, a group folder in a shared room only when everyone there is in the group. The sidebar's one-line legend is gone; a pinned group file's icon now says the same about groups.
-
-- Buttons and toggle chips in the web UI are visible before you hover them. Lesser actions such as Cancel used to render as bare text that looked like an offset link, and toggle chips disappeared against cards and dialogs; both now have a fill or outline at rest, including when disabled.
-- Markdown files open in the viewer as a readable page: headings at their own sizes, a comfortable line length, and frontmatter in a small collapsed panel set apart from the document. The Rendered and Source switch moved into the viewer's header beside Download.
-- The Workspace page is now called Files and sits before Groups in the navigation; the dashboard has a Groups tile beside it. In the Files sidebar, My files, Rooms, Groups, Configuration and Skill instructions sit under one section named after the assistant, and rooms, groups and config files open as lists in the main page instead of filling the sidebar.
-- Google Workspace setup documentation now covers the operator's OAuth client, consent screen and credential storage. It distinguishes instance setup from each user's account connection and explains common connection failures.
-- New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
-- **The local VM sets up in the browser.** `istota-stack create` on a Mac, and `install.sh --local`, now open the setup page in your browser and finish in one run. `--terminal-setup` keeps the questions in the terminal.
+- **Location sharing stops when the room changes.** A change of readers, archiving the room or switching the bot off ends sharing, and sharing again needs a fresh approval.
+- **Groups need an owner.** Every group has at least one owner, stale edits are refused, and the last owner cannot leave other members without naming a replacement.
+- **Workspace is now Files**, before Groups in the navigation. Rooms, groups and configuration open as lists in the page, and each list says what a task can do with its files and where.
+- **The local VM sets up in the browser.** `istota-stack create` and `install.sh --local` open the setup page and finish in one run.
+- Buttons and toggle chips have a visible fill or outline before you hover them, and Markdown files open as a readable page with frontmatter in a collapsed panel.
 
 ### Fixed
 
-- The web app's "Loading…" text no longer jumps around the screen as a page assembles. A loading page now shows one thin bar fixed along the top edge of the window, and the page area stays empty until the content arrives. A chat room that is still loading shows a softly pulsing octopus in place of the text.
-- On a phone, the file editor and the plain-text file view now show text at the same size as on a desktop, rather than enlarged. The page still does not zoom in when you tap into the text.
-- Cancelling browser setup on a Mac now returns the VM setup result even when it finishes while cancellation is being acknowledged.
-
-- **Re-running setup in the terminal keeps your answers.** `istota-stack setup --force` used to offer first-run defaults, so pressing Enter could change the address and move the local VM's web page off the port it is reached on. Every question now defaults to the current value, stored credentials are kept unless you enter new ones, and the previous config and stack files are backed up first.
-- **The local VM's web page stays on the port your Mac forwards.** A VM created with `--port` other than 8080 could end up with its web page and the browser setup page on 8080, which nothing forwards. Setup now uses the forwarded port as the default address and refuses another one, naming the right address.
+- Re-running setup in the terminal keeps your current answers and credentials and backs up the previous files, and the local VM's web page stays on the port your Mac forwards. Cancelling browser setup on a Mac still returns the VM's result.
+- Loading pages show one thin bar along the top instead of "Loading…" text that moved around, and on a phone the file editor's text is no longer enlarged.
 
 ## [0.45.0] - 2026-10-14
 
