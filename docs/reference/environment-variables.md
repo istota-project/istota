@@ -218,7 +218,7 @@ Two more are set for one command at a time:
 
 Inside the `daemon` and `web` containers, compose sets `ISTOTA_CONFIG_PATH=/data/config/config.toml` and `ISTOTA_ADMINS_FILE=/data/config/admins`, and each credential file becomes its uppercase name (`istota_nextcloud_app_password` becomes `ISTOTA_NEXTCLOUD_APP_PASSWORD`, one of the [secret overrides](#secret-overrides) above). Where the VM has the editor's trigger directory, `web` also gets `ISTOTA_CONFIG_APPLIER=host`, which says the host applies config changes and turns the web editor on. `ISTOTA_WEB_INSECURE_COOKIES=1` drops the `Secure` flag from the session cookie; setup writes `0` for every ingress.
 
-On the Mac, `ISTOTA_LIMA_INSTANCE` names the Lima instance `istota-stack` and `istota` act on (default `istota`).
+On the Mac, `ISTOTA_LIMA_INSTANCE` names the Lima instance `istota-stack` and `istota` act on (default `istota`), and `ISTOTA_REPO_URL` the repository `create` reads the newest release from and the VM clones (default `https://github.com/istota-project/istota.git`). `RELEASE_SIGNING_KEY` in the Mac's environment is the key `create` uses when `--signing-key` is not given.
 
 ### host.env and .env
 
@@ -234,7 +234,7 @@ The VM keeps two settings files beside the checkout. `istota setup` writes the k
 | `TLS_CERT_SOURCE`, `UPSTREAM_PROXY`, `LISTEN_ADDR`, `LISTEN_PORT` | The ingress mode's details |
 | `ACME_EMAIL`, `ACME_SERVER` | Optional, for certbot in `direct` ingress |
 | `RCLONE_REMOTE` | The remote in `/srv/app/istota/rclone.conf` the mount uses (`nextcloud` when setup wrote the file) |
-| `RELEASE_SIGNING_KEY` | The release key, one line of an SSH public key, written to `allowed_signers` |
+| `RELEASE_SIGNING_KEY` | The release key, one line of an SSH public key, written to `allowed_signers`. The installer writes the project's key (`host/release-signing-key.pub`) unless it was given another |
 | `CLAUDE_CODE_VERSION` | The Claude Code version a build pins, when it pins one |
 | `ZRAM_ENABLED` | `0` leaves swap alone |
 | `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | The local VM's block on container traffic to the Mac's loopback (`HOST_GATEWAY_ADDR`), except DNS and the TCP ports in `HOST_LOOPBACK_ALLOW`, which `allow-host-port` and `deny-host-port` edit |

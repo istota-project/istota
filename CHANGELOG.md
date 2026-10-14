@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 
+### Changed
+
+- **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
+
 ### Removed
 
 - **The standalone install is gone.** `install.sh --standalone` and `istota setup` outside the image now point at `install.sh --local` and `istota-stack import-standalone`; `istota update` is removed. `istota serve` stays for development on a checkout. See docs/getting-started/local-install.md.

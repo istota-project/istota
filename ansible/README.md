@@ -22,13 +22,12 @@ The VM must already be bootstrapped from a verified release: `host/cloud-init.ya
 
 ## Variables
 
-`defaults/main.yml` lists every variable with a comment, and is the overview of what an operator sets. Its values are generic placeholders. An estate's real values (hostnames, addresses, the release key, every credential) belong in the estate's own `host_vars` and vault, never in this repository. On an install imported from a bare-metal host, `istota migrate import-bare-metal --emit-plan` writes the rewritten config as a plan, which is a starting point for `istota_config`.
+`defaults/main.yml` lists every variable with a comment, and is the overview of what an operator sets. Its values are generic placeholders, except `istota_release_signing_key`, which defaults to the project's release key (`host/release-signing-key.pub`). An estate's real values (hostnames, addresses, every credential) belong in the estate's own `host_vars` and vault, never in this repository. On an install imported from a bare-metal host, `istota migrate import-bare-metal --emit-plan` writes the rewritten config as a plan, which is a starting point for `istota_config`.
 
 A minimal `host_vars` file for a proxied VM:
 
 ```yaml
 istota_release: v0.45.0
-istota_release_signing_key: "ssh-ed25519 AAAA... releases"
 istota_ingress: proxied
 istota_domain: istota.example.com
 istota_upstream_proxy: 192.0.2.10
@@ -73,7 +72,7 @@ An image older than this role's `istota-stack` cannot read the role's input and 
 
 ### Release or latest
 
-`istota_update_mode` picks how the VM is updated. `release` (the default) runs the signed tag in `istota_release`, verified against `istota_release_signing_key`, and updates only when that variable changes. `latest` follows main: each play asks `istota-stack latest-tag` for the name main's tip would install (`main-<12 hex>`, read from origin without fetching) and runs `istota-stack update --unsigned latest` only when it differs from the deployed one. Nothing is verified in `latest` mode, so no key is required and `istota_release` is ignored. Either way the rebuild after a config change uses the way the deployed tag was installed, so an unsigned tag is rebuilt unsigned.
+`istota_update_mode` picks how the VM is updated. `release` (the default) runs the signed tag in `istota_release`, verified against `istota_release_signing_key` (the project's key unless a fork sets its own), and updates only when that variable changes. `latest` follows main: each play asks `istota-stack latest-tag` for the name main's tip would install (`main-<12 hex>`, read from origin without fetching) and runs `istota-stack update --unsigned latest` only when it differs from the deployed one. Nothing is verified in `latest` mode, so no key is required and `istota_release` is ignored. Either way the rebuild after a config change uses the way the deployed tag was installed, so an unsigned tag is rebuilt unsigned.
 
 ```yaml
 istota_update_mode: latest

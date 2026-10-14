@@ -560,6 +560,7 @@ Used by Claude Code inside the sandbox to invoke skill CLIs with credentials inj
 `host/provision.sh` installs `istota-stack`, the VM's one command for the stack. Run it as root. It works on `/srv/app/istota` and runs the compose file from the deployed checkout, `/srv/app/istota/src`.
 
 ```bash
+istota-stack update                          # the newest signed release (vX.Y.Z); nothing when already on it
 istota-stack update TAG                      # verify a signed release tag, build it, switch to it
 istota-stack update --unsigned TAG           # any tag, without the signature check, for this run
 istota-stack update --unsigned latest        # the tip of main, recorded as main-<12 hex>
@@ -598,18 +599,20 @@ The [local install](../getting-started/local-install.md) puts a Mac-side `istota
 
 ```bash
 istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] \
-    (--tag TAG --signing-key KEY | --repo DIR [--tag TAG]) [--adopt] [--no-setup]
+    ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt] [--no-setup]
 istota-stack start | stop | status | shell
 istota-stack open [--files]                 # the web UI; --files the workspace in Finder
 istota-stack autostart on|off               # limactl autostart enable|disable
 istota-stack allow-host-port N | deny-host-port N
-istota-stack update [args]                  # the VM's update, then the Mac scripts from its checkout
+istota-stack update [TAG]                   # the VM's update, then the Mac scripts from its checkout
 istota-stack destroy [--force] [--purge]    # refuses without the master key in the Keychain;
                                             # --purge also deletes the folder, the key and the saved settings
 istota-stack restore [--date YYYY-MM-DD] [--force] [create's options]
 istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create's options]
 istota ...                                  # the istota CLI in the daemon container, as uid 10001
 ```
+
+A release `create` with no `--tag` installs the newest `vX.Y.Z` tag in the repository (read with `git ls-remote`), and with no `--signing-key` verifies it against the project's release key. A re-run takes the tag and key the first run recorded.
 
 Every other verb is passed to the VM's `istota-stack` as root, with its arguments and exit status unchanged; `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac. Exit codes: a forwarded verb's own, else 64 for a usage error, 69 when `limactl` is missing or older than 2.0, 78 for a refused folder, port, machine or Keychain item.
 

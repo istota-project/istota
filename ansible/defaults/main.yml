@@ -35,8 +35,9 @@ istota_update_force: false
 istota_release: ""
 # One line of an SSH public key. Every tag is verified against it (host.env's
 # RELEASE_SIGNING_KEY, written to allowed_signers by provision.sh). Required in
-# release mode.
-istota_release_signing_key: ""
+# release mode. The default is the project's release key,
+# host/release-signing-key.pub; a fork's releases need the fork's.
+istota_release_signing_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM8wnX7YSjgMETMV8EOf/hQ6J5HpZsw9WfY/r0Glfq4z istota-releases"
 
 # --- host.env ----------------------------------------------------------------
 # local | nextcloud: where the workspace lives, not whether Nextcloud is used.

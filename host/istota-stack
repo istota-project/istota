@@ -1,6 +1,8 @@
 #!/bin/bash
 # istota-stack: the VM's command for the one istota stack on it. Run as root.
 #
+#   istota-stack update         the newest signed release (vX.Y.Z), verified, built and
+#                               switched to; nothing when the stack already runs it
 #   istota-stack update <tag>   verify a signed release tag, build it, switch to it
 #   istota-stack update --unsigned <tag>
 #                               the same for any tag, signed or not, on request
@@ -356,6 +358,23 @@ stack_exec() {
     compose exec "${tty[@]}" "$(main_service)" istota-drop "$@"
 }
 
+# Copied into install.sh, host/cloud-init.yaml and the Mac's istota-stack, which
+# run before any checkout exists; tests/test_host_units.py holds each copy byte
+# for byte equal to this one.
+# --- newest release ---
+# The newest release among the tag names on stdin, one bare name per line: the
+# highest vX.Y.Z by number (v0.10.0 is newer than v0.9.9). Prints nothing and
+# fails when no name is one. It only picks: the caller verifies the tag. Not
+# `sort -V`, which macOS's sort lacks.
+newest_release_tag() {
+    local newest
+    newest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" || true
+    [ -n "$newest" ] || return 1
+    echo "v${newest}"
+}
+# --- end newest release ---
+
 # --- release tags ------------------------------------------------------------
 
 # git against the checkout, reading no configuration but this.
@@ -632,14 +651,27 @@ latest_name() {
 cmd_update() {
     local unsigned=""
     if [ "${1:-}" = "--unsigned" ]; then unsigned=1; shift; fi
-    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
-    local tag="$1" object before
-    check_tag_name "$tag"
+    local newest=""
+    if [ "$#" -eq 0 ] && [ -z "$unsigned" ]; then
+        newest=1
+    elif [ "$#" -ne 1 ]; then
+        usage >&2; exit 64
+    fi
+    local tag="${1:-}" object before
+    [ -n "$newest" ] || check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
     verified_git fetch --quiet --tags origin \
         "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
         || die "git fetch failed; nothing was changed."
-    if [ "$tag" = latest ]; then
+    if [ -n "$newest" ]; then
+        tag="$(verified_git tag --list | newest_release_tag)" \
+            || die "origin has no release tag (vX.Y.Z); \`istota-stack update <tag>\` names one. Nothing was changed."
+        if [ "$tag" = "$(env_get "$ENV_FILE" ISTOTA_TAG)" ] && [ -z "$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)" ]; then
+            log "already on ${tag}, the newest release"
+            exit 0
+        fi
+        log "the newest release is ${tag}"
+    elif [ "$tag" = latest ]; then
         [ -n "$unsigned" ] || refuse_tag "latest follows ${LATEST_BRANCH}, which is never signed: \`istota-stack update --unsigned latest\`."
         tag="$(latest_name "$(verified_git rev-parse --verify "refs/remotes/origin/${LATEST_BRANCH}^{commit}")")"
     fi
@@ -647,7 +679,12 @@ cmd_update() {
         object="$(resolve_unsigned_tag "$tag")"
         log "${tag}: installing without a signature check (--unsigned)"
     elif ! object="$(verify_release_tag "$tag")"; then
-        echo "[istota-stack] Only releases are signed: \`istota-stack update --unsigned ${tag}\` installs any other tag." >&2
+        if [ -n "$newest" ]; then
+            # Never an older tag in its place: that is a downgrade nobody asked for.
+            echo "[istota-stack] ${tag} is the newest release tag; nothing was installed. \`istota-stack update <tag>\` installs another." >&2
+        else
+            echo "[istota-stack] Only releases are signed: \`istota-stack update --unsigned ${tag}\` installs any other tag." >&2
+        fi
         exit "$EXIT_REFUSED_TAG"
     fi
     before="$(verified_git rev-parse HEAD)"
