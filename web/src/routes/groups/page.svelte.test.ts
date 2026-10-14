@@ -147,6 +147,8 @@ it('shows every card on one overview, from a pre-overview view link too', async 
     expect(screen.getByRole('heading', { name })).toBeTruthy();
   expect(screen.queryByRole('navigation', { name: 'Group view' })).toBeNull();
   await screen.findByText('Bob');
+  for (const role of ['Owner', 'Member'])
+    expect(screen.getByText(role).classList.contains('badge')).toBe(true);
   expect(screen.queryByRole('button', { name: 'Add member' })).toBeNull();
   expect(screen.getByRole('button', { name: 'Leave group' })).toBeTruthy();
 });

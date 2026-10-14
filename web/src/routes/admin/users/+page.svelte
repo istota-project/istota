@@ -222,9 +222,9 @@
                     >{user.identity?.email ?? '—'}</td
                   >
                   <td class="access">
-                    {#if user.identity?.disabled}<Badge variant="partial">Disabled</Badge>{:else}
-                      <span>{signInStateLabel(user.identity, user.state)}</span>
-                    {/if}
+                    <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
+                      >{signInStateLabel(user.identity, user.state)}</Badge
+                    >
                   </td>
                   <td class="last-login"
                     >{user.identity

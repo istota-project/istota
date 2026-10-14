@@ -92,6 +92,8 @@ it('shows the three states and offers only the editor on a Nextcloud-only row', 
   expect(within(row).getByText('Nextcloud only')).toBeTruthy();
   expect(screen.getByText('Email code')).toBeTruthy();
   expect(screen.getByText('Password set')).toBeTruthy();
+  for (const state of ['Nextcloud only', 'Email code', 'Password set'])
+    expect(screen.getByText(state).classList.contains('badge')).toBe(true);
   await fireEvent.click(within(row).getByRole('button', { name: 'Actions for Legacy' }));
   const items = await screen.findAllByRole('menuitem');
   expect(items.map((item) => item.textContent?.trim())).toEqual(['Edit settings']);
