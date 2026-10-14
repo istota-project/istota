@@ -40,14 +40,17 @@
     }
     if (!(e instanceof GroupApiError)) return null;
     storageUnavailable = e.reason === 'storage_unavailable' || e.code === 'memory_unavailable';
+    const message = storageUnavailable
+      ? 'Group storage is unavailable. Notebook editing is disabled until storage is restored.'
+      : e.message;
     if (e.code === 'memory_unreadable' || e.status === 404 || e.status === 403) {
       saveBlocked = true;
       entries = [];
       cursor = null;
       notebook = null;
-      error = e.message;
+      error = message;
     }
-    return e.message;
+    return message;
   }
   async function loadNotebook() {
     loading = true;

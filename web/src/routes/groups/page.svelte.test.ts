@@ -277,11 +277,18 @@ it('shows the large warning and lets only an admin retry storage', async () => {
   first.unmount();
   identity.user.is_admin = true;
   api.getGroupMemory.mockRejectedValue(
-    new api.GroupApiError(503, 'memory_unreadable', 'Storage unavailable', 'storage_unavailable'),
+    new api.GroupApiError(
+      503,
+      'memory_unreadable',
+      'Group memory cannot be read',
+      'storage_unavailable',
+    ),
   );
   api.retryGroupStorage.mockResolvedValue({ storage_available: true });
   render(Groups);
-  await screen.findByText('Storage unavailable');
+  await screen.findByText(
+    'Group storage is unavailable. Notebook editing is disabled until storage is restored.',
+  );
   api.getGroupMemory.mockResolvedValue(notebook);
   await fireEvent.click(screen.getByRole('button', { name: 'Retry storage setup' }));
   await screen.findByText('Shared plans');
