@@ -55,6 +55,13 @@ What a restricted task gets:
 
 **Without bwrap none of this confines**: Docker, macOS and a config with the sandbox off strip prompt, skills, allowlist and env, but tools can still read the workspace; `security.room_scope_confinement` warns. Witness: `tests/smoke/test_sandbox_shared_room.py` with a private-room control; the default suite reads argv only. The memory masks, the bot-directory self-bind and `IDENTITY_GUARD` (Stage 28) were removed with the grants: they fired only for `files` granted without `memory`, which no turn can be any more.
 
+## Group web access and managed writes
+
+`groups.policy` checks current membership on member web reads and writes, independent of owner management authority. An admin outside a group may inspect metadata and membership through admin routes but gets no notebook or viewer bypass. `workspace.places.list_places` and `webui.chat_files.servable_roots` derive current memberships on each request, so removal or archive removes listing, preview and download access on the next request. Membership grants no access to another member's personal files, memory or credentials. The task audience gate above stays unchanged; a running task can retain an admitted snapshot or bind after removal.
+
+Web notebook saves and the host-side memory CLI lock the same resolved file under `{db_path.parent}/locks/group-memory`, from trusted host configuration. That anchor is outside sandbox mounts and must be shared with writable permissions across the daemon and web services. Managed saves preserve explicit read refusals and recheck membership under the lock before replacement. Admitted task directories remain writable, so direct filesystem edits can bypass this managed lock and audit trail. There is no automatic group writer.
+
+
 ## sandbox/task_env.py
 
 `build_task_runtime`: the model env, the credential split (clean / proxy-only / credential), the `SkillProxy` and `NetworkProxy`, and the read-only bind list, as a `TaskRuntime`. **Context managers are built here, entered by the caller**: they must span primary, reroute and fallback, so the `ExitStack` stays in `execute_task` around `run_with_failover`.

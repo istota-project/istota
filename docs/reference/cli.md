@@ -270,20 +270,24 @@ The skill form also takes `--group <id>` on every verb, set operations included,
 
 ### Groups
 
-Groups are created and managed only here. Every write records `operator` as its author; refusals exit 1 with the reason on stderr.
+The operator CLI and Groups web pages share the group management service. CLI writes use explicit operator authority and record `operator` as actor; refusals exit 1 with the reason on stderr.
 
 ```bash
-istota group create ID [--kind LABEL] [--name "Display Name"]   # Create, seed Groups/ID/GROUP.md
-istota group list [--all]                    # Current groups; --all includes archived
-istota group show ID                         # Display name, kind, members and membership history (JSON)
-istota group add-member ID USER [--role owner|member]   # USER must be a configured user
-istota group remove-member ID USER           # End a membership; the row is kept
-istota group archive ID                      # Stop loading and membership; rows stay readable
+istota group create ID --owner USER [--owner USER ...] [--kind LABEL] [--name "Display name"]
+istota group update ID --revision N [--name "Display name"] [--kind LABEL]
+istota group ensure-storage ID              # Retry directory seeding after restoring storage
+istota group list [--all]                    # Include archived groups with --all
+istota group show ID                         # Revision, metadata, members and membership history
+istota group add-member ID USER --revision N [--role owner|member] [--acknowledge-history] [--replacement-owner USER]
+istota group remove-member ID USER --revision N [--replacement-owner USER]
+istota group archive ID --revision N --confirm
 istota group kv-get ID NAMESPACE KEY         # Read the group's KV store, with written_by
 istota group kv-list ID NAMESPACE            # List a namespace, e.g. _memory_audit
 ```
 
-An id is lowercase letters, digits, `.`, `_` and `-`, 2 to 64 characters. There is no `delete`: membership is a history and an archived group's id is not reused. `--kind` is a display label and `--role` is recorded but read by nothing. See [groups](../features/groups.md).
+Creation requires at least one existing enabled owner. Use the current revision from `show` for mutations; adding a new member requires `--acknowledge-history`. Changing an existing member's role does not create a new membership period. The last owner cannot leave other members without a replacement appointed in the same operation. `--kind` is a display label; owners can manage the group through the web.
+
+An id is lowercase letters, digits, `.`, `_` and `-`, 2 to 64 characters, starting with a letter or digit; `none` is reserved. There is no `delete`: membership is a history and an archived group's id is not reused. A failed storage seed does not undo creation; restore storage and run `ensure-storage`. See [groups](../features/groups.md).
 
 ### Web chat maintenance
 

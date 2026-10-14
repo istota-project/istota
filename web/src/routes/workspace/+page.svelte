@@ -524,6 +524,21 @@
         {:else}
           <ReachBadge access={place.reach.private} />
         {/if}
+        {#if place.kind === 'group'}
+          <HeaderNav
+            ariaLabel="Group"
+            items={[
+              {
+                label: 'Group memory',
+                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length), view: 'memory' })}`,
+              },
+              {
+                label: 'Group members',
+                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length), view: 'members' })}`,
+              },
+            ]}
+          />
+        {/if}
         {#if place.kind === 'drive'}
           <HeaderNav
             ariaLabel="Drive location"

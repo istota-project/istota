@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workspace group folders now link to the shared notebook and member list.
+
 - Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried without creating a second group.
 
 - Groups now has a member home for the shared notebook, recorded changes, members and linked rooms. Owners can manage membership and group details, and members can leave with a replacement owner when needed.

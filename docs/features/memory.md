@@ -38,7 +38,7 @@ CHANNEL.md is indexed under `source_type = "channel_memory_durable"` — a separ
 
 ### Group memory (GROUP.md)
 
-Memory shared by the members of a [group](groups.md), at `/Groups/{group_id}/GROUP.md`. Loaded as `## Group memory` for the groups the task may carry: all of the user's groups in a conversation with the bot alone, and in a shared room only those whose members include everyone present. A room linked to a group carries that group alone, under the same rule. Written through the same `memory` skill with `--group <id>`, only when a member asks, and never by the sleep cycle. The file reaches the model inside untrusted-content markers, since any member can write it. Not indexed for search.
+Memory shared by the members of a [group](groups.md), at `/Groups/{group_id}/GROUP.md`. Loaded as `## Group memory` for the groups the task may carry: all of the user's groups in a conversation with the bot alone, and in a shared room only those whose members include everyone present. A room linked to a group carries that group alone, under the same rule. Members edit the notebook in Groups or ask the bot to write through the `memory` skill with `--group <id>`. The sleep cycle never writes it. Web and CLI writers share a lock under `{db_path.parent}/locks/group-memory`; web edits check revisions and report conflicts. An unreadable notebook disables editing rather than appearing empty, and saves repeat the read under the lock. Recorded changes show the existing audit trail, which direct filesystem writes can bypass; they are not restorable versions. The file reaches the model inside untrusted-content markers, since any member can write it. Not indexed for search.
 
 ### Per-skill overlays
 

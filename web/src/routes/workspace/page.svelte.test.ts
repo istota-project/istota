@@ -1308,3 +1308,25 @@ it('says the configuration files are read as instructions', async () => {
   await within(section).findByText('USER.md');
   expect(within(section).getByText('Istota reads these as instructions.')).toBeTruthy();
 });
+
+it('links a group folder to its notebook and members without adding links to personal files', async () => {
+  const group: WorkspacePlace = {
+    ...home,
+    id: 'group:team.one',
+    kind: 'group',
+    label: 'Team',
+    view_root: '/Groups/team.one',
+  };
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, group], notes: [] });
+  __history.reset('/workspace?place=group%3Ateam.one&path=memories');
+  render(Workspace);
+  const memory = await screen.findByRole('link', { name: 'Group memory' });
+  expect(memory).toHaveAttribute('href', '/groups?group=team.one&view=memory');
+  expect(screen.getByRole('link', { name: 'Group members' })).toHaveAttribute(
+    'href',
+    '/groups?group=team.one&view=members',
+  );
+  await fireEvent.click(screen.getByRole('link', { name: 'My files' }));
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'Group memory' })).toBeNull());
+  expect(screen.queryByRole('link', { name: 'Group members' })).toBeNull();
+});
