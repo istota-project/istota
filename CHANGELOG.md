@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
 
-- Room location sharing stops when readers or transport identities change, or when the room is archived or switched off. Rejoining or reopening the room requires fresh approval; ordinary roster refreshes keep sharing active.
+- Room location sharing stops when readers or transport identities change, or when the room is archived or switched off. Rejoining or reopening the room requires fresh approval; ordinary roster refreshes keep sharing active. Upgrading older room identities preserves the consent record and requires fresh approval for location sharing.
 
 - Request timed location sharing with a room through a private approval preview. The preview names the readers, precision and duration; approval fixes the expiry, and stopping also cancels pending requests and their approval notices. A stop during execution keeps the private preview out of the room.
 
