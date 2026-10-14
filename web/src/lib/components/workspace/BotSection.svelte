@@ -65,7 +65,7 @@
       >
         <House size={14} />
         <span class="view-name" title={home.label}>{home.label}</span>
-        <TaskReachIcon access={home.reach.private} id={`task-reach-${home.id}`} />
+        <TaskReachIcon access={home.reach.private} botName={label} id={`task-reach-${home.id}`} />
       </a>
     {/if}
     {#each ENTRIES.filter((entry) => views.includes(entry.view)) as entry (entry.view)}

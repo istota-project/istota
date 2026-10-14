@@ -7,6 +7,7 @@
   let {
     pins,
     places,
+    botName,
     busy,
     onRemove,
     configFiles,
@@ -17,6 +18,7 @@
   }: {
     pins: WorkspacePin[];
     places: WorkspacePlace[];
+    botName: string;
     busy: boolean;
     onRemove: (pin: WorkspacePin) => void;
     configFiles: WorkspaceConfigFile[];
@@ -79,7 +81,12 @@
         {#snippet content()}
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
-          >{#if access}<TaskReachIcon {access} id={reachId} scope={pinScope(pinned)} />{/if}
+          >{#if access}<TaskReachIcon
+              {access}
+              {botName}
+              id={reachId}
+              scope={pinScope(pinned)}
+            />{/if}
         {/snippet}
         {#if !pin.available}
           <div class="unavailable">{@render content()}</div>

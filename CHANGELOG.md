@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A timed location share or a card purchase asked for in a WhatsApp group no longer fails with `invalid_preview` when you have a private WhatsApp chat with the bot. The approval now reaches that chat as expected.
+- Files uses your assistant's own name in the robot icon's tooltips, the "How … reaches your files" panel and its notes, instead of always saying "Istota".
 
 ## [0.46.0] - 2026-10-14
 

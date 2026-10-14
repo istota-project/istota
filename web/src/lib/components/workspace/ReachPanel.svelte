@@ -2,7 +2,8 @@
   import { Bot } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import ReachBadge from './ReachBadge.svelte';
-  let { place, notes }: { place: WorkspacePlace; notes: string[] } = $props();
+  let { place, notes, botName }: { place: WorkspacePlace; notes: string[]; botName: string } =
+    $props();
 </script>
 
 <!-- The Nextcloud view is the user's own, so its note is the whole story and stays visible. -->
@@ -10,7 +11,7 @@
   {#if place.reach.note}<p class="reach-notice">{place.reach.note}</p>{/if}
 {:else}
   <details class="reach-panel">
-    <summary>How Istota reaches your files</summary>
+    <summary>How {botName} reaches your files</summary>
     <div class="reach-body">
       <p class="reach-legend">
         <Bot size={14} role="img" aria-label="The robot icon" /> in the sidebar means your tasks can reach

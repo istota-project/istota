@@ -38,28 +38,38 @@ describe('reachesTasks', () => {
 
 describe('taskReachDescription', () => {
   it('gives one sentence per reachable access and null otherwise', () => {
-    expect(taskReachDescription('rw')).toBe('Istota can read and change these files');
-    expect(taskReachDescription('ro')).toBe('Istota can read these files');
-    expect(taskReachDescription('skill')).toBe('Istota reaches this through a skill');
-    expect(taskReachDescription('conditional')).toBe('Istota’s access depends on the room');
-    expect(taskReachDescription('none')).toBeNull();
-    expect(taskReachDescription('later' as WorkspaceAccess)).toBeNull();
-    expect(taskReachDescription('toString' as WorkspaceAccess)).toBeNull();
+    expect(taskReachDescription('rw', 'Istota')).toBe('Istota can read and change these files');
+    expect(taskReachDescription('ro', 'Istota')).toBe('Istota can read these files');
+    expect(taskReachDescription('skill', 'Istota')).toBe('Istota reaches this through a skill');
+    expect(taskReachDescription('conditional', 'Istota')).toBe(
+      'Istota’s access depends on the room',
+    );
+    expect(taskReachDescription('none', 'Istota')).toBeNull();
+    expect(taskReachDescription('later' as WorkspaceAccess, 'Istota')).toBeNull();
+    expect(taskReachDescription('toString' as WorkspaceAccess, 'Istota')).toBeNull();
+  });
+
+  it('names the bot it is given', () => {
+    expect(taskReachDescription('rw', 'Helper')).toBe('Helper can read and change these files');
+    expect(taskReachDescription('skill', 'Helper')).toBe('Helper reaches this through a skill');
+    expect(taskReachDescription('conditional', 'Helper')).toBe(
+      'Helper’s access depends on the room',
+    );
   });
 
   it('limits a room folder to that room', () => {
-    expect(taskReachDescription('rw', 'room')).toBe(
-      'Istota can read and change these files, in this room only',
+    expect(taskReachDescription('rw', 'Helper', 'room')).toBe(
+      'Helper can read and change these files, in this room only',
     );
-    expect(taskReachDescription('none', 'room')).toBeNull();
+    expect(taskReachDescription('none', 'Helper', 'room')).toBeNull();
   });
 
   it('says how the rooms index and a group folder are limited', () => {
-    expect(taskReachDescription('rw', 'rooms')).toBe(
-      'Istota can read and change these files, each only in its own room',
+    expect(taskReachDescription('rw', 'Helper', 'rooms')).toBe(
+      'Helper can read and change these files, each only in its own room',
     );
-    expect(taskReachDescription('ro', 'group')).toBe(
-      'Istota can read these files, in a shared room only when everyone there is in the group',
+    expect(taskReachDescription('ro', 'Helper', 'group')).toBe(
+      'Helper can read these files, in a shared room only when everyone there is in the group',
     );
   });
 });
