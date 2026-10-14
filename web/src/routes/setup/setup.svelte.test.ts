@@ -1411,3 +1411,137 @@ describe('Finishing', () => {
     expect(screen.queryByText(/security certificate/)).toBeNull();
   });
 });
+
+describe('a re-run over a configured stack', () => {
+  // What the server seeds a re-run's draft with: the stack's own answers,
+  // credentials redacted. `user_id` is a terminal-made id.
+  const PRIOR: SetupDraft = {
+    ...ANSWERED,
+    user_id: 'ada_admin',
+    password: { set: false },
+    feeds_enabled: true,
+    money_enabled: false,
+    profiles: ['browser'],
+  };
+  const RERUN_FINISHED = { login_url: 'https://istota.example.com/istota/login' };
+
+  async function openRerun(step: string, draft: SetupDraft = PRIOR) {
+    vi.mocked(getSetupState).mockResolvedValue({
+      ...state('open'),
+      rerun: true,
+      user_id: 'ada_admin',
+      modules_available: MODULES,
+    });
+    vi.mocked(getSetupDraft).mockResolvedValue({ draft });
+    saved = { ...draft };
+    __history.reset(`/setup/?step=${step}`);
+    render(Page);
+  }
+
+  it('is titled Change setup and goes from Welcome to the AI service, with no password screen', async () => {
+    await openRerun('welcome');
+
+    expect(await screen.findByRole('heading', { name: 'Change setup' })).toBeInTheDocument();
+    expect(screen.getAllByText(/Step 1 of 7/).length).toBeGreaterThan(0);
+    await next();
+    expect(await screen.findByRole('heading', { name: 'AI service' })).toBeInTheDocument();
+    expect(currentUrl()).toBe('/setup/?step=model');
+  });
+
+  it('falls back to the first screen for the password step in the address', async () => {
+    await openRerun('account');
+
+    expect(await screen.findByRole('heading', { name: 'Change setup' })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Password/)).toBeNull();
+  });
+
+  it('shows the username, email, name and time zone read-only on Welcome', async () => {
+    await openRerun('welcome');
+    await screen.findByRole('heading', { name: 'Change setup' });
+
+    const username = screen.getByLabelText(/^Username/);
+    const email = screen.getByLabelText(/^Your email/);
+    expect(username).toHaveValue('ada_admin');
+    expect(username).toHaveAttribute('readonly');
+    expect(email).toHaveValue('ada@example.com');
+    expect(email).toHaveAttribute('readonly');
+    expect(screen.getByLabelText(/^Your name/)).toHaveAttribute('readonly');
+    expect(screen.getByLabelText(/^Time zone/)).toHaveValue('Europe/London');
+    expect(screen.getByLabelText(/^Time zone/)).toHaveAttribute('readonly');
+    expect(screen.getByText(/Change these in Settings/)).toBeInTheDocument();
+    // The assistant's name is still a question.
+    expect(screen.getByLabelText(/^What should your assistant be called/)).not.toHaveAttribute(
+      'readonly',
+    );
+
+    // Typing at the email changes nothing, so the username does not follow it.
+    await type(/^Your email/, 'countess@example.com');
+    await next();
+    await screen.findByRole('heading', { name: 'AI service' });
+    expect(saved).toMatchObject({ user_email: 'ada@example.com', user_id: 'ada_admin' });
+  });
+
+  it('leaves the username alone when storage is toggled on the Nextcloud screen', async () => {
+    await openRerun('nextcloud');
+    const cards = await screen.findAllByRole('radio');
+
+    await fireEvent.click(cards[1]);
+    const own = await screen.findByLabelText(/^Your own Nextcloud username/);
+    expect(own).toHaveValue('ada_admin');
+    expect(own).toHaveAttribute('readonly');
+
+    await fireEvent.click(screen.getAllByRole('radio')[0]);
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Email and calendar' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ storage: 'local', user_id: 'ada_admin' });
+  });
+
+  it('shows the module toggles as they are and read-only, the browser still a choice', async () => {
+    await openRerun('features');
+    const browser = await screen.findByLabelText(/^Let Marlowe browse the web/);
+
+    expect(screen.getByLabelText(/^Feeds/)).toBeChecked();
+    expect(screen.getByLabelText(/^Feeds/)).toBeDisabled();
+    expect(screen.getByLabelText(/^Money/)).not.toBeChecked();
+    expect(screen.getByLabelText(/^Money/)).toBeDisabled();
+    expect(screen.getByText(/Change these in Settings/)).toBeInTheDocument();
+    expect(browser).toBeEnabled();
+
+    await fireEvent.click(browser);
+    await next();
+    await screen.findByRole('heading', { name: 'Review' });
+    expect(saved).toMatchObject({ feeds_enabled: true, money_enabled: false, profiles: [] });
+  });
+
+  it('reviews without a password group and shows the username', async () => {
+    await openRerun('review');
+    await screen.findByRole('button', { name: 'Finish setup' });
+
+    expect(document.querySelector('[data-review-step="account"]')).toBeNull();
+    expect(reviewRow('welcome', 'Your username')).toBe('ada_admin');
+  });
+
+  describe('finishing', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+      vi.mocked(finishSetup).mockResolvedValue(RERUN_FINISHED);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it('says the stack is restarting, not that it is starting for the first time', async () => {
+      await openRerun('review');
+      await fireEvent.click(await screen.findByRole('button', { name: 'Finish setup' }));
+      await screen.findByText('Settings saved');
+
+      expect(screen.getByText(/saved and Marlowe is restarting/)).toBeInTheDocument();
+      expect(screen.getByText(/Restarting Marlowe/)).toBeInTheDocument();
+      expect(screen.getByText(/You sign in as before/)).toBeInTheDocument();
+      expect(screen.queryByText(/the first time/)).toBeNull();
+    });
+  });
+});

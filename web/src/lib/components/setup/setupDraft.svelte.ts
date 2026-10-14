@@ -35,14 +35,33 @@ export const SETUP_STEPS = [
 
 export type SetupStepId = (typeof SETUP_STEPS)[number]['id'];
 export type SetupStepInfo = (typeof SETUP_STEPS)[number];
+export type SetupStepList = readonly SetupStepInfo[];
 
-export function isSetupStep(value: string): value is SetupStepId {
-  return SETUP_STEPS.some((s) => s.id === value);
+/**
+ * The screens a re-run leaves out: the password belongs to the login the
+ * first run made, which a re-run does not touch. The server's
+ * `RERUN_SKIPPED_STEPS`, held to this by `setupDraft.test.ts`.
+ */
+export const RERUN_SKIPPED_STEPS: readonly SetupStepId[] = ['account'];
+const RERUN_SETUP_STEPS: SetupStepList = SETUP_STEPS.filter(
+  (s) => !RERUN_SKIPPED_STEPS.includes(s.id),
+);
+
+/** The screens, in order: a first run's, or a re-run's (`/state`'s `rerun`). */
+export function setupSteps(rerun: boolean): SetupStepList {
+  return rerun ? RERUN_SETUP_STEPS : SETUP_STEPS;
+}
+
+export function isSetupStep(
+  value: string,
+  steps: SetupStepList = SETUP_STEPS,
+): value is SetupStepId {
+  return steps.some((s) => s.id === value);
 }
 
 /** The step's number as the indicator shows it, from 1. */
-export function stepPosition(id: SetupStepId): number {
-  return SETUP_STEPS.findIndex((s) => s.id === id) + 1;
+export function stepPosition(id: SetupStepId, steps: SetupStepList = SETUP_STEPS): number {
+  return steps.findIndex((s) => s.id === id) + 1;
 }
 
 export function stepInfo(id: SetupStepId): SetupStepInfo {
@@ -50,8 +69,12 @@ export function stepInfo(id: SetupStepId): SetupStepInfo {
 }
 
 /** The step before or after `id`, or null at either end. */
-export function neighbourStep(id: SetupStepId, delta: -1 | 1): SetupStepId | null {
-  return SETUP_STEPS[stepPosition(id) - 1 + delta]?.id ?? null;
+export function neighbourStep(
+  id: SetupStepId,
+  delta: -1 | 1,
+  steps: SetupStepList = SETUP_STEPS,
+): SetupStepId | null {
+  return steps[stepPosition(id, steps) - 1 + delta]?.id ?? null;
 }
 
 export const DEFAULT_BOT_NAME = 'Istota';

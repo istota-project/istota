@@ -17,9 +17,11 @@
     modules?: { field: string; module: string }[];
     /** The machine's memory, from `/state`; 0 when it could not be read. */
     memoryMib?: number;
+    /** A re-run: the module toggles are the user's settings, shown and kept. */
+    rerun?: boolean;
   }
 
-  let { draft, errors, botName, modules = [], memoryMib = 0 }: Props = $props();
+  let { draft, errors, botName, modules = [], memoryMib = 0, rerun = false }: Props = $props();
 
   // Once, when the screen opens.
   function open() {
@@ -48,13 +50,21 @@
 </script>
 
 <div class="step">
-  <p>Everything is on to start with. Turn off what you won't use.</p>
+  {#if rerun}
+    <p>
+      These features are settings of your own account. Change these in Settings. Web browsing is the
+      server's, and can be changed here.
+    </p>
+  {:else}
+    <p>Everything is on to start with. Turn off what you won't use.</p>
+  {/if}
   {#each modules as { field, module } (field)}
     <div class="feature">
       <Field label={moduleTitle(module)} checkbox error={errors[field]}>
         <input
           type="checkbox"
           checked={draft.flag(field, true)}
+          disabled={rerun}
           onchange={(e: Event) => draft.set(field, checked(e))}
         />
       </Field>

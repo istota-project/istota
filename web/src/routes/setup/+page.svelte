@@ -32,6 +32,7 @@
     createSetupDraft,
     isSetupStep,
     neighbourStep,
+    setupSteps,
     stepInfo,
     type SetupStepId,
   } from '$lib/components/setup/setupDraft.svelte';
@@ -59,12 +60,17 @@
   const draft = createSetupDraft();
 
   const botName = $derived(draft.text('bot_name') || setup?.defaults?.bot_name || DEFAULT_BOT_NAME);
+  // A re-run changes a stack that is set up: no password screen, and the
+  // per-user answers are shown rather than asked.
+  const rerun = $derived(setup?.rerun === true);
+  const steps = $derived(setupSteps(rerun));
 
   const stepSel = createUrlSelection<{ step: SetupStepId }>({
     key: 'setup',
     params: ['step'],
     encode: (selection) => ({ step: selection.step }),
-    decode: (params) => (params.step && isSetupStep(params.step) ? { step: params.step } : null),
+    decode: (params) =>
+      params.step && isSetupStep(params.step, steps) ? { step: params.step } : null,
     read: () => (ready ? { step } : null),
     apply: (selection) => {
       step = selection.step;
@@ -108,7 +114,7 @@
     unreachable =
       e instanceof SetupApiError && e.status !== 0
         ? e.message
-        : 'If setup stopped, run sudo istota-stack setup --web on the server to start it again.';
+        : `If setup stopped, run sudo istota-stack setup --web${rerun ? ' --force' : ''} on the server to start it again.`;
     view = 'unreachable';
   }
 
@@ -175,7 +181,7 @@
   let offerSkip = $state(false);
 
   function go(delta: -1 | 1) {
-    const next = neighbourStep(step, delta);
+    const next = neighbourStep(step, delta, steps);
     if (!next) return;
     errors = {};
     formError = '';
@@ -248,7 +254,7 @@
         view = 'finishing';
         return;
       }
-      if (e instanceof SetupApiError && e.status === 400 && e.step && isSetupStep(e.step)) {
+      if (e instanceof SetupApiError && e.status === 400 && e.step && isSetupStep(e.step, steps)) {
         const target = e.step;
         if (target !== step) stepSel.push({ step: target });
         errors = byField(e.fields.filter((f) => !f.step || f.step === target));
@@ -261,9 +267,9 @@
     }
   }
 
-  const title = $derived(stepInfo(step).title);
-  const isFirst = $derived(neighbourStep(step, -1) === null);
-  const isLast = $derived(neighbourStep(step, 1) === null);
+  const title = $derived(rerun && step === 'welcome' ? 'Change setup' : stepInfo(step).title);
+  const isFirst = $derived(neighbourStep(step, -1, steps) === null);
+  const isLast = $derived(neighbourStep(step, 1, steps) === null);
   // The screens whose Next runs a connection test that has not passed yet.
   const testsOnNext = $derived(step === 'model' || step === 'nextcloud' || step === 'connections');
 </script>
@@ -295,7 +301,8 @@
     <StepFinishing
       {botName}
       loginUrl={finished.login_url}
-      email={finished.email}
+      email={finished.email ?? ''}
+      {rerun}
       browser={draft.list('profiles').includes(BROWSER_PROFILE)}
       subscription={draft.text('brain_kind') === 'claude_code'}
       internet={(draft.text('ingress') || 'local') !== 'local'}
@@ -304,12 +311,16 @@
   </SetupFrame>
 {:else if view === 'finishing'}
   <SetupFrame {botName} title="Setup has finished">
-    <p>Your settings are saved and {botName} is starting. This page can be closed.</p>
+    <p>
+      Your settings are saved and {botName} is {rerun ? 'restarting' : 'starting'}. This page can be
+      closed.
+    </p>
   </SetupFrame>
 {:else}
   <SetupFrame
     {botName}
     {step}
+    {steps}
     {title}
     onBack={isFirst ? undefined : () => go(-1)}
     onNext={isLast ? () => finish() : () => advance()}
@@ -332,6 +343,7 @@
         bind:this={stepRef}
         {draft}
         {errors}
+        {rerun}
         defaultBotName={setup?.defaults?.bot_name}
       />
     {:else if step === 'account'}
@@ -353,7 +365,7 @@
         localAddress={setup?.local_address}
       />
     {:else if step === 'nextcloud'}
-      <StepNextcloud bind:this={stepRef} {draft} {errors} {botName} bind:offerSkip />
+      <StepNextcloud bind:this={stepRef} {draft} {errors} {botName} {rerun} bind:offerSkip />
     {:else if step === 'connections'}
       <StepConnections bind:this={stepRef} {draft} {errors} {botName} bind:offerSkip />
     {:else if step === 'features'}
@@ -361,6 +373,7 @@
         {draft}
         {errors}
         {botName}
+        {rerun}
         modules={setup?.modules_available}
         memoryMib={setup?.memory_total_mib}
       />
@@ -370,6 +383,7 @@
         {botName}
         models={setup?.defaults?.models}
         modules={setup?.modules_available}
+        {rerun}
         onEdit={(target) => stepSel.push({ step: target })}
       />
     {/if}
