@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Google Workspace setup documentation now covers the operator's OAuth client, consent screen and credential storage. It distinguishes instance setup from each user's account connection and explains common connection failures.
 - New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
 
 ## [0.45.0] - 2026-10-14

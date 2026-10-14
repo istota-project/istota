@@ -85,7 +85,7 @@ CARTO is its own service rather than a second field on Overland: a different cre
 
 A special case: stored in their own `google_oauth_tokens` table (not in `secrets`) because the OAuth flow writes `access_token` and `refresh_token` as a pair with expiry metadata. Fernet-encrypted at rest using the same `ISTOTA_SECRET_KEY`. A migration function auto-upgrades any pre-existing plaintext rows on read.
 
-Users connect their Google account through the web dashboard at `/istota/` (the dashboard shows a Google Workspace card). See [Google Workspace](../features/google-workspace.md) for the full setup.
+The operator first configures the instance's Google OAuth client ID and secret through Admin → Configuration. Each user then connects their own Google account at Settings → Connections (`/istota/settings/connections`). Istota ships without Google client credentials; the operator creates a Web application client in their own Google Cloud project. See [Google Workspace](../features/google-workspace.md) for consent-screen setup, the callback URL and credential storage.
 
 ## Shared credentials
 

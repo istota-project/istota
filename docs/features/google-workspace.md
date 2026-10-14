@@ -2,6 +2,10 @@
 
 Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`). The bot uses `gws` commands via Bash with structured JSON output. [Contacts](contacts.md) uses the same Google connection through its own skill and the People API.
 
+The operator configures one OAuth client ID and secret for the instance. Each user then connects their own Google account and chooses which services Istota may access. Configuring the client does not grant access to any account or to an entire Workspace organization. Personal Google accounts can connect too, if the OAuth app's audience allows them.
+
+Istota ships without Google client credentials. Create a client in a Google Cloud project you control: it owns the consent screen, enabled APIs and registered callback URL. An API key cannot replace the OAuth client ID and secret for this connection. Do not distribute a shared client secret with an image or source checkout; Google's [OAuth credential policy](https://developers.google.com/identity/protocols/oauth2/policies#handle-client-credentials-securely) requires keeping it private.
+
 ## Setup
 
 ### 1. Create Google Cloud OAuth credentials
@@ -16,26 +20,41 @@ Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google
     - People API (for Contacts)
     - Google Docs API
     - Google Chat API (only if you intend to offer the skill's `chat` verbs)
-4. Go to **APIs & Services > Credentials > Create Credentials > OAuth client ID**
-5. Application type: **Web application**
-6. Add an authorized redirect URI:
+4. Configure **Google Auth platform → Branding** with an app name, support email and contact email. Under **Audience**, choose Internal for an app restricted to your Google Workspace organization, or External for personal accounts or users outside it. Internal is available only to projects associated with an organization. For an External app in Testing, add every account that will connect under **Test users**. See Google's [consent setup guide](https://developers.google.com/workspace/guides/configure-oauth-consent).
+5. Under **Data Access**, add the scopes you intend to allow in Istota. Use the [scope table below](#scopes-reference); enabling an API and declaring its OAuth scopes are separate steps.
+6. Open **Google Auth platform → Clients → Create client** and choose **Web application**. This is the server-side OAuth client, not a Desktop app client or a service account.
+7. Add an **Authorized redirect URI**:
    ```
    https://your-hostname/istota/google/callback
    ```
-7. Copy the **Client ID** and **Client Secret**
+8. Copy the **Client ID** and **Client Secret** into the instance settings described below. Keep the secret private.
 
 :::note
-The redirect URI must match your Istota web interface hostname exactly, including the scheme (`https://`).
+Istota constructs this URL from `[site] hostname`, with `/istota/google/callback` as the path. Register the exact URL, including scheme, port if present, path and absence of a trailing slash. Production hosts use HTTPS; literal localhost/loopback development hosts use HTTP. The Nextcloud sign-in callback (`/istota/callback`) is a different OAuth flow. See Google's [redirect URI rules](https://developers.google.com/identity/protocols/oauth2/web-server#redirect-uri-validation).
 :::
 
+For an External app left in Testing, refresh tokens for Workspace scopes expire after seven days, so users must reconnect. For ongoing use, move the app to In production and complete any verification Google requires for your audience and scopes. Publishing and verification are separate steps; personal-use and internal apps can qualify for verification exceptions. A Workspace administrator may also need to allow the app. See Google's [token expiry rules](https://developers.google.com/identity/protocols/oauth2#expiration) and [verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification).
+
 ### 2. Configure Istota
+
+On the stack, open **Admin → Configuration** (`/istota/admin/config`):
+
+1. Set `google_workspace.enabled` to `true` and `google_workspace.client_id` to the ID from Google.
+2. Set the deployment credential `istota_google_workspace_client_secret` to the matching secret. Use the credential field, rather than putting the secret in the raw TOML editor.
+3. Set `google_workspace.scopes` if you want a different service ceiling from the defaults below.
+4. Review and submit the change, complete the editor's confirmation, and wait for the stack to restart.
+
+The [web config editor](../configuration/web-editor.md) applies the settings and secret together. It is read-only without the host applier, or when the relevant resource is managed by an external plan. **Admin → Connections** currently has Nextcloud and WhatsApp cards; Google client setup is on Configuration. **Settings → Connections** is where each user authorizes their own Google account.
+
+For file-based configuration, set these values in `config.toml`:
 
 ```toml
 [google_workspace]
 enabled = true
 client_id = "123456789-abc.apps.googleusercontent.com"
-client_secret = ""    # or ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET env var
 ```
+
+On the stack, the secret goes in `/srv/app/istota/secrets/istota_google_workspace_client_secret` on the VM. The container exposes it as `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET`. Follow the [deployment credential procedure](../configuration/credentials.md#provisioning-global-credentials) to replace it and restart the services. Outside the stack, set that environment variable for both the web process and daemon; it overrides `[google_workspace] client_secret`. The client ID stays in TOML. Restart both processes after changes. Keep the existing `ISTOTA_SECRET_KEY`: it encrypts users' stored OAuth tokens and is unrelated to the Google client secret.
 
 The default scopes offer read-only access to Drive, Gmail, Calendar, Sheets, Docs and Contacts (including Other contacts).
 
@@ -63,9 +82,9 @@ The istota image ships `gws` on `PATH`, so a server needs no step here. For an i
 
 ### 4. Connect a user's Google account
 
-Each user connects their own Google account from **Settings → Google Workspace**:
+Each user connects their own Google account from **Settings → Connections → Google Workspace**:
 
-1. User logs in to the Istota web interface and opens `/istota/settings`
+1. User logs in to the Istota web interface and opens `/istota/settings/connections`
 2. The **Google Workspace** card lists one row per service with an access level: no access, read-only, or read and write. Services outside the instance ceiling are fixed at "No access" and say so
 3. User picks their levels and saves, then clicks **Connect**
 4. Google's consent screen asks for exactly the scopes that selection resolves to. The user may still deselect individual boxes there
@@ -84,8 +103,22 @@ The card reads the granted scopes back out of the stored token, so it reports wh
 Changing the selection requires reconnecting: Google has to ask again. The connect flow already sets `access_type=offline` and `prompt=consent`, so a reconnect issues a fresh refresh token.
 
 :::note
-The consent screen appears on every connect, not only the first. The authorization request asks for offline access with `prompt=consent`, because Google returns a refresh token only when both are asked for — and without one, a reconnect (after widening `scopes`, or after the user revokes access from their Google account) would store an access token that expires in an hour and cannot be renewed.
+The consent screen appears on every connect, not only the first. Istota requests offline access and forces consent on reconnect so it can obtain a refresh token again. Offline access alone can omit a refresh token when the user has already authorized the client. Without one, the new access token would expire without a way to renew it.
 :::
+
+### Troubleshooting setup
+
+| Symptom | What to check |
+|---|---|
+| Google Workspace card is missing | Enable `google_workspace.enabled` in the instance configuration and apply the restart. |
+| “Google Workspace not configured” | Set the client ID and enable the integration, then restart the web process. |
+| `redirect_uri_mismatch` | Compare Google's registered URI with the URL built from `site.hostname`, including `/istota/google/callback`. |
+| `invalid_client` or a failed code exchange | Check that the client ID and secret belong to the same Web application client and that both services loaded the new secret. |
+| Access blocked or user not allowed | Check the app's audience, test-user list, verification status and Workspace administrator's app policy. |
+| Reconnect needed after seven days | Check whether the External OAuth app is still in Testing. |
+| An API is disabled or permissions are missing | Enable the service's API in the same Cloud project, check the instance scope ceiling, then have the user select access and reconnect. |
+
+Replacing the OAuth client ID requires users to reconnect: existing refresh tokens belong to the old client. Rotating a secret for the same client is different; update the instance credential and restart both services before retiring the old secret.
 
 ## Usage
 
