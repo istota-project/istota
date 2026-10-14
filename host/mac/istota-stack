@@ -156,6 +156,7 @@ require_running() {
 VM_PROBE='s=/srv/app/istota
 printf "tag=%s\n" "$(sed -n "s/^ISTOTA_TAG=//p" "$s/.env" 2>/dev/null | tail -n 1)"
 printf "unsigned=%s\n" "$(sed -n "s/^ISTOTA_TAG_UNSIGNED=//p" "$s/.env" 2>/dev/null | tail -n 1)"
+printf "publish=%s\n" "$(sed -n "s/^NGINX_PUBLISH=//p" "$s/.env" 2>/dev/null | tail -n 1)"
 if [ -f "$s/config/config.toml" ]; then echo config=1; else echo config=0; fi
 printf "admin=%s\n" "$(sed -n "/^[[:space:]]*[^#[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*\$//;p;q;}" "$s/config/admins" 2>/dev/null)"'
 
@@ -618,6 +619,25 @@ escrow_key() {
 
 # The first admin's way in: an enrolment link for an identity with no
 # password yet, or how to make one.
+# The port nginx publishes on in the VM, which is what reaches the Mac's
+# loopback. A VM set up earlier for another hostname keeps its own port, and
+# the forward made for the port asked for has nothing behind it: report and
+# record the one that answers.
+SERVED_PORT=""
+reconcile_port() {
+    local probe="$1" asked="$2" publish actual
+    SERVED_PORT="$asked"
+    publish="$(probe_value "$probe" publish)"
+    case "$publish" in 127.0.0.1:*:*) ;; *) return 0 ;; esac
+    actual="${publish#127.0.0.1:}"
+    actual="${actual%%:*}"
+    valid_port "$actual" || return 0
+    [ "$actual" != "$asked" ] || return 0
+    log "the stack was set up for localhost:${actual}, not ${asked}; it answers on ${actual}."
+    state_set "PORT=${actual}"
+    SERVED_PORT="$actual"
+}
+
 enrolment() {
     local admin="$1" port="$2" url listing line email="" link=""
     url="http://localhost:${port}/istota"
@@ -852,7 +872,8 @@ cmd_create() {
     refresh_scripts
     escrow_key
     probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
-    enrolment "$(probe_value "$probe" admin)" "$port"
+    reconcile_port "$probe" "$port"
+    enrolment "$(probe_value "$probe" admin)" "$SERVED_PORT"
     log "done. \`istota-stack status\` shows the VM; files are in ${folder}."
 }
 
@@ -1534,7 +1555,8 @@ cmd_import_standalone() {
     escrow_key
     local probe
     probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
-    enrolment "$(probe_value "$probe" admin)" "$port"
+    reconcile_port "$probe" "$port"
+    enrolment "$(probe_value "$probe" admin)" "$SERVED_PORT"
 
     local doctor_rc=0
     vm_stack exec istota doctor </dev/null || doctor_rc=$?

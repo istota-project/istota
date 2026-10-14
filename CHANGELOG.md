@@ -93,6 +93,7 @@ Shared rooms are friendlier by default: a cheap model decides whether a group tu
 
 ### Fixed
 
+- On a Mac whose VM was already set up for a different port, `istota-stack create` now prints the address that actually answers and remembers it, instead of the port it was asked for.
 - `install.sh --local` on a Mac whose VM already exists now installs a signed release. The VM is given the release key when it has none recorded, instead of every signed tag being refused.
 - The admin Logs, Health, Browsers and backup views, location pings, SMS callbacks, web cancel and notices to WhatsApp all work on the Docker stack again.
 - The image now includes `gws`, `gitleaks` and `pdftotext`, so Google Workspace, unattended commits and PDF reading work.

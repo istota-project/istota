@@ -194,6 +194,7 @@ if verb == "shell":
     vm = state.setdefault("vm", {})
     if command[:2] == ["sh", "-c"]:
         out(f"tag={vm.get('tag', '')}\nunsigned={vm.get('unsigned', '')}\n"
+            f"publish={vm.get('publish', '')}\n"
             f"config={1 if vm.get('config') else 0}\nadmin={vm.get('admin', '')}\n")
         sys.exit(0)
     if command[:1] != ["istota-stack"]:
@@ -741,6 +742,29 @@ class TestCreate:
         write = next(c for c in calls if c[:1] == ["host-env"] and len(c) > 2)
         assert f"RELEASE_SIGNING_KEY={PROJECT_KEY}" in write
         assert calls.index(write) < calls.index(["update", "v1.2.0"])
+
+    def test_an_existing_stack_on_another_port_is_reported_on_its_own(self, mac):
+        """A VM set up earlier for `localhost` publishes on 8080; the forward
+        made for 8181 has nothing behind it, and the sign-in line said 8181."""
+        mac.set(instance={"name": "istota", "status": "Running"},
+                vm={"tag": "v1.2.0", "config": True, "admin": "alice",
+                    "publish": "127.0.0.1:8080:80"},
+                auth_list="alice email=a@example.com password_set=True")
+        result = mac.run("create", "--tag", "v1.2.0", "--port", "8181")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "sign in at http://localhost:8080/istota" in result.stdout
+        state = (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+        assert "PORT=8080\n" in state
+
+    def test_a_stack_on_the_port_asked_for_says_nothing_more(self, mac):
+        mac.set(instance={"name": "istota", "status": "Running"},
+                vm={"tag": "v1.2.0", "config": True, "admin": "alice",
+                    "publish": "127.0.0.1:8181:80"},
+                auth_list="alice email=a@example.com password_set=True")
+        result = mac.run("create", "--tag", "v1.2.0", "--port", "8181")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "set up for" not in result.stdout
+        assert "http://localhost:8181/istota" in result.stdout
 
     def test_a_recorded_key_is_not_replaced(self, mac):
         mac.set(instance={"name": "istota", "status": "Running"},
