@@ -456,3 +456,64 @@ def test_scripts_index_invalid_reference_leaf(config, index_tree):
     index = _index(config)
     assert index.files == []
     assert list(index.broken) == ["bad\x00.py"]
+
+
+def test_scripts_index_never_trusts_a_resolved_descendant(config, index_tree, monkeypatch):
+    from istota.cron_loader import CronJob
+
+    staging = index_tree.parent / "staging"
+    (staging / "istota/scripts").mkdir(parents=True)
+    other_user = config.workspace_path / "Users/bob"
+    (other_user / "istota/scripts").mkdir(parents=True)
+    (other_user / "istota/scripts/private.py").write_text("# Private description")
+    _write_jobs(index_tree, [CronJob(
+        name="check", cron="0 9 * * *",
+        command="python /Users/alice/istota/scripts/private.py",
+    )])
+    real_contained = storage._contained_under_user_root
+
+    def swap(config, user_id, path):
+        if path == index_tree / "scripts":
+            path.rename(index_tree / "scripts-original")
+            path.symlink_to(staging / "istota/scripts", target_is_directory=True)
+            resolved = real_contained(config, user_id, path)
+            staging.rename(staging.with_name("staging-original"))
+            staging.symlink_to(other_user, target_is_directory=True)
+            return resolved
+        return real_contained(config, user_id, path)
+
+    monkeypatch.setattr(storage, "_contained_under_user_root", swap)
+    index = _index(config)
+    assert index.files == []
+    assert index.sources["scripts"] == "refused"
+    assert not index.referenced_by
+
+
+@pytest.mark.parametrize("content", [
+    storage.HEARTBEAT_TEMPLATE.format(conversation_token="", user_id="alice"),
+    "",
+    '```toml\n[settings]\ndefault_cooldown_minutes = 60\n```',
+])
+def test_scripts_index_valid_empty_heartbeat(config, index_tree, content):
+    (index_tree / "config/HEARTBEAT.md").write_text(content)
+    assert _index(config).sources["heartbeat"] == "ok"
+
+
+@pytest.mark.parametrize("content", [b"\xff", b'```toml\nchecks = [\n```'])
+def test_scripts_index_unreadable_heartbeat(config, index_tree, content):
+    (index_tree / "config/HEARTBEAT.md").write_bytes(content)
+    assert _index(config).sources["heartbeat"] == "error"
+
+
+@pytest.mark.parametrize("name", ["daily report.txt", "report;draft(1).txt", "report."])
+def test_scripts_index_prompt_file_uses_complete_path(config, index_tree, name):
+    from istota.cron_loader import CronJob
+
+    (index_tree / "scripts/prompts" / name).write_text("Summarize the report")
+    _write_jobs(index_tree, [CronJob(
+        name="report", cron="0 9 * * *",
+        prompt_file=f"/Users/alice/istota/scripts/prompts/{name}",
+    )])
+    index = _index(config)
+    assert not index.broken
+    assert index.referenced_by[f"prompts/{name}"][0].kind == "prompt_file"

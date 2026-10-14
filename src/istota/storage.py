@@ -444,9 +444,12 @@ def resolve_user_scripts_dir(config: "Config", user_id: str) -> Path | None:
     """
     if not config.has_workspace:
         return None
-    scripts = _get_mount_path(
-        config, get_user_scripts_path(user_id, config.bot_dir_name)
-    )
+    user_root = config.workspace_root(user_id)
+    if user_root is None:
+        return None
+    # Only the configured user root is trusted to follow links. Never let a
+    # resolved descendant become the anchor of a later no-follow walk.
+    scripts = user_root.resolve() / config.bot_dir_name / "scripts"
     for directory in (scripts.parent, scripts):
         try:
             info = directory.lstat()
@@ -459,9 +462,10 @@ def resolve_user_scripts_dir(config: "Config", user_id: str) -> Path | None:
             logger.warning("scripts_dir_refused user=%s reason=symlink", user_id)
             return None
     resolved = _contained_under_user_root(config, user_id, scripts)
-    if resolved is None:
+    if resolved != scripts:
         logger.warning("scripts_dir_refused user=%s reason=outside_user_tree", user_id)
-    return resolved
+        return None
+    return scripts
 
 
 def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:

@@ -256,6 +256,12 @@ def _load_source(config: "Config", user_id: str, source: str, loader) -> tuple[o
         return None, "error"
     try:
         loaded = loader(config, user_id)
+        if loaded is None and source == "heartbeat":
+            # The heartbeat loader also returns None for a valid file with
+            # no checks, including the template seeded for a new user.
+            content = storage.read_user_config_file(config, user_id, "HEARTBEAT.md")
+            if content is not None and not heartbeat.heartbeat_document_errors(content, user_id):
+                return None, "ok"
     except Exception as exc:
         logger.warning("scripts_source_failed user=%s source=%s error=%s", user_id, source, type(exc).__name__)
         return None, "error"
@@ -324,7 +330,15 @@ def scripts_index(config: "Config", conn: sqlite3.Connection, user_id: str) -> S
             if job.command:
                 add(paths(job.command), ScriptRef("cron", job.name, "command", "runs", state))
             if job.prompt_file:
-                add(paths(job.prompt_file), ScriptRef("cron", job.name, "prompt_file", "prompt_file", state))
+                try:
+                    path = PurePosixPath(job.prompt_file).relative_to(
+                        storage.get_user_scripts_path(user_id, config.bot_dir_name)
+                    )
+                except ValueError:
+                    pass
+                else:
+                    if path.parts and ".." not in path.parts:
+                        add([path.as_posix()], ScriptRef("cron", job.name, "prompt_file", "prompt_file", state))
             elif job.prompt:
                 mentions = sorted(set(paths(job.prompt)) | set(find_bare_mentions(job.prompt, existing)))
                 add(mentions, ScriptRef("cron", job.name, "prompt", "mentions", state))
