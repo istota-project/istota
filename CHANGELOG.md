@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
 
-- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Files. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
+- Groups has a member overview: the shared notebook, members, linked rooms ordered by latest activity, and the newest shared files, as cards on one page. Files links back to it. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
 - Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
 - Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
 
