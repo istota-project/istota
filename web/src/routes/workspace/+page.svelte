@@ -43,6 +43,7 @@
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';
+  import { placeForRef } from '$lib/components/workspace/reach';
   import PinnedList from '$lib/components/workspace/PinnedList.svelte';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
 
@@ -296,14 +297,7 @@
       if (!drive) return unavailable;
       return { label: 'Reveal', onSelect: () => void revealDrive(ref, drive.id) };
     }
-    const place = places
-      .filter(
-        (place) =>
-          place.browsable &&
-          place.view_root &&
-          (ref === place.view_root || ref.startsWith(place.view_root + '/')),
-      )
-      .sort((a, b) => b.view_root!.length - a.view_root!.length)[0];
+    const place = placeForRef(places, ref);
     if (!place) return unavailable;
     const relative = ref.slice(place.view_root!.length).replace(/^\//, '');
     const path = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';

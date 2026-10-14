@@ -2,6 +2,7 @@
   import { CategoryGroup, KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
+  import { placeForRef } from './reach';
   let {
     pins,
     places,
@@ -39,13 +40,7 @@
   }
   function folderTarget(pin: WorkspacePin) {
     if (!pin.available || !pin.is_dir || pin.provider !== 'workspace') return null;
-    const place = places
-      .filter(
-        (place) =>
-          place.view_root &&
-          (pin.ref === place.view_root || pin.ref.startsWith(place.view_root + '/')),
-      )
-      .sort((a, b) => b.view_root!.length - a.view_root!.length)[0];
+    const place = placeForRef(places, pin.ref);
     return place
       ? { place: place.id, path: pin.ref.slice(place.view_root!.length).replace(/^\//, '') }
       : null;
