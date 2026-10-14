@@ -10,7 +10,7 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { EmptyState, NoticeBanner, StatTile } from '$lib/components/ui';
+  import { EmptyState, NoticeBanner, StatTile, PageLoading } from '$lib/components/ui';
   import { directionColor } from '$lib/money/direction';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
@@ -155,7 +155,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if !summary}

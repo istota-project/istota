@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The web app's "Loading…" text no longer jumps around the screen as a page assembles. A loading page now shows one thin bar fixed along the top edge of the window, and the page area stays empty until the content arrives. A chat room that is still loading shows a softly pulsing octopus in place of the text.
 - On a phone, the file editor and the plain-text file view now show text at the same size as on a desktop, rather than enlarged. The page still does not zoom in when you tap into the text.
 - Cancelling browser setup on a Mac now returns the VM setup result even when it finishes while cancellation is being acknowledged.
 

@@ -13,7 +13,7 @@
     type ConfigRequest,
     type ConfigResource,
   } from '$lib/api';
-  import { Button, EmptyState, Input, NoticeBanner } from '$lib/components/ui';
+  import { Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
@@ -268,7 +268,7 @@
 
 <div class="settings config-page">
   {#if loading && !view}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error && !view}
     <div class="center-msg error">{error}</div>
   {:else if view}

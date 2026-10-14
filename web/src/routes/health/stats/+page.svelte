@@ -31,7 +31,7 @@
     metricLabel,
     toCanonical,
   } from '$lib/health/units';
-  import { Button, EmptyState, Field, Input, Modal, Select } from '$lib/components/ui';
+  import { Button, EmptyState, Field, Input, Modal, Select, PageLoading } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
 
   Chart.register(
@@ -423,7 +423,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if metricsToShow().length === 0 && !hasBp()}

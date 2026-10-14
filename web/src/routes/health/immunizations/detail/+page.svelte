@@ -19,6 +19,7 @@
     Field,
     Select,
     type SelectOption,
+    PageLoading,
   } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
@@ -126,7 +127,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if immunization}

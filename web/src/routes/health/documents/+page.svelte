@@ -47,6 +47,7 @@
     Select,
     type KebabItem,
     type SelectOption,
+    PageLoading,
   } from '$lib/components/ui';
   import {
     attachOptions,
@@ -396,7 +397,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if loadError}
   <div class="center-msg error">{loadError}</div>
 {:else if documents.length === 0}

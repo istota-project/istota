@@ -302,6 +302,13 @@ function mockCredentialRoutes(url: string, method: string, body: any): unknown |
  */
 const MOCK_EMPTY_MONEY = process.env.VITE_MOCK_EMPTY === 'money';
 
+/**
+ * `VITE_MOCK_LATENCY_MS=1500` holds every mock response that long. Off
+ * localhost a load finishes inside the loader's fade-in, so without it the page
+ * loader (ISSUE-752) and every other loading state cannot be looked at.
+ */
+const MOCK_LATENCY_MS = Math.max(0, Number(process.env.VITE_MOCK_LATENCY_MS) || 0);
+
 interface MockReq {
   url: string;
   method: string;
@@ -12152,11 +12159,15 @@ export function mockApi(): Plugin {
           res.end('mock not implemented');
         };
 
-        if (method === 'GET' || method === 'HEAD') {
-          dispatch(undefined);
-        } else {
-          readBody(req).then(dispatch);
-        }
+        const handle = () => {
+          if (method === 'GET' || method === 'HEAD') {
+            dispatch(undefined);
+          } else {
+            readBody(req).then(dispatch);
+          }
+        };
+        if (MOCK_LATENCY_MS > 0) setTimeout(handle, MOCK_LATENCY_MS);
+        else handle();
       });
     },
   };

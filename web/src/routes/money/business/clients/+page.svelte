@@ -21,6 +21,7 @@
     KebabMenu,
     NoticeBanner,
     type KebabItem,
+    PageLoading,
   } from '$lib/components/ui';
   import ClientForm from '$lib/components/money/ClientForm.svelte';
 
@@ -195,7 +196,7 @@
   {/if}
 
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if clients.length === 0}

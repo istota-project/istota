@@ -7,7 +7,7 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
-  import { EmptyState, StatTile } from '$lib/components/ui';
+  import { EmptyState, StatTile, PageLoading } from '$lib/components/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
@@ -184,7 +184,7 @@
 
 <div class="tax-content">
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error && !data}
     <div class="center-msg error">{error}</div>
   {:else if !data}

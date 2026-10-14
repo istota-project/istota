@@ -13,7 +13,7 @@
     Tooltip,
     Legend,
   } from 'chart.js';
-  import { EmptyState, StatTile } from '$lib/components/ui';
+  import { EmptyState, StatTile, PageLoading } from '$lib/components/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -311,7 +311,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if months.length === 0}

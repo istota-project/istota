@@ -15,7 +15,7 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { EmptyState, KebabMenu } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -238,7 +238,7 @@
   {/if}
 
   {#if loading && transactions.length === 0}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if transactions.length === 0}

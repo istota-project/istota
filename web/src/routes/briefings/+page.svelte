@@ -9,7 +9,7 @@
     briefingArchiveError,
   } from '$lib/stores/briefings';
   import { formatDateTime } from '$lib/dateFormat';
-  import { EmptyState } from '$lib/components/ui';
+  import { EmptyState, PageLoading } from '$lib/components/ui';
 
   let current = $state<BriefingArchiveItem | null>(null);
   let loading = $state(false);
@@ -74,7 +74,7 @@
       <div use:fileLinks class="body markdown">{@html renderMarkdown(current.body_md ?? '')}</div>
     </article>
   {:else if loading || $briefingArchiveCount === null}
-    <p class="center-msg">Loading…</p>
+    <PageLoading />
   {:else if $briefingArchiveError}
     <!-- Ahead of the empty state and behind everything else: a briefing already
          on screen stays readable through a failed refresh, but an archive that

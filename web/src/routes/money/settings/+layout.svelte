@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { PageLoading } from '$lib/components/ui';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { getModuleServices, type ServiceCard as ServiceCardData } from '$lib/api';
@@ -40,7 +41,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if !moduleEnabled}

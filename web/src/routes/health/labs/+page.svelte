@@ -13,7 +13,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, Select } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Select, PageLoading } from '$lib/components/ui';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -208,7 +208,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if specimen && matrix && matrix.panels.length === 0 && drafts.length === 0}

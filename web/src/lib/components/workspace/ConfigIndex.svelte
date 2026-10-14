@@ -1,6 +1,6 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
-  import { Button, EmptyState, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Button, EmptyState, KebabMenu, type KebabItem, PageLoading } from '$lib/components/ui';
   import type { WorkspaceConfigFile } from '$lib/api';
   import { configFileDescription, configFileDetail, configFileLabel } from './configFiles';
 
@@ -41,7 +41,7 @@
       <Button variant="secondary" onclick={onRetry}>Retry</Button>
     </div>
   {:else if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if files.length}
     <IndexCaption {caption} {reachNote} />
     <ul>

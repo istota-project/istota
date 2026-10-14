@@ -27,6 +27,7 @@
     NoticeBanner,
     Button,
     CategoryGroup,
+    LoadingOctopus,
   } from '$lib/components/ui';
   import { isHiddenRoom } from '$lib/stores/roomOrder';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -1497,7 +1498,7 @@
         onpointercancel={() => (tapStart = null)}
       >
         {#if !$loaded}
-          <div class="chat-placeholder">Loading…</div>
+          <div class="chat-placeholder"><LoadingOctopus label="Loading messages…" /></div>
         {:else if $messages.length === 0}
           <div class="chat-placeholder">
             {#if $view === 'unread'}
@@ -1965,9 +1966,8 @@
     justify-content: center;
     gap: var(--space-2);
     color: var(--text-dim);
-    /* Matches the whole-pane loading message every other section uses
-	     (`.center-msg`, app.css). The empty states set their own larger type on
-	     the `<p>` below, so this only lands on the bare "Loading…" line. */
+    /* The loading state's octopus is sized in em off this. The empty states
+	     set their own larger type on the `<p>` below. */
     font-size: var(--text-sm);
     text-align: center;
   }

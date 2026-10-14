@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { PageLoading } from '$lib/components/ui';
   import { goto } from '$app/navigation';
   import { Collapsible } from 'bits-ui';
   import { getReport, type AccountRow } from '$lib/money/api';
@@ -96,7 +97,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else}

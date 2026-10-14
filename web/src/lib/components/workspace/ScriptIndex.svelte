@@ -1,7 +1,14 @@
 <script lang="ts">
   import IndexCaption from './IndexCaption.svelte';
   import type { WorkspaceScriptsIndex } from '$lib/api';
-  import { Button, EmptyState, KebabMenu, NoticeBanner, type KebabItem } from '$lib/components/ui';
+  import {
+    Button,
+    EmptyState,
+    KebabMenu,
+    NoticeBanner,
+    type KebabItem,
+    PageLoading,
+  } from '$lib/components/ui';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { brokenKind, scriptRefLabel, scriptUsage, type ScriptKind } from './scriptFiles';
 
@@ -56,7 +63,7 @@
       <Button variant="secondary" onclick={onRetry}>Retry</Button>
     </div>
   {:else if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if index}
     {#if broken.length}
       <div class="broken">

@@ -14,7 +14,14 @@
     type AdminPairingState,
     type AdminWhatsAppConnection,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, EmptyState, NoticeBanner } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    NoticeBanner,
+    PageLoading,
+  } from '$lib/components/ui';
   import NextcloudCard from './NextcloudCard.svelte';
   import GoogleWorkspaceCard from './GoogleWorkspaceCard.svelte';
 
@@ -651,7 +658,7 @@
 
 <div class="settings connections-page">
   {#if loading && !connections}
-    <div class="center-msg">Loading connections…</div>
+    <PageLoading label="Loading connections…" />
   {:else if error && !connections}
     <div class="center-msg error">{error}</div>
   {:else if nextcloud || whatsapp || google}

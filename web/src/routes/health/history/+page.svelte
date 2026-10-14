@@ -17,6 +17,7 @@
     Field,
     Select,
     type SelectOption,
+    PageLoading,
   } from '$lib/components/ui';
   import {
     conditionOptionLabel,
@@ -319,7 +320,7 @@
 </div>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else}

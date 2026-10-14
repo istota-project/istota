@@ -36,6 +36,14 @@ function isErrorBranch(cond) {
   return MENTIONS_ERROR.test(cond.replace(NEGATED_ERROR, ''));
 }
 
+/** The shared loading placeholder, whose `.center-msg` lives in the component. */
+const PAGE_LOADING = /<PageLoading\b/;
+
+/** Does this branch render the whole-pane state's box, directly or via the placeholder? */
+function rendersPaneState(markup) {
+  return hasClasses(markup, 'center-msg') || PAGE_LOADING.test(markup);
+}
+
 /** Does any single `class="…"` in this markup carry all of these names? */
 function hasClasses(markup, ...names) {
   for (const match of markup.matchAll(/class="([^"]*)"/g)) {
@@ -147,7 +155,7 @@ export function ifChains(source) {
 export function findPaneErrorViolations(source) {
   const found = [];
   for (const chain of ifChains(source)) {
-    const hasCentered = chain.branches.some((b) => hasClasses(b.content, 'center-msg'));
+    const hasCentered = chain.branches.some((b) => rendersPaneState(b.content));
     if (!hasCentered) continue;
     for (const branch of chain.branches) {
       if (!isErrorBranch(branch.cond)) continue;
@@ -187,7 +195,7 @@ export function findHeldChromeViolations(source) {
   const chains = ifChains(source);
   const hasWholePaneFailure = chains.some(
     (chain) =>
-      chain.branches.some((b) => hasClasses(b.content, 'center-msg')) &&
+      chain.branches.some((b) => rendersPaneState(b.content)) &&
       chain.branches.some((b) => isErrorBranch(b.cond)),
   );
   if (!hasWholePaneFailure) return [];
@@ -200,6 +208,24 @@ export function findHeldChromeViolations(source) {
     const [gate] = chain.branches;
     if (!HELD_FOR_LOADING_ONLY.test(gate.cond)) continue;
     found.push({ line: gate.line, cond: gate.cond });
+  }
+  return found;
+}
+
+// A `.center-msg` whose text says the pane is still loading. ISSUE-752: it was
+// centred in whatever box existed at the time, so it jumped as the nav and then
+// a module sidebar rendered around it. Pane loads render `<PageLoading />`,
+// which keeps the slot and drives the one fixed loader in the root layout.
+// Literal text only: a label interpolated as `{label}` or a computed `class={…}`
+// is not caught, and none is in the tree.
+const PANE_LOADING_TEXT =
+  /<(\w+)\b[^>]*?\sclass="([^"]*\bcenter-msg\b[^"]*)"[^>]*>\s*((?:Loading|Running)[^<]*)</g;
+
+export function findPaneLoadingText(source) {
+  const found = [];
+  for (const match of source.matchAll(PANE_LOADING_TEXT)) {
+    if (match[2].split(/\s+/).includes('error')) continue;
+    found.push({ line: lineOf(source, match.index), markup: match[0].slice(0, -1).trim() });
   }
   return found;
 }
