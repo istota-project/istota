@@ -100,6 +100,9 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
       throw Object.assign(new Error(await errorMessage(resp, detail)), {
         status: resp.status,
         field: typeof detail?.field === 'string' ? detail.field : null,
+        // The parsed refusal, for a route whose error body carries more than a
+        // message (the Nextcloud sharing save's per-row `failed`).
+        body: detail as unknown,
       });
     }
     try {
@@ -182,8 +185,91 @@ export interface User {
   avatars?: { user: string | null; bot: string | null };
 }
 
-export async function disconnectNextcloudToken(): Promise<{ ok: boolean; was_connected: boolean }> {
-  return apiFetch('/settings/nextcloud-token', { method: 'DELETE' });
+/**
+ * Remove the stored Nextcloud token. With `unshare`, the bot's shares are
+ * removed first and the token is kept when any is left: the 409 then carries
+ * `still_shared` (names) on the thrown error's `body`, or only the listing's
+ * message when Nextcloud could not be asked.
+ */
+export async function disconnectNextcloudToken(
+  unshare = false,
+): Promise<{ ok: boolean; was_connected: boolean }> {
+  const query = unshare ? '?unshare=true' : '';
+  return apiFetch(`/settings/nextcloud-token${query}`, { method: 'DELETE' });
+}
+
+// --- Nextcloud calendar and address-book sharing ---
+//
+// The state lives in Nextcloud: each level is read back from the collection's
+// own share list, so a share made in the Nextcloud apps shows here too. Ids,
+// never URLs, cross to the browser.
+
+export type NextcloudShareLevel = 'off' | 'readonly' | 'full';
+export type NextcloudShareKind = 'calendars' | 'contacts';
+
+export interface NextcloudKindState {
+  /** The operator's limit for raising access. Lowering is always allowed. */
+  ceiling: NextcloudShareLevel;
+  /** False when the bot could not use a share of this kind on this instance. */
+  available: boolean;
+}
+
+export interface NextcloudCollection {
+  id: string;
+  kind: NextcloudShareKind;
+  name: string;
+  level: NextcloudShareLevel;
+}
+
+export interface NextcloudSharing {
+  /** The bot's own Nextcloud account, the sharee. */
+  bot: string;
+  kinds: Record<NextcloudShareKind, NextcloudKindState>;
+  collections: NextcloudCollection[];
+}
+
+export interface NextcloudShareFailure {
+  id: string;
+  name: string;
+  reason: string;
+}
+
+export interface NextcloudSharingSaveResult extends NextcloudSharing {
+  failed: NextcloudShareFailure[];
+}
+
+export async function getNextcloudSharing(): Promise<NextcloudSharing> {
+  return apiFetch<NextcloudSharing>('/settings/nextcloud-sharing');
+}
+
+/**
+ * Send only the changed rows. The server re-reads after writing, so the result
+ * is what Nextcloud now holds. A save where every change failed is a 502 that
+ * still carries the re-read list and `failed`; that is resolved like a partial
+ * failure rather than thrown, since the rows are what the card has to show.
+ */
+export async function saveNextcloudSharing(
+  changes: Record<string, NextcloudShareLevel>,
+): Promise<NextcloudSharingSaveResult> {
+  try {
+    return await apiFetch<NextcloudSharingSaveResult>('/settings/nextcloud-sharing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ changes }),
+    });
+  } catch (e) {
+    const err = e as { status?: number; body?: Partial<NextcloudSharingSaveResult> | null };
+    const body = err.body;
+    if (
+      err.status === 502 &&
+      body &&
+      Array.isArray(body.collections) &&
+      Array.isArray(body.failed)
+    ) {
+      return body as NextcloudSharingSaveResult;
+    }
+    throw e;
+  }
 }
 
 export interface AdminStatsUserSource {

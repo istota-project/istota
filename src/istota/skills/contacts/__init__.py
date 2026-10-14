@@ -69,7 +69,8 @@ def _public(value, field=""):
 
 def _hint(ctx):
     username = one_line(ctx.env.get("CARDDAV_USERNAME", ""))
-    return f"Share an address book with the bot account {username} from the Nextcloud Contacts app."
+    return (f"Share an address book with the bot account {username} from Settings > Connections, "
+            "or from the Nextcloud Contacts app.")
 
 
 def _collect(args, *, query=None):

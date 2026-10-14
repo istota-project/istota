@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
 - Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
+- **Share calendars and address books with Istota from Settings.** The Nextcloud card lists them and shares each with the bot at No access, Read-only or Read and write, using your own connection; disconnecting can remove the shares. Needs `token_storage = "encrypted"`. See docs/features/nextcloud.md.
 - The Workspace sidebar marks each place Istota can use in your tasks, in any of your rooms, with a small robot icon, pinned files and folders included (a room folder's icon says only that room's tasks reach it), and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you. Selecting your Nextcloud view now says so without opening anything, and how to hand Istota a file.
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
@@ -22,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
+
+### Fixed
+
+- A calendar shared with the bot read-only is now listed to the model as read-only. Discovery reads the bot's privileges on each calendar and Nextcloud's read-only flag; a calendar whose server reports no privileges is still treated as writable.
 
 ### Removed
 

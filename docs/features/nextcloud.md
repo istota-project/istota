@@ -126,6 +126,18 @@ Read and dismiss only. *Sending* a Nextcloud notification needs the `admin_notif
 
 Both feeds are bounded by default (25 entries) — an unbounded activity stream is a context-flooding hazard.
 
+## Sharing calendars and address books with Istota
+
+Tasks read a user's calendars and address books through the bot's own account, so the user shares each one with the bot. They can do that in the Nextcloud Calendar and Contacts apps, or from the Nextcloud card in Settings > Connections.
+
+The card lists every calendar and address book the user owns, each with No access, Read-only or Read and write. Saving creates, changes or removes the DAV share from that collection to the bot account, sent with the user's own Nextcloud OAuth token from the web process. Calendars and address books other people shared with the user, the birthday calendar, "Recently contacted" and the system address book "Accounts" are not listed. Nextcloud holds the share state and Istota stores none, so a share made or removed in the Nextcloud apps shows on the card the next time it loads. A change counts as done only when re-reading the collection shows it: Nextcloud answers 200 to a share it did not apply, for example with sharing switched off for the instance, and the card then reports "Nextcloud did not apply this change" on that row.
+
+The card needs `[web] token_storage = "encrypted"`, which `istota setup` writes on the stack. With ephemeral storage, the card shows only the connection state, and sharing is done in the Nextcloud apps. The token itself never reaches a task; tasks still see only what is shared with the bot account.
+
+Disconnecting asks whether to stop sharing as well. "Disconnect and stop sharing" removes the bot's shares first and deletes the token only once nothing is left shared, since removing a share needs the token. "Disconnect, keep sharing" leaves the shares in place. A share to a group the bot belongs to is not shown and is not removed.
+
+The operator caps what users may share with `[nextcloud.sharing]` (below). The cap limits raising access only: a user can always lower a share or remove it, and a share made by hand above the cap is shown at its real level. Calendars are not offered when tasks read calendars through another account (`[caldav] url` set, or a `[caldav] username` other than the bot's).
+
 ## Trust posture
 
 **Inbound is untrusted.** Talk messages, participant and room names, share notes, notifications and activity entries are all text other people wrote. Every such payload comes back wrapped in an explicit untrusted-content delimiter, and the skill declares `companion_skills: [untrusted_input, sensitive_actions]` so the inbound-handling guidance arrives whether the skill was selected eagerly or pulled from the menu. A room the bot merely sits in is an ingestion surface.
@@ -146,9 +158,15 @@ app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 share_default_expire_days = 14   # 0 = no default expiry on `share link`
 dav_prefix = ""                  # mount point of the storage root in the bot's own tree
 auto_share_bot_dir = true        # share the bot workspace back to the user at boot
+
+[nextcloud.sharing]
+calendars = "full"               # the most the Nextcloud card may share: "off", "readonly" or "full"
+contacts = "full"
 ```
 
 `dav_prefix` exists because the bot's storage root and the root of its Nextcloud file tree are not always the same directory. When the VM's rclone mount is rooted at the top of the bot's files they are, and it stays empty. When the mount is rooted at a folder inside them, `/Users/alice` on disk is, say, `/Shared Files/Users/alice` over DAV and OCS; the value is that folder (`istota setup` asks for it), and the request layer puts it in front of every path on the way out and strips it on the way back. Paths on disk, and the paths the skill takes and returns, are unaffected — they stay logical.
+
+`[nextcloud.sharing]` is the ceiling for the Nextcloud card in Settings > Connections. An invalid value warns and falls back to `"off"`, and `istota apply` refuses a plan carrying one.
 
 `auto_share_bot_dir` controls the OCS share of the bot workspace back to the user that runs on every boot. Leave it true unless the Nextcloud already puts that directory in the user's file tree some other way. The Nextcloud the old stack bundled did, through a `files_external` mount, and set this false so the user was not handed the same folder twice; one moved out of it keeps that value.
 

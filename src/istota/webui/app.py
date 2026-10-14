@@ -13212,15 +13212,100 @@ async def google_set_scopes(
     }
 
 
+def _nextcloud_sharing_payload(kinds: dict, collections: list) -> dict:
+    return {
+        "bot": _config.nextcloud.username,
+        "kinds": {
+            kind: {"ceiling": state.ceiling, "available": state.available}
+            for kind, state in kinds.items()
+        },
+        "collections": [
+            {"id": c.id, "kind": c.kind, "name": c.name, "level": c.level}
+            for c in collections
+        ],
+    }
+
+
+@api_router.get("/settings/nextcloud-sharing")
+async def nextcloud_sharing_get(user: dict = Depends(_require_api_auth)):
+    """The user's calendars and address books, each at the bot's current level."""
+    from istota.webui import nextcloud_sharing
+    from istota.workspace.listing import ListingError
+
+    try:
+        kinds, collections = await asyncio.to_thread(
+            nextcloud_sharing.list_collections, _config, user["username"],
+        )
+    except ListingError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    return _nextcloud_sharing_payload(kinds, collections)
+
+
+@api_router.put("/settings/nextcloud-sharing")
+async def nextcloud_sharing_put(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Share or unshare collections with the bot; success is the re-read."""
+    from istota.webui import nextcloud_sharing
+    from istota.workspace.listing import ListingError
+
+    changes = payload.get("changes")
+    if not isinstance(changes, dict) or not changes:
+        return JSONResponse({"error": "changes must be a non-empty object"}, status_code=400)
+    username = user["username"]
+    try:
+        result = await asyncio.to_thread(
+            nextcloud_sharing.set_levels, _config, username, changes,
+        )
+    except ListingError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    failed_ids = {f.id for f in result.failed}
+    logger.info(
+        "Nextcloud sharing changed for user %s: %s (failed: %s)",
+        username, sorted(set(changes) - failed_ids), sorted(failed_ids),
+    )
+    body = _nextcloud_sharing_payload(result.kinds, result.collections)
+    body["failed"] = [{"id": f.id, "name": f.name, "reason": f.reason} for f in result.failed]
+    status = 502 if failed_ids >= set(changes) else 200
+    return JSONResponse(body, status_code=status)
+
+
 @api_router.delete("/settings/nextcloud-token")
 async def nextcloud_token_disconnect(
+    unshare: bool = False,
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ):
     """Delete the user's stored Nextcloud OAuth pair (settings "Disconnect").
     The web session is untouched — only the retained token goes away; the next
-    login re-mints a pair if the feature is still enabled."""
+    login re-mints a pair if the feature is still enabled.
+
+    With `unshare`, the bot's shares are removed first, since removing one
+    needs the token. Anything left shared, or a listing that fails, keeps the
+    token so the user can try again."""
     from istota.webui import tokens as _wt
+    if unshare and _wt.token_status(_config.db_path, user["username"]) is not None:
+        from istota.webui import nextcloud_sharing
+        from istota.workspace.listing import ListingError
+        try:
+            result = await asyncio.to_thread(
+                nextcloud_sharing.unshare_all, _config, user["username"],
+            )
+        except ListingError as exc:
+            return JSONResponse({"error": exc.message}, status_code=409)
+        left = [c for c in result.collections if c.level != "off"]
+        still_shared = [c.name for c in left]
+        logger.info(
+            "Nextcloud shares removed for user %s on disconnect; still shared: %s",
+            user["username"], sorted(c.id for c in left),
+        )
+        if still_shared:
+            return JSONResponse(
+                {"error": "Could not stop sharing.", "still_shared": still_shared},
+                status_code=409,
+            )
     deleted = await asyncio.to_thread(
         _wt.delete_tokens, _config.db_path, user["username"],
     )

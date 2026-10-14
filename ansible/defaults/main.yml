@@ -227,6 +227,14 @@ istota_config: {}
 #     # something else already puts it in the user's files.
 #     auto_share_bot_dir: true
 #
+#     # The highest access a user may grant the bot from the Nextcloud card on
+#     # Settings > Connections, per kind: "off", "readonly" or "full". It bounds
+#     # raising a share only; lowering or removing one is always allowed. An unknown
+#     # value falls back to "off".
+#     sharing:
+#       calendars: "full"
+#       contacts: "full"
+#
 #   talk:
 #     # Enable Talk polling (requires istota user to be added to conversations)
 #     enabled: true

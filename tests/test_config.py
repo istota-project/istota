@@ -2394,6 +2394,49 @@ class TestMemorySystemConfigLoading:
         assert cfg.max_memory_chars == 0
 
 
+class TestNextcloudSharingCeiling:
+    """`[nextcloud.sharing]`: the operator's cap on what the Connections card may share."""
+
+    def test_defaults_to_full_for_both_kinds(self, tmp_path):
+        cfg = load_config(tmp_path / "nonexistent.toml")
+        assert cfg.nextcloud.sharing.calendars == "full"
+        assert cfg.nextcloud.sharing.contacts == "full"
+
+    def test_loads_each_level(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('[nextcloud.sharing]\ncalendars = "readonly"\ncontacts = "off"\n')
+        cfg = load_config(p)
+        assert cfg.nextcloud.sharing.calendars == "readonly"
+        assert cfg.nextcloud.sharing.contacts == "off"
+
+    def test_an_invalid_value_falls_back_to_off_not_the_default(self, tmp_path, caplog):
+        from istota.config_mapper import collect_problems
+
+        p = tmp_path / "config.toml"
+        p.write_text('[nextcloud.sharing]\ncalendars = "read-only"\n')
+        with caplog.at_level(logging.WARNING), collect_problems() as problems:
+            cfg = load_config(p)
+        assert cfg.nextcloud.sharing.calendars == "off"
+        assert cfg.nextcloud.sharing.contacts == "full"
+        assert [(pr["kind"], pr["path"]) for pr in problems] == [
+            ("discarded", ("nextcloud", "sharing", "calendars")),
+        ]
+        warning = next(r.getMessage() for r in caplog.records if "nextcloud.sharing.calendars" in r.getMessage())
+        assert "'readonly'" in warning and "'off'" in warning
+
+    def test_a_non_string_value_falls_back_to_off(self, tmp_path):
+        p = tmp_path / "config.toml"
+        p.write_text('[nextcloud.sharing]\ncontacts = true\n')
+        assert load_config(p).nextcloud.sharing.contacts == "off"
+
+    def test_field_choices_carry_both_keys(self):
+        from istota.config import FIELD_CHOICES, NEXTCLOUD_SHARING_LEVELS
+
+        assert NEXTCLOUD_SHARING_LEVELS == ("off", "readonly", "full")
+        assert FIELD_CHOICES[("nextcloud", "sharing", "calendars")] == NEXTCLOUD_SHARING_LEVELS
+        assert FIELD_CHOICES[("nextcloud", "sharing", "contacts")] == NEXTCLOUD_SHARING_LEVELS
+
+
 class TestTheExampleDocumentsEveryLiveSection:
     """Six live `Config` sections were in `config.example.toml` nowhere at all.
 

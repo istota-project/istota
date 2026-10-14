@@ -33,6 +33,15 @@ Complete reference for `config/config.toml`. See `config/config.example.toml` in
 | `dav_prefix` | `""` | Where the storage root sits in the bot's Nextcloud tree; prefixed onto every DAV/OCS path. Empty when the workspace is the root of the bot's files; otherwise the folder that holds it, which `istota setup` asks for. A Nextcloud moved out of an old stack uses `"Shared Files"` (see [Moving the bundled Nextcloud](../deployment/moving-the-bundled-nextcloud.md)) |
 | `auto_share_bot_dir` | `true` | Share the bot workspace back to the user over OCS at boot. False where the deployment already mounts it into the user's tree |
 
+### `[nextcloud.sharing]`
+
+The highest access a user may give the bot to their calendars and address books from the Nextcloud card on Settings > Connections. The ceiling bounds raising a share only: lowering or removing one is always allowed, and a share made by hand above the ceiling is shown at its real level.
+
+| Setting | Default | Description |
+|---|---|---|
+| `calendars` | `"full"` | `"off"`, `"readonly"` or `"full"`. An unknown value falls back to `"off"` with a warning, and `istota apply` refuses a plan carrying it |
+| `contacts` | `"full"` | The same, for address books |
+
 ## `[talk]`
 
 | Setting | Default | Description |
