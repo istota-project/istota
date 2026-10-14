@@ -5702,7 +5702,11 @@ function mockGroups(path: string, method: string) {
         { user_id: 'carol', display_name: 'Carol', role: 'owner' },
         { user_id: 'dave', display_name: 'Dave', role: 'member' },
       ],
-      rooms: [{ token: 'project', name: 'Project room', origin: 'web' }],
+      // Tokens of mocked chat rooms, so the overview's Rooms card has activity to sort by.
+      rooms: [
+        { token: 'web-carol-general', name: 'general', origin: 'web' },
+        { token: 'talk-design-review', name: 'design review', origin: 'talk' },
+      ],
       disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
     };
   if (path === '/istota/api/groups/team/memory')

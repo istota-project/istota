@@ -646,12 +646,8 @@
             ariaLabel="Group"
             items={[
               {
-                label: 'Group memory',
-                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length), view: 'memory' })}`,
-              },
-              {
-                label: 'Group members',
-                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length), view: 'members' })}`,
+                label: 'Group overview',
+                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length) })}`,
               },
             ]}
           />

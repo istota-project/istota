@@ -6,7 +6,6 @@
     ShellHeader,
     Sidebar,
     SidebarToggle,
-    HeaderNav,
     Button,
     EmptyState,
   } from '$lib/components/ui';
@@ -16,8 +15,9 @@
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import GroupNotebook from '$lib/components/groups/GroupNotebook.svelte';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
-  type View = 'memory' | 'members' | 'rooms';
-  type Selection = { group: string; view: View };
+  import GroupRooms from '$lib/components/groups/GroupRooms.svelte';
+  import GroupFiles from '$lib/components/groups/GroupFiles.svelte';
+  type Selection = { group: string };
   const current = getCurrentUser();
   const user = $derived(current.user);
   let groups = $state<GroupSummary[]>([]);
@@ -29,34 +29,16 @@
   let sidebarOpen = $state(false);
   let active = true;
   let request = 0;
+  // A link from before the overview may still carry `view=`; it is ignored.
   const selection = createUrlSelection<Selection>({
     key: 'groups',
-    params: ['group', 'view'],
-    encode: (s) => ({ group: s.group, view: s.view }),
-    decode: (p) =>
-      p.group
-        ? { group: p.group, view: p.view === 'members' || p.view === 'rooms' ? p.view : 'memory' }
-        : null,
+    params: ['group'],
+    encode: (s) => ({ group: s.group }),
+    decode: (p) => (p.group ? { group: p.group } : null),
     read: () => selected,
     apply: select,
   });
   selection.start();
-  const navItems = $derived(
-    selected
-      ? [
-          ...(['memory', 'members', 'rooms'] as View[]).map((view) => ({
-            href: `${base}/groups/?${new URLSearchParams({ group: selected!.group, view })}`,
-            label: view[0].toUpperCase() + view.slice(1),
-            active: selected!.view === view,
-          })),
-          {
-            href: `${base}/files?${new URLSearchParams({ place: `group:${selected.group}` })}`,
-            label: 'Files',
-            active: false,
-          },
-        ]
-      : [],
-  );
   function message(e: unknown) {
     if (e instanceof AuthError) current.expireSession();
     return e instanceof Error ? e.message : 'Could not load groups.';
@@ -90,10 +72,7 @@
       groups = result.groups;
       if (groups.length)
         await select(
-          (!resetSelection ? selection.current() : null) ?? {
-            group: groups[0].group_id,
-            view: 'memory',
-          },
+          (!resetSelection ? selection.current() : null) ?? { group: groups[0].group_id },
         );
       else {
         selected = null;
@@ -148,7 +127,6 @@
           open={sidebarOpen}
           onclick={() => (sidebarOpen = !sidebarOpen)}
         />{/snippet}
-      {#snippet nav()}<HeaderNav items={navItems} ariaLabel="Group view" />{/snippet}
     </ShellHeader>
   {/snippet}
   {#snippet sidebar()}
@@ -173,7 +151,7 @@
                 event.button === 0
               ) {
                 event.preventDefault();
-                selection.push({ group: group.group_id, view: 'memory' });
+                selection.push({ group: group.group_id });
               }
             }}><span class="view-name">{group.display_name}</span></a
           >
@@ -195,40 +173,37 @@
   {:else if detail && selected}
     <div class="settings groups-page">
       {#key detail.group_id}
-        {#if selected.view === 'memory'}<GroupNotebook groupId={detail.group_id} />
-        {:else if selected.view === 'members'}
+        <div class="overview card-grid">
+          <div class="wide"><GroupNotebook groupId={detail.group_id} /></div>
           <SettingsCard title="Members">
+            {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
             <GroupMembers group={detail} onChanged={changed} />
           </SettingsCard>
-        {:else}
-          <SettingsCard
-            title="Linked rooms"
-            description="Chat rooms linked to this group that you can open."
-          >
-            {#if detail.rooms.length}<ul class="rooms">
-                {#each detail.rooms as room (room.token)}<li>
-                    <a href="{base}/chat?room={encodeURIComponent(room.token)}">{room.name}</a>
-                  </li>{/each}
-              </ul>
-            {:else}<EmptyState size="sm">No linked rooms you can access.</EmptyState>{/if}
-          </SettingsCard>
-        {/if}
+          <GroupRooms rooms={detail.rooms} />
+          {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
+        </div>
       {/key}
     </div>
   {/if}
 </AppShell>
 
 <style>
-  .rooms {
-    list-style: none;
-    margin: 0;
-    padding: 0;
+  .settings.groups-page {
+    max-width: var(--content-max);
   }
-  .rooms li {
-    padding-block: var(--space-2);
-    border-bottom: 1px solid var(--border-subtle);
+  .overview {
+    --card-min: 320px;
+    --card-gap: var(--space-4);
   }
-  .rooms li:last-child {
-    border-bottom: none;
+  .wide {
+    display: flex;
+    flex-direction: column;
+  }
+  /* Two tracks exist from about 660px of column (two 320px minimums and the
+     gap); below that a span would add an implicit column and overflow. */
+  @container settings (min-width: 680px) {
+    .wide {
+      grid-column: span 2;
+    }
   }
 </style>

@@ -126,31 +126,29 @@
 </script>
 
 <div class="notebook">
-  {#if loading}
-    <p class="center-msg">Loading notebook…</p>
-  {:else if error}
-    <div class="center-msg error">
-      <p>{error}</p>
-      <div class="actions">
-        <Button onclick={loadNotebook}>Reload notebook</Button>
-        {#if user.is_admin && storageUnavailable}<Button onclick={retryStorage}
-            >Retry storage setup</Button
-          >{/if}
-      </div>
-    </div>
-  {:else if notebook}
-    {#if notebook.large}<NoticeBanner variant="warn" title="Large notebook" collapsed={false}
-        >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
-      >{/if}
-    {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
-    <SettingsCard title="Notebook" description={charter}>
-      {#snippet status()}<span class="caption">{formatBytes(notebook?.bytes ?? 0)}</span>{/snippet}
-      {#snippet actions()}
+  {#if notebook?.large}<NoticeBanner variant="warn" title="Large notebook" collapsed={false}
+      >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
+    >{/if}
+  {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
+  <SettingsCard title="Notebook" description={charter}>
+    {#snippet status()}{#if notebook}<span class="caption">{formatBytes(notebook.bytes)}</span
+        >{/if}{/snippet}
+    {#snippet actions()}{#if notebook}
         <Button size="sm" onclick={openActivity}>Recorded changes</Button>
         <Button size="sm" variant="primary" onclick={() => (editorOpen = true)}
           >Edit notebook</Button
         >
-      {/snippet}
+      {/if}{/snippet}
+    {#if loading}<p class="caption">Loading notebook…</p>
+    {:else if error}
+      <p class="banner error">{error}</p>
+      <div class="actions">
+        <Button size="sm" onclick={loadNotebook}>Reload notebook</Button>
+        {#if user.is_admin && storageUnavailable}<Button size="sm" onclick={retryStorage}
+            >Retry storage setup</Button
+          >{/if}
+      </div>
+    {:else if notebook}
       {#if notebook.content.trim()}<div class="reading">
           <TextPreview name="GROUP.md" text={notebook.content} untrusted controls={false} />
         </div>
@@ -164,8 +162,8 @@
               >{formatRelative(notebook.last_change.ts)}</span
             >{/if}
         </p>{/if}
-    </SettingsCard>
-  {/if}
+    {/if}
+  </SettingsCard>
   {#if activityOpen}
     <SettingsCard
       title="Recorded changes"
@@ -227,15 +225,25 @@
 <style>
   .notebook {
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: var(--space-3);
+  }
+  /* Takes only spare height, so on the overview the card fills a grid row a
+     taller neighbour set, and anywhere else it keeps its natural size. */
+  .notebook > :global(.card) {
+    flex-grow: 1;
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
   }
+  /* Capped so a long notebook scrolls in its card rather than pushing every
+     other card on the overview off the screen. */
   .reading {
+    max-height: 28rem;
+    overflow: auto;
     padding: var(--space-4);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
