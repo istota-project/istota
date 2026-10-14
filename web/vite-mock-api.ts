@@ -422,6 +422,7 @@ const user = {
     chat: true,
     briefings: true,
     workspace: true,
+    groups: true,
     feeds: true,
     location: true,
     money: true,
@@ -5550,6 +5551,52 @@ const mockConfigText = new Map<string, string>([
   ['skills/notes', 'Keep notes terse.\n'],
 ]);
 const mockConfigSkills = ['calendar', 'developer', 'email', 'notes'];
+// Groups: one read-only group behind the `group:team` workspace place, enough for the
+// Groups page and the Files page's links into it.
+const mockGroup = {
+  group_id: 'team',
+  display_name: 'Team',
+  kind: 'team',
+  revision: 1,
+  role: 'owner' as const,
+  capabilities: {
+    member: true,
+    owner: true,
+    manage: true,
+    archive: true,
+    read_memory: true,
+    edit_memory: true,
+    leave: true,
+  },
+};
+const mockGroupMemory = '# Team\n\nShared notes for the team.\n';
+function mockGroups(path: string, method: string) {
+  if (method !== 'GET') return undefined;
+  if (path === '/istota/api/groups') return { groups: [mockGroup] };
+  if (path === '/istota/api/groups/team')
+    return {
+      ...mockGroup,
+      members: [
+        { user_id: 'carol', display_name: 'Carol', role: 'owner' },
+        { user_id: 'dave', display_name: 'Dave', role: 'member' },
+      ],
+      rooms: [{ token: 'project', name: 'Project room', origin: 'web' }],
+      disclosure: { memory: 'Members can read and edit the notebook.', rooms: [], briefings: [] },
+    };
+  if (path === '/istota/api/groups/team/memory')
+    return {
+      group_id: 'team',
+      status: 'readable',
+      content: mockGroupMemory,
+      revision: 'r1',
+      bytes: Buffer.byteLength(mockGroupMemory, 'utf8'),
+      max_bytes: 32 * 1024,
+      large: false,
+      last_change: null,
+    };
+  if (path === '/istota/api/groups/team/memory/activity') return { entries: [], next_cursor: null };
+  return undefined;
+}
 function mockConfigFiles(path: string, method: string, body: any) {
   const prefix = '/istota/api/workspace/config-files';
   if (path === prefix && method === 'GET') {
@@ -5679,6 +5726,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
 
   const configFiles = mockConfigFiles(driveUrl.pathname, method, body);
   if (configFiles !== undefined) return configFiles;
+
+  const groupReply = mockGroups(driveUrl.pathname, method);
+  if (groupReply !== undefined) return groupReply;
 
   const [path, query] = url.split('?');
   if (
