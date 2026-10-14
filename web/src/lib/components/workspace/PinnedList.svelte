@@ -2,6 +2,8 @@
   import { CategoryGroup, KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
+  import TaskReachIcon from './TaskReachIcon.svelte';
+  import { placeForRef, reachesTasks } from './reach';
   let {
     pins,
     places,
@@ -37,15 +39,17 @@
     items.push({ label: 'Remove pin', disabled: busy, onSelect: () => onRemove(pin) });
     return items;
   }
+  // The place whose reach a pin shows, or null where the row has no link or button to carry the description.
+  function pinPlace(pin: WorkspacePin) {
+    if (!pin.available) return null;
+    if (pin.provider === 'drive') {
+      return pin.web_url ? (places.find((place) => place.kind === 'drive') ?? null) : null;
+    }
+    return placeForRef(places, pin.ref);
+  }
   function folderTarget(pin: WorkspacePin) {
     if (!pin.available || !pin.is_dir || pin.provider !== 'workspace') return null;
-    const place = places
-      .filter(
-        (place) =>
-          place.view_root &&
-          (pin.ref === place.view_root || pin.ref.startsWith(place.view_root + '/')),
-      )
-      .sort((a, b) => b.view_root!.length - a.view_root!.length)[0];
+    const place = placeForRef(places, pin.ref);
     return place
       ? { place: place.id, path: pin.ref.slice(place.view_root!.length).replace(/^\//, '') }
       : null;
@@ -61,11 +65,15 @@
   >
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
+      {@const pinned = pinPlace(pin)}
+      {@const access = pinned?.reach.private ?? null}
+      {@const reachId = `task-reach-pin-${pin.id}`}
+      {@const describedBy = access && reachesTasks(access) ? reachId : undefined}
       <div class="list-row pin-row">
         {#snippet content()}
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
-          >
+          >{#if access}<TaskReachIcon {access} id={reachId} room={pinned?.kind === 'room'} />{/if}
         {/snippet}
         {#if !pin.available}
           <div class="unavailable">{@render content()}</div>
@@ -73,15 +81,23 @@
           <a
             class="view-btn"
             href={href(folder.place, folder.path)}
+            aria-describedby={describedBy}
             onclick={(event) => onNavigate(event, folder.place, folder.path)}>{@render content()}</a
           >
         {:else if pin.provider === 'drive' && pin.web_url}
-          <a class="view-btn" href={pin.web_url} target="_blank" rel="noopener noreferrer"
-            >{@render content()}</a
+          <a
+            class="view-btn"
+            href={pin.web_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-describedby={describedBy}>{@render content()}</a
           >
         {:else if pin.provider === 'workspace' && !pin.is_dir}
-          <button class="view-btn" type="button" onclick={() => viewer.openFile(pin.ref)}
-            >{@render content()}</button
+          <button
+            class="view-btn"
+            type="button"
+            aria-describedby={describedBy}
+            onclick={() => viewer.openFile(pin.ref)}>{@render content()}</button
           >
         {:else}
           <div class="unavailable">{@render content()}</div>
