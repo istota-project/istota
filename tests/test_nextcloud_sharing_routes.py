@@ -165,6 +165,8 @@ class TestPut:
 
     @pytest.mark.parametrize("payload", [
         {"changes": {PERSONAL: "admin"}},
+        {"changes": {PERSONAL: []}},
+        {"changes": {PERSONAL: {"x": 1}}},
         {"changes": {"../../etc": "full"}},
         {"changes": [PERSONAL]},
         {},

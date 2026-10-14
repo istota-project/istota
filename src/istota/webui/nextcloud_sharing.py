@@ -272,7 +272,7 @@ def set_levels(config, user_id: str, changes: dict[str, str]) -> SetResult:
     no longer in the listing is reported as gone and the rest proceed.
     """
     for collection_id, level in changes.items():
-        if not isinstance(collection_id, str) or not _ID.fullmatch(collection_id) or level not in _RANK:
+        if not isinstance(collection_id, str) or not _ID.fullmatch(collection_id) or not isinstance(level, str) or level not in _RANK:
             raise ListingError(400, "Unknown calendar, address book or access level.")
     if not config.nextcloud.username or _is_bot(config, user_id):
         raise ListingError(400, "There is no bot account to share with.")
