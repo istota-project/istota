@@ -4697,7 +4697,112 @@ const VIEWER_TEXT: Record<string, string> = {
   'note.txt': 'A plain text file.\nSecond line.\n',
   'source.html': '<script>alert("example")</script><h1>Source only</h1>',
   'drawing.svg': '<svg xmlns="http://www.w3.org/2000/svg"><circle r="20" /></svg>',
+  'weekly_report.py':
+    '"""Summarise the week from the journal and open tasks."""\n\nprint("weekly report")\n',
+  'feed_cleanup.sh':
+    '#!/bin/sh\n# Prune read feed entries older than 90 days.\nistota-skill feeds prune --days 90\n',
+  'scratch.py': 'print("scratch")\n',
+  'monthly_review.md': '# Monthly review\n\nLook back over the last month.\n',
 };
+/* The Scripts index for the Files page. Paths are relative to
+ * `scripts_view_path`; VIEWER_TEXT holds a body for each, keyed by name. */
+const mockScriptsIndex = {
+  scripts_view_path: '/Users/carol/istota/scripts',
+  files: [
+    {
+      path: 'weekly_report.py',
+      kind: 'script',
+      size: 1840,
+      modified: '2026-10-12T08:15:00Z',
+      description: 'Summarise the week from the journal and open tasks.',
+      referenced_by: [
+        {
+          source: 'cron',
+          name: 'weekly-report',
+          field: 'command',
+          kind: 'runs',
+          state: 'enabled',
+        },
+      ],
+      mentioned_in: [],
+    },
+    {
+      path: 'tools/feed_cleanup.sh',
+      kind: 'script',
+      size: 612,
+      modified: '2026-09-30T19:02:00Z',
+      description: 'Prune read feed entries older than 90 days.',
+      referenced_by: [
+        {
+          source: 'cron',
+          name: 'feed-cleanup',
+          field: 'command',
+          kind: 'runs',
+          state: 'disabled',
+        },
+        {
+          source: 'heartbeat',
+          name: 'feed-disk',
+          field: 'command',
+          kind: 'runs',
+          state: 'enabled',
+        },
+      ],
+      mentioned_in: [
+        {
+          source: 'cron',
+          name: 'monthly-review',
+          field: 'prompt',
+          kind: 'mentions',
+          state: 'enabled',
+        },
+      ],
+    },
+    {
+      path: 'scratch.py',
+      kind: 'script',
+      size: 204,
+      modified: '2026-08-02T10:40:00Z',
+      description: null,
+      referenced_by: [],
+      mentioned_in: [],
+    },
+    {
+      path: 'monthly_review.md',
+      kind: 'prompt',
+      size: 980,
+      modified: '2026-10-01T07:00:00Z',
+      description: 'Prompt for the first-of-month review.',
+      referenced_by: [
+        {
+          source: 'cron',
+          name: 'monthly-review',
+          field: 'prompt_file',
+          kind: 'prompt_file',
+          state: 'suspended',
+        },
+      ],
+      mentioned_in: [],
+    },
+  ],
+  broken: [
+    {
+      path: 'backup_photos.sh',
+      referenced_by: [
+        {
+          source: 'cron',
+          name: 'photo-backup',
+          field: 'command',
+          kind: 'runs',
+          state: 'enabled',
+        },
+      ],
+    },
+  ],
+  truncated: false,
+  sources: { cron: 'ok', heartbeat: 'ok', scripts: 'ok' },
+};
+
 function viewerFixture(name: string): Buffer | null {
   if (Object.hasOwn(VIEWER_MEDIA, name)) {
     return readFileSync(new URL(`./test-fixtures/file-viewer/${name}`, import.meta.url));
@@ -5907,6 +6012,7 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
     return { status: 'ok' };
   }
   if (method !== 'GET') return undefined;
+  if (path === '/istota/api/workspace/scripts') return mockScriptsIndex;
   if (path === '/istota/api/workspace/places')
     return {
       places: workspacePlaces,
