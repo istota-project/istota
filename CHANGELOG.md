@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
 
+### Fixed
+
+- A calendar shared with the bot read-only is now listed to the model as read-only. Discovery reads the bot's privileges on each calendar and Nextcloud's read-only flag; a calendar whose server reports no privileges is still treated as writable.
+
 ### Removed
 
 - **The standalone install is gone.** `install.sh --standalone` and `istota setup` outside the image now point at `install.sh --local` and `istota-stack import-standalone`; `istota update` is removed. `istota serve` stays for development on a checkout. See docs/getting-started/local-install.md.
