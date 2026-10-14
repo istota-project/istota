@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a phone, the file editor and the plain-text file view now show text at the same size as on a desktop, rather than enlarged. The page still does not zoom in when you tap into the text.
 - Cancelling browser setup on a Mac now returns the VM setup result even when it finishes while cancellation is being acknowledged.
 
 - **Re-running setup in the terminal keeps your answers.** `istota-stack setup --force` used to offer first-run defaults, so pressing Enter could change the address and move the local VM's web page off the port it is reached on. Every question now defaults to the current value, stored credentials are kept unless you enter new ones, and the previous config and stack files are backed up first.
