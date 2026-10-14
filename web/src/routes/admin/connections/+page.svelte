@@ -9,12 +9,14 @@
     whatsAppPairingStreamUrl,
     WHATSAPP_PAIRING_TERMINAL_STATES,
     type AdminConnection,
+    type AdminGoogleWorkspaceConnection,
     type AdminNextcloudConnection,
     type AdminPairingState,
     type AdminWhatsAppConnection,
   } from '$lib/api';
   import { Badge, Button, ConfirmDialog, EmptyState, NoticeBanner } from '$lib/components/ui';
   import NextcloudCard from './NextcloudCard.svelte';
+  import GoogleWorkspaceCard from './GoogleWorkspaceCard.svelte';
 
   /** The five small fields the stream carries. Never the pairing code. */
   interface PairingFrame {
@@ -63,6 +65,10 @@
 
   let nextcloud = $derived(connections ? findNextcloud(connections) : null);
   let whatsapp = $derived(connections ? findWhatsApp(connections) : null);
+  let google = $derived(
+    connections?.find((c): c is AdminGoogleWorkspaceConnection => c.id === 'google_workspace') ??
+      null,
+  );
   let link = $derived(whatsapp?.link ?? null);
 
   /** The pairing state to render: the live stream frame where one has arrived,
@@ -648,16 +654,15 @@
     <div class="center-msg">Loading connections…</div>
   {:else if error && !connections}
     <div class="center-msg error">{error}</div>
-  {:else if nextcloud || whatsapp}
+  {:else if nextcloud || whatsapp || google}
     <NoticeBanner
       title="Deployment-level connections"
       variant="info"
       bind:collapsed={aboutCollapsed}
     >
       <p>
-        These are the links the deployment holds as a whole, not the per-user services on your
-        settings page. Each card says what this install is connected to and what the daemon last
-        found when it checked.
+        These are the connections configured for the deployment. Each card shows its configuration
+        and any available checks. Each user connects their own accounts in Settings → Connections.
       </p>
       {#if whatsapp}
         <p>
@@ -817,6 +822,9 @@
           </div>
         {/if}
       </section>
+    {/if}
+    {#if google}
+      <GoogleWorkspaceCard connection={google} />
     {/if}
   {:else}
     <!-- Each card reads its own entry by id rather than iterating, so an

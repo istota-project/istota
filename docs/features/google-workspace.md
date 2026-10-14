@@ -37,14 +37,18 @@ For an External app left in Testing, refresh tokens for Workspace scopes expire 
 
 ### 2. Configure Istota
 
-On the stack, open **Admin → Configuration** (`/istota/admin/config`):
+On the stack, open **Admin → Connections → Google Workspace** and choose **Configure**. This opens the existing Configuration editor filtered to Google Workspace (`/istota/admin/config?section=google_workspace`). You can clear the filter to see other settings.
 
 1. Set `google_workspace.enabled` to `true` and `google_workspace.client_id` to the ID from Google.
 2. Set the deployment credential `istota_google_workspace_client_secret` to the matching secret. Use the credential field, rather than putting the secret in the raw TOML editor.
 3. Set `google_workspace.scopes` if you want a different service ceiling from the defaults below.
 4. Review and submit the change, complete the editor's confirmation, and wait for the stack to restart.
 
-The [web config editor](../configuration/web-editor.md) applies the settings and secret together. It is read-only without the host applier, or when the relevant resource is managed by an external plan. **Admin → Connections** currently has Nextcloud and WhatsApp cards; Google client setup is on Configuration. **Settings → Connections** is where each user authorizes their own Google account.
+The [web config editor](../configuration/web-editor.md) applies the settings and secret together. It is read-only without the host applier, or when the relevant resource is managed by an external plan. Environment overrides also remain read-only. The card reflects loaded configuration after the restart; unsaved edits do not change its status. Use the same Configure action for later edits and secret rotation. **Settings → Connections** is where each user authorizes their own Google account.
+
+The admin card reports **Disabled**, **Setup incomplete** or **Configured**, with the client ID, whether the secret is set, the callback URL and each service's maximum access level. It lists additional scopes separately because they have no per-user service picker control. “No services are allowed” appears only when all service rows say No access and there are no additional scopes. Configured means the required settings are present; it does not verify credentials, enabled APIs or Google consent settings and makes no Google request.
+
+If the card reports a missing site hostname, set it through the [deployment setup procedure](../deployment/running-the-stack.md), then restart the services. The hostname is read-only in Configuration. Use the card's callback URL when registering the redirect URI in Google Cloud.
 
 For file-based configuration, set these values in `config.toml`:
 
