@@ -90,7 +90,7 @@ async def test_membership_is_live(client, config):
     assert (await client.get("/workspace/list", params=params)).status_code == 404
 
 
-@pytest.mark.parametrize("path", ["/workspace/places", "/workspace/list?place=home"])
+@pytest.mark.parametrize("path", ["/workspace/places", "/workspace/list?place=home", "/workspace/scripts"])
 async def test_auth_required(client, app, path):
     app.dependency_overrides.clear()
     assert (await client.get(path)).status_code == 401
@@ -926,3 +926,85 @@ async def test_config_file_paths_match_pins_with_a_custom_bot_name(client, confi
     })
     assert response.status_code == 200
     assert response.json()["pin"]["ref"] == user_file["view_path"]
+
+
+async def test_scripts_flatten_references_for_authenticated_user(client, config, tmp_path):
+    from datetime import datetime
+    from istota.cron_loader import CronJob, generate_cron_md, sync_cron_jobs_to_db
+
+    root = config.workspace_path / "Users/alice" / config.bot_dir_name
+    scripts = root / "scripts"
+    (scripts / "prompts").mkdir(parents=True)
+    _config_dir(config).mkdir()
+    (scripts / "report.py").write_text("# Build the report\nprint('ok')\n")
+    (scripts / "orphan.sh").write_text("echo ok\n")
+    (scripts / "prompts/daily.txt").write_text("Summarize the day\n")
+    other = config.workspace_path / "Users/bob" / config.bot_dir_name / "scripts"
+    other.mkdir(parents=True)
+    (other / "private.py").write_text("# Private script\n")
+    prefix = f"/Users/alice/{config.bot_dir_name}/scripts"
+    jobs = [
+        CronJob(name="report", cron="0 9 * * *", command=f"python {scripts}/report.py"),
+        CronJob(name="daily", cron="0 9 * * *", prompt_file=f"{prefix}/prompts/daily.txt"),
+        CronJob(name="mention", cron="0 9 * * *", prompt="Use scripts/report.py"),
+    ]
+    (_config_dir(config) / "CRON.md").write_text(generate_cron_md(jobs))
+    (_config_dir(config) / "HEARTBEAT.md").write_text(
+        '```toml\n[[checks]]\nname = "backup"\ntype = "shell-command"\n'
+        f'command = "bash {scripts}/missing.sh"\n```'
+    )
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, "alice", jobs)
+
+    response = await client.get("/workspace/scripts", params={"user_id": "bob"})
+    assert response.status_code == 200
+    assert str(tmp_path) not in response.text
+    data = response.json()
+    assert set(data) == {"scripts_view_path", "files", "broken", "truncated", "sources"}
+    assert data["scripts_view_path"] == prefix
+    assert data["sources"] == {"scripts": "ok", "cron": "ok", "heartbeat": "ok"}
+    assert data["truncated"] is False
+    assert [file["path"] for file in data["files"]] == ["orphan.sh", "prompts/daily.txt", "report.py"]
+    orphan, prompt, report = data["files"]
+    assert set(report) == {"path", "kind", "size", "modified", "description", "referenced_by", "mentioned_in"}
+    assert report["kind"] == "script"
+    assert report["description"] == "Build the report"
+    assert report["size"] == (scripts / "report.py").stat().st_size
+    assert datetime.fromisoformat(report["modified"]).utcoffset().total_seconds() == 0
+    assert report["referenced_by"] == [{"source": "cron", "name": "report", "field": "command", "kind": "runs", "state": "enabled"}]
+    assert report["mentioned_in"] == [{"source": "cron", "name": "mention", "field": "prompt", "kind": "mentions", "state": "enabled"}]
+    assert prompt["kind"] == "prompt"
+    assert prompt["referenced_by"] == [{"source": "cron", "name": "daily", "field": "prompt_file", "kind": "prompt_file", "state": "enabled"}]
+    assert prompt["mentioned_in"] == []
+    assert orphan["description"] is None
+    assert orphan["referenced_by"] == orphan["mentioned_in"] == []
+    assert data["broken"] == [{"path": "missing.sh", "referenced_by": [
+        {"source": "heartbeat", "name": "backup", "field": "command", "kind": "runs", "state": "enabled"},
+    ]}]
+
+
+@pytest.mark.parametrize("unavailable", ["config", "workspace", "user_root"])
+async def test_scripts_unavailable(client, app, config, monkeypatch, unavailable):
+    if unavailable == "config":
+        del app.state.istota_config
+    elif unavailable == "workspace":
+        config.workspace_path = None
+    else:
+        monkeypatch.setattr(config, "workspace_root", lambda user_id: None)
+    response = await client.get("/workspace/scripts")
+    assert response.status_code == 503
+    message = "config unavailable" if unavailable == "config" else "No workspace is configured."
+    assert response.json() == {"error": message}
+
+
+async def test_scripts_unexpected_error_does_not_expose_host_path(app, config, monkeypatch):
+    from istota.workspace import scripts
+
+    def fail(*args):
+        raise RuntimeError(f"Could not read {config.workspace_path}/private")
+
+    monkeypatch.setattr(scripts, "scripts_index", fail)
+    async with AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="https://example.com") as client:
+        response = await client.get("/workspace/scripts")
+    assert response.status_code == 500
+    assert str(config.workspace_path) not in response.text

@@ -436,6 +436,38 @@ def _contained_under_user_root(
     return contained_overlay_dir(path, _get_mount_path(config, f"Users/{user_id}"))
 
 
+def resolve_user_scripts_dir(config: "Config", user_id: str) -> Path | None:
+    """Resolve scripts beneath the user root, refusing symlinked components.
+
+    Missing directories are allowed. Readers still need the no-follow walk
+    when opening files, since a resolved path does not pin a directory.
+    """
+    if not config.has_workspace:
+        return None
+    user_root = config.workspace_root(user_id)
+    if user_root is None:
+        return None
+    # Only the configured user root is trusted to follow links. Never let a
+    # resolved descendant become the anchor of a later no-follow walk.
+    scripts = user_root.resolve() / config.bot_dir_name / "scripts"
+    for directory in (scripts.parent, scripts):
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.warning("scripts_dir_refused user=%s reason=unreadable", user_id)
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            logger.warning("scripts_dir_refused user=%s reason=symlink", user_id)
+            return None
+    resolved = _contained_under_user_root(config, user_id, scripts)
+    if resolved != scripts:
+        logger.warning("scripts_dir_refused user=%s reason=outside_user_tree", user_id)
+        return None
+    return scripts
+
+
 def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
     """The user's ``{bot_dir}/config`` directory, resolved, or None.
 

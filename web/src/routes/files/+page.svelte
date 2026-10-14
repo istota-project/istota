@@ -32,12 +32,17 @@
     uploadWorkspaceFile,
     type WorkspacePlace,
     type WorkspaceListing,
+    getWorkspaceScripts,
+    type WorkspaceScriptsIndex,
     getWorkspaceConfigFiles,
     getWorkspaceConfigFile,
     saveWorkspaceConfigFile,
     type WorkspaceConfigFile,
   } from '$lib/api';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
+  import { viewer } from '$lib/fileViewer/store.svelte';
+  import ScriptsView from '$lib/components/workspace/ScriptsView.svelte';
+  import ScriptList from '$lib/components/workspace/ScriptList.svelte';
   import BotSection from '$lib/components/workspace/BotSection.svelte';
   import ConfigIndex from '$lib/components/workspace/ConfigIndex.svelte';
   import PlaceIndex from '$lib/components/workspace/PlaceIndex.svelte';
@@ -111,6 +116,22 @@
   const identity = getCurrentUser();
   const botName = $derived(identity.user?.bot_name || 'Istota');
 
+  let scriptsIndex = $state<WorkspaceScriptsIndex | null>(null);
+  let scriptsLoading = $state(true);
+  let scriptsError = $state('');
+  async function loadScripts() {
+    scriptsLoading = true;
+    scriptsError = '';
+    try {
+      const result = await getWorkspaceScripts();
+      if (active) scriptsIndex = result;
+    } catch {
+      if (active) scriptsError = 'Could not load your scripts.';
+    } finally {
+      scriptsLoading = false;
+    }
+  }
+
   let configFiles = $state<WorkspaceConfigFile[]>([]);
   let configLoading = $state(true);
   let configError = $state('');
@@ -152,7 +173,7 @@
     };
   }
   // A view shows an index in the main area; place and path are then empty.
-  type Selection = { place: string; path: string; view?: IndexView };
+  type Selection = { place: string; path: string; view?: IndexView; script?: string };
   let places = $state<WorkspacePlace[]>([]);
   let notes = $state<string[]>([]);
   let loading = $state(true);
@@ -302,14 +323,23 @@
   let active = true;
   const selection = createUrlSelection<Selection>({
     key: 'workspace',
-    params: ['place', 'path', 'view'],
+    params: ['place', 'path', 'view', 'script'],
     encode: (value): Record<string, string> =>
       value.view
-        ? { view: value.view }
+        ? {
+            view: value.view,
+            ...(value.view === 'scripts' && value.script ? { script: value.script } : {}),
+          }
         : { place: value.place, ...(value.path ? { path: value.path } : {}) },
     decode: (params) => {
       const view = parseIndexView(params.view);
-      if (view) return { place: '', path: '', view };
+      if (view)
+        return {
+          place: '',
+          path: '',
+          view,
+          ...(view === 'scripts' && params.script ? { script: params.script } : {}),
+        };
       return { place: params.place || places[0]?.id || 'home', path: params.path || '' };
     },
     read: () => selected,
@@ -320,8 +350,8 @@
   function href(place: string, path = '') {
     return `${base}/files?${new URLSearchParams({ place, ...(path ? { path } : {}) })}`;
   }
-  function viewHref(view: IndexView) {
-    return `${base}/files?${new URLSearchParams({ view })}`;
+  function viewHref(view: IndexView, script?: string) {
+    return `${base}/files?${new URLSearchParams({ view, ...(view === 'scripts' && script ? { script } : {}) })}`;
   }
   function plainClick(event: MouseEvent) {
     return !(
@@ -338,11 +368,16 @@
     sidebarOpen = false;
     selection.push({ place, path });
   }
-  function navigateView(event: MouseEvent, view: IndexView) {
+  function navigateView(event: MouseEvent, view: IndexView, script?: string) {
     if (!plainClick(event)) return;
     event.preventDefault();
     sidebarOpen = false;
-    selection.push({ place: '', path: '', view });
+    selection.push({
+      place: '',
+      path: '',
+      view,
+      ...(view === 'scripts' && script ? { script } : {}),
+    });
   }
   function driveFolder(path: string) {
     return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
@@ -467,6 +502,7 @@
     void load();
     void loadPins();
     void loadConfigFiles();
+    void loadScripts();
     return () => {
       active = false;
       generation++;
@@ -512,6 +548,16 @@
           {viewHref}
           onNavigate={navigate}
           onNavigateView={navigateView}
+        />
+        <ScriptList
+          index={scriptsIndex}
+          loading={scriptsLoading}
+          error={scriptsError}
+          active={view === 'scripts'}
+          selected={selected?.script}
+          {viewHref}
+          onNavigateView={navigateView}
+          onRetry={loadScripts}
         />
         <PlaceList
           places={places.filter((place) => sidebarKinds.includes(place.kind))}
@@ -580,7 +626,19 @@
           {href}
           onNavigate={navigate}
         />
-      {:else}
+      {:else if view === 'scripts'}
+        <ScriptsView
+          index={scriptsIndex}
+          loading={scriptsLoading}
+          error={scriptsError}
+          selected={selected?.script}
+          onSelect={(script) =>
+            selection.push({ place: '', path: '', view: 'scripts', ...(script ? { script } : {}) })}
+          onOpen={(path) => viewer.openFile(path)}
+          onRetry={loadScripts}
+          {revealAction}
+        />
+      {:else if view === 'config' || view === 'skills'}
         <ConfigIndex
           label={INDEX_VIEW_LABELS[view]}
           caption={view === 'config'

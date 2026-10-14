@@ -2951,3 +2951,28 @@ class TestInspectOverlay:
         found = inspect_overlay(d / "develper.md", known_skills=self.KNOWN)
         assert found.reason == "unknown_skill"
         assert found.first_line is None
+
+
+class TestReadOverlayHead:
+    def test_head_is_opt_in_and_bounded(self, tmp_path):
+        from istota.skills._loader import read_overlay_bytes, OVERLAY_UNREADABLY_LARGE
+        path = tmp_path / "large.py"
+        path.write_bytes(b"# Description\n" + b"x" * 100)
+        assert read_overlay_bytes(path, max_bytes=14)[1] == OVERLAY_UNREADABLY_LARGE
+        assert read_overlay_bytes(path, max_bytes=14, head_only=True) == (b"# Description\n", None, 114)
+
+    @pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
+    def test_head_refuses_non_regular_files(self, tmp_path, kind):
+        from istota.skills._loader import read_overlay_bytes
+        target = tmp_path / "target"
+        target.write_bytes(b"private")
+        path = tmp_path / "file"
+        if kind == "symlink":
+            path.symlink_to(target)
+        elif kind == "fifo":
+            os.mkfifo(path)
+        else:
+            path.mkdir()
+        data, refusal, _ = read_overlay_bytes(path, head_only=True)
+        assert data is None
+        assert refusal is not None

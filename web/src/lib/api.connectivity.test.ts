@@ -373,3 +373,21 @@ it('deletes an encoded workspace filename through the authenticated API', async 
     expect.objectContaining({ method: 'DELETE', credentials: 'same-origin' }),
   );
 });
+
+describe('workspace scripts', () => {
+  it('loads the index through the authenticated API', async () => {
+    const body = {
+      scripts_view_path: '/Users/alice/istota/scripts',
+      files: [],
+      broken: [],
+      truncated: false,
+      sources: { scripts: 'ok', cron: 'missing', heartbeat: 'missing' },
+    };
+    fetchMock.mockResolvedValue(jsonResponse(200, body));
+    expect(await api.getWorkspaceScripts()).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/workspace/scripts',
+      expect.objectContaining({ credentials: 'same-origin' }),
+    );
+  });
+});

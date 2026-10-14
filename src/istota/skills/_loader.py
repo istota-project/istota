@@ -1159,7 +1159,8 @@ def open_overlay_dir(
 
 
 def read_overlay_bytes(
-    path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES, dir_fd: int | None = None
+    path: Path, *, max_bytes: int = OVERLAY_READ_CAP_BYTES, dir_fd: int | None = None,
+    head_only: bool = False,
 ) -> tuple[bytes | None, str | None, int | None]:
     """Read an overlay file, refusing anything that is not a plain file.
 
@@ -1168,6 +1169,9 @@ def read_overlay_bytes(
     and None otherwise. A *missing* file is ``(b"", None, None)`` — absence is
     how a reporting surface learns there is no overlay, so it must not read as
     a refusal.
+
+    ``head_only`` returns at most ``max_bytes`` from a larger file instead of
+    refusing it. All file-type and descriptor checks still apply.
 
     The overlay directory sits under ``{mount}/Users/{user_id}``, which
     ``build_bwrap_cmd`` binds **read-write** into that user's own sandbox. Every
@@ -1229,7 +1233,7 @@ def read_overlay_bytes(
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return None, OVERLAY_NOT_A_REGULAR_FILE, None
-        if st.st_size > max_bytes:
+        if not head_only and st.st_size > max_bytes:
             return None, OVERLAY_UNREADABLY_LARGE, st.st_size
         chunks: list[bytes] = []
         remaining = max_bytes
