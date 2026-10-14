@@ -77,7 +77,7 @@ def setup_banner(encoding: str = "utf-8") -> str:
     except UnicodeEncodeError:
         logo = _SETUP_OCTOPUS_ASCII
     labels = dict(enumerate(_SETUP_WORDMARK.splitlines(), start=1))
-    labels.update({6: "Your personal AI, self-hosted.", 8: "Setup"})
+    labels.update({6: "Your personal AI operating system.", 8: "Setup"})
     lines = []
     for index, line in enumerate(logo.splitlines()):
         lines.append(f"  {line:<20}  {labels.get(index, '')}".rstrip())

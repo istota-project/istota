@@ -447,9 +447,9 @@ def test_setup_banner_is_printable_and_fits_a_terminal(encoding):
     banner = setup_wizard.setup_banner(encoding)
     banner.encode(encoding)
     assert r"|_/__/ \__\___/\__\__,_|" in banner
-    assert "Your personal AI, self-hosted." in banner
+    assert "Your personal AI operating system." in banner
     assert "Setup" in banner
-    assert max(map(len, banner.splitlines())) <= 56
+    assert max(map(len, banner.splitlines())) <= 60
     assert len(banner.strip("\n").splitlines()) <= 10
     assert "\x1b" not in banner
     assert ("█" in banner) == (encoding == "utf-8")
