@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
+  import { formatDateTime } from '$lib/dateFormat';
   import { Badge, Button, NoticeBanner } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
@@ -83,7 +84,7 @@
   }
 
   function when(at: string | null): string {
-    return at ? new Date(at).toLocaleString() : 'never';
+    return formatDateTime(at, { empty: 'never' });
   }
 
   onMount(() => load());

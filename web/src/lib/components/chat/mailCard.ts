@@ -3,6 +3,7 @@
  * stage 3). Every field comes from stored metadata or the stored body, never
  * from model text and never from a raw header read at render time.
  */
+import { formatDateTime } from '$lib/dateFormat';
 import type {
   MailAddress,
   MailAttachment,
@@ -149,9 +150,5 @@ export const MAIL_STATE_LABELS: Record<OutgoingMailState, string> = {
 /** A header date as the reader's locale writes it, or as stored when it does
  *  not parse. */
 export function formatMailDate(value: string): string {
-  if (!value) return '';
-  const when = new Date(value);
-  return Number.isNaN(when.getTime())
-    ? value
-    : when.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return formatDateTime(value, { dateStyle: 'medium', timeStyle: 'short' });
 }

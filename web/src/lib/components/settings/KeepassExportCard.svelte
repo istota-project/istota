@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import { exportKeepass, type StepUpProof } from '$lib/api';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
+  import { formatDate } from '$lib/dateFormat';
   import { Button, Field, Modal } from '$lib/components/ui';
   import SettingsCard from './SettingsCard.svelte';
   import StepUpDialog from './StepUpDialog.svelte';
@@ -41,7 +42,12 @@
         return;
       }
       if (keyfile) {
-        const date = new Date().toLocaleDateString('en-CA');
+        const date = formatDate(new Date().toISOString(), {
+          locale: 'en-CA',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        });
         downloadBlob(
           new Blob([keyfile], { type: 'application/xml' }),
           `istota-export-${date}.keyx`,
