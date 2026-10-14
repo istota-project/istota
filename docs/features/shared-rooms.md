@@ -246,3 +246,13 @@ Personal memory is not extracted from shared rooms: what is said in front of mor
 | `!<bot name> off` / `on` | anyone | [Switch the bot off](room-veto.md) in this room, or ask for it back |
 
 The full list is in the [command reference](../reference/commands.md).
+
+## Location sharing
+
+In a web room, Talk group or Baileys WhatsApp group, “Share my location here” posts one timestamped observation from your phone. “Roughly” selects an approximate area instead of the default exact point. A one-time share gives other members no permission to request later updates. From your private chat, naming a room holds the exact post for your approval.
+
+“Share my location here for an hour” asks for private approval naming every reader, precision and duration. Timed sharing requires known configured readers and lasts from 5 minutes to 24 hours after approval. The preview goes to your private chat or your notifications, never the group. Room members can then ask “Where is Alice?” or “Where is everyone?”, even without their own GPS enabled. Only active shares with a fresh usable phone observation return a location; a stale point is not repeated. These replies reveal no personal history or saved places and create no periodic updates. Email threads are unsupported.
+
+“Stop sharing my location” immediately revokes your current-room permission and cancels pending approvals. “Stop sharing everywhere” does so across your rooms without naming them to the current audience. Stop works even with GPS disabled. Reader changes, archive, bot veto and binding changes end sharing; rejoining or re-enabling the room does not restore it. A query rechecks permission before returning, but a result already returned can still reach the room. Earlier messages and screenshots remain.
+
+This permission exposes only the projected current location to this room. It does not give another member your task identity, personal tools or databases, and does not change the refusal to send briefings, alerts or other personal deliveries into shared rooms. See [location sharing](location.md#sharing-with-a-room) for precision, freshness and command details.

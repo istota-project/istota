@@ -48,6 +48,7 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("credential_grant_rooms", "conversation_token"): "room_token",
     ("outbound_drafts", "room_token"): "room_token",
     ("notifications", "room_token"): "room_token",
+    ("location_share_grants", "room_token"): "room_token",
     ("user_profiles", "default_room"): "room_token",
     # Parse the descriptor: room:/web: identities differ from talk: refs.
     ("tasks", "output_target"): "descriptor",
@@ -115,6 +116,7 @@ PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
     ("task_usage_models", "cache_write_tokens"): "model usage count",
     ("task_usage_models", "output_tokens"): "model usage count",
     # Approval covers the preview/body, never a re-rendered migration result.
+    ("location_share_grants", "binding_fingerprint"): "frozen location consent binding",
     ("whatsapp_skill_requests", "preview_digest"): "approved content digest",
     ("whatsapp_skill_requests", "approved_digest"): "approved content digest",
     ("whatsapp_skill_requests", "content_hash"): "body digest",
@@ -311,6 +313,9 @@ def _rewrite_destinations(conn, old: str, new: str) -> None:
             f"SELECT * FROM {table} WHERE destination IS NOT NULL AND destination != ''",
         ).fetchall()
         for row in rows:
+            if table == "whatsapp_skill_requests" and row["kind"] == "location_share":
+                # Room identity changes revoke grants; retain their exact consent record.
+                continue
             destination = _json_object(row["destination"])
             if not any(destination.get(key) == old for key in ("room_token", "parent", "about")):
                 continue
@@ -355,6 +360,7 @@ def _migrate_room(conn: sqlite3.Connection, old: str) -> str:
         "SELECT 1 FROM rooms WHERE token=? AND origin='email' UNION ALL "
         "SELECT 1 FROM room_bindings WHERE room_token=? AND surface='email'", (old, old),
     ).fetchone() is not None
+    db._invalidate_room_location_shares(conn, old, reason="room_identity_changed")
     _rewrite_destinations(conn, old, new)
     for (table, column), handler in REWRITE_COLUMNS.items():
         if handler in {"destination_json", "destination_fingerprint"}:

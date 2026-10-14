@@ -1,13 +1,38 @@
 ---
 name: location
-triggers: [location, gps, where, place, places, visit, visits, track, position, coordinates, attendance, reverse geocode, day summary, neighborhood, summary]
-description: Location tracking, place recognition, visit history, and calendar attendance
+triggers: [location, gps, where, place, places, visit, visits, track, position, coordinates, attendance, reverse geocode, day summary, neighborhood, summary, share my location, stop sharing]
+description: Personal location tracking, room location sharing, place recognition, visit history, and calendar attendance
 cli: true
 env: [{"var":"LOCATION_DB_PATH","from":"setup_env","proxy_only":true},{"var":"CALDAV_URL","from":"config","config_path":"caldav_url","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_USERNAME","from":"config","config_path":"caldav_username","when":"caldav_url","gate_has_discovered_calendars":true},{"var":"CALDAV_PASSWORD","from":"config","config_path":"caldav_password","when":"caldav_url","gate_has_discovered_calendars":true,"sensitive":true}]
 ---
 # Location Skill
 
 GPS-based location tracking via the Overland iOS app. Tracks location pings, resolves named places, and records visits.
+
+## Share your location
+
+```bash
+istota-skill location share --request-key here-1
+istota-skill location share --precision area --request-key area-1
+istota-skill location share --room Hiking --request-key hiking-1
+istota-skill location share --for 1h --precision exact --request-key hour-1
+istota-skill location sharing
+istota-skill location unshare
+istota-skill location unshare --room Hiking
+istota-skill location unshare --all
+```
+
+A request with no duration shares one observation. In the caller's current shared room, `delivery: reply` means render the returned snapshot in the ordinary answer. From a private chat, name a room or use the linked room; the exact text is held for approval through `room post`. Reuse the request key on retry: that post keeps its original observation. A shared-room turn cannot target a second room. Email threads are unsupported.
+
+“Roughly” selects `--precision area`; otherwise use exact. Exact shares carry the measured point, accuracy and observed time. Area shares round coordinates to two decimal places before any output or map link; say “Approximate area,” never an exact pin or an anonymity guarantee. Share only the returned projection: no saved places, visit details, Wi-Fi, battery or personal history. Do not substitute `location current`, whose personal payload is broader.
+
+`--for` requests on-demand access after private approval. If the user explicitly wants continuing access without naming a duration, propose `1h`. Accept 5 minutes through 24 hours; reject indefinite or longer access without shortening it. The held preview names the room, all readers, precision and duration. Do not repeat its terms or coordinates to the group, and never infer approval from a clean turn or conversation history. The scheduler presents the preview privately or in the owner's notifications. Approval starts the duration; sharing uses the existing tracker and does not start it or send periodic updates. Timed shares require known readers on web, Talk or Baileys groups.
+
+A fresh fix is at most 15 minutes old and has usable accuracy. Phone observations are selected by observed time; imported Garmin tracks do not qualify. Declared fixes remain labeled `declared`. With no fresh fix, report that status without an older coordinate. Only an explicit one-time request for a last-known observation may add `--last-known`, allowing up to 24 hours and retaining the “Last known” label and time. It cannot be combined with `--for`. A delayed approved post remains “Location observed at …”, never “now.”
+
+`sharing` lists the caller's grants, restricted to this room in a shared turn. `unshare` stops pending and active shares without approval; from a private chat name a room or use `--all`. The room skill's `location-stop` is also available when GPS is disabled. Stop prevents later reads but cannot erase messages or recall already returned tool results. Reader changes, room archive, bot veto and transport binding changes end sharing; reopening or rejoining requires new approval.
+
+For another member's current location, load the `room` skill and use `room location --user USER` or `room locations`. Never answer from an old transcript or access another member's personal location history.
 
 ## Places
 

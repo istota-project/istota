@@ -265,6 +265,8 @@ def _relabel(conn, room_token: str, lid: str, ref: str, user_id: str | None) -> 
         (ref, user_id, room_token, SURFACE, lid, room_token, SURFACE, ref),
     ).rowcount
     if moved:
+        from istota.location.sharing import invalidate_room_location_shares
+        invalidate_room_location_shares(conn, room_token)
         conn.execute(
             "UPDATE room_epochs SET person = ? WHERE room_token = ? AND person = ?",
             (_person(user_id, ref), room_token, _person(None, lid)),
