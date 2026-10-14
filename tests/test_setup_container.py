@@ -1831,3 +1831,123 @@ class TestTheAdminsFile:
         path = tmp_path / "admins"
         setup_wizard._ensure_admins_file(path, "alice", out=lambda *_: None)
         assert load_admin_users(str(path)) == {"alice"}
+
+
+class TestTheRerunSnapshot:
+    """`istota setup --snapshot` / `--restore`: what an abandoned web re-run
+    puts back. uid 10001's work, since root acts on nothing under config/ or
+    secrets/."""
+
+    @pytest.fixture
+    def stack(self, tmp_path, monkeypatch, _no_credentials_in_env):
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        setup_wizard.write_container_setup(
+            ContainerAnswers(user_id="alice", **_FIRST_RUNS[0][1]),
+            data_dir=tmp_path / "data", vm_dir=tmp_path / "vm", out=lambda *_: None,
+        )
+        return tmp_path
+
+    @staticmethod
+    def _what_restore_covers(tmp_path: Path) -> dict[str, bytes]:
+        config = tmp_path / "data" / "config"
+        files = {
+            name: (config / name).read_bytes()
+            for name in ("config.toml", "managed.json") if (config / name).exists()
+        }
+        for path in sorted((tmp_path / "vm" / "secrets").iterdir()):
+            files[f"secrets/{path.name}"] = path.read_bytes()
+        return files
+
+    @staticmethod
+    def _run(tmp_path: Path, **kw) -> int:
+        args = SimpleNamespace(
+            shape="container", vm_dir=str(tmp_path / "vm"), data_dir=str(tmp_path / "data"), **kw,
+        )
+        return setup_wizard.run_setup(args, out=lambda *_: None)
+
+    def test_a_round_trip_puts_back_what_a_finish_changed(self, stack):
+        snapshot = stack / "data" / "config" / ".setup-rerun"
+        before = self._what_restore_covers(stack)
+
+        assert self._run(stack, snapshot=str(snapshot)) == 0
+        assert _mode(snapshot) == 0o700
+        assert all(_mode(p) == 0o600 for p in snapshot.rglob("*") if p.is_file())
+
+        config = stack / "data" / "config" / "config.toml"
+        config.write_text('bot_name = "changed"\n')
+        (stack / "data" / "config" / "managed.json").write_text("{}\n")
+        secrets_dir = stack / "vm" / "secrets"
+        (secrets_dir / "istota_brain_native_api_key").unlink()
+        setup_wizard._write_secret_file(secrets_dir / "istota_email_imap_password", "new")
+        setup_wizard._write_secret_file(secrets_dir / "something_new", "extra")
+
+        assert self._run(stack, restore=str(snapshot)) == 0
+
+        assert self._what_restore_covers(stack) == before
+        assert not (secrets_dir / "something_new").exists()
+        assert _mode(config) == 0o600
+        assert _mode(secrets_dir / "istota_brain_native_api_key") == 0o400
+        assert not snapshot.exists()
+
+    def test_a_managed_file_the_snapshot_lacks_is_removed(self, stack):
+        managed = stack / "data" / "config" / "managed.json"
+        managed.unlink()
+        snapshot = stack / "data" / "config" / ".setup-rerun"
+        setup_wizard.snapshot_for_rerun(snapshot, stack / "data", stack / "vm" / "secrets")
+        managed.write_text("{}\n")
+
+        setup_wizard.restore_rerun_snapshot(snapshot, stack / "data", stack / "vm" / "secrets")
+
+        assert not managed.exists()
+
+    @pytest.mark.parametrize("linked", ["secrets/istota_caldav_password", "config.toml"])
+    def test_a_link_is_refused_and_nothing_is_taken(self, stack, linked):
+        target = stack / "elsewhere"
+        target.write_text("not setup's\n")
+        path = (stack / "vm" / linked) if linked.startswith("secrets/") else (stack / "data" / "config" / linked)
+        path.unlink()
+        path.symlink_to(target)
+        snapshot = stack / "data" / "config" / ".setup-rerun"
+
+        with pytest.raises(setup_wizard.SetupError, match="link"):
+            setup_wizard.snapshot_for_rerun(snapshot, stack / "data", stack / "vm" / "secrets")
+        assert not snapshot.exists()
+        assert [p.name for p in snapshot.parent.iterdir() if p.name.startswith(".setup-rerun")] == []
+
+    def test_an_earlier_snapshot_is_not_overwritten(self, stack):
+        snapshot = stack / "data" / "config" / ".setup-rerun"
+        setup_wizard.snapshot_for_rerun(snapshot, stack / "data", stack / "vm" / "secrets")
+        kept = (snapshot / "config.toml").read_bytes()
+        (stack / "data" / "config" / "config.toml").write_text('bot_name = "half-written"\n')
+
+        with pytest.raises(setup_wizard.SetupError, match="--restore"):
+            setup_wizard.snapshot_for_rerun(snapshot, stack / "data", stack / "vm" / "secrets")
+        assert (snapshot / "config.toml").read_bytes() == kept
+
+    def test_restore_refuses_a_directory_that_is_not_a_snapshot(self, stack):
+        empty = stack / "data" / "config" / ".setup-rerun"
+        empty.mkdir()
+        before = self._what_restore_covers(stack)
+
+        with pytest.raises(setup_wizard.SetupError, match="snapshot"):
+            setup_wizard.restore_rerun_snapshot(empty, stack / "data", stack / "vm" / "secrets")
+        assert self._what_restore_covers(stack) == before
+
+    def test_the_cli_parses_both_flags(self, stack, monkeypatch, capsys):
+        from istota import cli
+
+        snapshot = stack / "data" / "config" / ".setup-rerun"
+        for flag in ("--snapshot", "--restore"):
+            monkeypatch.setattr("sys.argv", [
+                "istota", "setup", flag, str(snapshot),
+                "--vm-dir", str(stack / "vm"), "--data-dir", str(stack / "data"),
+            ])
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+            assert excinfo.value.code == 0, capsys.readouterr().err
+        assert not snapshot.exists()
+
+    def test_both_at_once_is_refused(self, stack):
+        snapshot = str(stack / "snap")
+        with pytest.raises(setup_wizard.SetupError, match="--snapshot"):
+            self._run(stack, snapshot=snapshot, restore=snapshot)

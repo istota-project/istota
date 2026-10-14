@@ -17,10 +17,14 @@ functions of the answers.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import getpass
 import logging
 import os
 import secrets
+import shutil
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -290,6 +294,8 @@ def setup_shape(args) -> str:
 
 def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
+    if getattr(args, "snapshot", None) or getattr(args, "restore", None):
+        return run_rerun_snapshot(args, out=out)
     if getattr(args, "web", False) or getattr(args, "local", False):
         from .webui import setup_app  # noqa: PLC0415 - FastAPI only for the web setup
 
@@ -1251,7 +1257,7 @@ def _payload_type_ok(value, expected: type) -> bool:
     return isinstance(value, expected)
 
 
-def answers_from_payload(payload: dict) -> ContainerAnswers:
+def answers_from_payload(payload: dict, base: ContainerAnswers | None = None) -> ContainerAnswers:
     """The web setup's answers as ``ContainerAnswers``.
 
     Only ``WEB_SETUP_FIELDS`` are accepted, and an unknown key or a value of
@@ -1260,6 +1266,13 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     ``--yes`` run of ``collect_container_answers`` gives it, so the two front
     ends agree on what unasked means. Validation is
     ``validate_container_answers``'s, not this function's.
+
+    ``base`` is a re-run's prior answers (``prior_answers``). The answers
+    start from a copy of it, so a key left out keeps the base value, every
+    field no screen asks is kept, and a profile the stack already runs may
+    stay though the web does not offer it. A key sent empty still takes the
+    first-run default, and what the storage, ingress or workspace choice
+    turns off is turned off whatever the base had.
     """
     if not isinstance(payload, dict):
         raise PayloadError([FieldError("", "The setup answers must be a JSON object.")])
@@ -1276,61 +1289,88 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
         else:
             values[key] = value
 
-    def text(key: str) -> str:
-        return str(values.get(key, "")).strip()
+    def text(key: str, default: str = "") -> str:
+        if key in values:
+            value = str(values[key]).strip()
+        elif base is not None:
+            value = str(getattr(base, key)).strip()
+        else:
+            value = ""
+        return value or default
 
-    a = ContainerAnswers()
-    a.bot_name = text("bot_name") or "Istota"
+    def flag(key: str, default: bool) -> bool:
+        if key in values:
+            return values[key]
+        return getattr(base, key) if base is not None else default
+
+    a = dataclasses.replace(base) if base is not None else ContainerAnswers()
+    a.bot_name = text("bot_name", "Istota")
     a.user_id = text("user_id")
-    a.display_name = text("display_name") or a.user_id
-    a.timezone = text("timezone") or "UTC"
+    a.display_name = text("display_name", a.user_id)
+    a.timezone = text("timezone", "UTC")
     a.user_email = text("user_email")
 
-    a.hostname = text("hostname") or "localhost"
+    a.hostname = text("hostname", "localhost")
     default_ingress = "local" if a.hostname.split(":")[0] in ("localhost", "127.0.0.1") else "direct"
-    a.ingress = text("ingress") or default_ingress
+    a.ingress = text("ingress", default_ingress)
     if a.ingress == "proxied":
         a.upstream_proxy = text("upstream_proxy")
         a.listen_addr = text("listen_addr")
-        a.listen_port = values.get("listen_port") or 8080
+        if "listen_port" in values or base is None:
+            a.listen_port = values.get("listen_port") or 8080
+        else:
+            a.listen_port = base.listen_port or 8080
         source = text("tls_cert_source")
         a.tls_cert_source = "" if source == "none" else source
-    elif a.ingress == "direct":
-        a.tls_cert_source = text("tls_cert_source") or "acme"
+    else:
+        a.upstream_proxy, a.listen_addr, a.listen_port = "", "", 0
+    if a.ingress == "direct":
+        a.tls_cert_source = text("tls_cert_source", "acme")
 
-    storage = text("storage") or "local"
+    if "storage" in values:
+        storage = str(values["storage"]).strip() or "local"
+    elif base is not None and base.uses_nextcloud:
+        storage = "nextcloud"
+    else:
+        storage = "local"
     if storage not in STORAGE_CHOICES:
         errors.append(FieldError("storage", f"Unknown storage {storage!r}; use local or nextcloud."))
     elif storage == "nextcloud":
+        a.host_folder = False
         a.nextcloud_url = text("nextcloud_url").rstrip("/")
         if not a.nextcloud_url:
             errors.append(FieldError("nextcloud_url", "Enter your Nextcloud's address."))
-        a.nextcloud_public_url = (text("nextcloud_public_url") or a.nextcloud_url).rstrip("/")
-        a.nextcloud_username = text("nextcloud_username") or "istota"
+        a.nextcloud_public_url = text("nextcloud_public_url", a.nextcloud_url).rstrip("/")
+        a.nextcloud_username = text("nextcloud_username", "istota")
         a.nextcloud_app_password = text("nextcloud_app_password")
-        a.talk_enabled = values.get("talk_enabled", True)
+        a.talk_enabled = flag("talk_enabled", True)
         # The terminal's `--yes` answers: the mount, its root as the bot
         # folder, shared back; a local workspace has nothing in Nextcloud to share.
-        a.workspace = text("workspace") or "mount"
+        a.workspace = text("workspace", "mount")
         if a.workspace not in WORKSPACE_CHOICES:
             errors.append(FieldError("workspace", f"Unknown workspace {a.workspace!r}; use mount or local."))
         elif a.workspace == "local":
+            a.nextcloud_dav_prefix = ""
             a.nextcloud_auto_share_bot_dir = False
+        elif base is None or not base.workspace_is_mount:
+            a.nextcloud_auto_share_bot_dir = not a.nextcloud_dav_prefix
+    else:
+        a.nextcloud_url = ""
 
-    a.brain_kind = text("brain_kind") or "claude_code"
+    a.brain_kind = text("brain_kind", "claude_code")
     if a.brain_kind == "native":
-        a.native_base_url = text("native_base_url") or DEFAULT_ANTHROPIC_BASE_URL
+        a.native_base_url = text("native_base_url", DEFAULT_ANTHROPIC_BASE_URL)
         a.native_model = text("native_model")
         a.native_api_key = text("native_api_key")
     else:
         a.claude_code_oauth_token = text("claude_code_oauth_token")
 
-    a.email_enabled = values.get("email_enabled", False)
+    a.email_enabled = flag("email_enabled", False)
     if a.email_enabled:
         a.imap_host = text("imap_host")
         a.imap_user = text("imap_user")
-        a.smtp_host = text("smtp_host") or a.imap_host
-        a.bot_email = text("bot_email") or a.imap_user
+        a.smtp_host = text("smtp_host", a.imap_host)
+        a.bot_email = text("bot_email", a.imap_user)
         a.imap_password = text("imap_password")
         a.authserv_id = text("authserv_id")
 
@@ -1348,8 +1388,9 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
         if field_name in values and module_available(module):
             setattr(a, field_name, values[field_name])
 
-    profiles = list(values.get("profiles", []))
-    offered = [p for p in profiles if p not in WEB_SETUP_PROFILES]
+    profiles = list(values["profiles"]) if "profiles" in values else list(a.profiles)
+    kept = base.profiles if base is not None else ()
+    offered = [p for p in profiles if p not in WEB_SETUP_PROFILES and p not in kept]
     if offered:
         errors.append(FieldError("profiles", f"The web setup does not offer {offered}."))
     a.profiles = tuple(profiles)
@@ -1357,6 +1398,56 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     if errors:
         raise PayloadError(errors, a)
     return a
+
+
+def payload_from_answers(a: ContainerAnswers) -> dict:
+    """The web draft that reads back as ``a``: the inverse of
+    ``answers_from_payload`` over ``WEB_SETUP_FIELDS``, for a re-run's seeded
+    draft. What no screen asks stays on the answers it is read against
+    (``base=``). Credentials are their real values: the draft is in memory,
+    and every route redacts it."""
+    tls = tls_cert_source(a)
+    if a.ingress == "proxied" and not tls:
+        tls = "none"
+    payload: dict = {
+        "bot_name": a.bot_name,
+        "user_id": a.user_id,
+        "display_name": a.display_name or a.user_id,
+        "timezone": a.timezone,
+        "user_email": a.user_email,
+        "hostname": a.hostname,
+        "ingress": a.ingress,
+        "upstream_proxy": a.upstream_proxy,
+        "listen_addr": a.listen_addr,
+        "listen_port": a.listen_port,
+        "tls_cert_source": tls,
+        "storage": "nextcloud" if a.uses_nextcloud else "local",
+        "workspace": a.workspace,
+        "nextcloud_url": a.nextcloud_url,
+        "nextcloud_public_url": a.nextcloud_public_url,
+        "nextcloud_username": a.nextcloud_username,
+        "nextcloud_app_password": a.nextcloud_app_password,
+        "talk_enabled": a.talk_enabled,
+        "brain_kind": a.brain_kind,
+        "native_base_url": a.native_base_url,
+        "native_model": a.native_model,
+        "native_api_key": a.native_api_key,
+        "claude_code_oauth_token": a.claude_code_oauth_token,
+        "email_enabled": a.email_enabled,
+        "imap_host": a.imap_host,
+        "imap_user": a.imap_user,
+        "imap_password": a.imap_password,
+        "smtp_host": a.smtp_host,
+        "bot_email": a.bot_email,
+        "authserv_id": a.authserv_id,
+        "caldav_url": a.caldav_url,
+        "caldav_username": a.caldav_username,
+        "caldav_password": a.caldav_password,
+        **{field_name: getattr(a, field_name) for field_name, _module, _question in _OPT_OUT_MODULES},
+        "profiles": list(a.profiles),
+    }
+    assert payload.keys() == WEB_SETUP_FIELDS.keys()
+    return payload
 
 
 def _follow(prior_value: str, prior_source: str, new_source: str) -> str:
@@ -1861,3 +1952,147 @@ def write_container_setup(
             "  The Claude credential has no config key; without --vm-dir it was not "
             "written. Put it in the stack's secrets/ directory."
         )
+
+
+# ===========================================================================
+# The rollback snapshot of a web re-run
+# ===========================================================================
+
+#: The files under config/ a web Finish changes and a snapshot holds; the
+#: secret files are the rest. `admins` and the master key are never rewritten.
+SNAPSHOT_CONFIG_FILES = ("config.toml", "managed.json")
+
+
+def _read_regular_file(path: Path) -> bytes | None:
+    """``path``'s bytes, or None when there is no file. A link, a directory or
+    anything else that is not a regular file is refused: the snapshot copies
+    what setup wrote and nothing a link points at."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise SetupError(f"{path} is a link; setup does not follow one.") from None
+        raise SetupError(f"Could not read {path}: {exc.strerror}.") from None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise SetupError(f"{path} is not a regular file.")
+        return fh.read()
+
+
+def _read_secret_dir(secrets_dir: Path) -> dict[str, bytes]:
+    """Every file under ``secrets_dir`` by name, each through ``_read_regular_file``."""
+    if not os.path.lexists(secrets_dir):
+        return {}
+    if secrets_dir.is_symlink() or not secrets_dir.is_dir():
+        raise SetupError(f"{secrets_dir} is a link or not a directory; setup does not follow one.")
+    files = {}
+    for path in sorted(secrets_dir.iterdir()):
+        data = _read_regular_file(path)
+        if data is not None:
+            files[path.name] = data
+    return files
+
+
+def _write_new_private(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(data)
+
+
+def snapshot_for_rerun(snapshot_dir: Path, data_dir: Path, secrets_dir: Path) -> None:
+    """Copy what a web re-run's Finish may change into ``snapshot_dir`` (0700,
+    files 0600): ``config.toml``, ``managed.json`` and every secret file.
+
+    Built beside its destination and renamed into place, so a snapshot that
+    exists is a whole one. An existing snapshot is refused rather than
+    replaced: it is the only copy of a setup an earlier run did not finish.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    if os.path.lexists(snapshot_dir):
+        raise SetupError(
+            f"A snapshot from an earlier re-run is at {snapshot_dir}. Put it back with "
+            f"`istota setup --restore {snapshot_dir}`, or remove it, then try again."
+        )
+    config_dir = Path(data_dir) / "config"
+    files = {name: _read_regular_file(config_dir / name) for name in SNAPSHOT_CONFIG_FILES}
+    if files["config.toml"] is None:
+        raise SetupError(f"There is no {config_dir / 'config.toml'} to snapshot.")
+    secret_files = _read_secret_dir(Path(secrets_dir))
+
+    partial = Path(tempfile.mkdtemp(prefix=f"{snapshot_dir.name}.partial.", dir=snapshot_dir.parent))
+    try:
+        os.chmod(partial, 0o700)
+        for name, data in files.items():
+            if data is not None:
+                _write_new_private(partial / name, data)
+        (partial / "secrets").mkdir(mode=0o700)
+        for name, data in secret_files.items():
+            _write_new_private(partial / "secrets" / name, data)
+        os.rename(partial, snapshot_dir)
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+
+
+def restore_rerun_snapshot(snapshot_dir: Path, data_dir: Path, secrets_dir: Path) -> None:
+    """Put back what ``snapshot_for_rerun`` took, then remove the snapshot.
+
+    The config files go back through the writer the config editor uses and
+    the secret files through ``_write_secret_file``; a config file or a secret
+    file the snapshot does not have is removed, so the set is the snapshot's.
+    Everything is read before anything is written.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    if snapshot_dir.is_symlink() or not snapshot_dir.is_dir():
+        raise SetupError(f"{snapshot_dir} is not a setup snapshot.")
+    files = {name: _read_regular_file(snapshot_dir / name) for name in SNAPSHOT_CONFIG_FILES}
+    if files["config.toml"] is None or not (snapshot_dir / "secrets").is_dir():
+        raise SetupError(f"{snapshot_dir} is not a setup snapshot: it has no config.toml or secrets/.")
+    secret_files = _read_secret_dir(snapshot_dir / "secrets")
+    try:
+        secret_text = {name: data.decode("utf-8") for name, data in secret_files.items()}
+    except UnicodeDecodeError:
+        raise SetupError(f"A secret file in {snapshot_dir} is not text; restore it by hand.") from None
+
+    from istota import apply  # noqa: PLC0415
+
+    config_dir = Path(data_dir) / "config"
+    for name, data in files.items():
+        if data is None:
+            (config_dir / name).unlink(missing_ok=True)
+        else:
+            apply.write_private(config_dir / name, data)
+    secrets_dir = Path(secrets_dir)
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(secrets_dir, 0o700)
+    for name, text in secret_text.items():
+        _write_secret_file(secrets_dir / name, text)
+    for path in secrets_dir.iterdir():
+        if path.name not in secret_text:
+            path.unlink()
+    shutil.rmtree(snapshot_dir)
+
+
+def run_rerun_snapshot(args, *, out) -> int:
+    """``istota setup --snapshot DIR`` / ``--restore DIR``, run as uid 10001
+    by ``istota-stack setup --web --force`` around the setup server."""
+    snapshot, restore = getattr(args, "snapshot", None), getattr(args, "restore", None)
+    if snapshot and restore:
+        raise SetupError("--snapshot and --restore are two steps; give one.")
+    if getattr(args, "web", False):
+        raise SetupError("--snapshot and --restore do not go with --web.")
+    setup_shape(args)
+    if not getattr(args, "vm_dir", None):
+        raise SetupError("--snapshot and --restore need --vm-dir, whose secrets/ they cover.")
+    data_dir = Path(getattr(args, "data_dir", None) or CONTAINER_DATA_DIR)
+    secrets_dir = Path(args.vm_dir) / "secrets"
+    if snapshot:
+        snapshot_for_rerun(Path(snapshot), data_dir, secrets_dir)
+        out(f"Took a snapshot of the setup files at {snapshot}.")
+    else:
+        restore_rerun_snapshot(Path(restore), data_dir, secrets_dir)
+        out(f"Put the setup files back from {restore}.")
+    return 0

@@ -5195,11 +5195,19 @@ def main():
     )
     setup_parser.add_argument(
         "--web", action="store_true",
-        help="Run the first-run setup in a browser instead (container; needs --vm-dir)",
+        help="Run setup in a browser instead; with --force, change an existing setup (container; needs --vm-dir)",
     )
     setup_parser.add_argument(
         "--local", action="store_true",
         help="With --web: plain HTTP on port 8080, for a page opened on this machine",
+    )
+    setup_parser.add_argument(
+        "--snapshot", metavar="DIR",
+        help="Copy config.toml, managed.json and secrets/ into DIR before a web re-run (container)",
+    )
+    setup_parser.add_argument(
+        "--restore", metavar="DIR",
+        help="Put back what --snapshot took, then remove DIR (container)",
     )
 
     # serve (combined local launcher: scheduler + web in one process)

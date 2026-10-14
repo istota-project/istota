@@ -13,6 +13,11 @@ code, a spent one and a locked-out unlock all get the same 403. The draft is
 held in memory only: it carries credentials, so nothing reaches disk before
 Finish, and an hour with no request ends the session and the process (exit 3).
 
+With ``--force`` it is a re-run over a configured stack: the draft starts as
+what the stack's files say (``setup_wizard.prior_answers``), every answer no
+screen asks is kept, and Finish rewrites the config and the secret files but
+creates no login.
+
 Bodies are read by hand under a 64 KiB cap and never declared as pydantic
 parameters, so a refusal can never echo a submitted credential back. Uvicorn's
 access log is off and the request log names the path without its query.
@@ -101,10 +106,40 @@ SETUP_STEPS: dict[str, tuple[str, ...]] = {
 }
 SETUP_STEPS["review"] = tuple(dict.fromkeys(f for fields in SETUP_STEPS.values() for f in fields))
 
+#: The screens a re-run leaves out: the password belongs to the login the
+#: first run made, which a re-run does not touch. The page's re-run list is
+#: held to this one.
+RERUN_SKIPPED_STEPS: tuple[str, ...] = ("account",)
+RERUN_SETUP_STEPS: dict[str, tuple[str, ...]] = {
+    step: fields for step, fields in SETUP_STEPS.items()
+    if step not in RERUN_SKIPPED_STEPS and step != "review"
+}
+RERUN_SETUP_STEPS["review"] = tuple(dict.fromkeys(f for fields in RERUN_SETUP_STEPS.values() for f in fields))
+
+
+def setup_steps(rerun: bool) -> dict[str, tuple[str, ...]]:
+    """The screens, in order, with the fields each asks."""
+    return RERUN_SETUP_STEPS if rerun else SETUP_STEPS
+
+
 _ALREADY_SET_UP = (
-    "istota is already set up; use the admin Configuration page or "
+    "istota is already set up; use the admin Configuration page, "
+    "`istota-stack setup --force`, or `istota-stack setup --web --force` to change it in a browser."
+)
+_NOTHING_TO_CHANGE = (
+    "There is no config to change; run `istota-stack setup --web` for a first setup."
+)
+_RERUN_UNPARSEABLE = (
+    "config.toml does not parse ({reason}); fix it, or re-run in the terminal with "
     "`istota-stack setup --force`."
 )
+#: A re-run's stored credential, by the field holding the host it was stored
+#: for. A changed host drops it from the draft (`_drop_moved_credentials`).
+_CREDENTIAL_HOSTS: dict[str, str] = {
+    "nextcloud_app_password": "nextcloud_url",
+    "imap_password": "imap_host",
+    "caldav_password": "caldav_url",
+}
 _CODE_REFUSED = (
     "That setup code is not valid, or it has already been used. To get a new one, "
     "stop the running setup (Ctrl-C, or `sudo systemctl stop istota-setup`) and run "
@@ -138,6 +173,14 @@ class SetupState:
     #: host.env's LOCAL_FORWARD_PORT at start, 0 off the local VM; every
     #: draft-to-answers call carries it (`_answers_for`).
     forwarded_port: int = 0
+    #: A re-run (`--force`): `prior` is what the stack's files said at start,
+    #: the base of every draft-to-answers call, and `existing_user` its user.
+    rerun: bool = False
+    prior: setup_wizard.ContainerAnswers | None = None
+    existing_user: str = ""
+    #: Credential fields still holding the value `prior` seeded, not one the
+    #: page sent; only these are dropped when their host changes.
+    stored_credentials: set[str] = field(default_factory=set)
     code_spent: bool = False
     session_id: str | None = None
     last_activity: float = 0.0
@@ -402,30 +445,90 @@ def _plain(errors: list[FieldError], a: setup_wizard.ContainerAnswers | None) ->
 
 def _subscription_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
     # The terminal keeps an existing token file when the answer is empty; a
-    # first web setup has no file to keep.
-    if a.brain_kind == "claude_code" and not a.claude_code_oauth_token:
+    # first web setup has no file to keep. A re-run's base may hold an
+    # Anthropic API key instead, which the web asks for nowhere.
+    if a.brain_kind == "claude_code" and not (a.claude_code_oauth_token or a.anthropic_api_key):
         return [FieldError(
             "claude_code_oauth_token", "Paste the token that `claude setup-token` printed.",
         )]
     return []
 
 
+def _same_host(value: object) -> str:
+    return str(value or "").strip().rstrip("/").lower()
+
+
+def _host_moved(state: SetupState, credential: str, draft: dict) -> bool:
+    """Whether the draft names another host than the one ``credential`` was
+    stored for. A host the draft does not hold is the prior's."""
+    host = _CREDENTIAL_HOSTS[credential]
+    if state.prior is None or host not in draft:
+        return False
+    return _same_host(draft[host]) != _same_host(getattr(state.prior, host))
+
+
+def _drop_moved_credentials(state: SetupState) -> None:
+    """Drop a stored credential whose host the draft has changed, so no
+    check and no Finish sends it to a host it was not stored for."""
+    for credential in sorted(state.stored_credentials):
+        if _host_moved(state, credential, state.draft):
+            state.draft[credential] = ""
+            state.stored_credentials.discard(credential)
+
+
+def _moved_credential_errors(state: SetupState, a: setup_wizard.ContainerAnswers) -> list[FieldError]:
+    """Ask again for a credential dropped by a host change: left empty, the
+    writer would keep the stored file and send it to the new host."""
+    if state.prior is None:
+        return []
+    in_use = {
+        "nextcloud_app_password": a.uses_nextcloud,
+        "imap_password": a.email_enabled,
+        # The shared validator already asks for a calendar's password.
+        "caldav_password": False,
+    }
+    return [
+        FieldError(credential, "Enter it again: the one saved before was for the old address.")
+        for credential, used in in_use.items()
+        if used and getattr(state.prior, credential) and not getattr(a, credential)
+        and _host_moved(state, credential, state.draft)
+    ]
+
+
+def _rerun_username_errors(a: setup_wizard.ContainerAnswers, existing_user: str) -> list[FieldError]:
+    if a.user_id == existing_user:
+        return []
+    return [FieldError(
+        "user_id", f"This changes an existing setup, so the username stays “{existing_user}”.",
+    )]
+
+
 def _answers_for(state: SetupState, draft: dict) -> setup_wizard.ContainerAnswers:
     """The answers ``draft`` makes on this machine: the one place the server
     turns a draft into answers, so what the draft cannot carry (the VM's
-    forwarded port) reaches validation, the checks and Finish alike.
+    forwarded port, a re-run's prior answers) reaches validation, the checks
+    and Finish alike.
 
     Raises ``PayloadError``, its ``answers`` carrying the same.
     """
     payload = {key: value for key, value in draft.items() if key != PASSWORD_FIELD}
     try:
-        a = setup_wizard.answers_from_payload(payload)
+        a = setup_wizard.answers_from_payload(payload, base=state.prior)
     except PayloadError as exc:
         if exc.answers is not None:
-            exc.answers.forwarded_port = state.forwarded_port
+            _on_this_machine(state, exc.answers)
         raise
-    a.forwarded_port = state.forwarded_port
+    _on_this_machine(state, a)
     return a
+
+
+def _on_this_machine(state: SetupState, a: setup_wizard.ContainerAnswers) -> None:
+    a.forwarded_port = state.forwarded_port
+    # The OAuth pair was registered with the prior Nextcloud and no screen
+    # asks it, so another Nextcloud turns Nextcloud login off, as the
+    # terminal does for a client id with no secret.
+    if state.prior is not None and _same_host(a.nextcloud_url) != _same_host(state.prior.nextcloud_url):
+        a.oauth_client_id = a.oauth_client_secret = ""
 
 
 def draft_errors(
@@ -438,6 +541,9 @@ def draft_errors(
     and only its errors on a field the payload already refused are dropped.
     A username other than the one an earlier Finish wrote in the state's
     data directory is refused too.
+
+    A re-run creates no login, so it asks for no email or password, and it
+    keeps the existing username whatever rule made it; it refuses any other.
     """
     errors: list[FieldError] = []
     try:
@@ -447,34 +553,39 @@ def draft_errors(
         errors.extend(_plain(exc.errors, a))
     if a is not None:
         refused = {e.field for e in errors}
-        web_rules = [
-            *_username_errors(a), *_address_errors(a), *_subscription_errors(a),
-            *_kept_username_errors(a, state.data_dir),
-        ]
+        web_rules = [*_address_errors(a), *_subscription_errors(a)]
+        if state.rerun:
+            web_rules += [
+                *_rerun_username_errors(a, state.existing_user), *_moved_credential_errors(state, a),
+            ]
+        else:
+            web_rules += [*_username_errors(a), *_kept_username_errors(a, state.data_dir)]
         shared = _plain(setup_wizard.validate_container_answers(a), a)
         for error in (*shared, *web_rules):
             if error.field not in refused:
                 errors.append(error)
-    errors.extend(_email_errors(draft))
-    errors.extend(_password_errors(draft))
+    if not state.rerun:
+        errors.extend(_email_errors(draft))
+        errors.extend(_password_errors(draft))
     return (None if errors else a), errors
 
 
 def step_errors(state: SetupState, draft: dict, step: str) -> list[FieldError]:
     """The draft's errors on ``step``'s fields, plus any form-level error."""
     _answers, errors = draft_errors(state, draft)
+    steps = setup_steps(state.rerun)
     # A field two screens ask (the username) is reported on the one that owns
     # it for this draft, so it is not refused under a label that doesn't ask it.
-    wanted = {f for f in SETUP_STEPS[step] if step == "review" or step_of(f, draft) == step}
+    wanted = {f for f in steps[step] if step == "review" or step_of(f, draft, steps) == step}
     return [e for e in errors if e.field == "" or e.field in wanted]
 
 
-def step_of(field_name: str, draft: dict) -> str:
+def step_of(field_name: str, draft: dict, steps: dict[str, tuple[str, ...]] = SETUP_STEPS) -> str:
     """The screen that asks ``field_name``, for the page to go back to."""
     if field_name == "user_id" and draft.get("storage") == "nextcloud":
         # With Nextcloud the username is the Nextcloud screen's.
         return "nextcloud"
-    for step, fields in SETUP_STEPS.items():
+    for step, fields in steps.items():
         if step != "review" and field_name in fields:
             return step
     return "review"
@@ -582,14 +693,53 @@ async def openrouter_model_ids(seconds: float) -> list[str]:
     return sorted(catalog)
 
 
+def _prior_for_rerun(data_dir: Path, vm_dir: Path) -> setup_wizard.ContainerAnswers:
+    """What a re-run starts from, or the reason it cannot start."""
+    import tomllib  # noqa: PLC0415
+
+    config_path = data_dir / "config" / "config.toml"
+    if not config_path.is_file():
+        raise SetupError(_NOTHING_TO_CHANGE)
+    try:
+        prior = setup_wizard.prior_answers(data_dir, vm_dir)
+    except setup_wizard.PriorConfigUnreadable as exc:
+        raise SetupError(_RERUN_UNPARSEABLE.format(reason=exc)) from None
+    if prior is None:
+        raise SetupError(_NOTHING_TO_CHANGE)
+    if not prior.user_id:
+        doc = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        ids = setup_wizard.prior_user_ids(doc, config_path.parent / "admins")
+        if ids:
+            named = ", ".join(ids)
+            raise SetupError(
+                f"config.toml has more than one admin with a [users] block ({named}), and the "
+                "browser setup cannot ask which one it is for. Re-run in the terminal with "
+                "`istota-stack setup --force`."
+            )
+        raise SetupError(
+            "No user in config.toml is both in config/admins and has a [users] block, so the "
+            "browser setup does not know whose it is. Re-run in the terminal with "
+            "`istota-stack setup --force`."
+        )
+    return prior
+
+
 def create_setup_app(
-    *, data_dir: Path, vm_dir: Path, code_path: Path, local: bool,
+    *, data_dir: Path, vm_dir: Path, code_path: Path, local: bool, rerun: bool = False,
     clock: Callable[[], float] = time.monotonic,
     check_seconds: float = setup_checks.CHECK_SECONDS,
 ) -> FastAPI:
-    """The setup app over ``data_dir``, refusing when a config already exists."""
+    """The setup app over ``data_dir``.
+
+    A first run refuses when a config already exists. A re-run (``rerun``)
+    needs one, and starts from what the stack's files say: the draft is
+    seeded with it, and every answer the form does not carry is kept.
+    """
     data_dir = Path(data_dir)
-    if (data_dir / "config" / "config.toml").exists():
+    prior = None
+    if rerun:
+        prior = _prior_for_rerun(data_dir, Path(vm_dir))
+    elif (data_dir / "config" / "config.toml").exists():
         raise SetupError(_ALREADY_SET_UP)
     try:
         code = normalize_code(Path(code_path).read_text(encoding="utf-8"))
@@ -604,7 +754,11 @@ def create_setup_app(
     state = SetupState(
         code=code, local=local, data_dir=data_dir, vm_dir=Path(vm_dir), clock=clock,
         forwarded_port=setup_wizard.forwarded_port(Path(vm_dir)), check_seconds=check_seconds,
+        rerun=rerun, prior=prior, existing_user=prior.user_id if prior is not None else "",
     )
+    if prior is not None:
+        state.draft = setup_wizard.payload_from_answers(prior)
+        state.stored_credentials = {name for name in _CREDENTIAL_HOSTS if state.draft.get(name)}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -654,8 +808,9 @@ def create_setup_app(
             phase = "finishing"
         else:
             phase = "open" if open_here else "locked"
-        return {
+        body = {
             "phase": phase,
+            "rerun": state.rerun,
             "local": state.local,
             "host": request.headers.get("host", ""),
             # What "Only on this computer" answers at: the port Lima forwards.
@@ -681,6 +836,11 @@ def create_setup_app(
                 },
             },
         }
+        # This route needs no session and a server's is public, so whose
+        # setup this is goes only to the session.
+        if state.rerun and open_here:
+            body["user_id"] = state.existing_user
+        return body
 
     @app.post("/istota/api/setup/unlock")
     async def unlock(request: Request):
@@ -749,6 +909,8 @@ def create_setup_app(
                     state.draft.pop(key, None)
                 continue
             state.draft[key] = value
+            state.stored_credentials.discard(key)
+        _drop_moved_credentials(state)
         return {"draft": _redacted_draft(state.draft)}
 
     @app.post("/istota/api/setup/validate")
@@ -757,7 +919,7 @@ def create_setup_app(
         _require_origin(state, request)
         body = await _read_json(request)
         step = body.get("step") if isinstance(body, dict) else None
-        if step not in SETUP_STEPS:
+        if step not in setup_steps(state.rerun):
             return _error(400, "unknown_step", "Unknown setup step.")
         errors = step_errors(state, state.draft, step)
         return {
@@ -810,10 +972,11 @@ def create_setup_app(
                 return _error(409, "finished", "Setup has already finished.")
             a, errors = draft_errors(state, state.draft)
             if errors:
-                return _invalid_at_finish(errors, state.draft)
+                return _invalid_at_finish(errors, state.draft, setup_steps(state.rerun))
             try:
                 await asyncio.to_thread(
-                    finish, a, state.draft[PASSWORD_FIELD], data_dir=state.data_dir, vm_dir=state.vm_dir,
+                    finish, a, state.draft.get(PASSWORD_FIELD, ""),
+                    data_dir=state.data_dir, vm_dir=state.vm_dir, rerun=state.rerun,
                 )
             except FinishError as exc:
                 return JSONResponse(
@@ -824,7 +987,9 @@ def create_setup_app(
             # The draft holds every credential and the password; nothing
             # needs them now.
             state.draft.clear()
-        result = {"login_url": login_url(a), "email": auth_email(a.user_email)}
+        result = {"login_url": login_url(a)}
+        if not state.rerun:
+            result["email"] = auth_email(a.user_email)
         # Asked for after the response is sent, so the page gets it first.
         return JSONResponse(result, background=BackgroundTask(request_exit, state, 0))
 
@@ -842,17 +1007,19 @@ def create_setup_app(
     return app
 
 
-def _invalid_at_finish(errors: list[FieldError], draft: dict) -> JSONResponse:
+def _invalid_at_finish(
+    errors: list[FieldError], draft: dict, steps: dict[str, tuple[str, ...]],
+) -> JSONResponse:
     """Every error with the screen that asks it, and the first such screen."""
-    steps = [step_of(e.field, draft) for e in errors]
-    order = list(SETUP_STEPS)
+    where = [step_of(e.field, draft, steps) for e in errors]
+    order = list(steps)
     body = {
         "error": "invalid",
         "message": "Some answers need fixing before setup can finish.",
-        "step": min(steps, key=order.index),
+        "step": min(where, key=order.index),
         "fields": [
             {"field": e.field, "message": e.message, "step": step}
-            for e, step in zip(errors, steps)
+            for e, step in zip(errors, where)
         ],
     }
     return JSONResponse(body, status_code=400)
@@ -905,7 +1072,10 @@ def auth_email(raw: str) -> str:
     return auth.normalize_email(raw)
 
 
-def finish(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, vm_dir: Path) -> None:
+def finish(
+    a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, vm_dir: Path,
+    rerun: bool = False,
+) -> None:
     """Write everything ``a`` decides, the first admin's login, and the marker.
 
     Stops at the first failure with a ``FinishError`` naming the step. Every
@@ -913,14 +1083,11 @@ def finish(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, v
     and keep an existing master key and admins file, the profile and the
     identity are ensured, and a second ``set_password`` only bumps an epoch
     nobody has signed in under yet.
+
+    A re-run (``rerun``) backs the config up before replacing it and leaves
+    the database alone: the login, the profile and the password are the
+    first run's, and the profile row wins over ``[users.X]`` anyway.
     """
-    import sqlite3  # noqa: PLC0415
-
-    from istota import db, user_profiles  # noqa: PLC0415
-    from istota.config import config_from_document  # noqa: PLC0415
-
-    from . import auth  # noqa: PLC0415
-
     # The web form offers no host folder, so its "local" on a VM whose
     # workspace is the Mac's folder keeps that folder, as the terminal does.
     if not a.nextcloud_url and setup_wizard.current_storage(vm_dir) == "host-folder":
@@ -928,10 +1095,24 @@ def finish(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, v
     try:
         setup_wizard.write_container_setup(
             a, data_dir=data_dir, vm_dir=vm_dir, out=lambda line: logger.info("setup: %s", line.strip()),
+            backup=setup_wizard.RERUN_CONFIG_BACKUPS if rerun else None,
         )
     except (OSError, SetupError) as exc:
         raise _failed("settings", exc) from None
     logger.info("setup: finish: settings written")
+    if not rerun:
+        _finish_account(a, password, data_dir=data_dir)
+    _write_marker(vm_dir)
+
+
+def _finish_account(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path) -> None:
+    """The first admin's database rows: the profile, the identity, the password."""
+    import sqlite3  # noqa: PLC0415
+
+    from istota import db, user_profiles  # noqa: PLC0415
+    from istota.config import config_from_document  # noqa: PLC0415
+
+    from . import auth  # noqa: PLC0415
 
     db_path = db_path_under(data_dir)
     try:
@@ -951,6 +1132,8 @@ def finish(a: setup_wizard.ContainerAnswers, password: str, *, data_dir: Path, v
         raise _failed("account", exc) from None
     logger.info("setup: finish: account ready for %s", a.user_id)
 
+
+def _write_marker(vm_dir: Path) -> None:
     marker = Path(vm_dir) / SETUP_DONE
     try:
         marker.unlink(missing_ok=True)
@@ -982,21 +1165,17 @@ def _run_server(app: FastAPI, settings: dict) -> int:
 def _argument_refusal(args) -> str | None:
     if not getattr(args, "web", False):
         return "--local goes with --web."
-    if getattr(args, "force", False):
-        return (
-            "--force does not go with --web: the web setup is for a first run only. "
-            "Use `istota-stack setup --force` to replace an existing config."
-        )
     if not getattr(args, "vm_dir", None):
         return "--web needs --vm-dir, the staging directory istota-stack hands it."
     return None
 
 
 def serve(args, *, out=print) -> int:
-    """``istota setup --web [--local]``: run the setup server to completion.
+    """``istota setup --web [--force] [--local]``: run the setup server to completion.
 
-    Refuses, before binding, when the arguments cannot mean a web setup or a
-    config already exists.
+    Refuses, before binding, when the arguments cannot mean a web setup, when
+    a first run finds a config, or when a re-run (``--force``) finds none or
+    one it cannot start from.
     """
     refusal = _argument_refusal(args)
     if refusal:
@@ -1006,6 +1185,7 @@ def serve(args, *, out=print) -> int:
     local = bool(getattr(args, "local", False))
     app = create_setup_app(
         data_dir=data_dir, vm_dir=vm_dir, code_path=vm_dir / "setup-code", local=local,
+        rerun=bool(getattr(args, "force", False)),
     )
     settings: dict = {
         "host": "0.0.0.0",
