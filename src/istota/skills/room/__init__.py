@@ -10,6 +10,7 @@ skill: the actor, the task and the database path are never arguments.
 """
 
 import argparse
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 
@@ -27,8 +28,24 @@ def _dispatch(args):
     path = os.environ.get("ISTOTA_DB_PATH", "")
     if not actor or not task.isdecimal() or not path:
         raise RequestError("task_unavailable")
+    config = load_config()
+    if args.command in {"location", "locations", "location-stop"}:
+        from istota.location import sharing
+
+        config.db_path = Path(path)
+        now = datetime.now(timezone.utc)
+        if args.command == "location":
+            return sharing.read_room_location(config, actor_user_id=actor, task_id=int(task),
+                                              subject_user_id=args.user, now=now)
+        if args.command == "locations":
+            return sharing.read_room_locations(config, actor_user_id=actor, task_id=int(task), now=now)
+        with db.get_db(config.db_path) as conn:
+            current = sharing._interactive_task(conn, config, actor_user_id=actor, task_id=int(task))
+            room = private_replies._live_shared_room(conn, current, actor)
+            return sharing.revoke_location_shares(
+                conn, actor_user_id=actor, room_token=None if args.all else room,
+                all_rooms=args.all, now=now)
     with db.get_db(Path(path)) as conn:
-        config = load_config()
         if args.command == "answer-privately":
             return private_replies.queue_private_answer(
                 conn, config, actor_user_id=actor, task_id=int(task))
@@ -56,10 +73,16 @@ def build_parser():
     post.add_argument("text")
     # No text: what is asked again is the principal's own turn, never the model's.
     commands.add_parser("answer-privately")
+    location = commands.add_parser("location")
+    location.add_argument("--user", required=True)
+    commands.add_parser("locations")
+    stop = commands.add_parser("location-stop")
+    stop.add_argument("--all", action="store_true")
     return parser
 
 
 def main(argv=None):
     args = parse_and_resolve(build_parser(), argv)
     return run_skill_cli(
-        {"whisper": _dispatch, "post": _dispatch, "answer-privately": _dispatch}, args)
+        {command: _dispatch for command in ("whisper", "post", "answer-privately",
+                                             "location", "locations", "location-stop")}, args)

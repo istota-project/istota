@@ -3,7 +3,7 @@
 import json
 import sqlite3
 import uuid
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from istota import db, location
 from istota.location.logic import location_snapshot
@@ -385,3 +385,117 @@ def approve_location_share(conn, config, *, grant_id, request_id, preview_digest
                      "closed_at=?, updated_at=? WHERE id=?",
                      (preview_digest, _grant_timestamp(now), _grant_timestamp(now), _grant_timestamp(now), request_id))
         return active
+
+
+def _location_query_room(conn, config, actor_user_id, task_id):
+    task = _interactive_task(conn, config, actor_user_id=actor_user_id, task_id=task_id)
+    room = private_replies._live_shared_room(conn, task, actor_user_id)
+    _, audience, fingerprint, epoch = _timed_room_terms(conn, config, room, actor_user_id)
+    return room, audience, fingerprint, epoch
+
+
+def _location_query_subject(conn, config, room, subject):
+    members = [user for user in db.list_room_members(conn, room)
+               if user in config.users and is_current_member(conn, room, user)]
+    if subject in members:
+        return subject
+    matches = sorted(user for user in members
+                     if config.users[user].display_name.casefold() == subject.strip().casefold())
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return {"error": "ambiguous_user", "candidates": [
+            {"user_id": user, "display_name": config.users[user].display_name} for user in matches]}
+    return {"error": "location_unavailable"}
+
+
+def _readable_location_grant(conn, config, grant, terms, now):
+    room, audience, fingerprint, epoch = terms
+    owner = grant["owner_user_id"]
+    return (grant["state"] == "active" and grant["expires_at"] is not None
+            and grant["expires_at"] > _grant_timestamp(now)
+            and grant["room_token"] == room and owner in config.users
+            and is_current_member(conn, room, owner)
+            and json.loads(grant["audience_json"]) == audience
+            and grant["binding_fingerprint"] == fingerprint and grant["room_epoch"] == epoch
+            and config.is_module_enabled(owner, "location", conn=conn))
+
+
+def _read_room_locations(config, *, actor_user_id, task_id, subject_user_id, now):
+    try:
+        with db.get_db(config.db_path) as conn:
+            conn.execute("BEGIN")
+            terms = _location_query_room(conn, config, actor_user_id, task_id)
+            subject = None
+            if subject_user_id is not None:
+                subject = _location_query_subject(conn, config, terms[0], subject_user_id)
+                if isinstance(subject, dict):
+                    return subject
+            rows = conn.execute(
+                "SELECT * FROM location_share_grants WHERE room_token=? AND state='active' "
+                "AND expires_at>? AND (? IS NULL OR owner_user_id=?) ORDER BY owner_user_id",
+                (terms[0], _grant_timestamp(datetime.now(timezone.utc)), subject, subject),
+            ).fetchall()
+            grants = [dict(row) for row in rows
+                      if _readable_location_grant(conn, config, row, terms, datetime.now(timezone.utc))]
+            if len(grants) > 50:
+                raise RequestError("location_share_limit")
+
+        collected = []
+        for grant in grants:
+            # Recheck before each owner's I/O as an earlier read may have taken
+            # time. A module path is resolved only after its grant is accepted.
+            with db.get_db(config.db_path) as conn:
+                conn.execute("BEGIN")
+                if _location_query_room(conn, config, actor_user_id, task_id) != terms:
+                    raise RequestError("audience_changed")
+                current = conn.execute("SELECT * FROM location_share_grants WHERE id=?", (grant["id"],)).fetchone()
+                if current is None or not _readable_location_grant(
+                        conn, config, current, terms, datetime.now(timezone.utc)):
+                    continue
+                try:
+                    owner = location.resolve_for_user(grant["owner_user_id"], config, conn=conn)
+                except location.UserNotFoundError:
+                    continue
+            snapshot = {"error": "no_fresh_location"}
+            if owner.db_path.is_file():
+                snapshot = location_snapshot(owner.db_path, now=now, precision=grant["precision"],
+                                             accuracy_threshold_m=config.location.accuracy_threshold_m)
+            collected.append((grant, snapshot))
+
+        # One final transaction covers the entire aggregate. Earlier successful
+        # reads cannot survive a stop committed while a later owner was read.
+        with db.get_db(config.db_path) as conn:
+            conn.execute("BEGIN")
+            final_now = datetime.now(timezone.utc)
+            if _location_query_room(conn, config, actor_user_id, task_id) != terms:
+                raise RequestError("audience_changed")
+            results = []
+            for grant, snapshot in collected:
+                current = conn.execute("SELECT * FROM location_share_grants WHERE id=?", (grant["id"],)).fetchone()
+                if (current is None or current["precision"] != grant["precision"]
+                        or not _readable_location_grant(conn, config, current, terms, final_now)):
+                    continue
+                result = {"owner_user_id": grant["owner_user_id"], **snapshot}
+                if "error" not in snapshot:
+                    result["expires_at"] = current["expires_at"]
+                results.append(result)
+            if subject_user_id is not None:
+                return results[0] if results else {"error": "location_unavailable"}
+            return {"locations": results}
+    except RequestError as exc:
+        if str(exc) == "audience_unavailable":
+            return {"error": "location_unavailable"}
+        raise
+    except (sqlite3.Error, OSError):
+        raise RequestError("location_temporarily_unavailable") from None
+
+
+def read_room_location(config, *, actor_user_id, task_id, subject_user_id, now):
+    return _read_room_locations(config, actor_user_id=actor_user_id, task_id=task_id,
+                                subject_user_id=subject_user_id, now=now)
+
+
+def read_room_locations(config, *, actor_user_id, task_id, now):
+    return _read_room_locations(config, actor_user_id=actor_user_id, task_id=task_id,
+                                subject_user_id=None, now=now)
