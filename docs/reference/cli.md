@@ -465,17 +465,12 @@ istota setup --vm-dir DIR [--hostname HOST] [--ingress local|proxied|direct] \
     [--storage local|host-folder] [--nextcloud-url URL [--workspace mount|local]] \
     [--yes] [--force] ...                       # The stack's wizard, run by `istota-stack setup`
 istota setup --web --vm-dir DIR [--local]     # The same questions in a browser, run by `istota-stack setup --web`
-istota setup [--yes] [--workspace DIR] [--brain claude_code|native] \
-    [--user ID] [--port N] [--email] [--location] [--force] ...   # The local wizard, for `istota serve`
 istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
-istota update [--force] [--channel stable|main]           # Self-update the deprecated standalone install
 ```
 
-On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. In the image, `--workspace mount|local` says where the workspace lives when `--nextcloud-url` is given (default `mount`, the rclone mount); `--storage host-folder` is the local VM's shared folder and is kept on a re-run without the flag. `--web` serves the first-run setup page instead of asking in the terminal, over HTTPS on a one-use code, or plain HTTP on port 8080 with `--local`; it refuses when a config already exists. Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it is the local wizard: a workspace directory (`--workspace`, default `~/.istota`), one user, and `~/.config/istota/`.
+On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. In the image, `--workspace mount|local` says where the workspace lives when `--nextcloud-url` is given (default `mount`, the rclone mount); `--storage host-folder` is the local VM's shared folder and is kept on a re-run without the flag. `--web` serves the first-run setup page instead of asking in the terminal, over HTTPS on a one-use code, or plain HTTP on port 8080 with `--local`; it refuses when a config already exists. Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it refuses and writes nothing: the standalone install it used to set up was removed, and a Mac takes the [local install](../getting-started/local-install.md).
 
-`istota serve` runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). It is the development loop on a Mac checkout, and the deprecated standalone install's launcher; see [development setup](../development/setup.md).
-
-`istota update` reads the install record `install.sh` wrote, fetches and resets that checkout, reinstalls the tool, and runs fresh-code migrations. `--channel stable` (the default) tracks the latest release tag, `--channel main` the branch tip; the choice is remembered. It refuses to run on the stack, which is updated with `istota-stack update`. See [Standalone install](../getting-started/standalone-install.md).
+`istota serve` runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). It is the development loop on a Mac checkout; see [development setup](../development/setup.md). There is no `istota update`: the stack is updated with `istota-stack update`.
 
 ### Database
 

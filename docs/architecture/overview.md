@@ -220,7 +220,7 @@ Istota has one deployment: the istota stack on a Debian 13 machine dedicated to 
 
 **Functional over object-oriented.** Most code is module-level functions. Classes exist only where shared state across calls is necessary (TalkClient, UserWorker, WorkerPool).
 
-**Graceful degradation, except for the sandbox.** Memory search falls back to BM25-only without sqlite-vec, and indexing failures never affect core processing. The sandbox is the exception: on Linux a daemon whose bubblewrap sandbox cannot be built refuses to start rather than run tasks unconfined. Only a development checkout on macOS (`istota serve`) and the deprecated standalone install run without it.
+**Graceful degradation, except for the sandbox.** Memory search falls back to BM25-only without sqlite-vec, and indexing failures never affect core processing. The sandbox is the exception: on Linux a daemon whose bubblewrap sandbox cannot be built refuses to start rather than run tasks unconfined. Only a development checkout on macOS (`istota serve`) runs without it.
 
 **Security by environment, not tool restriction.** Rather than limiting the model's tools, credentials are stripped from the execution environment and optionally routed through a credential proxy.
 
