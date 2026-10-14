@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 
-- The health checks now sign in to Nextcloud as the bot, so a revoked app password or a bot account name that does not match the server shows up as a failed check rather than as failing tasks. A server that is down or in maintenance shows as a warning and sends no alert.
+- The health checks now sign in to Nextcloud as the bot, so a revoked app password or a bot account name that does not match the server shows up as a failed check rather than as failing tasks. A server that is down or in maintenance shows as a warning and sends no alert. The admin Connections tab has a Nextcloud card with the server, the bot account, Talk, the storage mode and the last check's result, and a button to check again.
 
 ### Changed
 

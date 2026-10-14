@@ -3,7 +3,7 @@ import { tick } from 'svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen, waitFor, fireEvent, within } from '@testing-library/svelte';
 
-import type { AdminConnection, AdminConnectionLink, AdminPairingState } from '$lib/api';
+import type { AdminConnectionLink, AdminPairingState, AdminWhatsAppConnection } from '$lib/api';
 
 /**
  * The WhatsApp card on `/admin/connections`.
@@ -112,7 +112,7 @@ function linkState(over: Partial<AdminConnectionLink> = {}): AdminConnectionLink
   };
 }
 
-function connection(over: Partial<AdminConnection> = {}): AdminConnection {
+function connection(over: Partial<AdminWhatsAppConnection> = {}): AdminWhatsAppConnection {
   return {
     id: 'whatsapp',
     label: 'WhatsApp',
@@ -167,7 +167,7 @@ function frame(
   };
 }
 
-async function mount(over: Partial<AdminConnection> = {}) {
+async function mount(over: Partial<AdminWhatsAppConnection> = {}) {
   api.getAdminConnections.mockResolvedValue({ connections: [connection(over)] });
   render(Page);
   await screen.findByTestId('whatsapp-card');
@@ -176,7 +176,7 @@ async function mount(over: Partial<AdminConnection> = {}) {
 /** The same mount under fake timers, where `findBy*` cannot be awaited: the
  *  library's polling wait needs a clock this test is holding still. One zero
  *  advance flushes the load's microtasks, and `tick()` flushes Svelte. */
-async function mountFake(over: Partial<AdminConnection> = {}) {
+async function mountFake(over: Partial<AdminWhatsAppConnection> = {}) {
   api.getAdminConnections.mockResolvedValue({ connections: [connection(over)] });
   render(Page);
   await vi.advanceTimersByTimeAsync(0);
