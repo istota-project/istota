@@ -41,6 +41,11 @@ def _chain_types(exc: BaseException | None) -> list[type]:
     return types
 
 
+def chain_class_names(exc: BaseException | None) -> list[str]:
+    """The class names along ``exc``'s cause chain, for a log line with no text."""
+    return [t.__name__ for t in _chain_types(exc)]
+
+
 _DNS_MARKERS = (
     "name or service not known", "nodename nor servname", "temporary failure in name resolution",
     "no address associated", "failed to resolve", "getaddrinfo failed", "errno -2]", "errno -3]",

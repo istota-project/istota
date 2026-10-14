@@ -7814,6 +7814,209 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
+# The Nextcloud connection
+#
+# Severity rule: a FAIL is a configuration or account fault that will not fix
+# itself; anything that may be an outage, a restart, maintenance mode or
+# throttling is a WARN. Only a FAIL alerts, and the default alert route is Talk
+# on this same Nextcloud, so an outage FAIL could not arrive and a nightly
+# maintenance window would page every night.
+#
+# Details are built from outcomes and status codes only, never from
+# `OcsError.message` or exception text: the server and httpx wrote those.
+# ---------------------------------------------------------------------------
+
+_NC_LOG_REMEDY = "See the nextcloud_connection_check line in the daemon log."
+
+_NC_REMEDIES = {
+    "unreachable": (
+        "Check [nextcloud] url and that this host can reach it; inbound Talk "
+        "and file sync are affected until it can."
+    ),
+    "slow": (
+        "Nextcloud's brute-force protection may be throttling this host after "
+        "failed logins; check the server's bruteforce_attempts table or wait, "
+        "and check the app password."
+    ),
+    "rate_limited": "Wait and run the check again.",
+    "server_error": (
+        "The server or a proxy in front of it is failing, or Nextcloud is in "
+        "maintenance mode."
+    ),
+    "auth_failed": (
+        "Issue a new app password for the bot account and set it through the "
+        "config editor's credentials, or the istota_nextcloud_app_password "
+        "secret on the stack."
+    ),
+    "forbidden": "The account may be disabled, or the app password restricted.",
+    "not_found": (
+        "[nextcloud] url should be the server's base address, without "
+        "/index.php or a path."
+    ),
+    "error": _NC_LOG_REMEDY,
+    "wrong_account": (
+        "Set [nextcloud] username (and [talk] bot_username) to the account id "
+        "shown. Files, shares and room provisioning address the account by "
+        "that id."
+    ),
+}
+
+_NC_WARN_OUTCOMES = frozenset({"unreachable", "slow", "rate_limited", "server_error"})
+
+
+def _nextcloud_url_problem(url: str) -> str:
+    """The FAIL detail for a URL no request should be made to, or ""."""
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        parts.port  # raises on an out-of-range or non-numeric port
+    except ValueError:
+        return "[nextcloud] url is not an http(s) URL"
+    if parts.scheme not in ("http", "https") or not hostname:
+        return "[nextcloud] url is not an http(s) URL"
+    if "@" in parts.netloc:
+        return "[nextcloud] url contains credentials"
+    return ""
+
+
+def _log_nextcloud_connection(outcome: str, http_status, ocs_status, exc) -> None:
+    from istota.lib.unreachable import chain_class_names
+
+    logger.warning(
+        "nextcloud_connection_check outcome=%s http_status=%s ocs_status=%s chain=%s",
+        outcome, http_status, ocs_status, ",".join(chain_class_names(exc)),
+    )
+
+
+def _failed_sign_in_detail(sign, host: str, username: str) -> str:
+    from istota.lib.unreachable import unreachable_message
+    from istota.nextcloud._http import DEFAULT_TIMEOUT
+
+    outcome = sign.outcome
+    if outcome == "unreachable":
+        cause = sign.exc.__cause__ if sign.exc is not None else None
+        reason = unreachable_message(host, exc=cause, seconds=DEFAULT_TIMEOUT)
+        return reason.rstrip(".")
+    if outcome == "slow":
+        return (
+            f"{host} accepted the connection and did not answer within "
+            f"{DEFAULT_TIMEOUT:g} seconds"
+        )
+    if outcome == "rate_limited":
+        return f"{host} rate-limited the check (HTTP 429)"
+    if outcome == "server_error":
+        return f"{host} answered HTTP {sign.http_status}"
+    if outcome == "auth_failed":
+        return f"{host} did not accept the credentials for {username}"
+    if outcome == "forbidden":
+        return f"{host} refused to show the account's details (HTTP 403)"
+    if outcome == "not_found":
+        return f"{host} has no OCS API at this address (HTTP 404)"
+    if outcome == "wrong_account":
+        return f"the credentials sign in as {sign.account_id}, not {username}"
+    if sign.exc is None:
+        return f"{host} returned no account id"
+    return f"{host}: unexpected answer (HTTP {sign.http_status}, OCS {sign.ocs_status})"
+
+
+def check_nextcloud_connection(config: "Config", probe: bool) -> CheckResult:
+    """Does the bot's account sign in to Nextcloud, and as the account configured.
+
+    Signs in before reading capabilities, so a bad password costs one failed
+    login per run rather than two. The classification is
+    `capabilities.sign_in`, the one the setup check uses.
+    """
+    from istota.lib.unreachable import host_of
+    from istota.nextcloud import capabilities
+
+    name = "nextcloud.connection"
+    if not config.nextcloud_enabled:
+        return CheckResult(name, SKIP, "no [nextcloud] url configured", scope=DEPLOYMENT)
+
+    url = config.nextcloud.url
+    username = config.nextcloud.username
+    if not username:
+        return CheckResult(
+            name, FAIL, "[nextcloud] url is set but username is empty",
+            remedy="Set [nextcloud] username to the bot account's Nextcloud user id.",
+            scope=DEPLOYMENT,
+        )
+    url_problem = _nextcloud_url_problem(url)
+    if url_problem:
+        return CheckResult(
+            name, FAIL, url_problem,
+            remedy=(
+                "Set [nextcloud] url to the server's base address, such as "
+                "https://cloud.example.com, with no user name or password in "
+                "it; the app password is a credential of its own."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if not probe:
+        return CheckResult(
+            name, SKIP,
+            "sign-in cannot be observed without a network request (probe disabled)",
+            scope=DEPLOYMENT,
+        )
+
+    host = host_of(url)
+    sign = capabilities.sign_in(config)
+    if sign.outcome != "ok":
+        _log_nextcloud_connection(sign.outcome, sign.http_status, sign.ocs_status, sign.exc)
+        status = WARN if sign.outcome in _NC_WARN_OUTCOMES else FAIL
+        return CheckResult(
+            name, status, _failed_sign_in_detail(sign, host, username),
+            remedy=_NC_REMEDIES.get(sign.outcome, _NC_LOG_REMEDY),
+            scope=DEPLOYMENT,
+        )
+
+    account_id = sign.account_id
+    talk_enabled = config.talk.enabled
+    if talk_enabled and config.talk.bot_username != account_id:
+        return CheckResult(
+            name, FAIL,
+            f"signed in as {account_id}; [talk] bot_username is {config.talk.bot_username}",
+            remedy=(
+                "Set [talk] bot_username to the account id shown. Talk "
+                "identifies the bot's own messages and @mentions by that name, "
+                "so group rooms in mention mode get no answer and the bot's own "
+                "posts are recorded as a guest's turns."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    try:
+        caps = capabilities.fetch_capabilities(config)
+    except Exception as exc:  # noqa: BLE001 — a check never raises
+        _log_nextcloud_connection(
+            "capabilities_failed",
+            getattr(exc, "http_status", None), getattr(exc, "ocs_status", None), exc,
+        )
+        return CheckResult(
+            name, WARN,
+            f"signed in as {account_id}; could not read the server's capabilities",
+            remedy=_NC_LOG_REMEDY,
+            scope=DEPLOYMENT,
+        )
+
+    summary = capabilities.summarize(caps, sign.account)
+    if talk_enabled and not summary["talk"]["available"]:
+        return CheckResult(
+            name, WARN,
+            f"signed in as {account_id}; Talk is not installed on {host}",
+            remedy="Install Talk on the server, or set [talk] enabled = false.",
+            scope=DEPLOYMENT,
+        )
+
+    display_name = summary["account"]["display_name"]
+    who = f"{account_id} ({display_name})" if display_name else account_id
+    version = summary["server"]["version"] or "an unreported version"
+    return CheckResult(
+        name, OK, f"signed in as {who} on Nextcloud {version}", scope=DEPLOYMENT,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
 
@@ -9684,6 +9887,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("talk.signaling_chat_relay", check_signaling_chat_relay),
     ("talk.signaling_auth", check_signaling_auth),
     ("talk.signaling_watchers", check_signaling_watchers),
+    ("nextcloud.connection", check_nextcloud_connection),
     ("sms.common", check_sms_common),
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
@@ -9824,6 +10028,8 @@ CHECK_SCOPES: dict[str, str] = {
     "talk.signaling_chat_relay": DEPLOYMENT,
     "talk.signaling_auth": DEPLOYMENT,
     "talk.signaling_watchers": DEPLOYMENT,
+    # Signs in to the configured Nextcloud: a server and an account.
+    "nextcloud.connection": DEPLOYMENT,
     "sms.common": DEPLOYMENT,
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,
