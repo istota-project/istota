@@ -1,7 +1,24 @@
 """Descriptions, references and limits for the user's scripts inventory."""
 
+import logging
+import os
 import re
+import sqlite3
+import stat
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from pathlib import Path, PurePosixPath
+
+from istota import cron_loader, db, heartbeat, storage
+from istota.skills._loader import open_overlay_dir, read_overlay_bytes
+from istota.workspace.listing import ListingError, list_dir
+
+if TYPE_CHECKING:
+    from istota.config import Config
+
+logger = logging.getLogger(__name__)
 
 DESCRIPTION_HEAD_BYTES = 8192
 DESCRIPTION_MAX_CHARS = 200
@@ -118,3 +135,211 @@ def describe(name: str, head: bytes, *, kind: str) -> str | None:
                 if content is None:
                     return None
     return None
+
+
+@dataclass(frozen=True)
+class ScriptRef:
+    source: str
+    name: str
+    field: str
+    kind: str
+    state: str
+
+
+@dataclass(frozen=True)
+class ScriptFile:
+    path: str
+    kind: str
+    size: int
+    modified: str
+    description: str | None
+
+
+@dataclass(frozen=True)
+class ScriptsIndex:
+    scripts_view_path: str
+    files: list[ScriptFile]
+    referenced_by: dict[str, list[ScriptRef]]
+    mentioned_in: dict[str, list[ScriptRef]]
+    broken: dict[str, list[ScriptRef]]
+    truncated: bool
+    sources: dict[str, str]
+
+
+def scan_scripts(root: Path) -> tuple[list[ScriptFile], bool]:
+    """Walk a user's bot/scripts tree, checking every component below the user."""
+    user_root = root.parent.parent
+    base = [root.parent.name, root.name]
+    try:
+        fd = open_overlay_dir(user_root, *base, raise_errors=True)
+    except FileNotFoundError:
+        return [], False
+    if fd is None:
+        raise ListingError(404, "Scripts folder refused.")
+    os.close(fd)
+    pending = deque([[]])
+    files = []
+    truncated = False
+    while pending:
+        parts = pending.popleft()
+        try:
+            listing = list_dir(user_root, base + parts)
+            directory_fd = open_overlay_dir(user_root, *base, *parts, raise_errors=True)
+            if directory_fd is None:
+                raise ListingError(404, "Scripts folder refused.")
+        except (ListingError, OSError) as exc:
+            if not parts:
+                raise
+            logger.debug("scripts_subdir_skipped error=%s", type(exc).__name__)
+            continue
+        truncated |= listing.truncated
+        try:
+            for entry in listing.entries:
+                if entry.hidden or entry.name in {"__pycache__", "node_modules", "venv"}:
+                    continue
+                if entry.kind == "dir":
+                    if len(parts) < SCRIPTS_MAX_DEPTH:
+                        pending.append([*parts, entry.name])
+                    else:
+                        truncated = True
+                    continue
+                if entry.kind != "file":
+                    continue
+                if len(files) >= SCRIPTS_MAX_FILES:
+                    return sorted(files, key=lambda file: file.path), True
+                path = PurePosixPath(*parts, entry.name)
+                kind = "prompt" if path.parts[0] == "prompts" and path.suffix in {".txt", ".md"} else "script"
+                head, _, _ = read_overlay_bytes(
+                    root / path, dir_fd=directory_fd,
+                    max_bytes=DESCRIPTION_HEAD_BYTES, head_only=True,
+                )
+                files.append(ScriptFile(
+                    path=path.as_posix(), kind=kind, size=entry.size,
+                    modified=datetime.fromtimestamp(entry.modified, timezone.utc).isoformat().replace("+00:00", "Z"),
+                    description=describe(entry.name, head, kind=kind) if head is not None else None,
+                ))
+                if len(files) >= SCRIPTS_MAX_FILES:
+                    return sorted(files, key=lambda file: file.path), True
+        finally:
+            os.close(directory_fd)
+    return sorted(files, key=lambda file: file.path), truncated
+
+
+def _target_kind(root: Path, path: str) -> str | None:
+    """Check an unlisted reference without following any directory or leaf link."""
+    parts = PurePosixPath(path).parts
+    fd = open_overlay_dir(root.parent.parent, root.parent.name, root.name, *parts[:-1])
+    if fd is None:
+        return None
+    try:
+        info = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISREG(info.st_mode):
+            return "file"
+        if stat.S_ISDIR(info.st_mode):
+            return "dir"
+    except (OSError, ValueError):
+        pass
+    finally:
+        os.close(fd)
+    return None
+
+
+def _load_source(config: "Config", user_id: str, source: str, loader) -> tuple[object, str]:
+    directory = storage.resolve_user_config_dir(config, user_id)
+    if directory is None:
+        return None, "error"
+    try:
+        (directory / f"{source.upper()}.md").lstat()
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError:
+        return None, "error"
+    try:
+        loaded = loader(config, user_id)
+    except Exception as exc:
+        logger.warning("scripts_source_failed user=%s source=%s error=%s", user_id, source, type(exc).__name__)
+        return None, "error"
+    return loaded, "ok" if loaded is not None else "error"
+
+
+def _cron_state(job: cron_loader.CronJob, row: db.ScheduledJob | None, is_admin: bool) -> str:
+    if cron_loader.fj_is_disallowed_command(job, is_admin):
+        return "admin_only"
+    if not job.enabled or (row is not None and row.disabled_at):
+        return "disabled"
+    if row is None:
+        return "not_synced"
+    if row.auto_disabled_at:
+        return "suspended"
+    return "enabled"
+
+
+def scripts_index(config: "Config", conn: sqlite3.Connection, user_id: str) -> ScriptsIndex | None:
+    if not config.has_workspace or config.workspace_root(user_id) is None:
+        return None
+    root = storage.resolve_user_scripts_dir(config, user_id)
+    files, truncated = [], False
+    sources = {"scripts": "ok"}
+    if root is None:
+        sources["scripts"] = "refused"
+    else:
+        try:
+            files, truncated = scan_scripts(root)
+        except (ListingError, OSError) as exc:
+            sources["scripts"] = "refused"
+            logger.warning("scripts_dir_refused user=%s reason=%s", user_id, type(exc).__name__)
+    existing = {file.path for file in files}
+    referenced_by: dict[str, list[ScriptRef]] = {}
+    mentioned_in: dict[str, list[ScriptRef]] = {}
+    broken: dict[str, list[ScriptRef]] = {}
+
+    def paths(text: str) -> list[str]:
+        return find_script_paths(text, user_id=user_id, bot_dir=config.bot_dir_name, workspace_path=config.workspace_path)
+
+    def add(paths: list[str], ref: ScriptRef) -> None:
+        for path in paths:
+            if ref.kind == "mentions":
+                if path in existing:
+                    refs = mentioned_in.setdefault(path, [])
+                else:
+                    continue
+            else:
+                kind = None
+                if path in existing:
+                    kind = "file"
+                elif root is not None:
+                    kind = _target_kind(root, path)
+                if kind == "dir":
+                    continue
+                refs = (referenced_by if kind == "file" else broken).setdefault(path, [])
+            if ref not in refs:
+                refs.append(ref)
+
+    document, sources["cron"] = _load_source(config, user_id, "cron", cron_loader.load_cron_document)
+    rows = {row.name: row for row in db.get_user_scheduled_jobs(conn, user_id)}
+    is_admin = config.is_admin(user_id)
+    if document is not None:
+        for job in document.jobs:
+            state = _cron_state(job, rows.get(job.name), is_admin)
+            if job.command:
+                add(paths(job.command), ScriptRef("cron", job.name, "command", "runs", state))
+            if job.prompt_file:
+                add(paths(job.prompt_file), ScriptRef("cron", job.name, "prompt_file", "prompt_file", state))
+            elif job.prompt:
+                mentions = sorted(set(paths(job.prompt)) | set(find_bare_mentions(job.prompt, existing)))
+                add(mentions, ScriptRef("cron", job.name, "prompt", "mentions", state))
+    loaded, sources["heartbeat"] = _load_source(config, user_id, "heartbeat", heartbeat.load_heartbeat_config)
+    if loaded is not None:
+        for check in loaded[1]:
+            command = check.config.get("command")
+            if check.type == "shell-command" and isinstance(command, str):
+                state = "enabled" if is_admin else "admin_only"
+                add(paths(command), ScriptRef("heartbeat", check.name, "command", "runs", state))
+    for mapping in (referenced_by, mentioned_in, broken):
+        for refs in mapping.values():
+            refs.sort(key=lambda ref: (ref.source, ref.name))
+    return ScriptsIndex(
+        scripts_view_path=storage.get_user_scripts_path(user_id, config.bot_dir_name),
+        files=files, referenced_by=referenced_by, mentioned_in=mentioned_in,
+        broken=broken, truncated=truncated, sources=sources,
+    )

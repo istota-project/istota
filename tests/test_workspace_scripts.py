@@ -203,3 +203,256 @@ def test_find_bare_mentions_non_matches(text):
     from istota.workspace.scripts import find_bare_mentions
 
     assert find_bare_mentions(text, {"x.py"}) == []
+
+
+@pytest.fixture
+def index_tree(config):
+    from istota import db
+    db.init_db(config.db_path)
+    root = config.workspace_path / "Users/alice/istota"
+    (root / "scripts/prompts").mkdir(parents=True)
+    (root / "config").mkdir()
+    return root
+
+
+def _write_jobs(root, jobs):
+    from istota.cron_loader import generate_cron_md
+    (root / "config/CRON.md").write_text(generate_cron_md(jobs))
+
+
+def _index(config):
+    from istota import db
+    from istota.workspace.scripts import scripts_index
+    with db.get_db(config.db_path) as conn:
+        return scripts_index(config, conn, "alice")
+
+
+def test_scripts_index_joins_files_documents_and_job_state(config, index_tree):
+    from datetime import datetime
+    from istota import db
+    from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+    from istota.workspace.scripts import ScriptRef
+
+    root = index_tree
+    (root / "scripts/run.py").write_text("# Runs the report\nprint('ok')")
+    (root / "scripts/orphan.sh").write_text("echo ok")
+    (root / "scripts/prompts/report.txt").write_text("Use scripts/orphan.sh")
+    prefix = "/Users/alice/istota/scripts/"
+    jobs = [CronJob(name=name, cron="0 9 * * *", command=f"python {prefix}run.py; python {prefix}run.py")
+            for name in ("active", "paused", "disabled")]
+    jobs += [
+        CronJob(name="file-disabled", cron="0 9 * * *", enabled=False, command=f"python {prefix}run.py"),
+        CronJob(name="prompt", cron="0 9 * * *", prompt_file=prefix + "prompts/report.txt"),
+        CronJob(name="mention", cron="0 9 * * *", prompt=f"Use scripts/run.py and {prefix}run.py; create {prefix}new.py"),
+        CronJob(name="new", cron="0 9 * * *", command=f"python {prefix}run.py"),
+    ]
+    _write_jobs(root, jobs)
+    (root / "config/HEARTBEAT.md").write_text('```toml\n[[checks]]\nname = "missing"\ntype = "shell-command"\ncommand = "bash /Users/alice/istota/scripts/missing.sh"\n```')
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, "alice", jobs[:-1])
+        rows = {job.name: job for job in db.get_user_scheduled_jobs(conn, "alice")}
+        db.suspend_scheduled_job(conn, rows["paused"].id)
+        db.disable_scheduled_job(conn, rows["disabled"].id)
+        sync_cron_jobs_to_db(conn, "bob", [jobs[-1]])
+    before = (root / "config/CRON.md").read_bytes()
+    index = _index(config)
+    assert index.scripts_view_path == prefix.rstrip("/")
+    assert index.sources == {"scripts": "ok", "cron": "ok", "heartbeat": "ok"}
+    assert not index.truncated
+    assert [file.path for file in index.files] == ["orphan.sh", "prompts/report.txt", "run.py"]
+    assert index.files[1].kind == "prompt"
+    assert index.files[1].description == "Use scripts/orphan.sh"
+    assert index.files[2].description == "Runs the report"
+    assert index.files[2].size == (root / "scripts/run.py").stat().st_size
+    assert datetime.fromisoformat(index.files[2].modified).utcoffset().total_seconds() == 0
+    assert [(ref.name, ref.state) for ref in index.referenced_by["run.py"]] == [
+        ("active", "enabled"), ("disabled", "disabled"), ("file-disabled", "disabled"),
+        ("new", "not_synced"), ("paused", "suspended"),
+    ]
+    assert index.referenced_by["prompts/report.txt"] == [ScriptRef("cron", "prompt", "prompt_file", "prompt_file", "enabled")]
+    assert index.mentioned_in["run.py"] == [ScriptRef("cron", "mention", "prompt", "mentions", "enabled")]
+    assert not index.referenced_by.get("orphan.sh")
+    assert not index.mentioned_in.get("orphan.sh")
+    assert index.broken == {"missing.sh": [ScriptRef("heartbeat", "missing", "command", "runs", "enabled")]}
+    assert (root / "config/CRON.md").read_bytes() == before
+
+
+def test_scripts_index_non_admin_references(config, index_tree):
+    from istota.cron_loader import CronJob
+    config.admin_users = {"bob"}
+    prefix = "/Users/alice/istota/scripts/"
+    (index_tree / "scripts/run.sh").write_text("# Run")
+    _write_jobs(index_tree, [CronJob(name="command", cron="0 9 * * *", command=f"bash {prefix}run.sh; bash {prefix}missing.sh")])
+    (index_tree / "config/HEARTBEAT.md").write_text('```toml\n[[checks]]\nname = "check"\ntype = "shell-command"\ncommand = "bash /Users/alice/istota/scripts/missing.sh"\n```')
+    index = _index(config)
+    assert index.referenced_by["run.sh"][0].state == "admin_only"
+    assert [(ref.source, ref.state) for ref in index.broken["missing.sh"]] == [("cron", "admin_only"), ("heartbeat", "admin_only")]
+
+
+def test_scan_scripts_bounds_and_descriptions(index_tree, monkeypatch):
+    from istota.workspace import scripts
+    root = index_tree / "scripts"
+    for name in (".hidden.py", "__pycache__/x.py", "node_modules/x.js", "venv/x.py", ".venv/x.py", "deep/beyond/x.py"):
+        path = root / name
+        path.parent.mkdir(exist_ok=True, parents=True)
+        path.write_text("# Hidden")
+    (root / "large.py").write_bytes(b"# Large script\n" + b"x" * scripts.DESCRIPTION_HEAD_BYTES)
+    (root / "binary").write_bytes(b"\x00\xff")
+    (root / "prompts/guide.md").write_text("# A prompt")
+    (root / "prompts/helper.py").write_text("# A script")
+    (root / "linked").symlink_to(root / "large.py")
+    (root / "linked-dir").symlink_to(root / "prompts", target_is_directory=True)
+    monkeypatch.setattr(scripts, "SCRIPTS_MAX_DEPTH", 1)
+    files, truncated = scripts.scan_scripts(root)
+    assert truncated
+    assert [(f.path, f.kind, f.description) for f in files] == [
+        ("binary", "script", None), ("large.py", "script", "Large script"),
+        ("prompts/guide.md", "prompt", "A prompt"), ("prompts/helper.py", "script", "A script"),
+    ]
+
+
+def test_scripts_index_truncation_checks_unlisted_targets(config, index_tree, monkeypatch):
+    from istota.cron_loader import CronJob
+    from istota.workspace import scripts
+    root = index_tree / "scripts"
+    (root / "a.py").write_text("# First")
+    (root / "z.py").write_text("# Last")
+    (root / "lib").mkdir()
+    (root / "link.py").symlink_to(root / "z.py")
+    (root / "linked-dir").symlink_to(root / "lib", target_is_directory=True)
+    prefix = "/Users/alice/istota/scripts/"
+    targets = ["z.py", "lib", "link.py", "linked-dir/x.py", "missing.py"]
+    _write_jobs(index_tree, [CronJob(name="check", cron="0 9 * * *", command="; ".join(prefix + p for p in targets))])
+    monkeypatch.setattr(scripts, "SCRIPTS_MAX_FILES", 1)
+    index = _index(config)
+    assert index.truncated
+    assert [f.path for f in index.files] == ["a.py"]
+    assert set(index.broken) == {"link.py", "linked-dir/x.py", "missing.py"}
+    assert "lib" not in index.referenced_by
+    assert "z.py" in index.referenced_by
+
+
+def test_scripts_index_missing_sources_and_directory(config, index_tree):
+    from istota.cron_loader import CronJob
+    (index_tree / "scripts/prompts").rmdir()
+    (index_tree / "scripts").rmdir()
+    index = _index(config)
+    assert index.files == []
+    assert index.sources == {"scripts": "ok", "cron": "missing", "heartbeat": "missing"}
+    _write_jobs(index_tree, [CronJob(name="missing", cron="0 9 * * *", command="bash /Users/alice/istota/scripts/gone.sh")])
+    assert set(_index(config).broken) == {"gone.sh"}
+
+
+def test_scripts_index_refuses_scripts_symlink(config, index_tree, tmp_path):
+    (index_tree / "scripts/prompts").rmdir()
+    (index_tree / "scripts").rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("# Private")
+    (index_tree / "scripts").symlink_to(outside, target_is_directory=True)
+    index = _index(config)
+    assert index.files == []
+    assert index.sources["scripts"] == "refused"
+
+
+@pytest.mark.parametrize("source", ["cron", "heartbeat"])
+def test_scripts_index_source_failure_is_partial(config, index_tree, monkeypatch, source, caplog):
+    from istota import cron_loader, heartbeat
+    (index_tree / "scripts/run.py").write_text("# Run")
+    (index_tree / f"config/{source.upper()}.md").write_text("present")
+    module, name = (cron_loader, "load_cron_document") if source == "cron" else (heartbeat, "load_heartbeat_config")
+    def fail(*args):
+        raise OSError("private host path")
+    monkeypatch.setattr(module, name, fail)
+    index = _index(config)
+    assert [f.path for f in index.files] == ["run.py"]
+    assert index.sources[source] == "error"
+    assert "OSError" in caplog.text
+    assert "private host path" not in caplog.text
+
+
+def test_scripts_index_unreadable_cron_is_error(config, index_tree):
+    (index_tree / "config/CRON.md").write_bytes(b"\xff")
+    assert _index(config).sources["cron"] == "error"
+
+
+def test_scripts_index_without_workspace_or_valid_user(config):
+    from istota.workspace.scripts import scripts_index
+    assert scripts_index(Config(), None, "alice") is None
+    assert scripts_index(config, None, "../bob") is None
+
+
+@pytest.mark.parametrize("component", ["istota", "istota/scripts"])
+def test_scripts_index_refuses_directory_swap_after_resolution(config, index_tree, tmp_path, monkeypatch, component):
+    real_resolve = storage.resolve_user_scripts_dir
+    user_root = index_tree.parent
+    victim = user_root / component
+    outside = tmp_path / "outside"
+    (outside / "scripts").mkdir(parents=True)
+    (outside / "scripts/private.py").write_text("# Private")
+    (outside / "private.py").write_text("# Private")
+
+    def swap(config, user_id):
+        resolved = real_resolve(config, user_id)
+        victim.rename(victim.with_name(victim.name + "-old"))
+        victim.symlink_to(outside, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(storage, "resolve_user_scripts_dir", swap)
+    index = _index(config)
+    assert index.files == []
+    assert index.sources["scripts"] == "refused"
+
+
+@pytest.mark.parametrize("at_root", [True, False])
+def test_scripts_index_directory_listing_failures(config, index_tree, monkeypatch, at_root):
+    from istota.workspace import scripts
+    from istota.workspace.listing import ListingError
+
+    (index_tree / "scripts/run.py").write_text("# Run")
+    (index_tree / "scripts/prompts/hidden.txt").write_text("Not reachable")
+    real_list = scripts.list_dir
+    def fail(root, parts):
+        if (len(parts) == 2) == at_root:
+            raise ListingError(403, "Folder refused")
+        return real_list(root, parts)
+    monkeypatch.setattr(scripts, "list_dir", fail)
+    index = _index(config)
+    if at_root:
+        assert index.files == []
+        assert index.sources["scripts"] == "refused"
+    else:
+        assert [file.path for file in index.files] == ["run.py"]
+        assert index.sources["scripts"] == "ok"
+
+
+def test_scripts_index_keeps_valid_jobs_from_partial_cron(config, index_tree):
+    (index_tree / "scripts/run.py").write_text("# Run")
+    (index_tree / "config/CRON.md").write_text(
+        '```toml\n[[jobs]]\nname = "valid"\ncron = "0 9 * * *"\n'
+        'command = "python /Users/alice/istota/scripts/run.py"\n'
+        '[[jobs]]\nname = "refused"\ncron = "0 9 * * *"\n'
+        'prompt_file = "/Users/alice/istota/scripts/missing.txt"\n```'
+    )
+    index = _index(config)
+    assert index.sources["cron"] == "ok"
+    assert [ref.name for ref in index.referenced_by["run.py"]] == ["valid"]
+    assert not index.broken
+
+
+
+def test_scan_scripts_stops_at_file_limit(index_tree, monkeypatch):
+    from istota.workspace import scripts
+    (index_tree / "scripts/run.py").write_text("# Run")
+    monkeypatch.setattr(scripts, "SCRIPTS_MAX_FILES", 1)
+    files, truncated = scripts.scan_scripts(index_tree / "scripts")
+    assert [file.path for file in files] == ["run.py"]
+    assert truncated
+
+
+def test_scripts_index_invalid_reference_leaf(config, index_tree):
+    from istota.cron_loader import CronJob
+    _write_jobs(index_tree, [CronJob(name="invalid", cron="0 9 * * *", command="python /Users/alice/istota/scripts/bad\x00.py")])
+    index = _index(config)
+    assert index.files == []
+    assert list(index.broken) == ["bad\x00.py"]
