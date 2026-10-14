@@ -690,8 +690,15 @@ cmd_create() {
         run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
     fi
 
-    run_step "write host.env" "istota-stack host-env ..." \
-        vm_stack host-env STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}"
+    local host_env=(STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}")
+    # Only a new VM takes the key from the template; an existing one may have
+    # none. A recorded key stays, so a VM trusting a fork's key keeps it.
+    if [ "$source" = release ]; then
+        local recorded_key
+        recorded_key="$(vm_stack host-env RELEASE_SIGNING_KEY </dev/null)" || fail 1 "could not read the VM's host.env."
+        [ -n "$recorded_key" ] || host_env+=("RELEASE_SIGNING_KEY=${key}")
+    fi
+    run_step "write host.env" "istota-stack host-env ..." vm_stack host-env "${host_env[@]}"
 
     # What to install: a tag given now; else, on a new VM, the tag this Mac
     # last saw deployed; else the one the VM bootstraps from. A VM with a tag

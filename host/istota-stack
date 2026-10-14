@@ -1910,6 +1910,14 @@ cmd_host_env() {
         case "$key" in ""|*[!A-Z0-9_]*) die "'${key}' is not a host.env key" ;; esac
     done
     file_set "$HOST_ENV" "$@"
+    # As provision.sh writes it: the Mac's create on an existing VM builds a
+    # signed tag before provision.sh runs.
+    for pair in "$@"; do
+        if [ "${pair%%=*}" = RELEASE_SIGNING_KEY ] && [ -n "${pair#*=}" ]; then
+            printf 'releases namespaces="git" %s\n' "${pair#*=}" > "$ALLOWED_SIGNERS"
+            chmod 0644 "$ALLOWED_SIGNERS"
+        fi
+    done
 }
 
 # Move a path the Mac CLI copied into the VM into a fresh directory under

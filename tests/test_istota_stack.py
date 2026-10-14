@@ -2416,6 +2416,24 @@ class TestHostEnv:
     def test_a_mix_of_reads_and_writes_is_a_usage_error(self, fx):
         assert fx.run("host-env", "INGRESS=local", "STORAGE").returncode == 64
 
+    def test_setting_the_release_key_writes_allowed_signers(self, fx):
+        """The Mac's create on a VM that has no key yet: the signed build
+        that follows reads allowed_signers, not host.env."""
+        signers = fx.stack / "allowed_signers"
+        signers.unlink(missing_ok=True)
+        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostEnvTestKeyOnly releases"
+        result = fx.run("host-env", f"RELEASE_SIGNING_KEY={key}")
+        assert result.returncode == 0, result.stderr
+        assert f"RELEASE_SIGNING_KEY={key}\n" in (fx.stack / "host.env").read_text()
+        assert signers.read_text() == f'releases namespaces="git" {key}\n'
+        assert signers.stat().st_mode & 0o777 == 0o644
+
+    def test_other_keys_leave_allowed_signers_alone(self, fx):
+        signers = fx.stack / "allowed_signers"
+        before = signers.read_text()
+        assert fx.run("host-env", "INGRESS=local").returncode == 0
+        assert signers.read_text() == before
+
 
 class TestStaging:
     """`stage` and `unstage`: the Mac CLI's file arguments land in a fresh
