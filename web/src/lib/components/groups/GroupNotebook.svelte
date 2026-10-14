@@ -157,7 +157,7 @@
       {:else}<EmptyState size="sm"
           >The shared notebook is empty. Add facts you want the group to remember.</EmptyState
         >{/if}
-      {#if notebook.last_change}<p class="caption meta">
+      {#if notebook.last_change}<p class="caption last-change">
           Last changed by {notebook.last_change.user_id ||
             'an unknown actor'}{#if notebook.last_change.ts}
             <span title={formatDateTime(notebook.last_change.ts)}
@@ -247,7 +247,7 @@
   .reading :global(.markdown > :last-child) {
     margin-bottom: 0;
   }
-  .meta {
+  .last-change {
     margin: var(--space-2) 0 0;
   }
   .changes {
