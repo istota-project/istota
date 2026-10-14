@@ -24,6 +24,7 @@ subcommands also need the framework-side geocode caches and read
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -91,7 +92,7 @@ def _tz_name(args) -> str:
 def cmd_share(args):
     from istota import db
     from istota.config import load_config
-    from istota.location.sharing import share_location_snapshot
+    from istota.location.sharing import request_location_share, share_location_snapshot
     from istota.relay.requests import RequestError
 
     actor = os.environ.get("ISTOTA_USER_ID", "")
@@ -101,11 +102,14 @@ def cmd_share(args):
         raise RequestError("task_unavailable")
     try:
         with db.get_db(Path(path)) as conn:
-            result = share_location_snapshot(
-                conn, load_config(), actor_user_id=actor, task_id=int(task),
-                request_key=args.request_key, room=args.room, precision=args.precision,
-                allow_last_known=args.last_known, now=datetime.now(timezone.utc),
-            )
+            options = dict(actor_user_id=actor, task_id=int(task), request_key=args.request_key,
+                           room=args.room, precision=args.precision, now=datetime.now(timezone.utc))
+            if args.duration_seconds is not None:
+                result = request_location_share(
+                    conn, load_config(), duration_seconds=args.duration_seconds, **options)
+            else:
+                result = share_location_snapshot(
+                    conn, load_config(), allow_last_known=args.last_known, **options)
     except sqlite3.Error:
         raise RequestError("location_temporarily_unavailable") from None
     print(json.dumps(result))
@@ -842,6 +846,16 @@ def cmd_import_garmin_tracks(args):
     }))
 
 
+
+def _share_duration(value):
+    match = re.fullmatch(r"([0-9]+)(s|m|h)", value)
+    if match:
+        seconds = int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]]
+        if 300 <= seconds <= 86400:
+            return seconds
+    raise argparse.ArgumentTypeError("Use a duration from 5m to 24h, with s, m or h units")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
@@ -854,11 +868,14 @@ def build_parser():
     scope.add_argument("--room", default=None)
     scope.add_argument("--all", action="store_true")
 
-    share = sub.add_parser("share", help="Share one location observation in a room")
+    share = sub.add_parser("share", help="Share an observation or request timed room access")
     share.add_argument("--request-key", required=True)
     share.add_argument("--room", default=None)
     share.add_argument("--precision", choices=["exact", "area"], default="exact")
-    share.add_argument("--last-known", action="store_true")
+    mode = share.add_mutually_exclusive_group()
+    mode.add_argument("--last-known", action="store_true")
+    mode.add_argument("--for", dest="duration_seconds", type=_share_duration,
+                      help="Request timed sharing, for example 30m or 1h")
 
     hist = sub.add_parser("history", help="Recent location pings")
     hist.add_argument("--limit", type=int, default=0)

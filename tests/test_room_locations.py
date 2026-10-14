@@ -263,8 +263,6 @@ def test_owner_management_cli_scopes_shared_list_and_all_stop(setup, monkeypatch
     assert [s["room_token"] for s in result["shares"]] == [shared]
     cli.cmd_unshare(cli.build_parser().parse_args(["unshare", "--all"]))
     assert json.loads(capsys.readouterr().out) == {"stopped": 2}
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["share", "--request-key", "share", "--for", "1h"])
 
 
 def test_owner_management_refuses_forged_task(setup, monkeypatch):

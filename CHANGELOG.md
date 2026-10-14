@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Request timed location sharing with a room through a private approval preview. The preview names the readers, precision and duration; approval fixes the expiry, and stopping also cancels pending requests.
+
 - Owners can list and stop their location-sharing permissions, including pending requests. Stopping everywhere returns only a count when requested in a shared room.
 
 - Share one location observation in a shared room, either an exact point or an approximate area. Sharing from a private chat asks for approval and posts the observation shown in the preview, even if your location changes before approval.

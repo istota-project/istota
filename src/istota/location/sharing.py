@@ -136,7 +136,7 @@ def _expire_location_grants(conn, *, now):
 def _hold_location_grant(conn, *, owner_user_id, origin_task_id, request_key,
                          room_token, precision, duration_seconds, audience,
                          binding_fingerprint, room_epoch, now):
-    """Persist validated terms; only the future private-approval service calls this."""
+    """Persist validated terms; only the private-approval service calls this."""
     _validate_input(request_key, "location share")
     if precision not in {"exact", "area"}:
         raise RequestError("invalid_precision")
@@ -221,3 +221,162 @@ def revoke_location_shares(conn, *, actor_user_id, room_token=None, all_rooms=Fa
                 (_grant_timestamp(now), _grant_timestamp(now), row["request_id"]),
             )
         return {"stopped": len(rows)}
+
+
+def _timed_room_terms(conn, config, room_token, owner_user_id):
+    """Freeze actual readers separately from the owner's current membership."""
+    from istota.transport import ParticipantRef
+    from istota.transport.participants import is_the_bot
+
+    destination = private_replies._post_destination(conn, room_token, owner_user_id)
+    if not db.room_is_shared(conn, room_token):
+        raise RequestError("not_a_shared_room")
+    bindings = db.list_room_bindings(conn, room_token)
+    if not bindings or any(b.surface not in {"web", "talk", "whatsapp"} for b in bindings):
+        raise RequestError("unsupported_room")
+    if any(b.surface == "whatsapp" for b in bindings):
+        from istota.transport.whatsapp.groups import group_destination
+        if config.whatsapp.provider != "baileys" or not group_destination(conn, room_token):
+            raise RequestError("unsupported_room")
+    readers = set(db.list_room_members(conn, room_token))
+    for row in conn.execute(
+            "SELECT * FROM room_participants WHERE room_token=? AND left_at IS NULL", (room_token,)):
+        ref = ParticipantRef(surface=row["surface"], surface_ref=row["surface_ref"], user_id=row["user_id"])
+        if is_the_bot(config, ref):
+            readers.discard(row["user_id"])
+            continue
+        if row["kind"] != "principal" or row["user_id"] not in config.users:
+            raise RequestError("audience_unavailable")
+        readers.add(row["user_id"])
+    if not readers or any(user not in config.users for user in readers):
+        raise RequestError("audience_unavailable")
+    # The post fingerprint covers transport identity; include every binding so
+    # replacing a web handle cannot silently change a held grant's destination.
+    fingerprint = private_replies._fingerprint(
+        destination["fingerprint"], [(b.surface, b.surface_ref) for b in bindings])
+    epoch = conn.execute("SELECT COALESCE(MAX(epoch),0) FROM room_epochs WHERE room_token=?",
+                         (room_token,)).fetchone()[0]
+    return destination, sorted(readers), fingerprint, epoch
+
+
+def request_location_share(conn, config, *, actor_user_id, task_id, request_key,
+                           duration_seconds, precision, now, room=None):
+    from istota.confirmations import check_preview_delivery, flatten
+    from istota.relay.requests import MAX_CONTENT_CHARS, _store_request
+
+    _validate_input(request_key, "location share")
+    if precision not in {"exact", "area"}:
+        raise RequestError("invalid_precision")
+    if type(duration_seconds) is not int or not 300 <= duration_seconds <= 86400:
+        raise RequestError("invalid_duration")
+    with write_transaction(conn):
+        task = _interactive_task(conn, config, actor_user_id=actor_user_id, task_id=task_id)
+        own = canonical_token(conn, task.conversation_token)
+        if private_replies.is_shared_room(conn, own, is_group_chat=task.is_group_chat):
+            target = private_replies._live_shared_room(conn, task, actor_user_id)
+            if room and private_replies._post_target(conn, task, actor_user_id, room) != target:
+                raise RequestError("private_turn_required")
+        else:
+            if not db.is_private_room_of(conn, own, actor_user_id, allow_phone=True):
+                raise RequestError("not_a_private_room")
+            target = private_replies._post_target(conn, task, actor_user_id, room)
+        existing = conn.execute(
+            "SELECT * FROM location_share_grants WHERE owner_user_id=? AND origin_task_id=? AND request_key=?",
+            (actor_user_id, task_id, request_key),
+        ).fetchone()
+        if existing is not None:
+            if (existing["room_token"] != target or existing["precision"] != precision
+                    or existing["duration_seconds"] != duration_seconds):
+                raise RequestError("request_conflict")
+            req = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (existing["request_id"],)).fetchone()
+            if req is None:
+                raise RequestError("grant_unavailable")
+            return _question_response(conn, req)
+        try:
+            location.resolve_for_user(actor_user_id, config, conn=conn)
+        except location.UserNotFoundError:
+            raise RequestError("location_unavailable") from None
+        destination, audience, fingerprint, epoch = _timed_room_terms(conn, config, target, actor_user_id)
+        readers = ", ".join(flatten(user) for user in audience)
+        preview = (
+            f"Share your location with {flatten(destination['label'])}?\n"
+            f"Readers: {readers}\n"
+            "Answers are visible to the whole room.\n"
+            f"Precision: {precision} ({'exact coordinates' if precision == 'exact' else 'approximate area, rounded coordinates'}).\n"
+            f"Duration: {duration_seconds / 60:g} minutes from approval.\n"
+            "Members may request fresh observations supplied by your existing tracker. "
+            "This does not start tracking or send periodic updates.\n"
+            "Stop with room location-stop or ask me to stop sharing. "
+            "Stopping prevents later reads; it cannot erase messages or screenshots already shared."
+        )
+        if len(preview) > MAX_CONTENT_CHARS:
+            raise RequestError("invalid_preview")
+        check_preview_delivery(conn, config, task, preview)
+        grant = _hold_location_grant(
+            conn, owner_user_id=actor_user_id, origin_task_id=task_id, request_key=request_key,
+            room_token=target, precision=precision, duration_seconds=duration_seconds,
+            audience=audience, binding_fingerprint=fingerprint, room_epoch=epoch, now=now)
+        req = _store_request(
+            conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
+            kind="location_share", recipient_user_id=actor_user_id, text=preview,
+            service_body=preview, template_body=None, provider="room", preview=preview,
+            binding_fingerprint=fingerprint, origin={"surface": task.source_type, "room_token": own},
+            destination={"grant_id": grant["id"], "room_token": target, "precision": precision,
+                         "duration_seconds": duration_seconds, "audience": audience,
+                         "binding_fingerprint": fingerprint, "room_epoch": epoch},
+        )
+        conn.execute("UPDATE location_share_grants SET request_id=? WHERE id=?", (req["id"], grant["id"]))
+        return _question_response(conn, req)
+
+
+def approve_location_share(conn, config, *, grant_id, request_id, preview_digest,
+                           actor_user_id, now):
+    """Daemon-only authorization; cancelled terms return an error and stay closed."""
+    from istota.relay.requests import text_hash
+
+    with write_transaction(conn):
+        grant = conn.execute("SELECT * FROM location_share_grants WHERE id=?", (grant_id,)).fetchone()
+        req = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
+        if (grant is None or req is None or grant["owner_user_id"] != actor_user_id
+                or req["requester_user_id"] != actor_user_id or req["recipient_user_id"] != actor_user_id
+                or req["kind"] != "location_share" or grant["request_id"] != request_id
+                or grant["origin_task_id"] != req["origin_task_id"]
+                or req["preview_digest"] != preview_digest or text_hash(req["preview"] or "") != preview_digest):
+            raise RequestError("confirmation_unavailable")
+        destination = json.loads(req["destination"] or "{}")
+        expected = {"grant_id": grant_id, "room_token": grant["room_token"], "precision": grant["precision"],
+                    "duration_seconds": grant["duration_seconds"], "audience": json.loads(grant["audience_json"]),
+                    "binding_fingerprint": grant["binding_fingerprint"], "room_epoch": grant["room_epoch"]}
+        if destination != expected or req["binding_fingerprint"] != grant["binding_fingerprint"]:
+            raise RequestError("confirmation_unavailable")
+        if req["state"] == "approved" and grant["state"] == "active":
+            if grant["expires_at"] <= _grant_timestamp(now):
+                raise RequestError("grant_unavailable")
+            return dict(grant)
+        task = db.get_task(conn, req["origin_task_id"])
+        if (req["state"] != "held" or grant["state"] != "held" or task is None
+                or task.user_id != actor_user_id or task.status != "pending_confirmation"
+                or task.whatsapp_confirmation_request_id != request_id
+                or text_hash(task.confirmation_prompt or "") != preview_digest):
+            raise RequestError("confirmation_unavailable")
+        try:
+            if config is None:
+                raise RequestError("location_unavailable")
+            location.resolve_for_user(actor_user_id, config, conn=conn)
+            _, audience, fingerprint, epoch = _timed_room_terms(conn, config, grant["room_token"], actor_user_id)
+            if (audience != expected["audience"] or fingerprint != grant["binding_fingerprint"]
+                    or epoch != grant["room_epoch"]):
+                raise RequestError("audience_changed")
+        except (RequestError, location.UserNotFoundError):
+            # Return rather than raise: the caller's approval savepoint must
+            # retain cancellation, including the request-to-grant trigger.
+            conn.execute("UPDATE whatsapp_skill_requests SET state='cancelled', error_code='authority_changed', "
+                         "closed_at=?, updated_at=? WHERE id=?",
+                         (_grant_timestamp(now), _grant_timestamp(now), request_id))
+            db.cancel_task(conn, task.id)
+            return {"error": "grant_unavailable"}
+        active = _activate_location_grant(conn, grant_id=grant_id, now=now)
+        conn.execute("UPDATE whatsapp_skill_requests SET state='approved', approved_digest=?, approved_at=?, "
+                     "closed_at=?, updated_at=? WHERE id=?",
+                     (preview_digest, _grant_timestamp(now), _grant_timestamp(now), _grant_timestamp(now), request_id))
+        return active

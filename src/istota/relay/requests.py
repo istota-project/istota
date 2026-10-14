@@ -799,7 +799,16 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str, config=
         if row["relay_id"] and message_relays.is_blocked(
                 conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
             raise RequestError("recipient_unavailable")
-        if row["kind"] == "recovery_fill":
+        if row["kind"] == "location_share":
+            from datetime import datetime, timezone
+            from istota.location.sharing import approve_location_share
+
+            destination = json.loads(row["destination"] or "{}")
+            approve_location_share(
+                conn, config, grant_id=destination.get("grant_id"), request_id=request_id,
+                preview_digest=preview_digest, actor_user_id=task.user_id, now=datetime.now(timezone.utc),
+            )
+        elif row["kind"] == "recovery_fill":
             from istota.credentials import recovery_fill
             destination = json.loads(row["destination"] or "{}")
             authorization = conn.execute(

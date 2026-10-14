@@ -896,6 +896,8 @@ async def cmd_confirm(ctx: CommandContext):
         return _record_confirm_exchange(
             ctx, f"Cancelled #{task.id} — {label}. {confirmations.SWITCHED_OFF_ACK}",
         )
+    if db.get_task(conn, task.id).status == "cancelled":
+        return _record_confirm_exchange(ctx, confirmations.CANCELLED_APPROVAL_ACK)
     if trusted:
         return _record_confirm_exchange(
             ctx,
