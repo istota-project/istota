@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-14
+
 You can now share where you are with a shared room, as one observation or for a set time, after approving a private preview that names who will see it and how precisely. Room members can ask where someone sharing with them is, and sharing stops by itself when the room's readers change. Groups have an overview page with the shared notebook, members, rooms and newest files, and administrators can create, recover and archive groups from the web.
 
 Files, the renamed Workspace page, lists the assistant's scripts and prompt files and says under each list what a task can do with the files in it. On a Mac, creating the local VM and changing an existing setup both happen in the browser, and re-running setup keeps your current answers. The web UI's buttons, loading states and Markdown viewer are easier to read. This release is 66 commits, against 55 in 0.45.0 and 756 in 0.44.0; the rest is setup fixes on the Mac.
@@ -3296,7 +3298,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.45.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.46.0...main
+[0.46.0]: https://github.com/istota-project/istota/releases/tag/v0.46.0
 [0.45.0]: https://github.com/istota-project/istota/releases/tag/v0.45.0
 [0.44.0]: https://github.com/istota-project/istota/releases/tag/v0.44.0
 [0.43.0]: https://github.com/istota-project/istota/releases/tag/v0.43.0
