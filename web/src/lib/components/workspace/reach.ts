@@ -8,11 +8,12 @@ export const ACCESS_LABELS: Record<WorkspaceAccess, string> = {
   conditional: 'Depends on room',
 };
 
+// Each follows the bot's name directly, so the possessive takes no space.
 const TASK_REACH_DESCRIPTIONS: Record<WorkspaceAccess, string | null> = {
-  rw: 'Istota can read and change these files',
-  ro: 'Istota can read these files',
-  skill: 'Istota reaches this through a skill',
-  conditional: 'Istota’s access depends on the room',
+  rw: ' can read and change these files',
+  ro: ' can read these files',
+  skill: ' reaches this through a skill',
+  conditional: '’s access depends on the room',
   none: null,
 };
 
@@ -36,7 +37,7 @@ export function accessLabel(access: WorkspaceAccess): string {
 }
 
 export function reachesTasks(access: WorkspaceAccess): boolean {
-  return taskReachDescription(access) !== null;
+  return Object.hasOwn(TASK_REACH_DESCRIPTIONS, access) && TASK_REACH_DESCRIPTIONS[access] !== null;
 }
 
 // An access kind this client does not know gets no description, so no icon claims reach it may not have.
@@ -52,11 +53,12 @@ const SCOPE_SUFFIXES: Record<TaskReachScope, string> = {
 
 export function taskReachDescription(
   access: WorkspaceAccess,
+  botName: string,
   scope?: TaskReachScope,
 ): string | null {
-  if (!Object.hasOwn(TASK_REACH_DESCRIPTIONS, access)) return null;
-  const description = TASK_REACH_DESCRIPTIONS[access];
-  return description && scope ? `${description}, ${SCOPE_SUFFIXES[scope]}` : description;
+  if (!reachesTasks(access)) return null;
+  const description = `${botName}${TASK_REACH_DESCRIPTIONS[access]}`;
+  return scope ? `${description}, ${SCOPE_SUFFIXES[scope]}` : description;
 }
 
 // The index caption's version of the icon, for a list whose every entry shares one reach.

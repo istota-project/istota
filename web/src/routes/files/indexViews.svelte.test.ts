@@ -108,6 +108,10 @@ it('marks only My files in the bot section and puts the reach on each index', as
     .filter((link) => link.querySelector('.task-reach'))
     .map((link) => link.querySelector('.view-name')?.textContent);
   expect(marked).toEqual(['My files']);
+  const myFiles = within(section).getByRole('link', { name: 'My files' });
+  expect(myFiles).toHaveAccessibleDescription('Helper can read and change these files');
+  const panel = await screen.findByText(/reaches your files/);
+  expect(panel.textContent).toBe('How Helper reaches your files');
 
   const config = await openIndex('Configuration');
   expect(

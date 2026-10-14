@@ -538,6 +538,7 @@
         <PinnedList
           {pins}
           {places}
+          {botName}
           busy={pinsBusy}
           onRemove={removePin}
           {configFiles}
@@ -560,6 +561,7 @@
         />
         <PlaceList
           places={places.filter((place) => sidebarKinds.includes(place.kind))}
+          {botName}
           selected={selected?.place || ''}
           {href}
           onNavigate={navigate}
@@ -749,7 +751,7 @@
         {/if}
       </div>
     </div>
-    <ReachPanel {place} {notes} />
+    <ReachPanel {place} {notes} {botName} />
     {#if uploads.length}
       <section class="uploads" aria-label="Uploads">
         <div class="upload-heading">

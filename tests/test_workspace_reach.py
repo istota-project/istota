@@ -241,3 +241,18 @@ def test_personal_nextcloud_connection_is_not_task_reach(config, conn):
         "which tasks never use. Istota’s Nextcloud skill uses the bot’s own account "
         "instead. To work on a file with Istota, put a copy in My files."
     )
+    config.bot_name = "Helper"
+    note = place_reach(config, conn, "alice", places)["nextcloud"].note
+    assert "Helper’s Nextcloud skill" in note and "with Helper," in note
+    assert "Istota" not in note
+
+
+def test_unsandboxed_note_names_the_bot(config, monkeypatch):
+    from istota.workspace.reach import deployment_notes
+    monkeypatch.setattr(executor, "_bwrap_checked", False)
+    config.bot_name = "Helper"
+    note = deployment_notes(config)[0]
+    # The process is the software, which keeps its own name; the assistant is the deployment's.
+    assert note.endswith(
+        "the Istota process can, so the reach shown below is what Helper is told, not a limit."
+    )

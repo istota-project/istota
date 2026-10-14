@@ -51,8 +51,8 @@ def place_reach(
         if place.kind == "nextcloud":
             result[place.id] = Reach("none", "none", "none", note=(
                 "Only you can see this view. It uses your personal Nextcloud connection, "
-                "which tasks never use. Istota’s Nextcloud skill uses the bot’s own account "
-                "instead. To work on a file with Istota, put a copy in My files."
+                f"which tasks never use. {config.bot_name}’s Nextcloud skill uses the bot’s own "
+                f"account instead. To work on a file with {config.bot_name}, put a copy in My files."
             ))
             continue
         if place.kind == "drive":
@@ -94,7 +94,8 @@ def deployment_notes(config: Config) -> list[str]:
     if effective is False:
         notes.append(
             "This is a development checkout without a sandbox. A task can read any file "
-            "the Istota process can, so the reach shown below is what Istota is told, not a limit."
+            "the Istota process can, so the reach shown below is what "
+            f"{config.bot_name} is told, not a limit."
         )
     elif effective is None:
         notes.append("Sandboxing has not been checked yet in this process.")
