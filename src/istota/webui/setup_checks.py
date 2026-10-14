@@ -28,12 +28,16 @@ import logging
 import math
 import smtplib
 import socket
-import ssl
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
 
 from istota.config import Config, config_from_document
+from istota.lib.unreachable import (  # noqa: F401 - timed_out_message is setup_app's too
+    _chain_text,
+    host_of,
+    timed_out_message,
+    unreachable_message,
+)
 
 logger = logging.getLogger("istota.setup_web")
 
@@ -121,72 +125,6 @@ def log_failure(kind: str, step: str, detail, config: Config) -> None:
     logger.info("setup: check %s %s failed: %s", kind, step, _redact(str(detail), _credentials(config)))
 
 
-def host_of(url: str) -> str:
-    try:
-        return urlsplit(url).hostname or url
-    except ValueError:
-        return url
-
-
-def _chain_text(exc: BaseException) -> str:
-    parts: list[str] = []
-    seen: set[int] = set()
-    node: BaseException | None = exc
-    while node is not None and id(node) not in seen:
-        seen.add(id(node))
-        parts.append(f"{type(node).__name__} {node}")
-        node = node.__cause__ or node.__context__
-    return " | ".join(parts)
-
-
-def _chain_types(exc: BaseException | None) -> list[type]:
-    types: list[type] = []
-    seen: set[int] = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        types.append(type(exc))
-        exc = exc.__cause__ or exc.__context__
-    return types
-
-
-_DNS_MARKERS = (
-    "name or service not known", "nodename nor servname", "temporary failure in name resolution",
-    "no address associated", "failed to resolve", "getaddrinfo failed", "errno -2]", "errno -3]",
-    "errno -5]", "errno 8]", "errno 11001]", "nameresolutionerror", "gaierror",
-)
-_REFUSED_MARKERS = ("connection refused", "errno 61]", "errno 111]", "errno 10061]")
-_TIMEOUT_MARKERS = ("timed out", "timeout")
-_TLS_MARKERS = ("certificate", "ssl", "tls", "wrong_version_number")
-
-
-def unreachable_message(host: str, *, exc: BaseException | None = None, text: str = "",
-                        seconds: float = CHECK_SECONDS) -> str:
-    """Why ``host`` could not be reached, from the failure's type and text.
-
-    The text only chooses among fixed messages; none of it is returned.
-    """
-    types = _chain_types(exc)
-    haystack = (text + " " + (_chain_text(exc) if exc else "")).lower()
-    if socket.gaierror in types or any(marker in haystack for marker in _DNS_MARKERS):
-        return f"Couldn't reach {host}: the name doesn't resolve."
-    if ConnectionRefusedError in types or any(marker in haystack for marker in _REFUSED_MARKERS):
-        return f"Couldn't reach {host}: the connection was refused."
-    if any(issubclass(t, ssl.SSLError) for t in types) or any(m in haystack for m in _TLS_MARKERS):
-        return f"Couldn't make a secure connection to {host}."
-    if any(issubclass(t, TimeoutError) for t in types) or any(m in haystack for m in _TIMEOUT_MARKERS):
-        return timed_out_message(host, seconds)
-    return f"Couldn't reach {host}."
-
-
-def timed_out_message(host: str, seconds: float = CHECK_SECONDS) -> str:
-    return f"{host} didn't answer within {_seconds(seconds)}."
-
-
-def _seconds(seconds: float) -> str:
-    whole = math.ceil(seconds) if seconds >= 1 else seconds
-    return f"{whole:g} seconds" if whole != 1 else "1 second"
-
-
 # --- the model -----------------------------------------------------------------
 
 
@@ -246,7 +184,7 @@ def check_nextcloud(config: Config, own_user_id: str, *, seconds: float = CHECK_
     counts as failed; a warning is ``ok`` with ``warning`` set.
     """
     from istota.nextcloud._http import OcsError, dav_files_url, dav_request  # noqa: PLC0415
-    from istota.nextcloud.capabilities import fetch_account, fetch_capabilities, summarize  # noqa: PLC0415
+    from istota.nextcloud.capabilities import fetch_capabilities, sign_in, summarize  # noqa: PLC0415
     from istota.nextcloud.shares import search_sharees  # noqa: PLC0415
 
     deadline = Deadline(seconds)
@@ -292,25 +230,25 @@ def check_nextcloud(config: Config, own_user_id: str, *, seconds: float = CHECK_
             return finish()
 
     # 2. The username and app password sign in, as the account named.
-    try:
-        account = fetch_account(config, timeout=deadline.timeout())
-    except OcsError as exc:
-        log_failure("nextcloud", "account", exc, config)
-        if exc.http_status == 401 or exc.ocs_status == 997:
+    signin = sign_in(config, timeout=deadline.timeout())
+    if signin.exc is not None:
+        log_failure("nextcloud", "account", signin.exc, config)
+    if signin.outcome == "wrong_account":
+        lines.append(CheckLine(
+            "signin", False,
+            f"Those details sign in as “{signin.account_id}”. Enter that as the assistant's username.",
+        ))
+        return finish()
+    if signin.outcome != "ok":
+        if signin.outcome == "auth_failed":
             message = "That username and app password weren't accepted. Check step 3."
-        elif exc.http_status is None:
-            message = unreachable(exc)
+        elif signin.outcome in ("unreachable", "slow") and signin.exc is not None:
+            message = unreachable(signin.exc)
         else:
             message = "Nextcloud refused to show the account's details."
         lines.append(CheckLine("signin", False, message))
         return finish()
-    account_id = str(account.get("id") or "")
-    if account_id != username:
-        lines.append(CheckLine(
-            "signin", False,
-            f"Those details sign in as “{account_id}”. Enter that as the assistant's username.",
-        ))
-        return finish()
+    account = signin.account
     lines.append(CheckLine("signin", True, f"Signed in as {username}."))
 
     # 3. The account is not an administrator: a warning, not a refusal.

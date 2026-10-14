@@ -8,9 +8,11 @@ precondition. ``feature_map`` flattens the payload into dotted booleans so
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ..config import Config
+from ..lib.unreachable import is_read_timeout
 from ._http import DEFAULT_TIMEOUT, OcsError, ocs_get
 
 
@@ -24,6 +26,61 @@ def fetch_account(config: Config, timeout: float = DEFAULT_TIMEOUT) -> dict[str,
     """Raw ``/cloud/user`` payload for the authenticated (bot) account."""
     data = ocs_get(config, "/cloud/user", timeout=timeout)
     return data if isinstance(data, dict) else {}
+
+
+@dataclass(frozen=True)
+class SignIn:
+    """What signing in as the configured bot account came to.
+
+    ``outcome`` is one of ``ok``, ``auth_failed``, ``forbidden``,
+    ``unreachable``, ``slow``, ``rate_limited``, ``server_error``,
+    ``not_found``, ``error`` or ``wrong_account``. ``exc`` is for the caller's
+    own wording and logging; its text is never shown to anyone.
+    """
+
+    outcome: str
+    account: dict
+    account_id: str
+    http_status: int | None
+    ocs_status: int | None
+    exc: OcsError | None
+
+
+def _failed_outcome(exc: OcsError) -> str:
+    status = exc.http_status
+    if status == 401 or exc.ocs_status == 997:
+        return "auth_failed"
+    if status == 403:
+        return "forbidden"
+    if status is None:
+        return "slow" if is_read_timeout(exc.__cause__) else "unreachable"
+    if status == 429:
+        return "rate_limited"
+    if status == 404:
+        return "not_found"
+    if status >= 500:
+        return "server_error"
+    return "error"
+
+
+def sign_in(config: Config, timeout: float = DEFAULT_TIMEOUT) -> SignIn:
+    """Sign in as ``[nextcloud] username`` and classify the answer.
+
+    The one classifier the setup check and the doctor check share. Never
+    raises an ``OcsError``; anything else propagates.
+    """
+    try:
+        account = fetch_account(config, timeout=timeout)
+    except OcsError as exc:
+        return SignIn(_failed_outcome(exc), {}, "", exc.http_status, exc.ocs_status, exc)
+    account_id = str(account.get("id") or "")
+    if account_id == "":
+        outcome = "error"
+    elif account_id != config.nextcloud.username:
+        outcome = "wrong_account"
+    else:
+        outcome = "ok"
+    return SignIn(outcome, account, account_id, None, None, None)
 
 
 def _dig(payload: Any, *keys: str, default: Any = None) -> Any:
