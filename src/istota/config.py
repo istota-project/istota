@@ -1680,6 +1680,8 @@ class GoogleWorkspaceConfig:
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/contacts.readonly",
+        "https://www.googleapis.com/auth/contacts.other.readonly",
     ])
 
 
@@ -2552,6 +2554,20 @@ class Config:
         """CalDAV password — explicit ``[caldav]`` override else the NC app password."""
         if self.caldav.password:
             return self.caldav.password
+        return self.nextcloud.app_password
+
+    @property
+    def carddav_url(self) -> str:
+        if not self.nextcloud.url:
+            return ""
+        return f"{self.nextcloud.url.rstrip('/')}/remote.php/dav"
+
+    @property
+    def carddav_username(self) -> str:
+        return self.nextcloud.username
+
+    @property
+    def carddav_password(self) -> str:
         return self.nextcloud.app_password
 
     @property

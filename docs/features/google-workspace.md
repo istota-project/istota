@@ -1,6 +1,6 @@
 # Google Workspace
 
-Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`). The bot uses `gws` commands via Bash with structured JSON output.
+Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`). The bot uses `gws` commands via Bash with structured JSON output. [Contacts](contacts.md) uses the same Google connection through its own skill and the People API.
 
 ## Setup
 
@@ -13,6 +13,7 @@ Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google
     - Gmail API
     - Google Calendar API
     - Google Sheets API
+    - People API (for Contacts)
     - Google Docs API
     - Google Chat API (only if you intend to offer the skill's `chat` verbs)
 4. Go to **APIs & Services > Credentials > Create Credentials > OAuth client ID**
@@ -36,7 +37,7 @@ client_id = "123456789-abc.apps.googleusercontent.com"
 client_secret = ""    # or ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET env var
 ```
 
-The default scopes offer read-only access to Drive, Gmail, Calendar, Sheets and Docs.
+The default scopes offer read-only access to Drive, Gmail, Calendar, Sheets, Docs and Contacts (including Other contacts).
 
 **`scopes` is a ceiling, not a request.** Each user picks their own subset of it on the settings page, and the connect redirect asks Google only for what that user chose — so listing a service here costs nothing for the users who leave it switched off. It has to be a hard maximum rather than a suggestion: the OAuth client belongs to a Google Cloud project whose enabled APIs you control, and a scope for an API the project has not enabled fails at Google's end with an error the user can do nothing about. Enable the API first, then list its scope.
 
@@ -53,6 +54,8 @@ scopes = [
 ```
 
 Changing this list never rewrites an existing grant — nothing revalidates one at startup. A user keeps whatever they consented to until they reconnect, and the settings card shows where the two differ.
+
+For Contacts on an existing install, enable the People API in the Google Cloud project. If `scopes` is explicit, add `https://www.googleapis.com/auth/contacts.readonly` and `https://www.googleapis.com/auth/contacts.other.readonly`; use `https://www.googleapis.com/auth/contacts` instead of `contacts.readonly` to offer read and write. Users must select Contacts and reconnect to grant the new access. Other contacts remains read-only at both levels.
 
 ### 3. Install the gws CLI
 
@@ -123,6 +126,7 @@ One row per service, matching `src/istota/credentials/google_scopes.py` — the 
 | Calendar | `.../auth/calendar.readonly` | `.../auth/calendar` |
 | Sheets | `.../auth/spreadsheets.readonly` | `.../auth/spreadsheets` |
 | Docs | `.../auth/documents.readonly` | `.../auth/documents` |
+| Contacts | `.../auth/contacts.readonly` + `.../auth/contacts.other.readonly` | `.../auth/contacts` + `.../auth/contacts.other.readonly` |
 | Chat | `.../auth/chat.spaces.readonly` + `.../auth/chat.messages.readonly` | `.../auth/chat.spaces` + `.../auth/chat.messages` |
 
 Prefix every scope with `https://www.googleapis.com`. Gmail's write level is `gmail.modify` rather than the bare `gmail` scope: it covers reading, sending and labelling without granting permanent deletion.

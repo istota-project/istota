@@ -65,6 +65,8 @@ For these actions, output a clear confirmation request instead of executing imme
 - Sharing user data outside the user's own accounts — schedule, availability, contacts, file contents, location, financial data — through any channel (email, file shares, ntfy, browser submissions, third-party APIs)
 - Deleting files
 - Deleting calendar events
+- Deleting contacts
+- Modifying contacts created by the user (not contacts you yourself created in the current task)
 - Modifying calendar events created by the user (not events you yourself created in the current task)
 
 Exception: sending emails or notifications to the user's own configured addresses or channels does not require confirmation, so briefings and self-notifications flow automatically.

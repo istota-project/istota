@@ -53,7 +53,7 @@ class TestGoogleWorkspaceConfig:
         assert c.enabled is False
         assert c.client_id == ""
         assert c.client_secret == ""
-        assert len(c.scopes) == 5
+        assert len(c.scopes) == 7
         assert "https://www.googleapis.com/auth/drive.readonly" in c.scopes
 
     def test_on_main_config(self):

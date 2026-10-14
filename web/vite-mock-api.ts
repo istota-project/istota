@@ -3299,8 +3299,8 @@ const _CONNECTED_SCHEMAS: ServiceSchema[] = [
 
 // --- Google Workspace scope picker (ISSUE-240) ---
 //
-// Mirrors istota/google_scopes.py. The instance ceiling below is deliberately
-// mixed — Drive full, Gmail/Calendar read-only, Sheets/Docs/Chat absent — so
+// Mirrors istota/credentials/google_scopes.py. The instance ceiling below is deliberately
+// mixed — Drive full, Gmail/Calendar/Contacts read-only, Sheets/Docs/Chat absent — so
 // the dev card exercises all three states the real one has to keep apart.
 
 const GOOGLE_SERVICES = [
@@ -3310,9 +3310,20 @@ const GOOGLE_SERVICES = [
   { service: 'sheets', label: 'Sheets', max_level: 'off' },
   { service: 'docs', label: 'Docs', max_level: 'off' },
   { service: 'chat', label: 'Chat', max_level: 'off' },
+  { service: 'contacts', label: 'Contacts', max_level: 'readonly' },
 ] as const;
 
 const GOOGLE_SCOPES: Record<string, { readonly: string[]; full: string[] }> = {
+  contacts: {
+    readonly: [
+      'https://www.googleapis.com/auth/contacts.readonly',
+      'https://www.googleapis.com/auth/contacts.other.readonly',
+    ],
+    full: [
+      'https://www.googleapis.com/auth/contacts',
+      'https://www.googleapis.com/auth/contacts.other.readonly',
+    ],
+  },
   drive: {
     readonly: ['https://www.googleapis.com/auth/drive.readonly'],
     full: ['https://www.googleapis.com/auth/drive'],
@@ -3358,7 +3369,11 @@ const GOOGLE_SCOPE_OWNER: Record<string, string> = Object.fromEntries(
 // banner is reachable without touching anything.
 const mockGoogle: { selection: Record<string, string>; granted: string[] | null } = {
   selection: {},
-  granted: ['https://www.googleapis.com/auth/drive.readonly'],
+  granted: [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/contacts.readonly',
+    'https://www.googleapis.com/auth/contacts.other.readonly',
+  ],
 };
 
 function googleDefaultSelection(): Record<string, string> {
@@ -3382,7 +3397,8 @@ function googleLevels(scopes: string[]): Record<string, string> {
   const levels: Record<string, string> = {};
   for (const svc of GOOGLE_SERVICES) {
     const map = GOOGLE_SCOPES[svc.service];
-    if (map.full.some((s) => scopes.includes(s))) levels[svc.service] = 'full';
+    if (map.full.some((s) => !map.readonly.includes(s) && scopes.includes(s)))
+      levels[svc.service] = 'full';
     else if (map.readonly.some((s) => scopes.includes(s))) levels[svc.service] = 'readonly';
   }
   return levels;
@@ -3397,10 +3413,9 @@ function googleMissing(requested: string[], granted: string[]): string[] {
     if (granted.includes(scope)) return false;
     for (const svc of GOOGLE_SERVICES) {
       const map = GOOGLE_SCOPES[svc.service];
+      if (map.full.includes(scope)) return true;
       if (map.readonly.includes(scope))
         return LEVEL_RANK[levels[svc.service] ?? 'off'] <= LEVEL_RANK.readonly;
-      if (map.full.includes(scope))
-        return LEVEL_RANK[levels[svc.service] ?? 'off'] <= LEVEL_RANK.full;
     }
     return true;
   });

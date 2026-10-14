@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
+
+**Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
+
 ### Changed
 
 - **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.

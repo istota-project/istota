@@ -1313,7 +1313,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # ============================================================================
 # Google Workspace Integration
 # ============================================================================
-# Enables the gws CLI skill with OAuth-based authentication.
+# Enables Google Workspace and Google Contacts with OAuth-based authentication.
+# Enable the People API for Contacts; existing connections must reconnect.
 # Users connect their Google account through the web UI.
 # Requires a Google Cloud project with OAuth 2.0 credentials:
 # https://console.cloud.google.com/apis/credentials
@@ -1329,6 +1330,8 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 #     "https://www.googleapis.com/auth/calendar.readonly",
 #     "https://www.googleapis.com/auth/spreadsheets.readonly",
 #     "https://www.googleapis.com/auth/documents.readonly",
+#     "https://www.googleapis.com/auth/contacts.readonly",
+#     "https://www.googleapis.com/auth/contacts.other.readonly",
 # ]
 
 # Briefings module (per-user content store + archive). All fields defaulted —

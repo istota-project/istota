@@ -183,8 +183,8 @@ from istota.skills._loader import (  # noqa: E402
 from istota.skills.skills import _workspace_dir  # noqa: E402
 
 # The only bundled skill bodies allowed to keep the literal "Nextcloud": the
-# gated deployment note in `files`, and the Nextcloud-specific sharing skill.
-_NEXTCLOUD_LITERAL_ALLOWLIST = {"files", "nextcloud"}
+# gated deployment note in `files`, sharing, and the named contacts backend.
+_NEXTCLOUD_LITERAL_ALLOWLIST = {"files", "nextcloud", "contacts"}
 
 
 class TestSkillBodiesStatic:

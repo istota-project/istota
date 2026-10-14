@@ -757,7 +757,7 @@ class TestGoogleScopeSelection:
         assert body["selection_set"] is False
         assert body["selection"] == {
             "drive": "readonly", "gmail": "readonly", "calendar": "readonly",
-            "sheets": "off", "docs": "off", "chat": "off",
+            "sheets": "off", "docs": "off", "chat": "off", "contacts": "off",
         }
 
     # -- saving the selection --------------------------------------------
