@@ -161,7 +161,8 @@ src/istota/
 │   ├── map_basemap.py    # Where the map's background tiles come from → leaf-modules.md
 │   ├── admin_logs.py     # Read-only log sources for the admin UI: the rotating app log (+ rotation chain, paged reader, live tail) and `task_logs`
 │   ├── admin_config_view.py  # Redacted, sectioned rendering of the loaded Config for the admin UI (credentials never leave the process)
-│   └── chat_files.py     # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse
+│   ├── chat_files.py     # Which paths `/chat/files` will serve, and the stored-answer check that rewrites links it would refuse
+│   └── nextcloud_sharing.py  # The user's calendars and address books, and their DAV shares to the bot, over the user's own token through `nextcloud_files.dav_request` → web-ui.md
 ├── maintenance/          # Backups, migrators, sweepers, host instrumentation → maintenance.md
 │   ├── db_health.py      # `PRAGMA quick_check` + self-healing `REINDEX` backstop for local SQLite DBs → maintenance.md
 │   ├── db_relocate.py    # One-time migrator: per-user module DBs from the mount → local disk, DELETE→WAL
