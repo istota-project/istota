@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
+- **Share calendars and address books with Istota from Settings.** The Nextcloud card lists them and shares each with the bot at No access, Read-only or Read and write, using your own connection; disconnecting can remove the shares. Needs `token_storage = "encrypted"`. See docs/features/nextcloud.md.
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 
