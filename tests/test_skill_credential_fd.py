@@ -88,7 +88,7 @@ def test_skill_fd_shares_fetch_limit_and_refuses_before_dispatch(sock_path, skil
         from istota.skills._credref import credential_ref
         parser = argparse.ArgumentParser()
         credential_ref(parser, "--secret", action="append")
-        parse_and_resolve(parser, ["--secret", "github_pat", "--secret", "github_pat"])
+        parse_and_resolve(parser, ["--secret", "home_assistant_url", "--secret", "home_assistant_token"])
         print("HANDLER RAN")
     """)
     with start_proxy(sock_path, vault_fetch_limit=2) as proxy:

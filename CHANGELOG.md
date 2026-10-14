@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `[security] vault_fetch_limit_per_task` now counts distinct credentials rather than reads. A credential already served in a task attempt can be read again at no cost, so a WordPress session no longer runs out after ten calls against one site. A name not yet served, whether absent or refused, is still charged every time, and setting the limit to `1` limits a task to one credential.
+
 ### Fixed
 
 - A timed location share or a card purchase asked for in a WhatsApp group no longer fails with `invalid_preview` when you have a private WhatsApp chat with the bot. The approval now reaches that chat as expected.
