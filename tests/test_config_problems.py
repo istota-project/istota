@@ -65,6 +65,8 @@ def _resolve(path: tuple[str, ...]) -> object:
 BAD_HOOK_VALUES: dict[str, object] = {
     "web.auth": ["bogus"],
     "web.token_storage": "plain",
+    "nextcloud.sharing.calendars": "read-only",
+    "nextcloud.sharing.contacts": "rw",
     "developer.container": {"exec_socket_dir": "relative/dir"},
     "developer.forge_cli_extra_denied": 5,
     "developer.forge_cli_permit": 5,
@@ -252,6 +254,11 @@ class TestVocabularies:
         from istota.webui.map_basemap import provider_names
 
         assert config_module._CONFIG_HOOKS["web.token_storage"].choices == FIELD_CHOICES[("web", "token_storage")]
+        for kind in ("calendars", "contacts"):
+            assert (
+                config_module._CONFIG_HOOKS[f"nextcloud.sharing.{kind}"].choices
+                == FIELD_CHOICES[("nextcloud", "sharing", kind)]
+            )
         assert FIELD_CHOICES[("email", "outbound_approval_floor")] == VALID_POLICIES
         assert FIELD_CHOICES[("email", "confirm_sender_match")] == config_module.CONFIRM_SENDER_MATCH_POLICIES
         assert set(FIELD_CHOICES[("brain", "kind")]) == KNOWN_BRAIN_KINDS

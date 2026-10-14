@@ -49,6 +49,22 @@ class LoggingConfig:
     backup_count: int = 5         # rotated files to keep
 
 
+NEXTCLOUD_SHARING_LEVELS = ("off", "readonly", "full")
+"""Access levels for a calendar or address book shared with the bot, narrowest first."""
+
+
+@dataclass
+class NextcloudSharingConfig:
+    """`[nextcloud.sharing]`: the highest level the Connections card may grant.
+
+    It bounds raising a share only. Lowering or removing one is always allowed,
+    so a ceiling never hides a grant the user can no longer take back.
+    """
+
+    calendars: str = "full"
+    contacts: str = "full"
+
+
 @dataclass
 class NextcloudConfig:
     url: str = ""
@@ -78,6 +94,7 @@ class NextcloudConfig:
     #: the very same directory, and the share would hand them a second copy of
     #: it under a different name.
     auto_share_bot_dir: bool = True
+    sharing: NextcloudSharingConfig = field(default_factory=NextcloudSharingConfig)
 
 
 @dataclass
@@ -4251,7 +4268,7 @@ def _forge_cli_list(raw: object, key: str) -> object:
     return _KEEP
 
 
-def _one_of(*valid: str) -> Hook:
+def _one_of(*valid: str, fallback: object = _KEEP) -> Hook:
     """A hook for a field whose value must come from a closed vocabulary.
 
     Warns naming the valid values and keeps the dataclass default, which is the
@@ -4261,19 +4278,24 @@ def _one_of(*valid: str) -> Hook:
     `email.outbound_approval_floor` and `email.confirm_sender_match` --
     deliberately do not use this and raise instead.
 
+    ``fallback`` replaces the default where the default is the widest value,
+    such as the `[nextcloud.sharing]` ceilings: keeping it would turn a typo
+    into broader access, so those fall back to the narrowest value instead.
+
     The hook carries its vocabulary as ``choices``, which is where
     :data:`FIELD_CHOICES` reads it from.
     """
+    outcome = "using the default" if fallback is _KEEP else f"using {fallback!r}"
 
     def hook(raw: object, key: str) -> object:
         if raw in valid:
             return raw
         report_problem(
             "discarded", key_path(key),
-            "[config] %s=%s is not a known value (expected %s); using the default",
-            key, Value(raw), " or ".join(repr(v) for v in valid),
+            "[config] %s=%s is not a known value (expected %s); %s",
+            key, Value(raw), " or ".join(repr(v) for v in valid), outcome,
         )
-        return _KEEP
+        return fallback
 
     hook.choices = tuple(valid)
     return hook
@@ -4285,6 +4307,8 @@ def _one_of(*valid: str) -> Hook:
 _CONFIG_HOOKS: dict[str, Hook] = {
     "web.auth": lambda raw, key: normalize_auth_methods(raw) or _KEEP,
     "web.token_storage": _one_of(*WEB_TOKEN_STORAGE_MODES),
+    "nextcloud.sharing.calendars": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
+    "nextcloud.sharing.contacts": _one_of(*NEXTCLOUD_SHARING_LEVELS, fallback="off"),
     # Normalised from three historical spellings, and the retired `backend` key
     # is warned about rather than ignored -- an operator who wrote
     # `backend = "none"` to keep builds off the container had that honoured
@@ -4384,6 +4408,8 @@ _CONFIG_HOOKS: dict[str, Hook] = {
 
 FIELD_CHOICES: dict[tuple[str, ...], tuple[str, ...]] = {
     ("web", "token_storage"): _CONFIG_HOOKS["web.token_storage"].choices,
+    ("nextcloud", "sharing", "calendars"): _CONFIG_HOOKS["nextcloud.sharing.calendars"].choices,
+    ("nextcloud", "sharing", "contacts"): _CONFIG_HOOKS["nextcloud.sharing.contacts"].choices,
     ("email", "outbound_approval_floor"): OUTBOUND_APPROVAL_POLICIES,
     ("email", "confirm_sender_match"): CONFIRM_SENDER_MATCH_POLICIES,
     ("brain", "kind"): BRAIN_KINDS,
