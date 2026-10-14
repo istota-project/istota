@@ -778,6 +778,35 @@ class TestTheOldDatabaseSurvives:
         )
 
 
+class TestLocationSharingUpgrade:
+    def test_request_rebuild_and_grant_cleanup_in_the_image(
+        self, volume_upgrade, istota_image, tmp_path,
+    ):
+        # The floor predates the request ledger. This last pre-sharing release
+        # exercises its constrained-table rebuild with every existing kind.
+        anchor = upgrade.resolve_anchor(REPO, ref="v0.45.0")
+        db_dir = tmp_path / "db"
+        path = upgrade.build_anchor_db(REPO, anchor.commit, db_dir / "istota.db")
+        with sqlite3.connect(path) as conn:
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='location_share_grants'").fetchone()
+        seeded = _docker_run(istota_image, volume_upgrade.config_dir, db_dir,
+                             ["-c", "python /seed/location_state.py seed /data/db/istota.db"],
+                             mounts=[(SEED_DIR, "/seed")])
+        assert seeded.returncode == 0, seeded.stdout + seeded.stderr
+        for _ in range(2):
+            migrated = _docker_run(istota_image, volume_upgrade.config_dir, db_dir,
+                                   ["-c", _istota("init")])
+            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+            observed = _docker_run(istota_image, volume_upgrade.config_dir, db_dir,
+                                   ["-c", "python /seed/location_state.py witness /data/db/istota.db"],
+                                   mounts=[(SEED_DIR, "/seed")])
+            assert observed.returncode == 0, observed.stdout + observed.stderr
+            assert json.loads(observed.stdout) == {
+                "retained_kinds": ["purchase", "recovery_fill", "relay_question", "room_post", "self_send", "side_whisper"],
+                "constraints": True, "cleanup": True,
+            }
+
+
 class TestRoomIdentityUpgrade:
     def test_offline_room_upgrade_preserves_history_and_is_replayable(
         self, volume_upgrade, istota_image, tmp_path,

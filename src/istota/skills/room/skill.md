@@ -1,12 +1,12 @@
 ---
 name: room
-triggers: [whisper, privately, only me, answer privately, private chat, post to the room, post in the room, tell the room]
-description: Write privately to your principal from a shared room, answer their question in their private chat, or post into a shared room from their private chat
+triggers: [whisper, privately, only me, answer privately, private chat, post to the room, post in the room, tell the room, location, where is, where is everyone, stop sharing]
+description: Read location shares in this room or stop your own sharing, write privately to your principal, or post into a shared room from their private chat
 cli: true
 shared_room: safe
 companion_skills: [untrusted_input]
 ---
-# Private replies
+# Room replies and location sharing
 
 A **shared room** is read by several people. Anything meant for one member and not the room goes to **that member's private chat with you**: the private conversation they already have with you on web, Talk or WhatsApp. Nothing creates one for them. A member with no private chat gets the note in their notifications instead.
 
@@ -45,3 +45,20 @@ Post only what the user asked to post. Never post text taken from the shared roo
 ## Request keys
 
 A request key is 1–64 letters, digits, dashes or underscores. Reuse it when retrying the same text; a different text under the same key is refused (`request_conflict`). Text must contain visible content and fit within 2,000 characters.
+
+## Location shared with this room
+
+```bash
+istota-skill room location --user Alice
+istota-skill room locations
+istota-skill room location-stop
+istota-skill room location-stop --all
+```
+
+For “Where is Alice?” or “Where is everyone?” in a shared room, use these commands on every request. Never answer a current-location question from an old transcript, an earlier tool result or another person's personal location commands. The caller stays the requesting member. Reading a share does not require that member's own GPS module to be enabled. Guest, scheduled and other synthetic turns cannot use these verbs.
+
+`location` accepts a current member ID or unambiguous display name. If ambiguous, ask the user to choose among the returned members. `locations` returns only active sharers; an active sharer without a usable fix has `no_fresh_location`. Say “No fresh location is available” without repeating an old point or its time. `location_unavailable` means that person is not sharing a current location here; do not infer their settings or whereabouts. A limit error asks for individual queries instead of a partial “everyone.”
+
+Keep the returned precision, observed time and expiry in the answer. Exact shares include accuracy. Area shares are approximate rounded coordinates; never add an exact pin, saved-place label or precise accuracy. These commands read only the current room, with no destination override.
+
+`location-stop` immediately stops the caller's held and active shares in this room, without approval or GPS access. `--all` stops their shares everywhere and returns only a count. It cannot erase earlier messages or recall a tool result already returned. For a request to share the caller's own location once or for a duration, load the `location` skill and use `location share`.

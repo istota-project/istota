@@ -305,12 +305,9 @@ class TestTheManifestField:
 
 
 def test_the_shipped_safe_set_is_exactly_the_reviewed_one(tmp_path):
-    # Widening this is a disclosure decision: each entry has to be shown to
-    # read nothing user-specific. `browse` and `markets` were on the draft's
-    # list and are not here, since both drive the user's own browser profile.
-    # `room` (multiplayer Stage 10) reads nothing: `whisper` writes only to the
-    # principal privately, and `post` works only from their private room, is
-    # refused in a shared one, and is held for their approval besides.
+    # Widening this is a disclosure decision. The room location verbs check
+    # explicit grants and refuse guests themselves; the location skill stays
+    # private because its other verbs read personal history.
     empty = tmp_path / "overrides"
     empty.mkdir()
     index = load_skill_index(empty)

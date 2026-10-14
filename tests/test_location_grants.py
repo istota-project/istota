@@ -333,3 +333,24 @@ def test_recorded_bot_identity_only_invalidates_for_another_bot(state, own_bot):
         assert result.outcome == "recorded" and result.gate_reason == "agent_author"
         assert conn.execute("SELECT state FROM location_share_grants WHERE id=?", (active["id"],)).fetchone()[0] == (
             "active" if own_bot else "revoked")
+
+
+def test_image_location_witness_rejects_old_schema_and_accepts_upgrade(tmp_path):
+    import runpy
+
+    path = tmp_path / "pre-sharing.db"
+    repo = Path(__file__).parents[1]
+    schema = (repo / "schema.sql").read_text().replace(", 'location_share'", "")
+    start = schema.index("-- Consent metadata only;")
+    end = schema.index("-- A recipient's block on one asker.", start)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema[:start] + schema[end:])
+    witness = runpy.run_path(str(repo / "tests/image/seed/location_state.py"))
+    witness["seed"](path)
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        witness["witness"](path)
+    db.init_db(path)
+    expected = {"retained_kinds": sorted(witness["KINDS"]), "constraints": True, "cleanup": True}
+    assert witness["witness"](path) == expected
+    db.init_db(path)
+    assert witness["witness"](path) == expected

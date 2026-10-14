@@ -2,6 +2,24 @@
 
 Overland GPS webhook receiver for location tracking with place detection and visit logging.
 
+## Sharing with a room
+
+Ask “Share my location here” in a web room, Talk group or Baileys WhatsApp group to post one observation. This grants no ongoing access. From a private chat, “Share my location with Hiking” asks for approval of the exact message before posting it. A retry keeps the observation you approved even if your phone has moved.
+
+“Share roughly where I am” shares an approximate area. Exact sharing is the default: a measured point with accuracy and observed time. Area sharing rounds both coordinates to two decimal places before returning them or building the map link, roughly a kilometre north/south and less east/west away from the equator. It omits precise accuracy and saved-place names. This is an approximate area, not an anonymity guarantee. Map links open OpenStreetMap when a recipient chooses to follow them; sharing itself does not fetch a map or reverse-geocode the point.
+
+For continuing access, ask “Let this room see my location for an hour.” You receive a private preview naming the room, readers, precision and duration, either in your private chat or your notifications. Nothing activates until you approve. Durations are 5 minutes through 24 hours, measured from approval; a request for continuing sharing without a duration proposes an hour for you to approve. Only rooms whose readers are known configured users support timed sharing. Email threads do not support either sharing mode.
+
+While your permission is active, a member can ask “Where is Alice?” or “Where is everyone?” in that room. They do not need their own tracker enabled. Answers contain only active sharers, and only the small location projection: no history, saved places, Wi-Fi, battery or visit details. A permission applies to one room, even if several rooms belong to the same group. It starts no tracker and sends no periodic messages.
+
+A current observation must come from the phone, be at most 15 minutes old and have usable accuracy within the configured limit. Imported Garmin tracks do not qualify. A declared point is labeled as declared. With no usable fix, the answer says no fresh location is available without an older coordinate or timestamp. You may explicitly request a last-known observation for a one-time share, up to 24 hours old; it remains labeled “Last known.” An approved delayed post retains its observed time and is never relabeled “now.”
+
+Ask “What am I sharing?” to list your permissions, or “Stop sharing my location” to stop in the current room. “Stop sharing everywhere” also cancels pending approvals. Stop takes effect without confirmation and works when your tracker is disabled. Reader changes, a transport binding change, archiving the room or switching the bot off end its shares; rejoining or reopening requires fresh approval. Disabling your location module suspends reads until re-enabled or the original expiry; stop revokes the permission permanently.
+
+Stop prevents later reads. A stop committed before a query's final permission check removes that location from its result. A result that already passed that check may still be delivered. Stop cannot erase earlier messages, screenshots or locations people remember.
+
+The skill commands are `location share [--room ROOM] [--precision exact|area] [--last-known] --request-key KEY`, `location share --for 1h --request-key KEY`, `location sharing` and `location unshare [--room ROOM | --all]`. Room members query with `room location --user USER` or `room locations`, and can always stop through `room location-stop [--all]`. Reads have no room override and never use old transcript answers as current observations.
+
 ## Architecture
 
 The webhook receiver (`webui/webhook_receiver.py`) ingests location pings from the [Overland](https://overland.p3k.app/) iOS/Android app. It detects transitions between named places and logs visits. On the stack its routes are served by the `web` service, behind the stack's nginx (`webui/stack_app.py`); `istota serve` includes them the same way.
