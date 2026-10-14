@@ -1555,6 +1555,228 @@ class TestTheLimaTemplate:
         assert result.returncode == 0, result.stderr
 
 
+RELEASE_KEY_FILE = HOST / "release-signing-key.pub"
+RELEASE_KEY_FINGERPRINT = "SHA256:msQ02X7UFfotEHfGWtElonM/WEQxCXCMBdLhBAjsX88"
+MAC_STACK = HOST / "mac" / "istota-stack"
+# The Mac's own bash is 3.2, and newest_release_tag runs there too.
+BASH = "/bin/bash" if Path("/bin/bash").exists() else "bash"
+
+
+def _release_key() -> str:
+    return RELEASE_KEY_FILE.read_text().rstrip("\n")
+
+
+def _bootstrap_script() -> str:
+    doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
+    return next(f["content"] for f in doc["write_files"] if f["path"] == "/root/istota-bootstrap.sh")
+
+
+def _newest_section(text: str) -> str:
+    start = text.index("# --- newest release ---")
+    end = text.index("# --- end newest release ---")
+    return text[start:end] + "# --- end newest release ---\n"
+
+
+def _default_key_in(path: Path) -> str:
+    (value,) = re.findall(r"^DEFAULT_SIGNING_KEY='([^'\n]*)'$", path.read_text(), re.MULTILINE)
+    return value
+
+
+class TestTheProjectReleaseKey:
+    """The public half of the key every release tag is signed with, so an
+    install needs no key pasted. `host/release-signing-key.pub` is the one
+    authoritative copy; every other is held to it byte for byte."""
+
+    def test_the_file_is_one_ssh_public_key_line(self):
+        text = RELEASE_KEY_FILE.read_text()
+        assert text.endswith("\n") and text.count("\n") == 1
+        kind, blob, comment = _release_key().split(" ")
+        assert kind == "ssh-ed25519"
+        # Not the key file's own comment, an address the private-data scan reads.
+        assert comment == "istota-releases"
+
+    @pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
+    def test_its_fingerprint_is_the_published_one(self):
+        result = subprocess.run(["ssh-keygen", "-lf", str(RELEASE_KEY_FILE)],
+                                capture_output=True, text=True, check=True)
+        assert result.stdout.split()[1] == RELEASE_KEY_FINGERPRINT
+
+    @pytest.mark.parametrize("script", [REPO / "install.sh", MAC_STACK])
+    def test_the_installers_default_to_it(self, script):
+        assert _default_key_in(script) == _release_key()
+
+    def test_cloud_init_writes_it_into_host_env(self):
+        doc = yaml.safe_load((HOST / "cloud-init.yaml").read_text())
+        host_env = next(f["content"] for f in doc["write_files"] if f["path"] == "/srv/app/istota/host.env")
+        assert f"RELEASE_SIGNING_KEY={_release_key()}\n" in host_env
+        assert "replace-me" not in host_env
+
+    def test_the_management_role_defaults_to_it(self):
+        defaults = yaml.safe_load((REPO / "ansible" / "defaults" / "main.yml").read_text())
+        assert defaults["istota_release_signing_key"] == _release_key()
+
+    @pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
+    def test_the_documented_fingerprint_command_reads_allowed_signers(self, tmp_path):
+        """`ssh-keygen -lf` refuses an allowed_signers line; the docs give a
+        command that takes the key out of it first."""
+        signers = tmp_path / "allowed_signers"
+        signers.write_text(f'releases namespaces="git" {_release_key()}\n')
+        result = subprocess.run(
+            ["sh", "-c", f"awk '{{print $3, $4}}' {signers} | ssh-keygen -lf -"],
+            capture_output=True, text=True, check=True,
+        )
+        assert RELEASE_KEY_FINGERPRINT in result.stdout
+
+
+class TestNewestReleaseTag:
+    """`newest_release_tag`: the tag a run with no tag named installs. It
+    only picks; the tag it prints is then verified like any other."""
+
+    @staticmethod
+    def newest(names: str) -> subprocess.CompletedProcess:
+        section = _newest_section((HOST / "istota-stack").read_text())
+        return subprocess.run(
+            [BASH, "-c", "set -euo pipefail\n" + section + "newest_release_tag\n"],
+            input=names, capture_output=True, text=True, timeout=30,
+        )
+
+    @pytest.mark.parametrize("script", [REPO / "install.sh", MAC_STACK])
+    def test_the_copies_are_istota_stacks_byte_for_byte(self, script):
+        assert _newest_section(script.read_text()) == _newest_section((HOST / "istota-stack").read_text())
+
+    def test_cloud_inits_copy_is_istota_stacks_byte_for_byte(self):
+        assert _newest_section(_bootstrap_script()) == _newest_section((HOST / "istota-stack").read_text())
+
+    @pytest.mark.parametrize(("names", "newest"), [
+        ("v0.9.9\nv0.10.0\nv0.2.0\n", "v0.10.0"),
+        ("v1.9.10\nv1.10.0\n", "v1.10.0"),
+        ("v9.99.99\nv10.0.0\nv2.0.0\n", "v10.0.0"),
+        ("v0.44.0\n", "v0.44.0"),
+        ("v1.0.0\nv1.2.0-rc1\nmain-0123456789ab\n1.2.3\nv1.2\nv2\nv3.0.0.1\nxv9.0.0\n", "v1.0.0"),
+    ])
+    def test_it_picks_the_highest_version(self, names, newest):
+        result = self.newest(names)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"{newest}\n"
+
+    @pytest.mark.parametrize("names", ["", "\n", "v1.2.0-rc1\nmain-abc\n1.2.3\nv1.2\n"])
+    def test_with_no_release_name_it_prints_nothing_and_fails(self, names):
+        result = self.newest(names)
+        assert result.returncode != 0
+        assert result.stdout == ""
+
+
+class TestInstallingTheNewestRelease:
+    """`install.sh --server` and `--local` with no --tag and no --signing-key:
+    the project's key, and the newest release, verified as a named one is."""
+
+    @staticmethod
+    def program(*parts: str) -> str:
+        script = INSTALL_SH.read_text()
+        helpers = script[script.index("_BOLD="):script.index("show_help() {")]
+        default = re.search(r"^DEFAULT_SIGNING_KEY=.*$", script, re.MULTILINE).group(0)
+        return "\n".join(["set -euo pipefail", helpers, default, *parts])
+
+    def signing_key(self, tmp_path, given: str = "", recorded: str | None = None):
+        host_env = tmp_path / "host.env"
+        if recorded is not None:
+            host_env.write_text(f"INGRESS=local\nRELEASE_SIGNING_KEY={recorded}\n")
+        program = self.program(
+            f'HOST_ENV="{host_env}"; SIGNING_KEY="{given}"',
+            _install_function("host_env_key"),
+            _install_function("server_signing_key"),
+            "server_signing_key",
+        )
+        return subprocess.run([BASH, "-c", program], capture_output=True, text=True, timeout=30)
+
+    def test_with_no_key_anywhere_it_is_the_projects(self, tmp_path):
+        result = self.signing_key(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"{_release_key()}\n"
+
+    def test_a_given_key_wins_over_the_default(self, tmp_path):
+        result = self.signing_key(tmp_path, given="ssh-ed25519 AAAAfork fork")
+        assert result.stdout == "ssh-ed25519 AAAAfork fork\n"
+
+    def test_a_recorded_key_wins_over_the_default(self, tmp_path):
+        """A host that installed a fork's releases keeps verifying against the
+        fork's key; the default never replaces what host.env records."""
+        result = self.signing_key(tmp_path, recorded="ssh-ed25519 AAAAfork fork")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ssh-ed25519 AAAAfork fork\n"
+
+    def test_the_recorded_key_given_again_is_accepted(self, tmp_path):
+        result = self.signing_key(tmp_path, given="ssh-ed25519 AAAAfork fork", recorded="ssh-ed25519 AAAAfork fork")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "ssh-ed25519 AAAAfork fork\n"
+
+    def test_a_different_key_than_the_recorded_one_is_refused(self, tmp_path):
+        result = self.signing_key(tmp_path, given=_release_key(), recorded="ssh-ed25519 AAAAfork fork")
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "already names a different RELEASE_SIGNING_KEY" in result.stderr
+
+    def test_the_server_resolves_the_tag_after_the_clone_and_verifies_it(self):
+        run_server = _install_function("run_server")
+        clone = run_server.index('git clone --quiet --no-checkout "$REPO_URL" "$SRC"')
+        newest = run_server.index("newest_release_tag")
+        verify = run_server.index('object="$(verify_release_tag "$RELEASE_TAG")"')
+        assert clone < newest < verify
+        # Named only once it is known, and nothing refuses a missing --tag first.
+        assert newest < run_server.index('section "Server install: ${RELEASE_TAG}"')
+        assert "Name the release" not in run_server[:newest]
+        assert run_server.index('SIGNING_KEY="$(server_signing_key)"') < clone
+
+    def test_a_newest_tag_that_fails_verification_is_refused_not_replaced(self):
+        run_server = _install_function("run_server")
+        verify = run_server[run_server.index('if ! object="$(verify_release_tag "$RELEASE_TAG")"'):]
+        refusal = verify[:verify.index("\n    fi\n")]
+        assert "--tag" in refusal and "exit 65" in refusal
+
+    def remote(self, tmp_path, listing: str, rc: int = 0):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        calls = tmp_path / "git-calls"
+        _stub(bindir, "git", f'printf "%s\\n" "$*" >> "{calls}"\nprintf "{listing}"\nexit {rc}\n')
+        program = self.program(
+            'REPO_URL="https://example.com/fork.git"',
+            _newest_section(INSTALL_SH.read_text()),
+            _install_function("newest_remote_release_tag"),
+            "newest_remote_release_tag",
+        )
+        result = subprocess.run([BASH, "-c", program], capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"})
+        return result, calls.read_text() if calls.exists() else ""
+
+    def test_local_reads_the_newest_tag_from_the_remote(self, tmp_path):
+        listing = "".join(f"{i:040x}\\trefs/tags/{name}\\n" for i, name in
+                          enumerate(["v0.9.0", "v0.10.0", "v0.10.0-rc1", "v0.2.0"]))
+        result, calls = self.remote(tmp_path, listing)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "v0.10.0\n"
+        assert calls == "ls-remote --tags --refs https://example.com/fork.git v*\n"
+
+    @pytest.mark.parametrize(("listing", "rc"), [("", 128), ("", 0), ("abc\\trefs/tags/v1.2\\n", 0)])
+    def test_local_without_a_release_on_the_remote_says_to_name_one(self, tmp_path, listing, rc):
+        result, _ = self.remote(tmp_path, listing, rc)
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "--tag" in result.stderr
+
+    def test_local_passes_the_resolved_tag_to_create(self):
+        run_local = _install_function("run_local")
+        resolve = run_local.index('RELEASE_TAG="$(newest_remote_release_tag)"')
+        assert resolve < run_local.index('section "Local install: ${RELEASE_TAG}"')
+        assert resolve < run_local.index('create --tag "$RELEASE_TAG"')
+
+    def test_cloud_init_installs_the_newest_release_when_no_tag_is_filled_in(self):
+        script = _bootstrap_script()
+        assert 'TAG=""' in script
+        clone = script.index('git clone --quiet --no-checkout "$REPO_URL" "$SRC"')
+        newest = script.index('TAG="$(verified_git tag --list | newest_release_tag)"')
+        assert clone < newest < script.index('object="$(verify_release_tag "$TAG")"')
+
+
 class TestTheProvisionDigest:
     """`provision.sh --digest` names the inputs a run acts on, and a successful
     run records it, so the management role can tell a provision a dead play

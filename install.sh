@@ -18,12 +18,14 @@
 #               desktop install replaces it. Only give it content you trust.
 #
 # Server (as root, on the machine that will run it):
-#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
-#       | sudo bash -s -- --server --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash -s -- --server
 #
 # Local (WITHOUT sudo, on the Mac):
-#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh \
-#       | bash -s -- --local --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases'
+#   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --local
+#
+# Both install the newest signed release (the highest vX.Y.Z tag), verified
+# against the project's release key (host/release-signing-key.pub). --tag and
+# --signing-key override them, for a specific release or a fork's releases.
 #
 # Standalone (WITHOUT sudo; it installs into your user):
 #   curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --standalone
@@ -31,26 +33,29 @@
 # Usage:
 #   install.sh [--server | --local | --standalone] [other flags...]
 #     --server             Server install (needs root, Debian 13)
-#       --tag TAG          the signed release tag to install (or ISTOTA_RELEASE_TAG)
+#       --tag TAG          the signed release tag to install (or ISTOTA_RELEASE_TAG);
+#                          default: the newest release
 #       --signing-key KEY  the release signing key, one line of an SSH public key
-#                          (or RELEASE_SIGNING_KEY; read from host.env once it has one)
+#                          (or RELEASE_SIGNING_KEY); default: the one host.env
+#                          records, else the project's
 #       --terminal-setup   set up in the terminal (`istota-stack setup`) rather
 #                          than in a browser
 #     --local              Local VM install on an Apple silicon Mac (no root); takes
-#                          --tag and --signing-key too, and forwards every other flag
-#                          to `istota-stack create` (--workspace, --port, --cpus, ...)
+#                          --tag and --signing-key too, with the same defaults, and
+#                          forwards every other flag to `istota-stack create`
+#                          (--workspace, --port, --cpus, ...)
 #     --standalone         Local single-user install (uv tool install + istota setup)
 #     --help               Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
 #   and no terminal, --server is used.
 #
 # The server path does what host/cloud-init.yaml does: clones the repository
-# into /srv/app/istota/src, verifies the release tag's signature against the
-# key before running anything from it, runs host/provision.sh, then
-# `istota-stack update <tag>` (builds the images), and starts the setup in a
-# browser (`systemctl start istota-setup`). It prints the address to open, the
-# one-use setup code and the certificate fingerprint, and `istota-stack
-# setup-code` prints them again. The setup installs the config, builds what it
+# into /srv/app/istota/src, picks the newest release tag unless --tag names one,
+# verifies its signature against the key before running anything from it,
+# runs host/provision.sh, then `istota-stack update <tag>` (builds the
+# images), and starts the setup in a browser (`systemctl start
+# istota-setup`). It prints the address to open, the one-use setup code and
+# the certificate fingerprint, and `istota-stack setup-code` prints them again. The setup installs the config, builds what it
 # needs, provisions again and starts the stack.
 #
 # With --terminal-setup it runs `istota-stack setup` (the wizard) instead, then
@@ -78,6 +83,9 @@ REPO_BRANCH="${ISTOTA_REPO_BRANCH:-main}"
 CLONE_DIR="${ISTOTA_CLONE_DIR:-}"
 RELEASE_TAG="${ISTOTA_RELEASE_TAG:-}"
 SIGNING_KEY="${RELEASE_SIGNING_KEY:-}"
+# host/release-signing-key.pub, which is authoritative; tests/test_host_units.py
+# holds this copy equal to it.
+DEFAULT_SIGNING_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM8wnX7YSjgMETMV8EOf/hQ6J5HpZsw9WfY/r0Glfq4z istota-releases'
 
 STACK=/srv/app/istota
 SRC="${STACK}/src"
@@ -118,7 +126,7 @@ while [ $# -gt 0 ]; do
         --terminal-setup) SETUP_IN_TERMINAL=true; shift ;;
         --bare|--docker)
             die "$1 is gone: a server is one Debian 13 machine running the stack.
-  Use --server --tag <release> --signing-key '<key>' (see --help)." ;;
+  Use --server (see --help)." ;;
         --help|-h) show_help; exit 0 ;;
         *) FORWARD_ARGS+=("$1"); shift ;;
     esac
@@ -231,6 +239,20 @@ verify_release_tag() {
     echo "$object"
 }
 
+# --- newest release ---
+# The newest release among the tag names on stdin, one bare name per line: the
+# highest vX.Y.Z by number (v0.10.0 is newer than v0.9.9). Prints nothing and
+# fails when no name is one. It only picks: the caller verifies the tag. Not
+# `sort -V`, which macOS's sort lacks.
+newest_release_tag() {
+    local newest
+    newest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" || true
+    [ -n "$newest" ] || return 1
+    echo "v${newest}"
+}
+# --- end newest release ---
+
 # --- server setup ---
 # The first run after the build: in a browser by default, as cloud-init does,
 # or the wizard in the terminal with --terminal-setup.
@@ -307,7 +329,7 @@ EOF
     ok "istota ${RELEASE_TAG} is running"
     echo
     echo -e "  ${_BOLD}Check it:${_RESET}  istota doctor"
-    echo -e "  ${_BOLD}Update:${_RESET}    istota-stack update <tag>"
+    echo -e "  ${_BOLD}Update:${_RESET}    istota-stack update"
     echo
     # stdin may now be the terminal; exit rather than read on from it.
     exit 0
@@ -319,6 +341,22 @@ host_env_key() {
     sed -n 's/^RELEASE_SIGNING_KEY=//p' "$HOST_ENV" | tail -n 1
 }
 
+# The key every tag is verified against. host.env holds it once written, and
+# then wins over the project's; a different key given here is refused rather
+# than swapped in.
+server_signing_key() {
+    local recorded
+    recorded="$(host_env_key)"
+    if [ -n "$recorded" ]; then
+        if [ -n "$SIGNING_KEY" ] && [ "$SIGNING_KEY" != "$recorded" ]; then
+            die "${HOST_ENV} already names a different RELEASE_SIGNING_KEY; edit it there if the key changed."
+        fi
+        echo "$recorded"
+    else
+        echo "${SIGNING_KEY:-$DEFAULT_SIGNING_KEY}"
+    fi
+}
+
 run_server() {
     if [ ${#FORWARD_ARGS[@]} -gt 0 ]; then
         die "The server install does not take ${FORWARD_ARGS[*]} (see --help)."
@@ -327,25 +365,14 @@ run_server() {
     if [ ! -r /etc/debian_version ] || ! command -v apt-get >/dev/null 2>&1; then
         die "The server install is for Debian 13."
     fi
-    [ -n "$RELEASE_TAG" ] || die "Name the release to install: --tag vX.Y.Z (or ISTOTA_RELEASE_TAG)."
 
-    # The key every tag is verified against. host.env holds it once written;
-    # a different key on the command line is refused rather than swapped in.
     local recorded
     recorded="$(host_env_key)"
-    if [ -n "$recorded" ]; then
-        if [ -n "$SIGNING_KEY" ] && [ "$SIGNING_KEY" != "$recorded" ]; then
-            die "${HOST_ENV} already names a different RELEASE_SIGNING_KEY; edit it there if the key changed."
-        fi
-        SIGNING_KEY="$recorded"
-    fi
-    [ -n "$SIGNING_KEY" ] \
-        || die "Give the release signing key: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)."
+    SIGNING_KEY="$(server_signing_key)"
     case "$SIGNING_KEY" in
         *$'\n'*) die "The signing key is one line of an SSH public key." ;;
     esac
 
-    section "Server install: ${RELEASE_TAG}"
     install -d -m 0755 "$STACK"
     if [ -z "$recorded" ]; then
         printf 'RELEASE_SIGNING_KEY=%s\n' "$SIGNING_KEY" >> "$HOST_ENV"
@@ -366,8 +393,16 @@ run_server() {
         info "Cloning ${REPO_URL} into ${SRC}"
         git clone --quiet --no-checkout "$REPO_URL" "$SRC"
     fi
+    if [ -z "$RELEASE_TAG" ]; then
+        RELEASE_TAG="$(verified_git tag --list | newest_release_tag)" \
+            || die "${REPO_URL} has no release tag (vX.Y.Z). Name the release to install with --tag."
+    fi
+    section "Server install: ${RELEASE_TAG}"
     local object
-    object="$(verify_release_tag "$RELEASE_TAG")"
+    if ! object="$(verify_release_tag "$RELEASE_TAG")"; then
+        error "nothing was installed. --tag picks another release."
+        exit 65
+    fi
     verified_git checkout --quiet --detach "${object}^{commit}"
     ok "${RELEASE_TAG} is signed by the release key"
 
@@ -381,6 +416,15 @@ run_server() {
 }
 
 # --- Local VM (macOS) ---------------------------------------------------------
+
+# The newest release on the remote, read without a clone: the VM verifies it.
+newest_remote_release_tag() {
+    local listing
+    listing="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" \
+        || die "could not list the release tags at ${REPO_URL}. Name the release to install with --tag."
+    sed 's|^.*refs/tags/||' <<<"$listing" | newest_release_tag \
+        || die "${REPO_URL} has no release tag (vX.Y.Z). Name the release to install with --tag."
+}
 
 # One file of the Mac half, from the checkout this ran from or else from the
 # branch this script was fetched from, put in place through a rename. Only to
@@ -408,9 +452,11 @@ run_local() {
         error "Lima is not installed: brew install lima, then re-run this."
         exit 69
     fi
-    [ -n "$RELEASE_TAG" ] || die "Name the release to install: --tag vX.Y.Z (or ISTOTA_RELEASE_TAG)."
-    [ -n "$SIGNING_KEY" ] \
-        || die "Give the release signing key: --signing-key 'ssh-ed25519 AAAA... releases' (or RELEASE_SIGNING_KEY)."
+    if [ -z "$RELEASE_TAG" ]; then
+        command -v git >/dev/null 2>&1 \
+            || die "git is needed to find the newest release: xcode-select --install, or name the release with --tag."
+        RELEASE_TAG="$(newest_remote_release_tag)"
+    fi
 
     local bin="${ISTOTA_MAC_BIN_DIR:-$HOME/.local/bin}"
     local data="${XDG_DATA_HOME:-$HOME/.local/share}/istota"
@@ -428,7 +474,10 @@ run_local() {
     # The setup wizard runs in the VM and asks on this terminal.
     reattach_tty_if_needed
     local rc=0
-    "${bin}/istota-stack" create --tag "$RELEASE_TAG" --signing-key "$SIGNING_KEY" \
+    # Without --signing-key, create takes the key it recorded, else the project's.
+    local key_args=()
+    [ -z "$SIGNING_KEY" ] || key_args=(--signing-key "$SIGNING_KEY")
+    "${bin}/istota-stack" create --tag "$RELEASE_TAG" "${key_args[@]+"${key_args[@]}"}" \
         "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}" || rc=$?
     # stdin may now be the terminal; exit rather than read on from it.
     exit "$rc"
@@ -631,12 +680,11 @@ prompt_install_mode() {
     echo
     echo -e "  ${_BOLD}1) Server${_RESET} ${_DIM}(default)${_RESET}"
     echo "     One install on a Debian 13 machine of its own, multi-user, with"
-    echo "     per-user bubblewrap isolation. Needs root, --tag and --signing-key."
+    echo "     per-user bubblewrap isolation. Needs root."
     echo
     echo -e "  ${_BOLD}2) Local VM${_RESET}${root_note}"
     echo "     Istota in a Lima VM on your Apple silicon Mac: the server's stack,"
-    echo "     sandbox included, with ~/Istota as its workspace. Needs Lima,"
-    echo "     --tag and --signing-key."
+    echo "     sandbox included, with ~/Istota as its workspace. Needs Lima."
     echo
     echo -e "  ${_BOLD}3) Standalone${_RESET}${root_note}"
     echo "     Single-user install on your own machine (macOS or Linux). No"

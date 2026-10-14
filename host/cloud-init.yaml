@@ -1,11 +1,13 @@
 #cloud-config
 # Bootstrap a Debian 13 server (a VM, a VPS or a bare-metal box) dedicated to
-# one istota install. Fill in the three values under "Fill in", then pass this
-# file as the machine's user data.
+# one istota install. Pass this file as the machine's user data as it is, or
+# change the values under "Fill in" first: a specific release, or a fork's
+# repository and release key.
 #
-# What it does: clones the repository, verifies the release tag's signature
-# against the key below before running anything from it, checks the tag out,
-# runs host/provision.sh from that checkout, builds the images from the tag
+# What it does: clones the repository, picks the newest release tag (vX.Y.Z)
+# unless TAG names one, verifies its signature against the key below before
+# running anything from it, checks the tag out, runs host/provision.sh from
+# that checkout, builds the images from the tag
 # (`istota-stack update <tag>`), and starts the setup in a browser
 # (`systemctl start istota-setup`). The address to open and the setup code are
 # printed to the console, which a VPS provider's web console shows; on the
@@ -27,20 +29,36 @@ write_files:
     permissions: "0644"
     content: |
       # Fill in: the release signing key, one line of an SSH public key. Every
-      # tag `istota-stack update` deploys is verified against it.
-      RELEASE_SIGNING_KEY=ssh-ed25519 AAAA...replace-me releases
+      # tag `istota-stack update` deploys is verified against it. This is the
+      # project's (host/release-signing-key.pub); a fork puts its own here.
+      RELEASE_SIGNING_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM8wnX7YSjgMETMV8EOf/hQ6J5HpZsw9WfY/r0Glfq4z istota-releases
   - path: /root/istota-bootstrap.sh
     permissions: "0700"
     content: |
       #!/bin/bash
       set -euo pipefail
-      # Fill in: where to clone from, and the release tag to provision from.
+      # Fill in: where to clone from, and the release tag to provision from
+      # (empty: the newest release).
       REPO_URL="https://github.com/istota-project/istota.git"
-      TAG="vX.Y.Z"
+      TAG=""
 
       SRC=/srv/app/istota/src
       ALLOWED_SIGNERS=/srv/app/istota/allowed_signers
       refuse_tag() { echo "[istota-bootstrap] REFUSE: $*" >&2; exit 65; }
+
+      # --- newest release ---
+      # The newest release among the tag names on stdin, one bare name per line: the
+      # highest vX.Y.Z by number (v0.10.0 is newer than v0.9.9). Prints nothing and
+      # fails when no name is one. It only picks: the caller verifies the tag. Not
+      # `sort -V`, which macOS's sort lacks.
+      newest_release_tag() {
+          local newest
+          newest="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+              | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" || true
+          [ -n "$newest" ] || return 1
+          echo "v${newest}"
+      }
+      # --- end newest release ---
 
       # Copied from host/istota-stack, which is authoritative: nothing from the
       # checkout may run before its tag is verified, so this cannot source it.
@@ -100,7 +118,14 @@ write_files:
       printf 'releases namespaces="git" %s\n' "$key" > "$ALLOWED_SIGNERS"
       chmod 0644 "$ALLOWED_SIGNERS"
       git clone --quiet --no-checkout "$REPO_URL" "$SRC"
-      object="$(verify_release_tag "$TAG")"
+      if [ -z "$TAG" ]; then
+          TAG="$(verified_git tag --list | newest_release_tag)" \
+              || refuse_tag "${REPO_URL} has no release tag (vX.Y.Z); set TAG to the release to install."
+      fi
+      if ! object="$(verify_release_tag "$TAG")"; then
+          echo "[istota-bootstrap] nothing was installed; set TAG to install another release." >&2
+          exit 65
+      fi
       verified_git checkout --quiet --detach "${object}^{commit}"
       ISTOTA_REPO_URL="$REPO_URL" "${SRC}/host/provision.sh"
 
