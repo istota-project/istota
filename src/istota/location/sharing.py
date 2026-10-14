@@ -205,7 +205,7 @@ def revoke_location_shares(conn, *, actor_user_id, room_token=None, all_rooms=Fa
     with write_transaction(conn):
         _expire_location_grants(conn, now=now)
         rows = conn.execute(
-            "SELECT id,request_id FROM location_share_grants WHERE owner_user_id=? "
+            "SELECT id,request_id,origin_task_id,state FROM location_share_grants WHERE owner_user_id=? "
             "AND state IN ('held','active') AND (? IS NULL OR room_token=?)",
             (actor_user_id, room_token, room_token),
         ).fetchall()
@@ -215,6 +215,9 @@ def revoke_location_shares(conn, *, actor_user_id, room_token=None, all_rooms=Fa
                 "ELSE 'revoked' END, closed_at=?, close_reason='owner_stop' WHERE id=?",
                 (_grant_timestamp(now), row["id"]),
             )
+            if row["state"] == "held" and row["origin_task_id"] is not None:
+                from istota.relay.relays import close_task_questions
+                close_task_questions(conn, row["origin_task_id"], reason="owner_stop")
             conn.execute(
                 "UPDATE whatsapp_skill_requests SET state='cancelled', error_code='owner_stop', "
                 "closed_at=?, updated_at=? WHERE id=? AND state='held'",

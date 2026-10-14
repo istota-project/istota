@@ -3627,6 +3627,15 @@ def process_one_task(
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
+        if relay_question is None:
+            # A stopped request's preview remains private after its hold ends.
+            stopped_location = conn.execute(
+                "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? "
+                "AND kind='location_share' AND state IN ('cancelled','expired','failed') "
+                "ORDER BY rowid DESC LIMIT 1", (task_id,),
+            ).fetchone()
+            if stopped_location is not None:
+                relay_question = dict(stopped_location)
     authorization_question = relay_question if relay_question and relay_question["kind"] in ("purchase", "recovery_fill", "location_share") else None
     if authorization_question and not success and not dry_run:
         from istota.relay.relays import close_task_questions
@@ -3845,6 +3854,24 @@ def process_one_task(
     voice_notes_to_remove: list[tuple[int, str, str]] | None = None
 
     with db.get_db(config.db_path) as conn:
+        if not dry_run and authorization_question and authorization_question["kind"] == "location_share":
+            from istota.relay.requests import write_transaction
+            # Keep this lock through parking so stop cannot race the state check.
+            with write_transaction(conn):
+                current_request = conn.execute(
+                    "SELECT state FROM whatsapp_skill_requests WHERE id=?",
+                    (authorization_question["id"],),
+                ).fetchone()
+                stopped_location = current_request is None or current_request["state"] != "held"
+                if stopped_location:
+                    db.cancel_task(conn, task_id)
+            if stopped_location:
+                conn.commit()
+                if event_writer is not None:
+                    event_writer.emit("cancelled")
+                    event_writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+                    event_writer.finish()
+                return (task_id, False)
         if success:
             if is_confirmation_request:
                 # Set task to pending confirmation instead of completing

@@ -362,3 +362,59 @@ def test_changed_approval_reports_refusal_and_commits_cancellation(env, monkeypa
     with db.get_db(config.db_path) as conn:
         assert db.get_task(conn, task.id).status == "cancelled"
         assert conn.execute("SELECT state FROM location_share_grants WHERE id=?", (grant["id"],)).fetchone()[0] == "cancelled"
+
+
+@pytest.mark.parametrize("cancel_at", ["execution", "before_park"])
+@pytest.mark.parametrize("reason", ["owner_stop", "audience_change"])
+def test_cancel_during_execution_never_publishes_preview(env, cancel_at, reason):
+    config, room = env
+    ident = turn(config, room)
+
+    def cancel(conn):
+        if reason == "owner_stop":
+            sharing.revoke_location_shares(
+                conn, actor_user_id="alice", room_token=room, now=NOW,
+            )
+        else:
+            db.add_web_room_member(conn, room, "carol")
+
+    def execute(*args, **kwargs):
+        with db.get_db(config.db_path) as conn:
+            held = request(conn, config, ident)
+            if cancel_at == "execution":
+                cancel(conn)
+        return True, json.dumps(held), None, None
+
+    def veto_check(conn, task):
+        if cancel_at == "before_park":
+            cancel(conn)
+        return False
+
+    with patch("istota.scheduler.execute_task", side_effect=execute), patch(
+        "istota.notifications.delivery.send_notification", return_value=True,
+    ), patch("istota.rooms.veto.task_room_vetoed", side_effect=veto_check):
+        from istota.scheduler import process_one_task
+        process_one_task(config)
+
+    with db.get_db(config.db_path) as conn:
+        task = db.get_task(conn, ident)
+        assert task.status == "cancelled"
+        assert not any("location-stop" in message.body for message in db.get_messages(conn, room))
+        assert not any("location-stop" in row[0] for row in conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=?", (ident,),
+        ))
+        assert not task.result or "location-stop" not in task.result
+        assert store.list_open(config, conn, "alice") == ([], 0)
+
+
+def test_stop_settles_pending_approval_task_and_notification(env):
+    config, room = env
+    task, _ = park(env)
+    with db.get_db(config.db_path) as conn:
+        sharing.revoke_location_shares(
+            conn, actor_user_id="alice", room_token=room, now=NOW,
+        )
+        stopped = db.get_task(conn, task.id)
+        assert stopped.status == "cancelled"
+        assert stopped.whatsapp_confirmation_request_id is None
+        assert store.list_open(config, conn, "alice") == ([], 0)
