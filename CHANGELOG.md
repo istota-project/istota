@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Share one location observation in a shared room, either an exact point or an approximate area. Sharing from a private chat asks for approval and posts the observation shown in the preview, even if your location changes before approval.
+
 ## [0.45.0] - 2026-10-14
 
 You can now share your Nextcloud calendars and address books with Istota from Settings, choosing read-only or read and write for each, and Istota can look up and edit contacts in those address books and in Google Contacts. The Workspace sidebar marks which places Istota can reach in your tasks.

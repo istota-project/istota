@@ -88,6 +88,29 @@ def _tz_name(args) -> str:
     return getattr(args, "tz", None) or os.environ.get("TZ", "America/Los_Angeles")
 
 
+def cmd_share(args):
+    from istota import db
+    from istota.config import load_config
+    from istota.location.sharing import share_location_snapshot
+    from istota.relay.requests import RequestError
+
+    actor = os.environ.get("ISTOTA_USER_ID", "")
+    task = os.environ.get("ISTOTA_TASK_ID", "")
+    path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not actor or not task.isdecimal() or not path:
+        raise RequestError("task_unavailable")
+    try:
+        with db.get_db(Path(path)) as conn:
+            result = share_location_snapshot(
+                conn, load_config(), actor_user_id=actor, task_id=int(task),
+                request_key=args.request_key, room=args.room, precision=args.precision,
+                allow_last_known=args.last_known, now=datetime.now(timezone.utc),
+            )
+    except sqlite3.Error:
+        raise RequestError("location_temporarily_unavailable") from None
+    print(json.dumps(result))
+
+
 def cmd_current(args):
     from istota.location.logic import location_current
 
@@ -776,6 +799,12 @@ def build_parser():
 
     sub.add_parser("current", aliases=["last"], help="Current location and visit")
 
+    share = sub.add_parser("share", help="Share one location observation in a room")
+    share.add_argument("--request-key", required=True)
+    share.add_argument("--room", default=None)
+    share.add_argument("--precision", choices=["exact", "area"], default="exact")
+    share.add_argument("--last-known", action="store_true")
+
     hist = sub.add_parser("history", help="Recent location pings")
     hist.add_argument("--limit", type=int, default=0)
     hist.add_argument("--date", help="Filter by date (YYYY-MM-DD)")
@@ -875,6 +904,7 @@ def main():
     args = parse_and_resolve(parser)
 
     commands = {
+        "share": cmd_share,
         "current": cmd_current,
         "last": cmd_current,  # alias — natural name an LLM reaches for
         "history": cmd_history,

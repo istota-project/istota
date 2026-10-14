@@ -1411,7 +1411,8 @@ def _post_target(conn, task, user_id: str, room: str | None) -> str:
 
 
 def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
-                   request_key: str, text: str, room: str | None = None) -> dict:
+                   request_key: str, text: str, room: str | None = None,
+                   request_context: dict | None = None, require_confirmation: bool = False) -> dict:
     """A private-room task asks to post ``text`` into a shared room, as the bot.
 
     From the member's own private room only, never from a shared room
@@ -1421,7 +1422,8 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
     is stored with its digest, the task parks on it, and only an approval of
     that digest releases the post. The one exception is ISSUE-565's clean
     turn, with the recipient test swapped for "the text is the member's own
-    words, verbatim in their prompt".
+    words, verbatim in their prompt". Host services can disable that exception
+    with ``require_confirmation`` and bind retry options in ``request_context``.
     """
     from istota.relay import relays as message_relays
 
@@ -1462,9 +1464,10 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
             service_body=text, template_body=None, provider="room",
             binding_fingerprint=destination["fingerprint"], preview=preview,
             origin=origin,
-            destination={key: destination[key] for key in ("kind", "room_token", "talk_ref", "label")},
+            destination={**{key: destination[key] for key in ("kind", "room_token", "talk_ref", "label")},
+                         **({"request_context": request_context} if request_context is not None else {})},
         )
-        if row["state"] == "held" and _clean_turn(conn, config, task, actor_user_id, post_text=text):
+        if row["state"] == "held" and not require_confirmation and _clean_turn(conn, config, task, actor_user_id, post_text=text):
             _queue_question(conn, request_id=row["id"], relay_id=None,
                             digest=row["preview_digest"], approval="clean_turn")
             row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (row["id"],)).fetchone()
