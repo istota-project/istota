@@ -213,10 +213,13 @@ def write_group_audit_log(
     group_id: str,
     user_id: str,
     *,
-    task_id: str | None,
+    task_id: str | None = None,
     applied: list[dict],
     rejected: list[dict],
-) -> None:
+    source: str = "runtime",
+    before_revision: str | None = None,
+    after_revision: str | None = None,
+) -> bool:
     """Append one runtime write to a group's own audit trail.
 
     `GROUP.md` has several authors, so its provenance belongs to the group, not
@@ -226,13 +229,15 @@ def write_group_audit_log(
     `group_kv.written_by`. Best-effort; never raises.
     """
     if not applied and not rejected:
-        return
+        return True
     entry = {
         "ts": _utc_now(),
         "group_id": group_id,
         "user_id": user_id,
         "task_id": task_id,
-        "source": "runtime",
+        "source": source,
+        "before_revision": before_revision,
+        "after_revision": after_revision,
         "entry_kind": "batch",
         "applied": applied,
         "rejected": rejected,
@@ -245,7 +250,9 @@ def write_group_audit_log(
             json.dumps(entry, ensure_ascii=False), user_id,
         )
 
-    _with_conn(config, _write, what=f"group audit write for {group_id}")
+        return True
+
+    return _with_conn(config, _write, default=False, what=f"group audit write for {group_id}")
 
 
 def read_audit_entries(

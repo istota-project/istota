@@ -416,3 +416,18 @@ describe('the setup route', () => {
     expect(getMe).toHaveBeenCalled();
   });
 });
+
+it.each([true, false, undefined])(
+  'shows Groups only with its navigation capability (%s)',
+  async (visible) => {
+    const user = person();
+    user.features.groups = visible;
+    getMe.mockResolvedValue(user);
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(Boolean(screen.queryByRole('link', { name: 'Groups' }))).toBe(Boolean(visible));
+    await fireEvent.keyDown(screen.getByRole('button', { name: 'Open menu' }), { key: 'Enter' });
+    await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
+    expect(Boolean(screen.queryByRole('menuitem', { name: 'Groups' }))).toBe(Boolean(visible));
+  },
+);

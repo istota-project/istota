@@ -1961,6 +1961,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "google_workspace": False,
         "google_workspace_enabled": False,
         "workspace": False,
+        "groups": is_admin,
         "admin": is_admin,
     }
     if _config:
@@ -1971,6 +1972,14 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         features["briefings"] = _user_has_briefings(username)
         features["google_workspace_enabled"] = _config.google_workspace.enabled
         features["workspace"] = _config.has_workspace
+        if not is_admin:
+            from istota import db
+
+            def _has_groups():
+                with db.get_db(_config.db_path) as conn:
+                    return bool(db.list_user_groups(conn, username))
+
+            features["groups"] = await asyncio.to_thread(_has_groups)
         if not features["workspace"] and _config.google_workspace.enabled:
             from istota import db
             from istota.workspace.places import list_places
@@ -16631,6 +16640,17 @@ from istota.webui.workspace_routes import router as _workspace_router
 
 app.include_router(_workspace_router, prefix="/istota/api/workspace", tags=["workspace"])
 app.dependency_overrides[_workspace_require_auth] = _require_api_auth
+
+# Groups is core; administration never grants member content access.
+from istota.groups.routes import require_admin as _groups_require_admin
+from istota.groups.routes import require_auth as _groups_require_auth
+from istota.groups.routes import router as _groups_router
+from istota.groups.routes import verify_origin as _groups_verify_origin
+
+app.include_router(_groups_router, prefix="/istota/api", tags=["groups"])
+app.dependency_overrides[_groups_require_admin] = _require_admin
+app.dependency_overrides[_groups_require_auth] = _require_api_auth
+app.dependency_overrides[_groups_verify_origin] = _verify_origin
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

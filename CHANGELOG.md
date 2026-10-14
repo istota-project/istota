@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Workspace. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
+- Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
 - Room members can ask for one person’s shared location or everyone currently sharing, even without their own tracker enabled. Stopping or expiry during a query removes that location before the answer returns.
 
 - Room location sharing stops when readers or transport identities change, or when the room is archived or switched off. Rejoining or reopening the room requires fresh approval; ordinary roster refreshes keep sharing active. Upgrading older room identities preserves the consent record and requires fresh approval for location sharing.
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Owners can list and stop their location-sharing permissions, including pending requests. Stopping everywhere returns only a count when requested in a shared room.
 
 - Share one location observation in a shared room, either an exact point or an approximate area. Sharing from a private chat asks for approval and posts the observation shown in the preview, even if your location changes before approval.
+
+### Changed
+
+- New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
 
 ## [0.45.0] - 2026-10-14
 

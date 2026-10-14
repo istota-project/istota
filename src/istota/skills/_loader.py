@@ -1067,6 +1067,7 @@ def contained_group_dir(groups_root: Path, group_id: str) -> Path | None:
 
 def open_overlay_dir(
     user_root: Path, *parts: str, raise_mount_errors: bool = False,
+    raise_errors: bool = False,
 ) -> int | None:
     """An fd on ``{user_root}/{parts...}``, or None if any component below the
     root is not a plain directory reached directly from the one above it.
@@ -1122,7 +1123,9 @@ def open_overlay_dir(
 
     The caller closes the fd. By default every ``OSError`` is a None.
     ``raise_mount_errors`` preserves ENOTCONN/EIO for callers reporting a
-    disconnected mount. A platform without ``dir_fd`` support would raise
+    disconnected mount; ``raise_errors`` preserves every directory-open error for
+    callers that must distinguish unavailable roots from unsafe ones.
+    A platform without ``dir_fd`` support would raise
     ``NotImplementedError``, which Linux and macOS both rule out.
     """
     # Each part must be one ordinary component. A `/` would have its own
@@ -1137,7 +1140,7 @@ def open_overlay_dir(
     try:
         fd = os.open(user_root, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as exc:
-        if raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}:
+        if raise_errors or (raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}):
             raise
         return None
     try:
@@ -1149,7 +1152,7 @@ def open_overlay_dir(
             fd = nxt
     except OSError as exc:
         os.close(fd)
-        if raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}:
+        if raise_errors or (raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}):
             raise
         return None
     return fd

@@ -123,6 +123,7 @@ MAIL_CONFIG: dict = {
 }
 
 BASE = Profile("base")
+GROUP_MEMORY = Profile("group-memory", web=True)
 #: The forge profiles run with the network sandbox off, and only they do. The
 #: forge stub speaks plain HTTP, and the CONNECT proxy carries only tunnels, so
 #: git's absolute-form `GET http://…` through it is refused (405) where a real
@@ -306,6 +307,7 @@ EMAIL_HOLD_ALL = Profile(
 #: so add to it when adding a profile.
 ALL: tuple[Profile, ...] = (
     BASE,
+    GROUP_MEMORY,
     FORGE,
     NO_FORGE,
     NETWORK,

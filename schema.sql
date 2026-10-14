@@ -603,13 +603,14 @@ CREATE TABLE IF NOT EXISTS groups (
     display_name TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     created_by   TEXT NOT NULL,
-    archived_at  TEXT
+    archived_at  TEXT,
+    revision     INTEGER NOT NULL DEFAULT 0
 );
 
 -- Membership is a history, never a set: removal sets `ended_at`, no row is
 -- deleted, and a re-join inserts a new row, so `(group_id, user_id)` is not
--- unique. `role` (owner | member) is recorded and read by nothing in v1
--- (tests/test_groups.py::test_role_is_inert).
+-- unique. Owner roles govern administration through groups/service.py;
+-- owners and members have the same content access.
 CREATE TABLE IF NOT EXISTS group_members (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id   TEXT NOT NULL REFERENCES groups(group_id) ON DELETE CASCADE,
@@ -640,6 +641,17 @@ CREATE TABLE IF NOT EXISTS group_kv (
 );
 
 CREATE INDEX IF NOT EXISTS idx_group_kv_ns ON group_kv(group_id, namespace);
+
+CREATE TABLE IF NOT EXISTS group_events (
+    id INTEGER PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    subject_user_id TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_group_events_group ON group_events(group_id, id);
 
 -- Cron bookkeeping for module-owned shared briefing blocks (generated once
 -- globally, written into shared_kv). Mirrors briefing_state.
