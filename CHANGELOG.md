@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Buttons and toggle chips in the web UI are visible before you hover them. Lesser actions such as Cancel used to render as bare text that looked like an offset link, and toggle chips disappeared against cards and dialogs; both now have a fill or outline at rest, including when disabled.
+- Markdown files open in the viewer as a readable page: headings at their own sizes, a comfortable line length, and frontmatter in a small collapsed panel set apart from the document. The Rendered and Source switch moved into the viewer's header beside Download.
 - The Workspace page is now called Files and sits before Groups in the navigation; the dashboard has a Groups tile beside it. In the Files sidebar, My files, Rooms, Groups, Configuration and Skill instructions sit under one section named after the assistant, and rooms, groups and config files open as lists in the main page instead of filling the sidebar.
 - Google Workspace setup documentation now covers the operator's OAuth client, consent screen and credential storage. It distinguishes instance setup from each user's account connection and explains common connection failures.
 - New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.

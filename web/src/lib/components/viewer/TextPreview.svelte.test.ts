@@ -12,16 +12,19 @@ afterEach(() => {
 });
 
 describe('shared text preview', () => {
-  it('renders Markdown and frontmatter with a reversible readonly source view', async () => {
+  it('renders Markdown and frontmatter, or the readonly source when asked', async () => {
     const text = '---\ntitle: Note\n---\n# Hello';
-    render(TextPreview, { name: 'note.md', text });
+    const { rerender } = render(TextPreview, { name: 'note.md', text });
     expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
-    expect(screen.getByText('Frontmatter').closest('details')).toHaveTextContent('title: Note');
-    await fireEvent.click(screen.getByRole('button', { name: 'Source' }));
+    const frontmatter = screen.getByText('Frontmatter').closest('details');
+    expect(frontmatter).toHaveTextContent('title: Note');
+    expect(frontmatter?.nextElementSibling).toHaveClass('markdown');
+    expect(screen.queryByRole('button')).toBeNull();
+    await rerender({ source: true });
     expect(screen.getByRole('textbox')).toHaveValue(text);
     expect(screen.getByRole('textbox')).toHaveAttribute('readonly');
     expect(screen.queryByRole('heading')).toBeNull();
-    await fireEvent.click(screen.getByRole('button', { name: 'Rendered' }));
+    await rerender({ source: false });
     expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
   });
 
