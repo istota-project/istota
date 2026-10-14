@@ -66,6 +66,8 @@ async function edit() {
 it('opens memory by default and saves through the shared editor with the audience charter', async () => {
   render(Groups);
   await screen.findByText('Shared plans');
+  expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Groups');
+  expect(screen.queryByRole('heading', { name: 'Team' })).toBeNull();
   expect(screen.getByText(/current and future group members/)).toBeTruthy();
   expect(screen.queryByRole('link', { name: 'Briefings' })).toBeNull();
   expect(screen.getByRole('link', { name: 'Files' })).toHaveAttribute(
@@ -307,7 +309,9 @@ it('selects a remaining group after leaving the group named in the URL', async (
     return other;
   });
   await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Leave' }));
-  await screen.findByRole('heading', { name: 'Other team' });
+  await waitFor(() =>
+    expect(screen.getByRole('link', { name: 'Other team' })).toHaveClass('active'),
+  );
   expect(api.getGroup).toHaveBeenLastCalledWith('other');
 });
 it('refuses an editor reload after the notebook became unreadable', async () => {
@@ -337,9 +341,11 @@ it('keeps an owner metadata draft when reloading a revision conflict', async () 
   });
   await fireEvent.click(screen.getByRole('button', { name: 'Save details' }));
   await screen.findByText('Group changed; reload before saving');
-  api.getGroup.mockResolvedValue({ ...owned, revision: 4, display_name: 'Someone else edited' });
+  const edited = { ...owned, revision: 4, display_name: 'Someone else edited' };
+  api.getGroup.mockResolvedValue(edited);
+  api.getGroups.mockResolvedValue({ groups: [edited] });
   await fireEvent.click(screen.getByRole('button', { name: 'Reload group details' }));
-  await screen.findByRole('heading', { name: 'Someone else edited' });
+  await screen.findByRole('link', { name: 'Someone else edited' });
   expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue('My draft name');
   api.updateGroup.mockResolvedValue({ ...owned, revision: 5 });
   await fireEvent.click(screen.getByRole('button', { name: 'Save details' }));

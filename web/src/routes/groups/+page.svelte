@@ -138,7 +138,7 @@
 <AppShell>
   {#snippet header()}
     <ShellHeader
-      title={detail?.display_name ?? 'Groups'}
+      title="Groups"
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
       titleActionLabel="Toggle groups"
     >
