@@ -65,6 +65,12 @@ QR = "2@fake-pairing-payload-not-a-real-credential,AAAA/BBBB="
 PAIRING = "/istota/api/admin/connections/whatsapp/pairing"
 INDEX = "/istota/api/admin/connections"
 
+
+def _whatsapp(index: dict) -> dict:
+    """The WhatsApp entry of the index, which lists Nextcloud first."""
+    return next(c for c in index["connections"] if c["id"] == "whatsapp")
+
+
 #: Every route this stage adds, so the admin gate is enumerated rather than
 #: sampled. The five pairing routes plus the section index.
 ALL_GET_ROUTES = (
@@ -404,7 +410,7 @@ class TestTheConfigGates:
             cookies = await _login(client, ADMIN)
             resp = await _get(client, INDEX, cookies=cookies)
             assert resp.status_code == 200
-            card = resp.json()["connections"][0]
+            card = _whatsapp(resp.json())
             assert card["pairing_supported"] is True
             assert card["pairing_enabled"] is False
 
@@ -422,8 +428,8 @@ class TestTheConfigGates:
             cookies = await _login(client, ADMIN)
             assert (await _get(client, PAIRING, cookies=cookies)).status_code == 409
             card = (await _get(client, INDEX, cookies=cookies)).json()
-            assert card["connections"][0]["pairing_supported"] is False
-            assert card["connections"][0]["pairing_enabled"] is False
+            assert _whatsapp(card)["pairing_supported"] is False
+            assert _whatsapp(card)["pairing_enabled"] is False
 
     async def test_a_disabled_whatsapp_surface_is_a_503(
         self, tmp_path, publish_status
@@ -628,7 +634,7 @@ class TestTheSandboxBoundRelayRefusal:
                 headers={"Origin": "https://example.com"},
             )
             index = (await _get(client, INDEX, cookies=cookies)).json()
-        return config, resp, index["connections"][0]
+        return config, resp, _whatsapp(index)
 
     async def test_a_relay_inside_the_workspace_user_tree_is_refused(
         self, tmp_path, publish_status
@@ -666,7 +672,7 @@ class TestTheSandboxBoundRelayRefusal:
         """The shipped path on both server shapes, and the control that says
         the refusal is not refusing everything."""
         config, client, cookies = env
-        card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
+        card = _whatsapp((await _get(client, INDEX, cookies=cookies)).json())
         assert card["pairing_blocked_reason"] is None
         assert baileys_bridge.default_pairing_relay_path(config).parent == (
             Path(config.db_path).parent
@@ -1065,11 +1071,11 @@ class TestTheConnectionsIndex:
         bridge is down" — which on the canonical Ansible deployment is the
         ordinary state of the web unit."""
         _, client, cookies = env
-        card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
+        card = _whatsapp((await _get(client, INDEX, cookies=cookies)).json())
         assert card["link"] is None
 
         publish_status(_Status(fatal_is_permanent=True))
-        card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
+        card = _whatsapp((await _get(client, INDEX, cookies=cookies)).json())
         assert card["link"]["fatal_is_permanent"] is True
         assert card["link"]["fatal_reason"] == "logged_out"
         assert card["link"]["connection_replaced_latched"] is False
@@ -1087,14 +1093,14 @@ class TestTheConnectionsIndex:
         )
         publish_status(status)
 
-        card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
+        card = _whatsapp((await _get(client, INDEX, cookies=cookies)).json())
 
         assert card["link"]["connection_replaced_latched"] is True
 
     async def test_it_carries_the_durable_row_either_way(self, env):
         config, client, cookies = env
         _write_request(config)
-        card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
+        card = _whatsapp((await _get(client, INDEX, cookies=cookies)).json())
         assert card["pairing"]["state"] == db.WHATSAPP_PAIRING_REQUESTED
         assert card["pairing"]["requested_by"] == ADMIN
 
@@ -1330,4 +1336,4 @@ class TestARelativeRelayPathIsRefused:
 
         assert resp.status_code == 409
         assert _row(config) is None
-        assert card["connections"][0]["pairing_blocked_reason"] == "relative_path"
+        assert _whatsapp(card)["pairing_blocked_reason"] == "relative_path"

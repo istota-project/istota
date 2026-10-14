@@ -24,6 +24,9 @@
 #   DOMAIN, TLS_CERT_SOURCE, UPSTREAM_PROXY, LISTEN_ADDR, LISTEN_PORT
 #   RELEASE_SIGNING_KEY  the release key, one line of an SSH public key
 #   CLAUDE_CODE_VERSION  the Claude Code pin a build uses, when it uses one
+#   APT_MIRROR           a Debian mirror (http(s)://host/.../debian) in place of
+#                        deb.debian.org, for this host's apt and the images'
+#                        builds; removing it goes back to deb.debian.org
 #   ACME_EMAIL, ACME_SERVER   optional, for certbot in direct mode
 #   RCLONE_REMOTE        the rclone remote name in /srv/app/istota/rclone.conf
 #   ZRAM_ENABLED         0 to leave swap alone
@@ -162,6 +165,43 @@ export DEBIAN_FRONTEND=noninteractive
 # current Engine come from there, as in the role.
 apt_install() { apt-get install -y -qq --no-install-recommends "$@" >/dev/null; }
 
+# istota-stack carries the same check for the build arg; tests hold the two equal.
+valid_apt_mirror() {
+    [[ "$1" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~%-]+)+$ ]]
+}
+
+# APT_MIRROR: Debian's main archive at that mirror instead of deb.debian.org,
+# whose CDN stalls some connections. Only deb.debian.org/debian and the mirror
+# this set last (recorded in STATE) are replaced, so a third-party repository
+# whose path also ends in /debian stays, and so does the security archive. An
+# empty value puts deb.debian.org back where a mirror was recorded.
+use_apt_mirror() {
+    local mirror="$1" state="$2" root="$3" previous="" target file pattern
+    if [ -n "$mirror" ] && ! valid_apt_mirror "$mirror"; then
+        log "WARNING: APT_MIRROR '${mirror}' is not an http(s) URL ending in a path; apt keeps its sources."
+        return 0
+    fi
+    if [ -f "$state" ]; then previous="$(cat "$state")"; fi
+    [ -n "$mirror" ] || [ -n "$previous" ] || return 0
+    target="${mirror:-https://deb.debian.org/debian}"
+    pattern='https?://deb\.debian\.org/debian'
+    if [ -n "$previous" ] && valid_apt_mirror "$previous"; then
+        pattern="${pattern}|${previous//./\\.}"
+    fi
+    for file in "${root}/etc/apt/mirrors/debian.list" "${root}/etc/apt/sources.list.d/debian.sources" \
+                "${root}/etc/apt/sources.list"; do
+        [ -f "$file" ] || continue
+        sed -i -E "s#(^|[[:space:]])(${pattern})/?([[:space:]]|\$)#\1${target}\3#" "$file"
+    done
+    if [ -n "$mirror" ]; then
+        [ "$mirror" = "$previous" ] || log "apt uses ${mirror} for Debian's main archive"
+        printf '%s\n' "$mirror" > "$state"
+    else
+        log "apt uses deb.debian.org again"
+        rm -f "$state"
+    fi
+}
+
 # rclone for the Nextcloud mount: rclone.org's own .deb, pinned by version and
 # per-arch SHA-256 (from the release's signed SHA256SUMS), never Debian's
 # package (#694). Debian builds rclone against its own 2016 bazil.org/fuse,
@@ -267,6 +307,7 @@ wait_for_mount_uploads() {
     done
 }
 
+use_apt_mirror "$(host_env APT_MIRROR)" "${STACK}/.apt-mirror" ""
 apt-get update -qq
 apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils openssl
 

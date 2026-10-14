@@ -766,6 +766,16 @@ class TestTheNextcloudCheck:
         assert all(not lines[key]["ok"] for key in ("admin", "files", "talk", "user"))
         _plain(resp, UPSTREAM_TEXT, NC_PASSWORD)
 
+    def test_a_sign_in_with_no_account_id_is_refused(self, unlocked):
+        # Changed with the shared classifier: this used to read "Those details
+        # sign in as “”", naming an empty account.
+        _app, client = unlocked
+        with FakeNextcloud(username=NC_USER, password=NC_PASSWORD, account_id="").serve() as nc:
+            _nextcloud_draft(client, nc.url)
+            resp = _check(client, "nextcloud")
+        assert resp.json()["ok"] is False
+        assert _lines(resp)["signin"]["message"] == "Nextcloud refused to show the account's details."
+
     def test_warnings_do_not_fail_the_check(self, unlocked):
         _app, client = unlocked
         with FakeNextcloud(username=NC_USER, password=NC_PASSWORD, groups=("admin",), talk=False).serve() as nc:

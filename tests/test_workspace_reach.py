@@ -236,4 +236,8 @@ def test_personal_nextcloud_connection_is_not_task_reach(config, conn):
     places = list_places(config, conn, "alice")
     reach = place_reach(config, conn, "alice", places)["nextcloud"]
     assert (reach.private, reach.shared_member, reach.restricted) == ("none", "none", "none")
-    assert "browse" in reach.note
+    assert reach.note == (
+        "Only you can see this view. It uses your personal Nextcloud connection, "
+        "which tasks never use. Istota’s Nextcloud skill uses the bot’s own account "
+        "instead. To work on a file with Istota, put a copy in My files."
+    )

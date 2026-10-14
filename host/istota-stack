@@ -170,6 +170,12 @@ mount_dir_for_storage() {
 
 MOUNT_DIR="${ISTOTA_MOUNT_DIR:-$(mount_dir_for_storage "$(env_get "$HOST_ENV" STORAGE)")}"
 
+# host.env's APT_MIRROR, which the images' builds take as a build arg.
+# provision.sh carries the same check; tests hold the two equal.
+valid_apt_mirror() {
+    [[ "$1" =~ ^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~%-]+)+$ ]]
+}
+
 # Set KEY=VALUE pairs in .env, keeping every other line, through a rename so a
 # reader never sees half a file.
 env_set() {
@@ -278,8 +284,13 @@ compose() {
     fi
     local certs="${STACK}/certs"
     if [ "$(env_get "$HOST_ENV" TLS_CERT_SOURCE)" = "acme" ]; then certs="${STACK}/letsencrypt"; fi
-    local pin
+    local pin apt_mirror
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
+    apt_mirror="$(env_get "$HOST_ENV" APT_MIRROR)"
+    if [ -n "$apt_mirror" ] && ! valid_apt_mirror "$apt_mirror"; then
+        log "WARNING: APT_MIRROR '${apt_mirror}' is not an http(s) URL ending in a path; builds use deb.debian.org."
+        apt_mirror=""
+    fi
     # What the entrypoint requires at /mnt/shared: the filesystem type, and for
     # a host folder its .istota-workspace marker (an empty stand-in for a folder
     # that went away is a virtiofs mount too).
@@ -292,6 +303,7 @@ compose() {
         # Only a pin that is set: compose passes an empty variable as an empty
         # build arg, which overrides the Dockerfile's default and fails the build.
         if [ -n "$pin" ]; then export CLAUDE_CODE_VERSION="$pin"; else unset CLAUDE_CODE_VERSION; fi
+        if [ -n "$apt_mirror" ]; then export APT_MIRROR="$apt_mirror"; else unset APT_MIRROR; fi
         # The image has no .git: the commit being built and its deployed name
         # are how a running stack says which code it is. Every build caller
         # sets ISTOTA_TAG and has the checkout at that commit.
@@ -2156,6 +2168,14 @@ cmd_host_env() {
         case "$key" in ""|*[!A-Z0-9_]*) die "'${key}' is not a host.env key" ;; esac
     done
     file_set "$HOST_ENV" "$@"
+    # As provision.sh writes it: the Mac's create on an existing VM builds a
+    # signed tag before provision.sh runs.
+    for pair in "$@"; do
+        if [ "${pair%%=*}" = RELEASE_SIGNING_KEY ] && [ -n "${pair#*=}" ]; then
+            printf 'releases namespaces="git" %s\n' "${pair#*=}" > "$ALLOWED_SIGNERS"
+            chmod 0644 "$ALLOWED_SIGNERS"
+        fi
+    done
 }
 
 # Move a path the Mac CLI copied into the VM into a fresh directory under

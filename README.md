@@ -1,11 +1,10 @@
-
 <p align="center">
   <img src="web/static/logo-512.png" alt="Istota's octopus mark" width="160">
 </p>
 
 <h1 align="center">Istota</h1>
 
-<p align="center"><strong>Your personal AI operating system, on your own server.</strong></p>
+<p align="center"><strong>An open-source personal operating system with an AI agent and a first-class web UI.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/istota-project/istota" alt="EUPL-1.2 license"></a>
@@ -13,292 +12,144 @@
   <a href="https://istota.cynium.com/docs"><img src="https://img.shields.io/badge/docs-istota.cynium.com-blue" alt="Documentation"></a>
 </p>
 
-Istota (ee-stoh-tah, Polish for *being* or *entity*) is a self-hosted personal AI operating system that puts a loyal and opinionated octopus-shaped agent at the center of your digital life.
+Istota runs on your own server or in a VM on your Mac. It combines chat, persistent memory, background jobs, and web applications for feeds, briefings, health, location, and money. The agent works across these through a maintained set of tools, with filesystem isolation, network restrictions, and credential handling enforced by the runtime. You choose the model and the services it can access.
 
-It runs on a server or VM of your own and unifies your calendar, email, files, location, health, finances, feeds, conversations, and memory — or whatever subset of these you choose — across a single command layer.
+Istota has been in active development since February 2026. The application, task history, and personal records live on infrastructure you control, and the installer brings up a working system.
 
-Istota can reconstruct a day from appointments, places, and purchases; prepare you for a meeting from mail, documents, and past decisions; or turn unread feeds and newsletters into a briefing delivered every morning.
-
-It has a curated skillset, durable tasks, schedules, persistent memory, human approvals, and secure defaults. A full web app gives chat, health, location, money, feeds, briefings, notifications, and administration proper interfaces of their own. Talk to the agent there, over email, WhatsApp, SMS, or in Nextcloud Talk.
-
-Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. It serves one person or several from the same install, with or without Nextcloud.
-
-Multi-user is native. One Istota server can host several separate personal agents, each with its own memory, files, credentials, module data, rooms, and task queues. Shared rooms and files are explicit; using the same server does not collapse several people's lives into one agent profile.
-
-If you've used a local agent like OpenClaw or Hermes, parts of Istota will feel familiar: chat channels, tools, memory, scheduled jobs, and a choice of model providers. Istota's center of gravity is the personal system behind the agent. Health, location, money, feeds, and briefings are native applications with their own storage, CLI, and web UI. Its skillset is deliberately curated, and every executable skill uses the same command interface and credential boundary. The modules remain useful without a model. Together they give the agent durable, structured records it can reliably write, query and combine.
-
-Istota also ships with [`emissaries.md`](config/emissaries.md), a constitutional layer for what a personal agent owes to its user and to the people it encounters on that user's behalf. Think of it as a code of ethics for agents. It draws a sharp line between private counsel and public action: the agent may disagree honestly in private, but outward commitments must reflect its principal's judgment and remain traceable to a responsible person. It treats access to private data as power rather than license, and places honesty, dignity, and proportionality toward third parties above persona or user preference. Istota treats those principles and structural security as separate requirements; the sandbox, credential isolation, and confirmation gates enforce boundaries that a prompt cannot. In that respect, Istota shares the humanist premise of [Common Task](https://commontask.org/): people are ends rather than inputs to a system, and technology should be judged by how it affects their agency and well-being.
-
-> **Istota is pre-1.0 software under active development.** Interfaces, configuration, and database schemas may change between releases. Pin a release and read the [changelog](CHANGELOG.md) before upgrading.
-
-## A personal agent on rails
-
-A model can reason, but a dependable personal agent needs much more than a model loop. It needs known ways to act, boundaries around those actions, durable state, background execution, and deterministic interfaces for the work.
-
-The design is intentionally *cybernetic*. The agent observes, compares what happened with what was intended, acts, and records the result. Modules, schedules, heartbeats, notifications, and memory keep that loop running beyond a single chat turn.
-
-It's also opinionated. Common tasks have supported paths. Skills expose structured commands instead of teaching the model to improvise against internal files and databases. Sensitive operations pass through permission checks and credential boundaries. Repeatable work can become a scheduled command that does not call a model at all.
-
-| Rail | What it means in Istota |
-| --- | --- |
-| **Secure defaults** | Tasks start with scoped files, no direct database access, no ambient credentials, and allowlisted network access on the supported sandboxed deployment. Wider access is an operator decision. |
-| **Curated skillset** | Istota ships a maintained standard library of skills with documented behavior and live CLIs. Skills are selected on demand, and users can add personal instructions without changing the shared skill. |
-| **One command surface** | `istota-skill <skill> <command>` is the common interface to calendars, email, memory, health, money, feeds, files, Nextcloud, and other services. The agent, scheduler, and operator use the same command families. |
-| **Durable execution** | Every request enters a queue with a task identity, status, brain, permissions, retries, streamed events, and usage records. Foreground chat and background jobs have separate workers. |
-| **Structured personal data** | Health, location, money, feeds, and briefings have schemas, storage, CLIs, and web pages. Clear module interfaces let the agent cross-reference them in one task without inventing a new representation in each conversation. |
-| **Durable memory** | Per-user and per-room memory, hybrid search, a temporal knowledge graph, and learned playbooks carry facts and decisions across sessions. |
-| **Native multi-user** | One service hosts separate personal systems. User identity scopes every room, task, file, memory, credential, resource, and module query from intake through delivery. |
-| **Human control** | Confirmations, notifications, audit logs, explicit resource grants, and administrator-only operations keep consequential actions visible. |
-
-Those rails are the operating system around the agent. Native modules are its applications, skills are its system calls, the task queue is its scheduler, and the web app, chat surfaces, and CLI are ways to work with it. Per-user isolation gives the system real users and permissions. SQLite, plain files, Beancount, and optional Nextcloud storage provide the filesystem layer.
-
-The rails do not make the model mandatory. You can still read feeds, review transactions, inspect health records, browse location history, and use the module CLIs when no model is available. The agent adds a shared language interface and the ability to reason and act across the system.
-
-## Your life is not a data product
-
-This is not hyperbole. Location history shows where you sleep, work, travel, and seek care. Health records describe your body. Transactions reveal habits and relationships. Calendar, email, files, conversations, and reading history fill in the rest. Put together, this is an unusually complete record of a person.
-
-Istota is self-hosted because that record should remain under your control. The web app, scheduler, memory, task history, and module databases run on infrastructure you administer. There is no required Istota cloud account or hosted control plane. Data lives in SQLite and plain formats such as Markdown, TOML, CSV, JSON, and Beancount, so access does not depend on one company continuing to operate or choosing to treat you well.
-
-Self-hosting does not make outside services disappear. If you connect Nextcloud, email, Garmin, a market-data source, or another service, those systems receive the traffic needed to use them. If you choose a hosted model provider, task prompts and tool results sent to that model leave your server under that provider's terms. Istota lets you choose the model backend, including a local OpenAI-compatible endpoint, and makes those connections operator-controlled rather than mandatory parts of an Istota service.
-
-The agent is also constrained inside your own server. Sensitive credentials stay outside the model process, task files and network access are scoped, databases are hidden from sandboxed tasks, and consequential operations can require confirmation. The [security model](#secure-defaults-explicit-boundaries) describes what each deployment shape enforces and where its limits are.
-
-## The records connect
-
-Personal data becomes more informative when its sources can be read together. Each source records a different part of reality:
-
-- Your calendar records intent: where you meant to be, who you expected to meet, and what you set aside time to do.
-
-- Location history records presence: where your devices observed you and how long you stayed.
-
-- Transactions record economic activity: when and where money moved, what it was for, and which account it touched.
-
-- Email, conversations, files, and durable memory preserve the surrounding decisions and explanations.
-
-- Health records and Garmin data show measurements, activity, and changes over time.
-
-- Feeds, newsletters, bookmarks, and briefings record what you follow and what has already reached your attention.
-
-The pattern is feedback: compare intention with observation, notice the difference, act, and carry the result forward in memory.
-
-No source is a complete account. Their overlap can answer questions that one app cannot:
-
-| Task | Records Istota can combine |
-| --- | --- |
-| **Reconstruct a day or trip** | Compare the calendar's plan with observed visits, card transactions, messages, and saved documents to build a sourced timeline of what happened. |
-| **Prepare for a meeting** | Gather the calendar event, recent correspondence, shared files, open todos, room history, and remembered decisions into one briefing. |
-| **Understand an expense** | Use its date, merchant, location, nearby calendar events, travel history, and work records to identify the likely purpose before changing the ledger. |
-| **Reconcile work and invoices** | Compare scheduled meetings, the work log, client correspondence, invoices, and incoming payments to find work that may not have been billed or paid. |
-| **Review a health change** | Put measurements and Garmin trends beside travel, schedule changes, encounters, and notes to surface correlations for review without treating timing as proof of cause. |
-| **Follow an interest** | Collect unread feeds and newsletters, remove repeated stories, add relevant bookmarks or web sources, summarize the result into a personal briefing, and deliver it on a schedule. |
-| **Resume an old thread** | Search conversations, email, files, memory, and the knowledge graph to recover what was decided, why it was decided, and what remained open. |
-
-These compositions can happen in response to a question or as a scheduled workflow. Istota does not silently merge every source into one store. Each module owns its schema and permissions. The agent performs the join at task time through the same scoped CLI that exposes each module, reading only the records the task is allowed to use.
-
-## The web app
-
-Istota has a responsive, installable web app built with SvelteKit. It is the main place to see and organize information that does not fit well in a chat reply.
-
-| Area | What you can do |
-| --- | --- |
-| **Chat** | Keep separate rooms for different parts of your life, stream replies, attach files, record voice notes, reply to messages, and continue a conversation between the web and Nextcloud Talk. Recent rooms and messages remain available offline, and messages written without a connection are sent when it returns. |
-| **Health** | Track body measurements, import bloodwork, inspect biomarker trends, keep encounters and diagnoses, manage immunizations, attach source documents, and sync Garmin data. |
-| **Location** | See recent positions on a map, review visits and travel history, save places, and inspect automatically detected places and stays. |
-| **Money** | Review accounts and transactions, inspect balance-sheet, cash-flow, and income reports, track investments, estimate quarterly taxes, manage clients and invoices, and keep a work log. |
-| **Feeds** | Subscribe to RSS, Atom, Tumblr, and Are.na sources; read entries in a native feed reader; keep read state; and manage subscriptions without a third-party reading service. |
-| **Briefings** | Read and archive personal briefings assembled from newsletters, feeds, web pages, markets, calendars, todos, and shared content blocks. |
-| **Notifications** | Use one inbox for items that need attention, including failed scheduled jobs, expired Garmin authentication, and health imports awaiting confirmation. |
-| **Settings and administration** | Manage personal preferences and module settings. Administrators can inspect service health, usage, logs, and a credential-redacted view of the loaded configuration. |
-
-## Native modules
-
-### Health
-
-The health module keeps structured records and the documents behind them in one place. It handles body-stat time series, bloodwork panels, biomarker trends, encounters, diagnoses, immunizations, and Garmin daily data. Bloodwork can be entered manually, imported from CSV, or extracted from a document with OCR. Explanations generated by a model are stored separately from the source values, and measurements retain their units.
-
-### Location
-
-The location module accepts GPS pings from the Istota iOS app, Overland, and Garmin, identifies recurring places, and turns raw points into visits and travel history. The web map shows where you have been and lets you manage saved places. The agent can use the same data through a scoped location skill.
-
-### Money
-
-The money module combines a plain-text Beancount ledger with web views for accounts, transactions, financial statements, portfolio history, tax estimates, clients, invoices, and work records. Your ledger remains usable with ordinary Beancount tools outside Istota. The agent can help classify transactions, prepare reports, and work with the records through the same module interface.
-
-### Feeds
-
-The feed reader polls RSS and Atom feeds as well as Tumblr and Are.na sources. It stores subscriptions, entries, images, deduplication state, and read state in a per-user SQLite database. You can read in the web app, manage feeds from the CLI, or ask the agent to find and summarize material from your subscriptions.
-
-### Briefings
-
-A briefing is a saved, readable report built from ordered blocks. A block can gather newsletters, feeds, a browsed front page, market data, calendar events, todos, or content shared by more than one briefing. Briefings have their own reader and archive and can also be delivered through Talk, email, or ntfy.
-
-The modules are separate by design. Health does not need access to your ledger, and the feed reader does not need access to your calendar. Their common CLI gives the agent a controlled composition layer: it can query more than one module for a task without hard-wiring every possible relationship into the modules themselves.
-
-## An agent that can act within the system
-
-Istota does not hand the model a pile of unrelated integrations. A task receives the relevant conversation, memories, resources, and skill instructions, then works through a defined runtime with one of several interchangeable model backends.
-
-- **Pluggable brains.** Use the Claude Code CLI, Istota's in-process agent loop with any OpenAI-compatible API, or the Claude terminal UI. Choose a default, route certain source types to another brain, or pin an allowed brain to a room or scheduled job.
-
-- **Curated standard library.** Istota ships with 41 skills for calendar, email, files, web browsing, Google Workspace, GitHub and GitLab work, WordPress, bookmarks, transcription, OCR, reminders, schedules, health, money, location, feeds, briefings, and more. This is a maintained skillset with common conventions and security rules, not an open-ended marketplace installed into every task.
-
-- **Unified CLI.** Skills with executable operations share the `istota-skill <skill> <command>` interface and return structured output. The credential proxy, user scope, path checks, and audit behavior sit behind that interface, so callers do not need to reproduce them. The same commands can power an agent turn, a scheduled job, or an operator script:
-
-  ```bash
-  istota-skill calendar list --date today
-  istota-skill feeds entries --status unread
-  istota-skill money balances
-  istota-skill tasks recent
-  ```
-
-- **Persistent memory.** Each person and room can have durable Markdown memory. Nightly curation extracts dated memories, updates a temporal knowledge graph, and can distill successful procedures into reusable playbooks. Hybrid keyword and vector search retrieves relevant material later, so a thread can resume with its past decisions and unfinished work.
-
-- **Proactive work.** A conversation can become a reminder, a recurring prompt, or a deterministic scheduled command. Heartbeat checks watch files, URLs, deadlines, calendar conflicts, commands, and Istota itself. Cooldowns, quiet hours, failure tracking, notifications, and delivery rules let Istota act again when something changes or comes due.
-
-- **Several ways to talk.** The same task system accepts web chat, Nextcloud Talk, WhatsApp, SMS, threaded email, watched `TASKS.md` files, a terminal REPL, and direct CLI requests. Web chat and Talk share a room model; WhatsApp and SMS stay separate external conversations, each reached through one number.
-
-- **Durable execution.** Every request enters a SQLite queue before it runs. Foreground and background worker pools are separate for each user, so a long report or overnight job does not block an active conversation. Retries, confirmations, streamed events, cancellations, and usage records follow the task through one lifecycle.
-
-## Files and personal cloud
-
-Every user has a workspace for notes, configuration, inbox files, memories, scripts, and generated exports. That workspace can be an ordinary local directory or a Nextcloud-backed file tree.
-
-Nextcloud is a first-class integration, not a requirement. When connected, Istota can use Nextcloud for files, calendars, contacts, OAuth login, notifications, and Talk while acting as an ordinary user over standard protocols. Without it, the workspace is a local directory in the stack's state and people sign in with email.
-
-Data stays in formats that can be inspected and moved without Istota: SQLite, Markdown, TOML, JSON, CSV, and Beancount. Module data is stored per user. Online database backups, restore tooling, migration checks, and `istota doctor` cover the operational side of keeping that data on your own server.
-
-## One server, many personal systems
-
-Istota's multi-user model runs through the whole system. Every task carries its user's identity from message intake through the queue, prompt assembly, sandbox, skill calls, module queries, and final delivery. That identity determines which files, memories, credentials, resources, rooms, and databases the task can reach.
-
-Each person has their own profile and persona, module data, workspace, secrets, worker pools, and conversation history. Administrators can grant resources and administrator-only skills without making them ambient for everyone else. One person's long-running background job does not occupy another person's queue.
-
-Sharing is a separate, explicit act. Talk rooms and Nextcloud files create common spaces when people want them; private memory and module data remain personal. This makes one Istota instance suitable for a household, a small organization, or several independent users while preserving a separate personal system for each person.
-
-## Secure defaults, explicit boundaries
-
-The rails are enforced in code rather than left as instructions in the prompt. Istota treats model output as untrusted input. A server install uses several independent controls to limit what a task can reach:
-
-- **Filesystem isolation.** Each task runs in a bubblewrap sandbox with a scoped view of the current user's files. Framework and module databases are masked from the sandbox, and one administrator's repositories are never mounted into another's task.
-
-- **Credential isolation.** Sensitive credentials are removed from the model process. Skill commands run through a Unix-socket proxy that injects only the credentials declared for that skill and available to that user. The encrypted secret store's master key is never returned through the lookup channel.
-
-- **Network isolation.** Sandboxed tasks run in their own network namespace. Outbound connections pass through an allowlist-based CONNECT proxy, with TLS kept end to end. The native web-fetch path runs outside the task sandbox but applies its own SSRF and egress policy.
-
-- **Constrained writes.** The agent cannot open Istota's databases directly. Operations that originate in a sandbox are written as requests, validated against the task's own identity, and applied by the scheduler after the task succeeds.
-
-- **Resource limits.** Linux cgroups can cap memory, processes, and CPU for each task. Development builds run in a separate per-user dev container rather than through a Docker socket exposed to the task.
-
-The stack's daemon container carries the narrow grant bubblewrap needs (a seccomp and an AppArmor profile, no capabilities after a short root phase), and refuses to start if the sandbox cannot be built rather than running tasks unconfined. That grant is why the stack runs on a machine of its own. Read the [security documentation](https://istota.cynium.com/docs/deployment/security/) before exposing an instance or giving it sensitive resources.
-
-## How a request runs
-
-Every surface is a transport in front of one task queue. A message arrives, becomes a task with an identity and a brain, and its result is delivered back to the surface it came from and to any other destination the task was given.
-
-```text
-Web chat ──────────┐                                                                         ┌──> Web chat
-Nextcloud Talk ────┤                                                                         ├──> Nextcloud Talk
-WhatsApp ──────────┤                                                                         ├──> WhatsApp
-SMS ───────────────┤                                                                         ├──> SMS
-Email ─────────────┼──> durable task queue ──> prompt + relevant data ──> Brain ──> result ──┼──> Email
-TASKS.md ──────────┤                                     │                  │                ├──> ntfy push
-CLI / REPL ────────┤                                     │                  │                ├──> TASKS.md
-Scheduled jobs ────┤                                     │                  │                └──> CLI / REPL
-Heartbeat checks ──┘                                     │                  │
-                                                         │                  ├──> skills and connected services
-                                                         │                  └──> native modules
-                                                         └──> memory, resources, room history
-```
-
-The scheduler claims a task, selects its brain, assembles two prompt layers, starts the task runtime, and streams structured events to the surfaces that can show them. The system layer contains standing instructions and skill documentation. User-controlled material such as memories, retrieved facts, conversation history, and attachments stays in the user layer. A task keeps the brain and permissions it had when it was queued, even if room settings change while it is running.
-
-Scheduled jobs and heartbeat checks are task sources rather than transports; their results are delivered over whichever surface the job names. The surfaces themselves differ in what they can carry:
-
-| Surface | Inbound | Delivery | Room model |
-| --- | --- | --- | --- |
-| **Web chat** | Requests, attachments, voice notes | Streamed, with offline queueing | Canonical room view |
-| **Nextcloud Talk** | Requests and attachments in any room the agent is in | Progress acknowledgements, edited in place | External room view, mirrored with web chat |
-| **Email** | Mail sent to the agent's own address, including replies in a thread | Reply in the same thread | Joins an existing room's transcript, never creates one |
-| **WhatsApp** | Text and photographs to one number, through a paired session or Meta's Cloud API | Final reply, with buttons for confirmations where the adapter has them | Outside the room model |
-| **SMS** | Text messages to one number, through Twilio or Telnyx | Final reply, sized to the segment budget | Outside the room model |
-| **ntfy** | None; delivery only | Push notification to the user's own topic | Outside the room model |
-| **TASKS.md** | Lines added to a watched file | Written back to the line it came from | Outside the room model |
-| **CLI / REPL** | `istota task` and an interactive terminal | Streamed to the terminal | Outside the room model |
-
-WhatsApp and SMS carry the answer rather than the conversation: the exchange stays in task history under a stable per-user conversation token instead of in a room, and a confirmation sent there can be answered there. ntfy is delivery only. A reply can be pointed at any of the three explicitly.
+[Documentation](https://istota.cynium.com/docs/) · [Security model](docs/deployment/security.md) · [Changelog](CHANGELOG.md) · [EUPL-1.2](LICENSE)
 
 ## Install
 
-Istota has one deployment, the same on a server and on a Mac: a stack of containers (the scheduler, the web app and nginx) on a Debian 13 machine dedicated to it, with every task in a bubblewrap sandbox with its own cgroup. `istota-stack` is the one command that installs updates, changes settings and controls it. Nextcloud is optional; without it, storage is local.
+Choose a fresh Debian 13 machine dedicated to Istota, or an Apple silicon Mac with Lima. Both run the same container stack and Linux task sandbox. The machine must be dedicated because the container gets the access bubblewrap needs to build the sandbox, which is only acceptable with nothing else on the host. Have a model backend ready: an Anthropic or OpenRouter API key, or a Claude subscription token. Nextcloud is optional.
 
-Run the installer as root on a fresh Debian 13 machine (a VM, a VPS or a bare-metal box). It picks the newest release, verifies its tag against the project's release signing key, provisions the machine, builds the images there and starts the setup in your browser, which starts the stack when it finishes (`--terminal-setup` runs the setup wizard in the terminal instead). `istota-stack` manages it afterwards.
+### Server
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | sudo bash -s -- --server
-```
-
-`--tag vX.Y.Z` installs a specific release instead, and `--signing-key` names another key, for a fork's releases. `sudo istota-stack update` later installs the newest signed release.
-
-On an Apple silicon Mac, `install.sh --local` runs the same stack in a Lima VM, with a folder in your home as the workspace, and the Mac's `istota-stack` forwards every command into it; see the [local install](https://istota.cynium.com/docs/getting-started/local-install/). An optional Ansible role exists for machines managed from an estate inventory; nothing in an install needs it. Read an installer before piping it into a shell. For prerequisites, setup choices and updates, use the [quickstart](https://istota.cynium.com/docs/getting-started/quickstart-server/).
-
-The older standalone single-user install was removed. `istota-stack import-standalone` moves an existing one into the local VM; see [moving from the standalone install](https://istota.cynium.com/docs/getting-started/local-install/#moving-from-the-standalone-install).
-
-## Configuration
-
-Opinionated defaults do not make the system fixed. Configuration starts in TOML and can be overlaid with per-user records from the database. Users can manage their own resources, briefing settings, module settings, secrets, and preferences through the CLI or web app, subject to administrator policy.
-
-Common entry points, run on the machine:
+On a dedicated Debian 13 VM, VPS, or bare-metal machine:
 
 ```bash
-istota-stack setup                   # the setup wizard, inside the image
-istota-stack apply plan.toml         # write config.toml from a plan
-istota doctor                        # check runtime and service dependencies
-istota task "Summarize my unread feeds" -u alice -x
-istota secret --help                 # provision and inspect credentials
-istota user --help                   # manage users
-istota resource --help               # manage connected resources
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
+less install.sh
+sudo bash install.sh --server
 ```
 
-See the [configuration overview](https://istota.cynium.com/docs/configuration/overview/) and [complete reference](https://istota.cynium.com/docs/configuration/reference/).
+The installer verifies a signed release tag, provisions the machine, builds the images, and prints an address and one-use code for browser setup. The setup page configures your first user, model, storage, and connections, then starts the stack. The setup page uses a self-signed certificate, so your browser warns before opening it; compare the certificate's fingerprint with the one the installer printed. Add `--terminal-setup` to use the terminal wizard instead.
+
+[Server quickstart](docs/getting-started/quickstart-server.md)
+
+### Local on a Mac
+
+Requires Apple silicon and Lima 2.0 or later. With Homebrew installed:
+
+```bash
+brew install lima
+curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh -o install.sh
+less install.sh
+bash install.sh --local
+```
+
+Run this as your normal user. It creates a dedicated Debian VM, runs setup in the terminal, and opens a web link to set your password. The web app is available at `http://localhost:8080/istota/`. Your workspace is `~/Istota`, accessible from Finder; databases stay inside the VM, with snapshots written to the workspace. A copy of the credential master key is stored in your login Keychain.
+
+[Local install, requirements, and recovery](docs/getting-started/local-install.md)
+
+The older standalone single-user install was removed. `istota-stack import-standalone` moves an existing one into the local VM; see [moving from the standalone install](docs/getting-started/local-install.md#moving-from-the-standalone-install).
+
+### After setup
+
+Start in web chat. Chat, memory, task execution, and scheduling are included. Modules are on by default; turn off any you don't use, and connect accounts for email, calendars, or other external services. Their integrations ship with Istota; you still supply the accounts and credentials.
+
+Use `sudo istota-stack update` on the server or `istota-stack update` on the Mac to install the newest signed release. Updates build on your machine and preserve configuration and data. `istota-stack rollback` (with `sudo` on the server) returns to the previous release when its image can read the current database.
+
+Istota is pre-1.0 software. Configuration and schemas can change between releases; read the [changelog](CHANGELOG.md) before upgrading. A server can keep background jobs running around the clock. A local VM pauses while the Mac sleeps.
+
+## A complete system around the agent
+
+The applications hold your records, the scheduler runs background work, and the agent uses their tools under a shared permission model, with documented interfaces and ways to inspect the result.
+
+- **A maintained toolset.** Calendar, email, files, browsing, memory, scheduling, and the native modules ship with documented commands. You do not need to assemble a plugin collection to get the basic system working. Executable skills share the `istota-skill <skill> <command>` interface, with user scoping and credential access enforced behind it.
+- **Durable tasks.** Requests enter a SQLite queue before execution. Task status, retries, confirmations, cancellation, streamed events, and usage records follow the request. Separate foreground and background workers keep scheduled work from occupying every conversational worker.
+- **Work between conversations.** Reminders, recurring prompts, briefings, and heartbeat checks run through the scheduler. Repeatable operations can run as scheduled commands without calling a model.
+- **Memory you can inspect.** Markdown memory, conversation search, a temporal knowledge graph, and reusable playbooks carry context between tasks. Memory is scoped to users, rooms, and groups.
+
+The toolset is extensible. Operators can override a skill's instructions, users can add their own instructions to a skill, and contributors can add new skills. See the [skills index](docs/reference/skills-index.md), [per-skill overlays](docs/configuration/per-user.md#per-skill-overlays), and [adding skills](docs/development/adding-skills.md).
+
+## A web UI for the work and its records
+
+The responsive SvelteKit web app is a primary interface. Use chat to delegate work, then use the module pages to inspect and edit the underlying records.
+
+| Area | What is included |
+| --- | --- |
+| Chat | Rooms, streamed replies, attachments, voice notes, message replies, and task progress. |
+| Feeds and briefings | An RSS/Atom reader with Tumblr and Are.na support, plus saved briefings assembled from sources such as feeds, newsletters, calendars, and the web. |
+| Health | Measurements, bloodwork, biomarker trends, encounters, immunizations, source documents, and Garmin data. |
+| Location | Maps, GPS history, detected visits, and saved places. |
+| Money | A Beancount ledger with transaction and account views, financial reports, portfolio history, invoices, and work records. |
+| Search and notifications | Search across configured sources and an inbox for failures, pending work, and other items that need attention. |
+| Settings and administration | Preferences, delivery, connections, credentials, and wallet; for admins, service health, usage, logs, and configuration editing. |
+
+The record views and ordinary module operations work without a model call. The agent can query several modules in one task: prepare a meeting brief from calendar events and correspondence, compare a trip's visits with its expenses, or turn unread feeds into a morning briefing. See the [web interface](docs/features/web-interface.md) documentation.
+
+You can also reach the agent through [email](docs/features/email.md), [WhatsApp](docs/features/whatsapp.md), [SMS](docs/features/sms.md), [Nextcloud Talk](docs/features/talk.md), or the [CLI](docs/reference/cli.md). These use the same task system; each external service needs its own connection setup.
+
+## Isolation and credential handling
+
+The supported deployment runs on a dedicated Linux machine or VM. Inside it, the task sandbox limits what model-driven tools can reach.
+
+- **Filesystem isolation.** Bubblewrap exposes the task's allowed workspace and resources. Framework and module databases are hidden from sandboxed processes; access goes through user-scoped operations outside the sandbox. A Linux deployment refuses to start if it cannot build the sandbox.
+- **Network isolation.** Sandboxed processes have no direct network access. Outbound connections pass through a proxy with an allowed destination list. Host-side skills, web fetching, and browser services have separate access policies, described in the security documentation.
+- **Credential separation.** Skill credentials are injected into host-side operations. The credential broker lets sandboxed tools use placeholders that are replaced with secrets only for authorized destinations. Broker and reveal enforcement are on by default; explicitly readable entries are an exception.
+- **Resource containment.** Task cgroups bound memory, CPU, and process use. With the optional devbox enabled, development builds run in a separate per-user container. Tasks receive no Docker socket.
+
+These controls limit the damage a mistaken or manipulated model can cause. They do not make every permitted action correct or prevent data from leaving through an authorized service. Confirmation requirements and service permissions still matter. The operator controls the host and remains trusted.
+
+On a Mac, these controls run inside the Lima VM. Running the development server (`uv run istota serve`) directly on macOS does not provide the same isolation.
+
+Read the [security model](docs/deployment/security.md) and [credential broker documentation](docs/configuration/credentials.md#credential-broker) for the boundaries and exceptions.
+
+## Emissaries
+
+The agent's standing instructions include [`emissaries.md`](config/emissaries.md), a set of principles for how a personal agent acts for its user and toward the people it deals with on that user's behalf. They sit before the persona, apply to every user, and cannot be overridden per user. An operator can turn them off, and briefings skip them.
+
+- **Private counsel, public accountability.** In private, the agent may disagree and say so. Anything it sends, posts, or commits to in public must be something its user would endorse, and stays traceable to that person. When in doubt, it asks first.
+- **Obligations to third parties.** The agent does not claim to be human when sincerely asked, does not demean or manipulate the people it deals with, and does not take irreversible actions on ambiguous instructions. The user cannot instruct it out of these.
+- **Access is not license.** Access to private mail, relationships, and finances is used only in the user's interest, and private things stay private.
+
+The principles shape the agent's judgment; the sandbox, credential handling, and confirmation requirements enforce the boundaries a prompt cannot. See [persona and emissaries](docs/configuration/persona.md) and the [Emissaries framework](https://github.com/istota-project/emissaries).
+
+## Your data and your model
+
+Istota requires no Istota cloud account or hosted control plane. Records live in SQLite, plain files, and formats such as Markdown, JSON, CSV, and Beancount. You can inspect, back up, and move them with ordinary tools. Nextcloud can provide files, calendars, contacts, login, and Talk; a local workspace works without it.
+
+Two main model paths are supported:
+
+- **Claude Code:** the Claude Code CLI runs the agent loop.
+- **Native brain:** Istota runs the loop against an OpenAI-compatible Chat Completions endpoint: Anthropic's API, OpenRouter, or a local model server. A local server is configured after setup. The model and endpoint need compatible tool calling; model quality and supported modalities affect which tasks work well.
+
+Changing the backend leaves your application data and task system in place. A hosted provider receives the prompts and tool results sent to it. A local model keeps those inference requests local; connected services still receive the traffic needed to use them.
+
+See [native brain configuration](docs/configuration/native-brain.md) and the [`[brain]` reference](docs/configuration/reference.md#brain). A model server on the Mac itself also needs the local VM's explicit [host-port allowance](docs/getting-started/local-install.md#reaching-a-service-on-your-mac).
+
+## One install for several people
+
+Each user has separate files, credentials, personal memory, module data, and task queues. User identity follows a request through intake, sandbox setup, skill calls, and delivery.
+
+Shared rooms and groups make collaboration explicit. In shared chat rooms, personal memory is withheld from the prompt. A member's turn runs with that member's full reach; a guest's turn runs as the host and reaches nothing of the host's. Sharing a room is therefore a deliberate audience choice. Email thread rooms differ: admitted mail runs as the host, with memory loaded.
+
+See [shared rooms](docs/features/shared-rooms.md) and [groups](docs/features/groups.md).
 
 ## Development
 
-Istota's backend and task runtime are Python. The web app is SvelteKit. The repository also contains the stack's compose file and images, the host provisioning scripts, an optional Ansible management role, the browser service, deployment tests, and a full local testbed.
+The backend and task runtime are Python; the web app is SvelteKit with a FastAPI backend. Docker Compose and host scripts define the deployment. An optional Ansible role manages installations from an existing inventory.
 
 ```bash
 uv sync --extra test
-
-ruff check --output-format concise src tests testbed docker/browser docker/devbox docker/istota scripts
-scripts/qtest uv run pytest
-```
-
-For web work:
-
-```bash
 npm --prefix web ci
-npm --prefix web run lint:design
-npm --prefix web run check
-scripts/qtest npm --prefix web run test
-npm --prefix web run format:check
 ```
 
-On a Mac checkout, `uv run istota serve` runs the scheduler and the web app in one unsandboxed process on loopback, for the edit-run loop. The default Python suite omits tests that need live services, Linux sandboxing, built images, Docker Compose, the full testbed, or a deployment host. Read the [testing guide](https://istota.cynium.com/docs/development/testing/) before working on those paths.
-
-## Documentation
-
-- [Documentation](https://istota.cynium.com/docs)
-- [Web interface](https://istota.cynium.com/docs/features/web-interface/)
-- [SMS](https://istota.cynium.com/docs/features/sms/)
-- [WhatsApp](https://istota.cynium.com/docs/features/whatsapp/)
-- [Architecture overview](https://istota.cynium.com/docs/architecture/overview/)
-- [Skills index](https://istota.cynium.com/docs/reference/skills-index/)
-- [Command reference](https://istota.cynium.com/docs/reference/commands/)
-- [Changelog](CHANGELOG.md)
+Start with the [development setup](docs/development/setup.md), [architecture overview](docs/architecture/overview.md), and [testing guide](docs/development/testing.md). Linux sandbox and deployment changes have dedicated test tiers; the ordinary unit suite does not exercise those boundaries.
 
 ## License
 
-Istota is released under the [European Union Public Licence 1.2](LICENSE) (EUPL v1.2), the European Commission's reciprocal open-source license.
+[European Union Public Licence 1.2](LICENSE), a reciprocal open-source license.
 
 ---
 

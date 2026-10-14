@@ -4,8 +4,21 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Layer 1: system + diagnostic toolkit. Kept in one apt invocation so the
 # image stays slim — anything else the agent needs can be installed at
-# runtime with apt-get / pip / cargo / npm.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# runtime with apt-get / pip / cargo / npm. A mirror set here stays in the
+# image's sources, so the runtime installs use it too.
+# APT_MIRROR is host.env's, passed by istota-stack: a Debian mirror in place
+# of deb.debian.org, whose CDN stalls some connections. The cache mounts keep
+# downloaded packages between builds; zz-build-cache moves them out of the
+# directory the base image's docker-clean empties, and is gone again before
+# the layer is written. tests/test_apt_mirror.py holds the three Dockerfiles
+# that run apt to this.
+ARG APT_MIRROR=
+RUN --mount=type=cache,id=devbox-apt-archives,target=/var/cache/apt-build,sharing=locked \
+    --mount=type=cache,id=devbox-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "$APT_MIRROR" ]; then sed -i -E "s#^(URIs: )https?://deb\.debian\.org/debian\$#\1${APT_MIRROR}#" /etc/apt/sources.list.d/debian.sources; fi \
+    && mkdir -p /var/cache/apt-build/partial \
+    && echo 'Dir::Cache::Archives "/var/cache/apt-build";' > /etc/apt/apt.conf.d/zz-build-cache \
+    && apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config \
         python3 python3-venv python3-pip \
         git curl wget jq yq sqlite3 ripgrep fd-find htop less \
@@ -15,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tcpdump iperf3 netbase \
         sudo ca-certificates locales \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
@@ -28,9 +41,13 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # Note that docker/istota/Dockerfile and the Ansible role still install Node 20
 # — that is the runtime the shipped web bundle is built and served with, and
 # moving it is a change to the deployed artifact rather than to this box.
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+RUN --mount=type=cache,id=devbox-apt-archives,target=/var/cache/apt-build,sharing=locked \
+    --mount=type=cache,id=devbox-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    mkdir -p /var/cache/apt-build/partial \
+    && echo 'Dir::Cache::Archives "/var/cache/apt-build";' > /etc/apt/apt.conf.d/zz-build-cache \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get update && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
 # Layer 3: Go. Pinned to a versioned URL so rebuilds are reproducible — bump
 # deliberately, not opportunistically.

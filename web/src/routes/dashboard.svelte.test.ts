@@ -152,6 +152,31 @@ describe('the dashboard with no connection', () => {
   });
 });
 
+describe('the welcome card while the timezone is outstanding', () => {
+  it('holds its place in the grid and fills in without changing its note', async () => {
+    // Rendered only once `/profile` answered, the card arrived after the tiles
+    // and pushed every one of them down a row.
+    getMe.mockResolvedValue(person());
+    let answer!: (value: { profile: { timezone?: string } | null }) => void;
+    getProfile.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+
+    const { container } = render(DashboardInLayout);
+    await screen.findByText('Talk to Istota in the app');
+
+    const card = container.querySelector('.welcome-card');
+    expect(card).not.toBeNull();
+    expect(card!.classList.contains('pending')).toBe(true);
+    expect(card!.previousElementSibling).toBeNull();
+    const note = container.querySelector('.welcome-note')!.textContent;
+
+    answer({ profile: { timezone: 'Europe/Warsaw' } });
+
+    await waitFor(() => expect(card!.classList.contains('pending')).toBe(false));
+    expect(container.querySelector('.welcome-card')).toBe(card);
+    expect(container.querySelector('.welcome-note')!.textContent).toBe(note);
+  });
+});
+
 describe('the dashboard when the connection returns', () => {
   it('follows the live identity rather than pinning the cached copy', async () => {
     // The layout swaps a cached identity for the live one on reconnect

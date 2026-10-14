@@ -1,13 +1,17 @@
 """Tests for calendar skill — all-day event timezone filtering + CLI."""
 
+import logging
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from istota.skills.calendar import (
     Calendar,
+    get_calendars_for_user,
     get_events, create_event, update_event, cmd_create, cmd_update, cmd_delete, cmd_list,
     build_parser, main,
     _parse_datetime, _get_date_range,
@@ -492,9 +496,10 @@ def _fake_calendar(name: str, url: str, owner: str):
     cal = MagicMock()
     cal.name = name
     cal.url = url
-    cal.get_properties.return_value = {
-        "{DAV:}owner": f"/remote.php/dav/principals/users/{owner}/",
-    }
+    owner_prop = ET.fromstring(
+        f'<d:owner xmlns:d="DAV:"><d:href>/remote.php/dav/principals/users/{owner}/</d:href></d:owner>'
+    )
+    cal.get_properties.return_value = {"{DAV:}owner": owner_prop}
     return cal
 
 
@@ -582,3 +587,81 @@ class TestTheCliScopesCalendarsToTheTaskUser:
             main(["list", "--calendar", BOB_URL])
         assert exc.value.code == 1
         assert '"status": "error"' in capsys.readouterr().out
+
+
+# --- Calendar write access, read off the real caldav parsing path ------------
+
+CAL_PATH = "/remote.php/dav/calendars/istota/personal_shared_by_alice/"
+_OWNER_PROP = "<d:owner><d:href>/remote.php/dav/principals/users/alice/</d:href></d:owner>"
+
+
+def _privileges(*names: str) -> str:
+    inner = "".join(f"<d:privilege><d:{n}/></d:privilege>" for n in names)
+    return f"<d:current-user-privilege-set>{inner}</d:current-user-privilege-set>"
+
+
+def _multistatus(found: str, missing: str = "") -> bytes:
+    body = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+        f"<d:response><d:href>{CAL_PATH}</d:href>"
+        f"<d:propstat><d:prop>{found}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+    )
+    if missing:
+        body += (
+            f"<d:propstat><d:prop>{missing}</d:prop>"
+            "<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>"
+        )
+    return (body + "</d:response></d:multistatus>").encode()
+
+
+def _discover(xml: bytes):
+    """Run discovery for alice over a real caldav Calendar whose PROPFIND answers ``xml``."""
+    import caldav
+    from caldav.davclient import DAVResponse
+
+    client = caldav.DAVClient(url="https://cloud.example.com/remote.php/dav/")
+    sent = []
+
+    def propfind(url, body, depth):
+        sent.append(body)
+        response = SimpleNamespace(
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+            status_code=207, content=xml, text=xml.decode(),
+        )
+        return DAVResponse(response)
+
+    client.propfind = propfind
+    calendar = caldav.Calendar(client=client, url=CAL_PATH, name="Personal")
+    client.principal = lambda: SimpleNamespace(calendars=lambda: [calendar])
+    return get_calendars_for_user(client, "alice"), sent
+
+
+class TestCalendarWriteAccess:
+    @pytest.mark.parametrize("found, missing, writable", [
+        (_OWNER_PROP + _privileges("read", "write"), "", True),
+        (_OWNER_PROP + _privileges("read", "write-properties"), "", False),
+        (_OWNER_PROP + _privileges("all"), "", True),
+        (_OWNER_PROP, "<d:current-user-privilege-set/><oc:read-only/>", True),
+        (_OWNER_PROP + _privileges("read", "write") + "<oc:read-only>true</oc:read-only>", "", False),
+    ], ids=["write", "write-properties-only", "all", "absent", "oc-read-only"])
+    def test_writable_follows_the_privilege_set(self, caplog, found, missing, writable):
+        caplog.set_level(logging.ERROR)
+        calendars, _ = _discover(_multistatus(found, missing))
+        assert calendars == [("Personal", f"https://cloud.example.com{CAL_PATH}", writable)]
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_one_propfind_asks_for_owner_privileges_and_read_only(self):
+        _, sent = _discover(_multistatus(_OWNER_PROP + _privileges("read")))
+        assert len(sent) == 1
+        props = {el.tag for el in ET.fromstring(sent[0]).iter()}
+        assert {
+            "{DAV:}owner",
+            "{DAV:}current-user-privilege-set",
+            "{http://owncloud.org/ns}read-only",
+        } <= props
+
+    def test_another_users_calendar_is_skipped(self):
+        bob = _OWNER_PROP.replace("alice", "bob")
+        calendars, _ = _discover(_multistatus(bob + _privileges("write")))
+        assert calendars == []

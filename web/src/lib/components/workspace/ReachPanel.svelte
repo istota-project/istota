@@ -1,13 +1,22 @@
 <script lang="ts">
+  import { Bot } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import ReachBadge from './ReachBadge.svelte';
   let { place, notes }: { place: WorkspacePlace; notes: string[] } = $props();
 </script>
 
-<details class="reach-panel">
-  <summary>How Istota reaches your files</summary>
-  <div class="reach-body">
-    {#if place.kind !== 'nextcloud'}
+<!-- The Nextcloud view is the user's own, so its note is the whole story and stays visible. -->
+{#if place.kind === 'nextcloud'}
+  {#if place.reach.note}<p class="reach-notice">{place.reach.note}</p>{/if}
+{:else}
+  <details class="reach-panel">
+    <summary>How Istota reaches your files</summary>
+    <div class="reach-body">
+      <p class="reach-legend">
+        <Bot size={14} role="img" aria-label="The robot icon" /> in the sidebar means your tasks can reach
+        that place, in any of your rooms, or for a room folder, only in that room. Places without it are
+        visible to you only.
+      </p>
       {#each notes as note}<p>{note}</p>{/each}
       <dl>
         <dt>Private room</dt>
@@ -17,17 +26,21 @@
         <dt>Guest turn or unasked task</dt>
         <dd><ReachBadge access={place.reach.restricted} /></dd>
       </dl>
-    {/if}
-    {#if place.reach.note}<p>{place.reach.note}</p>{/if}
-  </div>
-</details>
+      {#if place.reach.note}<p>{place.reach.note}</p>{/if}
+    </div>
+  </details>
+{/if}
 
 <style>
-  .reach-panel {
+  .reach-panel,
+  .reach-notice {
     border-bottom: 1px solid var(--border-subtle);
     padding: var(--space-3);
     font-size: var(--text-sm);
     color: var(--text-muted);
+  }
+  .reach-notice {
+    margin: 0;
   }
   summary {
     cursor: pointer;
@@ -36,8 +49,11 @@
   .reach-body {
     padding-top: var(--space-2);
   }
-  p {
+  .reach-body p {
     margin: var(--space-2) 0;
+  }
+  .reach-legend :global(svg) {
+    vertical-align: text-bottom;
   }
   dl {
     display: grid;

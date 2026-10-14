@@ -603,7 +603,7 @@ Exit codes: 0 done, 1 a failure, 2 `apply` changed the config (or `check-image` 
 The [local install](../getting-started/local-install.md) puts a Mac-side `istota-stack` and `istota` into `~/.local/bin`. Run them as yourself, never with `sudo`. The VM is the Lima instance `istota`, or `ISTOTA_LIMA_INSTANCE`.
 
 ```bash
-istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] \
+istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] [--disk GIB] \
     ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt] [--terminal-setup | --no-setup]
 istota-stack start | stop | status | shell
 istota-stack open [--files]                 # the web UI; --files the workspace in Finder

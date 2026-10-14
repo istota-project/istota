@@ -9,15 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
-
-**Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
-
 - **Change the setup in a browser.** `istota-stack setup --web --force` opens the setup page over a configured stack, filled in with the current answers. The stack is stopped while the page is open. If you close the page or cancel with `istota-stack setup-cancel`, the previous setup is put back and the stack starts again. On a Mac the same command opens the page in your browser once it is ready, and Ctrl-C cancels it. `istota-stack status` now says when the web page is published on a port other than the one the Mac forwards, rather than blaming Lima.
 
 ### Changed
 
-- **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
 - **The local VM sets up in the browser.** `istota-stack create` on a Mac, and `install.sh --local`, now open the setup page in your browser and finish in one run. `--terminal-setup` keeps the questions in the terminal.
 
 ### Fixed
@@ -25,10 +20,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Re-running setup in the terminal keeps your answers.** `istota-stack setup --force` used to offer first-run defaults, so pressing Enter could change the address and move the local VM's web page off the port it is reached on. Every question now defaults to the current value, stored credentials are kept unless you enter new ones, and the previous config and stack files are backed up first.
 - **The local VM's web page stays on the port your Mac forwards.** A VM created with `--port` other than 8080 could end up with its web page and the browser setup page on 8080, which nothing forwards. Setup now uses the forwarded port as the default address and refuses another one, naming the right address.
 
+## [0.45.0] - 2026-10-14
+
+You can now share your Nextcloud calendars and address books with Istota from Settings, choosing read-only or read and write for each, and Istota can look up and edit contacts in those address books and in Google Contacts. The Workspace sidebar marks which places Istota can reach in your tasks.
+
+Installing and updating no longer need a tag or a signing key: both move to the newest signed release. The Mac install sizes its VM to the Mac, a Debian mirror can be set for the VM and image builds, and the health checks now sign in to Nextcloud as the bot. This release is 53 commits, against 756 in 0.44.0 and 418 in 0.43.0; the rest is small fixes and the removal of the standalone install.
+
+**Before you upgrade.**
+
+- To use Google Contacts, enable the People API in your Google Cloud project, select Contacts in the Google Workspace settings and reconnect. An explicit scope ceiling needs both Contacts read-only scopes (`docs/features/contacts.md`).
+- The standalone install is removed. Move one with `istota-stack import-standalone`, not `istota update` (`docs/getting-started/local-install.md`).
+
+### Added
+
+- **Share calendars and address books with Istota from Settings.** The Nextcloud card lists them and shares each with the bot at No access, Read-only or Read and write, over your own connection. Needs `token_storage = "encrypted"`. See docs/features/nextcloud.md.
+- **Contacts.** Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts, including Google's read-only Other contacts. Results say which source they came from. See docs/features/contacts.md.
+- **The Workspace sidebar shows what Istota can reach.** A robot icon marks each place your tasks can use, pinned files and folders included; places without it are visible only to you.
+- **Nextcloud health checks.** The checks sign in to Nextcloud as the bot, so a revoked app password or a wrong bot account shows as a failed check. Admin → Connections has a Nextcloud card with the last result and a button to check again.
+- **The Mac install sizes its VM to the Mac**, and asks before using those defaults; `--cpus`, `--memory` and `--disk` set them directly.
+- `APT_MIRROR` in `host.env` names a Debian mirror for the VM and the image builds, and builds keep downloaded packages between runs.
+- Interactive terminal setup opens with a small octopus and an Istota wordmark.
+
+### Changed
+
+- **Installing and updating need no tag or key.** `install.sh` and `istota-stack update` move to the newest signed release, verified against the project's release key. `--tag` and `--signing-key` still pick a release or a fork's key. See docs/getting-started/quickstart-server.md.
+
+### Fixed
+
+- A calendar shared with the bot read-only is now listed to the model as read-only.
+
 ### Removed
 
-- **The standalone install is gone.** `install.sh --standalone` and `istota setup` outside the image now point at `install.sh --local` and `istota-stack import-standalone`; `istota update` is removed. `istota serve` stays for development on a checkout. See docs/getting-started/local-install.md.
-- **Upgrade note:** move a standalone install with `istota-stack import-standalone` rather than `istota update`, which would leave it with no web UI.
+- **The standalone install is gone.** `install.sh --standalone` and `istota setup` outside the image point at `install.sh --local` and `istota-stack import-standalone`; `istota update` is removed. `istota serve` stays for development. See docs/getting-started/local-install.md.
 
 ## [0.44.0] - 2026-10-13 (Coconut octopus)
 
@@ -96,6 +119,8 @@ Shared rooms are friendlier by default: a cheap model decides whether a group tu
 
 ### Fixed
 
+- On a Mac whose VM was already set up for a different port, `istota-stack create` now prints the address that actually answers and remembers it, instead of the port it was asked for.
+- `install.sh --local` on a Mac whose VM already exists now installs a signed release. The VM is given the release key when it has none recorded, instead of every signed tag being refused.
 - The admin Logs, Health, Browsers and backup views, location pings, SMS callbacks, web cancel and notices to WhatsApp all work on the Docker stack again.
 - The image now includes `gws`, `gitleaks` and `pdftotext`, so Google Workspace, unattended commits and PDF reading work.
 - `istota-stack update`, `rollback`, `setup` and `localize-workspace` are more reliable. Updates reclaim build cache, rollback restores the host scripts, and the stack logs to the journal.
@@ -3253,7 +3278,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.44.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.45.0...main
+[0.45.0]: https://github.com/istota-project/istota/releases/tag/v0.45.0
 [0.44.0]: https://github.com/istota-project/istota/releases/tag/v0.44.0
 [0.43.0]: https://github.com/istota-project/istota/releases/tag/v0.43.0
 [0.42.0]: https://github.com/istota-project/istota/releases/tag/v0.42.0

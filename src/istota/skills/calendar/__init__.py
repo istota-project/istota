@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
+from istota.lib.dav_xml import principal_user
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 
 try:
@@ -60,18 +61,57 @@ def list_calendars(client: caldav.DAVClient) -> list[tuple[str, str]]:
     return [(cal.name, str(cal.url)) for cal in calendars]
 
 
-def get_calendar_owner(calendar: caldav.Calendar) -> str | None:
-    """Get the owner username from a calendar's DAV properties."""
+_OWNER = "{DAV:}owner"
+_PRIVILEGE_SET = "{DAV:}current-user-privilege-set"
+_OC_READ_ONLY = "{http://owncloud.org/ns}read-only"
+_WRITE_PRIVILEGES = ("{DAV:}write", "{DAV:}all")
+
+
+def _access_props(calendar: caldav.Calendar) -> dict:
+    """The calendar's owner, privilege set and ``oc:read-only``, as raw elements.
+
+    caldav has no element for ``current-user-privilege-set``, and its parsed
+    path logs a traceback on it, so this asks for unparsed elements instead.
+    A calendar whose properties cannot be read gives ``{}``.
+    """
+    from caldav.elements.base import BaseElement
+
+    class CurrentUserPrivilegeSet(BaseElement):
+        tag = _PRIVILEGE_SET
+
+    class ReadOnly(BaseElement):
+        tag = _OC_READ_ONLY
+
     try:
-        props = calendar.get_properties([caldav.dav.Owner()])
-        owner_path = props.get("{DAV:}owner", "")
-        # Parse username from path like /remote.php/dav/principals/users/alice/
-        if "/principals/users/" in owner_path:
-            parts = owner_path.rstrip("/").split("/")
-            return parts[-1] if parts else None
+        return calendar.get_properties(
+            [caldav.dav.Owner(), CurrentUserPrivilegeSet(), ReadOnly()],
+            parse_props=False,
+        )
     except Exception:
-        pass
-    return None
+        return {}
+
+
+def get_calendar_owner(owner) -> str | None:
+    """The user id in a ``DAV:owner`` element, or None when it names no user."""
+    return principal_user(owner)
+
+
+def _calendar_writable(props: dict) -> bool:
+    read_only = props.get(_OC_READ_ONLY)
+    if read_only is not None and (read_only.text or "").strip().lower() in {"true", "1"}:
+        return False
+    privileges = props.get(_PRIVILEGE_SET)
+    if privileges is None:
+        # No privilege set reported: keep the old answer so a server that
+        # does not send one is not made read-only.
+        return True
+    # Only the whole `write` (or `all`) counts: a read-only Nextcloud share
+    # still carries `write-properties`.
+    for privilege in privileges.findall("{DAV:}privilege"):
+        for granted in privilege:
+            if granted.tag in _WRITE_PRIVILEGES:
+                return True
+    return False
 
 
 def get_calendars_for_user(
@@ -82,20 +122,18 @@ def get_calendars_for_user(
     Get calendars owned by a specific user.
 
     Returns list of (name, url, writable) tuples for calendars where the
-    DAV owner matches the given username.
+    DAV owner matches the given username. ``writable`` is what the
+    connecting account may do with the calendar.
     """
     principal = client.principal()
     calendars = principal.calendars()
 
     result = []
     for cal in calendars:
-        owner = get_calendar_owner(cal)
-        if owner == username:
-            # Check if writable by looking at current-user-privilege-set
-            # For now, assume shared calendars may be read-only
-            # We'll determine this by trying to check ACL or just mark as unknown
-            writable = True  # Default assumption; will fail gracefully on write
-            result.append((cal.name, str(cal.url), writable))
+        props = _access_props(cal)
+        if get_calendar_owner(props.get(_OWNER)) != username:
+            continue
+        result.append((cal.name, str(cal.url), _calendar_writable(props)))
 
     return result
 

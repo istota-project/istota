@@ -2224,7 +2224,7 @@ function mockUsageTotals(o: {
 
 const mockAdminStats = {
   system: {
-    version: '0.44.0',
+    version: '0.45.0',
     uptime_seconds: 345600,
     db_size_bytes: 119447552,
     python_version: '3.12.3',
@@ -3357,6 +3357,37 @@ const GOOGLE_SCOPES: Record<string, { readonly: string[]; full: string[] }> = {
 };
 
 const LEVEL_RANK: Record<string, number> = { off: 0, readonly: 1, full: 2 };
+
+// Nextcloud calendar and address-book sharing. Seeded with one share above a
+// readonly calendar ceiling, so the "above this instance's limit" row is
+// reachable without touching anything. `apply: false` on a row stands in for
+// Nextcloud answering 200 to a share it did not apply.
+const mockNcSharing = {
+  bot: 'istota',
+  kinds: {
+    calendars: { ceiling: 'readonly', available: true },
+    contacts: { ceiling: 'full', available: true },
+  } as Record<string, { ceiling: string; available: boolean }>,
+  collections: [
+    { id: 'a1b2c3d4e5f6', kind: 'calendars', name: 'Personal', level: 'full', apply: true },
+    { id: 'b2c3d4e5f6a1', kind: 'calendars', name: 'Work', level: 'off', apply: true },
+    { id: 'c3d4e5f6a1b2', kind: 'contacts', name: 'Contacts', level: 'off', apply: true },
+    { id: 'd4e5f6a1b2c3', kind: 'contacts', name: 'Clients', level: 'off', apply: false },
+  ],
+};
+
+function mockNcSharingPayload() {
+  return {
+    bot: mockNcSharing.bot,
+    kinds: mockNcSharing.kinds,
+    collections: mockNcSharing.collections.map(({ id, kind, name, level }) => ({
+      id,
+      kind,
+      name,
+      level,
+    })),
+  };
+}
 
 const GOOGLE_SCOPE_OWNER: Record<string, string> = Object.fromEntries(
   Object.entries(GOOGLE_SCOPES).flatMap(([svc, m]) =>
@@ -5418,9 +5449,14 @@ const workspacePlaces: WorkspacePlace[] = [
     id: 'nextcloud',
     kind: 'nextcloud',
     label: 'Nextcloud',
-    browsable: false,
+    browsable: true,
     view_root: null,
-    reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
+    reach: {
+      private: 'none',
+      shared_member: 'none',
+      restricted: 'none',
+      note: 'Only you can see this view. It uses your personal Nextcloud connection, which tasks never use. Istota’s Nextcloud skill uses the bot’s own account instead. To work on a file with Istota, put a copy in My files.',
+    },
   },
   {
     id: 'talk',
@@ -5835,9 +5871,49 @@ const handlers: MockHandler[] = [
       // which is the server's own rule.
       return { ok: true, generated: b?.generate ? `mock-${Date.now()}-passphrase` : '' };
     }
-    if (url === '/istota/api/settings/nextcloud-token' && method === 'DELETE') {
+    if (url.split('?')[0] === '/istota/api/settings/nextcloud-token' && method === 'DELETE') {
+      if (new URLSearchParams(url.split('?')[1] ?? '').get('unshare') === 'true') {
+        for (const c of mockNcSharing.collections) if (c.apply) c.level = 'off';
+        const still = mockNcSharing.collections.filter((c) => c.level !== 'off');
+        if (still.length > 0) {
+          return {
+            __status: 409,
+            error: 'Could not stop sharing.',
+            still_shared: still.map((c) => c.name),
+          };
+        }
+      }
       user.nextcloud_token = { connected: false, expires_at: null };
-      return { ok: true };
+      return { ok: true, was_connected: true };
+    }
+    if (url === '/istota/api/settings/nextcloud-sharing' && method === 'GET') {
+      if (!user.nextcloud_token?.connected) {
+        return { __status: 409, error: 'Nextcloud is not connected. Reconnect in Settings.' };
+      }
+      return mockNcSharingPayload();
+    }
+    if (url === '/istota/api/settings/nextcloud-sharing' && method === 'PUT') {
+      const changes = (body as { changes?: Record<string, string> })?.changes;
+      if (!changes || typeof changes !== 'object' || Object.keys(changes).length === 0) {
+        return { __status: 400, error: 'changes must be a non-empty object' };
+      }
+      for (const [id, level] of Object.entries(changes)) {
+        const row = mockNcSharing.collections.find((c) => c.id === id);
+        if (!row || !(level in LEVEL_RANK)) return { __status: 400, error: 'unknown id or level' };
+        const kind = mockNcSharing.kinds[row.kind];
+        const raise = LEVEL_RANK[level] > LEVEL_RANK[row.level];
+        if (raise && (!kind.available || LEVEL_RANK[level] > LEVEL_RANK[kind.ceiling])) {
+          return { __status: 403, error: 'That level is above what this instance allows.' };
+        }
+      }
+      const failed: { id: string; name: string; reason: string }[] = [];
+      for (const [id, level] of Object.entries(changes)) {
+        const row = mockNcSharing.collections.find((c) => c.id === id)!;
+        if (row.apply) row.level = level;
+        else failed.push({ id, name: row.name, reason: 'Nextcloud did not apply this change' });
+      }
+      const status = failed.length === Object.keys(changes).length ? 502 : 200;
+      return { __status: status, ...mockNcSharingPayload(), failed };
     }
     if (url === '/istota/api/google/status' && method === 'GET') {
       return mockGoogleStatus();

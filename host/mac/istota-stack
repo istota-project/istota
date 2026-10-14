@@ -1,7 +1,7 @@
 #!/bin/bash
 # istota-stack on the Mac: the local VM's command. Run as yourself, never sudo.
 #
-#   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB]
+#   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] [--disk GIB]
 #                       ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt]
 #                       [--terminal-setup | --no-setup]
 #                               make the workspace folder and the VM, then set up the
@@ -10,7 +10,9 @@
 #                               --terminal-setup asks the setup questions here instead,
 #                               --no-setup stops before them. A release is the newest
 #                               one unless --tag names it, verified against the
-#                               project's key unless --signing-key gives one
+#                               project's key unless --signing-key gives one.
+#                               A new VM's size defaults from this Mac's CPUs, memory
+#                               and free disk, and is asked on a terminal
 #   istota-stack start          start the VM
 #   istota-stack stop           stop the stack, then the VM
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
@@ -161,9 +163,9 @@ require_running() {
 VM_PROBE='s=/srv/app/istota
 printf "tag=%s\n" "$(sed -n "s/^ISTOTA_TAG=//p" "$s/.env" 2>/dev/null | tail -n 1)"
 printf "unsigned=%s\n" "$(sed -n "s/^ISTOTA_TAG_UNSIGNED=//p" "$s/.env" 2>/dev/null | tail -n 1)"
+printf "publish=%s\n" "$(sed -n "s/^NGINX_PUBLISH=//p" "$s/.env" 2>/dev/null | tail -n 1)"
 if [ -f "$s/config/config.toml" ]; then echo config=1; else echo config=0; fi
-printf "admin=%s\n" "$(sed -n "/^[[:space:]]*[^#[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*\$//;p;q;}" "$s/config/admins" 2>/dev/null)"
-printf "publish=%s\n" "$(sed -n "s/^NGINX_PUBLISH=//p" "$s/.env" 2>/dev/null | tail -n 1)"'
+printf "admin=%s\n" "$(sed -n "/^[[:space:]]*[^#[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*\$//;p;q;}" "$s/config/admins" 2>/dev/null)"'
 
 probe_value() {
     printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -n 1
@@ -327,6 +329,7 @@ is_state_file() {
         $1 == "WORKSPACE" { workspace = 1; next }
         $1 == "PORT" || $1 == "TAG" || $1 == "REPO" || $1 == "SIGNING_KEY" { next }
         $1 == "DEPLOYED_TAG" || $1 == "DEPLOYED_UNSIGNED" { next }
+        $1 == "CPUS" || $1 == "MEMORY" || $1 == "DISK" { next }
         { other = 1 }
         END { exit !(workspace && !other) }
     ' "$1"
@@ -394,6 +397,94 @@ port_or_default() {
     local port
     port="$(state_get PORT)"
     printf '%s\n' "${port:-$DEFAULT_PORT}"
+}
+
+# --- the VM's size -----------------------------------------------------------
+
+# This Mac's CPUs, memory in whole GiB, and free GiB where Lima keeps its
+# disks. Each prints nothing when it cannot be read.
+host_cpus() {
+    local n
+    n="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+    case "$n" in ""|*[!0-9]*) return 0 ;; esac
+    printf '%s\n' "$n"
+}
+
+host_memory_gib() {
+    local bytes
+    bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+    case "$bytes" in ""|*[!0-9]*) return 0 ;; esac
+    printf '%s\n' "$(( bytes / 1073741824 ))"
+}
+
+host_free_disk_gib() {
+    local dir="${LIMA_HOME:-${HOME}/.lima}" kb
+    [ -d "$dir" ] || dir="$HOME"
+    kb="$(df -Pk "$dir" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+    case "$kb" in ""|*[!0-9]*) return 0 ;; esac
+    printf '%s\n' "$(( kb / 1048576 ))"
+}
+
+clamp() {
+    local value="$1" low="$2" high="$3"
+    [ "$value" -ge "$low" ] || value="$low"
+    [ "$value" -le "$high" ] || value="$high"
+    printf '%s\n' "$value"
+}
+
+# Half the CPUs, a quarter of the memory and a quarter of the free disk,
+# within bounds; the template's own 4, 4 and 40 when a fact cannot be read.
+# A Lima disk is sparse, so its size is a ceiling, not space taken up front.
+default_cpus() { if [ -n "$1" ]; then clamp "$(( $1 / 2 ))" 2 8; else echo 4; fi; }
+default_memory() { if [ -n "$1" ]; then clamp "$(( $1 / 4 ))" 4 16; else echo 4; fi; }
+default_disk() { if [ -n "$1" ]; then clamp "$(( $1 / 4 ))" 40 100; else echo 40; fi; }
+
+# One size on the terminal: Enter takes the default, anything else is asked
+# again until it is a whole number from low to high. Into ASKED.
+ASKED=""
+ask_size() {
+    local prompt="$1" default="$2" low="$3" high="$4" answer
+    while true; do
+        answer=""
+        read -r -p "[istota-stack] ${prompt} [${default}]: " answer || { ASKED="$default"; echo; return 0; }
+        [ -n "$answer" ] || answer="$default"
+        case "$answer" in
+            *[!0-9]*|0*) ;;
+            *) if [ "$answer" -ge "$low" ] && [ "$answer" -le "$high" ]; then ASKED="$answer"; return 0; fi ;;
+        esac
+        echo "[istota-stack] a whole number from ${low} to ${high}, please." >&2
+    done
+}
+
+# A new VM's CPUs, memory and disk: what was given or recorded, else asked on
+# a terminal with this Mac's defaults, else those defaults.
+size_new_vm() {
+    local cpus memory free
+    cpus="$(host_cpus)"
+    memory="$(host_memory_gib)"
+    free="$(host_free_disk_gib)"
+    if [ -t 0 ] && { [ -z "$CREATE_CPUS" ] || [ -z "$CREATE_MEMORY" ] || [ -z "$CREATE_DISK" ]; }; then
+        log "this Mac has ${cpus:-an unknown number of} CPUs, ${memory:-unknown} GiB of memory and ${free:-unknown} GiB of free disk; the VM takes:"
+        if [ -z "$CREATE_CPUS" ]; then
+            ask_size "CPUs" "$(default_cpus "$cpus")" 1 "${cpus:-99}"
+            CREATE_CPUS="$ASKED"
+        fi
+        if [ -z "$CREATE_MEMORY" ]; then
+            ask_size "memory, GiB" "$(default_memory "$memory")" 1 "$(( ${memory:-1001} - 2 ))"
+            CREATE_MEMORY="$ASKED"
+        fi
+        if [ -z "$CREATE_DISK" ]; then
+            ask_size "disk, GiB" "$(default_disk "$free")" 10 999
+            CREATE_DISK="$ASKED"
+        fi
+    fi
+    [ -n "$CREATE_CPUS" ] || CREATE_CPUS="$(default_cpus "$cpus")"
+    [ -n "$CREATE_MEMORY" ] || CREATE_MEMORY="$(default_memory "$memory")"
+    [ -n "$CREATE_DISK" ] || CREATE_DISK="$(default_disk "$free")"
+    if [ -n "$free" ] && [ "$CREATE_DISK" -gt "$free" ]; then
+        log "warning: the disk may grow to ${CREATE_DISK} GiB and this Mac has ${free} GiB free."
+    fi
+    log "the VM: ${CREATE_CPUS} CPUs, ${CREATE_MEMORY} GiB of memory, a disk of up to ${CREATE_DISK} GiB."
 }
 
 valid_port() {
@@ -535,6 +626,25 @@ escrow_key() {
 
 # The first admin's way in: an enrolment link for an identity with no
 # password yet, or how to make one.
+# The port nginx publishes on in the VM, which is what reaches the Mac's
+# loopback. A VM set up earlier for another hostname keeps its own port, and
+# the forward made for the port asked for has nothing behind it: report and
+# record the one that answers.
+SERVED_PORT=""
+reconcile_port() {
+    local probe="$1" asked="$2" publish actual
+    SERVED_PORT="$asked"
+    publish="$(probe_value "$probe" publish)"
+    case "$publish" in 127.0.0.1:*:*) ;; *) return 0 ;; esac
+    actual="${publish#127.0.0.1:}"
+    actual="${actual%%:*}"
+    valid_port "$actual" || return 0
+    [ "$actual" != "$asked" ] || return 0
+    log "the stack was set up for localhost:${actual}, not ${asked}; it answers on ${actual}."
+    state_set "PORT=${actual}"
+    SERVED_PORT="$actual"
+}
+
 enrolment() {
     local admin="$1" port="$2" url listing line email="" link=""
     url="http://localhost:${port}/istota"
@@ -574,23 +684,24 @@ enrolment() {
 # create's options, parsed with the recorded state as defaults and checked,
 # into the CREATE_* globals: everything about them that can be refused without
 # the VM, so `restore` asks it before the old VM goes.
-CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_TAG="" CREATE_REPO=""
+CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_DISK="" CREATE_TAG="" CREATE_REPO=""
 CREATE_KEY="" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE="" CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN=""
 CREATE_TERMINAL_SETUP=""
 
 create_settings() {
-    CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_TAG="" CREATE_REPO=""
+    CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_DISK="" CREATE_TAG="" CREATE_REPO=""
     CREATE_KEY="${RELEASE_SIGNING_KEY:-}" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE=""
     CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN="" CREATE_TERMINAL_SETUP=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
+            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 case "$1" in
                     --workspace) CREATE_FOLDER="$2" ;;
                     --port) CREATE_PORT="$2" ;;
                     --cpus) CREATE_CPUS="$2" ;;
                     --memory) CREATE_MEMORY="$2" ;;
+                    --disk) CREATE_DISK="$2" ;;
                     --tag) CREATE_TAG="$2"; CREATE_TAG_GIVEN=1; CREATE_SOURCE_GIVEN=1 ;;
                     --repo) CREATE_REPO="$2"; CREATE_SOURCE_GIVEN=1 ;;
                     --signing-key) CREATE_KEY="$2" ;;
@@ -606,6 +717,10 @@ create_settings() {
     # A re-run takes what the first run was given.
     [ -n "$CREATE_FOLDER" ] || CREATE_FOLDER="$(workspace_or_default)"
     [ -n "$CREATE_PORT" ] || CREATE_PORT="$(port_or_default)"
+    # A VM made again (restore) takes the size the last one was made with.
+    [ -n "$CREATE_CPUS" ] || CREATE_CPUS="$(state_get CPUS)"
+    [ -n "$CREATE_MEMORY" ] || CREATE_MEMORY="$(state_get MEMORY)"
+    [ -n "$CREATE_DISK" ] || CREATE_DISK="$(state_get DISK)"
     if [ -z "$CREATE_SOURCE_GIVEN" ]; then
         CREATE_TAG="$(state_get TAG)"
         CREATE_REPO="$(state_get REPO)"
@@ -625,6 +740,17 @@ create_settings() {
     case "$CREATE_CPUS" in ""|[1-9]|[1-9][0-9]) ;; *) usage_error "--cpus takes a number of CPUs, not '${CREATE_CPUS}'" ;; esac
     CREATE_MEMORY="${CREATE_MEMORY%GiB}"
     case "$CREATE_MEMORY" in ""|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--memory takes whole GiB, not '${CREATE_MEMORY}'" ;; esac
+    CREATE_DISK="${CREATE_DISK%GiB}"
+    case "$CREATE_DISK" in ""|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) usage_error "--disk takes whole GiB from 10 to 999, not '${CREATE_DISK}'" ;; esac
+    local host
+    host="$(host_cpus)"
+    if [ -n "$CREATE_CPUS" ] && [ -n "$host" ] && [ "$CREATE_CPUS" -gt "$host" ]; then
+        fail "$EX_CONFIG" "--cpus ${CREATE_CPUS} is more than this Mac's ${host} CPUs. Nothing was changed."
+    fi
+    host="$(host_memory_gib)"
+    if [ -n "$CREATE_MEMORY" ] && [ -n "$host" ] && [ "$CREATE_MEMORY" -gt "$(( host - 2 ))" ]; then
+        fail "$EX_CONFIG" "--memory ${CREATE_MEMORY} leaves macOS less than 2 GiB of this Mac's ${host} GiB. Nothing was changed."
+    fi
     case "$CREATE_KEY" in *$'\n'*) usage_error "the signing key is one line of an SSH public key" ;; esac
 
     if [ -n "$CREATE_REPO" ]; then
@@ -656,7 +782,7 @@ require_new_vm_inputs() {
 
 cmd_create() {
     create_settings "$@"
-    local folder="$CREATE_FOLDER" port="$CREATE_PORT" cpus="$CREATE_CPUS" memory="$CREATE_MEMORY"
+    local folder="$CREATE_FOLDER" port="$CREATE_PORT"
     local tag="$CREATE_TAG" repo="$CREATE_REPO" key="$CREATE_KEY" adopt="$CREATE_ADOPT"
     local setup="$CREATE_SETUP" source="$CREATE_SOURCE"
 
@@ -670,6 +796,7 @@ cmd_create() {
     if [ -z "$status" ]; then
         require_new_vm_inputs
         require_port_free "$port"
+        size_new_vm
     fi
     prepare_folder "$folder" "$adopt"
     # The signing key is public; kept so a re-run or a restore can make the VM again.
@@ -680,8 +807,7 @@ cmd_create() {
         template="$(create_template)"
         expression=".portForwards[0].guestPort = ${port} | .portForwards[0].hostPort = ${port}"
         args=(create --tty=false "--name=${INSTANCE}")
-        [ -z "$cpus" ] || args+=(--cpus "$cpus")
-        [ -z "$memory" ] || args+=(--memory "$memory")
+        args+=(--cpus "$CREATE_CPUS" --memory "$CREATE_MEMORY" --disk "$CREATE_DISK")
         args+=("--param=WORKSPACE=${folder}")
         if [ "$source" = checkout ]; then
             args+=("--param=ISTOTA_REPO=${repo}")
@@ -694,15 +820,23 @@ cmd_create() {
         fi
         args+=(--set "$expression" "$template")
         run_step "create the VM" "limactl create --name=${INSTANCE} ..." limactl "${args[@]}"
+        state_set "CPUS=${CREATE_CPUS}" "MEMORY=${CREATE_MEMORY}" "DISK=${CREATE_DISK}"
         status=Stopped
     fi
     if [ "$status" != Running ]; then
         run_step "start the VM" "limactl start ${INSTANCE}" limactl start --tty=false "$INSTANCE"
     fi
 
-    run_step "write host.env" "istota-stack host-env ..." \
-        vm_stack host-env STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}" \
-        "LOCAL_FORWARD_PORT=${port}"
+    local host_env=(STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}"
+        "LOCAL_FORWARD_PORT=${port}")
+    # Only a new VM takes the key from the template; an existing one may have
+    # none. A recorded key stays, so a VM trusting a fork's key keeps it.
+    if [ "$source" = release ]; then
+        local recorded_key
+        recorded_key="$(vm_stack host-env RELEASE_SIGNING_KEY </dev/null)" || fail 1 "could not read the VM's host.env."
+        [ -n "$recorded_key" ] || host_env+=("RELEASE_SIGNING_KEY=${key}")
+    fi
+    run_step "write host.env" "istota-stack host-env ..." vm_stack host-env "${host_env[@]}"
 
     # What to install: a tag given now; else, on a new VM, the tag this Mac
     # last saw deployed; else the one the VM bootstraps from. A VM with a tag
@@ -764,7 +898,8 @@ cmd_create() {
     refresh_scripts
     escrow_key
     probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
-    enrolment "$(probe_value "$probe" admin)" "$port"
+    reconcile_port "$probe" "$port"
+    enrolment "$(probe_value "$probe" admin)" "$SERVED_PORT"
     log "done. \`istota-stack status\` shows the VM; files are in ${folder}."
 }
 
@@ -1183,7 +1318,7 @@ cmd_restore() {
                 [ "$#" -ge 2 ] || usage_error "--date needs a value"
                 date="$2"; shift 2 ;;
             --force) force=1; shift ;;
-            --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
+            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 [ "$1" != --workspace ] || folder="$2"
                 create_args+=("$1" "$2"); shift 2 ;;
@@ -1472,7 +1607,7 @@ cmd_import_standalone() {
                 if [ "$1" = --from ]; then from="$2"; else config="$2"; fi
                 shift 2 ;;
             --dry-run) dry=1; shift ;;
-            --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
+            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 [ "$1" != --workspace ] || folder="$2"
                 create_args+=("$1" "$2"); shift 2 ;;
@@ -1556,7 +1691,8 @@ cmd_import_standalone() {
     escrow_key
     local probe
     probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
-    enrolment "$(probe_value "$probe" admin)" "$port"
+    reconcile_port "$probe" "$port"
+    enrolment "$(probe_value "$probe" admin)" "$SERVED_PORT"
 
     local doctor_rc=0
     vm_stack exec istota doctor </dev/null || doctor_rc=$?

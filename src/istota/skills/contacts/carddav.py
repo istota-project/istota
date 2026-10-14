@@ -11,6 +11,8 @@ from xml.etree import ElementTree as ET
 import httpx
 import vobject
 
+from istota.lib.dav_xml import DavXmlError, parse_multistatus, principal_user, safe_segment
+
 from .model import (
     AddressBook, Contact, ContactInput, apply_changes_to_vcard,
     contact_from_vcard, match_score, new_vcard, one_line,
@@ -66,14 +68,9 @@ def _home(ctx: BackendContext) -> str:
     if parts.scheme not in {"http", "https"} or not parts.hostname or parts.query or parts.fragment or parts.username:
         raise CardDAVError("no_contact_source")
     username = ctx.env.get("CARDDAV_USERNAME", "")
-    if not _safe_segment(username):
+    if not safe_segment(username):
         raise CardDAVError("no_contact_source")
     return base + "/addressbooks/users/" + quote(username, safe="") + "/"
-
-
-def _safe_segment(value: str) -> bool:
-    # Reject nested escapes too: intermediaries must not reinterpret a separator.
-    return bool(value) and not any(c in value for c in "/\\%?#") and ".." not in value and not any(ord(c) < 32 or ord(c) == 127 for c in value)
 
 
 def _child_url(parent: str, href: str, *, collection: bool = False) -> str | None:
@@ -83,7 +80,7 @@ def _child_url(parent: str, href: str, *, collection: bool = False) -> str | Non
     # Check before urljoin, which would normalize away dot segments.
     if raw.query or raw.fragment or raw.username:
         return None
-    if any(not _safe_segment(unquote(part)) for part in raw.path.strip("/").split("/")):
+    if any(not safe_segment(unquote(part)) for part in raw.path.strip("/").split("/")):
         return None
     target = urlsplit(urljoin(parent, href))
     origin = urlsplit(parent)
@@ -94,7 +91,7 @@ def _child_url(parent: str, href: str, *, collection: bool = False) -> str | Non
     suffix = target.path[len(origin.path):]
     if collection:
         suffix = suffix.rstrip("/")
-    if not _safe_segment(unquote(suffix)):
+    if not safe_segment(unquote(suffix)):
         return None
     return target._replace(path=target.path.rstrip("/") + "/" if collection else target.path).geturl()
 
@@ -132,43 +129,10 @@ def _dav(ctx, method, url, *, body=None, headers=None, depth=None):
 
 
 def _multistatus(data):
-    # No DTDs/entities; contacts never need them. Also reject UTF-16/32 XML so
-    # a declaration cannot evade this byte-level check.
-    if b"\x00" in data or re.search(br"<!\s*(?:DOCTYPE|ENTITY)", data, re.IGNORECASE):
-        raise CardDAVError("invalid_response")
     try:
-        root = ET.fromstring(data)
-    except ET.ParseError:
+        return parse_multistatus(data)
+    except DavXmlError:
         raise CardDAVError("invalid_response") from None
-    if root.tag != DAV + "multistatus":
-        raise CardDAVError("invalid_response")
-    rows = []
-    for response in root.findall(DAV + "response"):
-        props = {}
-        for propstat in response.findall(DAV + "propstat"):
-            status = (propstat.findtext(DAV + "status") or "").split()
-            if len(status) < 2 or status[1] != "200":
-                continue
-            prop = propstat.find(DAV + "prop")
-            if prop is not None:
-                props.update({item.tag: item for item in prop})
-        rows.append((response.findtext(DAV + "href") or "", props))
-    return rows
-
-
-def _owner(prop) -> str | None:
-    if prop is None:
-        return None
-    value = prop.findtext(DAV + "href") or prop.text or ""
-    parts = urlsplit(value.strip())
-    if parts.query or parts.fragment:
-        return None
-    path = "/" + parts.path if parts.path.startswith("principals/users/") else parts.path
-    match = re.fullmatch(r"(?:/[^/]+)*/principals/users/([^/]+)/?", path)
-    if not match:
-        return None
-    user = unquote(match[1])
-    return user if _safe_segment(user) else None
 
 
 def _discover(ctx):
@@ -188,7 +152,7 @@ def _discover(ctx):
         if resource is None or resource.find(CARD + "addressbook") is None:
             continue
         owner = props.get(OC + "owner-principal") if OC + "owner-principal" in props else props.get(DAV + "owner")
-        if _owner(owner) != _require_user(ctx):
+        if principal_user(owner) != _require_user(ctx):
             continue
         url = _child_url(home, href, collection=True)
         if url is None:
@@ -270,7 +234,7 @@ def _resolve(ctx, contact_id):
         raise CardDAVError("not_found")
     key, name = contact_id[3:].split("/", 1)
     book = found.get(key)
-    if book is None or not _safe_segment(unquote(name)):
+    if book is None or not safe_segment(unquote(name)):
         raise CardDAVError("not_found")
     url = _child_url(book.url, name)
     if url is None:

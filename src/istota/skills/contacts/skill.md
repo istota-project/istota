@@ -27,7 +27,7 @@ Copy the opaque book keys and contact IDs from results. Search returns normalize
 
 Create accepts `--given`, `--family`, `--nickname`, repeated `--email ADDR[:kind]` and `--phone NUM[:kind]`, `--org`, `--title`, `--birthday` and `--note`. Birthday is `YYYY-MM-DD` or `--MM-DD` without a year. Update accepts the same scalar fields, `--add-email`, `--remove-email`, `--add-phone`, `--remove-phone`, and `--clear-org`, `--clear-title`, `--clear-birthday`, `--clear-note`. Pass values starting with `--` as `--birthday=--01-15`.
 
-Only address books the user owns and shared with the bot are available. If none appear, ask the user to share an address book with the bot account named in the hint from the Contacts app. A read-only book cannot be edited. Confirm before deleting contacts or modifying contacts the user created, as required by `sensitive_actions`. Creating a contact is a record and does not require separate confirmation.
+Only address books the user owns and shared with the bot are available. If none appear, ask the user to share an address book with the bot account named in the hint, from Settings > Connections or from the Nextcloud Contacts app. A read-only book cannot be edited. Confirm before deleting contacts or modifying contacts the user created, as required by `sensitive_actions`. Creating a contact is a record and does not require separate confirmation.
 
 Pass the etag from the last read when editing or deleting. On `changed_since_read`, show the contact again and retry once after checking the change is still appropriate. Never guess a different ID or book after `not_found`.
 

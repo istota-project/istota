@@ -32,7 +32,7 @@
 #
 # cpus, memory and the forwarded port cannot be params (Lima reads them as
 # numbers before it expands one). Give them at create instead:
-# `--cpus 6 --memory 8` and
+# `--cpus 6 --memory 8 --disk 60` and
 # `--set '.portForwards[0].guestPort = 8181 | .portForwards[0].hostPort = 8181'`,
 # then `istota-stack setup --hostname localhost:8181` to match.
 #

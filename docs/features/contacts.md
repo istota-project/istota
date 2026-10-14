@@ -4,9 +4,9 @@ Ask for a person's email address or phone number, or ask the bot to create or ed
 
 ## Connect Nextcloud
 
-In the Nextcloud Contacts app, share an address book you own with the bot's Nextcloud account. Give it write access if you want the bot to edit contacts. Run `istota-skill contacts books` to see available books; if none are shared, the response names the bot account to share with.
+Share an address book you own with the bot's Nextcloud account, either from the Nextcloud card in Settings > Connections or from the Nextcloud Contacts app. Give it Read and write access if you want the bot to edit contacts. Run `istota-skill contacts books` to see available books; if none are shared, the response names the bot account to share with.
 
-Istota uses the configured Nextcloud URL and bot account. Your Istota user ID must match the book owner's Nextcloud user ID. Connecting Nextcloud for web login does not grant contact access. Books owned by other users, the bot's own books and the server's system address book are excluded, even if the bot can see them. External CardDAV servers are not supported.
+Istota uses the configured Nextcloud URL and bot account. Your Istota user ID must match the book owner's Nextcloud user ID. Connecting Nextcloud for web login does not by itself grant contact access; the bot reads only the books shared with it, whether the share was made on the card or in the Contacts app. Books owned by other users, the bot's own books and the server's system address book are excluded, even if the bot can see them. External CardDAV servers are not supported.
 
 ## Connect Google
 
