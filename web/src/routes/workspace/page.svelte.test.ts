@@ -122,11 +122,68 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
   expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
   expect(sidebar.querySelector('.badge')).toBeNull();
   expect(container.querySelector('.folder-toolbar')).toHaveTextContent('Read-write');
+  expect(container.querySelector('.folder-toolbar .lucide-bot')).not.toBeNull();
   await screen.findByRole('link', { name: 'notes & drafts' });
   expect(container.querySelector('details')).not.toHaveAttribute('open');
   expect(screen.getByText('Files are stored in a local folder.')).toBeTruthy();
   expect(screen.getByText('Guest turn or unasked task')).toBeTruthy();
   expect(screen.getByText('No access')).toBeTruthy();
+  const legend = container.querySelector('details .reach-legend')!;
+  expect(legend).toHaveTextContent(
+    'in the sidebar means a task in your private room can reach that place, or for a room folder, a task in that room. Places without it are visible to you only.',
+  );
+  expect(within(legend as HTMLElement).getByRole('img', { name: 'The robot icon' })).toBeTruthy();
+});
+
+it('marks the places a task can reach and describes the mark without renaming the link', async () => {
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await openSection('Rooms');
+  for (const [label, description] of [
+    ['My files', 'Istota can read and change these files'],
+    ['Project room', 'Istota can read and change these files, in this room only'],
+  ]) {
+    const link = await within(sidebar).findByRole('link', { name: label });
+    expect(link).toHaveAccessibleName(label);
+    expect(link).toHaveAccessibleDescription(description);
+    const describedBy = link.getAttribute('aria-describedby')!;
+    expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(description);
+  }
+  expect(
+    within(sidebar).getByText(
+      'Istota can use these in your private room, and a room folder in that room.',
+    ),
+  ).toBeTruthy();
+});
+
+it('leaves the Nextcloud row unmarked and drops the legend when nothing is reachable', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      {
+        ...home,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+        reach: { private: 'none', shared_member: 'none', restricted: 'none', note: '' },
+      },
+    ],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'nextcloud',
+    path: '',
+    entries: [],
+    truncated: false,
+    skipped_names: 0,
+  });
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await openSection('Connections');
+  const link = await within(sidebar).findByRole('link', { name: 'Nextcloud' });
+  expect(link).not.toHaveAttribute('aria-describedby');
+  expect(link.querySelector('.task-reach')).toBeNull();
+  expect(within(sidebar).queryByText('Istota can use these in your private room.')).toBeNull();
 });
 
 it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () => {
@@ -900,9 +957,9 @@ it('links to Connections when Nextcloud needs reconnecting', async () => {
   );
 });
 
-it('explains personal Nextcloud browsing without claiming tasks have no file access', async () => {
+it('says plainly, outside any disclosure, that only the user sees the Nextcloud view', async () => {
   const note =
-    'This browser uses your personal Nextcloud connection. The Nextcloud skill uses the bot’s separate account. Files available to a task depend on that account’s access and the task’s workspace permissions.';
+    'Only you can see this view. It uses your personal Nextcloud connection, which tasks never use. Istota’s Nextcloud skill uses the bot’s own account instead. To work on a file with Istota, put a copy in My files.';
   api.getWorkspacePlaces.mockResolvedValue({
     places: [
       {
@@ -916,12 +973,18 @@ it('explains personal Nextcloud browsing without claiming tasks have no file acc
     ],
     notes: ['Files are stored in your Nextcloud at cloud.example.com.'],
   });
-  render(Workspace);
-  await screen.findByText(note);
+  const { container } = render(Workspace);
+  const notice = await screen.findByText(note);
+  expect(notice.closest('details')).toBeNull();
+  expect(notice).toBeVisible();
+  expect(container.querySelector('details')).toBeNull();
+  expect(screen.queryByText('How Istota reaches your files')).toBeNull();
+  const toolbar = container.querySelector('.folder-toolbar')!;
+  expect(toolbar).toHaveTextContent('Only you');
+  expect(toolbar.querySelector('.lucide-bot-off')).not.toBeNull();
   expect(screen.queryByText('No access')).toBeNull();
   expect(screen.queryByText('Private room')).toBeNull();
   expect(screen.queryByText('Files are stored in your Nextcloud at cloud.example.com.')).toBeNull();
-  expect(screen.getByText('How Istota reaches your files')).toBeTruthy();
 });
 
 it('puts My files immediately after Pinned and opens only My files by default', async () => {
@@ -1153,4 +1216,93 @@ it('uses default section state for an invalid saved preference', async () => {
   render(Workspace);
   const sidebar = await screen.findByRole('complementary');
   await within(sidebar).findByRole('link', { name: 'My files' });
+});
+
+const markedPins = [
+  {
+    id: 20,
+    provider: 'workspace',
+    ref: '/Users/alice/plan.md',
+    name: 'Home plan',
+    available: true,
+    is_dir: false,
+  },
+  {
+    id: 21,
+    provider: 'workspace',
+    ref: '/Users/alice/gone.md',
+    name: 'Gone plan',
+    available: false,
+    is_dir: false,
+  },
+  {
+    id: 22,
+    provider: 'drive',
+    ref: 'file_123456',
+    name: 'Drive report',
+    available: true,
+    is_dir: false,
+    web_url: 'https://drive.google.com/file/d/file_123456',
+  },
+  {
+    id: 23,
+    provider: 'drive',
+    ref: 'file_654321',
+    name: 'Drive notes',
+    available: true,
+    is_dir: false,
+    web_url: null,
+  },
+  {
+    id: 24,
+    provider: 'workspace',
+    ref: '/Channels/sample/agenda.md',
+    name: 'Room agenda',
+    available: true,
+    is_dir: false,
+  },
+];
+
+it('marks available pins whose place a task can reach', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, room, drivePlace], notes: [] });
+  api.getWorkspacePins.mockResolvedValue({ pins: markedPins });
+  render(Workspace);
+  await openSection('Pinned');
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  const homePin = await within(pinned).findByRole('button', { name: 'Home plan' });
+  expect(homePin).toHaveAccessibleName('Home plan');
+  expect(homePin).toHaveAccessibleDescription('Istota can read and change these files');
+  const drivePin = within(pinned).getByRole('link', { name: 'Drive report' });
+  expect(drivePin).toHaveAccessibleDescription('Istota reaches this through a skill');
+  const gone = within(pinned).getByText('Gone plan').closest('.pin-row')!;
+  expect(gone.querySelector('.task-reach')).toBeNull();
+  expect(gone.querySelector('[aria-describedby]')).toBeNull();
+  // No link to carry the description, so no icon either.
+  const noLink = within(pinned).getByText('Drive notes').closest('.pin-row')!;
+  expect(noLink.querySelector('.task-reach')).toBeNull();
+  expect(within(pinned).getByRole('button', { name: 'Room agenda' })).toHaveAccessibleDescription(
+    'Istota can read and change these files, in this room only',
+  );
+});
+
+it('leaves a Drive pin unmarked when no Drive place is listed', async () => {
+  api.getWorkspacePins.mockResolvedValue({ pins: markedPins });
+  render(Workspace);
+  await openSection('Pinned');
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  const drivePin = await within(pinned).findByRole('link', { name: 'Drive report' });
+  expect(drivePin).not.toHaveAttribute('aria-describedby');
+  expect(drivePin.querySelector('.task-reach')).toBeNull();
+  expect(within(pinned).getByRole('button', { name: 'Home plan' })).toHaveAttribute(
+    'aria-describedby',
+    'task-reach-pin-20',
+  );
+});
+
+it('says the configuration files are read as instructions', async () => {
+  render(Workspace);
+  const section = await screen.findByRole('region', { name: 'Configuration' });
+  await openSection('Configuration');
+  await within(section).findByText('USER.md');
+  expect(within(section).getByText('Istota reads these as instructions.')).toBeTruthy();
 });

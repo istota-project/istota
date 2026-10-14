@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
+- The Workspace sidebar marks each place Istota can use in your private room with a small robot icon, pinned files and folders included (a room folder's icon says only that room's tasks reach it), and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you. Selecting your Nextcloud view now says so without opening anything, and how to hand Istota a file.
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 

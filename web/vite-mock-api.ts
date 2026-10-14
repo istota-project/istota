@@ -5418,9 +5418,14 @@ const workspacePlaces: WorkspacePlace[] = [
     id: 'nextcloud',
     kind: 'nextcloud',
     label: 'Nextcloud',
-    browsable: false,
+    browsable: true,
     view_root: null,
-    reach: { ...workspaceReach, private: 'skill', shared_member: 'skill' },
+    reach: {
+      private: 'none',
+      shared_member: 'none',
+      restricted: 'none',
+      note: 'Only you can see this view. It uses your personal Nextcloud connection, which tasks never use. Istota’s Nextcloud skill uses the bot’s own account instead. To work on a file with Istota, put a copy in My files.',
+    },
   },
   {
     id: 'talk',
