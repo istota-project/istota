@@ -40,6 +40,8 @@
     type WorkspaceConfigFile,
   } from '$lib/api';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
+  import { viewer } from '$lib/fileViewer/store.svelte';
+  import ScriptsView from '$lib/components/workspace/ScriptsView.svelte';
   import ScriptList from '$lib/components/workspace/ScriptList.svelte';
   import BotSection from '$lib/components/workspace/BotSection.svelte';
   import ConfigIndex from '$lib/components/workspace/ConfigIndex.svelte';
@@ -623,6 +625,18 @@
           places={places.filter((item) => item.kind === 'group')}
           {href}
           onNavigate={navigate}
+        />
+      {:else if view === 'scripts'}
+        <ScriptsView
+          index={scriptsIndex}
+          loading={scriptsLoading}
+          error={scriptsError}
+          selected={selected?.script}
+          onSelect={(script) =>
+            selection.push({ place: '', path: '', view: 'scripts', ...(script ? { script } : {}) })}
+          onOpen={(path) => viewer.openFile(path)}
+          onRetry={loadScripts}
+          {revealAction}
         />
       {:else if view === 'config' || view === 'skills'}
         <ConfigIndex

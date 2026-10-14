@@ -6,6 +6,8 @@ import type { WorkspacePlace, WorkspaceScriptsIndex } from '$lib/api';
 import Files from './+page.svelte';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
+const openFile = vi.hoisted(() => vi.fn());
+vi.mock('$lib/fileViewer/store.svelte', () => ({ viewer: { openFile } }));
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/userContext', () => ({
   getCurrentUser: () => ({ user: { username: 'alice', bot_name: 'Helper' } }),
@@ -65,6 +67,7 @@ const scripts: WorkspaceScriptsIndex = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   localStorage.clear();
   __history.reset('/istota/files');
   api.getWorkspacePins.mockResolvedValue({ pins: [] });
@@ -85,14 +88,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 async function openScripts() {
-  const section = await screen.findByRole('region', { name: 'Scripts' });
+  const sidebar = await screen.findByRole('complementary');
+  const section = await within(sidebar).findByRole('region', { name: 'Scripts' });
   await fireEvent.click(within(section).getByRole('button', { name: /Scripts/ }));
   return section;
 }
 
 it('places a collapsed Scripts section after the bot configuration and before linked folders', async () => {
   render(Files);
-  const section = await screen.findByRole('region', { name: 'Scripts' });
+  const sidebar = await screen.findByRole('complementary');
+  const section = await within(sidebar).findByRole('region', { name: 'Scripts' });
   const config = screen.getByRole('link', { name: 'Configuration' });
   const linked = screen.getByRole('button', { name: /Linked folders/ });
   expect(config.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -118,7 +123,8 @@ it('remembers whether the Scripts section is open', async () => {
   expect(localStorage.getItem('workspace:section:scripts')).toBe('true');
   first.unmount();
   render(Files);
-  const section = await screen.findByRole('region', { name: 'Scripts' });
+  const sidebar = await screen.findByRole('complementary');
+  const section = await within(sidebar).findByRole('region', { name: 'Scripts' });
   expect(await within(section).findByRole('link', { name: 'All scripts' })).toBeTruthy();
 });
 
@@ -179,7 +185,7 @@ it.each(['All scripts', 'Configuration', 'My files', 'Shared folder'])(
 it.each(['view=config', 'place=home'])('ignores script outside its view: %s', async (query) => {
   __history.reset(`/istota/files?${query}&script=weekly.py`);
   render(Files);
-  await screen.findByRole('region', { name: 'Scripts' });
+  await screen.findByRole('complementary');
   await waitFor(() =>
     expect(new URLSearchParams(window.location.search).has('script')).toBe(false),
   );
@@ -217,4 +223,84 @@ it('leaves modified clicks to the browser', async () => {
   expect(event.defaultPrevented).toBe(false);
   expect(window.location.search).toBe(query);
   expect(row).not.toHaveAttribute('aria-current');
+});
+
+it('shows missing references, scripts and prompt files in the main pane', async () => {
+  render(Files);
+  const section = await openScripts();
+  await fireEvent.click(await within(section).findByRole('link', { name: 'All scripts' }));
+  const table = await screen.findByRole('table', { name: 'Scripts' });
+  expect(within(table).getAllByText('Not referenced')).toHaveLength(2);
+  expect(within(table).getByText('No description')).toBeTruthy();
+  expect(screen.getByRole('note')).toHaveTextContent('missing.sh');
+  expect(screen.getByRole('note')).toHaveTextContent('heartbeat: backup');
+  expect(screen.getByRole('note')).toHaveTextContent('enabled');
+  expect(screen.getByRole('table', { name: 'Prompt files' })).toHaveTextContent(
+    'prompts/daily.txt',
+  );
+});
+
+it('expands and scrolls a deep-linked row after the index arrives and restores history', async () => {
+  __history.reset('/istota/files?view=scripts&script=weekly.py');
+  let resolve!: (value: WorkspaceScriptsIndex) => void;
+  api.getWorkspaceScripts.mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  const scrolled: Element[] = [];
+  const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(function (
+    this: HTMLElement,
+  ) {
+    scrolled.push(this);
+  });
+  render(Files);
+  await screen.findByText('Loading scripts…');
+  resolve(scripts);
+  const first = await screen.findByRole('button', { name: 'weekly.py' });
+  await waitFor(() => expect(first).toHaveAttribute('aria-expanded', 'true'));
+  await waitFor(() => expect(scrolled.at(-1)).toContainElement(first));
+  const second = screen.getByRole('button', { name: 'tools/report & notes.py' });
+  await fireEvent.click(second);
+  expect(first).toHaveAttribute('aria-expanded', 'false');
+  expect(second).toHaveAttribute('aria-expanded', 'true');
+  expect(new URLSearchParams(window.location.search).get('script')).toBe('tools/report & notes.py');
+  __history.back();
+  window.dispatchEvent(new PopStateEvent('popstate'));
+  await waitFor(() => expect(first).toHaveAttribute('aria-expanded', 'true'));
+  await waitFor(() => expect(scrolled.at(-1)).toContainElement(first));
+  __history.forward();
+  window.dispatchEvent(new PopStateEvent('popstate'));
+  await waitFor(() => expect(second).toHaveAttribute('aria-expanded', 'true'));
+  await waitFor(() => expect(scrolled.at(-1)).toContainElement(second));
+  scroll.mockRestore();
+});
+
+it('opens scripts in the shared viewer and reveals their containing folder', async () => {
+  __history.reset('/istota/files?view=scripts');
+  render(Files);
+  const trigger = await screen.findByRole('button', {
+    name: 'Actions for tools/report & notes.py',
+  });
+  await fireEvent.keyDown(trigger, { key: 'Enter' });
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Open' }));
+  expect(openFile).toHaveBeenCalledWith('/Users/alice/Helper/scripts/tools/report & notes.py');
+  await fireEvent.keyDown(trigger, { key: 'Enter' });
+  const reveal = await screen.findByRole('menuitem', { name: 'Reveal' });
+  expect(reveal).toHaveAttribute('href', '/files?place=home&path=Helper%2Fscripts%2Ftools');
+  await fireEvent.click(reveal);
+  await waitFor(() =>
+    expect(api.getWorkspaceListing).toHaveBeenCalledWith('home', 'Helper/scripts/tools'),
+  );
+  expect(new URLSearchParams(window.location.search).has('script')).toBe(false);
+});
+
+it('retries a failed main-pane index load', async () => {
+  __history.reset('/istota/files?view=scripts');
+  api.getWorkspaceScripts.mockRejectedValueOnce(new Error('down'));
+  render(Files);
+  const main = await screen.findByRole('region', { name: 'Scripts view' });
+  expect(await within(main).findByText('Could not load your scripts.')).toBeTruthy();
+  await fireEvent.click(within(main).getByRole('button', { name: 'Retry' }));
+  expect(await within(main).findByRole('table', { name: 'Scripts' })).toBeTruthy();
 });
