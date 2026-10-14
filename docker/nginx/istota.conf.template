@@ -74,8 +74,10 @@ location = /istota/auth/set-password {
 }
 
 # The web UI. The SvelteKit build is served under base /istota, so proxy_pass
-# carries no path component and the URI is kept.
+# carries no path component and the URI is kept. `absolute_redirect off` for the
+# reason given at /standalone-signaling/: `/istota` is what people type.
 location /istota/ {
+    absolute_redirect off;
     proxy_pass http://$upstream_web;
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;

@@ -31,13 +31,25 @@ Then, in order:
 
 1. **Open with a feature.** The first sentence is something new a person can now do, in their words — "web chat works on a phone with no connection", not a count and not a problem. Never open with what was broken. A release whose real weight is security or bug fixing still opens on its best feature; the fixing is named in a clause near the end and carried by the changeset, which is where a reader goes for it.
 2. **Two paragraphs of prose, and no more.** The first is the features that reach the most people, the second is the rest plus one closing clause for the scale of the release and what the remainder was — the commit count against the two previous releases (`git log --oneline --no-merges vPREV..HEAD | wc -l`) belongs there, not in the opening. Group across buckets: a feature is usually spread over `Added`, `Changed` and `Fixed`. A theme that will not fit is not a third paragraph; it is a clause, or it is left to the changeset.
-3. **`**Before you upgrade.**` last**, as a list. One entry per thing that wants a decision or an action: a credential to reissue or rotate, a setting that is gone or has changed meaning, a migration a deploy performs and its refusal conditions, a default that flipped, a new alert to expect. Say what to do, not only what changed. Every `**Upgrade note:**` bullet in the section is a candidate; a bullet that merely says something is fixed is not, however large the fix.
+3. **`**Before you upgrade.**` last**, as a list of at most ten one-line entries. One entry per thing that wants a decision or an action: a credential to rotate, a setting that is gone, a migration with refusal conditions, a default that flipped. Say what to do in one or two sentences and name the docs page for the rest. Every `**Upgrade note:**` bullet in the section is a candidate; keep the ones that stop a deploy or change behaviour for everyone, and fold or drop the rest. A bullet that merely says something is fixed is not one, however large the fix.
 
 What to leave out: anything with no reader outside this repository (a refactor, a test-only change, a rule file), and the enumeration itself — the changeset is directly below and the announcement does not summarise all of it. An entry that matters and did not make a paragraph is not lost; it is one screen down.
 
 Voice is the changelog's own: second person, plain, specific, what it does rather than what it enables. Bold is for the `Before you upgrade` lead-ins and nothing else. The full checklist is the `writing-style` skill, which is worth invoking before drafting rather than after.
 
-The prose is capped at two paragraphs whatever the release: 980 commits earned about 350 words of it, and 36 commits earn three sentences and no upgrade list at all. Only the list grows with the release, because every entry in it is an action somebody has to take. The worked example is the announcement opening the most recent release in `CHANGELOG.md` — read it beside the section it opens.
+The prose is two paragraphs whatever the release: 755 commits earned about 230 words in 0.44.0, and 36 commits earn three sentences and no upgrade list at all. **The worked example is the 0.44.0 section in `CHANGELOG.md`**, announcement and changeset both; aim at its length and its level of detail.
+
+## Consolidating the changeset
+
+Bullets are written per merge, so by release time the section holds many entries about one feature, each long and correct on its own: 0.44.0 arrived at 116 KB with ten separate `istota apply` bullets. Before writing the announcement, rewrite the section as release notes for someone skimming what's new:
+
+- **One bullet per feature.** Merge every entry about the same thing into one, across merges and across `Added`, `Changed` and `Fixed` (put it where most of it belongs). Ten `istota apply` bullets become one line ending in `See docs/configuration/declarative-settings.md`.
+- **A sentence or two each, at most 50 words.** Bold lead-in for features in `Added` and `Changed`, plain for the rest. What a user can now do or what changed for them; no flags lists, env vars, columns, thresholds, issue numbers or implementation history. The detail lives in `docs/` and in the commits, so name the docs page instead.
+- **Group the small things.** Related fixes go in one bullet ("WhatsApp messages survive a restart, mentions show as names, …"), and minor UI additions in one "Smaller additions" line.
+- **`**Upgrade note:**` lines come out of the bullets.** The ones that matter go to the "Before you upgrade" list; the rest are dropped, since the docs page carries them.
+- **Do it before `release.sh`.** The tag annotation is signed with the section in it, so a section shortened after the cut means re-signing the tag or leaving the long version in the annotation.
+
+`scripts/release.sh` refuses a cut over the limits 0.44.0 sets with headroom: announcement prose over 300 words, more than ten upgrade entries, any entry over 50 words, or a section over 20,000 characters. The refusal lists the long entries by their first words. These are checks of the edit, not a target to pad up to.
 
 ## Three gotchas that have already cost a release
 
