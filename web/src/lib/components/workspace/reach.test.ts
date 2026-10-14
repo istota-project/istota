@@ -7,6 +7,7 @@ import {
   placeForRef,
   reachesTasks,
   taskReachDescription,
+  taskReachNote,
 } from './reach';
 
 function place(
@@ -47,10 +48,19 @@ describe('taskReachDescription', () => {
   });
 
   it('limits a room folder to that room', () => {
-    expect(taskReachDescription('rw', true)).toBe(
+    expect(taskReachDescription('rw', 'room')).toBe(
       'Istota can read and change these files, in this room only',
     );
-    expect(taskReachDescription('none', true)).toBeNull();
+    expect(taskReachDescription('none', 'room')).toBeNull();
+  });
+
+  it('says how the rooms index and a group folder are limited', () => {
+    expect(taskReachDescription('rw', 'rooms')).toBe(
+      'Istota can read and change these files, each only in its own room',
+    );
+    expect(taskReachDescription('ro', 'group')).toBe(
+      'Istota can read these files, in a shared room only when everyone there is in the group',
+    );
   });
 });
 
@@ -117,5 +127,18 @@ describe('accessVariant', () => {
   it('leaves an unknown access kind neutral', () => {
     expect(accessVariant('later' as WorkspaceAccess)).toBe('neutral');
     expect(accessVariant('toString' as WorkspaceAccess)).toBe('neutral');
+  });
+});
+
+describe('taskReachNote', () => {
+  it('names the bot and where the list reaches', () => {
+    expect(taskReachNote('rw', 'Helper')).toBe(
+      'Helper can read and change these files, in any of your rooms.',
+    );
+    expect(taskReachNote('ro', 'Helper', 'group')).toBe(
+      'Helper can read these files, in a shared room only when everyone there is in the group.',
+    );
+    expect(taskReachNote('skill', 'Helper')).toBeNull();
+    expect(taskReachNote('none', 'Helper', 'rooms')).toBeNull();
   });
 });

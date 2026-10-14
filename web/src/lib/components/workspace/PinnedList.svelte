@@ -3,7 +3,7 @@
   import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import TaskReachIcon from './TaskReachIcon.svelte';
-  import { placeForRef, reachesTasks } from './reach';
+  import { placeForRef, reachesTasks, type TaskReachScope } from './reach';
   let {
     pins,
     places,
@@ -40,6 +40,12 @@
     return items;
   }
   // The place whose reach a pin shows, or null where the row has no link or button to carry the description.
+  function pinScope(place: WorkspacePlace | null): TaskReachScope | undefined {
+    if (place?.kind === 'room') return 'room';
+    if (place?.kind === 'group') return 'group';
+    return undefined;
+  }
+
   function pinPlace(pin: WorkspacePin) {
     if (!pin.available) return null;
     if (pin.provider === 'drive') {
@@ -73,7 +79,7 @@
         {#snippet content()}
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
-          >{#if access}<TaskReachIcon {access} id={reachId} room={pinned?.kind === 'room'} />{/if}
+          >{#if access}<TaskReachIcon {access} id={reachId} scope={pinScope(pinned)} />{/if}
         {/snippet}
         {#if !pin.available}
           <div class="unavailable">{@render content()}</div>
@@ -115,7 +121,9 @@
   .unavailable {
     flex: 1;
     min-width: 0;
-    padding: var(--space-1) var(--space-3);
+    /* No right inset: the kebab beside it carries its own, so the bot icon sits as close to it
+       as the warning icon does to the bot icon in the bot section. */
+    padding: var(--space-1) 0 var(--space-1) var(--space-3);
     font-size: var(--text-sm);
     color: inherit;
   }

@@ -1,13 +1,10 @@
 <script lang="ts">
   import { Bot } from '@lucide/svelte';
   import type { WorkspaceAccess } from '$lib/api';
-  import { taskReachDescription } from './reach';
-  let {
-    access,
-    id,
-    room = false,
-  }: { access: WorkspaceAccess; id: string; room?: boolean } = $props();
-  const description = $derived(taskReachDescription(access, room));
+  import { taskReachDescription, type TaskReachScope } from './reach';
+  let { access, id, scope }: { access: WorkspaceAccess; id: string; scope?: TaskReachScope } =
+    $props();
+  const description = $derived(taskReachDescription(access, scope));
 </script>
 
 <!-- Hidden from the tree so the row's link keeps its label as its name; aria-describedby still reads the id. -->

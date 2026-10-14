@@ -1,4 +1,5 @@
 <script lang="ts">
+  import IndexCaption from './IndexCaption.svelte';
   import type { WorkspaceScriptsIndex } from '$lib/api';
   import { Button, EmptyState, KebabMenu, NoticeBanner, type KebabItem } from '$lib/components/ui';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
@@ -7,6 +8,7 @@
   let {
     label,
     caption,
+    reachNote = null,
     empty,
     kind,
     index,
@@ -18,6 +20,8 @@
   }: {
     label: string;
     caption: string;
+    /** The bot icon's sentence for the whole list, when every entry shares one reach. */
+    reachNote?: string | null;
     empty: string;
     kind: ScriptKind;
     index: WorkspaceScriptsIndex | null;
@@ -68,7 +72,7 @@
       </div>
     {/if}
     {#if files.length}
-      <p class="caption index-caption">{caption}</p>
+      <IndexCaption {caption} {reachNote} />
       <ul>
         {#each files as file (file.path)}
           {@const viewPath = `${index.scripts_view_path}/${file.path}`}
@@ -117,7 +121,6 @@
     padding-left: var(--space-4);
     list-style: disc;
   }
-  .index-caption,
   .index-note {
     margin: 0;
     padding: var(--space-3);

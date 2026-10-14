@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Each list under the assistant's section in Files (Rooms, Groups, Configuration, Skill instructions, Scripts, Prompt files) now says under its caption what a task can do with the files in it, and where: a room folder only in its own room, a group folder in a shared room only when everyone there is in the group. The sidebar's one-line legend is gone; a pinned group file's icon now says the same about groups.
+
 - Buttons and toggle chips in the web UI are visible before you hover them. Lesser actions such as Cancel used to render as bare text that looked like an offset link, and toggle chips disappeared against cards and dialogs; both now have a fill or outline at rest, including when disabled.
 - Markdown files open in the viewer as a readable page: headings at their own sizes, a comfortable line length, and frontmatter in a small collapsed panel set apart from the document. The Rendered and Source switch moved into the viewer's header beside Download.
 - The Workspace page is now called Files and sits before Groups in the navigation; the dashboard has a Groups tile beside it. In the Files sidebar, My files, Rooms, Groups, Configuration and Skill instructions sit under one section named after the assistant, and rooms, groups and config files open as lists in the main page instead of filling the sidebar.
