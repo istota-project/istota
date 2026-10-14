@@ -122,11 +122,17 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
   expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
   expect(sidebar.querySelector('.badge')).toBeNull();
   expect(container.querySelector('.folder-toolbar')).toHaveTextContent('Read-write');
+  expect(container.querySelector('.folder-toolbar .lucide-bot')).not.toBeNull();
   await screen.findByRole('link', { name: 'notes & drafts' });
   expect(container.querySelector('details')).not.toHaveAttribute('open');
   expect(screen.getByText('Files are stored in a local folder.')).toBeTruthy();
   expect(screen.getByText('Guest turn or unasked task')).toBeTruthy();
   expect(screen.getByText('No access')).toBeTruthy();
+  const legend = container.querySelector('details .reach-legend')!;
+  expect(legend).toHaveTextContent(
+    'in the sidebar means a task in your private room can reach that place. Places without it are visible to you only.',
+  );
+  expect(within(legend as HTMLElement).getByRole('img', { name: 'The robot icon' })).toBeTruthy();
 });
 
 it('marks the places a task can reach and describes the mark without renaming the link', async () => {
@@ -946,9 +952,9 @@ it('links to Connections when Nextcloud needs reconnecting', async () => {
   );
 });
 
-it('explains personal Nextcloud browsing without claiming tasks have no file access', async () => {
+it('says plainly, outside any disclosure, that only the user sees the Nextcloud view', async () => {
   const note =
-    'This browser uses your personal Nextcloud connection. The Nextcloud skill uses the bot’s separate account. Files available to a task depend on that account’s access and the task’s workspace permissions.';
+    'Only you can see this view. It uses your personal Nextcloud connection, which tasks never use. Istota’s Nextcloud skill uses the bot’s own account instead. To work on a file with Istota, put a copy in My files.';
   api.getWorkspacePlaces.mockResolvedValue({
     places: [
       {
@@ -962,12 +968,18 @@ it('explains personal Nextcloud browsing without claiming tasks have no file acc
     ],
     notes: ['Files are stored in your Nextcloud at cloud.example.com.'],
   });
-  render(Workspace);
-  await screen.findByText(note);
+  const { container } = render(Workspace);
+  const notice = await screen.findByText(note);
+  expect(notice.closest('details')).toBeNull();
+  expect(notice).toBeVisible();
+  expect(container.querySelector('details')).toBeNull();
+  expect(screen.queryByText('How Istota reaches your files')).toBeNull();
+  const toolbar = container.querySelector('.folder-toolbar')!;
+  expect(toolbar).toHaveTextContent('Only you');
+  expect(toolbar.querySelector('.lucide-bot-off')).not.toBeNull();
   expect(screen.queryByText('No access')).toBeNull();
   expect(screen.queryByText('Private room')).toBeNull();
   expect(screen.queryByText('Files are stored in your Nextcloud at cloud.example.com.')).toBeNull();
-  expect(screen.getByText('How Istota reaches your files')).toBeTruthy();
 });
 
 it('puts My files immediately after Pinned and opens only My files by default', async () => {
