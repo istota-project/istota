@@ -34,8 +34,7 @@ other credential was already gone. That is the whole of the gap, and it is why
 ISSUE-390 was live where it was.
 
 Two neighbouring shapes are deliberately not this module's problem. Where the
-proxy is off, `setup_wizard` also writes `sandbox_enabled = false`, so nothing
-is confined and there is no boundary for an environment variable to cross — the
+proxy is off and `sandbox_enabled = false` too, nothing is confined and there is no boundary for an environment variable to cross — the
 task runs as the user and can read the config file. Where the proxy is off *and*
 a sandbox is on, credentials do reach inside a real boundary; `load_config`
 already warns on that pairing (ISSUE-393 is about what that warning says).

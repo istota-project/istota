@@ -1262,8 +1262,8 @@ def localize_workspace_attachments(
     what the executor saw before. A refusal logs the basename only.
 
     An entry already naming a host path under the workspace or the temp dir
-    passes through untouched: on a macOS standalone install the workspace
-    itself sits under ``/Users/<user_id>/``, so the prefix test alone would
+    passes through untouched: on a macOS checkout running ``istota serve`` the
+    workspace can sit under ``/Users/<user_id>/``, so the prefix test alone would
     re-map a web upload's real path and warn about it.
 
     Checked here and read later by name, as a web upload is: a task of the
@@ -10737,15 +10737,6 @@ def _report_sandbox_posture(config: Config) -> None:
                 "no isolation between users. Linux + bubblewrap is the only supported multi-user deployment.",
                 len(config.users),
             )
-        elif config.is_standalone:
-            # Intended single-user local posture (istota serve / setup), not a
-            # misconfiguration. Still visible so the trust model isn't hidden.
-            logger.info(
-                "SECURITY Standalone local install — no sandbox isolation. The "
-                "agent runs with your user account's full privileges (trusted "
-                "single-user posture). Only give it content and instructions you "
-                "trust."
-            )
         else:
             logger.warning(
                 "SECURITY Sandbox explicitly disabled — no isolation guarantees (dev-only configuration)"
@@ -10762,7 +10753,7 @@ def run_daemon(
     Run the scheduler as a daemon (continuous loop).
     Handles graceful shutdown via SIGTERM/SIGINT.
 
-    ``install_signal_handlers`` (default True) preserves the standalone-daemon
+    ``install_signal_handlers`` (default True) is the daemon's own process
     behaviour. The combined ``istota serve`` launcher runs this on a worker
     thread with ``install_signal_handlers=False`` and owns SIGINT/SIGTERM
     itself (signal handlers can only be installed from the main thread), driving

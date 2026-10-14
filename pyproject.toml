@@ -228,12 +228,6 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/istota"]
-# Ship the built SvelteKit frontend as package data so the web UI works from a
-# non-editable install (no repo checkout). The release build copies web/build →
-# src/istota/web_static (gitignored) before `hatch build`; `artifacts` forces
-# those otherwise-VCS-excluded files into the wheel. web_app._resolve_static_dir
-# falls back to the packaged dir. Absent (dev build without the copy) → no error.
-artifacts = ["src/istota/web_static/**"]
 
 # schema.sql lives at the repo root (outside the package dir) but db.init_db
 # needs it at runtime, including from a non-editable install with no checkout.

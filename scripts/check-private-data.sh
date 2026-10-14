@@ -28,7 +28,7 @@ LOCAL_PATTERN_FILE=".private-data-local"
 EXEMPT_MARKER="private-data-ok"
 
 # Paths that are generated, vendored, or otherwise not ours to police.
-SKIP_RE='^(node_modules/|web/node_modules/|\.venv/|dist/|\.ruff_cache/|\.mypy_cache/|\.pytest_cache/|web/build/|src/istota/web_static/)|(^|/)(uv\.lock|package-lock\.json)$'
+SKIP_RE='^(node_modules/|web/node_modules/|\.venv/|dist/|\.ruff_cache/|\.mypy_cache/|\.pytest_cache/|web/build/)|(^|/)(uv\.lock|package-lock\.json)$'
 
 # Terms too generic to denylist: matching one would flag most of the tree.
 GENERIC_TERMS='^(user|users|admin|root|test|tests|dev|home|me|bot|alice|bob|carol|dana|localhost|ubuntu|debian|runner|build|ci|app|data|tmp|var)$'

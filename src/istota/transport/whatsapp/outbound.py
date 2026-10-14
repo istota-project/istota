@@ -1514,8 +1514,8 @@ def _write_billing_alerts(conn, user_id: str, task_id) -> tuple[object, ...]:
     An empty admin file means "everyone is admin" to `Config.is_admin` on a
     single-user config, and writing a row per user would be a fan-out rather
     than an escalation
-    — on that shape the recipient's own row is the notice, which on the
-    single-user install it describes is the operator's inbox anyway.
+    — on that shape the recipient's own row is the notice, which on a
+    single-user config is the operator's inbox anyway.
 
     A fixed dedup key per reader, since the circuit is a singleton and only an
     operator reopens it. The Meta message id is in no row at any length: a

@@ -281,8 +281,8 @@ async def _root_redirect() -> RedirectResponse:
 
     The whole UI lives under ``/istota`` (the base path is baked into the
     SvelteKit build and shared with the server deployment, where nginx routes
-    ``/istota/`` to this service). In a standalone / direct-uvicorn run there is
-    no nginx in front, so opening ``http://host:port/`` would otherwise 404 —
+    ``/istota/`` to this service). Under ``istota serve`` or a direct uvicorn
+    run there is no nginx in front, so opening ``http://host:port/`` would otherwise 404 —
     redirect it so the printed bare-port URL just works.
     """
     return RedirectResponse(url="/istota/", status_code=307)
@@ -336,8 +336,9 @@ def _assert_no_auth_launch_safe(auth: list[str], launch_app: FastAPI) -> None:
 def _no_auth_mode() -> bool:
     """Whether the web app is running with authentication bypassed.
 
-    Single-user local (standalone) shape: ``[web] auth = "none"``. Server
-    deployments leave the default ``"nextcloud"`` and this is always False.
+    ``[web] auth = "none"``, which only ``istota serve`` on a loopback bind
+    accepts (development on a checkout). The stack refuses it, so there this is
+    always False.
     """
     return bool(_config) and _config.web.has_method("none")
 
@@ -2646,7 +2647,6 @@ def _gather_admin_stats() -> dict:
 
     payload["modules"] = _admin_modules_section()
     payload["chat"] = _admin_chat_section()
-    payload["runtime"] = _admin_runtime_section()
     payload["models"] = _admin_models_section()
     payload["brain_status"] = _admin_brain_status_section()
     # Best-effort like every other section, and with more reason than most: this
@@ -2993,65 +2993,6 @@ def _admin_models_section() -> dict:
     except Exception as exc:  # noqa: BLE001 — never fail the stats payload
         logger.exception("admin models section failed")
         return {"error": str(exc)}
-
-
-def _admin_runtime_section() -> dict:
-    """Runtime posture block for the admin dashboard.
-
-    ``mode`` is config-derived (``Config.is_standalone``). ``caveats`` is
-    derived from what is *actually* disabled, so it stays accurate as the user
-    opts features back in — a caveat whose feature is enabled is omitted. Each
-    caveat is ``{"title", "detail"}``. In server mode the block is minimal
-    (``mode == "server"``, empty caveats) so the frontend renders nothing.
-    """
-    if not _config or not _config.is_standalone:
-        return {"mode": "server", "caveats": []}
-
-    caveats: list[dict] = []
-
-    # Security caveat is always present in standalone mode. Standalone is a
-    # trusted single-user posture without bwrap isolation, so the agent runs
-    # with the user's full privileges regardless of the sandbox_enabled flag.
-    caveats.append({
-        "title": "No sandbox isolation",
-        "detail": (
-            "The agent runs with your user account's full privileges. Only "
-            "give this instance content and instructions you trust."
-        ),
-    })
-
-    if not _config.nextcloud.url:
-        workspace = str(_config.workspace_path or "a local folder")
-        caveats.append({
-            "title": "No Nextcloud",
-            "detail": (
-                f"The workspace is a local folder ({workspace}); file sharing "
-                "and CalDAV-from-Nextcloud are unavailable."
-            ),
-        })
-
-    if not _config.location.enabled:
-        caveats.append({
-            "title": "GPS location tracking is off",
-            "detail": (
-                "The Overland webhook receiver isn't running under `istota "
-                "serve` by default."
-            ),
-        })
-
-    if not _config.talk.enabled:
-        caveats.append({
-            "title": "Nextcloud Talk is disabled",
-            "detail": "Chat is the web UI and REPL only.",
-        })
-
-    if not _config.email.enabled:
-        caveats.append({
-            "title": "Email polling is off",
-            "detail": "Inbound/outbound email is disabled.",
-        })
-
-    return {"mode": "standalone", "caveats": caveats}
 
 
 def _admin_system_section(version: str, db_path: Path) -> dict:
@@ -14540,8 +14481,8 @@ async def settings_generate_ingest_token(
         # decoder rejects for not being https — so the phone reports "not an
         # Istota provisioning code" and blames the code rather than the
         # missing config. A tracker cannot post to a relative URL either, so
-        # there is no token worth issuing here. Hits the standalone local
-        # install, where hostname is routinely blank.
+        # there is no token worth issuing here. Hits a checkout running
+        # `istota serve`, where hostname is routinely blank.
         raise HTTPException(
             status_code=409,
             detail="This deployment has no public hostname configured, so the "

@@ -6,7 +6,7 @@ both: `istota-stack config-apply`, started by a systemd path unit watching the
 trigger file this module writes. The compose override that binds the requests
 directory into the web container also sets `ISTOTA_CONFIG_APPLIER=host`, so
 the variable and a writable directory together are what "an applier exists"
-means. Anywhere else (`istota serve` on macOS, a deprecated standalone install)
+means. Anywhere else (`istota serve` on a checkout)
 the editor is read-only, and `detect` says why.
 
 The trigger file carries only a request id; the host reads nothing else from

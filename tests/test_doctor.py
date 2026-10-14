@@ -2906,16 +2906,12 @@ class TestSecretKey:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "a" * 64)
         assert self._run(make_config()).status == OK
 
-    def test_the_standalone_remedy_names_the_env_file(self, make_config):
-        from istota.config import WebConfig
-
-        config = make_config(web=WebConfig(auth="none"))
-        assert config.is_standalone is True
-        result = self._run(config)
+    def test_the_remedy_names_the_stacks_key_file(self, make_config):
+        result = self._run(make_config())
         assert result.status == FAIL
-        assert "istota.env" in result.remedy
+        assert "/data/.secret_key" in result.remedy
 
-    def _standalone(self, make_config, tmp_path, env_file=None):
+    def _with_env_file(self, make_config, tmp_path, env_file=None):
         from istota.config import WebConfig
 
         config_path = tmp_path / "cfg" / "config.toml"
@@ -2929,14 +2925,14 @@ class TestSecretKey:
         """`cmd_serve` is the only thing that sources istota.env, so `istota
         doctor` in an operator's shell carries no marker and never read the
         file; taking its own env as the answer failed a correct install."""
-        config = self._standalone(make_config, tmp_path, "ISTOTA_SECRET_KEY=" + "h" * 64 + "\n")
+        config = self._with_env_file(make_config, tmp_path, "ISTOTA_SECRET_KEY=" + "h" * 64 + "\n")
         result = self._run(config)
         assert result.status == OK
         assert "istota.env" in result.detail
         assert "h" * 8 not in result.detail
 
     def test_a_short_key_in_the_env_file_fails(self, make_config, tmp_path):
-        result = self._run(self._standalone(make_config, tmp_path, "ISTOTA_SECRET_KEY=tooshort\n"))
+        result = self._run(self._with_env_file(make_config, tmp_path, "ISTOTA_SECRET_KEY=tooshort\n"))
         assert result.status == FAIL
         assert str(secrets_store._MIN_KEY_LEN) in result.detail
         assert "tooshort" not in result.detail
@@ -2944,13 +2940,13 @@ class TestSecretKey:
     def test_an_env_file_without_the_key_still_fails(self, make_config, tmp_path):
         """The fallback must not turn a missing key into a pass just because a
         file is there."""
-        config = self._standalone(make_config, tmp_path, "ISTOTA_WEB_INSECURE_COOKIES=1\n")
+        config = self._with_env_file(make_config, tmp_path, "ISTOTA_WEB_INSECURE_COOKIES=1\n")
         assert self._run(config).status == FAIL
 
     def test_the_remedy_names_the_configs_own_env_file(self, make_config, tmp_path):
-        """`istota setup -c` puts the env file beside whatever config it was
+        """`istota serve` reads the env file beside whatever config it was
         given, so a hardcoded default names a path that may not exist."""
-        config = self._standalone(make_config, tmp_path)
+        config = self._with_env_file(make_config, tmp_path)
         result = self._run(config)
         assert result.status == FAIL
         assert str(Path(config.config_path).parent / "istota.env") in result.remedy
@@ -5273,11 +5269,12 @@ class TestSessionLogDir:
         assert "switched off on this deployment" in r.detail
         assert r.remedy
 
-    def test_the_standalone_install_as_shipped_warns_on_both_counts(
+    def test_the_database_in_the_workspace_with_the_sandbox_off_warns_on_both_counts(
         self, make_config, tmp_path,
     ):
-        # `setup_wizard` writes the workspace layout *and* `sandbox_enabled =
-        # false`; gating the mask arm on `sandbox_enabled` made this a plain OK.
+        # The workspace layout *and* `sandbox_enabled = false`, which the old
+        # standalone wizard wrote; gating the mask arm on `sandbox_enabled` made
+        # this a plain OK.
         # Both reasons are named, availability first: whether a mask exists at
         # all outranks where it would land.
         r = self._run(self._workspace_shape(make_config, tmp_path, sandbox_enabled=False))
@@ -7299,7 +7296,7 @@ class TestWallet:
         assert not config.db_path.exists()
 
 
-    def test_standalone_key_absent_from_cli_is_unchecked_not_damaged(self, make_config, db_path, monkeypatch):
+    def test_a_key_only_in_the_serve_env_file_is_unchecked_not_damaged(self, make_config, db_path, monkeypatch):
         from istota import db
         from istota.wallet import cards
         from .support.wallet import card_input

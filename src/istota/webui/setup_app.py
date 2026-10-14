@@ -962,8 +962,6 @@ def _argument_refusal(args) -> str | None:
             "--force does not go with --web: the web setup is for a first run only. "
             "Use `istota-stack setup --force` to replace an existing config."
         )
-    if setup_wizard.setup_shape(args) != "container":
-        return "--web sets up the container; it does not go with --shape standalone."
     if not getattr(args, "vm_dir", None):
         return "--web needs --vm-dir, the staging directory istota-stack hands it."
     return None

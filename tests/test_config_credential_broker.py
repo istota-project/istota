@@ -16,12 +16,7 @@ import pytest
 from istota.config import CredentialBrokerConfig, config_from_document, load_config
 from istota.config_mapper import collect_problems
 from istota.lib.toml_write import dumps
-from istota.setup_wizard import (
-    Answers,
-    ContainerAnswers,
-    container_config_document,
-    render_config_toml,
-)
+from istota.setup_wizard import ContainerAnswers, container_config_document
 
 
 @pytest.fixture(autouse=True)
@@ -116,9 +111,14 @@ def test_the_stack_setup_config_runs_the_broker():
     assert (broker.enabled, broker.enforce_reveal) == (True, True)
 
 
-def test_the_standalone_setup_config_does_not(tmp_path):
-    toml = render_config_toml(Answers(workspace=tmp_path / "ws", user_id="alice", web_port=8766))
+def test_a_config_with_the_sandbox_off_does_not(tmp_path):
+    """What the removed standalone wizard wrote, and what `istota serve` on a
+    checkout runs: no sandbox and no network proxy, so nowhere to substitute."""
     p = tmp_path / "config.toml"
-    p.write_text(toml)
+    p.write_text(
+        '[web]\nauth = "none"\n'
+        "[security]\nsandbox_enabled = false\nskill_proxy_enabled = false\n"
+        "[security.network]\nenabled = false\n"
+    )
     broker = load_config(p).security.credential_broker
     assert (broker.enabled, broker.enforce_reveal) == (False, False)

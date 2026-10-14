@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The standalone install is gone.** `install.sh --standalone`, `istota update` and the standalone half of `istota setup` were removed; both now refuse and point at `install.sh --local` and `istota-stack import-standalone`, which still moves an existing `~/.istota` into the local VM. `istota serve` with `[web] auth = "none"` stays for development on a checkout, without the shared-writer exemption the standalone shape had, and the wheel no longer carries the web bundle.
+
 ## [0.44.0] - 2026-10-13 (Coconut octopus)
 
 Istota now installs the same way everywhere: the Docker stack on a machine of its own, set up by `host/provision.sh` and updated from signed releases. On an Apple silicon Mac, `install.sh --local` creates that machine as a Lima VM, with `~/Istota` as the workspace folder you open in Finder and the master key copied into your login Keychain; `istota-stack restore` rebuilds a lost VM from the two. On a server, `install.sh --server` or a cloud VM started from `host/cloud-init.yaml` does the same. Setup runs in the browser and tests each connection before it saves. `istota-stack update` builds only a release tag whose signature it has checked, and `rollback` goes back one. Nextcloud is now optional: the workspace can be a local folder, with Talk and the `nextcloud` skill still connected. Once it runs, the new Workspace tab lets you browse, preview, upload and pin your files, Google Drive and your Nextcloud shares, search beside the bell finds messages, memories and records with Cmd+K, and admins edit the configuration from Admin → Configuration with a reviewed diff and an emailed code.

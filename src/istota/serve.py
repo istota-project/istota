@@ -1,4 +1,4 @@
-"""Combined single-process launcher for the local install (``istota serve``).
+"""Combined single-process launcher for development on a checkout (``istota serve``).
 
 Runs the task-processing scheduler loop and the uvicorn web server in one
 process, blocking until Ctrl-C. The scheduler owns the worker pool + every
@@ -61,7 +61,8 @@ def parse_env_text(text: str) -> dict[str, str]:
     """``KEY=VALUE`` lines as ``load_env_file`` reads them: an ``export``
     prefix, ``#`` comments, quotes stripped, and the first line for a name
     wins, since that is the one ``load_env_file`` puts in the environment.
-    The standalone import reads ``istota.env`` through this too."""
+    The standalone import and doctor's ``security.secret_key`` read
+    ``istota.env`` through this too."""
     values: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
@@ -111,7 +112,8 @@ def bootstrap_checks(config: Config) -> None:
     """Verify the instance is set up, and seed workspace dirs.
 
     Raises ``ServeError`` with an actionable message when the DB is missing or
-    no user row exists (i.e. ``istota setup`` was never run). Ensures the
+    no user row exists (``istota init`` and ``istota user ensure`` were never
+    run). Ensures the
     configured user's workspace directories exist (idempotent) so a fresh
     install is fully seeded before the pollers run.
     """
@@ -120,7 +122,7 @@ def bootstrap_checks(config: Config) -> None:
     db_path = Path(config.db_path)
     if not db_path.exists():
         raise ServeError(
-            f"No database at {db_path}. Run `istota setup` first."
+            f"No database at {db_path}. Run `istota init` first."
         )
 
     # A configured user is required — the no-auth web UI and every workspace
@@ -128,8 +130,7 @@ def bootstrap_checks(config: Config) -> None:
     # user_profiles table by load_config.
     if not config.users:
         raise ServeError(
-            "No user is configured. Run `istota setup` first (or "
-            "`istota user ensure -u <id>`)."
+            "No user is configured. Run `istota user ensure --name <id>` first."
         )
 
     # Confirm the DB is readable (a present-but-corrupt file should fail here,
@@ -140,7 +141,7 @@ def bootstrap_checks(config: Config) -> None:
     except Exception as exc:
         raise ServeError(
             f"Database at {db_path} is present but unreadable: {exc}. "
-            "Run `istota setup` to repair, or restore a backup."
+            "Run `istota init` to repair, or restore a backup."
         ) from exc
 
     # Seed workspace directories for every configured user (idempotent).

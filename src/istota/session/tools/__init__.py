@@ -24,8 +24,8 @@ The roots are still passed and still enforced — the server builds its
 ``ToolEnv`` from them — but they are the **error-message layer** now rather
 than the boundary: "outside the allowed workspace" beats ENOENT, and a path
 outside the namespace is not there to reach in the first place. Where bwrap is
-unavailable (macOS, the standalone install, a Docker stack without the two
-container settings) ``build_bwrap_cmd`` returns the command unchanged, the
+unavailable (macOS, a config with the sandbox off, a Docker stack without the
+two container settings) ``build_bwrap_cmd`` returns the command unchanged, the
 server is an ordinary child, and the roots are the confinement exactly as
 before — which is also what lets the default suite exercise this seam on a
 developer machine.

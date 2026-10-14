@@ -362,7 +362,26 @@ class TestTheRun:
         args = _args(tmp_path, shape=None)
         assert setup_wizard.setup_shape(args) == "container"
         monkeypatch.delenv("ISTOTA_SETUP_SHAPE")
-        assert setup_wizard.setup_shape(_args(tmp_path, shape=None, vm_dir=None)) == "standalone"
+        assert setup_wizard.setup_shape(_args(tmp_path, shape=None)) == "container"
+
+    def test_outside_the_image_it_refuses_and_names_the_local_vm(self, tmp_path):
+        """The standalone half is gone. Outside the image, with no --vm-dir,
+        setup refuses before writing anything and names what replaced it."""
+        args = _args(tmp_path, shape=None, vm_dir=None)
+        with pytest.raises(setup_wizard.SetupError) as excinfo:
+            setup_wizard.run_setup(args, out=lambda *_: None)
+        assert "install.sh --local" in str(excinfo.value)
+        assert "import-standalone" in str(excinfo.value)
+        assert not (tmp_path / "data").exists()
+
+    def test_update_is_no_longer_a_command(self, monkeypatch, capsys):
+        from istota import cli
+
+        monkeypatch.setattr("sys.argv", ["istota", "update"])
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main()
+        assert excinfo.value.code == 2
+        assert "invalid choice: 'update'" in capsys.readouterr().err
 
     def test_proxied_ingress_without_an_upstream_is_refused(self, tmp_path):
         with pytest.raises(setup_wizard.SetupError, match="upstream"):
@@ -1318,3 +1337,46 @@ class TestTheSenderCheck:
 
         assert on.authserv_id == "mx.example.test"
         assert off.authserv_id == ""
+
+
+class TestThePrompts:
+    """The terminal wizard's prompt helpers, which the container half kept when
+    the standalone half went."""
+
+    def test_yes_no_empty_takes_the_default(self):
+        assert setup_wizard._ask_yes_no(lambda _p: "", "Q?", True) is True
+        assert setup_wizard._ask_yes_no(lambda _p: "", "Q?", False) is False
+
+    def test_yes_no_re_asks_rather_than_reading_as_no(self):
+        """On a default-Yes prompt a typo used to flip *away* from the `[Y/n]`
+        just printed and disable a module durably."""
+        answers = iter(["yeah", "1", "y"])
+        said: list[str] = []
+        assert setup_wizard._ask_yes_no(lambda _p: next(answers), "Q?", True, out=said.append) is True
+        assert any("answer y or n" in line for line in said)
+
+    def test_yes_no_is_bounded_and_falls_back_to_the_default(self):
+        calls: list[str] = []
+
+        def ask(prompt):
+            calls.append(prompt)
+            return "maybe"
+
+        assert setup_wizard._ask_yes_no(ask, "Q?", True) is True
+        assert len(calls) == 3
+
+    def test_port_re_asks_on_a_non_number_and_out_of_range(self):
+        answers = iter(["me@example.test", "70000", "9000"])
+        said: list[str] = []
+        assert setup_wizard._ask_port(lambda _p: next(answers), "Port", 8080, out=said.append) == 9000
+        assert any("whole number" in line for line in said)
+        assert any("not a usable port" in line for line in said)
+
+    def test_port_gives_up_on_the_default_rather_than_looping(self):
+        assert setup_wizard._ask_port(lambda _p: "nope", "Port", 8080) == 8080
+
+    def test_timezone_validation(self):
+        assert setup_wizard._is_valid_timezone("America/Los_Angeles")
+        assert setup_wizard._is_valid_timezone("UTC")
+        assert not setup_wizard._is_valid_timezone("PDT")
+        assert not setup_wizard._is_valid_timezone("")
