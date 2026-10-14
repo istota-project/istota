@@ -1,6 +1,15 @@
 <script lang="ts">
   import { CategoryGroup } from '$lib/components/ui';
-  import { BookOpen, House, MessageSquare, SlidersHorizontal, Users } from '@lucide/svelte';
+  import {
+    BookOpen,
+    FileCode,
+    FileText,
+    House,
+    MessageSquare,
+    SlidersHorizontal,
+    TriangleAlert,
+    Users,
+  } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
   import TaskReachIcon from './TaskReachIcon.svelte';
   import { reachesTasks } from './reach';
@@ -10,6 +19,7 @@
     label,
     home,
     views,
+    warnings = {},
     current,
     viewOpen,
     href,
@@ -20,6 +30,8 @@
     label: string;
     home: WorkspacePlace | undefined;
     views: IndexView[];
+    /** An entry whose index has a problem to look at, with the warning's accessible label. */
+    warnings?: Partial<Record<IndexView, string>>;
     /** The entry the main area is showing: a view, or `home` for My files. */
     current: IndexView | 'home' | null;
     /** False while a room or group folder is open: its index entry is then an ancestor, not the page. */
@@ -35,6 +47,8 @@
     { view: 'groups', label: 'Groups', icon: Users },
     { view: 'config', label: 'Configuration', icon: SlidersHorizontal },
     { view: 'skills', label: 'Skill instructions', icon: BookOpen },
+    { view: 'scripts', label: 'Scripts', icon: FileCode },
+    { view: 'prompts', label: 'Prompt files', icon: FileText },
   ];
 </script>
 
@@ -64,6 +78,11 @@
       >
         <entry.icon size={14} />
         <span class="view-name">{entry.label}</span>
+        {#if warnings[entry.view]}
+          <span class="view-warning">
+            <TriangleAlert size={14} role="img" aria-label={warnings[entry.view]} />
+          </span>
+        {/if}
       </a>
     {/each}
   </CategoryGroup>
@@ -80,5 +99,10 @@
   }
   .view-btn > :global(svg) {
     color: var(--accent-amber);
+  }
+  .view-warning {
+    display: flex;
+    margin-left: auto;
+    color: var(--status-warn-fg);
   }
 </style>

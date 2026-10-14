@@ -77,7 +77,14 @@ it('collects the bot folder entries under one section named for the bot', async 
   const labels = within(section)
     .getAllByRole('link')
     .map((link) => link.querySelector('.view-name')?.textContent);
-  expect(labels).toEqual(['My files', 'Rooms', 'Groups', 'Configuration', 'Skill instructions']);
+  expect(labels).toEqual([
+    'My files',
+    'Rooms',
+    'Groups',
+    'Configuration',
+    'Skill instructions',
+    'Scripts',
+  ]);
   const sidebar = screen.getByRole('complementary');
   expect(within(sidebar).queryByRole('link', { name: 'Project room' })).toBeNull();
   expect(within(sidebar).queryByRole('link', { name: 'Team' })).toBeNull();
@@ -98,7 +105,7 @@ it('leaves out the entries with nothing behind them', async () => {
       within(section)
         .getAllByRole('link')
         .map((link) => link.querySelector('.view-name')?.textContent),
-    ).toEqual(['My files', 'Configuration']),
+    ).toEqual(['My files', 'Configuration', 'Scripts']),
   );
 });
 

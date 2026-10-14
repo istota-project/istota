@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Files now has a Scripts view with descriptions and the scheduled jobs or heartbeat checks that reference each script. It lists missing targets and marks scripts with no references; Open previews a file and Reveal opens its folder.
+- Files now has Scripts and Prompt files entries under the assistant's section, listing each file with its description and the scheduled jobs or heartbeat checks that reference it. Missing targets are listed above the files and flagged in the sidebar; choosing a file previews it and Reveal opens its folder.
 
 - Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
 
