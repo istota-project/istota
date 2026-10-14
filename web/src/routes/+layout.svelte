@@ -692,7 +692,7 @@
     color: var(--text-primary);
   }
 
-  @media (max-width: 800px) {
+  @media (max-width: 1023px) {
     .nav-user {
       display: none;
     }
