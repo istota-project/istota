@@ -15,6 +15,7 @@
     EmptyState,
     Badge,
     type KebabItem,
+    PageLoading,
   } from '$lib/components/ui';
   import {
     getWorkspacePins,
@@ -576,7 +577,7 @@
     </div>
   {/if}
   {#if loading}
-    <div class="center-msg">Loading files…</div>
+    <PageLoading label="Loading files…" />
   {:else if error}
     <div class="center-msg error">
       <p>{error}</p>
@@ -800,7 +801,7 @@
             : 'This connection is reached through a skill during a task.'}
         </div>
       {:else if listingLoading}
-        <div class="center-msg">Loading folder…</div>
+        <PageLoading label="Loading folder…" />
       {:else if listingError}
         <div class="center-msg error">
           {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}

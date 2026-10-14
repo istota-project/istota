@@ -3,7 +3,7 @@
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { formatDateTime } from '$lib/dateFormat';
-  import { Badge, Button, NoticeBanner } from '$lib/components/ui';
+  import { Badge, Button, NoticeBanner, PageLoading } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);
@@ -97,7 +97,7 @@
        transient 500 on the deep button left no way to retry short of a page
        reload, and took the findings the operator was reading with it. -->
   {#if loading && !report}
-    <div class="center-msg">Running checks…</div>
+    <PageLoading label="Running checks…" />
   {:else if error && !report}
     <div class="center-msg error">{error}</div>
   {:else if report}

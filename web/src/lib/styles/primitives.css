@@ -495,3 +495,14 @@ a:hover {
   padding-left: max(var(--overlay-pad-inline, 1rem), var(--safe-left));
   padding-right: max(var(--overlay-pad-inline, 1rem), var(--safe-right));
 }
+
+/* Text a screen reader reads and the page does not show. The same block was
+   hand-copied per component (NoticeDrawer, chat Message, TaskReachIcon). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

@@ -13,7 +13,7 @@
     type SetupFinished,
     type SetupState,
   } from '$lib/api';
-  import { Button, NoticeBanner } from '$lib/components/ui';
+  import { Button, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import SetupFrame from '$lib/components/setup/SetupFrame.svelte';
   import StepUnlock from '$lib/components/setup/StepUnlock.svelte';
@@ -275,7 +275,7 @@
 </script>
 
 {#if view === 'loading'}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if view === 'unreachable'}
   <SetupFrame {botName} title="Setup">
     <NoticeBanner variant="danger" title="Can't reach the setup service" collapsed={false}>

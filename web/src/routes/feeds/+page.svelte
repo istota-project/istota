@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { PageLoading } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -413,7 +414,7 @@
 
 <div class="feed-page">
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else}

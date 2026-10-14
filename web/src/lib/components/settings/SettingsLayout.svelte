@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { PageLoading } from '$lib/components/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -50,7 +51,7 @@
   {/if}
 
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else}
     {@render children()}
   {/if}

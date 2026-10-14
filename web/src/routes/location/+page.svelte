@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { PageLoading } from '$lib/components/ui';
   import { onMount, onDestroy } from 'svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
@@ -194,7 +195,7 @@
 
 <div class="page-fill">
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else}

@@ -26,6 +26,7 @@
     Select,
     type KebabItem,
     type SelectOption,
+    PageLoading,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
   import { formatDate } from '$lib/dateFormat';
@@ -361,7 +362,7 @@
   {/if}
 
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if entries.length === 0}

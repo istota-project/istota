@@ -177,7 +177,9 @@ body:has(.app-content-fill) {
 }
 
 /* A route's whole-pane status message — the loading placeholder, and the error
-   state that occupies the same slot. An empty state is `EmptyState`, top-aligned. One rule so every module reads the
+   state that occupies the same slot. The loading placeholder is `PageLoading`,
+   which keeps this box empty and raises the fixed bar in the root layout: text
+   centred here moved each time the shell composed around it (ISSUE-752). An empty state is `EmptyState`, top-aligned. One rule so every module reads the
    same: centered in the content area both ways, dim, small.
 
    `flex: 1` rather than `min-height: 100%` is what does the vertical centering:

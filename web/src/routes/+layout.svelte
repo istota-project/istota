@@ -9,7 +9,13 @@
   import { DropdownMenu } from 'bits-ui';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
-  import { NotificationBell, SearchButton, SearchDialog } from '$lib/components/ui';
+  import {
+    NotificationBell,
+    SearchButton,
+    SearchDialog,
+    PageLoading,
+    PageLoader,
+  } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
@@ -401,10 +407,12 @@
   <title>{pageTitle}</title>
 </svelte:head>
 
+<PageLoader />
+
 {#if setupRoute}
   {@render children()}
 {:else if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if user}

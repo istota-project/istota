@@ -28,7 +28,15 @@
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
   import { base } from '$app/paths';
-  import { Badge, Button, ConfirmDialog, EmptyState, KebabMenu, Modal } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    KebabMenu,
+    Modal,
+    PageLoading,
+  } from '$lib/components/ui';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
 
@@ -324,7 +332,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if snapshots.length === 0}

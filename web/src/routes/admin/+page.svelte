@@ -12,7 +12,14 @@
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import { Avatar, AvatarPicker, EmptyState, Field, StatTile } from '$lib/components/ui';
+  import {
+    Avatar,
+    AvatarPicker,
+    EmptyState,
+    Field,
+    StatTile,
+    PageLoading,
+  } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -383,7 +390,7 @@
      Configuration and Logs sections. This page is the Status section's body. -->
 <div class="settings admin-page">
   {#if loading && !stats}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if stats}

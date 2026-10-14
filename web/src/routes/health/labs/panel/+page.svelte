@@ -25,6 +25,7 @@
     IconButton,
     Select,
     type SelectOption,
+    PageLoading,
   } from '$lib/components/ui';
   import { X } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
@@ -217,7 +218,7 @@
 
 <div class="page">
   {#if loading}
-    <div class="center-msg">Loading…</div>
+    <PageLoading />
   {:else if error && !panel}
     <div class="center-msg error">{error}</div>
   {:else if panel}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { EmptyState } from '$lib/components/ui';
+  import { EmptyState, PageLoading } from '$lib/components/ui';
   import { getAccounts, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
@@ -77,7 +77,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if visibleNodes.length === 0}

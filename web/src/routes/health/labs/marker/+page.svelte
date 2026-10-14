@@ -23,7 +23,7 @@
     type BiomarkerTrend,
   } from '$lib/api';
   import { formatDate } from '$lib/dateFormat';
-  import { EmptyState } from '$lib/components/ui';
+  import { EmptyState, PageLoading } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -281,7 +281,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if trend}

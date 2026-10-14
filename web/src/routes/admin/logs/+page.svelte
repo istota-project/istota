@@ -10,7 +10,7 @@
     type AdminLogRecord,
     type AdminLogSource,
   } from '$lib/api';
-  import { Button, Chip, EmptyState, Input, Select } from '$lib/components/ui';
+  import { Button, Chip, EmptyState, Input, Select, PageLoading } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
   import { copyText } from '$lib/clipboard';
   import { notifyError } from '$lib/stores/notices';
@@ -424,7 +424,7 @@
 
   <div class="log-pane" bind:this={logEl} onscroll={onScroll}>
     {#if loading && records.length === 0}
-      <div class="center-msg">Loading…</div>
+      <PageLoading />
     {:else if records.length === 0 && !error}
       <EmptyState>
         {applied.q || applied.level || applied.user_id

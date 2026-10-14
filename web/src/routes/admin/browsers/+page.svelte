@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Button, NoticeBanner } from '$lib/components/ui';
+  import { Button, NoticeBanner, PageLoading } from '$lib/components/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);
@@ -47,7 +47,7 @@
 
 <div class="settings admin-page">
   {#if loading}
-    <div class="center-msg">Loading browsers…</div>
+    <PageLoading label="Loading browsers…" />
   {:else if failed || report?.status === 'unavailable'}
     <div class="center-msg error" role="status">Browser service is unavailable.</div>
   {:else if report?.status === 'disabled'}

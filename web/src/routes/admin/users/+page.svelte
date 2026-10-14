@@ -21,6 +21,7 @@
     KebabMenu,
     NoticeBanner,
     type KebabItem,
+    PageLoading,
   } from '$lib/components/ui';
   import { SettingsCard } from '$lib/components/settings';
   import { formatRelative } from '$lib/dateFormat';
@@ -167,7 +168,7 @@
 
 <div class="settings admin-page">
   {#if !view && !error}
-    <div class="center-msg">Loading users…</div>
+    <PageLoading label="Loading users…" />
   {:else if !view}
     <div class="center-msg error">{error}</div>
   {:else}

@@ -20,6 +20,7 @@
     Chip,
     Sidebar,
     SidebarToggle,
+    PageLoading,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { MONEY_SETTINGS_SECTIONS } from '$lib/money/settingsSections';
@@ -121,7 +122,7 @@
 </script>
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else}

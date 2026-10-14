@@ -25,6 +25,7 @@
     Select,
     type KebabItem,
     type SelectOption,
+    PageLoading,
   } from '$lib/components/ui';
   import { diagnosisStatusVariant } from '$lib/health/status';
   import { linkableConditionOptions } from '$lib/health/conditions';
@@ -249,7 +250,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if encounter}

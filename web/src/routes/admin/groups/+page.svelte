@@ -10,6 +10,7 @@
     EmptyState,
     Badge,
     NoticeBanner,
+    PageLoading,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { formatDate, formatDateTime, formatRelative } from '$lib/dateFormat';
@@ -230,7 +231,7 @@
 </script>
 
 <div class="settings admin-page">
-  {#if loading}<p class="center-msg">Loading groups…</p>
+  {#if loading}<PageLoading label="Loading groups…" />
   {:else if error}<div class="center-msg error">
       <p>{error}</p>
       <Button onclick={load}>Retry</Button>
@@ -300,7 +301,7 @@
           </table>
         </div>{/if}
     </SettingsCard>
-    {#if detailLoading}<p class="center-msg">Loading group…</p>
+    {#if detailLoading}<PageLoading label="Loading group…" />
     {:else if detailError}<div class="center-msg error">
         <p>{detailError}</p>
         <Button onclick={() => selected && select(selected)}>Reload group details</Button>

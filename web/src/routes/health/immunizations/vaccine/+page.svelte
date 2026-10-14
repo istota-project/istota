@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, KebabMenu } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -81,7 +81,7 @@
 {/if}
 
 {#if loading}
-  <div class="center-msg">Loading…</div>
+  <PageLoading />
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if !ref}

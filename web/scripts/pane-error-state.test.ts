@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   findHeldChromeViolations,
   findPaneErrorViolations,
+  findPaneLoadingText,
   ifChains,
 } from './pane-error-state.mjs';
 
@@ -170,6 +171,38 @@ describe('findPaneErrorViolations', () => {
   });
 });
 
+describe('findPaneErrorViolations with the shared placeholder', () => {
+  it('reads <PageLoading /> as the loading branch', () => {
+    // The placeholder is a component, so its `.center-msg` is not in the page's
+    // own markup. Without this the checker would stop seeing every chain.
+    const found = findPaneErrorViolations(`
+{#if loading}
+  <PageLoading />
+{:else if error}
+  <div class="banner error">{error}</div>
+{/if}`);
+    expect(found).toHaveLength(1);
+  });
+});
+
+describe('findPaneLoadingText', () => {
+  it('catches a pane-level loading message', () => {
+    expect(findPaneLoadingText(`<div class="center-msg">Loading…</div>`)).toHaveLength(1);
+    expect(findPaneLoadingText(`<p class="center-msg">Loading groups…</p>`)).toHaveLength(1);
+    expect(findPaneLoadingText(`<div class="center-msg">Running checks…</div>`)).toHaveLength(1);
+    expect(
+      findPaneLoadingText(`<div role="status" class="center-msg">Loading…</div>`),
+    ).toHaveLength(1);
+  });
+
+  it('leaves the error twin and a non-loading message alone', () => {
+    expect(findPaneLoadingText(`<div class="center-msg error">{error}</div>`)).toEqual([]);
+    expect(
+      findPaneLoadingText(`<div class="center-msg">Browser service is disabled.</div>`),
+    ).toEqual([]);
+  });
+});
+
 describe('findHeldChromeViolations', () => {
   it('catches a toolbar held back for loading but not for the failure beside it', () => {
     const found = findHeldChromeViolations(`
@@ -245,6 +278,19 @@ describe('the routes themselves', () => {
     for (const file of svelteFiles(SRC)) {
       for (const v of findPaneErrorViolations(readFileSync(file, 'utf8'))) {
         offenders.push(`${relative(WEB_ROOT, file)}:${v.line}  {:else if ${v.cond}}  ${v.markup}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('leave pane-level loading to the one fixed loader', () => {
+    // ISSUE-752: a centred "Loading…" moves each time the shell around it
+    // composes. The pane shows `<PageLoading />`, and the visible indicator is
+    // the fixed bar in the root layout.
+    const offenders: string[] = [];
+    for (const file of svelteFiles(SRC)) {
+      for (const v of findPaneLoadingText(readFileSync(file, 'utf8'))) {
+        offenders.push(`${relative(WEB_ROOT, file)}:${v.line}  ${v.markup}`);
       }
     }
     expect(offenders).toEqual([]);

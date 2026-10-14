@@ -8,6 +8,7 @@
     SidebarToggle,
     Button,
     EmptyState,
+    PageLoading,
   } from '$lib/components/ui';
   import { SettingsCard } from '$lib/components/settings';
   import { getGroups, getGroup, AuthError, type GroupSummary, type GroupDetail } from '$lib/api';
@@ -159,7 +160,7 @@
       </div>
     </Sidebar>
   {/snippet}
-  {#if loading || detailLoading}<p class="center-msg">Loading groups…</p>
+  {#if loading || detailLoading}<PageLoading label="Loading groups…" />
   {:else if error}<div class="center-msg error">
       <p>{error}</p>
       <Button onclick={() => load()}>Retry</Button>
