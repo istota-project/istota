@@ -62,6 +62,22 @@ describe('GoogleWorkspaceCard', () => {
     expect(await screen.findByText(/not configured on this Istota instance/i)).toBeInTheDocument();
   });
 
+  it('renders Contacts from the service rows and shows its read-only ceiling', async () => {
+    await mount(
+      status({
+        offered: [{ service: 'contacts', label: 'Contacts', max_level: 'readonly' }],
+        selection: { contacts: 'readonly' },
+      }),
+    );
+    const picker = await screen.findByLabelText('Contacts access level');
+    expect(picker).not.toBeDisabled();
+    await fireEvent.pointerDown(picker, { pointerType: 'mouse', button: 0 });
+    await fireEvent.pointerUp(picker, { pointerType: 'mouse', button: 0 });
+    await fireEvent.click(picker);
+    expect(await screen.findByRole('option', { name: 'Read-only' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Read and write' })).not.toBeInTheDocument();
+  });
+
   it('shows Not connected before a grant exists', async () => {
     await mount(status());
     expect(await screen.findByText('Not connected')).toBeInTheDocument();

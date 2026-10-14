@@ -58,8 +58,8 @@ class GoogleService:
     #: Scopes that together grant read access.
     readonly: tuple[str, ...]
     #: Scopes that together grant read+write access. Google's write scopes
-    #: subsume their read-only counterparts, so a level is one or the other,
-    #: never both.
+    #: subsume their read-only counterparts. A separate read-only scope may
+    #: also be required at both levels (for example, other contacts).
     full: tuple[str, ...]
 
     def scopes_for(self, level: str) -> tuple[str, ...]:
@@ -115,6 +115,12 @@ SERVICES: tuple[GoogleService, ...] = (
         readonly=(f"{_BASE}chat.spaces.readonly", f"{_BASE}chat.messages.readonly"),
         full=(f"{_BASE}chat.spaces", f"{_BASE}chat.messages"),
     ),
+    GoogleService(
+        key="contacts",
+        label="Contacts",
+        readonly=(f"{_BASE}contacts.readonly", f"{_BASE}contacts.other.readonly"),
+        full=(f"{_BASE}contacts", f"{_BASE}contacts.other.readonly"),
+    ),
 )
 
 _BY_KEY: dict[str, GoogleService] = {s.key: s for s in SERVICES}
@@ -126,7 +132,8 @@ def _build_scope_index() -> dict[str, tuple[str, str]]:
         for scope in svc.readonly:
             index[scope] = (svc.key, LEVEL_READONLY)
         for scope in svc.full:
-            index[scope] = (svc.key, LEVEL_FULL)
+            # A scope required at both levels grants read access only.
+            index.setdefault(scope, (svc.key, LEVEL_FULL))
     return index
 
 
@@ -345,6 +352,8 @@ def missing_scopes(
             continue
         key, level = owner
         have = granted_levels.get(key, LEVEL_OFF)
-        if _LEVEL_RANK[have] <= _LEVEL_RANK[level]:
+        # A scope still required at full access is not covered by another
+        # full scope: Contacts writes do not include Other contacts reads.
+        if scope in _BY_KEY[key].full or _LEVEL_RANK[have] <= _LEVEL_RANK[level]:
             missing.append(scope)
     return missing

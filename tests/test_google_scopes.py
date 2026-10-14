@@ -17,14 +17,17 @@ CAL_RO = "https://www.googleapis.com/auth/calendar.readonly"
 CAL_FULL = "https://www.googleapis.com/auth/calendar"
 SHEETS_RO = "https://www.googleapis.com/auth/spreadsheets.readonly"
 DOCS_RO = "https://www.googleapis.com/auth/documents.readonly"
+CONTACTS_RO = "https://www.googleapis.com/auth/contacts.readonly"
+CONTACTS_FULL = "https://www.googleapis.com/auth/contacts"
+CONTACTS_OTHER_RO = "https://www.googleapis.com/auth/contacts.other.readonly"
 
 READONLY_FIVE = [DRIVE_RO, GMAIL_RO, CAL_RO, SHEETS_RO, DOCS_RO]
 
 
 class TestServiceTable:
-    def test_covers_the_six_documented_services(self):
+    def test_covers_the_documented_services(self):
         assert [s.key for s in gs.SERVICES] == [
-            "drive", "gmail", "calendar", "sheets", "docs", "chat",
+            "drive", "gmail", "calendar", "sheets", "docs", "chat", "contacts",
         ]
 
     def test_every_service_has_both_levels(self):
@@ -32,15 +35,16 @@ class TestServiceTable:
             assert svc.readonly, svc.key
             assert svc.full, svc.key
 
-    def test_readonly_and_full_scope_sets_are_disjoint(self):
+    def test_scopes_shared_by_both_levels_are_readonly(self):
         for svc in gs.SERVICES:
-            assert not set(svc.readonly) & set(svc.full), svc.key
+            for scope in set(svc.readonly) & set(svc.full):
+                assert gs.scope_owner(scope) == (svc.key, gs.LEVEL_READONLY)
 
     def test_no_scope_is_claimed_by_two_services(self):
         seen: dict[str, str] = {}
         for svc in gs.SERVICES:
             for scope in (*svc.readonly, *svc.full):
-                assert scope not in seen, f"{scope} claimed by {seen.get(scope)} and {svc.key}"
+                assert scope not in seen or seen[scope] == svc.key
                 seen[scope] = svc.key
 
     def test_config_defaults_are_all_recognised(self):
@@ -112,7 +116,7 @@ class TestDefaultSelection:
     def test_is_everything_the_operator_allows(self):
         assert gs.default_selection(READONLY_FIVE) == {
             "drive": "readonly", "gmail": "readonly", "calendar": "readonly",
-            "sheets": "readonly", "docs": "readonly", "chat": "off",
+            "sheets": "readonly", "docs": "readonly", "chat": "off", "contacts": "off",
         }
 
     def test_names_every_service_even_when_off(self):
@@ -331,3 +335,45 @@ class TestMissingScopes:
 @pytest.mark.parametrize("level", ["off", "readonly", "full"])
 def test_levels_constant_matches_the_names(level):
     assert level in gs.LEVELS
+
+
+class TestContactsScopes:
+    def test_readonly_ceiling_never_requests_write_access(self):
+        from istota.config import GoogleWorkspaceConfig
+
+        ceiling = GoogleWorkspaceConfig().scopes
+        assert CONTACTS_RO in ceiling
+        assert CONTACTS_OTHER_RO in ceiling
+        assert CONTACTS_FULL not in ceiling
+        assert gs.resolve_selection({"contacts": "full"}, ceiling) == [
+            CONTACTS_RO, CONTACTS_OTHER_RO,
+        ]
+
+    @pytest.mark.parametrize("level,scopes", [
+        ("readonly", [CONTACTS_RO, CONTACTS_OTHER_RO]),
+        ("full", [CONTACTS_FULL, CONTACTS_OTHER_RO]),
+    ])
+    def test_contacts_levels_keep_other_contacts_readonly(self, level, scopes):
+        assert list(gs.service("contacts").scopes_for(level)) == scopes
+        assert gs.levels_from_scopes(scopes) == {"contacts": level}
+        assert gs.resolve_selection({"contacts": level}, scopes) == scopes
+        row = gs.summarize_granted(scopes)["services"][0]
+        assert row["level"] == level
+        assert row["complete"] is True
+        assert row["also"] == []
+
+    def test_other_contacts_alone_is_a_partial_readonly_grant(self):
+        assert gs.scope_owner(CONTACTS_OTHER_RO) == ("contacts", "readonly")
+        assert gs.levels_from_scopes([CONTACTS_OTHER_RO]) == {"contacts": "readonly"}
+        row = gs.summarize_granted([CONTACTS_OTHER_RO])["services"][0]
+        assert row["level"] == "readonly"
+        assert row["complete"] is False
+        assert gs.missing_scopes([CONTACTS_FULL], [CONTACTS_OTHER_RO]) == [CONTACTS_FULL]
+
+    def test_write_grant_does_not_cover_other_contacts(self):
+        assert gs.missing_scopes(
+            [CONTACTS_RO, CONTACTS_OTHER_RO], [CONTACTS_FULL],
+        ) == [CONTACTS_OTHER_RO]
+        assert gs.missing_scopes(
+            [CONTACTS_RO, CONTACTS_OTHER_RO], [CONTACTS_FULL, CONTACTS_OTHER_RO],
+        ) == []
