@@ -68,7 +68,7 @@ This view shares the humanist premise of [Common Task](https://commontask.org/):
 
 Istota has one deployment: a stack of containers on a Debian 13 machine of its own, built from a signed release, with bubblewrap and per-task cgroups, and managed with one command, `istota-stack`. The machine can be a VPS, a VM on your own hardware, or a Lima VM on a Mac, and the stack is the same on each. Nextcloud is optional. The [quickstart](getting-started/quickstart-server.md) covers a server, and the [local install](getting-started/local-install.md) a Mac.
 
-The older [standalone install](getting-started/standalone-install.md), an unsandboxed single-user process, is deprecated. Existing installs keep working, and `istota-stack import-standalone` moves one into the local VM. Don't start a new one that way.
+The older standalone install, an unsandboxed single-user process, was removed. `istota-stack import-standalone` moves an existing one into the local VM: see [Moving from the standalone install](getting-started/local-install.md#moving-from-the-standalone-install).
 
 ## Explore the documentation
 

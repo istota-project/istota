@@ -679,14 +679,13 @@ class TestMountLiveness:
         assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
 
 
-class TestStandaloneInstallIsNotGated:
-    """A standalone install points ``workspace_path`` at its plain local
-    workspace, which is never a mountpoint. Gating on the resolved path alone
-    would refuse every backup there — including the one ``istota setup`` writes,
-    which lives inside that workspace by design."""
+class TestALocalWorkspaceIsNotGated:
+    """A config with a plain local ``workspace_path``, never a mountpoint.
+    Gating on the resolved path alone would refuse every backup there,
+    including one that lives inside that workspace by design."""
 
     def _standalone(self, tmp_path, **kw):
-        # Mirrors setup_wizard.render_config_toml: the workspace is local,
+        # What the removed standalone wizard wrote: the workspace is local,
         # there is no mount field, and backups sit inside the workspace.
         return _config(
             tmp_path,

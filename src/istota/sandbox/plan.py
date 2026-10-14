@@ -225,9 +225,9 @@ def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[
 
     ``protected`` is what a mask may not shadow: a mask at or above any of
     those would take away something the task needs (its own workspace, the
-    source tree it runs from), turning a security measure into an outage. The
-    standalone layout puts db_path beside the workspace, so this is reachable
-    by configuration rather than only by mistake.
+    source tree it runs from), turning a security measure into an outage. A
+    config may put db_path beside the workspace, so this is reachable by
+    configuration rather than only by mistake.
     """
     from istota import executor
 
@@ -473,7 +473,7 @@ def build_mount_plan(
     ``plan_masks`` logs a refused mask at ERROR and a misplaced
     ``module_data_dir`` at WARNING. Both were previously reachable only from a
     host that was going to build a sandbox; a second consumer calling this per
-    task on macOS or the standalone install turns the first into a directory
+    task on macOS or with the sandbox off turns the first into a directory
     nothing will mount and the second into the same two lines forever.
     """
     from istota import config as istota_config
@@ -1304,10 +1304,10 @@ def config_sandbox_bound_roots(config: "Config") -> list[tuple[Path, str]]:
     because no sandbox is built there at all — `effective_sandboxing` is False,
     so every answer here is conservative rather than wrong.
 
-    `workspace_path` whole is deliberately *not* an entry: on the standalone
-    install `db_path.parent`, the workspace and `temp_dir` are one directory,
-    so that entry would refuse the very shape the relay path's own fallback
-    resolves for.
+    `workspace_path` whole is deliberately *not* an entry: a config may make
+    `db_path.parent`, the workspace and `temp_dir` one directory, and that
+    entry would refuse the very shape the relay path's own fallback resolves
+    for.
 
     Never raises: it runs on a route's refusal path, and a config carrying a
     path it cannot resolve must produce a refusal rather than a traceback.

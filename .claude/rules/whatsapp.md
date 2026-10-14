@@ -74,7 +74,7 @@ Bounds: per-file cap is the fetcher's (sidecar aborts; Cloud checks `MediaURL.fi
 
 `ISTOTA_BAILEYS_MEDIA_DIR` is an **override, not a requirement** (ISSUE-508): requiring it crash-looped the sidecar on a cron deploy that could not re-render the unit. **Do not require a variable whose value another variable in the same process determines**; socket and session paths stay required. `deriveMediaDir` resolves the path, refuses relative or `/`, and refuses a result equal to or inside the session directory (a credential; `dir_holds_a_session` would count a photo as a session). The cron guard reports, never refuses. Deployment literals are compared to `media.default_media_dir` and driven through `deriveMediaDir`; a test checks the path is inside the unit's `ReadWritePaths=`.
 
-Fallback when the WebDAV copy fails: `{temp_dir}/whatsapp-media/`, owned by `cleanup_old_temp_files` (the staging sweep and the sandbox mask would otherwise lose it). Standalone residual: no mask there, so a workspace-root resource reaches staged files briefly. `doctor.whatsapp.media_staging` (gated on `enabled` only) reports mode, owner and orphans; absent is OK; survey only, since its repair deletes.
+Fallback when the WebDAV copy fails: `{temp_dir}/whatsapp-media/`, owned by `cleanup_old_temp_files` (the staging sweep and the sandbox mask would otherwise lose it). Residual where the database sits in the workspace: no mask there, so a workspace-root resource reaches staged files briefly. `doctor.whatsapp.media_staging` (gated on `enabled` only) reports mode, owner and orphans; absent is OK; survey only, since its repair deletes.
 
 ## Outbound media
 
@@ -103,7 +103,7 @@ The monthly cap is **reserved in the claim's own `BEGIN IMMEDIATE`**; only claim
 
 `whatsapp_webhooks_enabled` = `enabled` and the **active** provider in `WHATSAPP_WEBHOOK_PROVIDERS` (not `callback_only_names()`). After a flip to Baileys the handlers 404: **Meta's queued retries are lost** and outstanding rows keep their state. Same predicate in `serve._maybe_mount_webhooks`, the role (which **refuses `baileys`** rather than requiring `whatsapp_cloud`, so an unnamed provider keeps a receiver), and compose profiles (`whatsapp` receiver, `whatsapp-baileys` sidecar).
 
-The verify token is in the query string: nginx has `access_log off` on the route, and both standalone receivers run `--no-access-log` (`serve.build_uvicorn_server` passes `access_log=False`); a test pins all three. nginx's 512k body limit sits above istota's 256 KiB.
+The verify token is in the query string: nginx has `access_log off` on the route, and both separate-process receivers run `--no-access-log` (`serve.build_uvicorn_server` passes `access_log=False`); a test pins all three. nginx's 512k body limit sits above istota's 256 KiB.
 
 ## The Baileys adapter
 
@@ -155,7 +155,7 @@ Bridge side: `_handle_replaced`, transient while latched, permanent only with `p
 
 Admin requests from Admin, Connections; the scheduler's poll hands it to the bridge; the bridge sends a `shutdown` frame, moves the directory after the drop it caused, and opens a TTL window in which `_handle_qr` relays codes.
 
-- **Two channels**: request/state in the `whatsapp_runtime` row; the code in a 0600 relay file, **never the DB** (backups go to the mount). Standalone puts the relay under the per-user temp root; the route refuses a relay path inside a sandbox-bound root.
+- **Two channels**: request/state in the `whatsapp_runtime` row; the code in a 0600 relay file, **never the DB** (backups go to the mount). Where the database sits in the workspace the relay goes under the per-user temp root; the route refuses a relay path inside a sandbox-bound root.
 - **The frame is the evidence.** Waiting for `connected == False` is wrong: a new sidecar binds `saveCreds` before its link connects.
 - One restart is spent at the write; aborts after it name that and leave the directory. `sidecar_absent` (no sidecar within `restart_interval_seconds + 30.0`) costs nothing.
 - **`force`** accepts disconnecting a working session; the web also needs `confirm_disconnect`; neither defaults server-side (409). Carried in `pairing_force` because the poll calls `repair_session`. Never derived from live state.

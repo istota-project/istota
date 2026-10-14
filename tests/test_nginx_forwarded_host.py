@@ -74,6 +74,15 @@ class TestTheProxiesForwardThePort:
         direct = (REPO / "docker" / "nginx" / "direct-http.conf").read_text()
         assert "return 301 https://$host$request_uri;" in direct
 
+    def test_the_bare_prefix_redirect_is_relative(self):
+        """nginx answers `/istota` with its own 301 to `/istota/`, built from
+        `$host` and the container's port, so `localhost:8181/istota` landed on
+        `localhost/istota/`. A relative `Location` keeps the client's port."""
+        text = HOST_HEADER_SOURCES["docker"].read_text()
+        block = re.search(r"location /istota/ \{(.*?)\n\}", text, re.S)
+        assert block, "no `location /istota/` block"
+        assert "absolute_redirect off;" in block.group(1)
+
 
 try:
     import authlib  # noqa: F401 - probe: `istota.webui.app` needs it to import

@@ -533,7 +533,6 @@ class TestRefusals:
         "extra,needle",
         [
             (["--force"], "--force"),
-            (["--shape", "standalone"], "container"),
         ],
     )
     def test_web_refuses_the_flags_it_cannot_mean(self, dirs, monkeypatch, capsys, extra, needle):

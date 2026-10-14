@@ -17,10 +17,6 @@ The cache policy and the ``StaticFiles`` mount live here too, because two apps
 serve the bundle: ``web_app`` and the first-run setup server, which must run
 with no config and so cannot import ``web_app``. Starlette is imported inside
 :func:`cache_header_statics` only, so ``doctor`` still pays for none of it.
-
-Named ``static_dir`` rather than ``web_static`` on purpose: the packaged build
-tree is ``istota/web_static/``, and a module of that name beside it would
-shadow the package data directory.
 """
 
 from __future__ import annotations
@@ -31,38 +27,26 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 
-def pick_static_dir(env_dir: str, repo_build: Path, packaged: Path) -> Path:
-    """Pick the static dir from candidates (pure — unit-testable).
-
-    Precedence: env override > repo-relative build > packaged. Falls back to
-    the repo-relative path when neither build exists, preserving the existing
-    "missing build" behaviour (the ``StaticFiles`` mount is guarded on
-    ``.is_dir()``).
+def pick_static_dir(env_dir: str, repo_build: Path) -> Path:
+    """Pick the static dir (pure, unit-testable): the env override, else the
+    repo-relative build, whether or not it exists. The ``StaticFiles`` mount is
+    guarded on ``.is_dir()``, and doctor's ``web.static`` names a missing one.
     """
     if env_dir.strip():
         return Path(env_dir.strip())
-    if repo_build.is_dir():
-        return repo_build
-    if packaged.is_dir():
-        return packaged
     return repo_build
 
 
 def resolve_static_dir() -> Path:
     """The static dir for this install.
 
-    Precedence:
-      1. ``ISTOTA_WEB_STATIC_DIR`` env override (Docker runtime / explicit).
-      2. Repo-relative ``web/build`` (editable installs from the repo root).
-      3. Packaged static tree at ``istota/web_static`` (non-editable wheel
-         installs — the release build copies ``web/build`` there; see the
-         pyproject packaging config).
+    ``ISTOTA_WEB_STATIC_DIR`` (the image sets it to ``/app/web/build``), else
+    ``web/build`` in the checkout this package was imported from.
     """
     here = Path(__file__).resolve()
     return pick_static_dir(
         os.environ.get("ISTOTA_WEB_STATIC_DIR", ""),
         here.parent.parent.parent.parent / "web" / "build",
-        here.parent.parent / "web_static",
     )
 
 

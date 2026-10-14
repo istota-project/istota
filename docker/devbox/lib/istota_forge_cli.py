@@ -634,8 +634,7 @@ def fetch_forge_credentials(
     accidentally bind the token to the whole result.
 
     An ambient token is used only when the *policy* says to. On a deployment
-    with the skill proxy switched off — which the local single-user installer
-    writes — there is no socket to ask, and the token is legitimately in the
+    with the skill proxy switched off there is no socket to ask, and the token is legitimately in the
     environment rather than having escaped a stripping step. Refusing it there
     would leave the wrapper shadowing the real binary on PATH while being
     incapable of ever working. The permission comes from the policy file
