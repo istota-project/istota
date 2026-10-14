@@ -6,7 +6,7 @@ import pytest
 
 from tests.support import group_memory_processes as witness
 
-pytestmark = pytest.mark.smoke
+pytestmark = [pytest.mark.smoke, pytest.mark.profile("group-memory")]
 
 
 def test_group_memory_anchor_is_shared_by_daemon_and_web(stack):
