@@ -938,11 +938,15 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     command that answers it by id. The question is trimmed rather than the
     instruction, leaving room for the ``re: <room>`` header
     `send_private` puts in front.
+
+    The suffix carries no Markdown: the renderer strips backticks, and
+    `check_preview_delivery` requires this body to survive rendering unchanged
+    (ISSUE-753). No closing period either, so a copied command parses.
     """
     from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
 
-    suffix = (f"\n\nTask #{task_id}. Reply `!confirm {task_id} yes` "
-              f"or `!confirm {task_id} no`.")
+    suffix = (f"\n\nTask #{task_id}. Reply !confirm {task_id} yes "
+              f"or !confirm {task_id} no")
     budget = WHATSAPP_TEXT_LIMIT - len(suffix) - len(HEADER_PREFIX) - _LABEL_MAX - 2
     return render_whatsapp(prompt, limit=budget) + suffix
 
