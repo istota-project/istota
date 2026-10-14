@@ -390,7 +390,11 @@
                         userId={membership.user_id}
                         displayName={membership.display_name}
                       /></td
-                    ><td class="col-role muted">{membership.role}</td><td
+                    ><td class="col-role"
+                      ><Badge size="sm" variant={membership.role === 'owner' ? 'info' : 'neutral'}
+                        >{membership.role === 'owner' ? 'Owner' : 'Member'}</Badge
+                      ></td
+                    ><td
                       ><span title={formatDateTime(membership.added_at)}
                         >{formatDate(membership.added_at)}</span
                       >

@@ -193,9 +193,9 @@
         <span class="member-name"
           ><UserCell userId={member.user_id} displayName={member.display_name} /></span
         >
-        {#if member.role === 'owner'}<Badge variant="info" size="sm">Owner</Badge>{:else}<span
-            class="role muted">Member</span
-          >{/if}
+        <Badge variant={member.role === 'owner' ? 'info' : 'neutral'} size="sm"
+          >{member.role === 'owner' ? 'Owner' : 'Member'}</Badge
+        >
         {#if group.capabilities.manage}<KebabMenu
             ariaLabel={`Actions for ${member.display_name}`}
             items={[
@@ -353,9 +353,6 @@
   .member-name {
     flex: 1;
     min-width: 0;
-  }
-  .role {
-    font-size: var(--text-sm);
   }
   .form-fields p {
     margin: 0;
