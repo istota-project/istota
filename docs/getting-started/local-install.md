@@ -164,7 +164,7 @@ Credentials you stored through the web UI or `istota secret` are in the database
 
 ## Moving from the standalone install
 
-The standalone install (`~/.istota`, run by `istota serve`) was removed. `import-standalone` moves one into a new local VM, with its history.:
+The standalone install (`~/.istota`, run by `istota serve`) was removed. `import-standalone` moves one into a new local VM, with its history:
 
 ```bash
 istota-stack import-standalone --tag vX.Y.Z --signing-key 'ssh-ed25519 AAAA... releases' --dry-run

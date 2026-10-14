@@ -2911,6 +2911,17 @@ class TestSecretKey:
         assert result.status == FAIL
         assert "/data/.secret_key" in result.remedy
 
+    def test_the_stack_remedy_names_no_serve_env_file(self, make_config, tmp_path):
+        """A loaded config always has a path, but only `istota serve` on a
+        checkout reads the istota.env beside it."""
+        config_path = tmp_path / "cfg" / "config.toml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("")
+        result = self._run(make_config(config_path=config_path))
+        assert result.status == FAIL
+        assert "istota serve" not in result.remedy
+        assert "/data/.secret_key" in result.remedy
+
     def _with_env_file(self, make_config, tmp_path, env_file=None):
         from istota.config import WebConfig
 

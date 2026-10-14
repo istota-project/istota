@@ -1380,3 +1380,71 @@ class TestThePrompts:
         assert setup_wizard._is_valid_timezone("UTC")
         assert not setup_wizard._is_valid_timezone("PDT")
         assert not setup_wizard._is_valid_timezone("")
+
+
+class TestTheModuleQuestions:
+    """``_collect_modules`` on the container path: an unavailable module is
+    left alone, and an explicit flag beats unavailability."""
+
+    def _collect(self, monkeypatch, *, interactive, **flags):
+        monkeypatch.setattr("istota.modules.module_available", lambda name: name != "money")
+        asked: list[str] = []
+        out: list[str] = []
+        a = ContainerAnswers()
+        args = SimpleNamespace(**{
+            f"no_{m}": flags.get(f"no_{m}", False)
+            for m in ("money", "health", "feeds", "briefings")
+        })
+
+        def input_fn(prompt):
+            asked.append(prompt)
+            return ""
+
+        setup_wizard._collect_modules(
+            a, args, interactive=interactive, input_fn=input_fn, out=out.append,
+        )
+        return a, asked, out
+
+    def test_an_unavailable_module_is_neither_asked_about_nor_recorded(self, monkeypatch):
+        """Recording it as disabled would turn a missing extra into a stored
+        decision that outlives installing it."""
+        a, asked, out = self._collect(monkeypatch, interactive=True)
+        assert not any("money module" in p for p in asked)
+        assert any("health module" in p for p in asked)
+        assert a.money_enabled is True
+        assert any("money module's optional dependencies" in line for line in out)
+
+    def test_an_explicit_flag_still_wins_over_unavailability(self, monkeypatch):
+        a, _, _ = self._collect(monkeypatch, interactive=False, no_money=True)
+        assert a.money_enabled is False
+
+
+class TestTheAdminsFile:
+    """``_ensure_admins_file`` only ever creates, and asks the reader."""
+
+    def test_an_existing_file_not_naming_the_user_is_never_widened(self, tmp_path):
+        path = tmp_path / "admins"
+        existing = "# hand-edited\nbob\n"
+        path.write_text(existing)
+        out: list[str] = []
+        setup_wizard._ensure_admins_file(path, "alice", out=out.append)
+        assert path.read_text() == existing
+        # Refusing silently would lock the user out with no way to know why.
+        assert any("does not name 'alice'" in line for line in out)
+
+    def test_the_membership_test_is_load_admin_users(self, tmp_path):
+        """Writer and reader must not drift on what a line means."""
+        path = tmp_path / "admins"
+        existing = "# owner\n\n  alice  \n"
+        path.write_text(existing)
+        out: list[str] = []
+        setup_wizard._ensure_admins_file(path, "alice", out=out.append)
+        assert path.read_text() == existing
+        assert out == []
+
+    def test_a_missing_file_is_created_naming_the_user(self, tmp_path):
+        from istota.config import load_admin_users
+
+        path = tmp_path / "admins"
+        setup_wizard._ensure_admins_file(path, "alice", out=lambda *_: None)
+        assert load_admin_users(str(path)) == {"alice"}

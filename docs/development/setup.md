@@ -55,7 +55,7 @@ See [Secret scanning](secret-scanning.md).
 
 A Mac checkout runs Istota as one unsandboxed process on loopback, which is what `istota serve` is for. It is a development loop, not a deployment: there is no bubblewrap on macOS, so nothing confines a task, and the web app skips sign-in.
 
-The process needs a config you [write by hand](#initialize-by-hand); `istota setup` only runs inside the stack's image and refuses here. A minimal one for this loop sets `[web] auth = "none"`, `[security] sandbox_enabled = false` and `skill_proxy_enabled = false`, and names one user under `[users.<id>]`. Name an admins file (`ISTOTA_ADMINS_FILE`) with that user in it if you want the admin pages or shared briefing blocks.
+The process needs a config you [write by hand](#initialize-by-hand); `istota setup` only runs inside the stack's image and refuses here. A minimal one for this loop sets `[web] auth = "none"`, `[security] sandbox_enabled = false` and `skill_proxy_enabled = false`, and names one user under `[users.<id>]`. With `auth = "none"` the admin pages open without an admins file, but shared briefing blocks and other shared writes need one: name it with `ISTOTA_ADMINS_FILE` and put that user in it.
 
 ```bash
 uv run istota init               # create the database the config names

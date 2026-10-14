@@ -3281,9 +3281,10 @@ def _secret_key_remedy(config: "Config") -> str:
         f"`istota_secret_key` secrets file when the VM holds it there."
     )
     # The real path, not a default: `istota serve` reads the env file beside
-    # whatever config it was given.
+    # whatever config it was given. Only a checkout running `auth = "none"`
+    # is served that way; on the stack nothing reads that file.
     env_file = _secret_key_env_file(config)
-    if env_file is not None:
+    if env_file is not None and config.web.has_method("none"):
         remedy += f" `istota serve` on a checkout also reads it from {env_file}."
     return remedy
 

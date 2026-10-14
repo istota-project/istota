@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **The standalone install is gone.** `install.sh --standalone`, `istota update` and the standalone half of `istota setup` were removed; both now refuse and point at `install.sh --local` and `istota-stack import-standalone`, which still moves an existing `~/.istota` into the local VM. `istota serve` with `[web] auth = "none"` stays for development on a checkout, without the shared-writer exemption the standalone shape had, and the wheel no longer carries the web bundle.
+- **The standalone install is gone.** `install.sh --standalone`, `istota update` and the standalone half of `istota setup` were removed; both now refuse and point at `install.sh --local` and `istota-stack import-standalone`, which still moves an existing `~/.istota` into the local VM. `istota serve` with `[web] auth = "none"` stays for development on a checkout, without the shared-writer exemption the standalone shape had, and the wheel no longer carries the web bundle. **Upgrade note:** on a standalone install, run `istota-stack import-standalone` rather than `istota update`; updating onto this release leaves no web UI and no `update` command.
 
 ## [0.44.0] - 2026-10-13 (Coconut octopus)
 

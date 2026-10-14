@@ -65,8 +65,9 @@ def require_admin(
     Uses ``Config.is_shared_kv_writer`` — the same fail-closed gate that governs
     every ``shared_kv`` write (an empty admins allowlist authorizes NOBODY). This
     is the correct authority for admin surfaces that create content flowing into
-    other users' briefings, and it matches ``web_app._user_is_web_admin`` without
-    a cross-module import.
+    other users' briefings. It matches ``web_app._user_is_web_admin`` except
+    under ``auth = "none"``, where that gate admits the local user and this
+    one still requires the admins file.
     """
     cfg = _app_config(request)
     username = user.get("username", "")
