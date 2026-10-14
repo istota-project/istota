@@ -150,7 +150,7 @@
       </div>
     {:else if notebook}
       {#if notebook.content.trim()}<div class="reading">
-          <TextPreview name="GROUP.md" text={notebook.content} untrusted controls={false} />
+          <TextPreview name="GROUP.md" text={notebook.content} untrusted />
         </div>
       {:else}<EmptyState size="sm"
           >The shared notebook is empty. Add facts you want the group to remember.</EmptyState
