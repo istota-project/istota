@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-10-13 (Coconut octopus)
+
 Istota now installs the same way everywhere: the Docker stack on a machine of its own, set up by `host/provision.sh` and updated from signed releases. On an Apple silicon Mac, `install.sh --local` creates that machine as a Lima VM, with `~/Istota` as the workspace folder you open in Finder and the master key copied into your login Keychain; `istota-stack restore` rebuilds a lost VM from the two. On a server, `install.sh --server` or a cloud VM started from `host/cloud-init.yaml` does the same. Setup runs in the browser and tests each connection before it saves. `istota-stack update` builds only a release tag whose signature it has checked, and `rollback` goes back one. Nextcloud is now optional: the workspace can be a local folder, with Talk and the `nextcloud` skill still connected. Once it runs, the new Workspace tab lets you browse, preview, upload and pin your files, Google Drive and your Nextcloud shares, search beside the bell finds messages, memories and records with Cmd+K, and admins edit the configuration from Admin → Configuration with a reviewed diff and an emailed code.
 
 Shared rooms are friendlier by default: a cheap model decides whether a group turn is meant for the bot, and the bot reacts to thanks rather than replying. An email thread is now a room, with each mail shown as a card. On WhatsApp the bot reads photos, GIFs and voice notes, in groups as well as private chats, and sends pictures back. A failed turn has Retry and Continue buttons, and a failed job has Run now. Credentials live in Istota's own encrypted store, imported from KeePass when you choose, and browser tasks can fill two-factor codes, save recovery codes and fill a checkout from a card in Wallet without the task seeing any of them. `istota apply` and `istota snapshot` manage settings from a plan, and an optional Ansible role uses them to manage the VM from an inventory. This release is 755 commits, against 418 in 0.43.0 and 205 in 0.42.0. Most of the rest moves the old deployments onto the stack, fixes what broke when the daemon moved into containers, and tightens the sandbox, which now confines every task on the stack while the daemon runs as a non-root user.
@@ -3620,7 +3622,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://github.com/istota-project/istota/compare/v0.43.0...main
+[Unreleased]: https://github.com/istota-project/istota/compare/v0.44.0...main
+[0.44.0]: https://github.com/istota-project/istota/releases/tag/v0.44.0
 [0.43.0]: https://github.com/istota-project/istota/releases/tag/v0.43.0
 [0.42.0]: https://github.com/istota-project/istota/releases/tag/v0.42.0
 [0.41.1]: https://github.com/istota-project/istota/releases/tag/v0.41.1
