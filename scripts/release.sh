@@ -9,20 +9,36 @@
 # changeset. Write it last, immediately before cutting. How to write one:
 # .claude/rules/releases.md.
 #
-# Usage: scripts/release.sh 0.7.0 [--no-announcement]
+# A headline release carries a codename, always a species of octopus. It goes
+# on the version heading as `## [0.7.0] - DATE (Name)`, which both extractors
+# already tolerate, and from there into the tag subject and the release title.
+#
+# Usage: scripts/release.sh 0.7.0 [--codename "Name"] [--no-announcement]
 
 set -euo pipefail
 
 REQUIRE_ANNOUNCEMENT=1
 NEW=""
-for arg in "$@"; do
-  case "$arg" in
+CODENAME=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-announcement) REQUIRE_ANNOUNCEMENT=0 ;;
-    -*) echo "unknown option: $arg" >&2; exit 1 ;;
-    *) NEW="$arg" ;;
+    --codename)
+      [ $# -ge 2 ] || { echo "--codename needs a name" >&2; exit 1; }
+      CODENAME="$2"; shift ;;
+    -*) echo "unknown option: $1" >&2; exit 1 ;;
+    *) NEW="$1" ;;
   esac
+  shift
 done
 : "${NEW:?version required, e.g. 0.7.0}"
+# The codename is read back out of the heading by release.yml, so it is kept to
+# characters that cannot end the parenthesis or the line early.
+CODENAME_RE="^[A-Za-z][A-Za-z .'-]{0,59}\$"
+if [ -n "$CODENAME" ] && ! [[ "$CODENAME" =~ $CODENAME_RE ]]; then
+  echo "codename must be letters, spaces, dots, hyphens or apostrophes: $CODENAME" >&2
+  exit 1
+fi
 DATE=$(date +%Y-%m-%d)
 TAG="v$NEW"
 REPO_URL="https://github.com/istota-project/istota"
@@ -99,14 +115,15 @@ fi
 
 # Move [Unreleased] → [NEW] - DATE, add fresh empty [Unreleased] above,
 # update link references at bottom.
-python3 - "$NEW" "$DATE" "$REPO_URL" <<'PY'
+python3 - "$NEW" "$DATE" "$REPO_URL" "$CODENAME" <<'PY'
 import re, sys, pathlib
-new, date, url = sys.argv[1:]
+new, date, url, codename = sys.argv[1:]
 path = pathlib.Path("CHANGELOG.md")
 text = path.read_text()
+suffix = f" ({codename})" if codename else ""
 text = text.replace(
     "## [Unreleased]",
-    f"## [Unreleased]\n\n## [{new}] - {date}",
+    f"## [Unreleased]\n\n## [{new}] - {date}{suffix}",
     1,
 )
 old_unrel = re.search(r"^\[Unreleased\]:.*$", text, re.M).group(0)
@@ -204,12 +221,14 @@ git add CHANGELOG.md pyproject.toml
 # the version bump lands in this commit instead of leaving the tree dirty.
 [ -f web/vite-mock-api.ts ] && git add web/vite-mock-api.ts || true
 git commit -m "Bump version to $NEW"
-git tag -s "$TAG" --cleanup=verbatim -m "Release $TAG" -m "$NOTES"
+TITLE="Release $TAG"
+[ -n "$CODENAME" ] && TITLE="Release $TAG ($CODENAME)"
+git tag -s "$TAG" --cleanup=verbatim -m "$TITLE" -m "$NOTES"
 git verify-tag "$TAG" >/dev/null 2>&1 || {
   echo "warning: git verify-tag $TAG fails locally; add your key to gpg.ssh.allowedSignersFile to check it" >&2
 }
 git push --follow-tags
 
 echo
-echo "Released $TAG to origin."
+echo "Released ${TITLE#Release } to origin."
 echo "GitHub Release will be created when the mirror picks up the tag."

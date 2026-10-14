@@ -122,19 +122,103 @@ class TestTheEscapeHatch:
         assert "--no-announcement" in text
         assert 'REQUIRE_ANNOUNCEMENT=0' in text
 
-    @pytest.mark.parametrize("argv", [["0.9.0"], ["--no-announcement", "0.9.0"]])
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["0.9.0"],
+            ["--no-announcement", "0.9.0"],
+            ["0.9.0", "--codename", "Dumbo octopus"],
+            ["--codename", "Dumbo octopus", "--no-announcement", "0.9.0"],
+        ],
+    )
     def test_the_argument_loop_finds_the_version(self, tmp_path, argv):
-        loop = re.search(
-            r"REQUIRE_ANNOUNCEMENT=1\n(.*?)\n: \"\$\{NEW:\?", RELEASE_SH.read_text(), re.S
+        r = _run_argument_loop(argv, '\necho "$NEW|$REQUIRE_ANNOUNCEMENT|$CODENAME"')
+        assert r.returncode == 0, r.stderr
+        version, required, codename = r.stdout.strip().split("|")
+        assert version == "0.9.0"
+        assert required == ("0" if "--no-announcement" in argv else "1")
+        assert codename == ("Dumbo octopus" if "--codename" in argv else "")
+
+
+def _run_argument_loop(argv, tail):
+    loop = re.search(
+        r"REQUIRE_ANNOUNCEMENT=1\n(.*?)\n: \"\$\{NEW:\?[^\n]*\n(.*?)\nfi\n",
+        RELEASE_SH.read_text(),
+        re.S,
+    )
+    assert loop, "the argument loop in scripts/release.sh has moved"
+    script = (
+        "REQUIRE_ANNOUNCEMENT=1\n"
+        + loop.group(1)
+        + '\n: "${NEW:?}"\n'
+        + loop.group(2)
+        + "\nfi"
+        + tail
+    )
+    return subprocess.run(
+        ["bash", "-c", script, "release.sh", *argv],
+        capture_output=True,
+        text=True,
+    )
+
+
+class TestTheCodename:
+    """A headline release's codename rides on its version heading.
+
+    `scripts/release.sh` writes it there and `release.yml` reads it back for the
+    GitHub Release title; both halves are extracted from the shipped files.
+    """
+
+    @pytest.mark.parametrize("name", ["Dumbo)", "a\nb", "", "x" * 61, "Octopus [x]"])
+    def test_a_name_that_could_break_the_heading_is_refused(self, name):
+        r = _run_argument_loop(["0.9.0", "--codename", name], "")
+        if name == "":
+            assert r.returncode == 0  # an empty name is no codename
+        else:
+            assert r.returncode != 0
+            assert "codename must be" in r.stderr
+
+    def _write_heading(self, tmp_path, codename):
+        text = RELEASE_SH.read_text()
+        m = re.search(r'"\$CODENAME" <<\'PY\'\n(.*?)\nPY\n', text, re.S)
+        assert m, "the heading writer in scripts/release.sh has moved"
+        (tmp_path / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## [Unreleased]\n\nNotes.\n\n"
+            "[Unreleased]: https://example.invalid/compare/v0.8.0...main\n"
         )
-        assert loop, "the argument loop in scripts/release.sh has moved"
-        script = "REQUIRE_ANNOUNCEMENT=1\n" + loop.group(1) + '\necho "$NEW $REQUIRE_ANNOUNCEMENT"'
         r = subprocess.run(
-            ["bash", "-c", script, "release.sh", *argv],
+            [sys.executable, "-c", m.group(1), "0.9.0", "2026-10-13", "https://example.invalid", codename],
+            cwd=tmp_path,
             capture_output=True,
             text=True,
         )
         assert r.returncode == 0, r.stderr
-        version, required = r.stdout.split()
-        assert version == "0.9.0"
-        assert required == ("0" if "--no-announcement" in argv else "1")
+
+    def _title(self, tmp_path):
+        import yaml
+
+        workflow = yaml.safe_load((REPO / ".github" / "workflows" / "release.yml").read_text())
+        step = next(
+            s for s in workflow["jobs"]["release"]["steps"] if s.get("name") == "Create or update GitHub Release"
+        )
+        m = re.search(r"<<'PY'\n(.*?)\nPY\n", step["run"], re.S)
+        assert m, "the title extractor in release.yml has moved"
+        r = subprocess.run(
+            [sys.executable, "-c", m.group(1)],
+            cwd=tmp_path,
+            env={"VERSION": "0.9.0", "TAG": "v0.9.0"},
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    def test_the_codename_reaches_the_release_title(self, tmp_path):
+        self._write_heading(tmp_path, "Dumbo octopus")
+        assert "## [0.9.0] - 2026-10-13 (Dumbo octopus)\n" in (tmp_path / "CHANGELOG.md").read_text()
+        assert self._title(tmp_path) == "v0.9.0 (Dumbo octopus)"
+
+    def test_a_release_without_one_is_titled_by_its_tag(self, tmp_path):
+        self._write_heading(tmp_path, "")
+        assert "## [0.9.0] - 2026-10-13\n" in (tmp_path / "CHANGELOG.md").read_text()
+        assert self._title(tmp_path) == "v0.9.0"

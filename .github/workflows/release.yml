@@ -172,11 +172,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
+          # A headline release's codename is the parenthesis on its heading,
+          # `## [0.44.0] - DATE (Name)`, as scripts/release.sh writes it.
+          TITLE=$(python3 - <<'PY'
+          import os, re, pathlib
+          version = os.environ["VERSION"]
+          tag = os.environ["TAG"]
+          text = pathlib.Path("CHANGELOG.md").read_text()
+          m = re.search(rf"^## \[{re.escape(version)}\][^\n(]*\(([A-Za-z][A-Za-z .'-]*)\)\s*$", text, re.M)
+          print(f"{tag} ({m.group(1)})" if m else tag)
+          PY
+          )
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md
+            gh release edit "$TAG" --title "$TITLE" --notes-file /tmp/release-notes.md
           else
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md
+            gh release create "$TAG" --title "$TITLE" --notes-file /tmp/release-notes.md
           fi
 
   # A check that the tag builds, on both architectures an install runs. Nothing
