@@ -23,18 +23,31 @@ ENV TZ=America/New_York
 # Narrow faces bookworm's 1.x shipped. Both are here to keep the font list level
 # with the bookworm image; check `fc-list : family` against it before trimming.
 #
+# APT_MIRROR is host.env's, passed by istota-stack: a Debian mirror in place
+# of deb.debian.org, whose CDN stalls some connections. The cache mounts keep
+# downloaded packages between builds; zz-build-cache moves them out of the
+# directory the base image's docker-clean empties, and is gone again before
+# the layer is written. tests/test_apt_mirror.py holds the three Dockerfiles
+# that run apt to this.
+ARG APT_MIRROR=
+
 # Google ships Chrome's Linux .deb for amd64 and arm64, so the image builds
 # natively on either and an arm64 host needs no emulation. The arch comes from
 # dpkg rather than TARGETARCH, which the legacy builder leaves empty. An arm64
 # Chrome still says `Linux x86_64` in navigator.platform and the UA string; only
 # the high-entropy architecture hint reads `arm`. See BOT_DETECTION.md.
-RUN set -eux; \
+RUN --mount=type=cache,id=browser-apt-archives,target=/var/cache/apt-build,sharing=locked \
+    --mount=type=cache,id=browser-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "${arch}" in \
         amd64|arm64) ;; \
         *) echo "Google Chrome has no Linux package for ${arch}" >&2; exit 1 ;; \
     esac; \
-    apt-get update && apt-get install -y --no-install-recommends \
+    if [ -n "$APT_MIRROR" ]; then sed -i -E "s#^(URIs: )https?://deb\.debian\.org/debian\$#\1${APT_MIRROR}#" /etc/apt/sources.list.d/debian.sources; fi \
+    && mkdir -p /var/cache/apt-build/partial \
+    && echo 'Dir::Cache::Archives "/var/cache/apt-build";' > /etc/apt/apt.conf.d/zz-build-cache \
+    && apt-get update && apt-get install -y --no-install-recommends \
     tini \
     util-linux \
     x11vnc \
@@ -64,7 +77,7 @@ RUN set -eux; \
     && wget -q "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb" \
     && apt-get install -y "./google-chrome-stable_current_${arch}.deb" \
     && rm "google-chrome-stable_current_${arch}.deb" \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
 # Create non-root user so Chrome doesn't show --no-sandbox infobar
 RUN groupadd -r browser && useradd -r -g browser -G audio,video -d /home/browser -m browser

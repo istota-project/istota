@@ -269,7 +269,10 @@ TAG_MSG=$(mktemp)
 trap 'rm -f "$TAG_MSG"' EXIT
 printf '%s\n\n%s\n' "$TITLE" "$NOTES" > "$TAG_MSG"
 git tag -s "$TAG" --cleanup=verbatim -F "$TAG_MSG"
-if ! git cat-file tag "$TAG" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+# Read once and tested as text: under pipefail a `cat-file | grep -q` fails
+# when grep closes the pipe early on a match.
+TAG_BODY="$(git cat-file tag "$TAG")"
+if ! grep -qx -- '-----BEGIN SSH SIGNATURE-----' <<<"$TAG_BODY"; then
   echo "the signature on $TAG is not on a line of its own; not pushing" >&2
   exit 1
 fi

@@ -32,6 +32,7 @@ _FILE_ERRORS = {
     416: "That part of the file is not available.",
     None: "Could not load this Nextcloud file.",
 }
+_DAV_ROOTS = frozenset({"files", "calendars", "addressbooks/users"})
 _SINGLE_RANGE = re.compile(r"bytes=\d*-\d*")
 _PASSED_HEADERS = ("content-length", "content-range", "accept-ranges", "last-modified")
 
@@ -54,15 +55,28 @@ def _safe_parts(parts: list[str], errors: dict) -> None:
         raise ListingError(404, errors[404])
 
 
-@contextmanager
-def _dav(config, user_id: str, parts: list[str], method: str, *, ok: set[int],
-         errors: dict, folder: bool, headers: dict | None = None, content: bytes | None = None):
-    """One request to the caller's own DAV root, retried once on a refreshed token.
+def _safe_user(value: str) -> bool:
+    return bool(value) and value not in {".", ".."} and not any(c in value for c in "/\\") and not any(ord(c) < 32 for c in value)
 
-    Yields the open response. Only the user's own access token is ever sent:
-    no bot credential, no storage prefix, and a missing or revoked token is
-    the reconnect refusal rather than a fallback.
+
+@contextmanager
+def dav_request(config, user_id: str, parts: list[str], method: str, *, ok: set[int],
+                errors: dict, folder: bool, headers: dict | None = None, content: bytes | None = None,
+                root: str | None = "files", account: str | None = None):
+    """One request under the caller's own DAV home, retried once on a refreshed token.
+
+    The one place the user's token is sent to DAV. `root` picks the home
+    (`files`, `calendars`, `addressbooks/users`), and `None` addresses
+    `remote.php/dav/` itself, for the `current-user-principal` lookup.
+    `account` is the home's Nextcloud uid when it differs from the Istota id
+    the token is stored under. Yields the open response. Only the user's own
+    access token is ever sent: no bot credential, no storage prefix, and a
+    missing or revoked token is the reconnect refusal rather than a fallback.
     """
+    if root is not None and root not in _DAV_ROOTS:
+        raise ValueError(f"unknown DAV root: {root!r}")
+    if root is None and parts:
+        raise ValueError("the DAV root itself takes no path")
     _safe_parts(parts, errors)
     if not config.nextcloud_enabled or not tokens.feature_enabled(config):
         raise ListingError(409, _RECONNECT)
@@ -71,10 +85,13 @@ def _dav(config, user_id: str, parts: list[str], method: str, *, ok: set[int],
     parsed = urlsplit(base)
     if parsed.scheme not in {"https", "http"} or not parsed.netloc or parsed.username or parsed.query or parsed.fragment:
         raise ListingError(503, "Nextcloud is not configured.")
-    if not user_id or user_id in {".", ".."} or any(c in user_id for c in "/\\") or any(ord(c) < 32 for c in user_id):
+    home = user_id if account is None else account
+    if not _safe_user(user_id) or not _safe_user(home):
         raise ListingError(404, errors[404])
     path = "/".join(parts)
-    url = f"{base}/remote.php/dav/files/{quote(user_id, safe='')}/"
+    url = f"{base}/remote.php/dav/"
+    if root is not None:
+        url += f"{root}/{quote(home, safe='')}/"
     if path:
         url += quote(path, safe="/") + ("/" if folder else "")
     token = tokens.get_access_token(config.db_path, config, user_id)
@@ -109,12 +126,18 @@ def _dav(config, user_id: str, parts: list[str], method: str, *, ok: set[int],
             raise ListingError(409, _RECONNECT)
 
 
-def _read_multistatus(config, user_id, response) -> list[dict]:
+def read_bounded(response, too_large: str) -> bytes:
+    """The whole body, or a 502 with `too_large` once it passes the cap."""
     body = bytearray()
     for chunk in response.iter_bytes():
         body.extend(chunk)
         if len(body) > _MAX_RESPONSE_BYTES:
-            raise ListingError(502, "This Nextcloud folder is too large to list.")
+            raise ListingError(502, too_large)
+    return bytes(body)
+
+
+def _read_multistatus(config, user_id, response) -> list[dict]:
+    body = read_bounded(response, "This Nextcloud folder is too large to list.")
     # Only the parser gets this copy. No bot credential or storage prefix is used.
     base = config.web.oauth2_provider.rstrip("/")
     user_config = replace(config, nextcloud=replace(
@@ -127,7 +150,7 @@ def _read_multistatus(config, user_id, response) -> list[dict]:
 
 
 def _propfind(config, user_id, parts, *, depth: str, folder: bool, errors: dict) -> list[dict]:
-    with _dav(
+    with dav_request(
         config, user_id, parts, "PROPFIND", ok={207}, errors=errors, folder=folder,
         headers={"Depth": depth, "Content-Type": "application/xml"}, content=dav.PROPFIND_BODY,
     ) as response:
@@ -195,7 +218,7 @@ def preview_file(config, user_id: str, parts: list[str]) -> dict:
     if row["is_dir"]:
         raise ListingError(400, "This is a folder, not a file.")
     head = bytearray()
-    with _dav(config, user_id, parts, "GET", ok={200}, errors=_FILE_ERRORS, folder=False) as response:
+    with dav_request(config, user_id, parts, "GET", ok={200}, errors=_FILE_ERRORS, folder=False) as response:
         for chunk in response.iter_bytes():
             head.extend(chunk)
             if len(head) > PREVIEW_MAX_BYTES:
@@ -224,7 +247,7 @@ def open_file(config, user_id: str, parts: list[str], range_header: str | None =
         headers["Range"] = range_header.strip()
     stack = ExitStack()
     try:
-        response = stack.enter_context(_dav(
+        response = stack.enter_context(dav_request(
             config, user_id, parts, "GET", ok={200, 206}, errors=_FILE_ERRORS, folder=False,
             headers=headers,
         ))

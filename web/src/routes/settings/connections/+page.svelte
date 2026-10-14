@@ -3,18 +3,17 @@
   import { base } from '$app/paths';
   import {
     getSettingsServices,
-    disconnectNextcloudToken,
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { Button, EmptyState } from '$lib/components/ui';
+  import { EmptyState } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import {
     ServiceCard,
     GarminCard,
     GoogleWorkspaceCard,
+    NextcloudCard,
     SettingsLayout,
-    SettingsCard,
   } from '$lib/components/settings';
 
   const identity = getCurrentUser();
@@ -22,8 +21,6 @@
   let services: ServiceCardData[] = $state([]);
   let loading = $state(true);
   let error = $state('');
-  let info = $state('');
-  let ncTokenBusy = $state(false);
   // Set by a disconnect made here, which the identity record does not learn
   // about until the next `/me`. Otherwise the record is the answer — the
   // settings layout re-resolves it on entry (ISSUE-355), so a connect made
@@ -45,30 +42,6 @@
 
   onMount(loadServices);
 
-  // A full page navigation, not `goto`: `/reconnect` is a server auth route that
-  // answers with a redirect to Nextcloud, so the client router has nothing to
-  // resolve. Same shape as GoogleWorkspaceCard's connect.
-  //
-  // This replaces the card's old instruction to log out and back in, which was
-  // the only documented remedy for a credential that had died silently
-  // (ISSUE-333).
-  function reconnectNextcloud() {
-    window.location.href = `${base}/reconnect`;
-  }
-
-  async function disconnectNextcloud() {
-    ncTokenBusy = true;
-    try {
-      await disconnectNextcloudToken();
-      ncTokenOverride = { connected: false, expires_at: null };
-      info = 'Nextcloud connection removed.';
-    } catch (e) {
-      error = (e as Error).message || 'Disconnect failed';
-    } finally {
-      ncTokenBusy = false;
-    }
-  }
-
   // /settings/services already filters to connected services (no module-owned
   // monarch/feeds/overland leak through). Skip cards whose status is
   // "unavailable" — historically used to mean "no resource declaration" but
@@ -86,7 +59,7 @@
   );
 </script>
 
-<SettingsLayout {loading} {error} {info}>
+<SettingsLayout {loading} {error}>
   <p class="hint intro">
     Accounts and per-service credentials for skills that need them. Values are encrypted at rest and
     never sent back to the browser — secret fields are write-only. Module-specific credentials live
@@ -96,38 +69,11 @@
   </p>
 
   {#if ncToken}
-    {@const nc = ncToken}
-    <SettingsCard
-      title="Nextcloud"
-      description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
-    >
-      {#snippet status()}
-        <span class="status-pill status-{nc.connected ? 'configured' : 'missing'}">
-          {nc.connected ? 'Connected' : 'Not connected'}
-        </span>
-      {/snippet}
-      {#if nc.connected}
-        <div class="card-actions">
-          <Button variant="secondary" size="sm" onclick={reconnectNextcloud}>Reconnect</Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onclick={disconnectNextcloud}
-            disabled={ncTokenBusy}
-          >
-            {ncTokenBusy ? 'Disconnecting…' : 'Disconnect'}
-          </Button>
-        </div>
-      {:else}
-        <div class="card-actions">
-          <Button variant="primary" size="sm" onclick={reconnectNextcloud}>Connect</Button>
-        </div>
-        <p class="caption">
-          Connecting signs you in to Nextcloud again and brings you back here. Your session stays as
-          it is.
-        </p>
-      {/if}
-    </SettingsCard>
+    <NextcloudCard
+      token={ncToken}
+      username={identity.user.username}
+      onDisconnected={() => (ncTokenOverride = { connected: false, expires_at: null })}
+    />
   {/if}
 
   {#each activeServices as svc (svc.service)}
@@ -148,10 +94,5 @@
 <style>
   .intro {
     margin: 0;
-  }
-
-  .card-actions {
-    display: flex;
-    gap: var(--space-2);
   }
 </style>
