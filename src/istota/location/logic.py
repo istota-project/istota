@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 from istota.geo import MAX_STOP_EXTENSION_SECONDS, _parse_ts, haversine, resolve_place
 from istota.location import db as location_db
+from istota.location.garmin_import import parse_ts
 
 # The radius the day summary clusters a stop at, and so how far from a stop
 # a point can sit and still be read as being there.
@@ -440,6 +441,95 @@ def utc_day_bounds(day: str, zone: tzinfo) -> tuple[str, str]:
         day_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         day_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+
+
+def location_snapshot(
+    db_path: str | Path, *, now: datetime, precision: str,
+    accuracy_threshold_m: float, allow_last_known: bool = False,
+) -> dict:
+    """Project one phone observation for sharing, without personal metadata.
+
+    The caller checks authority and attaches the owner identity. No result
+    exposes a stale timestamp unless last-known sharing was explicitly asked
+    for. ``fresh_clock_skew`` marks an observation ahead by at most two minutes;
+    its age is clamped to zero. Personal dashboard queries remain separate.
+    """
+    if precision not in {"exact", "area"}:
+        raise ValueError("precision must be exact or area")
+    if not math.isfinite(accuracy_threshold_m) or accuracy_threshold_m < 0:
+        raise ValueError("accuracy_threshold_m must be finite and nonnegative")
+    now = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+    unavailable = {"error": "no_fresh_location"}
+    selected = None
+    with location_db.connect(Path(db_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT timestamp, lat, lon, accuracy, wifi_zone,
+                   julianday(timestamp) AS observed_day
+            FROM location_pings
+            WHERE source = 'overland' AND julianday(timestamp) IS NOT NULL
+            ORDER BY julianday(timestamp) DESC, id DESC
+            """
+        )
+        for row in rows:
+            # SQLite rounds fractional seconds to milliseconds. Resolve the
+            # leading index bucket with parse_ts so an older insertion with
+            # a higher ID cannot displace a newer sub-millisecond observation.
+            if selected is not None and row["observed_day"] < selected[0]["observed_day"]:
+                break
+            try:
+                observed_at = datetime.fromtimestamp(parse_ts(row["timestamp"]), timezone.utc)
+            except (ValueError, TypeError, OverflowError, OSError):
+                continue
+            lat, lon = row["lat"], row["lon"]
+            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                continue
+            if not math.isfinite(lat) or not math.isfinite(lon):
+                continue
+            if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+                continue
+            age = (now - observed_at).total_seconds()
+            if age < -120:
+                continue
+            if selected is None or observed_at > selected[1]:
+                selected = (row, observed_at, age)
+
+    if selected is None:
+        return unavailable
+    row, observed_at, age = selected
+    lat, lon = row["lat"], row["lon"]
+    # Accuracy is checked only after selection: a bad new fix cannot make
+    # an older good point appear to be the user's current position.
+    accuracy = row["accuracy"]
+    if not isinstance(accuracy, (int, float)) or not math.isfinite(accuracy):
+        return unavailable
+    if not 0 <= accuracy <= accuracy_threshold_m:
+        return unavailable
+    if age > (86400 if allow_last_known else 900):
+        return unavailable
+
+    freshness = "fresh"
+    if age < 0:
+        freshness = "fresh_clock_skew"
+    elif age > 900:
+        freshness = "last_known"
+    if precision == "area":
+        lat, lon = round(lat, 2), round(lon, 2)
+        accuracy = None
+        map_url = f"https://www.openstreetmap.org/#map=12/{lat}/{lon}"
+    else:
+        map_url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
+    return {
+        "precision": precision,
+        "observed_at": observed_at.isoformat(),
+        "age_seconds": max(0, age),
+        "accuracy_m": accuracy,
+        "observation_kind": "declared" if row["wifi_zone"] else "measured",
+        "freshness": freshness,
+        "lat": lat,
+        "lon": lon,
+        "map_url": map_url,
+    }
 
 
 def location_current(db_path: str | Path, *, tz: str | tzinfo | None = None) -> dict:

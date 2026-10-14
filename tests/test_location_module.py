@@ -823,3 +823,28 @@ class TestMigrate:
             new_id = location_db.add_place(conn, "fresh", 1.0, 2.0)
             conn.commit()
         assert new_id > 42
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_snapshot_index_fresh_and_v4_upgrade(location_path, upgrade):
+    if upgrade:
+        with sqlite3.connect(location_path) as conn:
+            conn.executescript(location_db.SCHEMA_SQL)
+            conn.execute("INSERT INTO schema_meta VALUES ('version', '4')")
+            location_db.insert_ping(conn, "2026-03-08T13:59:00+02:00", 12, 34, accuracy=10)
+    location_db.init_db(location_path)
+    location_db.init_db(location_path)
+    with location_db.connect(location_path) as conn:
+        version = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0]
+        assert int(version) >= 5
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT timestamp, lat, lon, accuracy, wifi_zone "
+            "FROM location_pings WHERE source = 'overland' "
+            "AND julianday(timestamp) IS NOT NULL "
+            "ORDER BY julianday(timestamp) DESC, id DESC"
+        ).fetchall()
+        details = " ".join(row["detail"] for row in plan)
+        assert "idx_location_pings_observed" in details
+        assert "TEMP B-TREE" not in details
+        if upgrade:
+            assert conn.execute("SELECT timestamp FROM location_pings").fetchone()[0] == "2026-03-08T13:59:00+02:00"
