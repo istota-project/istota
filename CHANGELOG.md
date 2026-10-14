@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Files now has a Scripts view with descriptions and the scheduled jobs or heartbeat checks that reference each script. It lists missing targets and marks scripts with no references; Open previews a file and Reveal opens its folder.
+
 - Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
 
 - Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Files. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.

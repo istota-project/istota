@@ -6,7 +6,7 @@ Open Files in the main navigation to see the files and connections Istota can re
 
 My files is your own workspace folder. Linked folders, room folders and group folders appear when they are available to your account. Room membership is checked again on each request, so leaving a room removes access to its folder.
 
-The first sidebar section after Pinned is named after the assistant. It holds My files, Rooms, Groups, Configuration and Skill instructions. Rooms and Groups open a list of your room or group folders in the main area, each with its access for a task; choose one to browse it, and the path above the listing leads back to the list. Linked folders and Connections have their own sections below it.
+The first sidebar section after Pinned is named after the assistant. It holds My files, Rooms, Groups, Configuration and Skill instructions. Rooms and Groups open a list of your room or group folders in the main area, each with its access for a task; choose one to browse it, and the path above the listing leads back to the list. Scripts, Linked folders and Connections have their own sections below it.
 
 In the sidebar, a small robot icon marks each place a task in your private room can reach, pinned files and folders included. A place without the icon is visible to you only. In the Rooms list, a room folder's access applies only to that room's own tasks. A line at the bottom of the sidebar says what the icon means, since a phone shows no hover text.
 
@@ -37,6 +37,21 @@ A save checks the file the way Istota reads it, and nothing is written when the 
 - If the file changed since you opened it, usually because Istota wrote to it, the save is refused and your text stays. Reload to see the other version. If Istota is writing the file at that moment, try again.
 
 Jobs saved in `CRON.md` change at the next CRON.md sync, not at once. A file that is not a plain file, such as a link a task left in its place, cannot be edited.
+
+## Scripts
+
+Expand Scripts in the Files sidebar, below the assistant's section and above Linked folders. All scripts opens a read-only view of your scripts and prompt files under `/Users/{user_id}/{BOT_DIR}/scripts/`. Each row shows its description, the scheduled jobs or heartbeat checks that reference it, and when it was modified. Choose a script in the sidebar or table to expand its references. The row's menu has Open for a preview and Reveal to open its folder in My files.
+
+Broken script references appear above the tables with the jobs or checks that name the missing file. Used by shows whether a job is disabled, suspended, not yet synced or admin-only. “Not referenced” means no command or prompt-file reference was found in your scheduling files. Inline prompts that mention a script are counted separately; a mention does not mean the script runs. Relative paths in commands and references from other scripts are not tracked.
+
+When writing a script, put a one-line description in a comment or module docstring immediately after the shebang, before any code:
+
+```python
+#!/usr/bin/env python3
+# Emails the weekly project summary.
+```
+
+Without a shebang, put the description first. Existing scripts without one still appear as “No description”. Prompt files under `scripts/prompts/` use their first non-empty line. Descriptions are shortened to 200 characters. The view reports when its listing is incomplete or a source could not be read; reload the page after editing files to refresh it.
 
 ## Nextcloud and Drive
 

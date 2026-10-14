@@ -169,11 +169,11 @@ Each user has a bot-managed workspace area:
 │   │   ├── TASKS.md    # User's task file
 │   │   └── ...
 │   ├── exports/    # Files I generate for the user
+│   ├── scripts/    # Reusable Python scripts
 │   └── ...
 ├── inbox/          # Files the user wants me to process
 ├── memories/       # Auto-generated dated memory files (read-only — written by sleep cycle)
-├── shared/         # Auto-organized files shared by user
-└── scripts/        # Reusable Python scripts
+└── shared/         # Auto-organized files shared by user
 ```
 
 ### Dated memory files (search-only)

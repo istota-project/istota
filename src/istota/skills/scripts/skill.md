@@ -35,6 +35,7 @@ An existing script might already do what's needed, or could be extended.
 
 - Python 3, functional style
 - `#!/usr/bin/env python3` shebang, `chmod +x` after creating
+- Put a one-line description immediately after the shebang, as a comment or module docstring (for example, `# Emails the weekly project summary`). The Files page uses it as the script description.
 - `snake_case.py` naming — descriptive (e.g., `backup_project_notes.py`, `weekly_report_email.py`)
 - Type hints, docstrings, `argparse` for CLI arguments
 - Standalone — import only stdlib and packages available in istota's uv environment
