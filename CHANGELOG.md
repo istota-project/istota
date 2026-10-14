@@ -7,31 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+You can now share your Nextcloud calendars and address books with Istota from Settings, choosing read-only or read and write for each, and Istota can look up and edit contacts in those address books and in Google Contacts. The Workspace sidebar marks which places Istota can reach in your tasks.
+
+Installing and updating no longer need a tag or a signing key: both move to the newest signed release. The Mac install sizes its VM to the Mac, a Debian mirror can be set for the VM and image builds, and the health checks now sign in to Nextcloud as the bot. This release is 53 commits, against 756 in 0.44.0 and 418 in 0.43.0; the rest is small fixes and the removal of the standalone install.
+
+**Before you upgrade.**
+
+- To use Google Contacts, enable the People API in your Google Cloud project, select Contacts in the Google Workspace settings and reconnect. An explicit scope ceiling needs both Contacts read-only scopes (`docs/features/contacts.md`).
+- The standalone install is removed. Move one with `istota-stack import-standalone`, not `istota update` (`docs/getting-started/local-install.md`).
+
 ### Added
 
-- `APT_MIRROR` in `host.env` names a Debian mirror to use instead of deb.debian.org, both for the VM's own packages and for the image builds. Builds also keep downloaded Debian packages between runs, so an update only fetches the packages that changed.
-- The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
-- Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
-- Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
-- **Share calendars and address books with Istota from Settings.** The Nextcloud card lists them and shares each with the bot at No access, Read-only or Read and write, using your own connection; disconnecting can remove the shares. Needs `token_storage = "encrypted"`. See docs/features/nextcloud.md.
-- The Workspace sidebar marks each place Istota can use in your tasks, in any of your rooms, with a small robot icon, pinned files and folders included (a room folder's icon says only that room's tasks reach it), and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you. Selecting your Nextcloud view now says so without opening anything, and how to hand Istota a file.
-
-**Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
-
-- The health checks now sign in to Nextcloud as the bot, so a revoked app password or a bot account name that does not match the server shows up as a failed check rather than as failing tasks. A server that is down or in maintenance shows as a warning and sends no alert. The admin Connections tab has a Nextcloud card with the server, the bot account, Talk, the storage mode and the last check's result, and a button to check again.
+- **Share calendars and address books with Istota from Settings.** The Nextcloud card lists them and shares each with the bot at No access, Read-only or Read and write, over your own connection. Needs `token_storage = "encrypted"`. See docs/features/nextcloud.md.
+- **Contacts.** Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts, including Google's read-only Other contacts. Results say which source they came from. See docs/features/contacts.md.
+- **The Workspace sidebar shows what Istota can reach.** A robot icon marks each place your tasks can use, pinned files and folders included; places without it are visible only to you.
+- **Nextcloud health checks.** The checks sign in to Nextcloud as the bot, so a revoked app password or a wrong bot account shows as a failed check. Admin → Connections has a Nextcloud card with the last result and a button to check again.
+- **The Mac install sizes its VM to the Mac**, and asks before using those defaults; `--cpus`, `--memory` and `--disk` set them directly.
+- `APT_MIRROR` in `host.env` names a Debian mirror for the VM and the image builds, and builds keep downloaded packages between runs.
+- Interactive terminal setup opens with a small octopus and an Istota wordmark.
 
 ### Changed
 
-- **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
+- **Installing and updating need no tag or key.** `install.sh` and `istota-stack update` move to the newest signed release, verified against the project's release key. `--tag` and `--signing-key` still pick a release or a fork's key. See docs/getting-started/quickstart-server.md.
 
 ### Fixed
 
-- A calendar shared with the bot read-only is now listed to the model as read-only. Discovery reads the bot's privileges on each calendar and Nextcloud's read-only flag; a calendar whose server reports no privileges is still treated as writable.
+- A calendar shared with the bot read-only is now listed to the model as read-only.
 
 ### Removed
 
-- **The standalone install is gone.** `install.sh --standalone` and `istota setup` outside the image now point at `install.sh --local` and `istota-stack import-standalone`; `istota update` is removed. `istota serve` stays for development on a checkout. See docs/getting-started/local-install.md.
-- **Upgrade note:** move a standalone install with `istota-stack import-standalone` rather than `istota update`, which would leave it with no web UI.
+- **The standalone install is gone.** `install.sh --standalone` and `istota setup` outside the image point at `install.sh --local` and `istota-stack import-standalone`; `istota update` is removed. `istota serve` stays for development. See docs/getting-started/local-install.md.
 
 ## [0.44.0] - 2026-10-13 (Coconut octopus)
 
