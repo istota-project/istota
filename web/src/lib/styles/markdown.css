@@ -362,6 +362,11 @@
     padding-right: max(0.75rem, var(--safe-right));
     gap: 0.5rem;
   }
+}
+
+/* The inline links hand over to the menu below 1024px: the row no longer fits
+   a tablet's width once every module is on. */
+@media (max-width: 1023px) {
   .app-nav .nav-links {
     display: none;
   }
