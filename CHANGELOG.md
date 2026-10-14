@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `APT_MIRROR` in `host.env` names a Debian mirror to use instead of deb.debian.org, both for the VM's own packages and for the image builds. Builds also keep downloaded Debian packages between runs, so an update only fetches the packages that changed.
 - The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
 - Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.

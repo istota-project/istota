@@ -63,7 +63,7 @@ class TestOneServicePerUser:
         service = _doc(_config())["services"]["devbox-alice"]
         assert service["build"]["context"] == "devbox"
         assert (SHIPPED_COMPOSE.parent / service["build"]["context"] / "Dockerfile").is_file()
-        assert service["build"]["args"] == {"DEV_UID": "10001", "DEV_GID": "10001"}
+        assert service["build"]["args"] == {"DEV_UID": "10001", "DEV_GID": "10001", "APT_MIRROR": None}
 
     def test_the_label_names_the_owner(self):
         service = _doc(_config())["services"]["devbox-bob"]

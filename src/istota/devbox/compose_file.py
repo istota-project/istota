@@ -178,7 +178,9 @@ def build_document(config, state_dir: str | None = None) -> dict:
             "build": {
                 "context": BUILD_CONTEXT,
                 "dockerfile": "Dockerfile",
-                "args": {"DEV_UID": str(ISTOTA_UID), "DEV_GID": str(ISTOTA_UID)},
+                # APT_MIRROR with no value: compose passes host.env's mirror
+                # when istota-stack exports one, and leaves the arg out when not.
+                "args": {"DEV_UID": str(ISTOTA_UID), "DEV_GID": str(ISTOTA_UID), "APT_MIRROR": None},
             },
             "image": "istota-devbox:${ISTOTA_TAG:-local}",
             "hostname": name,
