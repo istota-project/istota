@@ -655,6 +655,27 @@ describe('the Web address screen', () => {
     expect(validateSetupStep).toHaveBeenCalledWith('address');
   });
 
+  it('serves this computer at the port the VM forwards, from the server', async () => {
+    vi.mocked(getSetupState).mockResolvedValue({
+      ...state('open'),
+      host: 'localhost:8181',
+      local_address: 'localhost:8181',
+    });
+    __history.reset('/setup/?step=address');
+    render(Page);
+    expect(await screen.findByText('http://localhost:8181')).toBeInTheDocument();
+
+    const cards = await screen.findAllByRole('radio');
+    await fireEvent.click(cards[1]);
+    // The local address is cleared rather than offered as a web address.
+    expect(await screen.findByRole('textbox')).toHaveValue('');
+    await fireEvent.click(cards[0]);
+
+    await next();
+    expect(await screen.findByRole('heading', { name: 'Nextcloud' })).toBeInTheDocument();
+    expect(saved).toMatchObject({ ingress: 'local', hostname: 'localhost:8181' });
+  });
+
   it('starts on the internet when opened from another computer, and warns about this one', async () => {
     openedFrom('203.0.113.5');
     const cards = await screen.findAllByRole('radio');

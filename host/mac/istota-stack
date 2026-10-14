@@ -691,7 +691,8 @@ cmd_create() {
     fi
 
     run_step "write host.env" "istota-stack host-env ..." \
-        vm_stack host-env STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}"
+        vm_stack host-env STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}" \
+        "LOCAL_FORWARD_PORT=${port}"
 
     # What to install: a tag given now; else, on a new VM, the tag this Mac
     # last saw deployed; else the one the VM bootstraps from. A VM with a tag
@@ -755,6 +756,19 @@ rebuild_if_lacking() {
         run_step "rebuild ${deployed}" "istota-stack ${rebuild[*]}" vm_stack "${rebuild[@]}" </dev/null
     elif [ "$image_rc" -ne 0 ]; then
         fail "$image_rc" "step 'check the image' failed: \`istota-stack check-image\` (exit ${image_rc})"
+    fi
+}
+
+# host.env's LOCAL_FORWARD_PORT, the port Lima forwards, which setup publishes
+# nginx and its page on. Written only when the VM's differs: the read takes no
+# lock, and a write waits up to 600 s behind a running `setup --web`.
+write_forward_port() {
+    local port current
+    port="$(port_or_default)"
+    current="$(vm_stack host-env LOCAL_FORWARD_PORT </dev/null)" || fail 1 "could not read the VM's host.env."
+    if [ "$current" != "$port" ]; then
+        run_step "write the forwarded port" "istota-stack host-env LOCAL_FORWARD_PORT=${port}" \
+            vm_stack host-env "LOCAL_FORWARD_PORT=${port}" </dev/null
     fi
 }
 
@@ -1101,6 +1115,8 @@ cmd_restore() {
     [ -z "$force" ] || restore+=(--force)
     # printf is a builtin, so the key is on no command line.
     printf '%s\n' "$key" | run_step "restore the backups" "istota-stack ${restore[*]}" vm_stack "${restore[@]}"
+    # The backup's host.env may predate the key, or name an older VM's port.
+    write_forward_port
     rebuild_if_lacking
     run_step "start the stack" "systemctl enable --now istota-stack" \
         vm systemctl enable --now istota-stack </dev/null
@@ -1412,6 +1428,8 @@ cmd_import_standalone() {
         return 0
     fi
 
+    # The import installed the old install's host.env over the one create wrote.
+    write_forward_port
     log "copying the files of ${from} into ${folder}"
     copy_workspace "$from" "$folder"
     run_step "start the stack" "systemctl enable --now istota-stack" \

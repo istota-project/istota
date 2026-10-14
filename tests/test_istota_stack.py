@@ -3412,6 +3412,26 @@ class TestSetupWebLocal:
         assert f"  http://localhost:8080/istota/setup#code={code}\n" in result.stdout
         assert "fingerprint" not in result.stdout
 
+    def test_local_publishes_on_the_port_lima_forwards(self, web):
+        (web.stack / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\nLOCAL_FORWARD_PORT=8181\n")
+        result = web.run("setup", "--web", "--local", **_finished())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert " -p 127.0.0.1:8181:8080 " in _setup_call(web)
+        code = (_staged(web) / "setup-code").read_text().strip()
+        assert f"  http://localhost:8181/istota/setup#code={code}\n" in result.stdout
+
+    @pytest.mark.parametrize("value", ["", "0", "eighty"])
+    def test_no_usable_forward_keeps_8080(self, web, value):
+        (web.stack / "host.env").write_text(f"INGRESS=local\nLOCAL_FORWARD_PORT={value}\n")
+        assert web.run("setup", "--web", "--local", **_finished()).returncode == 0
+        assert " -p 127.0.0.1:8080:8080 " in _setup_call(web)
+
+    def test_an_explicit_publish_wins_over_the_forward(self, web):
+        (web.stack / "host.env").write_text("INGRESS=local\nLOCAL_FORWARD_PORT=8181\n")
+        result = web.run("setup", "--web", "--local", **_finished(ISTOTA_SETUP_PUBLISH="127.0.0.1:9090"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert " -p 127.0.0.1:9090:8080 " in _setup_call(web)
+
 
 @needs_openssl
 class TestSetupWebUnfinished:

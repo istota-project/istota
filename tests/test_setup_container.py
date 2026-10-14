@@ -1331,6 +1331,121 @@ class TestARerunStartsFromTheStack:
         assert not list((tmp_path / "data" / "config").glob("config.toml.bak.*"))
 
 
+def _forwarding_vm(tmp_path: Path, port: str = "8181") -> Path:
+    """A local VM's staged vm-dir: host.env as the Mac's `create` writes it."""
+    vm = tmp_path / "vm"
+    vm.mkdir(exist_ok=True)
+    (vm / "host.env").write_text(
+        f"STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_BLOCK=1\nLOCAL_FORWARD_PORT={port}\n"
+    )
+    return vm
+
+
+class TestTheForwardedPort:
+    """The local VM's nginx publishes on the port Lima forwards, which only
+    the Mac knows and writes into host.env as LOCAL_FORWARD_PORT."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch, _no_credentials_in_env):
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_API_KEY", "native-key")
+
+    @pytest.mark.parametrize("value, port", [
+        ("8181", 8181), ("80", 80), ("", 0), ("eighty", 0), ("0", 0), ("08181", 0), ("70000", 0), ("-1", 0),
+    ])
+    def test_forwarded_port_reads_host_env(self, tmp_path, value, port):
+        assert setup_wizard.forwarded_port(_forwarding_vm(tmp_path, value)) == port
+
+    def test_no_host_env_or_no_vm_dir_is_no_forward(self, tmp_path):
+        assert setup_wizard.forwarded_port(None) == 0
+        assert setup_wizard.forwarded_port(tmp_path) == 0
+
+    def test_the_749_rerun_keeps_publishing_on_the_forward(self, tmp_path, monkeypatch):
+        """#749 as reported: a VM made with `--port 8181`, set up, then
+        `setup --force --yes`. nginx must stay on 8181, which Lima forwards."""
+        vm = _forwarding_vm(tmp_path)
+        assert setup_wizard.run_setup(_args(tmp_path, hostname="localhost:8181"), out=lambda *_: None) == 0
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_API_KEY")
+
+        assert setup_wizard.run_setup(
+            _args(tmp_path, force=True, user=None, brain=None, native_model=None),
+            out=lambda *_: None,
+        ) == 0
+
+        env = _env((vm / ".env").read_text())
+        assert env["NGINX_PUBLISH"] == "127.0.0.1:8181:80"
+        assert env["DOMAIN"] == "localhost:8181"
+        host = _env((vm / "host.env").read_text())
+        assert host["LOCAL_FORWARD_PORT"] == "8181"
+        assert host["STORAGE"] == "host-folder"
+
+    def test_a_first_run_defaults_the_hostname_to_the_forward(self, tmp_path):
+        vm = _forwarding_vm(tmp_path)
+        assert setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None) == 0
+        env = _env((vm / ".env").read_text())
+        assert env["DOMAIN"] == "localhost:8181"
+        assert env["NGINX_PUBLISH"] == "127.0.0.1:8181:80"
+
+    def test_the_interactive_default_is_the_forward(self, tmp_path):
+        _forwarding_vm(tmp_path)
+        prompts: list[str] = []
+
+        def answer(prompt: str) -> str:
+            prompts.append(prompt)
+            return ""
+
+        setup_wizard.collect_container_answers(
+            _args(tmp_path, yes=False), input_fn=answer, out=lambda *_: None,
+            getpass_fn=lambda _p: "", forwarded_port=8181,
+        )
+        assert any(p.startswith("Public hostname") and "[localhost:8181]" in p for p in prompts), prompts
+
+    @pytest.mark.parametrize("hostname", ["localhost:8080", "localhost", "127.0.0.1:9000"])
+    def test_a_local_hostname_on_another_port_is_refused(self, tmp_path, hostname):
+        _forwarding_vm(tmp_path)
+        with pytest.raises(
+            setup_wizard.SetupError, match=r"This VM's port forward is 8181; use localhost:8181\.",
+        ):
+            setup_wizard.run_setup(_args(tmp_path, hostname=hostname), out=lambda *_: None)
+        assert not (tmp_path / "data" / "config" / "config.toml").exists()
+
+    def test_a_rerun_of_a_vm_set_up_on_the_wrong_port_is_refused(self, tmp_path, monkeypatch):
+        """A stack set up before the forward was known (bare localhost, so 8080)
+        is told the port to use rather than being re-published on 8080 again."""
+        setup_wizard.run_setup(_args(tmp_path, hostname="localhost"), out=lambda *_: None)
+        _forwarding_vm(tmp_path)
+        with pytest.raises(setup_wizard.SetupError, match="use localhost:8181"):
+            setup_wizard.run_setup(_args(tmp_path, force=True), out=lambda *_: None)
+
+    def test_direct_ingress_is_not_held_to_the_forward(self, tmp_path):
+        vm = _forwarding_vm(tmp_path)
+        assert setup_wizard.run_setup(
+            _args(tmp_path, hostname="istota.example.com", ingress="direct"), out=lambda *_: None,
+        ) == 0
+        assert _env((vm / ".env").read_text())["NGINX_PUBLISH"] == "80:80"
+
+    def test_the_validator_holds_the_rule_for_both_front_ends(self):
+        a = setup_wizard.ContainerAnswers(user_id="alice", hostname="localhost:8080", forwarded_port=8181)
+        assert [(e.field, e.message) for e in setup_wizard.validate_container_answers(a)] == [
+            ("hostname", "This VM's port forward is 8181; use localhost:8181."),
+        ]
+        a.hostname = "localhost:8181"
+        assert setup_wizard.validate_container_answers(a) == []
+        a.hostname, a.forwarded_port = "localhost:8080", 0
+        assert setup_wizard.validate_container_answers(a) == []
+
+    def test_the_forward_is_written_nowhere_by_setup(self, tmp_path):
+        """host.env's key is the Mac's: setup reads it and owns no line of it."""
+        a = setup_wizard.ContainerAnswers(user_id="alice", hostname="localhost:8181", forwarded_port=8181)
+        b = setup_wizard.ContainerAnswers(user_id="alice", hostname="localhost:8181")
+        assert "LOCAL_FORWARD_PORT" not in setup_wizard.host_env_values(a)
+        assert setup_wizard.host_env_values(a) == setup_wizard.host_env_values(b)
+        assert setup_wizard.stack_env_values(a) == setup_wizard.stack_env_values(b)
+        assert setup_wizard.container_config_document(a, inline_credentials=False) == (
+            setup_wizard.container_config_document(b, inline_credentials=False)
+        )
+
+
 #: First-run answer sets for the identity table: (id, answers). Each is
 #: written once, then re-run with no flags; every file must come out the same.
 _FIRST_RUNS = [

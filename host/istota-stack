@@ -1171,7 +1171,7 @@ build_what_setup_needs() {
 # `setup --web [--local]`: cmd_setup with the setup server in the middle, and
 # the steps cmd_setup leaves to the operator done after it. Never returns.
 cmd_setup_web() {
-    local local_mode="" arg tag publish inner rc=0 local_arg=()
+    local local_mode="" arg tag publish forward inner rc=0 local_arg=()
     for arg in "$@"; do
         case "$arg" in
             --web) ;;
@@ -1183,7 +1183,10 @@ cmd_setup_web() {
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     refuse_if_set_up
     if [ -n "$local_mode" ]; then
-        publish="${ISTOTA_SETUP_PUBLISH:-127.0.0.1:8080}"
+        # The port Lima forwards, which the Mac writes; the page must answer there.
+        forward="$(env_get "$HOST_ENV" LOCAL_FORWARD_PORT)"
+        case "$forward" in ""|0*|*[!0-9]*) forward=8080 ;; esac
+        publish="${ISTOTA_SETUP_PUBLISH:-127.0.0.1:${forward}}"
         inner=8080
         local_arg=(--local)
     else

@@ -345,7 +345,13 @@
         bind:offerSkip
       />
     {:else if step === 'address'}
-      <StepAddress bind:this={stepRef} {draft} {errors} host={setup?.host} />
+      <StepAddress
+        bind:this={stepRef}
+        {draft}
+        {errors}
+        host={setup?.host}
+        localAddress={setup?.local_address}
+      />
     {:else if step === 'nextcloud'}
       <StepNextcloud bind:this={stepRef} {draft} {errors} {botName} bind:offerSkip />
     {:else if step === 'connections'}

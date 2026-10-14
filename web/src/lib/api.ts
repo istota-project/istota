@@ -5495,6 +5495,8 @@ export interface SetupState {
   local?: boolean;
   /** The `Host` the browser used, for the web address screen. */
   host?: string;
+  /** Where "Only on this computer" answers: `localhost:<the port the VM forwards>`. */
+  local_address?: string;
   /** The module toggles this image can offer; `field` is the answer's name. */
   modules_available?: { field: string; module: string }[];
   memory_total_mib?: number;

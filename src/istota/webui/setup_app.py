@@ -135,6 +135,9 @@ class SetupState:
     data_dir: Path
     vm_dir: Path
     clock: Callable[[], float]
+    #: host.env's LOCAL_FORWARD_PORT at start, 0 off the local VM; every
+    #: draft-to-answers call carries it (`_answers_for`).
+    forwarded_port: int = 0
     code_spent: bool = False
     session_id: str | None = None
     last_activity: float = 0.0
@@ -382,6 +385,9 @@ _WEB_MESSAGE_FALLBACK = "This answer can't be used. Check it and try again."
 def _web_message(error: FieldError, a: setup_wizard.ContainerAnswers | None) -> str:
     if not error.field:
         return error.message
+    if a is not None and error.field == "hostname" and a.ingress == "local" and a.forwarded_port:
+        address = setup_wizard.local_address(a.forwarded_port)
+        return f"This computer reaches Istota at {address}. Use that address."
     if a is not None and error.field == "user_id" and a.uses_nextcloud:
         return "Enter your own Nextcloud username."
     if a is not None and error.field == "tls_cert_source" and a.ingress == "direct":
@@ -404,29 +410,47 @@ def _subscription_errors(a: setup_wizard.ContainerAnswers) -> list[FieldError]:
     return []
 
 
+def _answers_for(state: SetupState, draft: dict) -> setup_wizard.ContainerAnswers:
+    """The answers ``draft`` makes on this machine: the one place the server
+    turns a draft into answers, so what the draft cannot carry (the VM's
+    forwarded port) reaches validation, the checks and Finish alike.
+
+    Raises ``PayloadError``, its ``answers`` carrying the same.
+    """
+    payload = {key: value for key, value in draft.items() if key != PASSWORD_FIELD}
+    try:
+        a = setup_wizard.answers_from_payload(payload)
+    except PayloadError as exc:
+        if exc.answers is not None:
+            exc.answers.forwarded_port = state.forwarded_port
+        raise
+    a.forwarded_port = state.forwarded_port
+    return a
+
+
 def draft_errors(
-    draft: dict, *, data_dir: Path | None = None,
+    state: SetupState, draft: dict,
 ) -> tuple[setup_wizard.ContainerAnswers | None, list[FieldError]]:
     """Every error in the draft, and its answers when there are none.
 
     A payload refusal on one field does not hide the validator's errors on
     the others: the validator runs over what the rest of the payload made,
     and only its errors on a field the payload already refused are dropped.
-    With ``data_dir``, a username other than the one an earlier Finish wrote
-    there is refused too.
+    A username other than the one an earlier Finish wrote in the state's
+    data directory is refused too.
     """
-    answers = {key: value for key, value in draft.items() if key != PASSWORD_FIELD}
     errors: list[FieldError] = []
     try:
-        a = setup_wizard.answers_from_payload(answers)
+        a = _answers_for(state, draft)
     except PayloadError as exc:
         a = exc.answers
         errors.extend(_plain(exc.errors, a))
     if a is not None:
         refused = {e.field for e in errors}
-        web_rules = [*_username_errors(a), *_address_errors(a), *_subscription_errors(a)]
-        if data_dir is not None:
-            web_rules.extend(_kept_username_errors(a, data_dir))
+        web_rules = [
+            *_username_errors(a), *_address_errors(a), *_subscription_errors(a),
+            *_kept_username_errors(a, state.data_dir),
+        ]
         shared = _plain(setup_wizard.validate_container_answers(a), a)
         for error in (*shared, *web_rules):
             if error.field not in refused:
@@ -436,9 +460,9 @@ def draft_errors(
     return (None if errors else a), errors
 
 
-def step_errors(draft: dict, step: str, *, data_dir: Path | None = None) -> list[FieldError]:
+def step_errors(state: SetupState, draft: dict, step: str) -> list[FieldError]:
     """The draft's errors on ``step``'s fields, plus any form-level error."""
-    _answers, errors = draft_errors(draft, data_dir=data_dir)
+    _answers, errors = draft_errors(state, draft)
     # A field two screens ask (the username) is reported on the one that owns
     # it for this draft, so it is not refused under a label that doesn't ask it.
     wanted = {f for f in SETUP_STEPS[step] if step == "review" or step_of(f, draft) == step}
@@ -579,7 +603,7 @@ def create_setup_app(
 
     state = SetupState(
         code=code, local=local, data_dir=data_dir, vm_dir=Path(vm_dir), clock=clock,
-        check_seconds=check_seconds,
+        forwarded_port=setup_wizard.forwarded_port(Path(vm_dir)), check_seconds=check_seconds,
     )
 
     @asynccontextmanager
@@ -634,6 +658,8 @@ def create_setup_app(
             "phase": phase,
             "local": state.local,
             "host": request.headers.get("host", ""),
+            # What "Only on this computer" answers at: the port Lima forwards.
+            "local_address": setup_wizard.local_address(state.forwarded_port or setup_wizard.DEFAULT_LOCAL_PORT),
             "modules_available": [
                 {"field": name, "module": module}
                 for name, module, _question in setup_wizard._OPT_OUT_MODULES
@@ -733,7 +759,7 @@ def create_setup_app(
         step = body.get("step") if isinstance(body, dict) else None
         if step not in SETUP_STEPS:
             return _error(400, "unknown_step", "Unknown setup step.")
-        errors = step_errors(state.draft, step, data_dir=state.data_dir)
+        errors = step_errors(state, state.draft, step)
         return {
             "ok": not errors,
             "fields": [{"field": e.field, "message": e.message} for e in errors],
@@ -753,9 +779,8 @@ def create_setup_app(
         _require_origin(state, request)
         if kind not in CHECK_KINDS:
             return _error(400, "unknown_check", "Unknown connection check.")
-        answers = {key: value for key, value in state.draft.items() if key != PASSWORD_FIELD}
         try:
-            a = setup_wizard.answers_from_payload(answers)
+            a = _answers_for(state, state.draft)
         except PayloadError as exc:
             return _error(
                 400, "invalid", "Some answers need fixing before this can be tested.",
@@ -783,7 +808,7 @@ def create_setup_app(
         async with state.finish_lock:
             if state.finished:
                 return _error(409, "finished", "Setup has already finished.")
-            a, errors = draft_errors(state.draft, data_dir=state.data_dir)
+            a, errors = draft_errors(state, state.draft)
             if errors:
                 return _invalid_at_finish(errors, state.draft)
             try:

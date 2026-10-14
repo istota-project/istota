@@ -449,6 +449,10 @@ class ContainerAnswers:
     profiles: tuple[str, ...] = ()
     # Generated, and carried forward on a re-run.
     session_secret: str = ""
+    #: The host port Lima forwards to this VM (host.env's LOCAL_FORWARD_PORT,
+    #: which only the Mac writes), 0 off the local VM. Read, never asked, and
+    #: written nowhere: it only holds a `local` hostname to that port.
+    forwarded_port: int = 0
 
     @property
     def disabled_modules(self) -> list[str]:
@@ -722,9 +726,22 @@ def nginx_publish(a: ContainerAnswers) -> tuple[str, str]:
         if tls_cert_source(a) in PROXIED_TLS_SOURCES:
             return UNUSED_PUBLISH.format(port=80), f"{listen}:443"
         return f"{listen}:80", UNUSED_PUBLISH.format(port=443)
-    _, _, port = a.hostname.rpartition(":")
-    port = port if port.isdigit() else "8080"
-    return f"127.0.0.1:{port}:80", UNUSED_PUBLISH.format(port=443)
+    return f"127.0.0.1:{local_publish_port(a.hostname)}:80", UNUSED_PUBLISH.format(port=443)
+
+
+#: Where `local` ingress publishes nginx when the hostname names no port.
+DEFAULT_LOCAL_PORT = 8080
+
+
+def local_publish_port(hostname: str) -> str:
+    """The port `local` ingress publishes nginx on: the hostname's, else 8080."""
+    _, _, port = hostname.rpartition(":")
+    return port if port.isdigit() else str(DEFAULT_LOCAL_PORT)
+
+
+def local_address(port: int) -> str:
+    """The `local` hostname that publishes on ``port``."""
+    return f"localhost:{port}"
 
 
 def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
@@ -815,6 +832,17 @@ def current_storage(vm_dir: Path | None) -> str:
     if vm_dir is None or not (vm_dir / "host.env").is_file():
         return ""
     return _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "STORAGE")
+
+
+def forwarded_port(vm_dir: Path | None) -> int:
+    """host.env's LOCAL_FORWARD_PORT, the host port Lima forwards to this VM,
+    or 0 when there is none or it is not a port."""
+    if vm_dir is None or not (vm_dir / "host.env").is_file():
+        return 0
+    value = _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "LOCAL_FORWARD_PORT")
+    if not (value.isascii() and value.isdigit()) or value.startswith("0") or int(value) > 65535:
+        return 0
+    return int(value)
 
 
 class PriorConfigUnreadable(SetupError):
@@ -1118,6 +1146,11 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
                 "tls_cert_source",
                 "Proxied ingress takes a self-signed certificate, files or none, never ACME.",
             )
+    if a.ingress == "local" and a.forwarded_port and int(local_publish_port(a.hostname)) != a.forwarded_port:
+        refuse(
+            "hostname",
+            f"This VM's port forward is {a.forwarded_port}; use {local_address(a.forwarded_port)}.",
+        )
     if a.ingress == "direct" and a.tls_cert_source == "self-signed":
         refuse(
             "tls_cert_source",
@@ -1334,7 +1367,7 @@ def _follow(prior_value: str, prior_source: str, new_source: str) -> str:
 
 def collect_container_answers(
     args, *, input_fn, out, getpass_fn, current_storage: str = "",
-    prior: ContainerAnswers | None = None,
+    prior: ContainerAnswers | None = None, forwarded_port: int = 0,
 ) -> ContainerAnswers:
     """Build ``ContainerAnswers`` from flags and (unless ``--yes``) prompts.
 
@@ -1354,9 +1387,16 @@ def collect_container_answers(
     when there is no prior. A host folder is kept when ``--storage`` is not
     given, so a re-run does not move the workspace off the user's folder; it is
     asked for by no question, since only the local VM's ``create`` sets one up.
+
+    ``forwarded_port`` is host.env's LOCAL_FORWARD_PORT (``forwarded_port()``):
+    with no prior it is the hostname's default, and a ``local`` hostname on
+    another port is refused.
     """
     interactive = not getattr(args, "yes", False)
     a = dataclasses.replace(prior) if prior is not None else ContainerAnswers()
+    a.forwarded_port = forwarded_port
+    if prior is None and forwarded_port:
+        a.hostname = local_address(forwarded_port)
 
     def flag(name: str, default=None):
         value = getattr(args, name, None)
@@ -1407,7 +1447,7 @@ def collect_container_answers(
         out("  reverse proxy on a private network), local (loopback, a laptop VM).")
         ingress = _ask_choice(input_fn, "Ingress", tuple(INGRESS_HOPS), default_ingress, out=out)
     a.ingress = ingress or default_ingress
-    _refuse_on(a, "ingress")
+    _refuse_on(a, "ingress", "hostname")
     was_proxied = prior is not None and prior.ingress == "proxied"
     if a.ingress == "proxied":
         a.upstream_proxy = text(
@@ -1725,7 +1765,7 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
         out(f"  {exc}; starting from first-run defaults.")
     a = collect_container_answers(
         args, input_fn=input_fn, out=out, getpass_fn=getpass_fn,
-        current_storage=current_storage(vm_dir), prior=prior,
+        current_storage=current_storage(vm_dir), prior=prior, forwarded_port=forwarded_port(vm_dir),
     )
     write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out, backup=RERUN_CONFIG_BACKUPS)
 

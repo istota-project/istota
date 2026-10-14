@@ -234,6 +234,9 @@ if verb == "shell":
         rc = state.get("restore_rc", 0)
         if rc == 0:
             vm["config"] = True
+            # The backup's host.env goes in place of the one create wrote.
+            if "installed_host_env" in state:
+                vm["host_env"] = dict(state["installed_host_env"])
         save()
         sys.exit(rc)
     if stack[:1] == ["import-standalone"]:
@@ -242,6 +245,8 @@ if verb == "shell":
         if rc == 0 and "--dry-run" not in stack:
             vm["config"] = True
             vm["admin"] = state.get("admin", "alice")
+            if "installed_host_env" in state:
+                vm["host_env"] = dict(state["installed_host_env"])
         save()
         sys.exit(rc)
     if stack[:1] == ["stage"]:
@@ -618,7 +623,7 @@ class TestCreate:
 
         assert mac.stack_calls()[:6] == [
             ["host-env", "STORAGE=host-folder", "INGRESS=local",
-             "HOST_LOOPBACK_BLOCK=1", "HOST_GATEWAY_ADDR=192.168.5.2"],
+             "HOST_LOOPBACK_BLOCK=1", "HOST_GATEWAY_ADDR=192.168.5.2", "LOCAL_FORWARD_PORT=8181"],
             ["update", "v1.2.0"],
             ["setup", "--storage", "host-folder", "--ingress", "local", "--hostname", "localhost:8181"],
             ["check-image"],
@@ -1228,6 +1233,25 @@ class TestRestore:
         assert restore < vm.index(["systemctl", "enable", "--now", "istota-stack"])
         assert made.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
 
+    def test_the_backups_host_env_gets_this_vms_forwarded_port(self, made):
+        """The backup's host.env replaces create's, and may name no port or an
+        older VM's: the port Lima forwards now is written back before the start."""
+        made.set(installed_host_env={"STORAGE": "host-folder", "LOCAL_FORWARD_PORT": "9999"})
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.state()["vm"]["host_env"]["LOCAL_FORWARD_PORT"] == "8080"
+        vm = made.vm_calls()
+        write = vm.index(["istota-stack", "host-env", "LOCAL_FORWARD_PORT=8080"])
+        assert vm.index(["istota-stack", "restore"]) < write
+        assert write < vm.index(["systemctl", "enable", "--now", "istota-stack"])
+
+    def test_a_port_already_right_is_not_rewritten(self, made):
+        made.set(installed_host_env={"STORAGE": "host-folder", "LOCAL_FORWARD_PORT": "8080"})
+        assert made.run("restore", stdin="istota\n").returncode == 0
+        calls = made.stack_calls()
+        assert ["host-env", "LOCAL_FORWARD_PORT"] in calls
+        assert ["host-env", "LOCAL_FORWARD_PORT=8080"] not in calls
+
     def test_the_key_is_on_no_argv(self, made):
         assert made.run("restore", stdin="istota\n").returncode == 0
         for call in made.all_calls():
@@ -1447,6 +1471,16 @@ class TestImportStandalone:
         assert mac.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
         assert "Trash" in result.stdout
         assert standalone.tree() == before
+
+    def test_the_imported_host_env_gets_this_vms_forwarded_port(self, mac, standalone):
+        mac.set(installed_host_env={"STORAGE": "host-folder"})
+        result = _import(mac, "--port", "8181")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.state()["vm"]["host_env"]["LOCAL_FORWARD_PORT"] == "8181"
+        vm = mac.vm_calls()
+        write = vm.index(["istota-stack", "host-env", "LOCAL_FORWARD_PORT=8181"])
+        assert vm.index(["istota-stack", "import-standalone", STAGED, "--hostname", "localhost:8181"]) < write
+        assert write < vm.index(["systemctl", "enable", "--now", "istota-stack"])
 
     def test_the_files_are_copied_and_the_state_stays_behind(self, mac, standalone):
         assert _import(mac).returncode == 0

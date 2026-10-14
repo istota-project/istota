@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Re-running setup in the terminal keeps your answers.** `istota-stack setup --force` used to offer first-run defaults, so pressing Enter could change the address and move the local VM's web page off the port it is reached on. Every question now defaults to the current value, stored credentials are kept unless you enter new ones, and the previous config and stack files are backed up first.
+- **The local VM's web page stays on the port your Mac forwards.** A VM created with `--port` other than 8080 could end up with its web page and the browser setup page on 8080, which nothing forwards. Setup now uses the forwarded port as the default address and refuses another one, naming the right address.
 
 ### Removed
 

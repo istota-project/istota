@@ -11,12 +11,11 @@
     errors: Record<string, string>;
     /** The address the browser used to open this page (`Host`, from `/state`). */
     host?: string;
+    /** What "Only on this computer" serves on: the port the VM forwards (`/state`). */
+    localAddress?: string;
   }
 
-  let { draft, errors, host = '' }: Props = $props();
-
-  /** What "Only on this computer" serves on: the local stack's published port. */
-  const LOCAL_ADDRESS = 'localhost:8080';
+  let { draft, errors, host = '', localAddress = 'localhost:8080' }: Props = $props();
   const PROXY_CERTIFICATES = [
     { value: 'self-signed', label: 'Self-signed, made here' },
     { value: 'files', label: 'Certificate files I provide' },
@@ -81,8 +80,8 @@
   function choose(next: Choice) {
     draft.set('ingress', next);
     if (next === 'local') {
-      draft.set('hostname', LOCAL_ADDRESS);
-    } else if (draft.text('hostname') === LOCAL_ADDRESS) {
+      draft.set('hostname', localAddress);
+    } else if (draft.text('hostname') === localAddress) {
       draft.set('hostname', '');
     }
     if (next === 'direct') {
@@ -153,7 +152,7 @@
             />
           {/if}
           <p class="muted">
-            Istota will answer at <code>http://{LOCAL_ADDRESS}</code> on this machine.
+            Istota will answer at <code>http://{localAddress}</code> on this machine.
           </p>
         {:else}
           {#if value === 'proxied'}

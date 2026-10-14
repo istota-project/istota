@@ -1584,3 +1584,67 @@ class TestPlainWordsOnTheWeb:
         messages = {e.field: e.message for e in setup_wizard.validate_container_answers(a)}
         assert "--native-model" in messages["native_model"]
         assert "ISTOTA_BRAIN_NATIVE_API_KEY" in messages["native_api_key"]
+
+
+class TestTheForwardedPort:
+    """On the local VM the page builds its local address from the port Lima
+    forwards (host.env's LOCAL_FORWARD_PORT), and every route that turns the
+    draft into answers holds the hostname to it."""
+
+    @pytest.fixture
+    def forwarding(self, dirs, clock):
+        (dirs.vm_dir / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\nLOCAL_FORWARD_PORT=8181\n")
+        app, client = _make(dirs, clock)
+        assert _unlock(client).status_code == 200
+        return app, client
+
+    def test_state_names_the_local_address_without_a_session(self, dirs, clock):
+        (dirs.vm_dir / "host.env").write_text("LOCAL_FORWARD_PORT=8181\n")
+        _app, client = _make(dirs, clock)
+        body = client.get("/istota/api/setup/state").json()
+        assert body["phase"] == "locked"
+        assert body["local_address"] == "localhost:8181"
+
+    def test_with_no_forward_the_local_address_is_8080(self, server):
+        _app, client = server
+        assert client.get("/istota/api/setup/state").json()["local_address"] == "localhost:8080"
+
+    def test_validate_refuses_another_port_in_plain_words(self, forwarding):
+        _app, client = forwarding
+        _draft(client, **READY)
+        fields = _fields(_validate(client, "address"))
+        assert fields == [("hostname", "This computer reaches Istota at localhost:8181. Use that address.")]
+        _draft(client, hostname="localhost:8181")
+        assert _validate(client, "address").json() == {"ok": True, "fields": []}
+
+    def test_finish_refuses_another_port_and_writes_nothing(self, forwarding, dirs):
+        _app, client = forwarding
+        _draft(client, **READY)
+        resp = _finish(client)
+        assert resp.status_code == 400, resp.text
+        assert [f["field"] for f in resp.json()["fields"]] == ["hostname"]
+        assert resp.json()["step"] == "address"
+        assert not (dirs.data_dir / "config" / "config.toml").exists()
+
+    def test_finish_on_the_forward_publishes_on_it(self, forwarding, dirs):
+        _app, client = forwarding
+        _draft(client, **{**READY, "hostname": "localhost:8181"})
+        resp = _finish(client)
+        assert resp.status_code == 200, resp.text
+        env = (dirs.vm_dir / ".env").read_text()
+        assert "NGINX_PUBLISH=127.0.0.1:8181:80\n" in env
+        host = (dirs.vm_dir / "host.env").read_text()
+        assert "LOCAL_FORWARD_PORT=8181\n" in host and "STORAGE=host-folder\n" in host
+
+    def test_the_check_route_sees_the_forward(self, forwarding, monkeypatch):
+        _app, client = forwarding
+        seen = []
+
+        async def run_check(kind, a, browser_host, seconds):
+            seen.append(a.forwarded_port)
+            return setup_checks.CheckResult(ok=True, message="ok")
+
+        monkeypatch.setattr(setup_app, "_run_check", run_check)
+        _draft(client, **NATIVE)
+        assert _check(client, "model").status_code == 200
+        assert seen == [8181]
