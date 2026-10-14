@@ -98,6 +98,45 @@ if len(paragraphs) > 2:
         "in the 'Before you upgrade' list. How: .claude/rules/releases.md."
     )
 
+# The section is read by people skimming what's new; detail lives in docs/.
+# Limits are 0.44.0's condensed section with headroom.
+PROSE_WORDS, UPGRADE_ITEMS, ENTRY_WORDS, SECTION_CHARS = 300, 10, 50, 20000
+
+def entries(text):
+    """Top-level `- ` bullets, each with its indented continuation lines."""
+    out = []
+    for line in text.splitlines():
+        if line.startswith("- "):
+            out.append(line)
+        elif out and line.startswith("  ") and line.strip():
+            out[-1] += " " + line.strip()
+    return out
+
+problems = []
+prose_words = len(prose.split())
+if prose_words > PROSE_WORDS:
+    problems.append(f"the announcement prose is {prose_words} words; keep it under {PROSE_WORDS}")
+upgrade = preamble[len(prose):]
+items = entries(upgrade)
+if len(items) > UPGRADE_ITEMS:
+    problems.append(f"'Before you upgrade' has {len(items)} entries; keep the {UPGRADE_ITEMS} actions that matter most")
+changeset = section[len(re.split(r"^### ", section, maxsplit=1, flags=re.M)[0]):]
+for item in items + entries(changeset):
+    words = len(item.split())
+    if words > ENTRY_WORDS:
+        problems.append(f"{words} words: {' '.join(item.split()[:10])} ...")
+if len(section) > SECTION_CHARS:
+    problems.append(f"the section is {len(section)} characters; keep it under {SECTION_CHARS}")
+if problems:
+    sys.exit(
+        "the [Unreleased] section is too long to read as release notes:\n"
+        + "\n".join("  " + p for p in problems[:25])
+        + (f"\n  ... and {len(problems) - 25} more" if len(problems) > 25 else "")
+        + f"\nMerge the bullets about one feature into one, a sentence or two each\n"
+        f"(at most {ENTRY_WORDS} words) that names the docs page for the detail.\n"
+        "How: .claude/rules/releases.md; the model is the 0.44.0 section."
+    )
+
 # A heading inside the announcement does not stay inside it. Both extractors
 # split the section on '### ', so one is read as a changeset subsection and
 # emitted after the real ones; a '#' or '##' stays put and outranks the

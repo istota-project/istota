@@ -222,3 +222,40 @@ class TestTheCodename:
         self._write_heading(tmp_path, "")
         assert "## [0.9.0] - 2026-10-13\n" in (tmp_path / "CHANGELOG.md").read_text()
         assert self._title(tmp_path) == "v0.9.0"
+
+
+class TestTheLengthLimits:
+    """The section is release notes, not a merge log; 0.44.0 is the model."""
+
+    def test_the_0_44_0_section_passes(self, tmp_path):
+        text = (REPO / "CHANGELOG.md").read_text()
+        m = re.search(r"^## \[0\.44\.0\][^\n]*\n(.*?)(?=^## \[)", text, re.M | re.S)
+        assert m, "the 0.44.0 section is gone from CHANGELOG.md"
+        r = _run(tmp_path, _changelog(m.group(1).lstrip("\n")))
+        assert r.returncode == 0, r.stderr
+
+    def test_a_long_changeset_entry_is_named(self, tmp_path):
+        long_entry = "- **A feature** that " + "goes on " * 30 + "and on.\n"
+        r = _run(tmp_path, _changelog(ANNOUNCEMENT + "### Added\n\n" + long_entry))
+        assert r.returncode != 0
+        assert "too long to read as release notes" in r.stderr
+        assert "**A feature** that goes on" in r.stderr
+
+    def test_an_indented_upgrade_note_counts_toward_its_entry(self, tmp_path):
+        entry = "- Short.\n\n  **Upgrade note:** " + "more words here " * 20 + "\n"
+        r = _run(tmp_path, _changelog(ANNOUNCEMENT + "### Fixed\n\n" + entry))
+        assert r.returncode != 0
+        assert "- Short." in r.stderr
+
+    def test_more_than_ten_upgrade_entries(self, tmp_path):
+        prose = ANNOUNCEMENT.split("**Before you upgrade.**")[0]
+        items = "".join(f"- Do thing {i}.\n" for i in range(11))
+        r = _run(tmp_path, _changelog(prose + "**Before you upgrade.**\n\n" + items + "\n" + CANONICAL_SECTIONS))
+        assert r.returncode != 0
+        assert "11 entries" in r.stderr
+
+    def test_a_section_over_the_size_limit(self, tmp_path):
+        bullets = "".join(f"- Entry {i} with a few words in it.\n" for i in range(700))
+        r = _run(tmp_path, _changelog(ANNOUNCEMENT + "### Fixed\n\n" + bullets))
+        assert r.returncode != 0
+        assert "characters; keep it under 20000" in r.stderr
