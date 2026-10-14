@@ -213,7 +213,7 @@
   </div>
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={onClose}>Close</Button>
+    <Button variant="secondary" onclick={onClose}>Close</Button>
     <Button
       variant="primary"
       onclick={handleSave}

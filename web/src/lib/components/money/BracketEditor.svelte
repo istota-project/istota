@@ -183,7 +183,7 @@
   {/if}
 
   <div class="actions">
-    <Button variant="ghost" size="sm" {disabled} onclick={addRow}>
+    <Button variant="secondary" size="sm" {disabled} onclick={addRow}>
       <Plus size={14} /> Add bracket
     </Button>
   </div>

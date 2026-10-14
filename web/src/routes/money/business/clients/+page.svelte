@@ -176,7 +176,7 @@
   {#if notice}
     <div class="money-notice-bar">
       <NoticeBanner title={notice} variant="warn" />
-      <Button variant="ghost" onclick={() => (notice = '')}>Dismiss</Button>
+      <Button variant="secondary" onclick={() => (notice = '')}>Dismiss</Button>
     </div>
   {/if}
 

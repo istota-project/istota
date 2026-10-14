@@ -49,7 +49,7 @@
 >
   {#snippet actions()}{#if moneyEnabled}<Button
         href="{base}/money/transactions"
-        variant="ghost"
+        variant="secondary"
         size="sm">Money transactions</Button
       >{/if}{/snippet}
   {#if purchases.length === 0}<EmptyState>No purchases yet.</EmptyState>{/if}
@@ -72,7 +72,7 @@
         </div>
         <Badge size="sm">{purchase.state[0].toUpperCase() + purchase.state.slice(1)}</Badge>
         {#if ['held', 'authorized', 'filled'].includes(purchase.state)}<Button
-            variant="ghost"
+            variant="secondary"
             size="sm"
             disabled={!writable || busy}
             onclick={() => cancel(purchase.id)}

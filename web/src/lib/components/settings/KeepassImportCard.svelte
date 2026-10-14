@@ -172,7 +172,7 @@
       >
     {/if}
     <Button
-      variant="ghost"
+      variant="secondary"
       size="sm"
       onclick={() => {
         clear();

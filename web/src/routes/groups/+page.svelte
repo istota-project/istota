@@ -10,6 +10,7 @@
     Button,
     EmptyState,
   } from '$lib/components/ui';
+  import { SettingsCard } from '$lib/components/settings';
   import { getGroups, getGroup, AuthError, type GroupSummary, type GroupDetail } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
@@ -192,29 +193,42 @@
       >You do not belong to any groups.</EmptyState
     >
   {:else if detail && selected}
-    <div class="group-home content-frame">
+    <div class="settings groups-page">
       {#key detail.group_id}
         {#if selected.view === 'memory'}<GroupNotebook groupId={detail.group_id} />
-        {:else if selected.view === 'members'}<GroupMembers group={detail} onChanged={changed} />
-        {:else if detail.rooms.length}<ul class="rooms prose">
-            {#each detail.rooms as room}<li>
-                <a href="{base}/chat?room={encodeURIComponent(room.token)}">{room.name}</a>
-              </li>{/each}
-          </ul>
-        {:else}<EmptyState>No linked rooms you can access.</EmptyState>{/if}
+        {:else if selected.view === 'members'}
+          <SettingsCard title="Members">
+            <GroupMembers group={detail} onChanged={changed} />
+          </SettingsCard>
+        {:else}
+          <SettingsCard
+            title="Linked rooms"
+            description="Chat rooms linked to this group that you can open."
+          >
+            {#if detail.rooms.length}<ul class="rooms">
+                {#each detail.rooms as room (room.token)}<li>
+                    <a href="{base}/chat?room={encodeURIComponent(room.token)}">{room.name}</a>
+                  </li>{/each}
+              </ul>
+            {:else}<EmptyState size="sm">No linked rooms you can access.</EmptyState>{/if}
+          </SettingsCard>
+        {/if}
       {/key}
     </div>
   {/if}
 </AppShell>
 
 <style>
-  .group-home {
-    padding: var(--space-3);
-  }
   .rooms {
-    padding-left: var(--space-4);
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
   .rooms li {
-    margin-block: var(--space-2);
+    padding-block: var(--space-2);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .rooms li:last-child {
+    border-bottom: none;
   }
 </style>

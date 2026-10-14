@@ -18,6 +18,7 @@
     Field,
     Input,
     Modal,
+    MultiSelect,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
@@ -588,7 +589,7 @@
                   >
                 {/if}
                 {#if whatsappHasIdentity}
-                  <Button variant="ghost" size="sm" onclick={() => (confirmReset = true)}
+                  <Button variant="secondary" size="sm" onclick={() => (confirmReset = true)}
                     >Reset identity</Button
                   >
                 {/if}
@@ -630,19 +631,17 @@
               hint={hint('disabled_skills', 'Pick a skill to turn it off for this user.')}
               error={errors.disabled_skills}
             >
-              <div class="chip-set">
-                {#each detail.options.skills as name (name)}
-                  {@const on = form.disabled_skills.includes(name)}
-                  <Chip
-                    checked={on}
-                    aria-pressed={on}
-                    disabled={locked('disabled_skills')}
-                    onclick={() => {
-                      if (form) form.disabled_skills = toggle(form.disabled_skills, name);
-                    }}>{name}</Chip
-                  >
-                {/each}
-              </div>
+              <MultiSelect
+                value={form.disabled_skills}
+                options={detail.options.skills.map((name) => ({ value: name, label: name }))}
+                onValueChange={(next) => {
+                  if (form) form.disabled_skills = next;
+                }}
+                disabled={locked('disabled_skills')}
+                placeholder="Search skills to turn off…"
+                emptyLabel="All skills are on."
+                ariaLabel="Disabled skills"
+              />
             </Field>
           {/if}
           {#each WORKER_FIELDS as [field, label] (field)}
@@ -701,7 +700,7 @@
   {/if}
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={requestClose} disabled={busy}>Cancel</Button>
+    <Button variant="secondary" onclick={requestClose} disabled={busy}>Cancel</Button>
     <Button
       variant="primary"
       onclick={save}

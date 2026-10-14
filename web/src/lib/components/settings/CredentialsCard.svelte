@@ -286,7 +286,8 @@
     {/if}
   {/if}
   <div class="row">
-    <Button variant="ghost" size="sm" onclick={showDeleted}>Recently deleted credentials</Button>
+    <Button variant="secondary" size="sm" onclick={showDeleted}>Recently deleted credentials</Button
+    >
   </div>
 </SettingsCard>
 
@@ -312,7 +313,7 @@
     error={editorOpen ? error : ''}
   />
   {#snippet footer()}
-    <Button variant="ghost" onclick={() => (editorOpen = false)} disabled={busy}>Cancel</Button>
+    <Button variant="secondary" onclick={() => (editorOpen = false)} disabled={busy}>Cancel</Button>
     <Button variant="primary" onclick={save} loading={busy}>Save access</Button>
   {/snippet}
 </Modal>
@@ -355,7 +356,7 @@
     {#each deleted as row (row.id)}
       <p>
         <Button
-          variant="ghost"
+          variant="secondary"
           onclick={() => {
             deletedOpen = false;
             historyName = row.name;

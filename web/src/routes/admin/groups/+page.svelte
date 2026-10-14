@@ -9,7 +9,10 @@
     ConfirmDialog,
     EmptyState,
     Badge,
+    NoticeBanner,
   } from '$lib/components/ui';
+  import UserCell from '$lib/admin/UserCell.svelte';
+  import { formatDate, formatDateTime, formatRelative } from '$lib/dateFormat';
   import { SettingsCard } from '$lib/components/settings';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import {
@@ -45,6 +48,7 @@
   let users = $state<{ user_id: string; display_name: string }[]>([]);
   let storageNotes = $state<Record<string, string>>({});
   let storageErrors = $state<Record<string, string>>({});
+  let aboutCollapsed = $state(true);
   let active = true;
   let request = 0;
   const selection = createUrlSelection<string>({
@@ -232,37 +236,67 @@
       <Button onclick={load}>Retry</Button>
     </div>
   {:else}
-    <SettingsCard
-      title="Groups"
-      description="Create groups and manage their owners and membership. Administration does not add you as a member."
-    >
-      {#snippet actions()}<Button variant="primary" onclick={openCreate} disabled={busy}
+    <NoticeBanner title="About group administration" bind:collapsed={aboutCollapsed}>
+      <p>
+        Create groups and manage their owners and membership. Administration does not add you as a
+        member and does not open the group's notebook.
+      </p>
+      <p>
+        Removing a member ends future access. Messages and downloads already received remain with
+        their recipients. Archiving keeps the data and history, and the group ID cannot be reused.
+      </p>
+    </NoticeBanner>
+    <SettingsCard title="Groups">
+      {#snippet actions()}<Button variant="primary" size="sm" onclick={openCreate} disabled={busy}
           >Create group</Button
         >{/snippet}
-      {#if !groups.length}<EmptyState>No groups yet.</EmptyState>
+      {#if !groups.length}<EmptyState
+          >No groups yet. Create one to choose its first owners.</EmptyState
+        >
       {:else}<div class="table-scroll">
-          <table class="grid" aria-label="Groups">
+          <table class="grid groups-grid" aria-label="Groups">
             <thead
-              ><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th></tr
+              ><tr
+                ><th scope="col">Group</th><th scope="col" class="col-kind">Kind</th><th
+                  scope="col"
+                  class="col-created">Created</th
+                ><th scope="col" class="col-status">Status</th></tr
               ></thead
             >
-            <tbody
-              >{#each groups as item (item.group_id)}<tr>
-                  <td
-                    ><Button
-                      variant="ghost"
-                      onclick={() => selection.push(item.group_id)}
-                      disabled={busy}>{item.display_name}</Button
+            <tbody>
+              {#each groups as item (item.group_id)}
+                <!-- The row is a shortcut; the name button is the keyboard route. -->
+                <tr
+                  class="row-clickable"
+                  class:selected={item.group_id === selected}
+                  class:archived={item.archived_at}
+                  onclick={() => !busy && selection.push(item.group_id)}
+                >
+                  <td>
+                    <button
+                      type="button"
+                      class="group-name"
+                      aria-current={item.group_id === selected ? 'true' : undefined}
+                      disabled={busy}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        selection.push(item.group_id);
+                      }}>{item.display_name}</button
                     >
-                    <div class="caption">{item.group_id}</div></td
+                    <div class="caption mono">{item.group_id}</div>
+                  </td>
+                  <td class="col-kind muted">{item.kind}</td>
+                  <td class="col-created muted" title={formatDateTime(item.created_at)}
+                    >{formatDate(item.created_at)}</td
                   >
-                  <td>{item.kind}</td><td
-                    >{#if item.archived_at}<Badge>Archived</Badge>{:else if item.needs_owner}<Badge
-                        variant="warn">Needs owner</Badge
-                      >{:else}Active{/if}</td
+                  <td class="col-status"
+                    >{#if item.archived_at}<Badge size="sm">Archived</Badge
+                      >{:else if item.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge
+                      >{:else}<Badge size="sm" variant="success">Active</Badge>{/if}</td
                   >
-                </tr>{/each}</tbody
-            >
+                </tr>
+              {/each}
+            </tbody>
           </table>
         </div>{/if}
     </SettingsCard>
@@ -273,9 +307,19 @@
       </div>
     {:else if group}
       <SettingsCard title={group.display_name}>
+        {#snippet status()}
+          {#if group?.archived_at}<Badge size="sm">Archived</Badge
+            >{:else if group?.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge>{/if}
+        {/snippet}
         {#snippet actions()}
+          {#if group?.capabilities.read_memory}<Button
+              size="sm"
+              href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
+              >Open group notebook</Button
+            >{/if}
           {#if group && !group.archived_at && group.capabilities.archive}<Button
               variant="danger"
+              size="sm"
               disabled={busy}
               onclick={() => {
                 formError = '';
@@ -283,36 +327,49 @@
               }}>Archive group</Button
             >{/if}
         {/snippet}
-        <dl class="kv">
+        <dl class="kv group-facts">
           <dt>Group ID</dt>
-          <dd>{group.group_id}</dd>
+          <dd class="mono">{group.group_id}</dd>
           <dt>Kind</dt>
           <dd>{group.kind}</dd>
           <dt>Created</dt>
-          <dd>{group.created_at} by {group.created_by}</dd>
+          <dd>
+            <span title={formatDateTime(group.created_at)}>{formatDate(group.created_at)}</span>
+            <span class="muted">by {group.created_by}</span>
+          </dd>
+          {#if group.archived_at}
+            <dt>Archived</dt>
+            <dd>
+              <span title={formatDateTime(group.archived_at)}>{formatDate(group.archived_at)}</span>
+              <span class="muted">· data and membership history are kept</span>
+            </dd>
+          {/if}
         </dl>
-        {#if group.archived_at}<p>
-            Archived {group.archived_at}. Data and membership history are preserved.
-          </p>
-        {:else if group.needs_owner}<p class="banner warn">Needs owner</p>{/if}
-        {#if group.capabilities.read_memory}<Button
-            href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
-            >Open group notebook</Button
-          >{/if}
-        {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
+        {#if !group.archived_at && group.needs_owner}<p class="banner warn">
+            This group has no owner. Members can still use it, but nobody can manage its membership
+            until you assign one.
+          </p>{/if}
       </SettingsCard>
       {#if !group.archived_at}
+        <SettingsCard title="Members">
+          {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
+        </SettingsCard>
         <SettingsCard
           title="Storage"
           description="Retry setup if the group's workspace was unavailable. Existing files are kept."
         >
-          {#if storageNotes[group.group_id]}<p role="status">{storageNotes[group.group_id]}</p>{/if}
+          {#snippet actions()}<Button
+              size="sm"
+              onclick={retryStorage}
+              loading={busy}
+              loadingLabel="Working…">Retry storage setup</Button
+            >{/snippet}
+          {#if storageNotes[group.group_id]}<p class="banner info" role="status">
+              {storageNotes[group.group_id]}
+            </p>{/if}
           {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
               {storageErrors[group.group_id]}
             </p>{/if}
-          <Button onclick={retryStorage} loading={busy} loadingLabel="Working…"
-            >Retry storage setup</Button
-          >
         </SettingsCard>
       {/if}
       <SettingsCard title="Membership history">
@@ -321,24 +378,29 @@
             <table class="grid" aria-label="Membership history">
               <thead
                 ><tr
-                  ><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Joined</th
+                  ><th scope="col">Member</th><th scope="col" class="col-role">Role</th><th
+                    scope="col">Joined</th
                   ><th scope="col">Left</th></tr
                 ></thead
               >
               <tbody
                 >{#each group.history as membership}<tr
                     ><td
-                      >{membership.display_name}
-                      <div class="caption">{membership.user_id}</div></td
-                    ><td>{membership.role}</td><td
-                      >{membership.added_at}
-                      <div class="caption">Added by {membership.added_by}</div></td
+                      ><UserCell
+                        userId={membership.user_id}
+                        displayName={membership.display_name}
+                      /></td
+                    ><td class="col-role muted">{membership.role}</td><td
+                      ><span title={formatDateTime(membership.added_at)}
+                        >{formatDate(membership.added_at)}</span
+                      >
+                      <div class="caption">by {membership.added_by}</div></td
                     ><td
-                      >{membership.ended_at ?? 'Current member'}{#if membership.ended_by}<div
-                          class="caption"
-                        >
-                          Removed by {membership.ended_by}
-                        </div>{/if}</td
+                      >{#if membership.ended_at}<span title={formatDateTime(membership.ended_at)}
+                          >{formatDate(membership.ended_at)}</span
+                        >{#if membership.ended_by}<div class="caption">
+                            by {membership.ended_by}
+                          </div>{/if}{:else}<span class="muted">Current member</span>{/if}</td
                     ></tr
                   >{/each}</tbody
               >
@@ -348,20 +410,30 @@
       </SettingsCard>
       <SettingsCard
         title="Management events"
-        description="Role changes keep the membership period intact. The details below record each change."
+        description="Role changes keep the membership period intact. Each change is recorded here."
       >
-        {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState>{:else}<ul
+        {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState>{:else}<ol
             class="events"
           >
-            {#each group.events as event (event.id)}<li>
-                <strong>{eventTitle(event.event_type)}</strong> · {event.actor_id}{#if event.subject_user_id}
-                  → {event.subject_user_id}{/if}
-                <div class="caption">{event.created_at}</div>
-                <ul>
-                  {#each eventDetails(event) as line}<li>{line}</li>{/each}
-                </ul>
-              </li>{/each}
-          </ul>{/if}
+            {#each group.events as event (event.id)}
+              {@const lines = eventDetails(event)}
+              <li class="event">
+                <div class="event-head">
+                  <span class="event-title">{eventTitle(event.event_type)}</span>
+                  <span class="caption" title={formatDateTime(event.created_at)}
+                    >{formatRelative(event.created_at)}</span
+                  >
+                </div>
+                <div class="caption">
+                  by {event.actor_id}{#if event.subject_user_id}
+                    · {event.subject_user_id}{/if}
+                </div>
+                {#if lines.length}<ul class="event-details">
+                    {#each lines as line}<li>{line}</li>{/each}
+                  </ul>{/if}
+              </li>
+            {/each}
+          </ol>{/if}
       </SettingsCard>
     {/if}
   {/if}
@@ -390,8 +462,10 @@
     </fieldset>
     {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
   </div>
-  {#snippet footer()}<Button variant="ghost" onclick={() => (createOpen = false)} disabled={busy}
-      >Cancel</Button
+  {#snippet footer()}<Button
+      variant="secondary"
+      onclick={() => (createOpen = false)}
+      disabled={busy}>Cancel</Button
     ><Button
       variant="primary"
       onclick={create}
@@ -421,17 +495,99 @@
     flex-direction: column;
     gap: var(--space-3);
   }
+  .create-fields p {
+    margin: 0;
+  }
   fieldset {
-    border: 1px solid var(--border-default);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
     padding: var(--space-3);
   }
-  .events {
-    padding-left: var(--space-4);
+  legend {
+    padding-inline: var(--space-1);
+    font-weight: 500;
   }
-  .events li {
-    margin-block: var(--space-3);
+  .row-clickable {
+    cursor: pointer;
   }
-  .events {
+  .row-clickable:hover,
+  .row-clickable.selected {
+    background: var(--surface-raised);
+  }
+  .row-clickable.selected td:first-child {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .row-clickable.archived .group-name {
+    color: var(--text-muted);
+  }
+  .group-name {
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
     overflow-wrap: anywhere;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .col-kind,
+  .col-role {
+    width: 7rem;
+  }
+  .col-created,
+  .col-status {
+    width: 8rem;
+  }
+  .group-facts {
+    --kv-gap: var(--space-6);
+    margin: 0;
+  }
+  .group-facts dd {
+    overflow-wrap: anywhere;
+  }
+  .group-facts + .banner {
+    margin-top: var(--space-3);
+  }
+  .events {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .event {
+    padding-block: var(--space-2);
+    border-bottom: 1px solid var(--border-subtle);
+    overflow-wrap: anywhere;
+  }
+  .event:last-child {
+    border-bottom: none;
+  }
+  .event-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-3);
+  }
+  .event-title {
+    font-weight: 500;
+  }
+  .event-details {
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-4);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+  @container settings (max-width: 40rem) {
+    .col-created,
+    .col-kind {
+      display: none;
+    }
   }
 </style>

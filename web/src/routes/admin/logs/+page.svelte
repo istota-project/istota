@@ -435,7 +435,7 @@
       {#if nextBefore}
         <div class="older-row">
           <Button
-            variant="subtle"
+            variant="secondary"
             size="sm"
             onclick={loadOlder}
             loading={loadingOlder}
@@ -477,10 +477,10 @@
   <div class="log-footer">
     <span class="log-count">{records.length} shown</span>
     {#if records.length > 0}
-      <Button variant="subtle" size="sm" onclick={copyAll}>Copy</Button>
+      <Button variant="secondary" size="sm" onclick={copyAll}>Copy</Button>
     {/if}
     {#if !atBottom && records.length > 0}
-      <Button variant="subtle" size="sm" onclick={scrollToBottom}>Jump to latest</Button>
+      <Button variant="secondary" size="sm" onclick={scrollToBottom}>Jump to latest</Button>
     {/if}
   </div>
 </div>

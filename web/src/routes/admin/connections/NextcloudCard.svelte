@@ -112,7 +112,7 @@
     {/if}
 
     <div class="form-actions">
-      <Button variant="ghost" href={`${base}/admin/config`}>Change in Configuration</Button>
+      <Button variant="secondary" href={`${base}/admin/config`}>Change in Configuration</Button>
       <Button variant="secondary" onclick={checkNow} loading={checking} loadingLabel="Checking…"
         >Check now</Button
       >
@@ -122,7 +122,7 @@
       This install has no Nextcloud: <code>[nextcloud] url</code> is not set, and the workspace is local.
     </p>
     <div class="form-actions">
-      <Button variant="ghost" href={`${base}/admin/config`}>Change in Configuration</Button>
+      <Button variant="secondary" href={`${base}/admin/config`}>Change in Configuration</Button>
     </div>
   {/if}
 </section>

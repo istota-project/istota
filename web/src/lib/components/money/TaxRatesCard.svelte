@@ -69,7 +69,7 @@
         }}
       />
       {#if standardDeduction.overridden}
-        <Button variant="ghost" size="sm" onclick={() => revert('standard_deduction')}>
+        <Button variant="secondary" size="sm" onclick={() => revert('standard_deduction')}>
           Revert
         </Button>
       {/if}
@@ -88,7 +88,7 @@
     {#if brackets.overridden}
       <div class="revert-row">
         <p class="overridden">Your brackets, not the shipped ones.</p>
-        <Button variant="ghost" size="sm" onclick={() => revert('brackets')}>Revert</Button>
+        <Button variant="secondary" size="sm" onclick={() => revert('brackets')}>Revert</Button>
       </div>
     {/if}
   </SettingsField>

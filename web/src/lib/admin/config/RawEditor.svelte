@@ -79,9 +79,11 @@
     </ul>
     <div class="raw-actions">
       {#if pending !== null}
-        <Button variant="ghost" size="sm" onclick={() => onChange(null)}>Undo text changes</Button>
+        <Button variant="secondary" size="sm" onclick={() => onChange(null)}
+          >Undo text changes</Button
+        >
       {:else}
-        <Button variant="ghost" size="sm" onclick={() => (open = false)}>Close</Button>
+        <Button variant="secondary" size="sm" onclick={() => (open = false)}>Close</Button>
       {/if}
     </div>
   {/if}

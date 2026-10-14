@@ -23,7 +23,7 @@
 </script>
 
 <SettingsCard title="Activity" description="Recent credential actions.">
-  {#snippet actions()}<Button variant="ghost" size="sm" disabled={busy} onclick={load}
+  {#snippet actions()}<Button variant="secondary" size="sm" disabled={busy} onclick={load}
       >Refresh</Button
     >{/snippet}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}

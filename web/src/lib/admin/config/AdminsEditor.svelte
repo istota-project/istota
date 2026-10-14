@@ -94,7 +94,7 @@
       </Field>
       <Button variant="secondary" onclick={add} disabled={!adding.trim()}>Add</Button>
       {#if pending}
-        <Button variant="ghost" onclick={() => onChange(null)}>Undo</Button>
+        <Button variant="secondary" onclick={() => onChange(null)}>Undo</Button>
       {/if}
     </div>
     <p class="caption">

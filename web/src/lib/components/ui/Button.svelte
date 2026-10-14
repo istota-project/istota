@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
-  type Variant = 'primary' | 'secondary' | 'ghost' | 'pill' | 'subtle' | 'danger' | 'danger-icon';
+  type Variant = 'primary' | 'secondary' | 'pill' | 'danger' | 'danger-icon';
   type Size = 'sm' | 'md';
 
   interface Props {
@@ -138,11 +138,12 @@
   }
 
   /* Same filled shape as primary, quieter colour — for the reversing half of
-	   a pair (Disconnect next to Connect), where a ghost button would read as a
-	   different kind of control rather than a calmer one. Sits on --surface-card
-	   surfaces, so it can't use btn-pill's matching background. */
+	   a pair (Disconnect next to Connect) and every lesser action beside a
+	   primary one. There is no transparent variant: a label with no chrome at
+	   rest reads as a link set slightly off the text column. */
   .btn-secondary {
     background: var(--surface-raised);
+    box-shadow: inset 0 0 0 1px var(--border-default);
     color: var(--text-muted);
   }
   .btn-secondary:hover:not(:disabled) {
@@ -150,31 +151,15 @@
     color: var(--text-primary);
   }
 
+  /* The default. Filled and outlined at rest so it stays visible on a card,
+     whose background its old --surface-card fill matched exactly. */
   .btn-pill {
-    background: var(--surface-card);
-    color: var(--text-muted);
+    background: var(--surface-raised);
+    box-shadow: inset 0 0 0 1px var(--border-default);
+    color: var(--text-primary);
   }
   .btn-pill:hover:not(:disabled) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
-  }
-
-  .btn-ghost {
-    background: transparent;
-    color: var(--text-muted);
-  }
-  .btn-ghost:hover:not(:disabled) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
-  }
-
-  .btn-subtle {
-    background: transparent;
-    color: var(--text-dim);
-    padding-inline: var(--space-2);
-  }
-  .btn-subtle:hover:not(:disabled) {
-    color: var(--text-muted);
+    background: var(--border-default);
   }
 
   /* Red outline/text for a destructive confirm action (the confirm button in

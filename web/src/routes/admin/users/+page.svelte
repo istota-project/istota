@@ -286,7 +286,7 @@
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
     <div class="form-actions dialog-actions">
-      <Button variant="ghost" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
+      <Button variant="secondary" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
       <Button
         type="submit"
         variant="primary"

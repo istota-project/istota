@@ -1048,7 +1048,7 @@
             <span class="send-failed-text">{message.sendError || 'Couldn’t send.'}</span>
             {#if showRetry}
               <Button
-                variant="subtle"
+                variant="secondary"
                 size="sm"
                 disabled={retryBusy}
                 title={retryBusy ? 'Wait for the current turn to finish' : undefined}
@@ -1062,7 +1062,7 @@
           <div class="send-queued">
             <span class="send-queued-text">{queueWaitText}</span>
             {#if showQueueSend}
-              <Button variant="subtle" size="sm" onclick={() => onQueueSend?.(message.cid)}>
+              <Button variant="secondary" size="sm" onclick={() => onQueueSend?.(message.cid)}>
                 Send
               </Button>
             {/if}
@@ -1182,7 +1182,7 @@
         {:else if showTaskRetry}
           <div class="task-retry">
             <Button
-              variant="subtle"
+              variant="secondary"
               size="sm"
               disabled={retryBusy}
               title={retryBusy ? 'Wait for the current turn to finish' : 'Run this again'}
@@ -1193,7 +1193,7 @@
             </Button>
             {#if showContinue}
               <Button
-                variant="subtle"
+                variant="secondary"
                 size="sm"
                 disabled={retryBusy}
                 title={retryBusy

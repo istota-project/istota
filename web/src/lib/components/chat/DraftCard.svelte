@@ -179,7 +179,7 @@
     </p>
     <div class="draft-actions">
       <Button
-        variant="subtle"
+        variant="secondary"
         size="sm"
         disabled={busy}
         onclick={() => run(() => onDiscard(draft.id))}>Discard</Button
@@ -222,7 +222,7 @@
       >
       <Button variant="secondary" size="sm" disabled={busy} onclick={startEdit}>Edit</Button>
       <Button
-        variant="subtle"
+        variant="secondary"
         size="sm"
         disabled={busy}
         onclick={() => run(() => onDiscard(draft.id))}>Discard</Button
@@ -268,7 +268,7 @@
       ></textarea>
       <div class="draft-actions">
         <Button variant="primary" size="sm" disabled={busy} onclick={saveEdit}>Save</Button>
-        <Button variant="subtle" size="sm" disabled={busy} onclick={() => (editing = false)}
+        <Button variant="secondary" size="sm" disabled={busy} onclick={() => (editing = false)}
           >Cancel</Button
         >
       </div>
@@ -305,7 +305,7 @@
         >
         <Button variant="secondary" size="sm" disabled={busy} onclick={startEdit}>Edit</Button>
         <Button
-          variant="subtle"
+          variant="secondary"
           size="sm"
           disabled={busy}
           onclick={() => run(() => onDiscard(draft.id))}>Discard</Button
