@@ -19,7 +19,7 @@ Each install is one vault entry, named `wordpress_<name>`, under the user's `ist
 - Username field: the WordPress login.
 - Password field: an application password, made in wp-admin under Users, Profile, Application Passwords.
 
-Requests go only to a host the vault entry is bound to. A `--blog` pointing anywhere else is refused with `credential_host_mismatch` and nothing is sent. Each call reads the entry once from the task's vault budget, so prefer `describe` (one call for all discovery) over many small calls.
+Requests go only to a host the vault entry is bound to. A `--blog` pointing anywhere else is refused with `credential_host_mismatch` and nothing is sent. The site's entry counts once against the task's vault budget, however many calls read it; `describe` is still one call for all discovery.
 
 `istota-skill wordpress sites` lists the `wordpress_*` entries by site name. It reads no password and makes no request. If the user has no such entry, tell them to add one with the three fields above.
 

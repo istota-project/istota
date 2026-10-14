@@ -7372,15 +7372,14 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "load-bearing — the variable is set in the child process, so your own "
             "shell must not expand it first."
         )
-        # The cap is counted per name per request, so a model running one
-        # `run` per command spends it on repeats of the same few names.
+        # The cap counts distinct credentials (ISSUE-743), so the model only
+        # needs to know how many different ones it may use.
         fetch_limit = config.security.vault_fetch_limit_per_task
         if fetch_limit > 0:
             shared_credentials_line += (
-                f" Each name a `run` resolves counts against a budget of "
-                f"{fetch_limit} fetches for this task, repeats included, so put "
-                "several commands needing the same credentials inside one "
-                "`run ... -- sh -c '...'` rather than one `run` per command."
+                f" This task may use at most {fetch_limit} different shared "
+                "credentials; using one again costs nothing, and asking for a "
+                "name that does not exist counts each time."
             )
 
     # A linked turn (ISSUE-608): the header

@@ -300,9 +300,10 @@ features = []
 # skill_client_wait_seconds = 600  # how long the sandboxed istota-skill client waits
 #                                  # on the proxy socket. Every skill timeout is capped
 #                                  # at this minus 30s.
-# vault_fetch_limit_per_task = 10  # shared-credential fetches one task attempt may
-#                                  # make. 0 is unlimited. A fetch of a name that does
-#                                  # not exist still counts; listing names does not.
+# vault_fetch_limit_per_task = 10  # distinct shared credentials one task attempt may
+#                                  # read; reading one again is free. 0 is unlimited.
+#                                  # A name not yet served (absent or refused) counts
+#                                  # every time; listing names does not.
 # On deployments with several configured users, vaults require a working sandbox.
 # Accept same-uid cross-task credential exposure only as an operator decision.
 # allow_unsandboxed_multi_user_vaults = false

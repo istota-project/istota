@@ -49,21 +49,22 @@ a boundary.
 **Vault requests spend from the task attempt's fetch budget**, which
 `SkillProxy` owns (`[security] vault_fetch_limit_per_task`). An `ENTRY` is one
 request however many fields the entry has (ISSUE-583). Nothing here
-caches or de-duplicates: three `--fill-credential` flags are three requests, by
-§4b's own arithmetic, and a resolver that quietly collapsed two identical names
-would make the cap mean something other than what it says. Resolution stops at
-the first refusal for the same reason `_hostpath` does — the call is refused
-either way, and the names after it would spend budget on a call that is already
-over.
+caches or de-duplicates: three `--fill-credential` flags are three requests,
+and the proxy decides what each costs. A name it has already served this
+attempt is free (ISSUE-743), so the budget counts credentials. Resolution
+stops at the first refusal for the same reason `_hostpath` does — the call is
+refused either way, and the names after it would spend budget on a call that
+is already over.
 
 **And the spend is at the parse, so a handler that then fails does not get it
 back.** A `browse interact` against a dead container or an expired session has
-already charged its credentials by the time the request fails, and five such
-attempts at two credentials each exhaust the default budget of ten with nothing
-typed. That is the cost of the pre-dispatch refusal rather than an oversight:
-resolving at dispatch would buy the refund and give up the guarantee that no
-handler ever runs on a half-resolved namespace, which is the property §4a asks
-for and the one the whole stamp exists to provide.
+already charged its credentials by the time the request fails. Since
+ISSUE-743 a retry with the same credentials is free, so a failed call costs its
+credentials once rather than once per attempt. That is the cost of the
+pre-dispatch refusal rather than an oversight: resolving at dispatch would buy
+the refund and give up the guarantee that no handler ever runs on a
+half-resolved namespace, which is the property §4a asks for and the one the
+whole stamp exists to provide.
 
 Nothing from the package beyond `istota.sandbox.credential_shim`, which is a stdlib-only
 leaf (it is copied verbatim into the task's own shim directory and runs with no

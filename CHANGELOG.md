@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `[security] vault_fetch_limit_per_task` now counts distinct credentials rather than reads. A credential already served in a task attempt can be read again at no cost, so a WordPress session no longer runs out after ten calls against one site. A name not yet served, whether absent or refused, is still charged every time, and setting the limit to `1` limits a task to one credential.
+
 ## [0.46.0] - 2026-10-14
 
 You can now share where you are with a shared room, as one observation or for a set time, after approving a private preview that names who will see it and how precisely. Room members can ask where someone sharing with them is, and sharing stops by itself when the room's readers change. Groups have an overview page with the shared notebook, members, rooms and newest files, and administrators can create, recover and archive groups from the web.

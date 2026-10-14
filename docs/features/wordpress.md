@@ -38,7 +38,7 @@ The entry's name is `wordpress_` followed by the site's name, which is what `--s
 
 The URL field also binds the entry to its host. The skill sends the password only to a host the entry is bound to, so a site name or `--blog` the model chooses cannot send it anywhere else. On a subdomain multisite network, list each subsite host in the entry's `istota_hosts` attribute.
 
-Each call reads the entry once from the task's vault budget (`[security] vault_fetch_limit_per_task`). The vault's own rules apply: it is withheld on a guest's turn and on a task nobody asked in a shared room, and with the credential broker on, a scheduled job needs its grant's scheduled use switched on.
+The site's entry counts once against the task's vault budget (`[security] vault_fetch_limit_per_task`), however many calls read it. The vault's own rules apply: it is withheld on a guest's turn and on a task nobody asked in a shared room, and with the credential broker on, a scheduled job needs its grant's scheduled use switched on.
 
 `istota-skill wordpress sites` lists the `wordpress_*` entries by site name, without reading a password or making a request.
 
