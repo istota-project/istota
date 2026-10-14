@@ -974,7 +974,7 @@ cancel_web_setup() {
 web_setup() {
     require_running
     write_forward_port
-    local out pid rc arg watcher="" args=()
+    local out pid rc arg interrupted watcher="" args=()
     for arg in "$@"; do [ "$arg" = --local ] || args+=("$arg"); done
     out="$(mktemp "${TMPDIR:-/tmp}/istota-setup.XXXXXX")"
     # Only a terminal has a browser to open; the address is printed either way.
@@ -982,7 +982,7 @@ web_setup() {
         watch_setup_page "$out" &
         watcher=$!
     fi
-    trap cancel_web_setup HUP INT TERM
+    trap 'interrupted=1; cancel_web_setup' HUP INT TERM
     # A job and `wait`, so a trap runs at once rather than when the run ends
     # (up to an idle hour). Its stdin is kept, so with a terminal limactl
     # gives the VM's run a pty and Ctrl-C reaches it there too.
@@ -991,9 +991,10 @@ web_setup() {
     pid=$!
     while :; do
         rc=0
+        interrupted=0
         wait "$pid" || rc=$?
-        # Still there (or not yet reaped): a trap interrupted the wait.
-        kill -0 "$pid" 2>/dev/null || break
+        # The child may have exited during the trap; wait again for its status.
+        [ "$interrupted" = 1 ] || break
     done
     trap - HUP INT TERM
     if [ -n "$watcher" ]; then
