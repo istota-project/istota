@@ -26,7 +26,7 @@
       <p class="caption">{description}</p>
     </div>
     {#if added}
-      <Button variant="ghost" size="sm" onclick={onRemove}>Remove</Button>
+      <Button variant="secondary" size="sm" onclick={onRemove}>Remove</Button>
     {:else}
       <Button variant="secondary" size="sm" onclick={onAdd}>Add</Button>
     {/if}

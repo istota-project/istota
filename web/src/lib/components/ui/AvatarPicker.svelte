@@ -139,7 +139,7 @@
     {:else}
       <p class="hint">{prompt}</p>
       {#if removable}
-        <Button variant="ghost" size="sm" onclick={onRemove}>Remove</Button>
+        <Button variant="secondary" size="sm" onclick={onRemove}>Remove</Button>
       {/if}
     {/if}
   </div>
@@ -220,15 +220,6 @@
 
   .side .hint {
     margin: 0;
-  }
-
-  /* `ghost` rather than the `secondary` this replaced: Remove is the lesser of
-     two actions here and the picture is the other one, so a filled box of its
-     own is what made the old arrangement read as a row of equals. Pulled back
-     by its own inline padding so its label starts on the prompt's left edge
-     rather than indented under it. */
-  .side :global(.btn) {
-    margin-inline-start: calc(-1 * var(--space-2));
   }
 
   @media (prefers-reduced-motion: reduce) {

@@ -112,7 +112,7 @@
     </Field>
   {/if}
   {#snippet footer()}
-    <Button variant="ghost" onclick={onCancel}>Cancel</Button>
+    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
     {#if method === 'email'}
       <Button variant="secondary" disabled={busy} onclick={requestCode}>Send new code</Button>
     {:else if !requestId && !busy}

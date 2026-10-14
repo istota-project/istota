@@ -41,7 +41,7 @@
   {:else}
     <div class="confirm-actions">
       <Button variant="primary" size="sm" disabled={busy} onclick={onConfirm}>Confirm</Button>
-      <Button variant="subtle" size="sm" disabled={busy} onclick={onReject}>Cancel</Button>
+      <Button variant="secondary" size="sm" disabled={busy} onclick={onReject}>Cancel</Button>
     </div>
   {/if}
 </div>

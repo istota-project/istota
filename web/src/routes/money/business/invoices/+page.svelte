@@ -208,7 +208,7 @@
               {/each}
               <Button
                 size="sm"
-                variant="ghost"
+                variant="secondary"
                 disabled={!!busyReview}
                 onclick={() => handleReview(review)}
               >

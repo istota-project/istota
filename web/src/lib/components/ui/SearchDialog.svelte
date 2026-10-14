@@ -133,7 +133,7 @@
       {#if $controller.recentQueries.length}
         <p class="micro-label">Recent searches</p>
         {#each $controller.recentQueries as query}<Button
-            variant="ghost"
+            variant="secondary"
             onclick={() => {
               controller.setQuery(query);
               document.getElementById(inputId)?.focus();
@@ -172,13 +172,13 @@
         No matches.
       </p>{/if}
     {#if $controller.selectedSource && groups.some((group) => group.has_more)}<Button
-        variant="ghost"
+        variant="secondary"
         disabled={$controller.loading}
         onclick={() => controller.showMore()}>Show more</Button
       >{/if}
     {#if !$controller.selectedSource && $controller.query.trim().length >= 2}
       {#each $controller.onDemand as source}<Button
-          variant="ghost"
+          variant="secondary"
           onclick={() => void selectSource(source.source)}>Search {source.label}</Button
         >{/each}
     {/if}

@@ -691,7 +691,7 @@
       {/if}
     </div>
     {#snippet footer()}
-      <Button variant="ghost" onclick={cancelModal}>Cancel</Button>
+      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
       <Button variant="primary" onclick={saveAdd}>Add</Button>
     {/snippet}
   </Modal>
@@ -717,7 +717,7 @@
       {/if}
     </div>
     {#snippet footer()}
-      <Button variant="ghost" onclick={cancelModal}>Cancel</Button>
+      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
       <Button variant="primary" onclick={saveAddCategory}>Add</Button>
     {/snippet}
   </Modal>
@@ -762,7 +762,7 @@
       {/if}
     </div>
     {#snippet footer()}
-      <Button variant="ghost" onclick={cancelModal}>Cancel</Button>
+      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
       <Button variant="primary" onclick={saveEdit}>Save</Button>
     {/snippet}
   </Modal>

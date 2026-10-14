@@ -90,7 +90,7 @@
            actions at all, including one whose source is no longer registered.
            A notification nobody can explain is still one the user has to be able
            to clear, and there is nothing else on that modal that would. -->
-      <Button variant="subtle" size="sm" onclick={() => onOpenChange(false)}>Close</Button>
+      <Button variant="secondary" size="sm" onclick={() => onOpenChange(false)}>Close</Button>
       {#if actions.length === 0}
         <Button
           variant="secondary"

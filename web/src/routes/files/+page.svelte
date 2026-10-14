@@ -532,7 +532,7 @@
     <div class="pin-error" role="alert">
       <span class="form-error">{pinError}</span>{#if pinError === 'Could not load pins.'}<Button
           size="sm"
-          variant="ghost"
+          variant="secondary"
           onclick={loadPins}>Retry pins</Button
         >{/if}
     </div>
@@ -701,7 +701,7 @@
         <div class="upload-heading">
           <span class="micro-label">Uploads</span>
           {#if !uploads.some((row) => row.state === 'waiting' || row.state === 'uploading')}
-            <Button size="sm" variant="ghost" onclick={() => (uploads = [])}>Dismiss</Button>
+            <Button size="sm" variant="secondary" onclick={() => (uploads = [])}>Dismiss</Button>
           {/if}
         </div>
         <ul>

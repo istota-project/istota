@@ -720,7 +720,7 @@
         Delete
       </button>
     {/if}
-    <Button variant="ghost" onclick={onClose}>Cancel</Button>
+    <Button variant="secondary" onclick={onClose}>Cancel</Button>
     <Button variant="primary" onclick={handleSave} disabled={!canSave}>Save</Button>
   {/snippet}
 </Modal>

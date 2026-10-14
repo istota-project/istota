@@ -462,8 +462,10 @@
     </fieldset>
     {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
   </div>
-  {#snippet footer()}<Button variant="ghost" onclick={() => (createOpen = false)} disabled={busy}
-      >Cancel</Button
+  {#snippet footer()}<Button
+      variant="secondary"
+      onclick={() => (createOpen = false)}
+      disabled={busy}>Cancel</Button
     ><Button
       variant="primary"
       onclick={create}

@@ -256,7 +256,7 @@
       : `${entries.length} ${entries.length === 1 ? 'item' : 'items'}`}</span
   >
   {#if selectedEntries.length}<Button
-      variant="ghost"
+      variant="secondary"
       size="sm"
       disabled={deleting}
       onclick={() => (selectedKeys = [])}>Clear selection</Button

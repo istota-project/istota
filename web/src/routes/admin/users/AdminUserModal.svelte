@@ -588,7 +588,7 @@
                   >
                 {/if}
                 {#if whatsappHasIdentity}
-                  <Button variant="ghost" size="sm" onclick={() => (confirmReset = true)}
+                  <Button variant="secondary" size="sm" onclick={() => (confirmReset = true)}
                     >Reset identity</Button
                   >
                 {/if}
@@ -701,7 +701,7 @@
   {/if}
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={requestClose} disabled={busy}>Cancel</Button>
+    <Button variant="secondary" onclick={requestClose} disabled={busy}>Cancel</Button>
     <Button
       variant="primary"
       onclick={save}

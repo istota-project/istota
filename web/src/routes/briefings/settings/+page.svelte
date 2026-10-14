@@ -1082,7 +1082,7 @@
             {briefingSaving ? 'Saving…' : briefingEditingName ? 'Save changes' : '+ Add briefing'}
           </Button>
           {#if briefingEditingName}
-            <Button variant="ghost" size="sm" onclick={resetBriefingForm}>Cancel</Button>
+            <Button variant="secondary" size="sm" onclick={resetBriefingForm}>Cancel</Button>
           {/if}
         </div>
         {#if briefingError}
@@ -1320,7 +1320,7 @@
 
                                               <div class="source-form-actions">
                                                 <Button
-                                                  variant="ghost"
+                                                  variant="secondary"
                                                   size="sm"
                                                   onclick={cancelSource}>Cancel</Button
                                                 >
@@ -1504,7 +1504,8 @@
             <div class="shared-sources">
               <div class="shared-sources-head">
                 <span class="field-label">Sources</span>
-                <Button variant="ghost" size="sm" onclick={addSharedSource}>+ Add source</Button>
+                <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button
+                >
               </div>
               {#if sharedDraft.sources.length === 0}
                 <p class="muted small">
@@ -1542,7 +1543,7 @@
             </div>
 
             <div class="source-form-actions">
-              <Button variant="ghost" size="sm" onclick={cancelShared}>Cancel</Button>
+              <Button variant="secondary" size="sm" onclick={cancelShared}>Cancel</Button>
               <Button variant="primary" size="sm" onclick={saveShared} disabled={sharedSaving}
                 >{sharedSaving ? 'Saving…' : 'Save shared block'}</Button
               >

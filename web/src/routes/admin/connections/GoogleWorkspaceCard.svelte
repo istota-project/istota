@@ -82,7 +82,7 @@
     <Button variant="secondary" href={`${base}/admin/config?section=google_workspace`}
       >Configure</Button
     >
-    <Button variant="ghost" href="https://istota.cynium.com/docs/features/google-workspace/"
+    <Button variant="secondary" href="https://istota.cynium.com/docs/features/google-workspace/"
       >Setup guide</Button
     >
   </div>

@@ -161,7 +161,7 @@
 
   {#if phase === 'finished' || phase === 'lost'}
     <div class="form-actions">
-      <Button variant="ghost" onclick={onDismiss}>Dismiss</Button>
+      <Button variant="secondary" onclick={onDismiss}>Dismiss</Button>
     </div>
   {/if}
 </section>

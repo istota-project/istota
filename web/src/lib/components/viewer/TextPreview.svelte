@@ -35,10 +35,10 @@
 <div class="text-preview" class:fill>
   {#if presentation.kind === 'markdown'}
     <div class="view-controls" role="group" aria-label="Document view">
-      <Button variant={source ? 'ghost' : 'secondary'} onclick={() => (source = false)}
+      <Button variant={source ? 'secondary' : 'primary'} onclick={() => (source = false)}
         >Rendered</Button
       >
-      <Button variant={source ? 'secondary' : 'ghost'} onclick={() => (source = true)}
+      <Button variant={source ? 'primary' : 'secondary'} onclick={() => (source = true)}
         >Source</Button
       >
     </div>

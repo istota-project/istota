@@ -264,8 +264,10 @@
     {#if error}<p class="banner error">{error}</p>
       <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
   </div>
-  {#snippet footer()}<Button variant="ghost" onclick={() => (memberOpen = false)} disabled={busy}
-      >Cancel</Button
+  {#snippet footer()}<Button
+      variant="secondary"
+      onclick={() => (memberOpen = false)}
+      disabled={busy}>Cancel</Button
     ><Button
       variant="primary"
       onclick={saveMember}
@@ -283,8 +285,10 @@
     {#if error}<p class="banner error">{error}</p>
       <Button onclick={() => onChanged()}>Reload group details</Button>{/if}
   </div>
-  {#snippet footer()}<Button variant="ghost" onclick={() => (metadataOpen = false)} disabled={busy}
-      >Cancel</Button
+  {#snippet footer()}<Button
+      variant="secondary"
+      onclick={() => (metadataOpen = false)}
+      disabled={busy}>Cancel</Button
     ><Button variant="primary" onclick={saveMetadata} loading={busy} disabled={!displayName.trim()}
       >Save details</Button
     >{/snippet}

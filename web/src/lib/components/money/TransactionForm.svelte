@@ -107,7 +107,7 @@
   {/if}
 
   {#snippet footer()}
-    <Button variant="ghost" onclick={onCancel}>Cancel</Button>
+    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
     <Button variant="primary" onclick={handleSave} disabled={!account.trim() || saving}>
       {saving ? 'Saving…' : 'Save'}
     </Button>

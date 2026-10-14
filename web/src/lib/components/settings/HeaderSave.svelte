@@ -28,8 +28,11 @@
       >{save.dirtyLabel ?? 'Unsaved changes'}</span
     >
     {#if save.discard}
-      <Button variant="ghost" size="sm" onclick={save.discard} disabled={!save.dirty || save.saving}
-        >Discard</Button
+      <Button
+        variant="secondary"
+        size="sm"
+        onclick={save.discard}
+        disabled={!save.dirty || save.saving}>Discard</Button
       >
     {/if}
     <Button

@@ -62,7 +62,7 @@
   {#if onBack || onNext || actions}
     <footer class="setup-footer">
       <div class="back">
-        {#if onBack}<Button variant="ghost" onclick={onBack}>Back</Button>{/if}
+        {#if onBack}<Button variant="secondary" onclick={onBack}>Back</Button>{/if}
       </div>
       <div class="forward">
         {@render actions?.()}
