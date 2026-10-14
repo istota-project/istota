@@ -440,11 +440,21 @@ class TestTheUpgradeStaysClean:
     #: breaks the row disappears and `test_the_excluded_checks_still_ran`
     #: below goes red. The exclusion is watched from both sides.
     #:
+    #: `nextcloud.connection` is the third. The anchor config is rendered from
+    #: `render_env(nextcloud_url="placeholder")`, with `capture_config` pointing
+    #: `NC_INTERNAL_URL` at a stub that is gone by the time doctor runs, so the
+    #: `[nextcloud] url` the old entrypoint wrote names either no http(s) URL,
+    #: which the check FAILs before any request, or a server that is not there.
+    #: Either is a fact about the tier's stand-in config, not about the
+    #: upgrade. The check still runs, which `test_the_excluded_checks_still_ran`
+    #: watches.
+    #:
     #: An exclusion by name, never by scope or by status: a DEPLOYMENT-wide
     #: exemption would discard the drift findings that are this tier's subject.
     NOT_ABOUT_THE_UPGRADE = (
         "security.sandbox_effective",
         "security.skill_model_credential.value",
+        "nextcloud.connection",
     )
 
     @pytest.mark.parametrize("shape", SHAPES)

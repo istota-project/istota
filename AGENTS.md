@@ -199,6 +199,7 @@ src/istota/
 │   ├── text_match.py     # Literal query terms, FTS/LIKE matching and plain snippets → search.md
 │   ├── date_parse.py     # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
 │   ├── filenames.py      # The one rule for turning a name somebody else chose into a filename → leaf-modules.md
+│   ├── unreachable.py    # Why a host could not be reached, as a fixed message, and whether a request read-timed out: setup's checks and doctor → leaf-modules.md
 │   ├── mountinfo.py      # Which mount covers a path: the entrypoint's rclone preflight and the cgroup root check → leaf-modules.md
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getAdminDoctor, requestDoctorRun, type DoctorCheck, type DoctorReport } from '$lib/api';
+  import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
+  import { waitForDoctorRun } from '$lib/doctorRun';
   import { Badge, Button, NoticeBanner } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
@@ -46,12 +47,6 @@
     fail: 'Something this deployment depends on is missing or broken.',
   } as const;
 
-  // The daemon answers a request on its next tick (a second or so) and a deep
-  // run spawns a sandbox namespace, so this is generous; past it the daemon is
-  // not picking requests up, which is worth saying rather than spinning on.
-  const POLL_MS = 1500;
-  const WAIT_MS = 120_000;
-
   async function load() {
     try {
       report = await getAdminDoctor();
@@ -63,34 +58,22 @@
     }
   }
 
-  // The daemon's own marker, not a report's request_id: the next sweep
-  // overwrites that, and a failed run still answers.
-  function answered(r: DoctorReport, id: string): boolean {
-    return r.answered?.id === id;
-  }
-
   async function rerun(deep: boolean) {
     if (deep) deepRunning = true;
     else running = true;
     notice = '';
     try {
-      const asked = await requestDoctorRun(deep);
-      const wantDeep = asked.deep;
-      const until = Date.now() + WAIT_MS;
-      while (Date.now() < until) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-        const next = await getAdminDoctor();
+      const result = await waitForDoctorRun(deep, (next) => {
         report = next;
-        if (answered(next, asked.id)) {
-          error = '';
-          if (wantDeep) {
-            notice =
-              'Deep checks included: the daemon spawned a sandbox namespace and inspected it.';
-          }
-          return;
+      });
+      if (result.answered) {
+        error = '';
+        if (result.deep) {
+          notice = 'Deep checks included: the daemon spawned a sandbox namespace and inspected it.';
         }
+      } else {
+        notice = 'The daemon has not answered the request yet. Check that it is running.';
       }
-      notice = 'The daemon has not answered the request yet. Check that it is running.';
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to run checks';
     } finally {

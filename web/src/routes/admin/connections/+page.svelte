@@ -9,9 +9,12 @@
     whatsAppPairingStreamUrl,
     WHATSAPP_PAIRING_TERMINAL_STATES,
     type AdminConnection,
+    type AdminNextcloudConnection,
     type AdminPairingState,
+    type AdminWhatsAppConnection,
   } from '$lib/api';
   import { Badge, Button, ConfirmDialog, EmptyState, NoticeBanner } from '$lib/components/ui';
+  import NextcloudCard from './NextcloudCard.svelte';
 
   /** The five small fields the stream carries. Never the pairing code. */
   interface PairingFrame {
@@ -58,7 +61,8 @@
    *  plain `let` so the effect that reads it is not re-run by writing it. */
   let noticeState = '';
 
-  let whatsapp = $derived(connections?.find((c) => c.id === 'whatsapp') ?? null);
+  let nextcloud = $derived(connections ? findNextcloud(connections) : null);
+  let whatsapp = $derived(connections ? findWhatsApp(connections) : null);
   let link = $derived(whatsapp?.link ?? null);
 
   /** The pairing state to render: the live stream frame where one has arrived,
@@ -372,6 +376,14 @@
     else stopStream();
   });
 
+  function findNextcloud(list: AdminConnection[]): AdminNextcloudConnection | null {
+    return list.find((c): c is AdminNextcloudConnection => c.id === 'nextcloud') ?? null;
+  }
+
+  function findWhatsApp(list: AdminConnection[]): AdminWhatsAppConnection | null {
+    return list.find((c): c is AdminWhatsAppConnection => c.id === 'whatsapp') ?? null;
+  }
+
   function setNotice(text: string) {
     notice = text;
     noticeState = pairing?.state ?? '';
@@ -517,7 +529,7 @@
       const payload = await getAdminConnections();
       // Read off the payload rather than through the derived, so the row and
       // the link can never be one render apart.
-      const found = payload.connections.find((c) => c.id === 'whatsapp') ?? null;
+      const found = findWhatsApp(payload.connections);
       connections = payload.connections;
       pairingRow = found?.pairing ?? null;
       error = '';
@@ -636,7 +648,7 @@
     <div class="center-msg">Loading connections…</div>
   {:else if error && !connections}
     <div class="center-msg error">{error}</div>
-  {:else if whatsapp}
+  {:else if nextcloud || whatsapp}
     <NoticeBanner
       title="Deployment-level connections"
       variant="info"
@@ -644,19 +656,22 @@
     >
       <p>
         These are the links the deployment holds as a whole, not the per-user services on your
-        settings page. There is one for now: the WhatsApp session, which is a single paired device
-        shared by everybody on this install.
+        settings page. Each card says what this install is connected to and what the daemon last
+        found when it checked.
       </p>
-      <p>
-        Re-pairing asks the running sidecar to stop, moves the old credential aside, and shows the
-        code the restarted sidecar draws. It does not delete anything — the previous session
-        directory is kept beside the new one and named in the outcome below.
-      </p>
-      <p>
-        <strong>A pairing code is a full-account credential.</strong> It is rendered by the server and
-        never travels as text, and the window closes on its own; even so, keep the page to yourself while
-        one is open.
-      </p>
+      {#if whatsapp}
+        <p>
+          The WhatsApp session is a single paired device shared by everybody on this install.
+          Re-pairing asks the running sidecar to stop, moves the old credential aside, and shows the
+          code the restarted sidecar draws. It does not delete anything — the previous session
+          directory is kept beside the new one and named in the outcome below.
+        </p>
+        <p>
+          <strong>A pairing code is a full-account credential.</strong> It is rendered by the server and
+          never travels as text, and the window closes on its own; even so, keep the page to yourself
+          while one is open.
+        </p>
+      {/if}
     </NoticeBanner>
 
     {#if actionError}
@@ -669,136 +684,143 @@
       <div class="banner info">{notice}</div>
     {/if}
 
-    <section class="card" data-testid="whatsapp-card">
-      <div class="card-head">
-        <h2>{whatsapp.label}</h2>
-        <Badge variant={badge.variant}>{badge.label}</Badge>
-      </div>
+    {#if nextcloud}
+      <NextcloudCard connection={nextcloud} onchecked={() => load({ quiet: true })} />
+    {/if}
 
-      <dl class="kv">
-        <dt>Adapter</dt>
-        <dd>{whatsapp.provider}</dd>
-        {#if whatsapp.number}
-          <dt>Number</dt>
-          <dd>{whatsapp.number}</dd>
-        {/if}
-        {#if link}
-          <dt>Restarts</dt>
-          <dd>{link.restarts ?? '—'}</dd>
-        {/if}
-      </dl>
-
-      <p class="summary">{linkSummary}</p>
-
-      {#if whatsapp.credential_errors.length}
-        <div class="banner warn">
-          The active adapter reports missing configuration: {whatsapp.credential_errors.join('; ')}.
+    {#if whatsapp}
+      <section class="card" data-testid="whatsapp-card">
+        <div class="card-head">
+          <h2>{whatsapp.label}</h2>
+          <Badge variant={badge.variant}>{badge.label}</Badge>
         </div>
-      {/if}
 
-      {#if whatsapp.pairing_supported && whatsapp.enabled && !whatsapp.pairing_enabled}
-        <p class="caption" data-testid="pairing-disabled">
-          Re-pairing from the browser is switched off here (<code
-            >[whatsapp.baileys] pairing_enabled</code
-          >). Pair from a terminal with
-          <code>istota whatsapp pair</code>.
-        </p>
-      {/if}
+        <dl class="kv">
+          <dt>Adapter</dt>
+          <dd>{whatsapp.provider}</dd>
+          {#if whatsapp.number}
+            <dt>Number</dt>
+            <dd>{whatsapp.number}</dd>
+          {/if}
+          {#if link}
+            <dt>Restarts</dt>
+            <dd>{link.restarts ?? '—'}</dd>
+          {/if}
+        </dl>
 
-      {#if whatsapp.pairing_blocked_reason}
-        <div class="banner warn" data-testid="pairing-blocked">
-          A pairing code cannot be written on this deployment: the relay would land inside a
-          directory the task sandbox binds ({whatsapp.pairing_blocked_reason}). Point
-          <code>[whatsapp.baileys] pairing_relay_path</code> outside it, or pair from a terminal.
-        </div>
-      {/if}
+        <p class="summary">{linkSummary}</p>
 
-      {#if pairing}
-        <div class="pairing" data-testid="pairing-state">
-          <div class="pairing-head">
-            <span class="micro-label">{pairing.state.replace(/_/g, ' ')}</span>
-            {#if remaining !== null}
-              <span class="caption" data-testid="pairing-remaining"
-                >expires in {countdown(remaining)}</span
-              >
-            {/if}
+        {#if whatsapp.credential_errors.length}
+          <div class="banner warn">
+            The active adapter reports missing configuration: {whatsapp.credential_errors.join(
+              '; ',
+            )}.
           </div>
-          {#if pairingSummary}
-            <p class="summary">{pairingSummary}</p>
-          {/if}
-          {#if pairing.message}
-            <p class="caption pairing-message" data-testid="pairing-message">{pairing.message}</p>
-          {/if}
-          {#if qrSrc && !qrFetchFailed}
-            <img
-              class="qr"
-              src={qrSrc}
-              alt="WhatsApp pairing code"
-              data-testid="pairing-qr"
-              onerror={onQrError}
-            />
-          {:else if qrSrc}
-            <!-- The image is the operator's only route to the code, so a
+        {/if}
+
+        {#if whatsapp.pairing_supported && whatsapp.enabled && !whatsapp.pairing_enabled}
+          <p class="caption" data-testid="pairing-disabled">
+            Re-pairing from the browser is switched off here (<code
+              >[whatsapp.baileys] pairing_enabled</code
+            >). Pair from a terminal with
+            <code>istota whatsapp pair</code>.
+          </p>
+        {/if}
+
+        {#if whatsapp.pairing_blocked_reason}
+          <div class="banner warn" data-testid="pairing-blocked">
+            A pairing code cannot be written on this deployment: the relay would land inside a
+            directory the task sandbox binds ({whatsapp.pairing_blocked_reason}). Point
+            <code>[whatsapp.baileys] pairing_relay_path</code> outside it, or pair from a terminal.
+          </div>
+        {/if}
+
+        {#if pairing}
+          <div class="pairing" data-testid="pairing-state">
+            <div class="pairing-head">
+              <span class="micro-label">{pairing.state.replace(/_/g, ' ')}</span>
+              {#if remaining !== null}
+                <span class="caption" data-testid="pairing-remaining"
+                  >expires in {countdown(remaining)}</span
+                >
+              {/if}
+            </div>
+            {#if pairingSummary}
+              <p class="summary">{pairingSummary}</p>
+            {/if}
+            {#if pairing.message}
+              <p class="caption pairing-message" data-testid="pairing-message">{pairing.message}</p>
+            {/if}
+            {#if qrSrc && !qrFetchFailed}
+              <img
+                class="qr"
+                src={qrSrc}
+                alt="WhatsApp pairing code"
+                data-testid="pairing-qr"
+                onerror={onQrError}
+              />
+            {:else if qrSrc}
+              <!-- The image is the operator's only route to the code, so a
                  failed fetch says so in words rather than leaving a broken
                  image with no text. One retry has already been spent. -->
-            <p class="caption" data-testid="pairing-qr-error">
-              The pairing code could not be fetched. It is redrawn about every twenty seconds, so
-              the next rotation should bring it back.
-            </p>
-          {/if}
-          {#if inProgress}
-            <div class="form-actions">
-              <Button
-                variant="secondary"
-                onclick={cancel}
-                loading={cancelling}
-                loadingLabel="Cancelling…">Cancel pairing</Button
-              >
-            </div>
-          {/if}
-        </div>
-      {/if}
+              <p class="caption" data-testid="pairing-qr-error">
+                The pairing code could not be fetched. It is redrawn about every twenty seconds, so
+                the next rotation should bring it back.
+              </p>
+            {/if}
+            {#if inProgress}
+              <div class="form-actions">
+                <Button
+                  variant="secondary"
+                  onclick={cancel}
+                  loading={cancelling}
+                  loadingLabel="Cancelling…">Cancel pairing</Button
+                >
+              </div>
+            {/if}
+          </div>
+        {/if}
 
-      {#if offersForced}
-        <!-- One control, in the card. The confirmation is what carries the
+        {#if offersForced}
+          <!-- One control, in the card. The confirmation is what carries the
              weight here rather than the button's placement: an operator
              reported the separate section and its paragraph as redundant, and
              on the shape where `link` is unreadable they were — both controls
              rendered at once. This is not a one-click way out of a working
              session; it opens the typed confirmation. -->
-        <div class="form-actions" data-testid="forced-zone">
-          <Button variant="primary" onclick={() => (confirmOpen = true)} disabled={starting}
-            >Unlink and re-pair</Button
-          >
-          <ConfirmDialog
-            bind:open={confirmOpen}
-            title="Unlink and re-pair WhatsApp"
-            confirmLabel="Unlink and re-pair"
-            challenge={UNLINK_CHALLENGE}
-            message={'This disconnects the WhatsApp session, whether or not it is working, and ' +
-              'costs a real reconnect. The current credential is moved aside rather than deleted, ' +
-              'and a new code has to be scanned from the phone before messages can be sent again.'}
-            onConfirm={() => {
-              confirmOpen = false;
-              void start(true);
-            }}
-          />
-        </div>
-      {:else if offersDirect}
-        <div class="form-actions">
-          <Button
-            variant="primary"
-            onclick={() => start(false)}
-            loading={starting}
-            loadingLabel="Requesting…">Re-pair</Button
-          >
-        </div>
-      {/if}
-    </section>
+          <div class="form-actions" data-testid="forced-zone">
+            <Button variant="primary" onclick={() => (confirmOpen = true)} disabled={starting}
+              >Unlink and re-pair</Button
+            >
+            <ConfirmDialog
+              bind:open={confirmOpen}
+              title="Unlink and re-pair WhatsApp"
+              confirmLabel="Unlink and re-pair"
+              challenge={UNLINK_CHALLENGE}
+              message={'This disconnects the WhatsApp session, whether or not it is working, and ' +
+                'costs a real reconnect. The current credential is moved aside rather than deleted, ' +
+                'and a new code has to be scanned from the phone before messages can be sent again.'}
+              onConfirm={() => {
+                confirmOpen = false;
+                void start(true);
+              }}
+            />
+          </div>
+        {:else if offersDirect}
+          <div class="form-actions">
+            <Button
+              variant="primary"
+              onclick={() => start(false)}
+              loading={starting}
+              loadingLabel="Requesting…">Re-pair</Button
+            >
+          </div>
+        {/if}
+      </section>
+    {/if}
   {:else}
-    <!-- Reached when the payload carries no `whatsapp` entry, which is not the
-         same as carrying no connections: the index returns exactly one member
-         today, so the card reads it by id rather than iterating. -->
+    <!-- Each card reads its own entry by id rather than iterating, so an
+         entry this page has no card for is not drawn. -->
     <EmptyState>No deployment-level connections are configured.</EmptyState>
   {/if}
 </div>

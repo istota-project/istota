@@ -5328,6 +5328,20 @@ def _doctor_report_age(at: str) -> float | None:
     return (datetime.now(timezone.utc) - stamp).total_seconds()
 
 
+def _doctor_report_stale_age(at, interval: int) -> float | None:
+    """The report's age in seconds when it is past the staleness bound, else None.
+
+    None too when there is no sweep interval or the stamp does not parse: the
+    Health pane and the Connections card read "stale" from the same rule.
+    """
+    if not interval:
+        return None
+    age = _doctor_report_age(at)
+    if age is None or age <= interval * _DOCTOR_STALE_INTERVALS + _DOCTOR_STALE_SLACK_SECONDS:
+        return None
+    return age
+
+
 def _doctor_view(config) -> dict:
     from istota import doctor
 
@@ -5349,16 +5363,14 @@ def _doctor_view(config) -> dict:
             remedy="Check that the daemon is running; it records a run at start-up "
                    "and on every sweep.",
         ))
-    elif interval:
-        age = _doctor_report_age(report.get("at"))
-        if age is not None and age > interval * _DOCTOR_STALE_INTERVALS + _DOCTOR_STALE_SLACK_SECONDS:
-            results.insert(0, doctor.CheckResult(
-                "doctor.daemon_report", doctor.WARN,
-                f"the daemon's last run was {int(age // 60)} minutes ago, "
-                f"against a sweep every {interval // 60} minutes",
-                remedy="Check that the daemon is running and its doctor sweep is not failing "
-                       "(doctor_sweep_failed in its log).",
-            ))
+    elif (age := _doctor_report_stale_age(report.get("at"), interval)) is not None:
+        results.insert(0, doctor.CheckResult(
+            "doctor.daemon_report", doctor.WARN,
+            f"the daemon's last run was {int(age // 60)} minutes ago, "
+            f"against a sweep every {interval // 60} minutes",
+            remedy="Check that the daemon is running and its doctor sweep is not failing "
+                   "(doctor_sweep_failed in its log).",
+        ))
     # Redacted again with this process's config: the daemon redacted with its
     # own, and this is the process putting the text on the wire.
     results = doctor.redact(results, config)
@@ -5423,8 +5435,8 @@ async def admin_doctor_run(request: Request, _: dict = Depends(_require_admin),
 # ---- Connections: deployment-level external links ----
 #
 # Distinct from the per-user connected services on `/settings`: a connection
-# here is a deployment-wide link one operator owns, and WhatsApp's paired
-# Baileys session is its only member for now.
+# here is a deployment-wide link one operator owns. Two members: the Nextcloud
+# instance the bot signs in to, and WhatsApp's paired Baileys session.
 #
 # **The pairing QR never appears in a JSON body, on any of these routes.** It
 # is a full-account WhatsApp credential — anything that scans it is linked as a
@@ -5638,6 +5650,54 @@ def _pairing_stream_frame(payload: dict | None) -> dict:
     }
 
 
+def _nextcloud_connection_payload(config) -> dict:
+    """One card's worth of facts about the Nextcloud instance the bot signs in to.
+
+    Calls no Nextcloud endpoint: the result is the daemon's last
+    ``nextcloud.connection`` row, redacted again with this process's config as
+    `_doctor_view` does. Never the app password, nor any part of it.
+    """
+    from istota import doctor
+    from istota.nextcloud._http import nc_base_url
+
+    configured = bool(config.nextcloud_enabled)
+    payload = {
+        "id": "nextcloud",
+        "label": "Nextcloud",
+        "configured": configured,
+        "url": doctor._redact_userinfo(nc_base_url(config), remove=True) if configured else "",
+        "username": config.nextcloud.username,
+        "talk_enabled": bool(config.talk.enabled),
+        "talk_bot_username": config.talk.bot_username,
+        "storage": config.storage_backend,
+        "check": None,
+    }
+    try:
+        report = doctor.read_reports(config)["report"]
+    except Exception as exc:  # noqa: BLE001 - the card still renders without a result
+        logger.warning("nextcloud_connection_report_unread err=%s", type(exc).__name__)
+        return payload
+    if not report:
+        return payload
+    row = next((r for r in report.get("checks") or []
+                if r.get("name") == "nextcloud.connection"), None)
+    if row is None:
+        return payload
+    [result] = doctor.redact([doctor.CheckResult(
+        row["name"], row["status"], row["detail"], remedy=row.get("remedy", ""),
+        scope=row.get("scope", doctor.DEPLOYMENT),
+    )], config)
+    at = report.get("at")
+    payload["check"] = {
+        "status": result.status,
+        "detail": result.detail,
+        "remedy": result.remedy,
+        "at": at,
+        "stale": _doctor_report_stale_age(at, config.scheduler.doctor_check_interval) is not None,
+    }
+    return payload
+
+
 def _whatsapp_connection_payload() -> dict:
     """One card's worth of facts about the deployment's WhatsApp link.
 
@@ -5703,12 +5763,14 @@ async def admin_connections(_: dict = Depends(_require_admin)):
     leave the Connections pane blank on exactly the deployment whose operator
     made a deliberate choice.
     """
-    if _config is None:
+    config = _config
+    if config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
+    nextcloud = await asyncio.to_thread(_nextcloud_connection_payload, config)
     payload = await asyncio.to_thread(_whatsapp_connection_payload)
     if payload["pairing_supported"] and payload["enabled"]:
         payload["pairing"] = await asyncio.to_thread(_pairing_state_payload)
-    return {"connections": [payload]}
+    return {"connections": [nextcloud, payload]}
 
 
 @api_router.get("/admin/connections/whatsapp/pairing")
