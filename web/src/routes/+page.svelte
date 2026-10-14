@@ -25,23 +25,28 @@
   const user = $derived(identity.user);
 
   /* `null` until the timezone question has been answered, including answered
-     with '' — which is what an unreachable `/profile` yields. Kept distinct
-     from '' so the card and the tiles land in the same paint rather than the
-     greeting being drawn once from the browser clock and again a request
-     later. */
+     with '' — which is what an unreachable `/profile` yields. The card is in
+     the grid from the first paint so the tiles never move when it fills in;
+     only its text waits, so the greeting is not drawn once from the browser
+     clock and again a request later. */
   let timeZone = $state<string | null>(null);
   onMount(async () => {
     timeZone = await userTimezone();
   });
 
+  /* Rolled once per mount, so the rebuild when the timezone lands changes the
+     daypart and nothing else: the hidden placeholder text is the text that
+     appears, and the card keeps its height. */
+  const rolls = [Math.random(), Math.random()];
+
   /* Derived rather than built once at mount: the layout swaps a cached identity
      for the live one when the connection returns (ISSUE-354), and a greeting
-     pinned at mount would go on speaking as whoever the cache remembered. It
-     re-rolls when that happens, which is what it already did on every load. */
-  const welcome: Greeting | null = $derived.by(() => {
-    if (timeZone === null) return null;
+     pinned at mount would go on speaking as whoever the cache remembered. */
+  const welcome: Greeting = $derived.by(() => {
+    let next = 0;
     return buildGreeting(user.bot_name, {
-      timeZone,
+      timeZone: timeZone ?? '',
+      random: () => rolls[next++ % rolls.length],
       // Tips are only shown when they're true of this deployment, so they are
       // gated on the same payload the tiles below are.
       tips: {
@@ -75,26 +80,18 @@
     <!-- One grid, so the tiles flow around the welcome card: it takes the first
        three tracks and whatever fits beside it fills out the row. -->
     <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
-      {#if welcome}
-        <section class="welcome-card">
-          <img
-            class="welcome-sigil"
-            src="{base}/octopus-sigil.webp"
-            alt=""
-            width="19"
-            height="20"
-          />
-          <div class="welcome-text">
-            <p class="welcome-greeting">{welcome.greeting}</p>
-            <!-- Rendered segment by segment rather than as one string, so the
-               address is a real mailto link. Kept on one line (and off
-               prettier) because a break between the tags would put a space
-               either side of the link, inside a sentence. -->
-            <!-- prettier-ignore -->
-            <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
-          </div>
-        </section>
-      {/if}
+      <section class="welcome-card" class:pending={timeZone === null}>
+        <img class="welcome-sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
+        <div class="welcome-text">
+          <p class="welcome-greeting">{welcome.greeting}</p>
+          <!-- Rendered segment by segment rather than as one string, so the
+             address is a real mailto link. Kept on one line (and off
+             prettier) because a break between the tags would put a space
+             either side of the link, inside a sentence. -->
+          <!-- prettier-ignore -->
+          <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
+        </div>
+      </section>
       {#if user.features.chat}
         <a href="{base}/chat" class="feature-card">
           <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
@@ -193,6 +190,9 @@
   }
   .welcome-text {
     min-width: 0;
+  }
+  .welcome-card.pending .welcome-text {
+    visibility: hidden;
   }
   .welcome-greeting {
     margin: 0;
