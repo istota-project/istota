@@ -206,6 +206,8 @@ if verb == "shell":
             f"config={1 if vm.get('config') else 0}\nadmin={vm.get('admin', '')}\n"
             f"publish={vm.get('publish', '')}\n")
         sys.exit(0)
+    if command[:2] == ["systemctl", "is-active"]:
+        sys.exit(state.get("stack_active_rc", 0))
     if command[:1] != ["istota-stack"]:
         sys.exit(0)
     stack = command[1:]
@@ -253,6 +255,7 @@ if verb == "shell":
         if rc == 0:
             state = reload()
             state.setdefault("vm", {})["config"] = True
+            state["vm"]["admin"] = state.get("admin", "alice")
             save()
         sys.exit(rc)
     if stack[:1] == ["setup"]:
@@ -648,7 +651,7 @@ def _limactl_create(mac: Mac) -> list[str]:
 
 class TestCreate:
     def test_a_release_create_runs_the_server_sequence(self, mac):
-        result = _create(mac, "--port", "8181", "--cpus", "6", "--memory", "8")
+        result = _create(mac, "--port", "8181", "--cpus", "6", "--memory", "8", "--terminal-setup")
         assert result.returncode == 0, result.stdout + result.stderr
 
         folder = _resolved(mac.home / "Istota")
@@ -682,6 +685,75 @@ class TestCreate:
         assert vm.index(["istota-stack", "check-image"]) < provision < enable
         assert enable < vm.index(["istota-stack", "exec", "cat", "/data/.secret_key"])
 
+    def test_the_browser_setup_is_the_default(self, mac):
+        """#732: one run, the browser opened on the setup page. The VM's
+        `setup --web` builds, provisions and starts the stack itself, so create
+        only checks the stack is up, then escrows the key and refreshes."""
+        result = _create(mac, "--port", "8181")
+        assert result.returncode == 0, result.stdout + result.stderr
+        stack = mac.stack_calls()
+        assert ["setup", "--web", "--local"] in stack
+        assert not any(c[:1] == ["setup"] and "--web" not in c for c in stack)
+        assert ["check-image"] not in stack
+        vm = mac.vm_calls()
+        assert ["/srv/app/istota/src/host/provision.sh"] not in vm
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in vm
+        active = vm.index(["systemctl", "is-active", "istota-stack"])
+        assert vm.index(["istota-stack", "setup", "--web", "--local"]) < active
+        assert active < vm.index(["istota-stack", "exec", "cat", "/data/.secret_key"])
+        assert mac.state()["keychain"] == {"istota.local/secret-key-istota": KEY}
+        assert "http://localhost:8080/istota/setup#code=" in result.stdout
+
+    def test_terminal_setup_runs_the_wizard_and_no_browser(self, mac):
+        result = _create(mac, "--terminal-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        stack = mac.stack_calls()
+        assert ["setup", "--storage", "host-folder", "--ingress", "local",
+                "--hostname", "localhost:8080"] in stack
+        assert not any(c[:2] == ["setup", "--web"] for c in stack)
+        assert ["systemctl", "enable", "--now", "istota-stack"] in mac.vm_calls()
+        assert mac.calls("curl") == []
+
+    def test_a_stack_not_running_after_the_browser_setup_stops_create(self, mac):
+        mac.set(stack_active_rc=3)
+        result = _create(mac)
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "systemctl is-active istota-stack" in result.stderr
+        assert "keychain" not in mac.state()
+
+    def test_an_abandoned_browser_setup_stops_create_with_its_status(self, mac):
+        """The probe still says config=0, so the next create reaches the setup
+        step again and the VM mints a new code."""
+        mac.set(setup_web_rc=3)
+        result = _create(mac)
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "istota-stack create" in result.stderr
+        vm = mac.vm_calls()
+        assert ["/srv/app/istota/src/host/provision.sh"] not in vm
+        assert not any(c[:1] == ["systemctl"] for c in vm)
+        assert "keychain" not in mac.state()
+
+        mac.set(setup_web_rc=0)
+        mac.calls_path.unlink()
+        result = mac.run("create")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ["setup", "--web", "--local"] in mac.stack_calls()
+        assert ["systemctl", "enable", "--now", "istota-stack"] not in mac.vm_calls()
+
+    def test_a_run_resumed_past_a_finished_setup_runs_the_steps(self, mac):
+        """A config at the start is a setup an earlier run finished: whatever
+        failed after it is not known, so the build, provision and start run as
+        they always did, and no setup runs again."""
+        assert _create(mac).returncode == 0
+        mac.calls_path.unlink()
+        result = mac.run("create")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["setup"] for c in mac.stack_calls())
+        assert ["check-image"] in mac.stack_calls()
+        vm = mac.vm_calls()
+        assert ["/srv/app/istota/src/host/provision.sh"] in vm
+        assert ["systemctl", "enable", "--now", "istota-stack"] in vm
+
     def test_the_master_key_goes_to_the_keychain_and_never_on_an_argv(self, mac):
         result = _create(mac)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -709,7 +781,7 @@ class TestCreate:
 
     def test_an_image_without_what_the_config_needs_is_rebuilt(self, mac):
         mac.set(check_image_rcs=[2])
-        result = _create(mac)
+        result = _create(mac, "--terminal-setup")
         assert result.returncode == 0, result.stdout + result.stderr
         calls = mac.stack_calls()
         check = calls.index(["check-image"])
@@ -2009,6 +2081,19 @@ class TestInstallLocal:
         assert ".portForwards[0].hostPort = 8282" in create[create.index("--set") + 1]
         # create refreshed the scripts from the VM's checkout after the update.
         assert "copied from the VM" in (mac.bin_dir / "istota-stack").read_text()
+        assert ["setup", "--web", "--local"] in mac.stack_calls()
+
+    def test_terminal_setup_is_passed_to_create(self, mac):
+        result = subprocess.run(
+            [BASH, str(REPO / "install.sh"), "--local", "--tag", "v1.2.0",
+             "--signing-key", SIGNING_KEY, "--terminal-setup"],
+            capture_output=True, text=True, env=mac.env, input="", timeout=120,
+            start_new_session=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        setups = [c for c in mac.stack_calls() if c[:1] == ["setup"]]
+        assert setups == [["setup", "--storage", "host-folder", "--ingress", "local",
+                           "--hostname", "localhost:8080"]]
 
     def test_it_refuses_a_machine_that_is_not_an_apple_silicon_mac(self, mac):
         mac.set(system="Linux")

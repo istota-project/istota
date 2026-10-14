@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
+- **The local VM sets up in the browser.** `istota-stack create` on a Mac, and `install.sh --local`, now open the setup page in your browser and finish in one run. `--terminal-setup` keeps the questions in the terminal.
 
 ### Fixed
 

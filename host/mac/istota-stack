@@ -3,12 +3,14 @@
 #
 #   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB]
 #                       ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt]
-#                       [--no-setup]
+#                       [--terminal-setup | --no-setup]
 #                               make the workspace folder and the VM, then set up the
-#                               stack in it; a re-run continues where one stopped;
-#                               --no-setup stops before the setup questions. A release
-#                               is the newest one unless --tag names it, verified
-#                               against the project's key unless --signing-key gives one
+#                               stack in it in the browser, opened once the page
+#                               answers; a re-run continues where one stopped;
+#                               --terminal-setup asks the setup questions here instead,
+#                               --no-setup stops before them. A release is the newest
+#                               one unless --tag names it, verified against the
+#                               project's key unless --signing-key gives one
 #   istota-stack start          start the VM
 #   istota-stack stop           stop the stack, then the VM
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
@@ -574,11 +576,12 @@ enrolment() {
 # the VM, so `restore` asks it before the old VM goes.
 CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_TAG="" CREATE_REPO=""
 CREATE_KEY="" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE="" CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN=""
+CREATE_TERMINAL_SETUP=""
 
 create_settings() {
     CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_TAG="" CREATE_REPO=""
     CREATE_KEY="${RELEASE_SIGNING_KEY:-}" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE=""
-    CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN=""
+    CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN="" CREATE_TERMINAL_SETUP=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --workspace|--port|--cpus|--memory|--tag|--repo|--signing-key)
@@ -595,6 +598,7 @@ create_settings() {
                 shift 2 ;;
             --adopt) CREATE_ADOPT=1; shift ;;
             --no-setup) CREATE_SETUP=""; shift ;;
+            --terminal-setup) CREATE_TERMINAL_SETUP=1; shift ;;
             *) usage_error "create takes no '$1'" ;;
         esac
     done
@@ -730,16 +734,32 @@ cmd_create() {
         return 0
     fi
 
+    local set_up_in_browser="" rc=0
     if [ "$(probe_value "$probe" config)" != 1 ]; then
-        local setup=(setup --storage host-folder --ingress local --hostname "localhost:${port}")
-        # The wizard asks its questions on this terminal, as on a server.
-        vm_stack "${setup[@]}" || fail $? "step 'setup' failed: \`istota-stack ${setup[*]}\`"
+        if [ -n "$CREATE_TERMINAL_SETUP" ]; then
+            local setup=(setup --storage host-folder --ingress local --hostname "localhost:${port}")
+            # The wizard asks its questions on this terminal, as on a server.
+            vm_stack "${setup[@]}" || fail $? "step 'setup' failed: \`istota-stack ${setup[*]}\`"
+        else
+            # The web setup keeps the host folder from host.env.
+            web_setup || rc=$?
+            [ "$rc" -eq 0 ] || fail "$rc" "the setup did not finish (exit ${rc}); \`istota-stack create\` starts a new one."
+            set_up_in_browser=1
+        fi
     fi
 
-    rebuild_if_lacking
-    run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
-    run_step "start the stack" "systemctl enable --now istota-stack" \
-        vm systemctl enable --now istota-stack </dev/null
+    if [ -n "$set_up_in_browser" ]; then
+        # The VM's `setup --web` built what the config needs, provisioned and
+        # started the stack. A config found at the start is an earlier run's,
+        # whose later steps may not have happened, so those take the path below.
+        run_step "check the stack" "systemctl is-active istota-stack" \
+            vm systemctl is-active istota-stack </dev/null
+    else
+        rebuild_if_lacking
+        run_step "provision the VM" "${VM_SRC}/host/provision.sh" vm "${VM_SRC}/host/provision.sh" </dev/null
+        run_step "start the stack" "systemctl enable --now istota-stack" \
+            vm systemctl enable --now istota-stack </dev/null
+    fi
 
     refresh_scripts
     escrow_key

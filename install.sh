@@ -37,7 +37,8 @@
 #     --local              Local VM install on an Apple silicon Mac (no root); takes
 #                          --tag and --signing-key too, with the same defaults, and
 #                          forwards every other flag to `istota-stack create`
-#                          (--workspace, --port, --cpus, ...)
+#                          (--workspace, --port, --cpus, ...); sets up in a
+#                          browser, or with --terminal-setup in the terminal
 #     --help               Show this help
 #   With no mode flag on a terminal you are asked to choose; with no mode flag
 #   and no terminal, --server is used.
@@ -437,14 +438,16 @@ run_local() {
         *) warn "${bin} is not on your PATH; add it in your shell's profile: export PATH=\"${bin}:\$PATH\"" ;;
     esac
 
-    # The setup wizard runs in the VM and asks on this terminal.
+    # The setup runs in the VM: the browser opens on its page, or with
+    # --terminal-setup the wizard asks on this terminal.
     reattach_tty_if_needed
     local rc=0
     # Without --signing-key, create takes the key it recorded, else the project's.
-    local key_args=()
+    local key_args=() setup_args=()
     [ -z "$SIGNING_KEY" ] || key_args=(--signing-key "$SIGNING_KEY")
+    [ "$SETUP_IN_TERMINAL" = false ] || setup_args=(--terminal-setup)
     "${bin}/istota-stack" create --tag "$RELEASE_TAG" "${key_args[@]+"${key_args[@]}"}" \
-        "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}" || rc=$?
+        "${setup_args[@]+"${setup_args[@]}"}" "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}" || rc=$?
     # stdin may now be the terminal; exit rather than read on from it.
     exit "$rc"
 }
@@ -496,10 +499,6 @@ prompt_install_mode() {
 
 if [ "$MODE_EXPLICIT" = false ]; then
     prompt_install_mode
-fi
-
-if [ "$SETUP_IN_TERMINAL" = true ] && [ "$MODE" != server ]; then
-    die "--terminal-setup is for the server install."
 fi
 
 case "$MODE" in
