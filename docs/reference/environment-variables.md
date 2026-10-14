@@ -214,7 +214,7 @@ Two more are set for one command at a time:
 | Variable | Effect |
 |---|---|
 | `ISTOTA_CONFIG_READ_ONLY` | Whether `/data/config` is read-only in the container, `true` by default. `istota-stack` sets `false` for the one-shot containers of `setup`, `apply`, the imports, `restore` and `localize-workspace`, and for nothing that keeps running |
-| `ISTOTA_SETUP_PUBLISH` | Where `istota-stack setup --web` publishes its page: `0.0.0.0:443` by default (`[::]:443` on a machine with only IPv6), `127.0.0.1:8080` with `--local`. Set it to a free address and port when that one is taken |
+| `ISTOTA_SETUP_PUBLISH` | Where `istota-stack setup --web` publishes its page: `0.0.0.0:443` by default (`[::]:443` on a machine with only IPv6), `127.0.0.1:<LOCAL_FORWARD_PORT>` with `--local`, the port `host.env` says Lima forwards (8080 when that is empty). Set it to a free address and port when that one is taken |
 
 Inside the `daemon` and `web` containers, compose sets `ISTOTA_CONFIG_PATH=/data/config/config.toml` and `ISTOTA_ADMINS_FILE=/data/config/admins`, and each credential file becomes its uppercase name (`istota_nextcloud_app_password` becomes `ISTOTA_NEXTCLOUD_APP_PASSWORD`, one of the [secret overrides](#secret-overrides) above). Where the VM has the editor's trigger directory, `web` also gets `ISTOTA_CONFIG_APPLIER=host`, which says the host applies config changes and turns the web editor on. `ISTOTA_WEB_INSECURE_COOKIES=1` drops the `Secure` flag from the session cookie; setup writes `0` for every ingress.
 

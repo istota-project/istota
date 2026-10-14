@@ -464,11 +464,12 @@ A streamed, full-stack terminal assistant. Each line becomes a `source_type="rep
 istota setup --vm-dir DIR [--hostname HOST] [--ingress local|proxied|direct] \
     [--storage local|host-folder] [--nextcloud-url URL [--workspace mount|local]] \
     [--yes] [--force] ...                       # The stack's wizard, run by `istota-stack setup`
-istota setup --web --vm-dir DIR [--local]     # The same questions in a browser, run by `istota-stack setup --web`
+istota setup --web [--force] --vm-dir DIR [--local]   # The same questions in a browser, run by `istota-stack setup --web`
+istota setup --snapshot DIR | --restore DIR --vm-dir DIR   # A browser re-run's rollback copy, taken and put back by `istota-stack`
 istota serve [--host HOST] [--port N] [--env-file PATH]   # Scheduler loop + web server in one process
 ```
 
-On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. In the image, `--workspace mount|local` says where the workspace lives when `--nextcloud-url` is given (default `mount`, the rclone mount); `--storage host-folder` is the local VM's shared folder and is kept on a re-run without the flag. `--web` serves the first-run setup page instead of asking in the terminal, over HTTPS on a one-use code, or plain HTTP on port 8080 with `--local`; it refuses when a config already exists. Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it refuses and writes nothing: the standalone install it used to set up was removed, and a Mac takes the [local install](../getting-started/local-install.md).
+On the stack, `istota-stack setup` runs `istota setup --vm-dir` inside the image; it writes `config.toml`, the admins file, the master key and, in the `--vm-dir`, the stack's `.env`, `host.env` and `secrets/`. `istota setup --help` lists every flag. In the image, `--workspace mount|local` says where the workspace lives when `--nextcloud-url` is given (default `mount`, the rclone mount); `--storage host-folder` is the local VM's shared folder and is kept on a re-run without the flag. A `--force` re-run starts from what the stack's files say: every question defaults to the current answer, a credential prompt says Enter keeps the current one, and `--yes` with no flags writes the same files again. It backs up `config.toml` to `config.toml.bak.<time>` first, keeping the newest ten, and refuses a config it could not write back (a `[brain] kind` other than `claude_code` or `native`, a compose profile setup does not know). `--web` serves the setup page instead of asking in the terminal, over HTTPS on a one-use code, or plain HTTP on port 8080 inside the container with `--local`. It refuses when a config already exists, unless `--force` is given, which makes it the re-run page, filled in from the current files; then it refuses when there is no config, when the config does not parse, or when the user is not one id both in the admins file and with a `[users.<id>]` block. `--snapshot DIR` copies `config.toml`, `managed.json` and the secret files aside, and `--restore DIR` puts them back and removes the copy; `istota-stack setup --web --force` runs both. Outside the image (which sets `ISTOTA_SETUP_SHAPE=container`) and without `--vm-dir`, it refuses and writes nothing: the standalone install it used to set up was removed, and a Mac takes the [local install](../getting-started/local-install.md).
 
 `istota serve` runs the scheduler loop and web server in one process (default bind `127.0.0.1`, port from `[web]`). It is the development loop on a Mac checkout; see [development setup](../development/setup.md). There is no `istota update`: the stack is updated with `istota-stack update`.
 
@@ -566,9 +567,11 @@ istota-stack update --unsigned TAG           # any tag, without the signature ch
 istota-stack update --unsigned latest        # the tip of main, recorded as main-<12 hex>
 istota-stack latest-tag                      # the name `update --unsigned latest` would install; changes nothing
 istota-stack rollback [--force]              # back to the previous tag, if its image can run the database
-istota-stack setup [istota setup flags]      # the terminal wizard (first install, or --force)
+istota-stack setup [istota setup flags]      # the terminal wizard (first install, or --force to change it)
 istota-stack setup --web [--local]           # the first setup in a browser: an address and a one-use code
+istota-stack setup --web --force [--local]   # change a configured stack in a browser; the stack stops meanwhile
 istota-stack setup-code                      # print the address and code of a setup --web in progress
+istota-stack setup-cancel                    # end a setup --web in progress; a re-run puts the old setup back
 istota-stack apply PLAN [--dry-run] [--backup N]   # `istota apply` a plan; restarts the stack on a change
 istota-stack config-apply                    # apply what the web config editor requested
 istota-stack check-image                     # exit 2 when the image lacks what config.toml needs
@@ -589,7 +592,9 @@ istota-stack help
 
 `update` refuses a branch, a bare commit, a lightweight or unsigned tag, and a signature the release key in `allowed_signers` does not accept; `--unsigned` drops only the signature checks. A failed build leaves the previous tag running. `rollback` asks the previous image whether it can run the database first, and `--force` goes back to a release from before the state directory, onto the old state volume. Both reprovision the host when the release changed what `provision.sh` installs.
 
-Every verb that writes (`update`, `rollback`, `setup`, `apply`, `put-files`, `import-bare-metal`, `restore`, `import-standalone`, `retire-bare-metal`, `localize-workspace`, `up`, `down`, `host-env KEY=VALUE`) takes one lock. A second one waits up to ten minutes, then names the verb holding it. `setup --web` never waits, and `config-apply` exits quietly when another verb holds the lock. `restore` and `import-standalone` are for a stack that was never set up, and all three imports refuse while any container of the stack is running.
+Every verb that writes (`update`, `rollback`, `setup`, `apply`, `put-files`, `import-bare-metal`, `restore`, `import-standalone`, `retire-bare-metal`, `localize-workspace`, `up`, `down`, `host-env KEY=VALUE`) takes one lock. A second one waits up to ten minutes, then names the verb holding it. `setup --web` never waits, and `config-apply` exits quietly when another verb holds the lock. `setup-cancel` takes no lock, since the setup it ends holds it.
+
+`setup --force` and `setup --web --force` first copy `.env`, `host.env` and `rclone.conf` into `/srv/app/istota/backups/setup-<time>/`, keeping the newest ten. `setup --web --force` then copies the config and the secrets aside, pauses the browser watchdog timer and stops the stack before it prints the address. A finished run installs the new files and starts the stack and the timer again. A run that does not finish (Ctrl-C, `setup-cancel`, an idle hour) puts the previous config and secrets back and starts the stack on them. `--local` publishes the page on `127.0.0.1:<LOCAL_FORWARD_PORT>` from `host.env`, 8080 when that is empty. `restore` and `import-standalone` are for a stack that was never set up, and all three imports refuse while any container of the stack is running.
 
 Exit codes: 0 done, 1 a failure, 2 `apply` changed the config (or `check-image` wants a rebuild), 3 the previous image refused the database (`rollback`), 64 a usage error, 65 a tag refused. `exec` and `compose` return the command's own status.
 
@@ -599,11 +604,12 @@ The [local install](../getting-started/local-install.md) puts a Mac-side `istota
 
 ```bash
 istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] \
-    ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt] [--no-setup]
+    ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt] [--terminal-setup | --no-setup]
 istota-stack start | stop | status | shell
 istota-stack open [--files]                 # the web UI; --files the workspace in Finder
 istota-stack autostart on|off               # limactl autostart enable|disable
 istota-stack allow-host-port N | deny-host-port N
+istota-stack setup [--web] [--force] [setup's options]   # the VM's setup; --web opens the page once it answers
 istota-stack update [TAG]                   # the VM's update, then the Mac scripts from its checkout
 istota-stack destroy [--force] [--purge]    # refuses without the master key in the Keychain;
                                             # --purge also deletes the folder, the key and the saved settings
@@ -612,11 +618,13 @@ istota-stack import-standalone [--from DIR] [--config FILE] [--dry-run] [create'
 istota ...                                  # the istota CLI in the daemon container, as uid 10001
 ```
 
-A release `create` with no `--tag` installs the newest `vX.Y.Z` tag in the repository (read with `git ls-remote`), and with no `--signing-key` verifies it against the project's release key. A re-run takes the tag and key the first run recorded.
+A release `create` with no `--tag` installs the newest `vX.Y.Z` tag in the repository (read with `git ls-remote`), and with no `--signing-key` verifies it against the project's release key. A re-run takes the tag and key the first run recorded. `create` sets the stack up in the browser: it runs the VM's `setup --web --local` and opens the page once the setup server answers. `--terminal-setup` runs the terminal wizard instead, and `--no-setup` stops before either.
+
+`setup` writes the VM's `LOCAL_FORWARD_PORT` first when it differs from the port this Mac forwards, then runs the VM's `setup`. With `--web` it runs `setup --web --local` with the other arguments (`--force` to change a configured stack), prints the address, and on a terminal opens the page once it answers `locked`, giving up after 120 seconds. Ctrl-C ends it through the VM's `setup-cancel`. It returns the VM's exit status.
 
 Every other verb is passed to the VM's `istota-stack` as root, with its arguments and exit status unchanged; `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac. Exit codes: a forwarded verb's own, else 64 for a usage error, 69 when `limactl` is missing or older than 2.0, 78 for a refused folder, port, machine or Keychain item.
 
-The Mac CLI also drives five [VM verbs](#istota-stack-on-the-vm) itself: `host-env` (`create` sets `STORAGE=host-folder`, `INGRESS=local` and the loopback block), `stage [--daemon] PATH` and `unstage PATH` (a root-only, or uid 10001's, directory under `/srv/app/istota/staging/` for a file from the Mac), `restore` and `import-standalone`. The Mac's `restore` deletes the VM, makes a new one with `create --no-setup` and runs the VM's `restore`; its `import-standalone` makes the VM with `create --no-setup` when there is none, stages `~/.istota` into it and runs the VM's `import-standalone`, leaving `~/.istota` as it is.
+The Mac CLI also drives five [VM verbs](#istota-stack-on-the-vm) itself: `host-env` (`create` sets `STORAGE=host-folder`, `INGRESS=local`, the loopback block and `LOCAL_FORWARD_PORT`; `setup`, `restore` and `import-standalone` rewrite `LOCAL_FORWARD_PORT` when it differs), `stage [--daemon] PATH` and `unstage PATH` (a root-only, or uid 10001's, directory under `/srv/app/istota/staging/` for a file from the Mac), `restore` and `import-standalone`. The Mac's `restore` deletes the VM, makes a new one with `create --no-setup` and runs the VM's `restore`; its `import-standalone` makes the VM with `create --no-setup` when there is none, stages `~/.istota` into it and runs the VM's `import-standalone`, leaving `~/.istota` as it is.
 
 ## `istota` on the machine (host wrapper)
 

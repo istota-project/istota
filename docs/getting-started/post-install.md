@@ -23,7 +23,7 @@ istota-stack exec claude login
 
 ## Open the web app
 
-Open the hostname you gave the setup (`http://localhost:8080` on the local VM, unless you chose another port) and sign in. Web chat works with or without Nextcloud.
+Open the hostname you gave the setup (`http://localhost:8080` on the local VM, or the `--port` you gave `create`) and sign in. Web chat works with or without Nextcloud.
 
 ## Invite the bot to Talk
 

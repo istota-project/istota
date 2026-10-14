@@ -39,7 +39,8 @@ The installer refuses to run as root, on anything but an Apple silicon Mac, or w
 | `--cpus N` | `4` | the VM's CPUs |
 | `--memory N` | `4` | the VM's memory, in whole GiB |
 | `--adopt` | off | use a folder that already holds files |
-| `--no-setup` | off | stop before the setup questions ([setting up in the browser](#setting-up-in-the-browser)) |
+| `--terminal-setup` | off | answer the setup questions in the terminal rather than in the browser ([setting up](#setting-up)) |
+| `--no-setup` | off | stop before the setup questions |
 
 The scripts the installer downloads come from `main`, as with any `curl | bash` installer, and are used only to run `create`. Once the VM has verified the tag, `create` replaces them with the copies from the verified checkout, and every later `istota-stack update` does the same. From then on the Mac scripts are covered by the tag's signature.
 
@@ -48,26 +49,31 @@ The scripts the installer downloads come from `main`, as with any `curl | bash` 
 1. Refuses a folder in the wrong place, a port something on the Mac already listens on (it names the process), and an existing non-empty folder without `--adopt`. Nothing is written before these checks pass.
 2. Creates the folder and an empty `.istota-workspace` marker file at its root.
 3. Creates and starts the Lima VM. On first boot the VM clones the repository, verifies the tag against the key, checks it out and runs `host/provision.sh` from it.
-4. Writes the VM's `host.env`: `STORAGE=host-folder`, `INGRESS=local`, and the block on the Mac's loopback (`HOST_LOOPBACK_BLOCK=1`, `HOST_GATEWAY_ADDR=192.168.5.2`).
+4. Writes the VM's `host.env`: `STORAGE=host-folder`, `INGRESS=local`, the block on the Mac's loopback (`HOST_LOOPBACK_BLOCK=1`, `HOST_GATEWAY_ADDR=192.168.5.2`), and `LOCAL_FORWARD_PORT`, the port Lima forwards, which setup publishes nginx and the setup page on.
 5. Builds the images with `istota-stack update <tag>`.
-6. Runs the setup wizard in your terminal, with storage, ingress and the `localhost:<port>` hostname already set. It asks the same questions a server operator answers.
-7. Rebuilds when the config needs Claude Code (`check-image` exits 2), runs `provision.sh` again, and starts `istota-stack.service`.
-8. Refreshes the Mac scripts from the VM's checkout, copies the master key into your login Keychain, and prints a one-use link to set your password, opening it in the browser.
+6. Runs the setup in the browser ([below](#setting-up)): the VM prints an address and a one-use code, and `create` opens the page once it answers. When you finish it, the VM builds what your answers need, runs `provision.sh` again and starts the stack. With `--terminal-setup`, the setup wizard asks its questions in your terminal instead, with storage, ingress and the `localhost:<port>` hostname already set; `create` then rebuilds when the config needs Claude Code (`check-image` exits 2), runs `provision.sh` again, and starts `istota-stack.service` itself.
+7. Refreshes the Mac scripts from the VM's checkout, copies the master key into your login Keychain, and prints a one-use link to set your password, opening it in the browser. After a browser setup you already have a password, and it says so.
 
 If a step fails, `create` prints the step, the command it ran in the VM, its exit status and its last 20 lines, and exits with that status. It never retries a build or a provision on its own. Run `istota-stack create` again, with no arguments, and it continues from the first step whose effect is missing. It keeps what you gave it the first time, and the tag the VM last deployed, in `~/.config/istota-stack/istota.env` (under `$XDG_CONFIG_HOME` when that is set). On a VM that already has a tag deployed, a re-run keeps that tag unless you give `--tag` again; `istota-stack update` is the way to move it on.
 
-### Setting up in the browser
+### Setting up
 
-The [web setup](../deployment/running-the-stack.md#in-the-browser) works in the local VM too. It asks fewer questions than the terminal wizard, and can test an API key before saving it:
+`create` sets the stack up in the browser. The VM prints an `http://localhost:<port>/istota/setup#code=…` address, and on a terminal `create` opens it once the page answers; without a terminal (a piped installer) it only prints it. Answer the screens and choose "Only on this computer" for how people reach Istota. The page keeps the Mac folder as the workspace, and its local address is the port Lima forwards. It asks fewer questions than the terminal wizard and can test an API key before saving it. The [web setup](../deployment/running-the-stack.md#in-the-browser) section of the server documentation covers the rest.
+
+Ctrl-C ends the setup and `create` stops; so does closing the page and leaving it for an hour. Nothing is installed, and `istota-stack create` again starts a new setup with a new code. From another shell, `istota-stack setup-cancel` ends a setup that has no terminal to press Ctrl-C in.
+
+`create --terminal-setup` (and `install.sh --local --terminal-setup`) runs the setup wizard in your terminal instead. It asks the same questions a server operator answers.
+
+### Changing the setup
 
 ```bash
-istota-stack create --no-setup
-istota-stack setup --web --local
+istota-stack setup --web --force   # the setup page again, filled in with what the stack has now
+istota-stack setup --force         # the terminal wizard, every question defaulting to the current answer
 ```
 
-`setup --web --local` prints an `http://localhost:8080/istota/setup#code=…` address. Open it on the Mac and answer the screens; choose "Only on this computer" for how people reach Istota. The page keeps the Mac folder as the workspace. When it finishes, the VM builds what your answers need and starts the stack on the same address. Then run `istota-stack create` once more, with no arguments: it skips the steps that are done, copies the master key into the Keychain and refreshes the Mac scripts. Until you do, there is no copy of the key outside the VM.
+Both write the VM's `LOCAL_FORWARD_PORT` first when it is not the port this Mac forwards. Neither changes your username, email, display name, time zone or module choices; they are shown as they are, and Settings is where you change them. The browser re-run stops the stack while the page is open and starts it again when you finish. Ctrl-C, `istota-stack setup-cancel` or an idle hour puts the previous setup back and starts the stack on it. Before either re-run writes anything, the current `config.toml` goes to `config.toml.bak.<time>` and `.env`, `host.env` and `rclone.conf` to `/srv/app/istota/backups/setup-<time>/` in the VM, the newest ten of each kept.
 
-The setup page listens on the VM's port 8080, so this works with the default `--port`. With another port, use the terminal wizard.
+A setup re-run writes the whole `config.toml` from its answers, so a setting it does not ask about goes back to its default. For a small change, use the admin Configuration page or `istota-stack apply`.
 
 ## The workspace folder
 
@@ -109,11 +115,13 @@ istota task "..." -u alice -x  # the istota CLI, in the daemon container as uid 
 
 `stop` stops the stack before the VM so SQLite closes its files cleanly. `autostart on` runs `limactl autostart enable`, which writes a LaunchAgent that starts the VM at your next login; it does not start or stop a running VM.
 
-Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `setup`, `rollback`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a directory of its own in the VM for the call and removed afterwards.
+Every other verb is the VM's own `istota-stack`, run as root in the VM with its arguments unchanged and its exit status passed back: `rollback`, `setup-cancel`, `exec`, `compose`, `up`, `down`, `check-image` and the rest. `apply <plan>` and `import-bare-metal <dir>` take a path on the Mac: it is copied into a directory of its own in the VM for the call and removed afterwards.
 
 The VM is the Lima instance `istota`, in Lima's default home, so `limactl list` shows it. If you already have an instance of that name, set `ISTOTA_LIMA_INSTANCE` to another name for every `istota-stack` call.
 
-To change a setting, edit `/srv/app/istota/config/config.toml` in the VM (`istota-stack shell`, then `sudo -e` it) or use `istota-stack apply plan.toml` with a plan on the Mac, and restart with `istota-stack down && istota-stack up`.
+To change a setting, use the admin Configuration page, edit `/srv/app/istota/config/config.toml` in the VM (`istota-stack shell`, then `sudo -e` it) or use `istota-stack apply plan.toml` with a plan on the Mac, and restart with `istota-stack down && istota-stack up`. To go through the setup questions again, see [changing the setup](#changing-the-setup).
+
+`istota-stack status` says when nginx publishes on a port other than the one Lima forwards, which a setup from before `LOCAL_FORWARD_PORT` could leave behind, and names the fix: `istota-stack setup --web --force`, keeping `localhost:<port>` as the address.
 
 ### Updating
 
