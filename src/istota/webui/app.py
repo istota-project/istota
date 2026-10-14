@@ -5650,24 +5650,6 @@ def _pairing_stream_frame(payload: dict | None) -> dict:
     }
 
 
-def _url_without_userinfo(url: str) -> str:
-    """``url`` with any userinfo removed, username included.
-
-    Not `git_remote_scrub.strip_url_credential`, which keeps a plain username
-    by design; a card shows the server's address and nothing typed before it.
-    """
-    from urllib.parse import urlsplit, urlunsplit
-
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return ""
-    _, at, hostpart = parts.netloc.rpartition("@")
-    if not at:
-        return url
-    return urlunsplit((parts.scheme, hostpart, parts.path, parts.query, parts.fragment))
-
-
 def _nextcloud_connection_payload(config) -> dict:
     """One card's worth of facts about the Nextcloud instance the bot signs in to.
 
@@ -5683,7 +5665,7 @@ def _nextcloud_connection_payload(config) -> dict:
         "id": "nextcloud",
         "label": "Nextcloud",
         "configured": configured,
-        "url": _url_without_userinfo(nc_base_url(config)) if configured else "",
+        "url": doctor._redact_userinfo(nc_base_url(config), remove=True) if configured else "",
         "username": config.nextcloud.username,
         "talk_enabled": bool(config.talk.enabled),
         "talk_bot_username": config.talk.bot_username,

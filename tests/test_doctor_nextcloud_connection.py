@@ -14,6 +14,7 @@ import logging
 import httpx
 import pytest
 
+from istota import doctor
 from istota.config import Config, NextcloudConfig, TalkConfig
 from istota.doctor import (
     CHECK_SCOPES,
@@ -249,6 +250,18 @@ class TestSignedIn:
         assert result.detail == "signed in as istota; Talk is not installed on cloud.example.com"
         assert "[talk] enabled = false" in result.remedy
 
+    def test_talk_not_installed_is_reported_before_a_bot_username_mismatch(self, monkeypatch):
+        _Seam(monkeypatch, sign=_signed_in(), caps=_caps(talk=False))
+        result = check_nextcloud_connection(_config(bot_username="Istota"), probe=True)
+        assert result.status == WARN
+        assert "Talk is not installed" in result.detail
+
+    def test_a_mismatch_still_fails_when_capabilities_cannot_be_read(self, monkeypatch):
+        _Seam(monkeypatch, sign=_signed_in(), caps_exc=_failed_exc(http_status=500))
+        result = check_nextcloud_connection(_config(bot_username="Istota"), probe=True)
+        assert result.status == FAIL
+        assert "[talk] bot_username is Istota" in result.detail
+
     def test_talk_off_asks_neither_talk_question(self, monkeypatch):
         _Seam(monkeypatch, sign=_signed_in(), caps=_caps(talk=False))
         result = check_nextcloud_connection(
@@ -319,3 +332,14 @@ class TestLogging:
         with caplog.at_level(logging.DEBUG, logger="istota.doctor"):
             check_nextcloud_connection(_config(), probe=True)
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+class TestRedactUserinfo:
+    @pytest.mark.parametrize("remove, expected", [(False, "(unparseable)"), (True, "")])
+    def test_a_password_that_ends_the_netloc_early_is_dropped_whole(self, remove, expected):
+        url = f"https://bot:se#cret-{PASSWORD}@cloud.example.com"
+        assert doctor._redact_userinfo(url, remove=remove) == expected
+
+    def test_remove_keeps_the_address(self):
+        url = f"https://bot:{PASSWORD}@cloud.example.com:8443/nc"
+        assert doctor._redact_userinfo(url, remove=True) == "https://cloud.example.com:8443/nc"

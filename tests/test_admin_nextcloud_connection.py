@@ -142,6 +142,14 @@ class TestTheEntry:
         body, _ = await _index(_make_config(tmp_path, url="https://istota@cloud.example.com"))
         assert _nextcloud(body)["url"] == "https://cloud.example.com"
 
+    @pytest.mark.parametrize("sep", ["#", "?", "/"])
+    async def test_a_password_that_ends_the_netloc_early_is_not_returned(self, tmp_path, sep):
+        secret = f"se{sep}cret-{APP_PASSWORD}"
+        config = _make_config(tmp_path, url=f"https://istota:{secret}@cloud.example.com")
+        body, text = await _index(config)
+        assert _nextcloud(body)["url"] == ""
+        assert APP_PASSWORD not in text
+
     async def test_the_app_password_is_absent_from_the_body(self, tmp_path):
         config = _make_config(tmp_path)
         _record(config, [_row()])

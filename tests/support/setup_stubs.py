@@ -124,7 +124,7 @@ class FakeNextcloud(_Recording):
         super().__init__()
         self.username = username
         self.password = password
-        self.account_id = account_id or username
+        self.account_id = username if account_id is None else account_id
         self.groups = list(groups)
         self.talk = talk
         self.sharees = list(sharees)

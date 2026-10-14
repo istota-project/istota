@@ -4771,7 +4771,7 @@ def check_forge_transport(config: "Config", probe: bool) -> CheckResult:
     )
 
 
-def _redact_userinfo(url: str) -> str:
+def _redact_userinfo(url: str, *, remove: bool = False) -> str:
     """A URL safe to print: userinfo replaced, everything else intact.
 
     A forge URL is operator-written config and is not supposed to carry
@@ -4783,17 +4783,27 @@ def _redact_userinfo(url: str) -> str:
     cannot tell the configured value carried a credential at all — which is the
     most useful thing the report could have told them, and the thing they need
     in order to know something wants rotating.
+
+    ``remove=True`` deletes it instead, for a surface that shows the address
+    and says separately that the value is wrong (the admin Connections card).
+
+    A password holding an unencoded ``#``, ``?`` or ``/`` ends the netloc
+    early, so the credential lands in the path, query or fragment. An ``@``
+    anywhere past the netloc is treated as that case: nothing of the URL is
+    returned.
     """
+    unparseable = "" if remove else "(unparseable)"
     try:
         parts = urlsplit(url)
     except ValueError:
-        return "(unparseable)"
+        return unparseable
+    if "@" in (parts.path + parts.query + parts.fragment):
+        return unparseable
     if "@" not in (parts.netloc or ""):
         return url
     _, _, hostport = parts.netloc.rpartition("@")
-    return urlunsplit(
-        (parts.scheme, f"{_REDACTED}@{hostport}", parts.path, parts.query, parts.fragment)
-    )
+    netloc = hostport if remove else f"{_REDACTED}@{hostport}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 # ---------------------------------------------------------------------------
@@ -7972,6 +7982,26 @@ def check_nextcloud_connection(config: "Config", probe: bool) -> CheckResult:
 
     account_id = sign.account_id
     talk_enabled = config.talk.enabled
+    # Capabilities before the bot_username comparison: on a server with no
+    # Talk, that mismatch is not the fault to report.
+    caps = None
+    try:
+        caps = capabilities.fetch_capabilities(config)
+    except Exception as exc:  # noqa: BLE001 — a check never raises
+        _log_nextcloud_connection(
+            "capabilities_failed",
+            getattr(exc, "http_status", None), getattr(exc, "ocs_status", None), exc,
+        )
+
+    summary = capabilities.summarize(caps, sign.account) if caps is not None else None
+    if talk_enabled and summary is not None and not summary["talk"]["available"]:
+        return CheckResult(
+            name, WARN,
+            f"signed in as {account_id}; Talk is not installed on {host}",
+            remedy="Install Talk on the server, or set [talk] enabled = false.",
+            scope=DEPLOYMENT,
+        )
+
     if talk_enabled and config.talk.bot_username != account_id:
         return CheckResult(
             name, FAIL,
@@ -7985,26 +8015,11 @@ def check_nextcloud_connection(config: "Config", probe: bool) -> CheckResult:
             scope=DEPLOYMENT,
         )
 
-    try:
-        caps = capabilities.fetch_capabilities(config)
-    except Exception as exc:  # noqa: BLE001 — a check never raises
-        _log_nextcloud_connection(
-            "capabilities_failed",
-            getattr(exc, "http_status", None), getattr(exc, "ocs_status", None), exc,
-        )
+    if summary is None:
         return CheckResult(
             name, WARN,
             f"signed in as {account_id}; could not read the server's capabilities",
             remedy=_NC_LOG_REMEDY,
-            scope=DEPLOYMENT,
-        )
-
-    summary = capabilities.summarize(caps, sign.account)
-    if talk_enabled and not summary["talk"]["available"]:
-        return CheckResult(
-            name, WARN,
-            f"signed in as {account_id}; Talk is not installed on {host}",
-            remedy="Install Talk on the server, or set [talk] enabled = false.",
             scope=DEPLOYMENT,
         )
 
