@@ -166,3 +166,11 @@ class TestTheWrite:
         stop.set()
         t.join()
         assert seen <= {a, b}
+
+
+def test_explicit_read_distinguishes_missing_from_unavailable(config):
+    assert storage.read_group_memory_result(config, "fam") == {"status": "refused", "reason": "storage_unavailable"}
+    _group_dir(config).mkdir(parents=True)
+    assert storage.read_group_memory_result(config, "fam") == {"status": "missing"}
+    (_group_dir(config) / "GROUP.md").write_text("  \n")
+    assert storage.read_group_memory_result(config, "fam") == {"status": "readable", "content": "  \n"}

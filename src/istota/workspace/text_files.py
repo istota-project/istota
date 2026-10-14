@@ -71,6 +71,7 @@ def lock_dir(config: "Config", user_id: str) -> Path:
 @contextmanager
 def file_lock(
     config: "Config", user_id: str, path: Path, *, timeout_seconds: float = 5.0,
+    lock_anchor: Path | None = None,
 ) -> Iterator[None]:
     """Hold the exclusive lock on `path`. Raises `MemoryMdLocked` on timeout.
 
@@ -79,16 +80,17 @@ def file_lock(
     `resolve_user_config_dir(...) / name` for the bot config files.
     """
     with _md_lock.memory_md_lock(
-        path, timeout_seconds=timeout_seconds, lock_dir=lock_dir(config, user_id),
+        path, timeout_seconds=timeout_seconds, lock_dir=lock_anchor if lock_anchor is not None else lock_dir(config, user_id),
     ):
         yield
 
 
 @dataclass(frozen=True)
 class SaveOutcome:
-    status: Literal["ok", "conflict", "locked", "invalid", "too_large", "failed"]
+    status: Literal["ok", "conflict", "locked", "invalid", "too_large", "failed", "read_refused"]
     revision: str | None = None
     errors: tuple[str, ...] = ()
+    reason: str | None = None
 
 
 def save(
@@ -98,17 +100,19 @@ def save(
     content: str,
     expected_revision: str,
     *,
-    read: Callable[[], str | None],
+    read: Callable[[], str | None | dict],
     write: Callable[[str], bool],
     validate: Callable[[str], list[str]] | None = None,
     max_bytes: int,
+    lock_anchor: Path | None = None,
 ) -> SaveOutcome:
-    """Replace a file the user loaded at `expected_revision`. Never raises.
+    """Replace a file the user loaded at `expected_revision`.
 
     `read` and `write` are the file's own hardened helpers, so containment and
     leaf checks stay where they are. `read` returning None reads as empty,
     which is how the editors already treat an absent file. Size and `validate`
-    are checked before the lock: neither touches the file.
+    are checked before the lock: neither touches the file. Explicit read results
+    preserve refused reads; authorization errors from callbacks propagate.
     """
     if len(content.encode("utf-8")) > max_bytes:
         return SaveOutcome("too_large")
@@ -117,11 +121,23 @@ def save(
         if errors:
             return SaveOutcome("invalid", errors=tuple(errors))
     try:
-        with file_lock(config, user_id, path):
+        anchor = {"lock_anchor": lock_anchor} if lock_anchor is not None else {}
+        with file_lock(config, user_id, path, **anchor):
             # Re-read inside the lock: the revision the client carries was
             # taken before it, so comparing outside would leave exactly the
             # window the check exists to close.
-            current = read() or ""
+            result = read()
+            if isinstance(result, dict):
+                if result["status"] == "refused":
+                    return SaveOutcome("read_refused", reason=result["reason"])
+                if result["status"] == "missing":
+                    current = ""
+                elif result["status"] == "readable":
+                    current = result["content"]
+                else:
+                    return SaveOutcome("read_refused", reason="unreadable")
+            else:
+                current = result or ""
             if revision(current) != expected_revision:
                 return SaveOutcome("conflict")
             try:
@@ -136,4 +152,6 @@ def save(
                 return SaveOutcome("failed")
     except MemoryMdLocked:
         return SaveOutcome("locked")
+    except OSError:
+        return SaveOutcome("failed")
     return SaveOutcome("ok", revision=revision(content))

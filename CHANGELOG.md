@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Group members can read and edit their shared notebook through the web API and inspect recorded changes. Web and bot edits share a lock, stale edits are refused, and unreadable notebooks keep their original contents.
+
 - The group management API lets owners edit metadata and membership, and lets admins create groups, recover owners and inspect membership history. Adding a member requires acknowledgement of access to existing shared memory; member views show only rooms the caller already belongs to.
 - The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
 - Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.

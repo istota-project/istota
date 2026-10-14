@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from istota.lib.atomic_write import replace_at, write_text_atomic
+from istota.lib.atomic_write import replace_at
 from istota.lib.filenames import MAX_NAME_BYTES, safe_filename
 from istota.sandbox.host_paths import owner_path_parts
 from istota.sandbox.user_scope import is_scopable_user_id
@@ -2799,61 +2799,68 @@ def ensure_group_directories(
     return True
 
 
-def read_group_memory(config: "Config", group_id: str) -> str | None:
-    """The group's ``GROUP.md``, or None where there is nothing to load.
+def _open_group_dir(config: "Config", group_id: str) -> tuple[int | None, str | None]:
+    from .db import is_valid_group_id
+    from .skills._loader import open_overlay_dir
 
-    Hardened on ``read_channel_memory``'s terms and for its reason: the file
-    goes into every member's prompt and its directory is bound read-write into
-    every member's sandbox (ISSUE-339). Containment by equality under
-    ``{mount}/Groups``, then ``read_regular_file`` refuses a symlink, a FIFO
-    and anything past the read cap. Never raises.
-    """
-    group_dir = _contained_group_dir(config, group_id)
-    if group_dir is None:
-        if config.has_workspace:
-            logger.warning(
-                "group_memory_read_refused group=%r reason=group_dir_outside_group_root",
-                group_id,
-            )
-        return None
-    content, reason = read_regular_file(
-        group_dir / "GROUP.md", max_bytes=USER_CONFIG_READ_CAP_BYTES,
-    )
-    if reason is not None:
-        logger.warning(
-            "group_memory_read_refused group=%s reason=%s", group_id, reason,
-        )
-        return None
-    if not content or not content.strip():
-        return None
-    size = len(content.encode("utf-8"))
-    if size > GROUP_MEMORY_SOFT_LIMIT_BYTES:
-        logger.warning(
-            "group_memory_large group=%s bytes=%d soft_limit=%d",
-            group_id, size, GROUP_MEMORY_SOFT_LIMIT_BYTES,
-        )
-    return content
+    if not config.has_workspace:
+        return None, "storage_unavailable"
+    if not is_valid_group_id(group_id):
+        return None, "group_dir_outside_group_root"
+    try:
+        fd = open_overlay_dir(_get_mount_path(config, "/"), "Groups", group_id,
+                              raise_errors=True)
+    except OSError as exc:
+        import errno
+        reason = "group_dir_outside_group_root" if exc.errno in {errno.ELOOP, errno.ENOTDIR} else "storage_unavailable"
+        return None, reason
+    return (fd, None) if fd is not None else (None, "unsafe_directory")
+
+
+def read_group_memory_result(config: "Config", group_id: str) -> dict:
+    """A confirmed missing leaf, readable UTF-8, or a bounded refusal reason."""
+    from .skills._loader import OVERLAY_NOT_UTF8, read_overlay_bytes
+
+    fd, reason = _open_group_dir(config, group_id)
+    if fd is not None:
+        try:
+            data, reason, size = read_overlay_bytes(
+                Path("GROUP.md"), max_bytes=USER_CONFIG_READ_CAP_BYTES, dir_fd=fd)
+        finally:
+            os.close(fd)
+        if reason is None:
+            if size is None:
+                return {"status": "missing"}
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError:
+                reason = OVERLAY_NOT_UTF8
+            else:
+                if size > GROUP_MEMORY_SOFT_LIMIT_BYTES:
+                    logger.warning("group_memory_large group=%s bytes=%d soft_limit=%d",
+                                   group_id, size, GROUP_MEMORY_SOFT_LIMIT_BYTES)
+                return {"status": "readable", "content": content}
+    logger.warning("group_memory_read_refused group=%r reason=%s", group_id, reason)
+    return {"status": "refused", "reason": reason}
+
+
+def read_group_memory(config: "Config", group_id: str) -> str | None:
+    """Prompt compatibility: skip absent, refused and blank notebooks."""
+    result = read_group_memory_result(config, group_id)
+    content = result.get("content")
+    return content if content and content.strip() else None
 
 
 def write_group_memory(config: "Config", group_id: str, content: str) -> bool:
-    """Replace ``GROUP.md`` atomically (tmp + ``os.replace``). Never raises.
-
-    ``write_channel_memory``'s staging rule: a per-call staging name, so two
-    members' concurrent writes cannot interleave into one staging file.
-    """
-    group_dir = _contained_group_dir(config, group_id)
-    if group_dir is None:
-        logger.warning(
-            "group_memory_write_refused group=%r reason=group_dir_outside_group_root",
-            group_id,
-        )
+    """Replace through a validated directory descriptor, refusing unsafe leaves."""
+    fd, reason = _open_group_dir(config, group_id)
+    if fd is None:
+        logger.warning("group_memory_write_refused group=%r reason=%s", group_id, reason)
         return False
     try:
-        write_text_atomic(group_dir / "GROUP.md", content, mode=0o644)
-        return True
-    except (OSError, ValueError) as e:
-        logger.warning("group memory write failed for %s: %s", group_id, e)
-        return False
+        return write_regular_file(Path("GROUP.md"), content, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 # =============================================================================

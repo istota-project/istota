@@ -507,7 +507,8 @@ def _mount_relative(path: Path) -> str:
 
 
 def _audit_for(args, op: dict, outcome_or_reason: str, *,
-               target: Target, applied: bool) -> None:
+               target: Target, applied: bool,
+               before_revision: str | None = None, after_revision: str | None = None) -> bool | None:
     """Write an audit entry for a runtime CLI write.
 
     USER.md writes go to the user's trail. GROUP.md writes go to the group's
@@ -529,12 +530,12 @@ def _audit_for(args, op: dict, outcome_or_reason: str, *,
         )
         return
     if target.kind == _GROUP:
-        write_group_audit_log(
+        return write_group_audit_log(
             config, target.group_id, user_id,
             task_id=os.environ.get("ISTOTA_TASK_ID") or None,
             applied=entries, rejected=rejects,
+            before_revision=before_revision, after_revision=after_revision,
         )
-        return
     size = None
     extra = None
     # `target.path` **is** the USER.md path, already resolved once by
@@ -585,27 +586,29 @@ def _update_last_seen(path: Path, text: str, target: Target) -> None:
 
 
 def _lock_dir(target: Target) -> Path | None:
-    """Shared anchor dir for the runtime CLI.
-
-    GROUP.md takes the default anchor in the system temp dir: its writers are
-    several users, each with their own deferred dir, so a per-user anchor
-    would let two members' read-modify-writes interleave and drop one. Today
-    every writer is this CLI, spawned host-side by the skill proxy inside the
-    scheduler (the membership check needs the database, which no sandbox has),
-    and no curator writes the file. The anchor is per systemd unit, not per
-    host (`PrivateTmp=true`), so a GROUP.md writer in another process, such as
-    a web editor, needs a shared local anchor instead.
-
-    Otherwise use the per-user deferred dir (`ISTOTA_DEFERRED_DIR`) so the anchor is the
-    same inode whether this CLI runs host-side under the skill proxy or inside
-    the bwrap sandbox (the deferred dir is bind-mounted in), matching the
-    nightly curator's anchor. Falls back to the system-temp default for ad-hoc
-    CLI runs with no task env (no concurrent curator to coordinate with then).
-    """
+    """Group writers share host state; personal writers share their deferred dir."""
     if target.kind == _GROUP:
-        return None
+        from istota.memory.curation.file_lock import group_memory_lock_dir
+        return group_memory_lock_dir(_config_for_audit().db_path)
     deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "")
     return deferred_lock_dir(Path(deferred)) if deferred else None
+
+
+def _group_config():
+    from types import SimpleNamespace
+    return SimpleNamespace(db_path=_config_for_audit().db_path,
+                           workspace_path=_mount_path(), has_workspace=True)
+
+
+def _read_target(target: Target) -> str:
+    if target.kind != _GROUP:
+        return _read_text(target.path, _read_cap(target))
+    from istota.storage import read_group_memory_result
+    result = read_group_memory_result(_group_config(), target.group_id)
+    if result["status"] == "refused":
+        _err("memory_unreadable", reason=result["reason"])
+        sys.exit(1)
+    return result.get("content", "")
 
 
 def _do_op(args, op_dict: dict, *, verb: str) -> int:
@@ -613,7 +616,9 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
     path = target.path
     try:
         with memory_md_lock(path, timeout_seconds=5.0, lock_dir=_lock_dir(target)):
-            current = _read_text(path, _read_cap(target))
+            if target.kind == _GROUP and group_access_denied(target.group_id):
+                return _err(group_refusal(target.group_id))
+            current = _read_target(target)
             doc = parse_sectioned_doc(current)
             # A pinned section is closed to the nightly curator only; this
             # CLI runs on the user's own request and may edit it.
@@ -647,14 +652,26 @@ def _do_op(args, op_dict: dict, *, verb: str) -> int:
                         "would_exceed_read_cap",
                         bytes=size, cap=_read_cap(target),
                     )
-                _atomic_write(path, new_text)
+                if target.kind == _GROUP:
+                    from istota.storage import write_group_memory
+                    if group_access_denied(target.group_id):
+                        return _err(group_refusal(target.group_id))
+                    if not write_group_memory(_group_config(), target.group_id, new_text):
+                        return _err("memory_write_failed")
+                else:
+                    _atomic_write(path, new_text)
                 _update_last_seen(path, new_text, target)
-            _audit_for(args, op_dict, outcome, target=target, applied=True)
+            from istota.workspace.text_files import revision
+            recorded = _audit_for(args, op_dict, outcome, target=target, applied=True,
+                                  before_revision=revision(current),
+                                  after_revision=revision(new_text if outcome == "applied" else current))
             payload = {
                 "status": "ok",
                 "outcome": outcome,
                 "heading": op_dict.get("heading"),
             }
+            if target.kind == _GROUP:
+                payload["audit_recorded"] = recorded
             if "line" in op_dict:
                 payload["line"] = op_dict["line"]
             return _emit(payload)
@@ -800,7 +817,7 @@ def _channel_notes_shared() -> bool:
 def cmd_show(args) -> int:
     _refuse_retired_skill_flag(args)
     target = _resolve_target(args, verb="show")
-    text = _read_text(target.path, _read_cap(target))
+    text = _read_target(target)
     if args.heading:
         doc = parse_sectioned_doc(text)
         section = doc.find(args.heading)
@@ -830,7 +847,7 @@ def cmd_show(args) -> int:
 def cmd_headings(args) -> int:
     _refuse_retired_skill_flag(args)
     target = _resolve_target(args, verb="headings")
-    text = _read_text(target.path, _read_cap(target))
+    text = _read_target(target)
     doc = parse_sectioned_doc(text)
     print(json.dumps(
         {"status": "ok", "headings": [s.heading for s in doc.sections]},

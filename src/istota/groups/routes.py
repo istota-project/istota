@@ -4,12 +4,12 @@ import json
 import logging
 import sqlite3
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from istota import db
+from istota import db, storage
 from istota.config import refresh_user_profiles_if_changed
-from istota.groups import service
+from istota.groups import memory, service
 from istota.groups.policy import GroupError, group_capabilities, require_group_member
 from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import require_auth, verify_origin
@@ -27,9 +27,9 @@ def require_admin(request: Request, user: dict = Depends(require_auth)) -> dict:
     return user
 
 
-async def _payload(request, fields, required):
+async def _payload(request, fields, required, *, limit=BODY_LIMIT):
     try:
-        raw = await read_bounded_body(request, BODY_LIMIT)
+        raw = await read_bounded_body(request, limit)
     except BodyError as exc:
         raise HTTPException(exc.status, exc.message) from exc
     try:
@@ -245,3 +245,34 @@ async def admin_archive_group(group_id: str, request: Request, user: dict = Depe
                               _csrf: None = Depends(verify_origin)):
     payload = await _payload(request, {"revision": (int,), "confirm": (bool,)}, {"revision"})
     return await _run(request, user, _archive, group_id, payload)
+
+
+@router.get("/groups/{group_id}/memory")
+async def group_memory(group_id: str, request: Request, user: dict = Depends(require_auth)):
+    return await _run(request, user, memory.read_memory, group_id, read=True)
+
+
+@router.put("/groups/{group_id}/memory")
+async def put_group_memory(group_id: str, request: Request, user: dict = Depends(require_auth),
+                           _csrf: None = Depends(verify_origin)):
+    payload = await _payload(request, {"content": (str,), "revision": (str,)},
+                             {"content", "revision"}, limit=6 * storage.USER_CONFIG_READ_CAP_BYTES + 1024)
+    try:
+        payload["content"].encode("utf-8")
+    except UnicodeEncodeError:
+        raise HTTPException(422, "Content must be valid UTF-8") from None
+    return await _run(request, user, memory.save_memory, group_id, payload)
+
+
+@router.get("/groups/{group_id}/memory/activity")
+async def group_memory_activity(group_id: str, request: Request, user: dict = Depends(require_auth),
+                                cursor: str | None = Query(None, max_length=128),
+                                limit: int = Query(25, ge=1, le=100)):
+    return await _run(request, user, memory.read_activity, group_id, cursor=cursor, limit=limit, read=True)
+
+
+@router.post("/admin/groups/{group_id}/storage")
+async def retry_group_storage(group_id: str, request: Request, user: dict = Depends(require_admin),
+                              _csrf: None = Depends(verify_origin)):
+    await _payload(request, {}, set())
+    return await _run(request, user, memory.retry_storage, group_id)
