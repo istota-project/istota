@@ -714,10 +714,37 @@ class TestPrivateRepliesFromAGroup:
         assert _rows(group, "SELECT logical_key FROM sent_whatsapp") == [
             {"logical_key": f"private-reply:{delivery.message_id}"}]
 
+    def test_a_timed_location_share_from_the_group_is_held_for_private_approval(self, config, tmp_path):
+        """ISSUE-753: the private chat's confirmation body is what the
+        renderer would send, so the preview check holds the request. No
+        guest: a timed share refuses an audience it cannot name."""
+        from datetime import datetime, timezone
+
+        from istota.location import sharing
+
+        group = config
+        group.workspace_path = tmp_path / "files"
+        _apply(group, _roster([ALICE_JID, BOB_JID], added_by=ALICE_JID))
+        _private_chat(group)
+        (result,) = _apply(group, _message("Istota, share my location for 30m"))
+        with db.get_db(group.db_path) as conn:
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (result.task_id,))
+            response = sharing.request_location_share(
+                conn, group, actor_user_id="alice", task_id=result.task_id,
+                request_key="share", duration_seconds=1800, precision="exact",
+                now=datetime(2026, 3, 8, 12, tzinfo=timezone.utc))
+            assert response["status"] == "held"
+            assert conn.execute("SELECT state FROM location_share_grants").fetchone()[0] == "held"
+
+    def test_the_confirmation_body_survives_whatsapp_rendering(self):
+        body = private_replies.whatsapp_confirmation_body("Book it?", 7)
+
+        assert outbound.render_whatsapp(body) == body
+
     def test_a_long_question_keeps_the_instruction_that_answers_it(self):
         body = private_replies.whatsapp_confirmation_body("x" * 10000, 7)
 
-        assert body.endswith("`!confirm 7 no`.")
+        assert body.endswith("!confirm 7 no")
         assert len(body) + len("re: ") + 80 <= 4096
 
     def test_a_whisper_reaches_the_members_own_chat_headed_with_the_room(self, group, sent):
