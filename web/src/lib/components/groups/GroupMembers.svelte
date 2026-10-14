@@ -10,18 +10,28 @@
   } from '$lib/components/ui';
   import {
     getGroupUserOptions,
+    getAdminGroupUserOptions,
+    updateAdminGroup,
     putGroupMember,
     deleteGroupMember,
     updateGroup,
     GroupApiError,
     AuthError,
     type GroupDetail,
+    type AdminGroupDetail,
     type GroupMember,
     type GroupDisclosure,
   } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
-  let { group, onChanged }: { group: GroupDetail; onChanged: (left?: boolean) => Promise<void> } =
-    $props();
+  let {
+    group,
+    onChanged,
+    administration = false,
+  }: {
+    group: GroupDetail | AdminGroupDetail;
+    onChanged: (left?: boolean) => Promise<void>;
+    administration?: boolean;
+  } = $props();
   const current = getCurrentUser();
   const user = $derived(current.user);
   let busy = $state(false);
@@ -55,10 +65,10 @@
     error = e instanceof Error ? e.message : 'Could not save this change.';
     if (e instanceof GroupApiError && e.disclosure) disclosure = e.disclosure;
   }
-  async function openMember(member: GroupMember | null) {
+  async function openMember(member: GroupMember | null, initialRole?: 'member' | 'owner') {
     target = member;
     userId = member?.user_id ?? '';
-    role = member?.role ?? 'member';
+    role = initialRole ?? member?.role ?? 'member';
     replacement = '';
     acknowledged = false;
     disclosure = group.disclosure;
@@ -68,7 +78,9 @@
       busy = true;
       users = [];
       try {
-        users = (await getGroupUserOptions(group.group_id)).users;
+        users = (
+          await (administration ? getAdminGroupUserOptions() : getGroupUserOptions(group.group_id))
+        ).users;
         userId = options[0]?.value ?? '';
       } catch (e) {
         report(e);
@@ -82,12 +94,14 @@
     busy = true;
     error = '';
     try {
-      await putGroupMember(group.group_id, userId, {
+      const payload = {
         revision: group.revision,
         role,
         ...(!target ? { acknowledge_history: acknowledged } : {}),
         ...(replacement ? { replacement_owner: replacement } : {}),
-      });
+      };
+      if (administration) await updateAdminGroup(group.group_id, { ...payload, user_id: userId });
+      else await putGroupMember(group.group_id, userId, payload);
       memberOpen = false;
       await onChanged();
     } catch (e) {
@@ -108,12 +122,15 @@
     busy = true;
     error = '';
     try {
-      await deleteGroupMember(group.group_id, userId, {
+      const payload = {
         revision: group.revision,
         ...(replacement ? { replacement_owner: replacement } : {}),
-      });
+      };
+      if (administration)
+        await updateAdminGroup(group.group_id, { ...payload, user_id: userId, role: null });
+      else await deleteGroupMember(group.group_id, userId, payload);
       removeOpen = false;
-      await onChanged(userId === user.username);
+      await onChanged(!administration && userId === user.username);
     } catch (e) {
       report(e);
     } finally {
@@ -131,7 +148,7 @@
     busy = true;
     error = '';
     try {
-      await updateGroup(group.group_id, {
+      await (administration ? updateAdminGroup : updateGroup)(group.group_id, {
         revision: group.revision,
         display_name: displayName,
         kind,
@@ -150,9 +167,12 @@
   <div class="actions">
     {#if group.capabilities.manage}
       <Button onclick={() => openMember(null)}>Add member</Button>
+      {#if administration && 'needs_owner' in group && group.needs_owner}
+        <Button onclick={() => openMember(null, 'owner')}>Assign owner</Button>
+      {/if}
       <Button onclick={openMetadata}>Edit group details</Button>
     {/if}
-    {#if group.capabilities.leave}
+    {#if !administration && group.capabilities.leave}
       <Button
         variant="danger"
         onclick={() => {
@@ -170,6 +190,9 @@
             ariaLabel={`Actions for ${member.display_name}`}
             items={[
               { label: 'Change role', onSelect: () => openMember(member) },
+              ...(administration && member.role !== 'owner'
+                ? [{ label: 'Make owner', onSelect: () => openMember(member, 'owner') }]
+                : []),
               { label: 'Remove member', danger: true, onSelect: () => openRemove(member) },
             ]}
           />{/if}
@@ -257,14 +280,14 @@
 </Modal>
 <ConfirmDialog
   bind:open={removeOpen}
-  title={userId === user.username ? 'Leave group' : 'Remove member'}
-  confirmLabel={userId === user.username ? 'Leave' : 'Remove'}
+  title={!administration && userId === user.username ? 'Leave group' : 'Remove member'}
+  confirmLabel={!administration && userId === user.username ? 'Leave' : 'Remove'}
   confirmDisabled={busy}
   onConfirm={removeMember}
 >
   {#snippet body()}
     <p>
-      Are you sure you want to {userId === user.username
+      Are you sure you want to {!administration && userId === user.username
         ? 'leave this group'
         : `remove ${target?.display_name}`}? Future access ends. Already delivered messages and
       downloads remain with recipients.

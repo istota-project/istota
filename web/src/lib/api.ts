@@ -6059,3 +6059,62 @@ export function retryGroupStorage(
 ): Promise<{ group_id: string; storage_available: boolean }> {
   return groupRequest(`/admin/groups/${encodeURIComponent(id)}/storage`, 'POST', {});
 }
+
+export interface AdminGroupSummary extends GroupSummary {
+  created_by: string;
+  created_at: string;
+  archived_at: string | null;
+  needs_owner: boolean;
+}
+export interface AdminGroupDetail extends AdminGroupSummary {
+  members: GroupMember[];
+  disclosure: GroupDisclosure;
+  history: (GroupMember & {
+    added_at: string;
+    added_by: string;
+    ended_at: string | null;
+    ended_by: string | null;
+  })[];
+  events: {
+    id: number;
+    actor_id: string;
+    event_type: string;
+    subject_user_id: string | null;
+    created_at: string;
+    details: Record<string, unknown>;
+  }[];
+}
+export function getAdminGroups(): Promise<{ groups: AdminGroupSummary[] }> {
+  return groupRequest('/admin/groups');
+}
+export function getAdminGroup(id: string): Promise<AdminGroupDetail> {
+  return groupRequest(`/admin${groupPath(id)}`);
+}
+export function getAdminGroupUserOptions(): Promise<{
+  users: { user_id: string; display_name: string }[];
+}> {
+  return groupRequest('/admin/groups/user-options');
+}
+export function createAdminGroup(payload: {
+  revision: 0;
+  group_id: string;
+  display_name: string;
+  kind?: string;
+  owners: string[];
+}): Promise<{ group_id: string; revision: number; storage_available: boolean }> {
+  return groupRequest('/admin/groups', 'POST', payload);
+}
+export function updateAdminGroup(
+  id: string,
+  payload:
+    | { revision: number; display_name?: string; kind?: string }
+    | (Omit<GroupMembershipInput, 'role'> & { user_id: string; role: 'owner' | 'member' | null }),
+): Promise<{ group_id: string; revision: number }> {
+  return groupRequest(`/admin${groupPath(id)}`, 'PATCH', payload);
+}
+export function archiveAdminGroup(
+  id: string,
+  payload: { revision: number; confirm: true },
+): Promise<{ group_id: string; revision: number; archived_at: string }> {
+  return groupRequest(`/admin${groupPath(id)}/archive`, 'POST', payload);
+}

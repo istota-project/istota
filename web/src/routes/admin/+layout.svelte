@@ -11,6 +11,7 @@
     SlidersHorizontal,
     Stethoscope,
     Users,
+    UsersRound,
   } from '@lucide/svelte';
 
   let { children } = $props();
@@ -23,6 +24,7 @@
   const SECTIONS = [
     { href: '', label: 'Status', icon: Activity },
     { href: '/users', label: 'Users', icon: Users },
+    { href: '/groups', label: 'Groups', icon: UsersRound },
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
     { href: '/connections', label: 'Connections', icon: Plug },

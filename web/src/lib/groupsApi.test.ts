@@ -1,5 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import {
+  getAdminGroups,
+  getAdminGroup,
+  getAdminGroupUserOptions,
+  createAdminGroup,
+  updateAdminGroup,
+  archiveAdminGroup,
   getGroupMemory,
   saveGroupMemory,
   putGroupMember,
@@ -75,4 +81,47 @@ it('encodes the opaque activity cursor', async () => {
     '/api/groups/team/memory/activity?cursor=a%26b',
     expect.anything(),
   );
+});
+
+it('uses admin routes for management without requesting member content', async () => {
+  const fetch = vi.fn().mockImplementation(async () => new Response('{}'));
+  vi.stubGlobal('fetch', fetch);
+  await getAdminGroups();
+  await getAdminGroup('a b');
+  await getAdminGroupUserOptions();
+  await createAdminGroup({
+    revision: 0,
+    group_id: 'team',
+    display_name: 'Team',
+    owners: ['alice'],
+  });
+  await updateAdminGroup('a b', {
+    revision: 5,
+    user_id: 'alice',
+    role: 'owner',
+    acknowledge_history: true,
+  });
+  await archiveAdminGroup('a b', { revision: 6, confirm: true });
+  expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+    '/api/admin/groups',
+    '/api/admin/groups/a%20b',
+    '/api/admin/groups/user-options',
+    '/api/admin/groups',
+    '/api/admin/groups/a%20b',
+    '/api/admin/groups/a%20b/archive',
+  ]);
+  expect(fetch.mock.calls[4][1]).toMatchObject({
+    method: 'PATCH',
+    credentials: 'same-origin',
+    body: JSON.stringify({
+      revision: 5,
+      user_id: 'alice',
+      role: 'owner',
+      acknowledge_history: true,
+    }),
+  });
+  expect(fetch.mock.calls[5][1]).toMatchObject({
+    method: 'POST',
+    body: JSON.stringify({ revision: 6, confirm: true }),
+  });
 });
