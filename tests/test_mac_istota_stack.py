@@ -70,6 +70,19 @@ if name == "uname":
     out((state.get("arch", "arm64") if "-m" in argv else state.get("system", "Darwin")) + "\n")
     sys.exit(0)
 
+if name == "sysctl":
+    if state.get("sysctl_rc"):
+        sys.exit(state["sysctl_rc"])
+    facts = {"hw.ncpu": state.get("ncpu", 10), "hw.memsize": state.get("memory_gib", 32) * 1024 ** 3}
+    out(f"{facts[argv[-1]]}\n")
+    sys.exit(0)
+
+if name == "df":
+    free_kb = state.get("free_gib", 400) * 1024 ** 2
+    out("Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+        f"/dev/disk3s5 970000000 1000 {free_kb} 10% /System/Volumes/Data\n")
+    sys.exit(0)
+
 if name == "lsof":
     if any(a.endswith("istota-scheduler-daemon.lock") for a in argv):
         if state.get("lock_holder"):
@@ -325,7 +338,7 @@ def mac(tmp_path) -> Mac:
     stub = stubs / "stub"
     stub.write_text(STUB.replace("{python}", sys.executable))
     stub.chmod(0o755)
-    for name in ("limactl", "security", "lsof", "open", "uname", "git"):
+    for name in ("limactl", "security", "lsof", "open", "uname", "git", "sysctl", "df"):
         (stubs / name).symlink_to(stub)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"key": KEY}))
@@ -780,6 +793,88 @@ class TestCreate:
         assert "istota auth add alice --email" in result.stdout
 
 
+def _size(create: list[str]) -> tuple[str, str, str]:
+    return tuple(create[create.index(flag) + 1] for flag in ("--cpus", "--memory", "--disk"))
+
+
+def _create_on_a_terminal(mac: Mac, answers: str, *args: str) -> subprocess.CompletedProcess:
+    """`create --no-setup` with a terminal on stdin, the answers already typed."""
+    import pty
+
+    primary, secondary = pty.openpty()
+    try:
+        os.write(primary, answers.encode())
+        return subprocess.run(
+            [BASH, str(MAC_CLI), "create", "--tag", "v1.2.0", "--signing-key", SIGNING_KEY,
+             "--no-setup", *args],
+            stdin=secondary, capture_output=True, text=True, env=mac.env, timeout=60,
+        )
+    finally:
+        os.close(secondary)
+        os.close(primary)
+
+
+class TestTheVmsSize:
+    """A new VM is sized from this Mac: half its CPUs, a quarter of its memory
+    and a quarter of its free disk, within bounds, asked on a terminal."""
+
+    def test_with_nothing_given_the_size_follows_the_mac(self, mac):
+        mac.set(ncpu=10, memory_gib=32, free_gib=200)
+        result = _create(mac)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _size(_limactl_create(mac)) == ("5", "8", "50")
+        state = (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+        assert "CPUS=5\n" in state and "MEMORY=8\n" in state and "DISK=50\n" in state
+
+    def test_the_defaults_are_bounded(self, mac):
+        mac.set(ncpu=24, memory_gib=128, free_gib=2000)
+        assert _create(mac).returncode == 0
+        assert _size(_limactl_create(mac)) == ("8", "16", "100")
+
+    def test_a_mac_it_cannot_read_gets_the_templates_size(self, mac):
+        mac.set(sysctl_rc=1)
+        assert _create(mac).returncode == 0
+        assert _size(_limactl_create(mac))[:2] == ("4", "4")
+
+    def test_given_sizes_win(self, mac):
+        result = _create(mac, "--cpus", "6", "--memory", "12", "--disk", "80GiB")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _size(_limactl_create(mac)) == ("6", "12", "80")
+
+    @pytest.mark.parametrize("args", [("--cpus", "12"), ("--memory", "31")])
+    def test_more_than_the_mac_has_is_refused_first(self, mac, args):
+        mac.set(ncpu=10, memory_gib=32)
+        result = _create(mac, *args)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not mac.calls("limactl")
+
+    def test_a_disk_too_small_is_a_usage_error(self, mac):
+        assert _create(mac, "--disk", "5").returncode == 64
+
+    def test_a_terminal_is_asked_and_enter_takes_the_default(self, mac):
+        mac.set(ncpu=10, memory_gib=32, free_gib=200)
+        result = _create_on_a_terminal(mac, "lots\n12\n6\n\n60\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "from 1 to 10" in result.stderr
+        assert _size(_limactl_create(mac)) == ("6", "8", "60")
+
+    def test_a_terminal_is_not_asked_what_was_given(self, mac):
+        mac.set(ncpu=10, memory_gib=32, free_gib=200)
+        result = _create_on_a_terminal(mac, "\n", "--cpus", "3", "--memory", "6")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "CPUs [" not in result.stderr and "memory, GiB [" not in result.stderr
+        assert _size(_limactl_create(mac)) == ("3", "6", "50")
+
+    def test_an_existing_vm_is_not_resized_or_asked(self, mac):
+        assert _create(mac).returncode == 0
+        mac.calls_path.unlink()
+        result = _create_on_a_terminal(mac, "", "--cpus", "2")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c[:1] == ["create"] for c in mac.calls("limactl"))
+        state = (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+        assert "CPUS=5\n" in state
+
+
 class TestTheDeployedTagIsKept:
     """`create` is given a release to bootstrap from; `update` moves the VM on
     from it. A later `create` or `restore` installs what was last deployed,
@@ -1211,6 +1306,12 @@ class TestRestore:
         _back_up(mac)
         mac.calls_path.unlink()
         return mac
+
+    def test_the_new_vm_takes_the_old_ones_size(self, made):
+        made.set(ncpu=24, memory_gib=128, free_gib=2000)
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _size(_limactl_create(made)) == ("5", "8", "100")
 
     def test_it_replaces_the_vm_from_the_folder_and_the_keychain(self, made):
         result = made.run("restore", stdin="istota\n")

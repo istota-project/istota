@@ -18,7 +18,7 @@ login Keychain: istota.local / secret-key-istota (a copy of the master key)
 - A Mac with Apple silicon. An Intel Mac is refused.
 - Lima 2.0 or later: `brew install lima`. The installer does not install Homebrew or Lima for you.
 - A model backend: a Claude Code OAuth token, an API key, or an OpenAI-compatible server through the [native brain](../configuration/native-brain.md). A model server on the Mac itself needs one more step, [below](#reaching-a-service-on-your-mac).
-- Room for the VM: 4 CPUs, 4 GiB of memory and a 40 GiB disk by default.
+- Room for the VM. By default it takes half the Mac's CPUs (2 to 8), a quarter of its memory (4 to 16 GiB) and a disk of up to a quarter of the free space (40 to 100 GiB). The disk grows as it is used, so its size is a ceiling. On a terminal, `create` shows these defaults and asks for each one; Enter takes the default. The size is chosen once, when the VM is made.
 
 ## Install
 
@@ -36,8 +36,9 @@ The installer refuses to run as root, on anything but an Apple silicon Mac, or w
 |---|---|---|
 | `--workspace DIR` | `~/Istota` | the workspace folder ([rules below](#where-the-folder-may-be)) |
 | `--port N` | `8080` | the Mac port the web UI is on, 1024 or higher |
-| `--cpus N` | `4` | the VM's CPUs |
-| `--memory N` | `4` | the VM's memory, in whole GiB |
+| `--cpus N` | half the Mac's, 2 to 8 | the VM's CPUs, at most the Mac's |
+| `--memory N` | a quarter of the Mac's, 4 to 16 | the VM's memory in whole GiB, leaving macOS at least 2 |
+| `--disk N` | a quarter of the free disk, 40 to 100 | the most the VM's disk grows to, in whole GiB from 10 |
 | `--adopt` | off | use a folder that already holds files |
 | `--no-setup` | off | stop before the setup questions ([setting up in the browser](#setting-up-in-the-browser)) |
 
