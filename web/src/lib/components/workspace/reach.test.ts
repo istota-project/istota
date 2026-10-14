@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { WorkspaceAccess, WorkspacePlace } from '$lib/api';
 import {
   ACCESS_LABELS,
+  accessVariant,
   accessLabel,
   placeForRef,
   reachesTasks,
@@ -103,5 +104,18 @@ describe('placeForRef', () => {
   it('returns null when nothing contains the ref', () => {
     expect(placeForRef(places, '/Groups/g/a.md')).toBeNull();
     expect(placeForRef([], '/Users/u')).toBeNull();
+  });
+});
+
+describe('accessVariant', () => {
+  it('colours access from most to least reach', () => {
+    expect(
+      ['rw', 'ro', 'skill', 'conditional', 'none'].map((a) => accessVariant(a as WorkspaceAccess)),
+    ).toEqual(['success', 'info', 'info', 'warn', 'danger']);
+  });
+
+  it('leaves an unknown access kind neutral', () => {
+    expect(accessVariant('later' as WorkspaceAccess)).toBe('neutral');
+    expect(accessVariant('toString' as WorkspaceAccess)).toBe('neutral');
   });
 });

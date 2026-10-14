@@ -60,4 +60,7 @@
   .view-btn :global(svg) {
     flex-shrink: 0;
   }
+  .view-btn > :global(svg) {
+    color: var(--accent-amber);
+  }
 </style>

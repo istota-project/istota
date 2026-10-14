@@ -123,9 +123,15 @@ it('reserves the folder button height while the listing loads', async () => {
 });
 
 it('keeps the standard sidebar uncluttered and shows access beside the folder path', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [home, room, { ...home, id: 'linked:1', kind: 'linked', label: 'Shared folder' }],
+    notes: ['Files are stored in a local folder.'],
+  });
   const { container } = render(Workspace);
   const sidebar = await screen.findByRole('complementary');
   expect(sidebar.style.getPropertyValue('--sidebar-width')).toBe('220px');
+  await openSection('Linked folders');
+  await within(sidebar).findByRole('link', { name: 'Shared folder' });
   expect(sidebar.querySelector('.badge')).toBeNull();
   expect(container.querySelector('.folder-toolbar')).toHaveTextContent('Read-write');
   expect(container.querySelector('.folder-toolbar .lucide-bot')).not.toBeNull();

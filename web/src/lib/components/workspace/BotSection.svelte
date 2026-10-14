@@ -11,6 +11,7 @@
     home,
     views,
     current,
+    viewOpen,
     href,
     viewHref,
     onNavigate,
@@ -21,6 +22,8 @@
     views: IndexView[];
     /** The entry the main area is showing: a view, or `home` for My files. */
     current: IndexView | 'home' | null;
+    /** False while a room or group folder is open: its index entry is then an ancestor, not the page. */
+    viewOpen: boolean;
     href: (place: string, path?: string) => string;
     viewHref: (view: IndexView) => string;
     onNavigate: (event: MouseEvent, place: string, path?: string) => void;
@@ -56,7 +59,7 @@
         class="view-btn"
         class:active={current === entry.view}
         href={viewHref(entry.view)}
-        aria-current={current === entry.view ? 'page' : undefined}
+        aria-current={current === entry.view ? (viewOpen ? 'page' : 'location') : undefined}
         onclick={(event) => onNavigateView(event, entry.view)}
       >
         <entry.icon size={14} />
@@ -74,5 +77,8 @@
   }
   .view-btn :global(svg) {
     flex-shrink: 0;
+  }
+  .view-btn > :global(svg) {
+    color: var(--accent-amber);
   }
 </style>

@@ -166,3 +166,83 @@ it('keeps a failed configuration load retryable in the main area', async () => {
   await fireEvent.click(within(index).getByRole('button', { name: 'Retry' }));
   expect(await within(index).findByText('USER.md')).toBeTruthy();
 });
+
+it('marks a room index entry as the location, not the page, while a room is open', async () => {
+  __history.reset('/istota/files?place=room%3Asample');
+  render(Files);
+  const section = await botSection();
+  await waitFor(() =>
+    expect(within(section).getByRole('link', { name: 'Rooms' })).toHaveAttribute(
+      'aria-current',
+      'location',
+    ),
+  );
+  await fireEvent.click(within(section).getByRole('link', { name: 'Rooms' }));
+  expect(within(section).getByRole('link', { name: 'Rooms' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+});
+
+it('moves between an index and a folder with Back and Forward', async () => {
+  __history.reset('/istota/files?view=rooms');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Rooms' });
+  await fireEvent.click(within(index).getByRole('link', { name: 'Project room' }));
+  await waitFor(() => expect(api.getWorkspaceListing).toHaveBeenCalledWith('room:sample', ''));
+  __history.back();
+  window.dispatchEvent(new PopStateEvent('popstate'));
+  expect(await screen.findByRole('region', { name: 'Rooms' })).toBeTruthy();
+  __history.forward();
+  window.dispatchEvent(new PopStateEvent('popstate'));
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Rooms' })).toBeNull());
+  expect(screen.getByRole('navigation', { name: 'Folder path' })).toHaveTextContent('Project room');
+});
+
+it('shows loading, not an empty list, while a configuration retry is in flight', async () => {
+  api.getWorkspaceConfigFiles.mockRejectedValueOnce(new Error('down'));
+  __history.reset('/istota/files?view=config');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Configuration' });
+  await within(index).findByText('Could not load your configuration files.');
+  let resolve!: (value: unknown) => void;
+  api.getWorkspaceConfigFiles.mockReturnValueOnce(new Promise((done) => (resolve = done)));
+  await fireEvent.click(within(index).getByRole('button', { name: 'Retry' }));
+  expect(within(index).getByText('Loading…')).toBeTruthy();
+  expect(within(index).queryByText('No configuration files are available.')).toBeNull();
+  resolve({ files: configFiles });
+  expect(await within(index).findByText('USER.md')).toBeTruthy();
+});
+
+it('keeps a file dropped on an index view from navigating the tab', async () => {
+  __history.reset('/istota/files?view=config');
+  render(Files);
+  const index = await screen.findByRole('region', { name: 'Configuration' });
+  await within(index).findByText('USER.md');
+  const notCancelled = await fireEvent.drop(index, {
+    dataTransfer: { files: [], types: ['Files'] },
+  });
+  expect(notCancelled).toBe(false);
+});
+
+it('explains a pinned room file in the legend', async () => {
+  api.getWorkspacePins.mockResolvedValue({
+    pins: [
+      {
+        id: 1,
+        provider: 'workspace',
+        ref: '/Channels/sample/notes.md',
+        name: 'Room notes',
+        available: true,
+        is_dir: false,
+      },
+    ],
+  });
+  render(Files);
+  const sidebar = await screen.findByRole('complementary');
+  expect(
+    await within(sidebar).findByText(
+      'Helper can use these in your tasks, in any of your rooms. A pinned room file only in its own room.',
+    ),
+  ).toBeTruthy();
+});

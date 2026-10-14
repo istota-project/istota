@@ -16,6 +16,21 @@ const TASK_REACH_DESCRIPTIONS: Record<WorkspaceAccess, string | null> = {
   none: null,
 };
 
+export type AccessVariant = 'success' | 'info' | 'warn' | 'danger' | 'neutral';
+
+// A ramp from most to least reach; an access kind this client does not know stays neutral.
+const ACCESS_VARIANTS: Record<WorkspaceAccess, AccessVariant> = {
+  rw: 'success',
+  ro: 'info',
+  skill: 'info',
+  conditional: 'warn',
+  none: 'danger',
+};
+
+export function accessVariant(access: WorkspaceAccess): AccessVariant {
+  return Object.hasOwn(ACCESS_VARIANTS, access) ? ACCESS_VARIANTS[access] : 'neutral';
+}
+
 export function accessLabel(access: WorkspaceAccess): string {
   return Object.hasOwn(ACCESS_LABELS, access) ? ACCESS_LABELS[access] : access;
 }

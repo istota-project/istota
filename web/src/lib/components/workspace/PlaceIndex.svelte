@@ -79,7 +79,7 @@
   }
   .index-name :global(svg) {
     flex-shrink: 0;
-    color: var(--text-muted);
+    color: var(--accent-amber);
   }
   .index-label {
     overflow: hidden;

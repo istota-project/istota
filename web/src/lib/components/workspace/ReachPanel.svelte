@@ -54,6 +54,7 @@
   }
   .reach-legend :global(svg) {
     vertical-align: text-bottom;
+    color: var(--accent-blue);
   }
   dl {
     display: grid;

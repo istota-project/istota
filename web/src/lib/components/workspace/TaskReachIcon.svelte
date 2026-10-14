@@ -23,7 +23,7 @@
     display: inline-flex;
     flex-shrink: 0;
     margin-left: auto;
-    color: var(--text-muted);
+    color: var(--accent-blue);
   }
   .visually-hidden {
     position: absolute;

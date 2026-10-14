@@ -127,6 +127,10 @@
       configLoading = false;
     }
   }
+  function retryConfigFiles() {
+    configLoading = true;
+    void loadConfigFiles();
+  }
   function editConfigFile(file: WorkspaceConfigFile) {
     sidebarOpen = false;
     editing = file;
@@ -167,6 +171,22 @@
   );
   let parentView = $derived(indexViewForKind(place?.kind));
   const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
+  // Pins resolve to any place, rooms included, so the legend has to speak for them too.
+  let pinPlaces = $derived(
+    pins
+      .filter((pin) => pin.available && pin.provider === 'workspace')
+      .map((pin) => placeForRef(places, pin.ref))
+      .filter((item): item is WorkspacePlace => !!item && reachesTasks(item.reach.private)),
+  );
+  let legendRoomPin = $derived(pinPlaces.some((item) => item.kind === 'room'));
+  let legendShown = $derived(
+    pinPlaces.length > 0 ||
+      places.some(
+        (item) =>
+          (item.kind === 'home' || sidebarKinds.includes(item.kind)) &&
+          reachesTasks(item.reach.private),
+      ),
+  );
   let botCurrent = $derived<IndexView | 'home' | null>(
     view ?? (place?.kind === 'home' ? 'home' : indexViewForKind(place?.kind)),
   );
@@ -487,6 +507,7 @@
           home={places.find((place) => place.kind === 'home')}
           views={botViews}
           current={botCurrent}
+          viewOpen={view !== null}
           {href}
           {viewHref}
           onNavigate={navigate}
@@ -498,10 +519,10 @@
           {href}
           onNavigate={navigate}
         />
-        {#if places.some((place) => (place.kind === 'home' || sidebarKinds.includes(place.kind)) && reachesTasks(place.reach.private))}
+        {#if legendShown}
           <p class="caption reach-legend">
             <Bot size={14} aria-hidden="true" />{botName} can use these in your tasks, in any of your
-            rooms.
+            rooms.{legendRoomPin ? ' A pinned room file only in its own room.' : ''}
           </p>
         {/if}
       </Sidebar>
@@ -539,41 +560,46 @@
         </ol>
       </nav>
     </div>
-    {#if view === 'rooms'}
-      <PlaceIndex
-        label="Rooms"
-        caption="Each room's folder. A task reaches a room's folder only in that room."
-        empty="You have no room folders."
-        places={places.filter((item) => item.kind === 'room')}
-        {href}
-        onNavigate={navigate}
-      />
-    {:else if view === 'groups'}
-      <PlaceIndex
-        label="Groups"
-        caption="Folders shared with the groups you belong to."
-        empty="You have no group folders."
-        places={places.filter((item) => item.kind === 'group')}
-        {href}
-        onNavigate={navigate}
-      />
-    {:else}
-      <ConfigIndex
-        label={INDEX_VIEW_LABELS[view]}
-        caption={view === 'config'
-          ? `${botName} reads these as instructions.`
-          : "Added to a skill's instructions whenever it loads."}
-        empty={view === 'config'
-          ? 'No configuration files are available.'
-          : 'No skills take instructions from you.'}
-        files={configFiles.filter((file) => file.kind === (view === 'config' ? 'config' : 'skill'))}
-        loading={configLoading}
-        error={configError}
-        onEdit={editConfigFile}
-        onRetry={loadConfigFiles}
-        {revealAction}
-      />
-    {/if}
+    <!-- Disabled, but it still takes a drop, so a file let go here does not navigate the tab away. -->
+    <FileDropZone overlay disabled onFiles={enqueue}>
+      {#if view === 'rooms'}
+        <PlaceIndex
+          label="Rooms"
+          caption="Each room's folder. A task reaches a room's folder only in that room."
+          empty="You have no room folders."
+          places={places.filter((item) => item.kind === 'room')}
+          {href}
+          onNavigate={navigate}
+        />
+      {:else if view === 'groups'}
+        <PlaceIndex
+          label="Groups"
+          caption="Folders shared with the groups you belong to."
+          empty="You have no group folders."
+          places={places.filter((item) => item.kind === 'group')}
+          {href}
+          onNavigate={navigate}
+        />
+      {:else}
+        <ConfigIndex
+          label={INDEX_VIEW_LABELS[view]}
+          caption={view === 'config'
+            ? `${botName} reads these as instructions.`
+            : "Added to a skill's instructions whenever it loads."}
+          empty={view === 'config'
+            ? 'No configuration files are available.'
+            : 'No skills take instructions from you.'}
+          files={configFiles.filter(
+            (file) => file.kind === (view === 'config' ? 'config' : 'skill'),
+          )}
+          loading={configLoading}
+          error={configError}
+          onEdit={editConfigFile}
+          onRetry={retryConfigFiles}
+          {revealAction}
+        />
+      {/if}
+    </FileDropZone>
   {:else if !place}
     <EmptyState>This place is no longer available.</EmptyState>
   {:else}
@@ -837,11 +863,13 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    margin: var(--space-2) 0 0;
-    padding: 0 var(--space-2);
+    margin: var(--space-3) 0 0;
+    padding: var(--space-3) var(--space-2) 0;
+    border-top: 1px solid var(--border-subtle);
   }
   .reach-legend :global(svg) {
     flex-shrink: 0;
+    color: var(--accent-blue);
   }
   .only-you {
     display: inline-flex;
