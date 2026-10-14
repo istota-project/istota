@@ -39,12 +39,13 @@
     items.push({ label: 'Remove pin', disabled: busy, onSelect: () => onRemove(pin) });
     return items;
   }
-  function pinAccess(pin: WorkspacePin) {
+  // The place whose reach a pin shows, or null where the row has no link or button to carry the description.
+  function pinPlace(pin: WorkspacePin) {
     if (!pin.available) return null;
     if (pin.provider === 'drive') {
-      return places.find((place) => place.kind === 'drive')?.reach.private ?? null;
+      return pin.web_url ? (places.find((place) => place.kind === 'drive') ?? null) : null;
     }
-    return placeForRef(places, pin.ref)?.reach.private ?? null;
+    return placeForRef(places, pin.ref);
   }
   function folderTarget(pin: WorkspacePin) {
     if (!pin.available || !pin.is_dir || pin.provider !== 'workspace') return null;
@@ -64,14 +65,15 @@
   >
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
-      {@const access = pinAccess(pin)}
+      {@const pinned = pinPlace(pin)}
+      {@const access = pinned?.reach.private ?? null}
       {@const reachId = `task-reach-pin-${pin.id}`}
       {@const describedBy = access && reachesTasks(access) ? reachId : undefined}
       <div class="list-row pin-row">
         {#snippet content()}
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
-          >{#if access}<TaskReachIcon {access} id={reachId} />{/if}
+          >{#if access}<TaskReachIcon {access} id={reachId} room={pinned?.kind === 'room'} />{/if}
         {/snippet}
         {#if !pin.available}
           <div class="unavailable">{@render content()}</div>

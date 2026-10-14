@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkspaceAccess, WorkspacePlace } from '$lib/api';
-import { ACCESS_LABELS, placeForRef, reachesTasks, taskReachDescription } from './reach';
+import {
+  ACCESS_LABELS,
+  accessLabel,
+  placeForRef,
+  reachesTasks,
+  taskReachDescription,
+} from './reach';
 
 function place(
   id: string,
@@ -37,6 +43,21 @@ describe('taskReachDescription', () => {
     expect(taskReachDescription('none')).toBeNull();
     expect(taskReachDescription('later' as WorkspaceAccess)).toBeNull();
     expect(taskReachDescription('toString' as WorkspaceAccess)).toBeNull();
+  });
+
+  it('limits a room folder to that room', () => {
+    expect(taskReachDescription('rw', true)).toBe(
+      'Istota can read and change these files, in this room only',
+    );
+    expect(taskReachDescription('none', true)).toBeNull();
+  });
+});
+
+describe('accessLabel', () => {
+  it('falls back to the raw value for an unknown or inherited key', () => {
+    expect(accessLabel('rw')).toBe('Read-write');
+    expect(accessLabel('later' as WorkspaceAccess)).toBe('later');
+    expect(accessLabel('constructor' as WorkspaceAccess)).toBe('constructor');
   });
 });
 

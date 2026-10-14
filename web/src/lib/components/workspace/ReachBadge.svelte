@@ -2,14 +2,13 @@
   import { Bot } from '@lucide/svelte';
   import { Badge } from '$lib/components/ui';
   import type { WorkspaceAccess } from '$lib/api';
-  import { ACCESS_LABELS, reachesTasks } from './reach';
+  import { accessLabel, reachesTasks } from './reach';
   let { access }: { access: WorkspaceAccess } = $props();
 </script>
 
 <Badge size="sm"
   ><span class="reach-label"
-    >{#if reachesTasks(access)}<Bot size={12} aria-hidden="true" />{/if}{ACCESS_LABELS[access] ??
-      access}</span
+    >{#if reachesTasks(access)}<Bot size={12} aria-hidden="true" />{/if}{accessLabel(access)}</span
   ></Badge
 >
 

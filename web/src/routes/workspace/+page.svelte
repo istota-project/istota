@@ -462,7 +462,11 @@
         />
         {#if places.some((place) => reachesTasks(place.reach.private))}
           <p class="caption reach-legend">
-            <Bot size={14} aria-hidden="true" />Istota can use these in your private room.
+            <Bot size={14} aria-hidden="true" />{places.some(
+              (place) => place.kind === 'room' && reachesTasks(place.reach.private),
+            )
+              ? 'Istota can use these in your private room, and a room folder in that room.'
+              : 'Istota can use these in your private room.'}
           </p>
         {/if}
       </Sidebar>

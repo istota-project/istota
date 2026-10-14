@@ -16,14 +16,20 @@ const TASK_REACH_DESCRIPTIONS: Record<WorkspaceAccess, string | null> = {
   none: null,
 };
 
+export function accessLabel(access: WorkspaceAccess): string {
+  return Object.hasOwn(ACCESS_LABELS, access) ? ACCESS_LABELS[access] : access;
+}
+
 export function reachesTasks(access: WorkspaceAccess): boolean {
   return taskReachDescription(access) !== null;
 }
 
 // An access kind this client does not know gets no description, so no icon claims reach it may not have.
-export function taskReachDescription(access: WorkspaceAccess): string | null {
+// A room folder is bound only for that room's own tasks, so its description says so.
+export function taskReachDescription(access: WorkspaceAccess, room = false): string | null {
   if (!Object.hasOwn(TASK_REACH_DESCRIPTIONS, access)) return null;
-  return TASK_REACH_DESCRIPTIONS[access];
+  const description = TASK_REACH_DESCRIPTIONS[access];
+  return description && room ? `${description}, in this room only` : description;
 }
 
 export function placeForRef(places: WorkspacePlace[], ref: string): WorkspacePlace | null {

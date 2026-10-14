@@ -130,7 +130,7 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
   expect(screen.getByText('No access')).toBeTruthy();
   const legend = container.querySelector('details .reach-legend')!;
   expect(legend).toHaveTextContent(
-    'in the sidebar means a task in your private room can reach that place. Places without it are visible to you only.',
+    'in the sidebar means a task in your private room can reach that place, or for a room folder, a task in that room. Places without it are visible to you only.',
   );
   expect(within(legend as HTMLElement).getByRole('img', { name: 'The robot icon' })).toBeTruthy();
 });
@@ -139,16 +139,21 @@ it('marks the places a task can reach and describes the mark without renaming th
   render(Workspace);
   const sidebar = await screen.findByRole('complementary');
   await openSection('Rooms');
-  for (const label of ['My files', 'Project room']) {
+  for (const [label, description] of [
+    ['My files', 'Istota can read and change these files'],
+    ['Project room', 'Istota can read and change these files, in this room only'],
+  ]) {
     const link = await within(sidebar).findByRole('link', { name: label });
     expect(link).toHaveAccessibleName(label);
-    expect(link).toHaveAccessibleDescription('Istota can read and change these files');
+    expect(link).toHaveAccessibleDescription(description);
     const describedBy = link.getAttribute('aria-describedby')!;
-    expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(
-      'Istota can read and change these files',
-    );
+    expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(description);
   }
-  expect(within(sidebar).getByText('Istota can use these in your private room.')).toBeTruthy();
+  expect(
+    within(sidebar).getByText(
+      'Istota can use these in your private room, and a room folder in that room.',
+    ),
+  ).toBeTruthy();
 });
 
 it('leaves the Nextcloud row unmarked and drops the legend when nothing is reachable', async () => {
@@ -1239,10 +1244,27 @@ const markedPins = [
     is_dir: false,
     web_url: 'https://drive.google.com/file/d/file_123456',
   },
+  {
+    id: 23,
+    provider: 'drive',
+    ref: 'file_654321',
+    name: 'Drive notes',
+    available: true,
+    is_dir: false,
+    web_url: null,
+  },
+  {
+    id: 24,
+    provider: 'workspace',
+    ref: '/Channels/sample/agenda.md',
+    name: 'Room agenda',
+    available: true,
+    is_dir: false,
+  },
 ];
 
 it('marks available pins whose place a task can reach', async () => {
-  api.getWorkspacePlaces.mockResolvedValue({ places: [home, drivePlace], notes: [] });
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, room, drivePlace], notes: [] });
   api.getWorkspacePins.mockResolvedValue({ pins: markedPins });
   render(Workspace);
   await openSection('Pinned');
@@ -1255,6 +1277,12 @@ it('marks available pins whose place a task can reach', async () => {
   const gone = within(pinned).getByText('Gone plan').closest('.pin-row')!;
   expect(gone.querySelector('.task-reach')).toBeNull();
   expect(gone.querySelector('[aria-describedby]')).toBeNull();
+  // No link to carry the description, so no icon either.
+  const noLink = within(pinned).getByText('Drive notes').closest('.pin-row')!;
+  expect(noLink.querySelector('.task-reach')).toBeNull();
+  expect(within(pinned).getByRole('button', { name: 'Room agenda' })).toHaveAccessibleDescription(
+    'Istota can read and change these files, in this room only',
+  );
 });
 
 it('leaves a Drive pin unmarked when no Drive place is listed', async () => {

@@ -6,7 +6,7 @@ Open Workspace in the main navigation to see the files and connections Istota ca
 
 My files is your own workspace folder. Linked folders, room folders and group folders appear when they are available to your account. Room membership is checked again on each request, so leaving a room removes access to its folder.
 
-In the sidebar, a small robot icon marks each place a task in your private room can reach, pinned files and folders included. A place without the icon is visible to you only. A line at the bottom of the sidebar says what the icon means, since a phone shows no hover text.
+In the sidebar, a small robot icon marks each place a task in your private room can reach, pinned files and folders included. A room folder carries the icon too, though only that room's own tasks reach it. A place without the icon is visible to you only. A line at the bottom of the sidebar says what the icon means, since a phone shows no hover text.
 
 The folder toolbar shows the selected place's access for a task in a private room: Read-write, Read-only, Via skill or No access, with the robot icon when a task can reach the place. These badges describe task access; they do not mean that the web page can edit the files. Open “How Istota reaches your files” to see the selected place's access in a private room, on your own turn in a shared room, and on a guest's turn or a task nobody asked for. The disclosure also says what the robot icon means, where files are stored and whether sandboxing limits task access.
 

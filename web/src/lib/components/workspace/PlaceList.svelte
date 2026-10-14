@@ -46,7 +46,11 @@
         >
           {#if place.kind === 'talk'}<Paperclip size={14} />{:else}<group.icon size={14} />{/if}
           <span class="view-name" title={place.label}>{place.label}</span>
-          <TaskReachIcon access={place.reach.private} id={`task-reach-${place.id}`} />
+          <TaskReachIcon
+            access={place.reach.private}
+            id={`task-reach-${place.id}`}
+            room={place.kind === 'room'}
+          />
         </a>
       {/each}
     </CategoryGroup>
