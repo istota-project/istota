@@ -16,11 +16,16 @@ functions of the answers.
 
 from __future__ import annotations
 
+import dataclasses
+import errno
 import getpass
 import logging
 import os
 import secrets
+import shutil
+import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -233,7 +238,7 @@ def _collect_modules(a: ContainerAnswers, args, *, interactive, input_fn, out) -
             )
             continue
         if interactive:
-            setattr(a, field_name, _ask_yes_no(input_fn, question, True, out=out))
+            setattr(a, field_name, _ask_yes_no(input_fn, question, getattr(a, field_name), out=out))
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +342,8 @@ def setup_shape(args) -> str:
 
 def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
+    if getattr(args, "snapshot", None) or getattr(args, "restore", None):
+        return run_rerun_snapshot(args, out=out)
     if getattr(args, "web", False) or getattr(args, "local", False):
         from .webui import setup_app  # noqa: PLC0415 - FastAPI only for the web setup
 
@@ -382,6 +389,9 @@ CONTAINER_BROWSER_API_URL = "http://istota-browser:9223"
 #: The `signaling` service as the daemon reaches it on the stack network.
 CONTAINER_SIGNALING_URL = "http://signaling:8080"
 CONTAINER_WEB_PORT = 8766
+#: How many ``config.toml.bak.<stamp>`` copies a re-run keeps: istota-stack's
+#: ``CONFIG_APPLY_BACKUPS``, the same number ``istota apply`` keeps.
+RERUN_CONFIG_BACKUPS = 10
 
 #: Every credential the container half can write, by the name of the file it
 #: becomes under ``secrets/`` (compose mounts it at ``/run/secrets/<name>``).
@@ -495,6 +505,10 @@ class ContainerAnswers:
     profiles: tuple[str, ...] = ()
     # Generated, and carried forward on a re-run.
     session_secret: str = ""
+    #: The host port Lima forwards to this VM (host.env's LOCAL_FORWARD_PORT,
+    #: which only the Mac writes), 0 off the local VM. Read, never asked, and
+    #: written nowhere: it only holds a `local` hostname to that port.
+    forwarded_port: int = 0
 
     @property
     def disabled_modules(self) -> list[str]:
@@ -768,9 +782,22 @@ def nginx_publish(a: ContainerAnswers) -> tuple[str, str]:
         if tls_cert_source(a) in PROXIED_TLS_SOURCES:
             return UNUSED_PUBLISH.format(port=80), f"{listen}:443"
         return f"{listen}:80", UNUSED_PUBLISH.format(port=443)
-    _, _, port = a.hostname.rpartition(":")
-    port = port if port.isdigit() else "8080"
-    return f"127.0.0.1:{port}:80", UNUSED_PUBLISH.format(port=443)
+    return f"127.0.0.1:{local_publish_port(a.hostname)}:80", UNUSED_PUBLISH.format(port=443)
+
+
+#: Where `local` ingress publishes nginx when the hostname names no port.
+DEFAULT_LOCAL_PORT = 8080
+
+
+def local_publish_port(hostname: str) -> str:
+    """The port `local` ingress publishes nginx on: the hostname's, else 8080."""
+    _, _, port = hostname.rpartition(":")
+    return port if port.isdigit() else str(DEFAULT_LOCAL_PORT)
+
+
+def local_address(port: int) -> str:
+    """The `local` hostname that publishes on ``port``."""
+    return f"localhost:{port}"
 
 
 def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
@@ -863,6 +890,199 @@ def current_storage(vm_dir: Path | None) -> str:
     return _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "STORAGE")
 
 
+def forwarded_port(vm_dir: Path | None) -> int:
+    """host.env's LOCAL_FORWARD_PORT, the host port Lima forwards to this VM,
+    or 0 when there is none or it is not a port."""
+    if vm_dir is None or not (vm_dir / "host.env").is_file():
+        return 0
+    value = _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "LOCAL_FORWARD_PORT")
+    if not (value.isascii() and value.isdigit()) or value.startswith("0") or int(value) > 65535:
+        return 0
+    return int(value)
+
+
+class PriorConfigUnreadable(SetupError):
+    """The stack's config.toml exists but does not parse."""
+
+
+def prior_user_ids(doc: dict, admins_path: Path) -> list[str]:
+    """Every id with both a line in the admins file and a ``[users.<id>]``
+    block: the user a re-run keeps when there is exactly one."""
+    from .config import load_admin_users  # noqa: PLC0415
+
+    if not admins_path.is_file():
+        return []
+    users = doc.get("users")
+    if not isinstance(users, dict):
+        return []
+    admins = load_admin_users(str(admins_path))
+    return sorted(user_id for user_id in users if user_id in admins)
+
+
+def _env_file_values(path: Path) -> dict[str, str]:
+    """A ``KEY=value`` file as ``_host_env_value`` reads one, every key."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        name, sep, rest = line.partition("=")
+        if sep and not name.lstrip().startswith("#") and rest:
+            values[name.strip()] = rest
+    return values
+
+
+def prior_answers(data_dir: Path, vm_dir: Path | None) -> ContainerAnswers | None:
+    """What the stack's current files say, or None when there is no config.toml.
+
+    The inverse of ``container_config_document``, ``host_env_values``,
+    ``stack_env_values`` and ``container_secret_values`` for what those write;
+    the config is authoritative. A value setup cannot write is refused by name
+    rather than mapped to a default, so a re-run cannot quietly change it.
+    Raises ``PriorConfigUnreadable`` for a config that does not parse.
+    """
+    import tomllib  # noqa: PLC0415
+
+    config_path = data_dir / "config" / "config.toml"
+    if not config_path.is_file():
+        return None
+    try:
+        doc = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise PriorConfigUnreadable(f"{config_path} does not parse ({exc})") from None
+
+    def table(*keys: str) -> dict:
+        node = doc
+        for key in keys:
+            node = node.get(key) if isinstance(node, dict) else None
+        return node if isinstance(node, dict) else {}
+
+    def string(node: dict, key: str, default: str = "") -> str:
+        value = node.get(key)
+        return value if isinstance(value, str) else default
+
+    secrets_dir = vm_dir / "secrets" if vm_dir is not None else None
+
+    def credential(name: str, node: dict, key: str) -> str:
+        if secrets_dir is not None:
+            value = _read_secret_file(secrets_dir / name)
+            if value:
+                return value
+        return string(node, key)
+
+    def cannot_write(key: str, value: object) -> SetupError:
+        return SetupError(
+            f"{key} = {value!r} in {config_path.name} is not something setup can write. "
+            f"Change it on the admin Configuration page or in config.toml first, "
+            f"then re-run setup."
+        )
+
+    a = ContainerAnswers()
+    a.bot_name = string(doc, "bot_name", a.bot_name)
+
+    brain = table("brain")
+    a.brain_kind = string(brain, "kind", "claude_code")
+    if a.brain_kind not in _BRAIN_KINDS:
+        raise cannot_write("brain.kind", a.brain_kind)
+    native = table("brain", "native")
+    if a.brain_kind == "native":
+        a.native_base_url = string(native, "base_url", DEFAULT_ANTHROPIC_BASE_URL)
+        a.native_model = string(native, "model")
+        a.native_api_key = credential("istota_brain_native_api_key", native, "api_key")
+    else:
+        a.claude_code_oauth_token = credential("claude_code_oauth_token", {}, "")
+        a.anthropic_api_key = credential("anthropic_api_key", {}, "")
+
+    mounted = "workspace_mount_path" in doc
+    nextcloud = table("nextcloud")
+    web = table("web")
+    a.nextcloud_url = string(nextcloud, "url")
+    if a.uses_nextcloud:
+        a.nextcloud_username = string(nextcloud, "username", a.nextcloud_username)
+        a.nextcloud_dav_prefix = string(nextcloud, "dav_prefix")
+        a.nextcloud_auto_share_bot_dir = nextcloud.get("auto_share_bot_dir", True) is not False
+        a.nextcloud_app_password = credential("istota_nextcloud_app_password", nextcloud, "app_password")
+        a.workspace = "mount" if mounted else "local"
+        a.talk_enabled = table("talk").get("enabled", True) is not False
+        a.oauth_client_id = string(web, "oauth2_client_id")
+        a.nextcloud_public_url = string(web, "oauth2_provider") or a.nextcloud_url
+        a.oauth_client_secret = credential(
+            "istota_web_oauth2_client_secret", web, "oauth2_client_secret",
+        )
+    else:
+        a.host_folder = mounted
+        caldav = table("caldav")
+        a.caldav_url = string(caldav, "url")
+        a.caldav_username = string(caldav, "username")
+        a.caldav_password = credential("istota_caldav_password", caldav, "password")
+    auth = web.get("auth")
+    if isinstance(auth, list):
+        a.email_login = "email" in auth
+
+    email = table("email")
+    a.email_enabled = email.get("enabled") is True
+    if a.email_enabled:
+        a.imap_host = string(email, "imap_host")
+        a.imap_user = string(email, "imap_user")
+        a.smtp_host = string(email, "smtp_host")
+        a.bot_email = string(email, "bot_email")
+        a.authserv_id = string(email, "authserv_id")
+        for key in ("imap_port", "smtp_port"):
+            value = email.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                setattr(a, key, value)
+        a.imap_password = credential("istota_email_imap_password", email, "imap_password")
+
+    a.location_enabled = table("location").get("enabled") is True
+    developer = table("developer")
+    a.developer_enabled = developer.get("enabled") is True
+    if a.developer_enabled:
+        a.gitlab_token = credential("istota_developer_gitlab_token", developer, "gitlab_token")
+        a.github_token = credential("istota_developer_github_token", developer, "github_token")
+    a.hostname = string(table("site"), "hostname", a.hostname)
+
+    host_env = _env_file_values(vm_dir / "host.env") if vm_dir is not None else {}
+    if host_env.get("INGRESS"):
+        a.ingress = host_env["INGRESS"]
+    elif web.get("trusted_proxy_hops") == INGRESS_HOPS["proxied"]:
+        a.ingress = "proxied"
+    else:
+        a.ingress = "local" if "scheduler" in doc else "direct"
+    a.tls_cert_source = host_env.get("TLS_CERT_SOURCE", "")
+    a.upstream_proxy = host_env.get("UPSTREAM_PROXY", "")
+    a.listen_addr = host_env.get("LISTEN_ADDR", "")
+    port = host_env.get("LISTEN_PORT", "")
+    a.listen_port = int(port) if port.isdigit() else 0
+
+    stack_env = _env_file_values(vm_dir / ".env") if vm_dir is not None else {}
+    profiles = [p for p in stack_env.get("COMPOSE_PROFILES", "").split(",") if p]
+    unknown = [p for p in profiles if p not in CONTAINER_PROFILES]
+    if unknown:
+        raise SetupError(
+            f"COMPOSE_PROFILES in the stack's .env names {', '.join(unknown)}, which setup "
+            f"does not know (it knows {', '.join(CONTAINER_PROFILES)}). Remove it from .env "
+            f"first, then re-run setup."
+        )
+    # `location` follows location.enabled; keep it only where it does not.
+    a.profiles = tuple(p for p in profiles if not (p == "location" and a.location_enabled))
+
+    matches = prior_user_ids(doc, config_path.parent / "admins")
+    if len(matches) == 1:
+        a.user_id = matches[0]
+        user = table("users", a.user_id)
+        a.display_name = string(user, "display_name", a.user_id)
+        a.timezone = string(user, "timezone", a.timezone)
+        addresses = user.get("email_addresses")
+        if isinstance(addresses, list) and addresses and isinstance(addresses[0], str):
+            a.user_email = addresses[0]
+        disabled = user.get("disabled_modules")
+        if isinstance(disabled, list):
+            for field_name, module, _question in _OPT_OUT_MODULES:
+                setattr(a, field_name, module not in disabled)
+    return a
+
+
 def render_stack_env(a: ContainerAnswers, existing: str = "") -> str:
     """The compose ``.env`` after this run."""
     return merge_env_text(existing, stack_env_values(a), _STACK_ENV_HEADER)
@@ -898,11 +1118,13 @@ AUTHSERV_ID_EXPLANATION = (
 )
 
 
-def _ask_secret_optional(getpass_fn, label: str) -> str:
-    """A credential the operator may skip: one no-echo read, Enter skips."""
+def _ask_secret_optional(getpass_fn, label: str, *, keeps: bool = False) -> str:
+    """A credential the operator may skip: one no-echo read. Enter skips, or
+    keeps the stored one when ``keeps`` (the caller keeps it)."""
     _flush_terminal_input()
+    hint = "Enter keeps the current one" if keeps else "Enter to skip"
     try:
-        return getpass_fn(f"{label} (Enter to skip): ").strip()
+        return getpass_fn(f"{label} ({hint}): ").strip()
     except EOFError:
         return ""
 
@@ -980,6 +1202,11 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
                 "tls_cert_source",
                 "Proxied ingress takes a self-signed certificate, files or none, never ACME.",
             )
+    if a.ingress == "local" and a.forwarded_port and int(local_publish_port(a.hostname)) != a.forwarded_port:
+        refuse(
+            "hostname",
+            f"This VM's port forward is {a.forwarded_port}; use {local_address(a.forwarded_port)}.",
+        )
     if a.ingress == "direct" and a.tls_cert_source == "self-signed":
         refuse(
             "tls_cert_source",
@@ -1080,7 +1307,7 @@ def _payload_type_ok(value, expected: type) -> bool:
     return isinstance(value, expected)
 
 
-def answers_from_payload(payload: dict) -> ContainerAnswers:
+def answers_from_payload(payload: dict, base: ContainerAnswers | None = None) -> ContainerAnswers:
     """The web setup's answers as ``ContainerAnswers``.
 
     Only ``WEB_SETUP_FIELDS`` are accepted, and an unknown key or a value of
@@ -1089,6 +1316,13 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     ``--yes`` run of ``collect_container_answers`` gives it, so the two front
     ends agree on what unasked means. Validation is
     ``validate_container_answers``'s, not this function's.
+
+    ``base`` is a re-run's prior answers (``prior_answers``). The answers
+    start from a copy of it, so a key left out keeps the base value, every
+    field no screen asks is kept, and a profile the stack already runs may
+    stay though the web does not offer it. A key sent empty still takes the
+    first-run default, and what the storage, ingress or workspace choice
+    turns off is turned off whatever the base had.
     """
     if not isinstance(payload, dict):
         raise PayloadError([FieldError("", "The setup answers must be a JSON object.")])
@@ -1105,61 +1339,88 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
         else:
             values[key] = value
 
-    def text(key: str) -> str:
-        return str(values.get(key, "")).strip()
+    def text(key: str, default: str = "") -> str:
+        if key in values:
+            value = str(values[key]).strip()
+        elif base is not None:
+            value = str(getattr(base, key)).strip()
+        else:
+            value = ""
+        return value or default
 
-    a = ContainerAnswers()
-    a.bot_name = text("bot_name") or "Istota"
+    def flag(key: str, default: bool) -> bool:
+        if key in values:
+            return values[key]
+        return getattr(base, key) if base is not None else default
+
+    a = dataclasses.replace(base) if base is not None else ContainerAnswers()
+    a.bot_name = text("bot_name", "Istota")
     a.user_id = text("user_id")
-    a.display_name = text("display_name") or a.user_id
-    a.timezone = text("timezone") or "UTC"
+    a.display_name = text("display_name", a.user_id)
+    a.timezone = text("timezone", "UTC")
     a.user_email = text("user_email")
 
-    a.hostname = text("hostname") or "localhost"
+    a.hostname = text("hostname", "localhost")
     default_ingress = "local" if a.hostname.split(":")[0] in ("localhost", "127.0.0.1") else "direct"
-    a.ingress = text("ingress") or default_ingress
+    a.ingress = text("ingress", default_ingress)
     if a.ingress == "proxied":
         a.upstream_proxy = text("upstream_proxy")
         a.listen_addr = text("listen_addr")
-        a.listen_port = values.get("listen_port") or 8080
+        if "listen_port" in values or base is None:
+            a.listen_port = values.get("listen_port") or 8080
+        else:
+            a.listen_port = base.listen_port or 8080
         source = text("tls_cert_source")
         a.tls_cert_source = "" if source == "none" else source
-    elif a.ingress == "direct":
-        a.tls_cert_source = text("tls_cert_source") or "acme"
+    else:
+        a.upstream_proxy, a.listen_addr, a.listen_port = "", "", 0
+    if a.ingress == "direct":
+        a.tls_cert_source = text("tls_cert_source", "acme")
 
-    storage = text("storage") or "local"
+    if "storage" in values:
+        storage = str(values["storage"]).strip() or "local"
+    elif base is not None and base.uses_nextcloud:
+        storage = "nextcloud"
+    else:
+        storage = "local"
     if storage not in STORAGE_CHOICES:
         errors.append(FieldError("storage", f"Unknown storage {storage!r}; use local or nextcloud."))
     elif storage == "nextcloud":
+        a.host_folder = False
         a.nextcloud_url = text("nextcloud_url").rstrip("/")
         if not a.nextcloud_url:
             errors.append(FieldError("nextcloud_url", "Enter your Nextcloud's address."))
-        a.nextcloud_public_url = (text("nextcloud_public_url") or a.nextcloud_url).rstrip("/")
-        a.nextcloud_username = text("nextcloud_username") or "istota"
+        a.nextcloud_public_url = text("nextcloud_public_url", a.nextcloud_url).rstrip("/")
+        a.nextcloud_username = text("nextcloud_username", "istota")
         a.nextcloud_app_password = text("nextcloud_app_password")
-        a.talk_enabled = values.get("talk_enabled", True)
+        a.talk_enabled = flag("talk_enabled", True)
         # The terminal's `--yes` answers: the mount, its root as the bot
         # folder, shared back; a local workspace has nothing in Nextcloud to share.
-        a.workspace = text("workspace") or "mount"
+        a.workspace = text("workspace", "mount")
         if a.workspace not in WORKSPACE_CHOICES:
             errors.append(FieldError("workspace", f"Unknown workspace {a.workspace!r}; use mount or local."))
         elif a.workspace == "local":
+            a.nextcloud_dav_prefix = ""
             a.nextcloud_auto_share_bot_dir = False
+        elif base is None or not base.workspace_is_mount:
+            a.nextcloud_auto_share_bot_dir = not a.nextcloud_dav_prefix
+    else:
+        a.nextcloud_url = ""
 
-    a.brain_kind = text("brain_kind") or "claude_code"
+    a.brain_kind = text("brain_kind", "claude_code")
     if a.brain_kind == "native":
-        a.native_base_url = text("native_base_url") or DEFAULT_ANTHROPIC_BASE_URL
+        a.native_base_url = text("native_base_url", DEFAULT_ANTHROPIC_BASE_URL)
         a.native_model = text("native_model")
         a.native_api_key = text("native_api_key")
     else:
         a.claude_code_oauth_token = text("claude_code_oauth_token")
 
-    a.email_enabled = values.get("email_enabled", False)
+    a.email_enabled = flag("email_enabled", False)
     if a.email_enabled:
         a.imap_host = text("imap_host")
         a.imap_user = text("imap_user")
-        a.smtp_host = text("smtp_host") or a.imap_host
-        a.bot_email = text("bot_email") or a.imap_user
+        a.smtp_host = text("smtp_host", a.imap_host)
+        a.bot_email = text("bot_email", a.imap_user)
         a.imap_password = text("imap_password")
         a.authserv_id = text("authserv_id")
 
@@ -1177,8 +1438,9 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
         if field_name in values and module_available(module):
             setattr(a, field_name, values[field_name])
 
-    profiles = list(values.get("profiles", []))
-    offered = [p for p in profiles if p not in WEB_SETUP_PROFILES]
+    profiles = list(values["profiles"]) if "profiles" in values else list(a.profiles)
+    kept = base.profiles if base is not None else ()
+    offered = [p for p in profiles if p not in WEB_SETUP_PROFILES and p not in kept]
     if offered:
         errors.append(FieldError("profiles", f"The web setup does not offer {offered}."))
     a.profiles = tuple(profiles)
@@ -1188,8 +1450,65 @@ def answers_from_payload(payload: dict) -> ContainerAnswers:
     return a
 
 
+def payload_from_answers(a: ContainerAnswers) -> dict:
+    """The web draft that reads back as ``a``: the inverse of
+    ``answers_from_payload`` over ``WEB_SETUP_FIELDS``, for a re-run's seeded
+    draft. What no screen asks stays on the answers it is read against
+    (``base=``). Credentials are their real values: the draft is in memory,
+    and every route redacts it."""
+    tls = tls_cert_source(a)
+    if a.ingress == "proxied" and not tls:
+        tls = "none"
+    payload: dict = {
+        "bot_name": a.bot_name,
+        "user_id": a.user_id,
+        "display_name": a.display_name or a.user_id,
+        "timezone": a.timezone,
+        "user_email": a.user_email,
+        "hostname": a.hostname,
+        "ingress": a.ingress,
+        "upstream_proxy": a.upstream_proxy,
+        "listen_addr": a.listen_addr,
+        "listen_port": a.listen_port,
+        "tls_cert_source": tls,
+        "storage": "nextcloud" if a.uses_nextcloud else "local",
+        "workspace": a.workspace,
+        "nextcloud_url": a.nextcloud_url,
+        "nextcloud_public_url": a.nextcloud_public_url,
+        "nextcloud_username": a.nextcloud_username,
+        "nextcloud_app_password": a.nextcloud_app_password,
+        "talk_enabled": a.talk_enabled,
+        "brain_kind": a.brain_kind,
+        "native_base_url": a.native_base_url,
+        "native_model": a.native_model,
+        "native_api_key": a.native_api_key,
+        "claude_code_oauth_token": a.claude_code_oauth_token,
+        "email_enabled": a.email_enabled,
+        "imap_host": a.imap_host,
+        "imap_user": a.imap_user,
+        "imap_password": a.imap_password,
+        "smtp_host": a.smtp_host,
+        "bot_email": a.bot_email,
+        "authserv_id": a.authserv_id,
+        "caldav_url": a.caldav_url,
+        "caldav_username": a.caldav_username,
+        "caldav_password": a.caldav_password,
+        **{field_name: getattr(a, field_name) for field_name, _module, _question in _OPT_OUT_MODULES},
+        "profiles": list(a.profiles),
+    }
+    assert payload.keys() == WEB_SETUP_FIELDS.keys()
+    return payload
+
+
+def _follow(prior_value: str, prior_source: str, new_source: str) -> str:
+    """A default that tracks another answer: the new source when the prior
+    value was empty or was the prior source, else the prior value."""
+    return new_source if prior_value in ("", prior_source) else prior_value
+
+
 def collect_container_answers(
     args, *, input_fn, out, getpass_fn, current_storage: str = "",
+    prior: ContainerAnswers | None = None, forwarded_port: int = 0,
 ) -> ContainerAnswers:
     """Build ``ContainerAnswers`` from flags and (unless ``--yes``) prompts.
 
@@ -1198,13 +1517,27 @@ def collect_container_answers(
     ``ANTHROPIC_API_KEY``, ...), never from argv. Every refusal is
     ``validate_container_answers``'s, raised at the question it is about.
 
-    ``current_storage`` is host.env's STORAGE before this run. A host folder
-    is kept when ``--storage`` is not given, so a re-run does not move the
-    workspace off the user's folder; it is asked for by no question, since only
-    the local VM's ``create`` sets one up.
+    ``prior`` is what the stack's files say on a re-run (``prior_answers``).
+    The answers start from a copy of it, so every prompt default and every
+    ``--yes`` fallback is the current value, a question never asked keeps it,
+    and an empty credential answer keeps the stored one. Flags still win. The
+    user and their per-user settings are kept and shown, not asked: those live
+    in the profile row, which a config edit does not change.
+
+    ``current_storage`` is host.env's STORAGE before this run, the fallback
+    when there is no prior. A host folder is kept when ``--storage`` is not
+    given, so a re-run does not move the workspace off the user's folder; it is
+    asked for by no question, since only the local VM's ``create`` sets one up.
+
+    ``forwarded_port`` is host.env's LOCAL_FORWARD_PORT (``forwarded_port()``):
+    with no prior it is the hostname's default, and a ``local`` hostname on
+    another port is refused.
     """
     interactive = not getattr(args, "yes", False)
-    a = ContainerAnswers()
+    a = dataclasses.replace(prior) if prior is not None else ContainerAnswers()
+    a.forwarded_port = forwarded_port
+    if prior is None and forwarded_port:
+        a.hostname = local_address(forwarded_port)
 
     def flag(name: str, default=None):
         value = getattr(args, name, None)
@@ -1216,43 +1549,60 @@ def collect_container_answers(
             value = _ask(input_fn, prompt, default)
         return (value if value is not None else default).strip()
 
-    def secret(name: str, label: str) -> str:
+    def secret(name: str, label: str, current: str) -> str:
         value = _env_credential(name)
         if not value and interactive:
-            value = _ask_secret_optional(getpass_fn, label)
-        return value
+            value = _ask_secret_optional(getpass_fn, label, keeps=bool(current))
+        return value or current
 
-    a.bot_name = text("bot_name", "Bot name", "Istota") or "Istota"
+    a.bot_name = text("bot_name", "Bot name", a.bot_name) or "Istota"
 
-    a.user_id = text("user", "First admin's user id (their login name)", "")
-    _refuse_on(a, "user_id")
-    a.display_name = text("display_name", "Display name", a.user_id) or a.user_id
-    tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin)", "UTC")
-    if not _is_valid_timezone(tz):
-        out(f"  '{tz}' is not a valid IANA timezone; using UTC.")
-        tz = "UTC"
-    a.timezone = tz
-    a.user_email = text("user_email", "Their email address (optional)", "")
+    kept_user = bool(a.user_id) and flag("user") in (None, a.user_id)
+    if kept_user:
+        out(f"  First admin: {a.user_id} ({a.display_name}, {a.timezone}"
+            f"{', ' + a.user_email if a.user_email else ''}).")
+        out("  Their name, timezone, email and modules are changed in Settings, not here.")
+        a.display_name = flag("display_name", a.display_name)
+        a.timezone = flag("timezone", a.timezone)
+        a.user_email = flag("user_email", a.user_email)
+    else:
+        a.user_id = text("user", "First admin's user id (their login name)", "")
+        _refuse_on(a, "user_id")
+        a.display_name = text("display_name", "Display name", a.user_id) or a.user_id
+        tz = text("timezone", "Timezone (IANA, e.g. Europe/Berlin)", "UTC")
+        if not _is_valid_timezone(tz):
+            out(f"  '{tz}' is not a valid IANA timezone; using UTC.")
+            tz = "UTC"
+        a.timezone = tz
+        a.user_email = text("user_email", "Their email address (optional)", "")
 
     # Ingress and the public name.
-    a.hostname = text("hostname", "Public hostname (as browsers reach it)", "localhost")
-    default_ingress = "local" if a.hostname.split(":")[0] in ("localhost", "127.0.0.1") else "direct"
+    a.hostname = text("hostname", "Public hostname (as browsers reach it)", a.hostname)
+    if prior is not None and a.hostname == prior.hostname:
+        default_ingress = prior.ingress
+    else:
+        default_ingress = "local" if a.hostname.split(":")[0] in ("localhost", "127.0.0.1") else "direct"
     ingress = flag("ingress")
     if ingress is None and interactive:
         out("  Ingress: direct (this VM terminates TLS), proxied (behind your own")
         out("  reverse proxy on a private network), local (loopback, a laptop VM).")
         ingress = _ask_choice(input_fn, "Ingress", tuple(INGRESS_HOPS), default_ingress, out=out)
     a.ingress = ingress or default_ingress
-    _refuse_on(a, "ingress")
+    _refuse_on(a, "ingress", "hostname")
+    was_proxied = prior is not None and prior.ingress == "proxied"
     if a.ingress == "proxied":
         a.upstream_proxy = text(
-            "upstream_proxy", "Upstream proxy address(es) or CIDR(s), comma-separated", "",
+            "upstream_proxy", "Upstream proxy address(es) or CIDR(s), comma-separated",
+            a.upstream_proxy,
         )
         _refuse_on(a, "upstream_proxy")
-        a.listen_addr = text("listen_addr", "Address to listen on (the VM's private interface)", "")
+        a.listen_addr = text(
+            "listen_addr", "Address to listen on (the VM's private interface)", a.listen_addr,
+        )
         _refuse_on(a, "listen_addr")
+        port_default = a.listen_port or 8080
         a.listen_port = int(flag("listen_port") or (
-            _ask_port(input_fn, "Port to listen on", 8080, out=out) if interactive else 8080
+            _ask_port(input_fn, "Port to listen on", port_default, out=out) if interactive else port_default
         ))
         _refuse_on(a, "listen_port")
         if interactive:
@@ -1261,27 +1611,34 @@ def collect_container_answers(
             out("  how); files uses one you provide; none is plain HTTP, acceptable only")
             out("  on a network nothing else shares.")
         # No ACME here: the public name points at the upstream, not this VM.
+        kept_source = a.tls_cert_source if was_proxied else ""
         source = flag("tls_cert_source")
         if source is None and interactive:
             source = _ask_choice(
                 input_fn, "TLS on the hop from the proxy", ("self-signed", "files", "none"),
-                "self-signed", out=out,
+                (kept_source or "none") if was_proxied else "self-signed", out=out,
             )
+        if source is None:
+            source = kept_source
         if source == "none":
             source = ""
         a.tls_cert_source = source or ""
         _refuse_on(a, "tls_cert_source")
     if a.ingress == "direct":
+        kept_source = a.tls_cert_source if a.tls_cert_source in ("acme", "files") else "acme"
         a.tls_cert_source = _ask_choice(
-            input_fn, "Certificates from", ("acme", "files"), "acme", out=out,
-        ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or "acme")
+            input_fn, "Certificates from", ("acme", "files"), kept_source, out=out,
+        ) if flag("tls_cert_source") is None and interactive else (flag("tls_cert_source") or kept_source)
         _refuse_on(a, "tls_cert_source")
 
     # Where the workspace is: a folder the host shares in, a Nextcloud, or the
     # state volume.
     storage = flag("storage")
-    if storage is None and current_storage == "host-folder":
-        storage = "host-folder"
+    if storage is None:
+        if prior is not None:
+            storage = "host-folder" if prior.host_folder else None
+        elif current_storage == "host-folder":
+            storage = "host-folder"
     if storage not in (None, "local", "host-folder"):
         raise SetupError(f"Unknown storage {storage!r}; use local or host-folder.")
     a.host_folder = storage == "host-folder"
@@ -1292,26 +1649,34 @@ def collect_container_answers(
         )
 
     # Nextcloud, or none; with it, the workspace on the mount or local.
+    prior_nc_url = a.nextcloud_url
     nc_url = flag("nextcloud_url")
-    if nc_url is None and interactive and not a.host_folder:
+    if nc_url is None and a.host_folder:
+        nc_url = ""
+    if nc_url is None and interactive:
         use_nc = _ask_yes_no(
-            input_fn, "Connect to an existing Nextcloud (files and Talk)?", False, out=out,
+            input_fn, "Connect to an existing Nextcloud (files and Talk)?", bool(prior_nc_url), out=out,
         )
-        nc_url = _ask(input_fn, "Nextcloud URL as this stack reaches it", "") if use_nc else ""
+        nc_url = _ask(input_fn, "Nextcloud URL as this stack reaches it", prior_nc_url) if use_nc else ""
+    if nc_url is None:
+        nc_url = prior_nc_url
     a.nextcloud_url = (nc_url or "").strip().rstrip("/")
     if a.uses_nextcloud:
         a.nextcloud_public_url = text(
-            "nextcloud_public_url", "Nextcloud URL as browsers reach it", a.nextcloud_url,
+            "nextcloud_public_url", "Nextcloud URL as browsers reach it",
+            _follow(a.nextcloud_public_url, prior_nc_url, a.nextcloud_url),
         ).rstrip("/")
-        a.nextcloud_username = text("nextcloud_user", "The bot's Nextcloud user", "istota")
-        a.nextcloud_app_password = secret("istota_nextcloud_app_password", "Its app password")
+        a.nextcloud_username = text("nextcloud_user", "The bot's Nextcloud user", a.nextcloud_username)
+        a.nextcloud_app_password = secret(
+            "istota_nextcloud_app_password", "Its app password", a.nextcloud_app_password,
+        )
         workspace = flag("workspace")
         if workspace is None and interactive:
             out("  Where should the workspace live? mount uses the bot account's files in")
             out("  Nextcloud through an rclone mount on the VM. local keeps files on this VM")
             out("  and shows them in the web UI.")
-            workspace = _ask_choice(input_fn, "Workspace", WORKSPACE_CHOICES, "mount", out=out)
-        a.workspace = workspace or "mount"
+            workspace = _ask_choice(input_fn, "Workspace", WORKSPACE_CHOICES, a.workspace, out=out)
+        a.workspace = workspace or a.workspace
         if a.workspace not in WORKSPACE_CHOICES:
             raise SetupError(f"Unknown workspace {a.workspace!r}; use mount or local.")
         if a.workspace == "local":
@@ -1322,26 +1687,33 @@ def collect_container_answers(
         else:
             a.nextcloud_dav_prefix = text(
                 "nextcloud_dav_prefix",
-                "Folder in the bot's files that holds the workspace (blank for the root)", "",
+                "Folder in the bot's files that holds the workspace (blank for the root)",
+                a.nextcloud_dav_prefix,
             )
+            if prior is not None and prior.workspace_is_mount:
+                share_default = prior.nextcloud_auto_share_bot_dir
+            else:
+                share_default = not a.nextcloud_dav_prefix
             if flag("no_nextcloud_auto_share", False):
                 a.nextcloud_auto_share_bot_dir = False
             elif interactive:
                 a.nextcloud_auto_share_bot_dir = _ask_yes_no(
                     input_fn, "Share each user's bot folder back to them over OCS?",
-                    not a.nextcloud_dav_prefix, out=out,
+                    share_default, out=out,
                 )
             else:
-                a.nextcloud_auto_share_bot_dir = not a.nextcloud_dav_prefix
+                a.nextcloud_auto_share_bot_dir = share_default
         if flag("no_talk", False):
             a.talk_enabled = False
         elif interactive:
-            a.talk_enabled = _ask_yes_no(input_fn, "Use Nextcloud Talk?", True, out=out)
+            a.talk_enabled = _ask_yes_no(input_fn, "Use Nextcloud Talk?", a.talk_enabled, out=out)
         a.oauth_client_id = text(
-            "oauth_client_id", "OAuth2 client id for Nextcloud login (blank to skip)", "",
+            "oauth_client_id", "OAuth2 client id for Nextcloud login (blank to skip)", a.oauth_client_id,
         )
         if a.oauth_client_id:
-            a.oauth_client_secret = secret("istota_web_oauth2_client_secret", "OAuth2 client secret")
+            a.oauth_client_secret = secret(
+                "istota_web_oauth2_client_secret", "OAuth2 client secret", a.oauth_client_secret,
+            )
             if not a.oauth_client_secret:
                 out("  No client secret; Nextcloud login stays off.")
                 a.oauth_client_id = ""
@@ -1353,17 +1725,21 @@ def collect_container_answers(
     # Brain.
     kind = flag("brain")
     if kind is None and interactive:
-        kind = _ask_choice(input_fn, "Model backend", ("claude_code", "native"), "claude_code", out=out)
-    a.brain_kind = kind or "claude_code"
+        kind = _ask_choice(input_fn, "Model backend", ("claude_code", "native"), a.brain_kind, out=out)
+    a.brain_kind = kind or a.brain_kind
     if a.brain_kind == "native":
-        a.native_base_url = text("native_base_url", "API base URL", DEFAULT_ANTHROPIC_BASE_URL)
-        a.native_model = text("native_model", "Model id", DEFAULT_ANTHROPIC_MODEL if interactive else "")
-        a.native_api_key = secret("istota_brain_native_api_key", "API key")
+        a.native_base_url = text("native_base_url", "API base URL", a.native_base_url)
+        a.native_model = text(
+            "native_model", "Model id", a.native_model or (DEFAULT_ANTHROPIC_MODEL if interactive else ""),
+        )
+        a.native_api_key = secret("istota_brain_native_api_key", "API key", a.native_api_key)
         _refuse_on(a, "brain_kind", "native_model", "native_api_key")
     else:
-        a.claude_code_oauth_token = secret("claude_code_oauth_token", "Claude Code OAuth token")
+        a.claude_code_oauth_token = secret(
+            "claude_code_oauth_token", "Claude Code OAuth token", a.claude_code_oauth_token,
+        )
         if not a.claude_code_oauth_token:
-            a.anthropic_api_key = secret("anthropic_api_key", "Anthropic API key")
+            a.anthropic_api_key = secret("anthropic_api_key", "Anthropic API key", a.anthropic_api_key)
         if not (a.claude_code_oauth_token or a.anthropic_api_key):
             out("  No Claude credential given; add one to secrets/ before the first task.")
 
@@ -1371,30 +1747,36 @@ def collect_container_answers(
     if flag("email", False):
         a.email_enabled = True
     elif interactive:
-        a.email_enabled = _ask_yes_no(input_fn, "Enable email (IMAP/SMTP)?", False, out=out)
+        a.email_enabled = _ask_yes_no(input_fn, "Enable email (IMAP/SMTP)?", a.email_enabled, out=out)
     if a.email_enabled:
-        a.imap_host = text("imap_host", "IMAP host", "")
-        a.imap_user = text("imap_user", "IMAP user", "")
-        a.smtp_host = text("smtp_host", "SMTP host", a.imap_host)
-        a.bot_email = text("bot_email", "The bot's email address", a.imap_user)
-        a.imap_password = secret("istota_email_imap_password", "IMAP password")
+        prior_imap_host, prior_imap_user = a.imap_host, a.imap_user
+        a.imap_host = text("imap_host", "IMAP host", a.imap_host)
+        a.imap_user = text("imap_user", "IMAP user", a.imap_user)
+        a.smtp_host = text("smtp_host", "SMTP host", _follow(a.smtp_host, prior_imap_host, a.imap_host))
+        a.bot_email = text(
+            "bot_email", "The bot's email address", _follow(a.bot_email, prior_imap_user, a.imap_user),
+        )
+        a.imap_password = secret("istota_email_imap_password", "IMAP password", a.imap_password)
         if interactive and flag("authserv_id") is None:
             for line in AUTHSERV_ID_EXPLANATION:
                 out(line)
-        a.authserv_id = text("authserv_id", "Mail server's authserv-id (Enter to skip)", "")
+        a.authserv_id = text("authserv_id", "Mail server's authserv-id (Enter to skip)", a.authserv_id)
         _refuse_on(a, "authserv_id")
 
     # Calendar, where there is no Nextcloud to derive it from.
     if not a.uses_nextcloud:
         caldav = flag("caldav_url")
-        if caldav is None and interactive and _ask_yes_no(
-            input_fn, "Point calendar at a CalDAV server?", False, out=out,
-        ):
-            caldav = _ask(input_fn, "CalDAV URL", "")
+        if caldav is None and interactive:
+            if _ask_yes_no(input_fn, "Point calendar at a CalDAV server?", bool(a.caldav_url), out=out):
+                caldav = _ask(input_fn, "CalDAV URL", a.caldav_url)
+            else:
+                caldav = ""
+        if caldav is None:
+            caldav = a.caldav_url
         a.caldav_url = (caldav or "").strip()
         if a.caldav_url:
-            a.caldav_username = text("caldav_username", "CalDAV username", "")
-            a.caldav_password = secret("istota_caldav_password", "CalDAV password")
+            a.caldav_username = text("caldav_username", "CalDAV username", a.caldav_username)
+            a.caldav_password = secret("istota_caldav_password", "CalDAV password", a.caldav_password)
             if not a.caldav_password:
                 out("  No CalDAV password; leaving [caldav] out.")
                 a.caldav_url = a.caldav_username = ""
@@ -1403,27 +1785,39 @@ def collect_container_answers(
     if flag("location", False):
         a.location_enabled = True
     elif interactive:
-        a.location_enabled = _ask_yes_no(input_fn, "Enable GPS/location tracking?", False, out=out)
-    _collect_modules(a, args, interactive=interactive, input_fn=input_fn, out=out)
+        a.location_enabled = _ask_yes_no(
+            input_fn, "Enable GPS/location tracking?", a.location_enabled, out=out,
+        )
+    _collect_modules(a, args, interactive=interactive and not kept_user, input_fn=input_fn, out=out)
     if flag("developer", False):
         a.developer_enabled = True
     elif interactive:
-        a.developer_enabled = _ask_yes_no(input_fn, "Enable the developer skill?", False, out=out)
+        a.developer_enabled = _ask_yes_no(
+            input_fn, "Enable the developer skill?", a.developer_enabled, out=out,
+        )
     if a.developer_enabled:
-        a.gitlab_token = secret("istota_developer_gitlab_token", "GitLab token")
-        a.github_token = secret("istota_developer_github_token", "GitHub token")
+        a.gitlab_token = secret("istota_developer_gitlab_token", "GitLab token", a.gitlab_token)
+        a.github_token = secret("istota_developer_github_token", "GitHub token", a.github_token)
 
     # Compose profiles.
     profiles = list(flag("profile", []) or [])
     if not profiles and interactive:
-        if _ask_yes_no(input_fn, "Run the browser container?", True, out=out):
+        kept = set(a.profiles)
+        if _ask_yes_no(
+            input_fn, "Run the browser container?",
+            "browser" in kept if prior is not None else True, out=out,
+        ):
             profiles.append("browser")
         if a.uses_nextcloud and a.talk_enabled and _ask_yes_no(
-            input_fn, "Run the Talk signaling server?", False, out=out,
+            input_fn, "Run the Talk signaling server?", "signaling" in kept, out=out,
         ):
             profiles.append("signaling")
-        if _ask_yes_no(input_fn, "Run the WhatsApp (Baileys) sidecar?", False, out=out):
+        if _ask_yes_no(
+            input_fn, "Run the WhatsApp (Baileys) sidecar?", "whatsapp-baileys" in kept, out=out,
+        ):
             profiles.append("whatsapp-baileys")
+    elif not profiles:
+        profiles = list(a.profiles)
     a.profiles = tuple(profiles)
     _refuse_on(a)
     return a
@@ -1505,11 +1899,16 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
             out("Setup aborted; the existing config is untouched.")
             return 1
 
+    prior = None
+    try:
+        prior = prior_answers(data_dir, vm_dir)
+    except PriorConfigUnreadable as exc:
+        out(f"  {exc}; starting from first-run defaults.")
     a = collect_container_answers(
         args, input_fn=input_fn, out=out, getpass_fn=getpass_fn,
-        current_storage=current_storage(vm_dir),
+        current_storage=current_storage(vm_dir), prior=prior, forwarded_port=forwarded_port(vm_dir),
     )
-    write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out)
+    write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out, backup=RERUN_CONFIG_BACKUPS)
 
     out("")
     out("Setup complete.")
@@ -1548,13 +1947,18 @@ def _stage_rclone_conf(a: ContainerAnswers, vm_dir: Path, secrets_dir: Path, out
     _write_private(path, text)
 
 
-def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out) -> None:
+def write_container_setup(
+    a: ContainerAnswers, *, data_dir: Path, vm_dir: Path | None, out, backup: int | None = None,
+) -> None:
     """Write everything a set of answers decides, for either front end.
 
     ``config.toml``, ``admins``, ``managed.json`` and the master key under ``data_dir``; with a
     ``vm_dir``, the credential files and the staged ``.env`` and ``host.env``,
     plus ``rclone.conf`` when the workspace is the Nextcloud mount.
     Validation is the caller's: this writes what it is given.
+
+    ``backup`` set, a config.toml already there is kept as
+    ``config.toml.bak.<stamp>`` first, the newest ``backup`` of them kept.
     """
     config_path = data_dir / "config" / "config.toml"
     secrets_dir = vm_dir / "secrets" if vm_dir is not None else None
@@ -1562,11 +1966,16 @@ def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path |
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     inline = secrets_dir is None
-    _write_private(config_path, render_container_config(a, inline_credentials=inline))
+    from istota import apply
+
+    text = render_container_config(a, inline_credentials=inline)
+    if backup and config_path.exists():
+        apply.write_config_with_backup(config_path, text, backup)
+    else:
+        _write_private(config_path, text)
     _ensure_admins_file(config_path.parent / "admins", a.user_id, out=out)
     # Setup hands every resource to whoever edits next; a management plan
     # claims its own back on its next run.
-    from istota import apply
 
     apply.write_managed(config_path.parent, {name: (False, "setup") for name in apply.MANAGED_RESOURCES})
     _ensure_master_key(data_dir / ".secret_key", out)
@@ -1593,3 +2002,147 @@ def write_container_setup(a: ContainerAnswers, *, data_dir: Path, vm_dir: Path |
             "  The Claude credential has no config key; without --vm-dir it was not "
             "written. Put it in the stack's secrets/ directory."
         )
+
+
+# ===========================================================================
+# The rollback snapshot of a web re-run
+# ===========================================================================
+
+#: The files under config/ a web Finish changes and a snapshot holds; the
+#: secret files are the rest. `admins` and the master key are never rewritten.
+SNAPSHOT_CONFIG_FILES = ("config.toml", "managed.json")
+
+
+def _read_regular_file(path: Path) -> bytes | None:
+    """``path``'s bytes, or None when there is no file. A link, a directory or
+    anything else that is not a regular file is refused: the snapshot copies
+    what setup wrote and nothing a link points at."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise SetupError(f"{path} is a link; setup does not follow one.") from None
+        raise SetupError(f"Could not read {path}: {exc.strerror}.") from None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise SetupError(f"{path} is not a regular file.")
+        return fh.read()
+
+
+def _read_secret_dir(secrets_dir: Path) -> dict[str, bytes]:
+    """Every file under ``secrets_dir`` by name, each through ``_read_regular_file``."""
+    if not os.path.lexists(secrets_dir):
+        return {}
+    if secrets_dir.is_symlink() or not secrets_dir.is_dir():
+        raise SetupError(f"{secrets_dir} is a link or not a directory; setup does not follow one.")
+    files = {}
+    for path in sorted(secrets_dir.iterdir()):
+        data = _read_regular_file(path)
+        if data is not None:
+            files[path.name] = data
+    return files
+
+
+def _write_new_private(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(data)
+
+
+def snapshot_for_rerun(snapshot_dir: Path, data_dir: Path, secrets_dir: Path) -> None:
+    """Copy what a web re-run's Finish may change into ``snapshot_dir`` (0700,
+    files 0600): ``config.toml``, ``managed.json`` and every secret file.
+
+    Built beside its destination and renamed into place, so a snapshot that
+    exists is a whole one. An existing snapshot is refused rather than
+    replaced: it is the only copy of a setup an earlier run did not finish.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    if os.path.lexists(snapshot_dir):
+        raise SetupError(
+            f"A snapshot from an earlier re-run is at {snapshot_dir}. Put it back with "
+            f"`istota setup --restore {snapshot_dir}`, or remove it, then try again."
+        )
+    config_dir = Path(data_dir) / "config"
+    files = {name: _read_regular_file(config_dir / name) for name in SNAPSHOT_CONFIG_FILES}
+    if files["config.toml"] is None:
+        raise SetupError(f"There is no {config_dir / 'config.toml'} to snapshot.")
+    secret_files = _read_secret_dir(Path(secrets_dir))
+
+    partial = Path(tempfile.mkdtemp(prefix=f"{snapshot_dir.name}.partial.", dir=snapshot_dir.parent))
+    try:
+        os.chmod(partial, 0o700)
+        for name, data in files.items():
+            if data is not None:
+                _write_new_private(partial / name, data)
+        (partial / "secrets").mkdir(mode=0o700)
+        for name, data in secret_files.items():
+            _write_new_private(partial / "secrets" / name, data)
+        os.rename(partial, snapshot_dir)
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+
+
+def restore_rerun_snapshot(snapshot_dir: Path, data_dir: Path, secrets_dir: Path) -> None:
+    """Put back what ``snapshot_for_rerun`` took, then remove the snapshot.
+
+    The config files go back through the writer the config editor uses and
+    the secret files through ``_write_secret_file``; a config file or a secret
+    file the snapshot does not have is removed, so the set is the snapshot's.
+    Everything is read before anything is written.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    if snapshot_dir.is_symlink() or not snapshot_dir.is_dir():
+        raise SetupError(f"{snapshot_dir} is not a setup snapshot.")
+    files = {name: _read_regular_file(snapshot_dir / name) for name in SNAPSHOT_CONFIG_FILES}
+    if files["config.toml"] is None or not (snapshot_dir / "secrets").is_dir():
+        raise SetupError(f"{snapshot_dir} is not a setup snapshot: it has no config.toml or secrets/.")
+    secret_files = _read_secret_dir(snapshot_dir / "secrets")
+    try:
+        secret_text = {name: data.decode("utf-8") for name, data in secret_files.items()}
+    except UnicodeDecodeError:
+        raise SetupError(f"A secret file in {snapshot_dir} is not text; restore it by hand.") from None
+
+    from istota import apply  # noqa: PLC0415
+
+    config_dir = Path(data_dir) / "config"
+    for name, data in files.items():
+        if data is None:
+            (config_dir / name).unlink(missing_ok=True)
+        else:
+            apply.write_private(config_dir / name, data)
+    secrets_dir = Path(secrets_dir)
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(secrets_dir, 0o700)
+    for name, text in secret_text.items():
+        _write_secret_file(secrets_dir / name, text)
+    for path in secrets_dir.iterdir():
+        if path.name not in secret_text:
+            path.unlink()
+    shutil.rmtree(snapshot_dir)
+
+
+def run_rerun_snapshot(args, *, out) -> int:
+    """``istota setup --snapshot DIR`` / ``--restore DIR``, run as uid 10001
+    by ``istota-stack setup --web --force`` around the setup server."""
+    snapshot, restore = getattr(args, "snapshot", None), getattr(args, "restore", None)
+    if snapshot and restore:
+        raise SetupError("--snapshot and --restore are two steps; give one.")
+    if getattr(args, "web", False):
+        raise SetupError("--snapshot and --restore do not go with --web.")
+    setup_shape(args)
+    if not getattr(args, "vm_dir", None):
+        raise SetupError("--snapshot and --restore need --vm-dir, whose secrets/ they cover.")
+    data_dir = Path(getattr(args, "data_dir", None) or CONTAINER_DATA_DIR)
+    secrets_dir = Path(args.vm_dir) / "secrets"
+    if snapshot:
+        snapshot_for_rerun(Path(snapshot), data_dir, secrets_dir)
+        out(f"Took a snapshot of the setup files at {snapshot}.")
+    else:
+        restore_rerun_snapshot(Path(restore), data_dir, secrets_dir)
+        out(f"Put the setup files back from {restore}.")
+    return 0

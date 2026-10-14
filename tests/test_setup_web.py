@@ -529,19 +529,13 @@ class TestRefusals:
         assert "already set up" in err
         assert served == []
 
-    @pytest.mark.parametrize(
-        "extra,needle",
-        [
-            (["--force"], "--force"),
-        ],
-    )
-    def test_web_refuses_the_flags_it_cannot_mean(self, dirs, monkeypatch, capsys, extra, needle):
+    def test_web_force_without_a_config_has_nothing_to_change(self, dirs, monkeypatch, capsys):
         code, err, served = self._cli(
             monkeypatch, capsys,
-            ["setup", "--web", "--vm-dir", str(dirs.vm_dir), "--data-dir", str(dirs.data_dir), *extra],
+            ["setup", "--web", "--force", "--vm-dir", str(dirs.vm_dir), "--data-dir", str(dirs.data_dir)],
         )
         assert code == 1
-        assert needle in err
+        assert "no config" in err
         assert served == []
 
     def test_web_needs_a_vm_dir(self, dirs, monkeypatch, capsys):
@@ -1594,3 +1588,398 @@ class TestPlainWordsOnTheWeb:
         messages = {e.field: e.message for e in setup_wizard.validate_container_answers(a)}
         assert "--native-model" in messages["native_model"]
         assert "ISTOTA_BRAIN_NATIVE_API_KEY" in messages["native_api_key"]
+
+
+class TestTheForwardedPort:
+    """On the local VM the page builds its local address from the port Lima
+    forwards (host.env's LOCAL_FORWARD_PORT), and every route that turns the
+    draft into answers holds the hostname to it."""
+
+    @pytest.fixture
+    def forwarding(self, dirs, clock):
+        (dirs.vm_dir / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\nLOCAL_FORWARD_PORT=8181\n")
+        app, client = _make(dirs, clock)
+        assert _unlock(client).status_code == 200
+        return app, client
+
+    def test_state_names_the_local_address_without_a_session(self, dirs, clock):
+        (dirs.vm_dir / "host.env").write_text("LOCAL_FORWARD_PORT=8181\n")
+        _app, client = _make(dirs, clock)
+        body = client.get("/istota/api/setup/state").json()
+        assert body["phase"] == "locked"
+        assert body["local_address"] == "localhost:8181"
+
+    def test_with_no_forward_the_local_address_is_8080(self, server):
+        _app, client = server
+        assert client.get("/istota/api/setup/state").json()["local_address"] == "localhost:8080"
+
+    def test_validate_refuses_another_port_in_plain_words(self, forwarding):
+        _app, client = forwarding
+        _draft(client, **READY)
+        fields = _fields(_validate(client, "address"))
+        assert fields == [("hostname", "This computer reaches Istota at localhost:8181. Use that address.")]
+        _draft(client, hostname="localhost:8181")
+        assert _validate(client, "address").json() == {"ok": True, "fields": []}
+
+    def test_finish_refuses_another_port_and_writes_nothing(self, forwarding, dirs):
+        _app, client = forwarding
+        _draft(client, **READY)
+        resp = _finish(client)
+        assert resp.status_code == 400, resp.text
+        assert [f["field"] for f in resp.json()["fields"]] == ["hostname"]
+        assert resp.json()["step"] == "address"
+        assert not (dirs.data_dir / "config" / "config.toml").exists()
+
+    def test_finish_on_the_forward_publishes_on_it(self, forwarding, dirs):
+        _app, client = forwarding
+        _draft(client, **{**READY, "hostname": "localhost:8181"})
+        resp = _finish(client)
+        assert resp.status_code == 200, resp.text
+        env = (dirs.vm_dir / ".env").read_text()
+        assert "NGINX_PUBLISH=127.0.0.1:8181:80\n" in env
+        host = (dirs.vm_dir / "host.env").read_text()
+        assert "LOCAL_FORWARD_PORT=8181\n" in host and "STORAGE=host-folder\n" in host
+
+    def test_the_check_route_sees_the_forward(self, forwarding, monkeypatch):
+        _app, client = forwarding
+        seen = []
+
+        async def run_check(kind, a, browser_host, seconds):
+            seen.append(a.forwarded_port)
+            return setup_checks.CheckResult(ok=True, message="ok")
+
+        monkeypatch.setattr(setup_app, "_run_check", run_check)
+        _draft(client, **NATIVE)
+        assert _check(client, "model").status_code == 200
+        assert seen == [8181]
+
+
+# ---------------------------------------------------------------------------
+# Re-run mode: `istota setup --web --force` over a configured stack
+# ---------------------------------------------------------------------------
+
+from tests.test_setup_container import _FIRST_RUNS  # noqa: E402
+
+
+@pytest.fixture
+def _every_module(monkeypatch):
+    # Every module toggle is recorded, whatever extras this venv has.
+    monkeypatch.setattr("istota.modules.module_available", lambda _name: True)
+
+
+def _set_up(dirs, **fields) -> None:
+    """A stack a first run left behind, for `alice` unless ``fields`` say."""
+    a = setup_wizard.ContainerAnswers(**{"user_id": "alice", **fields})
+    setup_wizard.write_container_setup(
+        a, data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, out=lambda *_: None,
+    )
+
+
+def _stack_files(dirs) -> dict[str, bytes]:
+    """Every file setup writes, both roots, the config backups left out."""
+    files = {}
+    for name, root in (("data", dirs.data_dir), ("vm", dirs.vm_dir)):
+        for path, data in _written(root).items():
+            if ".bak." not in path:
+                files[f"{name}/{path}"] = data
+    return files
+
+
+def _rerun(dirs, clock, *, local=False):
+    return _make(dirs, clock, local=local, rerun=True)
+
+
+_NATIVE_STACK = dict(
+    hostname="localhost:8080", ingress="local", brain_kind="native",
+    native_model="model-x", native_api_key="native-key",
+)
+_EMAIL_STACK = dict(
+    hostname="localhost:8080", ingress="local", claude_code_oauth_token="oauth-token",
+    email_enabled=True, imap_host="imap.example.test", imap_user="zed@example.test",
+    imap_password="imap-pass", smtp_host="imap.example.test", bot_email="zed@example.test",
+)
+_NEXTCLOUD_STACK = dict(
+    hostname="bot.example.test", ingress="direct", nextcloud_url="https://cloud.example.test",
+    nextcloud_public_url="https://cloud.example.test", nextcloud_app_password="nc-pass",
+    oauth_client_id="client-id", oauth_client_secret="client-secret",
+    claude_code_oauth_token="oauth-token",
+)
+
+
+class TestTheRerunRefusals:
+    def test_force_with_web_is_accepted_over_a_config(self, dirs, monkeypatch, capsys, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        code, err, served = TestRefusals()._cli(
+            monkeypatch, capsys,
+            ["setup", "--web", "--force", "--local", "--vm-dir", str(dirs.vm_dir),
+             "--data-dir", str(dirs.data_dir)],
+        )
+        assert code == 0, err
+        assert len(served) == 1
+        assert served[0][0].state.setup.rerun is True
+
+    def test_a_rerun_needs_a_config(self, dirs):
+        with pytest.raises(setup_wizard.SetupError, match="no config"):
+            setup_app.create_setup_app(
+                data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path,
+                local=False, rerun=True,
+            )
+
+    def test_a_config_that_does_not_parse_refuses_and_names_the_terminal(self, dirs):
+        (dirs.data_dir / "config" / "config.toml").write_text("[brain\n")
+        with pytest.raises(setup_wizard.SetupError) as excinfo:
+            setup_app.create_setup_app(
+                data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path,
+                local=False, rerun=True,
+            )
+        assert "does not parse" in str(excinfo.value)
+        assert "istota-stack setup --force" in str(excinfo.value)
+
+    def test_two_possible_users_are_named_not_guessed(self, dirs, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        config_dir = dirs.data_dir / "config"
+        (config_dir / "admins").write_text("alice\nbob\n")
+        config = config_dir / "config.toml"
+        config.write_text(config.read_text() + '\n[users.bob]\ndisplay_name = "Bob"\n')
+        with pytest.raises(setup_wizard.SetupError) as excinfo:
+            setup_app.create_setup_app(
+                data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path,
+                local=False, rerun=True,
+            )
+        assert "alice" in str(excinfo.value) and "bob" in str(excinfo.value)
+
+    def test_a_value_setup_cannot_write_is_refused_by_name(self, dirs, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        config = dirs.data_dir / "config" / "config.toml"
+        config.write_text(config.read_text().replace('kind = "native"', 'kind = "tmux_claude"'))
+        with pytest.raises(setup_wizard.SetupError, match="brain.kind"):
+            setup_app.create_setup_app(
+                data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path,
+                local=False, rerun=True,
+            )
+
+    def test_a_first_run_app_still_refuses_a_config(self, dirs, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        with pytest.raises(setup_wizard.SetupError, match="already set up"):
+            setup_app.create_setup_app(
+                data_dir=dirs.data_dir, vm_dir=dirs.vm_dir, code_path=dirs.code_path, local=False,
+            )
+
+
+class TestTheSeededDraft:
+    def test_the_draft_is_the_stacks_answers_with_credentials_redacted(self, dirs, clock, _every_module):
+        _set_up(dirs, **_EMAIL_STACK)
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+
+        prior = setup_wizard.prior_answers(dirs.data_dir, dirs.vm_dir)
+        expected = setup_app._redacted_draft(setup_wizard.payload_from_answers(prior))
+        draft = client.get("/istota/api/setup/draft").json()["draft"]
+        assert draft == expected
+        assert draft["imap_password"] == {"set": True}
+        assert draft["imap_host"] == "imap.example.test"
+        assert "imap-pass" not in json.dumps(draft)
+
+    @pytest.mark.parametrize(
+        "fields", [case[1] for case in _FIRST_RUNS], ids=[case[0] for case in _FIRST_RUNS],
+    )
+    def test_payload_from_answers_reads_back_as_the_same_config(self, _every_module, fields):
+        a = setup_wizard.ContainerAnswers(user_id="alice", **fields)
+        payload = setup_wizard.payload_from_answers(a)
+        assert set(payload) == set(setup_wizard.WEB_SETUP_FIELDS)
+        back = setup_wizard.answers_from_payload(payload, base=a)
+        assert setup_wizard.render_container_config(back, inline_credentials=True) == (
+            setup_wizard.render_container_config(a, inline_credentials=True)
+        )
+
+    def test_state_says_rerun_to_anyone_and_the_user_only_to_the_session(self, dirs, clock, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        _app, client = _rerun(dirs, clock)
+        locked = client.get("/istota/api/setup/state").json()
+        assert locked["rerun"] is True
+        assert "user_id" not in locked
+        assert _unlock(client).status_code == 200
+        assert client.get("/istota/api/setup/state").json()["user_id"] == "alice"
+
+    def test_a_first_run_state_is_not_a_rerun(self, server):
+        _app, client = server
+        body = client.get("/istota/api/setup/state").json()
+        assert body["rerun"] is False
+        assert "user_id" not in body
+
+
+class TestTheRerunRules:
+    @pytest.fixture
+    def rerun(self, dirs, clock, _every_module):
+        _set_up(dirs, **_EMAIL_STACK)
+        app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        return app, client
+
+    def test_no_email_or_password_is_needed(self, rerun):
+        _app, client = rerun
+        assert _validate(client, "review").json() == {"ok": True, "fields": []}
+
+    def test_a_username_the_terminal_made_is_accepted(self, dirs, clock, _every_module):
+        # `valid_new_user_id` refuses upper case; the terminal never applied it.
+        _set_up(dirs, **{**_NATIVE_STACK, "user_id": "Alice"})
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        assert _validate(client, "review").json() == {"ok": True, "fields": []}
+
+    def test_another_username_is_refused(self, rerun):
+        _app, client = rerun
+        _draft(client, user_id="bob")
+        fields = _fields(_validate(client, "welcome"))
+        assert [f for f, _m in fields] == ["user_id"]
+        assert "alice" in fields[0][1]
+
+    def test_a_stack_on_an_api_key_needs_no_subscription_token(self, dirs, clock, _every_module):
+        _set_up(dirs, hostname="localhost:8080", ingress="local", anthropic_api_key="api-key")
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        assert _validate(client, "model").json() == {"ok": True, "fields": []}
+
+    def test_there_is_no_account_step(self, rerun):
+        _app, client = rerun
+        assert _validate(client, "account").status_code == 400
+        steps = setup_app.setup_steps(rerun=True)
+        assert "account" not in steps
+        assert list(steps) == [s for s in setup_app.SETUP_STEPS if s not in setup_app.RERUN_SKIPPED_STEPS]
+        assert setup_app.PASSWORD_FIELD not in steps["review"]
+        assert setup_app.setup_steps(rerun=False) is setup_app.SETUP_STEPS
+
+
+class TestACredentialFollowsItsHost:
+    """A stored credential is dropped from the draft when the host it was
+    stored for changes, so no check or Finish sends it somewhere new."""
+
+    @pytest.fixture
+    def rerun(self, dirs, clock, _every_module):
+        _set_up(dirs, **_EMAIL_STACK)
+        app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        return app, client
+
+    def test_a_changed_mail_server_drops_the_stored_password(self, rerun):
+        app, client = rerun
+        draft = _draft(client, imap_host="mail.elsewhere.test").json()["draft"]
+        assert draft["imap_password"] == {"set": False}
+        assert app.state.setup.draft["imap_password"] == ""
+        fields = _fields(_validate(client, "connections"))
+        assert [f for f, _m in fields] == ["imap_password"]
+
+    def test_a_changed_smtp_server_drops_the_imap_password_too(self, rerun):
+        # The SMTP password falls back to the IMAP one.
+        app, client = rerun
+        _draft(client, smtp_host="smtp.elsewhere.test")
+        assert app.state.setup.draft["imap_password"] == ""
+        fields = _fields(_validate(client, "connections"))
+        assert [f for f, _m in fields] == ["imap_password"]
+
+    def test_a_changed_model_endpoint_drops_the_native_key(self, dirs, clock, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        state = app.state.setup
+        assert state.draft["native_api_key"] == "native-key"
+
+        _draft(client, native_base_url="https://other.example.test/v1")
+
+        assert state.draft["native_api_key"] == ""
+        fields = _fields(_validate(client, "model"))
+        assert "native_api_key" in [f for f, _m in fields]
+
+    def test_moving_back_does_not_bring_it_back(self, rerun):
+        app, client = rerun
+        _draft(client, imap_host="mail.elsewhere.test")
+        _draft(client, imap_host="imap.example.test")
+        assert app.state.setup.draft["imap_password"] == ""
+
+    def test_the_same_server_keeps_it(self, rerun):
+        app, client = rerun
+        _draft(client, imap_host=" imap.example.test ", imap_user="zed@example.test")
+        assert app.state.setup.draft["imap_password"] == "imap-pass"
+
+    def test_a_new_password_given_with_the_new_server_is_kept(self, rerun):
+        app, client = rerun
+        _draft(client, imap_host="mail.elsewhere.test", imap_password="new-pass")
+        assert app.state.setup.draft["imap_password"] == "new-pass"
+        assert _validate(client, "connections").json() == {"ok": True, "fields": []}
+
+    def test_a_changed_nextcloud_drops_its_password_and_the_oauth_pair(self, dirs, clock, _every_module):
+        _set_up(dirs, **_NEXTCLOUD_STACK)
+        app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        state = app.state.setup
+        assert setup_app._answers_for(state, state.draft).oauth_client_secret == "client-secret"
+
+        _draft(client, nextcloud_url="https://other.example.test")
+
+        assert state.draft["nextcloud_app_password"] == ""
+        a = setup_app._answers_for(state, state.draft)
+        assert (a.oauth_client_id, a.oauth_client_secret) == ("", "")
+        assert "nextcloud" not in a.web_auth
+        fields = _fields(_validate(client, "nextcloud"))
+        assert [f for f, _m in fields] == ["nextcloud_app_password"]
+
+
+class TestARerunFinish:
+    @pytest.mark.parametrize(
+        "fields", [case[1] for case in _FIRST_RUNS], ids=[case[0] for case in _FIRST_RUNS],
+    )
+    def test_finishing_with_no_edits_writes_the_same_bytes(self, dirs, clock, _every_module, fields):
+        _set_up(dirs, **fields)
+        before = _stack_files(dirs)
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+
+        resp = _finish(client)
+
+        assert resp.status_code == 200, resp.text
+        assert _stack_files(dirs) == before
+        assert list((dirs.data_dir / "config").glob("config.toml.bak.*")) != []
+
+    def test_it_writes_the_marker_and_touches_no_account(self, dirs, clock, _every_module):
+        from istota import db
+
+        _set_up(dirs, **_NATIVE_STACK)
+        db_path = _db_path(dirs)
+        db_path.parent.mkdir(parents=True)
+        db.init_db(db_path)
+        user_profiles.ensure_profile(db_path, "alice", display_name="Alice From Settings", timezone="UTC")
+        db_before = db_path.read_bytes()
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+
+        resp = _finish(client)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"login_url": "http://localhost:8080/istota/login"}
+        assert (dirs.vm_dir / setup_app.SETUP_DONE).exists()
+        assert db_path.read_bytes() == db_before
+        assert len(list((dirs.data_dir / "config").glob("config.toml.bak.*"))) == 1
+
+    def test_an_edit_is_written(self, dirs, clock, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+        _draft(client, bot_name="Zed")
+
+        assert _finish(client).status_code == 200
+        assert 'bot_name = "Zed"' in (dirs.data_dir / "config" / "config.toml").read_text()
+
+    def test_a_rerun_on_the_wrong_port_is_refused_until_it_is_fixed(self, dirs, clock, _every_module):
+        _set_up(dirs, **_NATIVE_STACK)
+        host_env = dirs.vm_dir / "host.env"
+        host_env.write_text(host_env.read_text() + "LOCAL_FORWARD_PORT=8181\n")
+        _app, client = _rerun(dirs, clock)
+        assert _unlock(client).status_code == 200
+
+        resp = _finish(client)
+        assert resp.status_code == 400
+        assert [f["field"] for f in resp.json()["fields"]] == ["hostname"]
+
+        _draft(client, hostname="localhost:8181")
+        assert _finish(client).status_code == 200
+        assert "NGINX_PUBLISH=127.0.0.1:8181:80\n" in (dirs.vm_dir / ".env").read_text()

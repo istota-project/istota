@@ -82,7 +82,7 @@ sudo istota-stack rollback        # back to the release before
 
 The stack's state (the databases, the master key and, with local storage, the workspace) is the directory `/srv/app/istota/data`, bound at `/data` in the containers. Back it up. See [State and volumes](../deployment/running-the-stack.md#state-and-volumes).
 
-To change a setting, edit `/srv/app/istota/config/config.toml` and restart with `istota-stack down && istota-stack up`, or, as an admin, change it in the web UI's Configuration pane, which hands the change to the machine to apply ([Changing configuration from the web](../configuration/web-editor.md)). The running services read `config/` read-only. A credential is a file under `/srv/app/istota/secrets/`; replace it and restart.
+To change a setting, edit `/srv/app/istota/config/config.toml` and restart with `istota-stack down && istota-stack up`, or, as an admin, change it in the web UI's Configuration pane, which hands the change to the machine to apply ([Changing configuration from the web](../configuration/web-editor.md)). `istota-stack setup --web --force` goes through the setup page again, filled in with the current answers ([Running setup again](../deployment/running-the-stack.md#running-setup-again)). The running services read `config/` read-only. A credential is a file under `/srv/app/istota/secrets/`; replace it and restart.
 
 The optional containers (`browser`, `whatsapp-baileys`, `signaling`) are Compose profiles. The wizard turns them on from your answers by writing `COMPOSE_PROFILES` in `/srv/app/istota/.env`; see [Optional profiles](../deployment/running-the-stack.md#optional-profiles).
 
@@ -94,7 +94,7 @@ On an Apple silicon Mac the same stack runs in a Lima VM dedicated to it, with a
 curl -fsSL https://raw.githubusercontent.com/istota-project/istota/main/install.sh | bash -s -- --local
 ```
 
-Run it as yourself, without `sudo`. [Local install](local-install.md) covers the requirements, the workspace folder, the browser setup, backups to the Keychain and the folder, and moving a standalone install in.
+Run it as yourself, without `sudo`. The setup opens in your browser once the VM is built; `--terminal-setup` asks in the terminal there too. [Local install](local-install.md) covers the requirements, the workspace folder, the browser setup, backups to the Keychain and the folder, and moving a standalone install in.
 
 ## Managing the machine from Ansible
 

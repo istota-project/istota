@@ -420,7 +420,7 @@ def _keep_newest_backups(config_path: Path, keep: int) -> None:
         stale.unlink(missing_ok=True)
 
 
-def _write_config(config_path: Path, new_text: str, backup: int | None) -> None:
+def write_config_with_backup(config_path: Path, new_text: str, backup: int | None) -> None:
     if backup and config_path.exists():
         # Bytes, so the backup is the file as it was, line endings included.
         previous = config_path.read_bytes()
@@ -445,7 +445,7 @@ def plan_config(document: object, config_path: Path, *, backup: int | None = Non
     )
     return SectionPlan(
         "config", changed=True, diff=diff, warnings=warnings,
-        write=lambda: _write_config(config_path, new_text, backup),
+        write=lambda: write_config_with_backup(config_path, new_text, backup),
     )
 
 

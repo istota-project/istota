@@ -12,13 +12,21 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SETUP_STEPS, deriveUsername, isSetupStep, stepPosition } from './setupDraft.svelte';
+import {
+  SETUP_STEPS,
+  deriveUsername,
+  isSetupStep,
+  neighbourStep,
+  setupSteps,
+  stepPosition,
+} from './setupDraft.svelte';
 
 const SETUP_APP = resolve(__dirname, '../../../../../src/istota/webui/setup_app.py');
 
 function serverSteps(): string[] {
   const source = readFileSync(SETUP_APP, 'utf-8');
-  const start = source.indexOf('SETUP_STEPS: dict[str, tuple[str, ...]] = {');
+  // Anchored at the line start: `RERUN_SETUP_STEPS` declares the same type.
+  const start = source.indexOf('\nSETUP_STEPS: dict[str, tuple[str, ...]] = {');
   const end = source.indexOf('\n}\n', start);
   expect(start).toBeGreaterThan(-1);
   const block = source.slice(start, end);
@@ -28,9 +36,34 @@ function serverSteps(): string[] {
   return [...steps, ...extra];
 }
 
+/** The server's `RERUN_SKIPPED_STEPS`, the screens a re-run leaves out. */
+function serverRerunSkipped(): string[] {
+  const source = readFileSync(SETUP_APP, 'utf-8');
+  const match = source.match(/^RERUN_SKIPPED_STEPS: tuple\[str, \.\.\.\] = \(([^)]*)\)/m);
+  expect(match).not.toBeNull();
+  return [...match![1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+}
+
 describe('setup steps', () => {
   it('are the server’s steps, in the server’s order', () => {
     expect(SETUP_STEPS.map((s) => s.id)).toEqual(serverSteps());
+  });
+
+  it('in a re-run are the server’s re-run steps, without the password screen', () => {
+    const skipped = serverRerunSkipped();
+    expect(skipped).toEqual(['account']);
+    const expected = serverSteps().filter((s) => !skipped.includes(s));
+    expect(setupSteps(true).map((s) => s.id)).toEqual(expected);
+    expect(setupSteps(false)).toBe(SETUP_STEPS);
+  });
+
+  it('in a re-run go from Welcome straight to the AI service, and know no account step', () => {
+    const rerun = setupSteps(true);
+    expect(neighbourStep('welcome', 1, rerun)).toBe('model');
+    expect(neighbourStep('model', -1, rerun)).toBe('welcome');
+    expect(isSetupStep('account', rerun)).toBe(false);
+    expect(isSetupStep('account')).toBe(true);
+    expect(stepPosition('review', rerun)).toBe(SETUP_STEPS.length - 1);
   });
 
   it('recognise only their own ids', () => {

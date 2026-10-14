@@ -1,13 +1,21 @@
 <script lang="ts">
-  import { SETUP_STEPS, stepInfo, stepPosition, type SetupStepId } from './setupDraft.svelte';
+  import {
+    SETUP_STEPS,
+    stepInfo,
+    stepPosition,
+    type SetupStepId,
+    type SetupStepList,
+  } from './setupDraft.svelte';
 
   interface Props {
     current: SetupStepId;
+    /** A re-run's list has fewer screens. */
+    steps?: SetupStepList;
   }
 
-  let { current }: Props = $props();
+  let { current, steps = SETUP_STEPS }: Props = $props();
 
-  const position = $derived(stepPosition(current));
+  const position = $derived(stepPosition(current, steps));
   const title = $derived(stepInfo(current).title);
 </script>
 
@@ -18,7 +26,7 @@
 -->
 <nav class="setup-steps" aria-label="Setup progress">
   <ol class="dots">
-    {#each SETUP_STEPS as step, index (step.id)}
+    {#each steps as step, index (step.id)}
       <li
         class="dot"
         class:done={index + 1 < position}
@@ -29,7 +37,7 @@
       </li>
     {/each}
   </ol>
-  <p class="label">Step {position} of {SETUP_STEPS.length} · {title}</p>
+  <p class="label">Step {position} of {steps.length} · {title}</p>
 </nav>
 
 <style>
