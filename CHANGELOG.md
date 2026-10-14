@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
+
+**Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
+
 ## [0.44.0] - 2026-10-13 (Coconut octopus)
 
 Istota now installs the same way everywhere: the Docker stack on a machine of its own, updated from signed releases. On an Apple silicon Mac, `install.sh --local` runs it in a Lima VM with `~/Istota` as the workspace folder. On a server, `install.sh --server` or a cloud VM started from `host/cloud-init.yaml` does the same, and setup runs in the browser. Nextcloud is now optional, since the workspace can be a local folder. The new Workspace tab browses, previews, uploads and pins your files, Google Drive and Nextcloud shares, search beside the bell finds messages, memories and records with Cmd+K, and admins can edit the configuration from the web.

@@ -4,7 +4,12 @@ The map is the one table shared by the settings picker, the granted-scope
 display and the docs. Everything here is pure: no DB, no network.
 """
 
+from pathlib import Path
+import re
+import tomllib
+
 import pytest
+import yaml
 
 from istota.credentials import google_scopes as gs
 
@@ -377,3 +382,22 @@ class TestContactsScopes:
         assert gs.missing_scopes(
             [CONTACTS_RO, CONTACTS_OTHER_RO], [CONTACTS_FULL, CONTACTS_OTHER_RO],
         ) == []
+
+
+@pytest.mark.parametrize("example", ["toml", "ansible"])
+def test_documented_default_ceiling_matches_runtime(example):
+    from istota.config import GoogleWorkspaceConfig
+
+    root = Path(__file__).resolve().parent.parent
+    if example == "toml":
+        text = (root / "config/config.example.toml").read_text()
+        block = text.split("# [google_workspace]\n", 1)[1].split("# ]", 1)[0]
+        uncommented = "\n".join(line.removeprefix("# ") for line in block.splitlines())
+        scopes = tomllib.loads(uncommented + "]\n")["scopes"]
+    else:
+        text = (root / "ansible/defaults/main.yml").read_text()
+        block = text.split("#   google_workspace:\n", 1)[1]
+        scopes_line = re.search(r"^#     scopes: (.+)$", block, re.MULTILINE)
+        assert scopes_line is not None
+        scopes = yaml.safe_load(scopes_line[1])
+    assert scopes == GoogleWorkspaceConfig().scopes
