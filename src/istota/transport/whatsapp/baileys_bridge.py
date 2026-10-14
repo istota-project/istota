@@ -473,9 +473,10 @@ def default_pairing_relay_path(config: Config) -> Path:
     elsewhere — the paired session itself already sit in, and which the
     sandbox binds at no path.
 
-    **The standalone install is the exception and the path moves off the state
-    root there.** `setup_wizard` puts `db_path` at `{workspace}/istota.db`, so
-    `db_path.parent`, `workspace_path` and the state root are one directory:
+    **A config with the database in the workspace is the exception and the
+    path moves off the state root there.** With `db_path` at
+    `{workspace}/istota.db`, `db_path.parent`, `workspace_path` and the state
+    root are one directory:
     the shape where `_mask_dir` refuses outright, and where a `user_resources`
     row is bounded by `workspace_path` alone. The credential *class* is no
     different from `creds.json` already sitting in that unmasked tree, but a
@@ -573,8 +574,8 @@ def in_tree_sidecar_argv() -> tuple[str, ...]:
 
     `istota whatsapp pair`'s fallback, and **only** its fallback. Pairing
     needs a sidecar of its own — it is what makes the command work on a
-    developer machine and on a standalone install made from a clone with no
-    deployment wiring, and it is what gets a logged-out deployment out of the
+    developer machine running `istota serve` from a clone with no deployment
+    wiring, and it is what gets a logged-out deployment out of the
     one-way door a permanent fatal closes. The daemon must not take it; see
     `resolve_sidecar_argv`.
 
@@ -630,7 +631,7 @@ def shipped_library_version() -> str:
 def ensure_session_dir(path: Path) -> Path:
     """Create or tighten the session directory, and return it.
 
-    `setup_wizard`'s rule for `istota.env`, applied to a directory: the mode
+    `setup_wizard._write_private`'s rule, applied to a directory: the mode
     passed to `mkdir` applies **only to a directory the call creates**, and
     re-running against one that already exists is the whole case this has to
     get right — so the mode is asserted on a descriptor afterwards, every time.

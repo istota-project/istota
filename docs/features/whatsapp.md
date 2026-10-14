@@ -171,7 +171,7 @@ pairing_relay_path = ""         # defaults beside the database
 restart_interval_seconds = 0    # how long your supervisor takes to restart the sidecar
 ```
 
-The last four are the re-pairing flow's. `pairing_relay_path` is where a code crosses from the process holding the sidecar to the process serving `/admin`; the default sits beside the framework database at 0600, and on the standalone install it resolves off the workspace root instead, since there the two are one directory and the workspace is readable from inside a task's sandbox. A window is refused outright where the resolved path would still land inside a sandbox-bound directory, and the card says which setting to change.
+The last four are the re-pairing flow's. `pairing_relay_path` is where a code crosses from the process holding the sidecar to the process serving `/admin`; the default sits beside the framework database at 0600, and where the database sits in the workspace it resolves off the workspace root instead, since there the two are one directory and the workspace is readable from inside a task's sandbox. A window is refused outright where the resolved path would still land inside a sandbox-bound directory, and the card says which setting to change.
 
 `restart_interval_seconds` is a declaration rather than a control: it tells Istota roughly how long your supervisor waits before restarting the sidecar, and the only thing it changes is how long the card waits before saying the sidecar has not come back. Compose leaves it `0`, because Docker's backoff is not an interval; `0` means undeclared and a fixed 30-second allowance is used.
 

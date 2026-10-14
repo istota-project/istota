@@ -3530,9 +3530,6 @@ class TestWebAuthMethods:
         cfg = Config(web=WebConfig(auth=raw))
         assert cfg.web.auth == expected
         assert cfg.web.has_method("email") == ("email" in expected)
-        assert cfg.is_standalone == (expected == ["none"])
-        cfg.nextcloud.url = "https://cloud.example.com"
-        assert not cfg.is_standalone
         path = tmp_path / "config.toml"
         path.write_text("[web]\nauth = " + json.dumps(raw) + "\n")
         assert load_config(path).web.auth == expected

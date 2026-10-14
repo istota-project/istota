@@ -127,7 +127,7 @@ def _write_credential_shim(user_temp_dir: Path) -> Path | None:
     the call creates, and ``user_temp_dir`` persists across tasks — so a
     pre-existing one keeps whatever mode it had, which is the rule
     ``.claude/rules/whatsapp.md`` states for the Baileys session directory and
-    ``setup_wizard`` states for the env file. The same open is what refuses a
+    ``setup_wizard._write_private`` states for a file. The same open is what refuses a
     symlink standing at that name: the read-only re-bind in ``sandbox_plan``
     stops a task planting one, and this is what covers a deployment that
     already had one when the bind arrived.

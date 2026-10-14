@@ -231,8 +231,8 @@ RUN groupadd -g 10001 istota \
 RUN mkdir -p /data/db /data/config /data/tmp /data/home /data/workspace /data/logs \
     && chown -R 10001:10001 /data
 
-# `istota setup` run in this image writes the container shape's config
-# (/data/config/config.toml), not the standalone install's.
+# `istota setup` runs only in this image, where it writes the container's
+# config (/data/config/config.toml); outside it, it refuses.
 ENV ISTOTA_SETUP_SHAPE=container
 
 # The app log when the config names no `[logging] file` (ISSUE-703): on the

@@ -1,10 +1,10 @@
 """The tree's one TOML writer: `toml_string` and `dumps`.
 
-`tomllib` reads and does not write. Three writers grew beside it: the standalone
-wizard's `_toml_str` with hand-assembled lines, the container wizard's
-`tomli_w.dumps`, and the testbed's own `toml_dumps`, because the testbed may not
-depend on what istota depends on. This is all three, and `istota apply` renders
-through it as well.
+`tomllib` reads and does not write. Three writers grew beside it: the old
+standalone wizard's `_toml_str` with hand-assembled lines, the container
+wizard's `tomli_w.dumps`, and the testbed's own `toml_dumps`, because the
+testbed may not depend on what istota depends on. This replaced all three, and
+`istota apply` renders through it as well.
 
 `dumps` takes what `tomllib` returns (tables, arrays of tables, strings,
 integers, finite or infinite floats, booleans, dates and times, arrays) and

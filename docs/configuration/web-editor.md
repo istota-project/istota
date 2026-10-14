@@ -13,7 +13,7 @@ The web container cannot write `config/` (it is bound read-only into every servi
 
 Every applied change restarts the stack. The review dialog shows how many tasks are running, so the admin can wait for them.
 
-The applier is part of the stack's VM, a server or the local VM on a Mac, set up by `host/provision.sh`. Anywhere else (`istota serve` on macOS, a standalone install) the page is read-only and says so. On a VM provisioned before the applier was added, the page is read-only until `istota-stack update` re-runs provisioning and the stack restarts.
+The applier is part of the stack's VM, a server or the local VM on a Mac, set up by `host/provision.sh`. Anywhere else (`istota serve` on macOS) the page is read-only and says so. On a VM provisioned before the applier was added, the page is read-only until `istota-stack update` re-runs provisioning and the stack restarts.
 
 ## What it guards
 

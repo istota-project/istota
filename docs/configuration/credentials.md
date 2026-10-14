@@ -28,7 +28,7 @@ These belong to the Istota instance, not to any user. They live in `config.toml`
 | `ISTOTA_SECRET_KEY` | env only | `ISTOTA_SECRET_KEY` | Fernet encryption for tier-2 secrets |
 | `ISTOTA_WEB_TOKEN_KEY` | env only | `ISTOTA_WEB_TOKEN_KEY` | Separate Fernet key for stored per-user Talk tokens (`web_user_tokens`) |
 
-CalDAV credentials are derived from the Nextcloud app password automatically, so a Nextcloud-backed deployment configures nothing separately. The shape with no Nextcloud has no app password to derive from, so an install pointed at a CalDAV server of its own writes a `[caldav]` section, whose `password` takes `ISTOTA_CALDAV_PASSWORD`. Any field set there wins over the Nextcloud derivation, so it is equally how a Nextcloud deployment points at an external calendar server. That override is what keeps the credential out of `config.toml`, which on the standalone install is a generated file whose own header says secrets belong in the sibling `istota.env`.
+CalDAV credentials are derived from the Nextcloud app password automatically, so a Nextcloud-backed deployment configures nothing separately. The shape with no Nextcloud has no app password to derive from, so an install pointed at a CalDAV server of its own writes a `[caldav]` section, whose `password` takes `ISTOTA_CALDAV_PASSWORD`. Any field set there wins over the Nextcloud derivation, so it is equally how a Nextcloud deployment points at an external calendar server. That override is what keeps the credential out of `config.toml`.
 
 The SMS and WhatsApp rows are the exception to the credential-proxy sentence introducing this table: those credentials are consumed by the transports, which run in the daemon and web processes, and never enter a task's environment at all — so there is nothing for the credential proxy to strip. The non-secret account identifiers beside them — Twilio's `account_sid`, `api_key_sid` and `messaging_service_sid`, and Telnyx's `messaging_profile_id` — take `ISTOTA_SMS_*` overrides of their own so a whole provider block can come from the environment. WhatsApp's `waba_id` and `phone_number_id` do not: they are plain config in `config.toml`. Every field is listed in the [configuration reference](reference.md). The `baileys` WhatsApp adapter has no credential in config: the paired WhatsApp Web session on disk *is* the credential — see [WhatsApp](../features/whatsapp.md).
 
@@ -139,7 +139,7 @@ The daemon attempts one final non-deleting import for each configured legacy fil
 
 `ISTOTA_SECRET_KEY` opens the encrypted database. Losing it loses every stored credential unless you have an independent export. Keep a copy outside the storage and backups that hold the database.
 
-The stack keeps it at `/data/.secret_key`, which is `/srv/app/istota/data/.secret_key` on the VM. The local VM also copies it into the Mac's login Keychain (service `istota.local`), which is what `istota-stack restore` reads. A standalone installation uses `istota.env` beside its configuration. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
+The stack keeps it at `/data/.secret_key`, which is `/srv/app/istota/data/.secret_key` on the VM. The local VM also copies it into the Mac's login Keychain (service `istota.local`), which is what `istota-stack restore` reads. Database snapshots under `Backups/db/snapshots` do not include the key. A backup of all of `/data` may contain both the database and its key, so it does not provide that separation.
 
 An age credential backup is an independent recovery path: decrypt it with the private age key you keep elsewhere, then open its KeePass file with the enclosed password. It needs no server secret key. `security.key_separation` checks file locations, and reports when scheduled credential backups are off.
 
@@ -228,7 +228,7 @@ For the full skill development workflow including env var mapping, see [adding s
 
 The credential broker lets a task use a stored credential without ever holding its value. The task writes a placeholder such as `{{cred:portal_token}}` where the secret would go, and the network proxy puts the real value in on the way out, only on a connection to that credential's own site. The value never enters the sandbox, so a task that has been steered by a prompt injection has nothing to copy out.
 
-The broker and reveal enforcement are both on by default on the stack. On a shape without a sandbox and a network proxy, such as the deprecated standalone install or `istota serve` on a Mac, they are off by default, because a placeholder needs the proxy to be substituted and a value is only contained by the sandbox.
+The broker and reveal enforcement are both on by default on the stack. On a shape without a sandbox and a network proxy, such as `istota serve` on a Mac, they are off by default, because a placeholder needs the proxy to be substituted and a value is only contained by the sandbox.
 
 ### What it changes
 

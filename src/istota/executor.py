@@ -3032,8 +3032,9 @@ def effective_sandboxing(config: Config) -> bool:
     """Whether the filesystem sandbox is actually in place for this deployment.
 
     ``sandbox_enabled`` is what the operator asked for; this is what they got.
-    Four shapes run the model with the daemon's own filesystem access: the
-    standalone install, which ships ``sandbox_enabled = false``; and — despite
+    Four shapes run the model with the daemon's own filesystem access: a
+    config with ``sandbox_enabled = false`` (a checkout running ``istota
+    serve``); and — despite
     the flag being set — a container where the bwrap probe fails (no
     CAP_SYS_ADMIN, and that one is multi-user), a Linux host with no bwrap
     installed, and any non-Linux host.
@@ -3055,8 +3056,8 @@ def effective_sandboxing(config: Config) -> bool:
     not _bwrap_available()`` — "asked for it, didn't get it", which is
     ``sandbox_enabled and not effective_sandboxing(config)`` and not the plain
     negation. Collapsing it to ``not effective_sandboxing(config)`` would fire
-    an unsupported-configuration warning on every standalone install, which
-    ships the flag off deliberately.
+    an unsupported-configuration warning on every install that switches the
+    flag off deliberately.
     """
     return bool(config.security.sandbox_enabled and _bwrap_available())
 
@@ -3235,8 +3236,8 @@ def build_clean_env(config: Config) -> dict[str, str]:
     # USER/LOGNAME are process-identity basics, not secrets. The macOS login
     # Keychain lookup the `claude` CLI uses to find its OAuth credential needs
     # them — without them a stripped-env `claude -p` reports "Not logged in"
-    # even though the interactive CLI is authenticated (the standalone/local
-    # install's default brain). Harmless on Linux, where the credential is a
+    # even though the interactive CLI is authenticated (`istota serve` on a
+    # Mac checkout). Harmless on Linux, where the credential is a
     # file under HOME.
     for identity_key in ("USER", "LOGNAME"):
         identity_val = os.environ.get(identity_key)
@@ -4482,8 +4483,8 @@ def mask_shadowed_by(candidate: Path, protected: Iterable[Path]) -> list[Path]:
     ``doctor``'s ``runtime.session_log_dir`` check has to ask this exact
     question. "Is the directory under ``db_path.parent``" is the tempting
     second copy and it is wrong in the one case that matters: it answers True on
-    the standalone install, where ``db_path.parent`` *is* the workspace and the
-    mask is refused — so the checker would report the property holding while the
+    a config whose ``db_path.parent`` *is* the workspace, where the mask is
+    refused — so the checker would report the property holding while the
     directory sat outside every mask, which is the ``map_basemap`` two-consumers
     failure exactly.
     """
@@ -5004,7 +5005,8 @@ def native_fs_roots(
     What these roots still do is produce the error the model reads. "Cannot
     read /etc/shadow: path is outside the allowed workspace" is a better answer
     than ENOENT, and it is the answer on the unsandboxed shapes too — macOS,
-    the standalone install, a Docker stack without the two container settings —
+    a config with the sandbox off, a Docker stack without the two container
+    settings —
     where ``build_bwrap_cmd`` hands the command back unwrapped and this list is
     once again the only confinement there is. So it still names
     ``build_bwrap_cmd``'s user-data binds exactly (not the system/venv binds,
@@ -5054,7 +5056,7 @@ def native_fs_roots(
 
     - ``read_roots`` is ``None`` when confinement is off, and ``None`` means
       *unconfined* — both root lists are then inert. So a ``read_only`` entry
-      alone protects nothing on the standalone install or the shipped Docker
+      alone protects nothing with the sandbox off or on the shipped Docker
       stack.
     - ``write_denied_roots`` is checked *ahead of* that unconfined return, so
       it is enforced whether or not confinement is active; its empty value is
@@ -5080,8 +5082,8 @@ def native_fs_roots(
     That is the same residual ``.claude/rules/brain.md`` records for the
     session-log directory, and it is out of scope on the same grounds: no
     shipped shape produces the layout (Ansible and Docker both put
-    ``temp_dir`` outside the mount; on the standalone install the two coincide
-    but ``sandbox_enabled`` is false, so this function is never called), and
+    ``temp_dir`` outside the mount; the old standalone install had the two
+    coincide but ``sandbox_enabled`` false, so this function was never called), and
     refusing a resource path is a decision about resources rather than about
     this guard. Stated so it is a known gap rather than an assumed absence.
 
@@ -5097,8 +5099,9 @@ def native_fs_roots(
 
     **This function is not the only producer of that deny entry, and must not
     become it.** ``execute_task`` calls this only under
-    ``native_fs_confinement_active``, so on an unsandboxed shape — macOS, the
-    standalone install, the shipped Docker stack — nothing here runs at all.
+    ``native_fs_confinement_active``, so on an unsandboxed shape — macOS, a
+    config with the sandbox off, the shipped Docker stack — nothing here runs
+    at all.
     The control directory is therefore seeded onto ``fs_write_denied_roots``
     *outside* that branch, which is where it does the most work: those are the
     deployments with no bwrap re-bind behind it. ``ToolEnv`` enforces a deny
@@ -7127,7 +7130,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             folder_line = "It is a normal local folder."
         file_tools = f"""- Your files live in {config.storage_label} at '{ws_display}'. Use standard file tools (Read, Write, Edit, ls, cat).
   - The workspace is the area you manage for the user (memory, notes, inbox, shared files). {folder_line}"""
-        # The standalone install is the only shape this is true of.
+        # A checkout running `istota serve` with the sandbox off.
         if not effective_sandboxing(config):
             file_tools += """
   - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
@@ -8786,8 +8789,8 @@ def execute_task(
         # (`session/tools/env.py`, and `test_denied_even_when_unconfined`).
         #
         # That matters because the unconfined shapes are the ones with nothing
-        # else: `build_bwrap_cmd` hands the command back unwrapped on macOS, on
-        # the standalone install and on the shipped Docker stack (which grants
+        # else: `build_bwrap_cmd` hands the command back unwrapped on macOS,
+        # with the sandbox off and on the shipped Docker stack (which grants
         # neither `seccomp:unconfined` nor `systempaths=unconfined`, so the
         # bwrap probe fails and every task runs uncontained). Gating this on
         # sandboxing would leave the directory with no guard at all on

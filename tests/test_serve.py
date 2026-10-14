@@ -1,4 +1,4 @@
-"""Stage 2 tests for the local single-user install: the ``istota serve`` launcher.
+"""The ``istota serve`` launcher, for development on a checkout.
 
 Covers ``run_daemon(install_signal_handlers=…, ready_event=…)`` +
 ``request_shutdown()``, ``serve.run_serve`` orchestration (scheduler thread ↔
@@ -22,7 +22,7 @@ from istota.config import (
 )
 
 
-def _standalone_config(tmp_path, *, init=True, with_user=True):
+def _serve_config(tmp_path, *, init=True, with_user=True):
     workspace = tmp_path / "workspace"
     cfg = Config(
         db_path=tmp_path / "istota.db",
@@ -65,7 +65,7 @@ class TestRequestShutdown:
     def test_run_daemon_no_signal_handlers_sets_ready_event(self, tmp_path, monkeypatch):
         import istota.scheduler as sched
 
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
 
         # Neutralize external subsystems that spawn real loops / write files.
         monkeypatch.setattr(sched, "DAEMON_LOCK_PATH", tmp_path / "daemon.lock")
@@ -107,7 +107,7 @@ class TestRequestShutdown:
         import fcntl
         import istota.scheduler as sched
 
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
         lock_path = tmp_path / "daemon.lock"
         monkeypatch.setattr(sched, "DAEMON_LOCK_PATH", lock_path)
 
@@ -167,21 +167,21 @@ class TestEnvFile:
 
 
 class TestBootstrapChecks:
-    def test_missing_db_raises_setup_hint(self, tmp_path):
+    def test_missing_db_raises_init_hint(self, tmp_path):
         from istota import serve
-        cfg = _standalone_config(tmp_path, init=False)
-        with pytest.raises(serve.ServeError, match="setup"):
+        cfg = _serve_config(tmp_path, init=False)
+        with pytest.raises(serve.ServeError, match="istota init"):
             serve.bootstrap_checks(cfg)
 
     def test_no_user_raises(self, tmp_path):
         from istota import serve
-        cfg = _standalone_config(tmp_path, init=True, with_user=False)
+        cfg = _serve_config(tmp_path, init=True, with_user=False)
         with pytest.raises(serve.ServeError, match="user"):
             serve.bootstrap_checks(cfg)
 
     def test_ok_seeds_workspace_dirs(self, tmp_path):
         from istota import serve
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
         serve.bootstrap_checks(cfg)
         base = cfg.workspace_path / "Users" / "alice"
         assert base.is_dir()
@@ -243,7 +243,7 @@ class _FakeServer:
 class TestRunServe:
     def test_loopback_guard_refuses_non_loopback(self, tmp_path):
         from istota import serve
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
         with pytest.raises(serve.ServeError, match="loopback"):
             serve.run_serve(cfg, host="0.0.0.0", port=8799)
 
@@ -251,7 +251,7 @@ class TestRunServe:
         import istota.scheduler as sched
         from istota import serve
 
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
 
         daemon_started = threading.Event()
 
@@ -286,7 +286,7 @@ class TestRunServe:
         import istota.scheduler as sched
         from istota import serve
 
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
         lock_path = tmp_path / "daemon.lock"
         monkeypatch.setattr(sched, "DAEMON_LOCK_PATH", lock_path)
 
@@ -305,10 +305,10 @@ class TestRunServe:
             fcntl.flock(holder, fcntl.LOCK_UN)
             holder.close()
 
-    def test_serve_before_setup_errors(self, tmp_path):
+    def test_serve_before_init_errors(self, tmp_path):
         from istota import serve
-        cfg = _standalone_config(tmp_path, init=False)
-        with pytest.raises(serve.ServeError, match="setup"):
+        cfg = _serve_config(tmp_path, init=False)
+        with pytest.raises(serve.ServeError, match="istota init"):
             serve.run_serve(cfg, host="127.0.0.1", port=8799)
 
 
@@ -422,7 +422,7 @@ class TestSupervisorShutdownNotice:
         from istota import serve
         from istota.webui import shutdown as web_shutdown
 
-        cfg = _standalone_config(tmp_path)
+        cfg = _serve_config(tmp_path)
 
         def fake_daemon(config, *, install_signal_handlers=True, ready_event=None):
             if ready_event is not None:

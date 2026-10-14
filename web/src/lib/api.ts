@@ -381,10 +381,6 @@ export interface AdminStats {
     /** The bot's own Nextcloud account, for the bot-icon control's copy. */
     nextcloud_username?: string | null;
   };
-  runtime?: {
-    mode: 'standalone' | 'server';
-    caveats: { title: string; detail: string }[];
-  };
   models?: {
     brain_kind: string;
     default_model: string;

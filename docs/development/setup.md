@@ -55,17 +55,17 @@ See [Secret scanning](secret-scanning.md).
 
 A Mac checkout runs Istota as one unsandboxed process on loopback, which is what `istota serve` is for. It is a development loop, not a deployment: there is no bubblewrap on macOS, so nothing confines a task, and the web app skips sign-in.
 
-There are two ways to give that process a config: let the wizard write one in your home directory, or [write one in the checkout by hand](#initialize-by-hand). Pick one. When both exist, the checkout's `config/config.toml` wins, because the config search order checks it before `~/.config/istota/config.toml`.
+The process needs a config you [write by hand](#initialize-by-hand); `istota setup` only runs inside the stack's image and refuses here. A minimal one for this loop sets `[web] auth = "none"`, `[security] sandbox_enabled = false` and `skill_proxy_enabled = false`, and names one user under `[users.<id>]`. With `auth = "none"` the admin pages open without an admins file, but shared briefing blocks and other shared writes need one: name it with `ISTOTA_ADMINS_FILE` and put that user in it.
 
 ```bash
-uv run istota setup              # writes ~/.config/istota/config.toml and istota.env, workspace ~/.istota
+uv run istota init               # create the database the config names
 uv run istota serve              # scheduler + web app at http://127.0.0.1:8766/istota
 npm --prefix web run dev         # optional: the Vite dev server, proxying the API to :8766
 ```
 
-`serve` serves `web/build` when it exists, so `npm --prefix web run build` is the other way to see frontend changes. `setup` here is the same wizard the deprecated [standalone install](../getting-started/standalone-install.md) uses; that page lists what it writes and what is off in this shape.
+`serve` serves `web/build` when it exists, so `npm --prefix web run build` is the other way to see frontend changes.
 
-If the checkout also has a `config/config.toml`, a bare `istota serve` run from the repo root loads that file and ignores the one the wizard wrote. Name the wizard's file with the global `-c`, which goes before the subcommand: `uv run istota -c ~/.config/istota/config.toml serve`.
+A config elsewhere than the checkout's `config/config.toml` is named with the global `-c`, which goes before the subcommand: `uv run istota -c ~/.config/istota/config.toml serve`.
 
 To run what operators run, sandbox included, use the Lima VM from the [quickstart](../getting-started/quickstart-server.md#on-a-mac). `scripts/test-vm.sh` drives the same template for the `vm` test tier.
 
@@ -89,7 +89,7 @@ This is a manual run. The `vm` test tier (`scripts/test-vm.sh`, instance `istota
 
 ## Initialize by hand
 
-The alternative to the wizard is a config in the checkout.
+A config in the checkout.
 
 ```bash
 uv run istota init               # Create database from schema.sql
@@ -140,7 +140,7 @@ uv run istota list [-s STATUS] [-u USER]              # List tasks
 uv run istota show <task-id>                          # Task details
 ```
 
-`istota update` belongs to the deprecated [standalone install](../getting-started/standalone-install.md) and does nothing for a dev checkout. The full command surface is in the [CLI reference](../reference/cli.md).
+The full command surface is in the [CLI reference](../reference/cli.md).
 
 ## Project layout
 

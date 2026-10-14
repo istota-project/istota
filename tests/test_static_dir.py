@@ -1,6 +1,6 @@
-"""Stage 4 tests: packaging static-dir fallback + workspace-as-local-folder polish."""
+"""Where the web bundle is served from, its cache headers, and a workspace that
+is a local folder."""
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -30,31 +30,19 @@ class TestStaticDirResolution:
         from istota.webui.app import _pick_static_dir
         repo = tmp_path / "repo"
         repo.mkdir()
-        pkg = tmp_path / "pkg"
-        pkg.mkdir()
-        got = _pick_static_dir(str(tmp_path / "env"), repo, pkg)
-        assert got == tmp_path / "env"
+        assert _pick_static_dir(str(tmp_path / "env"), repo) == tmp_path / "env"
 
-    def test_repo_build_preferred_over_packaged(self, tmp_path):
+    def test_repo_build_without_an_override(self, tmp_path):
         from istota.webui.app import _pick_static_dir
         repo = tmp_path / "repo"
         repo.mkdir()
-        pkg = tmp_path / "pkg"
-        pkg.mkdir()
-        assert _pick_static_dir("", repo, pkg) == repo
+        assert _pick_static_dir("  ", repo) == repo
 
-    def test_packaged_fallback_when_repo_absent(self, tmp_path):
+    def test_the_repo_path_even_when_it_is_absent(self, tmp_path):
+        """No packaged fallback: the wheel carries no bundle any more, and
+        doctor's `web.static` names the missing path."""
         from istota.webui.app import _pick_static_dir
-        repo = tmp_path / "repo"  # not created
-        pkg = tmp_path / "pkg"
-        pkg.mkdir()
-        assert _pick_static_dir("", repo, pkg) == pkg
-
-    def test_falls_back_to_repo_path_when_neither_exists(self, tmp_path):
-        from istota.webui.app import _pick_static_dir
-        repo = tmp_path / "repo"
-        pkg = tmp_path / "pkg"
-        assert _pick_static_dir("", repo, pkg) == repo
+        assert _pick_static_dir("", tmp_path / "repo") == tmp_path / "repo"
 
 
 @_needs_web_deps
@@ -181,27 +169,3 @@ class TestWorkspaceLocalFolder:
         # Re-run must not overwrite.
         ensure_workspace_for_user(cfg, "alice")
         assert mem.read_text() == "# my custom memory\n"
-
-
-# ---------------------------------------------------------------------------
-# Local extras group is declared
-# ---------------------------------------------------------------------------
-
-
-class TestLocalExtras:
-    def test_local_extras_declared(self):
-        import tomllib
-        root = Path(__file__).resolve().parent.parent
-        data = tomllib.loads((root / "pyproject.toml").read_text())
-        extras = data["project"]["optional-dependencies"]
-        assert "local" in extras
-        joined = " ".join(extras["local"])
-        for part in ("web", "feeds", "calendar", "email", "markets"):
-            assert part in joined
-
-    def test_wheel_artifacts_include_web_static(self):
-        import tomllib
-        root = Path(__file__).resolve().parent.parent
-        data = tomllib.loads((root / "pyproject.toml").read_text())
-        artifacts = data["tool"]["hatch"]["build"]["targets"]["wheel"].get("artifacts", [])
-        assert any("web_static" in a for a in artifacts)

@@ -128,8 +128,8 @@ def pipefail_env() -> dict[str, str]:
     ``#!/bin/sh`` script gets the option on macOS, where ``/bin/sh`` is bash in
     sh-mode and imports the variable, and not on Debian, where ``/bin/sh`` is
     dash and has no ``pipefail`` at all. So a ``make`` recipe, an ``npm``
-    lifecycle script or a ``subprocess(shell=True)`` is covered on the
-    standalone install and not on the server. Do not write either behaviour
+    lifecycle script or a ``subprocess(shell=True)`` is covered under ``istota
+    serve`` on a Mac and not on the server. Do not write either behaviour
     into a doc as though it were the rule.
 
     **Two more measured edges.** Bash 3.2 in POSIX mode (``--posix``, not

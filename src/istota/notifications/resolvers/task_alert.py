@@ -343,7 +343,7 @@ def admin_readers(config: "Config") -> list[str]:
     """Who an operator alert with no user behind it goes to.
 
     `load_admin_users()` returning an empty set is `Config.is_admin`'s "every
-    user is an admin", the single-user install's ordinary state, so it fans
+    user is an admin" on a single-user config, so it fans
     out rather than reaching nobody. An admins file naming nobody in
     `config.users` (a stale entry, a renamed account) falls back the same way
     rather than writing rows for users with no configuration.
