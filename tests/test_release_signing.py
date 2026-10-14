@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
@@ -60,3 +61,60 @@ def test_no_expression_is_interpolated_into_a_script():
     assert scripts
     offenders = [script.splitlines()[0] for script in scripts if "${{" in script]
     assert offenders == [], offenders
+
+
+def test_a_tag_it_signs_verifies_with_an_install_flags(tmp_path):
+    """Sign a tag with the shipped lines and check it as `host/istota-stack` does.
+
+    The notes come out of `$(...)` with no trailing newline, and git appends the
+    signature straight after the message; 0.44.0 was cut with the signature
+    glued to its last bullet, which `git verify-tag` cannot find.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("ssh-keygen"):
+        pytest.skip("ssh-keygen not installed")
+    block = re.search(r'^TITLE="Release \$TAG"\n.*?\nfi\n', RELEASE_SH, re.M | re.S)
+    assert block, "the tag-signing block in scripts/release.sh has moved"
+
+    key = tmp_path / "key"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    pub = key.with_suffix(".pub").read_text().split()
+    signers = tmp_path / "allowed_signers"
+    signers.write_text(f"release {pub[0]} {pub[1]}\n")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        "PATH": __import__("os").environ["PATH"],
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "x")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "gpg.format", "ssh")
+    git("config", "user.signingkey", str(key))
+
+    script = 'TAG=v9.9.9\nCODENAME="Dumbo octopus"\nNOTES="### Fixed\n\n- A last bullet."\n' + block.group(0)
+    r = subprocess.run(["bash", "-c", script], cwd=repo, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    body = git("cat-file", "tag", "v9.9.9").stdout
+    assert "\n- A last bullet.\n-----BEGIN SSH SIGNATURE-----\n" in body
+    assert body.splitlines()[5] == "Release v9.9.9 (Dumbo octopus)"
+    verified = git(
+        "-c", "gpg.format=ssh",
+        "-c", f"gpg.ssh.allowedSignersFile={signers}",
+        "-c", "gpg.openpgp.program=false",
+        "-c", "gpg.x509.program=false",
+        "verify-tag", "v9.9.9",
+    )
+    assert verified.returncode == 0, verified.stderr

@@ -223,7 +223,17 @@ git add CHANGELOG.md pyproject.toml
 git commit -m "Bump version to $NEW"
 TITLE="Release $TAG"
 [ -n "$CODENAME" ] && TITLE="Release $TAG ($CODENAME)"
-git tag -s "$TAG" --cleanup=verbatim -m "$TITLE" -m "$NOTES"
+# The message goes in through a file so it ends in a newline: `$(...)` strips
+# it, verbatim cleanup does not add one back, and git appends the signature
+# straight after the message, where `git verify-tag` cannot find it.
+TAG_MSG=$(mktemp)
+trap 'rm -f "$TAG_MSG"' EXIT
+printf '%s\n\n%s\n' "$TITLE" "$NOTES" > "$TAG_MSG"
+git tag -s "$TAG" --cleanup=verbatim -F "$TAG_MSG"
+if ! git cat-file tag "$TAG" | grep -qx -- '-----BEGIN SSH SIGNATURE-----'; then
+  echo "the signature on $TAG is not on a line of its own; not pushing" >&2
+  exit 1
+fi
 git verify-tag "$TAG" >/dev/null 2>&1 || {
   echo "warning: git verify-tag $TAG fails locally; add your key to gpg.ssh.allowedSignersFile to check it" >&2
 }
