@@ -113,10 +113,18 @@
       return;
     }
     const prior = selected;
-    detail = null;
-    if (prior) await select(prior);
-    const result = await getGroups();
-    if (active) groups = result.groups;
+    if (!prior) return;
+    const id = ++request;
+    try {
+      const updated = await getGroup(prior.group);
+      const result = await getGroups();
+      if (active && id === request) {
+        detail = updated;
+        groups = result.groups;
+      }
+    } catch (e) {
+      if (active && id === request) error = message(e);
+    }
   }
   onMount(() => {
     load();

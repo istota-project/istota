@@ -9,15 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Workspace group folders now link to the shared notebook and member list.
-
-- Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried without creating a second group.
-
-- Groups now has a member home for the shared notebook, recorded changes, members and linked rooms. Owners can manage membership and group details, and members can leave with a replacement owner when needed.
-
-- Group members can read and edit their shared notebook through the web API and inspect recorded changes. Web and bot edits share a lock, stale edits are refused, and unreadable notebooks keep their original contents.
-
-- The group management API lets owners edit metadata and membership, and lets admins create groups, recover owners and inspect membership history. Adding a member requires acknowledgement of access to existing shared memory; member views show only rooms the caller already belongs to.
+- Groups has a member home for the shared notebook, recorded changes, members and linked rooms, with links from Workspace. Web and bot edits share a lock; stale edits are refused and unreadable notebooks keep their contents.
+- Admin Groups lets administrators create groups with chosen owners, recover ownerless groups, inspect membership history and archive groups. Storage setup can be retried once the workspace returns, without creating a second group.
 - The local Mac install sizes its VM to the Mac: half its CPUs, a quarter of its memory and a disk of up to a quarter of the free space, each within bounds. Run on a terminal, it shows these defaults and asks for each; `--cpus`, `--memory` and the new `--disk` set them directly.
 - Interactive terminal setup opens with a small shaded octopus and a compact FIGlet-style Istota wordmark. Terminals without Unicode support use an ASCII version; unattended setup omits the banner.
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.

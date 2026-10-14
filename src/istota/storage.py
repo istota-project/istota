@@ -2786,7 +2786,10 @@ def ensure_group_directories(
             )
         return False
     try:
-        (group_dir / "memories").mkdir(parents=True, exist_ok=True)
+        # Never recreate a missing workspace when its storage is unavailable.
+        _get_mount_path(config, GROUP_BASE).mkdir(exist_ok=True)
+        group_dir.mkdir(exist_ok=True)
+        (group_dir / "memories").mkdir(exist_ok=True)
     except OSError as e:
         logger.warning("group_dir_create_failed group=%s errno=%s", group_id, e.errno)
         return False

@@ -322,3 +322,32 @@ it('refuses an editor reload after the notebook became unreadable', async () => 
   expect(within(dialog).queryByRole('textbox')).toBeNull();
   expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
 });
+
+it('keeps an owner metadata draft when reloading a revision conflict', async () => {
+  __history.reset('/istota/groups/?group=team&view=members');
+  const owned = { ...group, capabilities: { ...group.capabilities, manage: true } };
+  api.getGroup.mockResolvedValue(owned);
+  api.updateGroup.mockRejectedValueOnce(
+    new api.GroupApiError(409, 'revision_conflict', 'Group changed; reload before saving'),
+  );
+  render(Groups);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Edit group details' }));
+  await fireEvent.input(screen.getByRole('textbox', { name: 'Name' }), {
+    target: { value: 'My draft name' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save details' }));
+  await screen.findByText('Group changed; reload before saving');
+  api.getGroup.mockResolvedValue({ ...owned, revision: 4, display_name: 'Someone else edited' });
+  await fireEvent.click(screen.getByRole('button', { name: 'Reload group details' }));
+  await screen.findByRole('heading', { name: 'Someone else edited' });
+  expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue('My draft name');
+  api.updateGroup.mockResolvedValue({ ...owned, revision: 5 });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save details' }));
+  await waitFor(() =>
+    expect(api.updateGroup).toHaveBeenLastCalledWith('team', {
+      revision: 4,
+      display_name: 'My draft name',
+      kind: 'team',
+    }),
+  );
+});

@@ -212,3 +212,12 @@ def test_noop_does_not_increment_revision_or_add_event(config):
         assert not result["changed"] and result["revision"] == 1
         service.update_group(conn, "family", actor_id="alice", expected_revision=1, display_name="Family")
         assert conn.execute("SELECT count(*) FROM group_events").fetchone()[0] == 1
+
+
+def test_creation_does_not_replace_a_missing_workspace(config, tmp_path):
+    config.workspace_path = tmp_path / "missing-workspace"
+    with db.get_db(config.db_path) as conn:
+        result = create(conn, config)
+        assert result["storage_available"] is False
+        assert db.is_group_member(conn, "family", "alice")
+        assert not config.workspace_path.exists()

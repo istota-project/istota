@@ -174,3 +174,16 @@ def test_explicit_read_distinguishes_missing_from_unavailable(config):
     assert storage.read_group_memory_result(config, "fam") == {"status": "missing"}
     (_group_dir(config) / "GROUP.md").write_text("  \n")
     assert storage.read_group_memory_result(config, "fam") == {"status": "readable", "content": "  \n"}
+
+
+def test_cli_storage_retry_does_not_replace_a_missing_workspace(config, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, "fam", kind="family", display_name="Family", created_by="operator")
+    config.workspace_path.rmdir()
+    monkeypatch.setattr(cli, "load_config", lambda path=None: config)
+    cli.cmd_group_ensure_storage(SimpleNamespace(config=None, group_id="fam"))
+    assert '"storage_available": false' in capsys.readouterr().out
+    assert not config.workspace_path.exists()
