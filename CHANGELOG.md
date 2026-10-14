@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Look up and edit contacts in Nextcloud address books shared with the bot and in Google Contacts. Searches include Google’s read-only Other contacts and identify which source each result came from.
-- The Workspace sidebar marks each place Istota can use in your private room with a small robot icon, and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you.
+- The Workspace sidebar marks each place Istota can use in your private room with a small robot icon, pinned files and folders included, and a line at the bottom of the sidebar says what the icon means. Places without it, such as your own Nextcloud view, are visible only to you.
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 

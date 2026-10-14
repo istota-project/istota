@@ -1200,3 +1200,69 @@ it('uses default section state for an invalid saved preference', async () => {
   const sidebar = await screen.findByRole('complementary');
   await within(sidebar).findByRole('link', { name: 'My files' });
 });
+
+const markedPins = [
+  {
+    id: 20,
+    provider: 'workspace',
+    ref: '/Users/alice/plan.md',
+    name: 'Home plan',
+    available: true,
+    is_dir: false,
+  },
+  {
+    id: 21,
+    provider: 'workspace',
+    ref: '/Users/alice/gone.md',
+    name: 'Gone plan',
+    available: false,
+    is_dir: false,
+  },
+  {
+    id: 22,
+    provider: 'drive',
+    ref: 'file_123456',
+    name: 'Drive report',
+    available: true,
+    is_dir: false,
+    web_url: 'https://drive.google.com/file/d/file_123456',
+  },
+];
+
+it('marks available pins whose place a task can reach', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({ places: [home, drivePlace], notes: [] });
+  api.getWorkspacePins.mockResolvedValue({ pins: markedPins });
+  render(Workspace);
+  await openSection('Pinned');
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  const homePin = await within(pinned).findByRole('button', { name: 'Home plan' });
+  expect(homePin).toHaveAccessibleName('Home plan');
+  expect(homePin).toHaveAccessibleDescription('Istota can read and change these files');
+  const drivePin = within(pinned).getByRole('link', { name: 'Drive report' });
+  expect(drivePin).toHaveAccessibleDescription('Istota reaches this through a skill');
+  const gone = within(pinned).getByText('Gone plan').closest('.pin-row')!;
+  expect(gone.querySelector('.task-reach')).toBeNull();
+  expect(gone.querySelector('[aria-describedby]')).toBeNull();
+});
+
+it('leaves a Drive pin unmarked when no Drive place is listed', async () => {
+  api.getWorkspacePins.mockResolvedValue({ pins: markedPins });
+  render(Workspace);
+  await openSection('Pinned');
+  const pinned = await screen.findByRole('region', { name: 'Pinned files' });
+  const drivePin = await within(pinned).findByRole('link', { name: 'Drive report' });
+  expect(drivePin).not.toHaveAttribute('aria-describedby');
+  expect(drivePin.querySelector('.task-reach')).toBeNull();
+  expect(within(pinned).getByRole('button', { name: 'Home plan' })).toHaveAttribute(
+    'aria-describedby',
+    'task-reach-pin-20',
+  );
+});
+
+it('says the configuration files are read as instructions', async () => {
+  render(Workspace);
+  const section = await screen.findByRole('region', { name: 'Configuration' });
+  await openSection('Configuration');
+  await within(section).findByText('USER.md');
+  expect(within(section).getByText('Istota reads these as instructions.')).toBeTruthy();
+});

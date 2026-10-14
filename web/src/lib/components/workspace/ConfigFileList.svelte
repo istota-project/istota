@@ -54,6 +54,7 @@
     defaultOpen={false}
     storageKey="workspace:section:configuration"
   >
+    <p class="caption">Istota reads these as instructions.</p>
     {#if error}
       <div class="config-error">
         <span class="form-error">{error}</span>

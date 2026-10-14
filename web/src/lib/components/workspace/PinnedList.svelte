@@ -2,7 +2,8 @@
   import { CategoryGroup, KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
-  import { placeForRef } from './reach';
+  import TaskReachIcon from './TaskReachIcon.svelte';
+  import { placeForRef, reachesTasks } from './reach';
   let {
     pins,
     places,
@@ -38,6 +39,13 @@
     items.push({ label: 'Remove pin', disabled: busy, onSelect: () => onRemove(pin) });
     return items;
   }
+  function pinAccess(pin: WorkspacePin) {
+    if (!pin.available) return null;
+    if (pin.provider === 'drive') {
+      return places.find((place) => place.kind === 'drive')?.reach.private ?? null;
+    }
+    return placeForRef(places, pin.ref)?.reach.private ?? null;
+  }
   function folderTarget(pin: WorkspacePin) {
     if (!pin.available || !pin.is_dir || pin.provider !== 'workspace') return null;
     const place = placeForRef(places, pin.ref);
@@ -56,11 +64,14 @@
   >
     {#each pins as pin (pin.id)}
       {@const folder = folderTarget(pin)}
+      {@const access = pinAccess(pin)}
+      {@const reachId = `task-reach-pin-${pin.id}`}
+      {@const describedBy = access && reachesTasks(access) ? reachId : undefined}
       <div class="list-row pin-row">
         {#snippet content()}
           <span class="pin-label" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
-          >
+          >{#if access}<TaskReachIcon {access} id={reachId} />{/if}
         {/snippet}
         {#if !pin.available}
           <div class="unavailable">{@render content()}</div>
@@ -68,15 +79,23 @@
           <a
             class="view-btn"
             href={href(folder.place, folder.path)}
+            aria-describedby={describedBy}
             onclick={(event) => onNavigate(event, folder.place, folder.path)}>{@render content()}</a
           >
         {:else if pin.provider === 'drive' && pin.web_url}
-          <a class="view-btn" href={pin.web_url} target="_blank" rel="noopener noreferrer"
-            >{@render content()}</a
+          <a
+            class="view-btn"
+            href={pin.web_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-describedby={describedBy}>{@render content()}</a
           >
         {:else if pin.provider === 'workspace' && !pin.is_dir}
-          <button class="view-btn" type="button" onclick={() => viewer.openFile(pin.ref)}
-            >{@render content()}</button
+          <button
+            class="view-btn"
+            type="button"
+            aria-describedby={describedBy}
+            onclick={() => viewer.openFile(pin.ref)}>{@render content()}</button
           >
         {:else}
           <div class="unavailable">{@render content()}</div>
