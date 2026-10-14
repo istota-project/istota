@@ -1,13 +1,14 @@
-/** The bot section's entries that open an index in the main area rather than a folder. */
-export type IndexView = 'rooms' | 'groups' | 'config' | 'skills';
+/** Views that open an index in the main area rather than a folder. */
+export type IndexView = 'rooms' | 'groups' | 'config' | 'skills' | 'scripts';
 
-export const INDEX_VIEWS: readonly IndexView[] = ['rooms', 'groups', 'config', 'skills'];
+export const INDEX_VIEWS: readonly IndexView[] = ['rooms', 'groups', 'config', 'skills', 'scripts'];
 
 export const INDEX_VIEW_LABELS: Record<IndexView, string> = {
   rooms: 'Rooms',
   groups: 'Groups',
   config: 'Configuration',
   skills: 'Skill instructions',
+  scripts: 'Scripts',
 };
 
 export function parseIndexView(value: string | null | undefined): IndexView | null {
