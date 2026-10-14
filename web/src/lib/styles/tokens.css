@@ -287,6 +287,11 @@
      unlike the two caps around it, because it bounds a form's line length
      rather than a screen, and a form should widen with its text. */
   --setup-max: 36rem;
+  /* The height of the app nav and of the page bar under it, border included. One
+     value for both bars and every width, so neither changes height across a
+     breakpoint and the two read as one band. A minimum: a bar whose content wraps
+     still grows. */
+  --app-bar-height: 2.6rem;
   /* The label column of an `inline` Field, so a form of them lines up. Sized
      for a typical label; a longer one wraps inside it rather than widening it. */
   --field-label-width: 9rem;

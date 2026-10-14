@@ -48,7 +48,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-4);
-    padding: var(--space-3);
+    /* The app nav's height (tokens.css), so the two bars match at every width. */
+    min-height: var(--app-bar-height);
+    padding: 0 var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -104,7 +106,6 @@
 
   @media (max-width: 768px) {
     .header {
-      padding: var(--space-2) var(--space-3);
       /* Tight enough that the title lands on the app nav's wordmark: the toggle
 			   occupies 0.4→2.0rem after its negative margins, so this gap is what puts
 			   the title at the shared 2.25rem inset (see app.css). The toggle itself is

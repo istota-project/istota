@@ -353,34 +353,6 @@
   color: #c0271d;
 }
 
-/* Restate the safe-area longhands after each padding shorthand. */
-@media (max-width: 800px) {
-  .app-nav {
-    padding: 0.5rem 0.75rem;
-    padding-top: max(0.5rem, var(--safe-top));
-    padding-left: max(0.75rem, var(--safe-left));
-    padding-right: max(0.75rem, var(--safe-right));
-    gap: 0.5rem;
-  }
-}
-
-/* The inline links hand over to the menu below 1024px: the row no longer fits
-   a tablet's width once every module is on. */
-@media (max-width: 1023px) {
-  .app-nav .nav-links {
-    display: none;
-  }
-}
-
-@media (max-width: 640px) {
-  .app-content {
-    padding: 1rem 0.75rem;
-    padding-bottom: max(1rem, var(--safe-bottom));
-    padding-left: max(0.75rem, var(--safe-left));
-    padding-right: max(0.75rem, var(--safe-right));
-  }
-}
-
 /* An `@name` mention (ISSUE-578), from `renderMarkdown` and from the user-row
    splitter in Message.svelte. Not under `.markdown`: a user's own text is
    rendered verbatim, outside that container, and the two must look alike.

@@ -18,14 +18,15 @@
   gap: 1rem;
   /* Never absorb the shrink when a fill page below wants the rest of the body. */
   flex-shrink: 0;
-  padding: 0.75rem;
+  min-height: calc(var(--app-bar-height) + var(--safe-top));
+  padding: 0 0.75rem;
   /* The nav is the top edge of the app, so it clears the status bar itself. In a
      browser tab that inset is 0 (the browser chrome already occupies the strip)
      and this is inert; installed to the home screen the web view runs full
      bleed under the status bar and without this the wordmark sits under the
      clock. Landscape on a notched phone puts the notch on one side — the
      left/right insets keep the row clear of it. */
-  padding-top: max(0.75rem, var(--safe-top));
+  padding-top: var(--safe-top);
   padding-left: max(0.75rem, var(--safe-left));
   padding-right: max(0.75rem, var(--safe-right));
   background: var(--surface-card);
@@ -61,7 +62,9 @@
 .app-nav .nav-links a {
   color: var(--text-muted);
   text-decoration: none;
-  padding: 0.15rem 0;
+  /* Short enough that the links stay inside the icon row's height, so the nav
+     is no taller once they appear at 1024px. */
+  padding: 0.1rem 0;
 }
 
 .app-nav .nav-links a:hover,
@@ -223,4 +226,23 @@ body:has(.app-content-fill) {
 
 .error-msg {
   color: var(--status-danger-fg);
+}
+
+/* The inline links hand over to the menu below 1024px: the row no longer fits
+   a tablet's width once every module is on. The nav keeps its padding at every
+   width, so its height does not change across a breakpoint. */
+@media (max-width: 1023px) {
+  .app-nav .nav-links {
+    display: none;
+  }
+}
+
+/* Restate the safe-area longhands after the padding shorthand. */
+@media (max-width: 640px) {
+  .app-content {
+    padding: 1rem 0.75rem;
+    padding-bottom: max(1rem, var(--safe-bottom));
+    padding-left: max(0.75rem, var(--safe-left));
+    padding-right: max(0.75rem, var(--safe-right));
+  }
 }
