@@ -1,7 +1,14 @@
 /** Views that open an index in the main area rather than a folder. */
-export type IndexView = 'rooms' | 'groups' | 'config' | 'skills' | 'scripts';
+export type IndexView = 'rooms' | 'groups' | 'config' | 'skills' | 'scripts' | 'prompts';
 
-export const INDEX_VIEWS: readonly IndexView[] = ['rooms', 'groups', 'config', 'skills', 'scripts'];
+export const INDEX_VIEWS: readonly IndexView[] = [
+  'rooms',
+  'groups',
+  'config',
+  'skills',
+  'scripts',
+  'prompts',
+];
 
 export const INDEX_VIEW_LABELS: Record<IndexView, string> = {
   rooms: 'Rooms',
@@ -9,6 +16,7 @@ export const INDEX_VIEW_LABELS: Record<IndexView, string> = {
   config: 'Configuration',
   skills: 'Skill instructions',
   scripts: 'Scripts',
+  prompts: 'Prompt files',
 };
 
 export function parseIndexView(value: string | null | undefined): IndexView | null {

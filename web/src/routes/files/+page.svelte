@@ -41,8 +41,8 @@
   } from '$lib/api';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
-  import ScriptsView from '$lib/components/workspace/ScriptsView.svelte';
-  import ScriptList from '$lib/components/workspace/ScriptList.svelte';
+  import ScriptIndex from '$lib/components/workspace/ScriptIndex.svelte';
+  import { brokenKind } from '$lib/components/workspace/scriptFiles';
   import BotSection from '$lib/components/workspace/BotSection.svelte';
   import ConfigIndex from '$lib/components/workspace/ConfigIndex.svelte';
   import PlaceIndex from '$lib/components/workspace/PlaceIndex.svelte';
@@ -131,6 +131,14 @@
       scriptsLoading = false;
     }
   }
+  let scriptWarnings = $derived({
+    ...(scriptsIndex?.broken.some((item) => brokenKind(item) === 'script')
+      ? { scripts: 'Jobs refer to missing scripts' }
+      : {}),
+    ...(scriptsIndex?.broken.some((item) => brokenKind(item) === 'prompt')
+      ? { prompts: 'Jobs refer to missing prompt files' }
+      : {}),
+  });
 
   let configFiles = $state<WorkspaceConfigFile[]>([]);
   let configLoading = $state(true);
@@ -173,7 +181,7 @@
     };
   }
   // A view shows an index in the main area; place and path are then empty.
-  type Selection = { place: string; path: string; view?: IndexView; script?: string };
+  type Selection = { place: string; path: string; view?: IndexView };
   let places = $state<WorkspacePlace[]>([]);
   let notes = $state<string[]>([]);
   let loading = $state(true);
@@ -183,12 +191,15 @@
   let place = $derived(places.find((item) => item.id === selected?.place));
   let view = $derived(selected?.view ?? null);
   let botViews = $derived(
-    (['rooms', 'groups', 'config', 'skills'] as IndexView[]).filter((item) => {
-      if (item === 'rooms') return places.some((p) => p.kind === 'room');
-      if (item === 'groups') return places.some((p) => p.kind === 'group');
-      if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
-      return true;
-    }),
+    (['rooms', 'groups', 'config', 'skills', 'scripts', 'prompts'] as IndexView[]).filter(
+      (item) => {
+        if (item === 'rooms') return places.some((p) => p.kind === 'room');
+        if (item === 'groups') return places.some((p) => p.kind === 'group');
+        if (item === 'skills') return configFiles.some((file) => file.kind === 'skill');
+        if (item === 'prompts') return !!scriptsIndex?.files.some((file) => file.kind === 'prompt');
+        return true;
+      },
+    ),
   );
   let parentView = $derived(indexViewForKind(place?.kind));
   const sidebarKinds: string[] = ['linked', 'drive', 'nextcloud', 'talk'];
@@ -323,23 +334,14 @@
   let active = true;
   const selection = createUrlSelection<Selection>({
     key: 'workspace',
-    params: ['place', 'path', 'view', 'script'],
+    params: ['place', 'path', 'view'],
     encode: (value): Record<string, string> =>
       value.view
-        ? {
-            view: value.view,
-            ...(value.view === 'scripts' && value.script ? { script: value.script } : {}),
-          }
+        ? { view: value.view }
         : { place: value.place, ...(value.path ? { path: value.path } : {}) },
     decode: (params) => {
       const view = parseIndexView(params.view);
-      if (view)
-        return {
-          place: '',
-          path: '',
-          view,
-          ...(view === 'scripts' && params.script ? { script: params.script } : {}),
-        };
+      if (view) return { place: '', path: '', view };
       return { place: params.place || places[0]?.id || 'home', path: params.path || '' };
     },
     read: () => selected,
@@ -350,8 +352,8 @@
   function href(place: string, path = '') {
     return `${base}/files?${new URLSearchParams({ place, ...(path ? { path } : {}) })}`;
   }
-  function viewHref(view: IndexView, script?: string) {
-    return `${base}/files?${new URLSearchParams({ view, ...(view === 'scripts' && script ? { script } : {}) })}`;
+  function viewHref(view: IndexView) {
+    return `${base}/files?${new URLSearchParams({ view })}`;
   }
   function plainClick(event: MouseEvent) {
     return !(
@@ -368,16 +370,11 @@
     sidebarOpen = false;
     selection.push({ place, path });
   }
-  function navigateView(event: MouseEvent, view: IndexView, script?: string) {
+  function navigateView(event: MouseEvent, view: IndexView) {
     if (!plainClick(event)) return;
     event.preventDefault();
     sidebarOpen = false;
-    selection.push({
-      place: '',
-      path: '',
-      view,
-      ...(view === 'scripts' && script ? { script } : {}),
-    });
+    selection.push({ place: '', path: '', view });
   }
   function driveFolder(path: string) {
     return path.split('/').filter(Boolean).at(-1)?.split(':')[0] || 'root';
@@ -542,22 +539,13 @@
           label={botName}
           home={places.find((place) => place.kind === 'home')}
           views={botViews}
+          warnings={scriptWarnings}
           current={botCurrent}
           viewOpen={view !== null}
           {href}
           {viewHref}
           onNavigate={navigate}
           onNavigateView={navigateView}
-        />
-        <ScriptList
-          index={scriptsIndex}
-          loading={scriptsLoading}
-          error={scriptsError}
-          active={view === 'scripts'}
-          selected={selected?.script}
-          {viewHref}
-          onNavigateView={navigateView}
-          onRetry={loadScripts}
         />
         <PlaceList
           places={places.filter((place) => sidebarKinds.includes(place.kind))}
@@ -626,14 +614,17 @@
           {href}
           onNavigate={navigate}
         />
-      {:else if view === 'scripts'}
-        <ScriptsView
+      {:else if view === 'scripts' || view === 'prompts'}
+        <ScriptIndex
+          label={INDEX_VIEW_LABELS[view]}
+          kind={view === 'scripts' ? 'script' : 'prompt'}
+          caption={view === 'scripts'
+            ? `Programs in your scripts folder. ${botName} runs them from scheduled jobs and checks.`
+            : 'Prompts in your scripts folder that scheduled jobs read as their instructions.'}
+          empty={view === 'scripts' ? 'No scripts yet.' : 'No prompt files yet.'}
           index={scriptsIndex}
           loading={scriptsLoading}
           error={scriptsError}
-          selected={selected?.script}
-          onSelect={(script) =>
-            selection.push({ place: '', path: '', view: 'scripts', ...(script ? { script } : {}) })}
           onOpen={(path) => viewer.openFile(path)}
           onRetry={loadScripts}
           {revealAction}

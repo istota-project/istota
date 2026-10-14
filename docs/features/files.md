@@ -6,7 +6,7 @@ Open Files in the main navigation to see the files and connections Istota can re
 
 My files is your own workspace folder. Linked folders, room folders and group folders appear when they are available to your account. Room membership is checked again on each request, so leaving a room removes access to its folder.
 
-The first sidebar section after Pinned is named after the assistant. It holds My files, Rooms, Groups, Configuration and Skill instructions. Rooms and Groups open a list of your room or group folders in the main area, each with its access for a task; choose one to browse it, and the path above the listing leads back to the list. Scripts, Linked folders and Connections have their own sections below it.
+The first sidebar section after Pinned is named after the assistant. It holds My files, Rooms, Groups, Configuration, Skill instructions, Scripts and Prompt files. Rooms and Groups open a list of your room or group folders in the main area, each with its access for a task; choose one to browse it, and the path above the listing leads back to the list. Linked folders and Connections have their own sections below it.
 
 In the sidebar, a small robot icon marks each place a task in your private room can reach, pinned files and folders included. A place without the icon is visible to you only. In the Rooms list, a room folder's access applies only to that room's own tasks. A line at the bottom of the sidebar says what the icon means, since a phone shows no hover text.
 
@@ -40,9 +40,9 @@ Jobs saved in `CRON.md` change at the next CRON.md sync, not at once. A file tha
 
 ## Scripts
 
-Expand Scripts in the Files sidebar, below the assistant's section and above Linked folders. All scripts opens a read-only view of your scripts and prompt files under `/Users/{user_id}/{BOT_DIR}/scripts/`. Each row shows its description, the scheduled jobs or heartbeat checks that reference it, and when it was modified. Choose a script in the sidebar or table to expand its references. The row's menu has Open for a preview and Reveal to open its folder in My files.
+Scripts and Prompt files are entries in the assistant's section of the Files sidebar. Each opens a read-only list of those files under `/Users/{user_id}/{BOT_DIR}/scripts/`; Prompt files appears once the folder holds one. Each row shows the file's description, the scheduled jobs or heartbeat checks that reference it, and when it was modified. Choose a name to preview it. The row's menu has Open and Reveal, which opens its folder in My files.
 
-Broken script references appear above the tables with the jobs or checks that name the missing file. Used by shows whether a job is disabled, suspended, not yet synced or admin-only. “Not referenced” means no command or prompt-file reference was found in your scheduling files. Inline prompts that mention a script are counted separately; a mention does not mean the script runs. Relative paths in commands and references from other scripts are not tracked.
+A missing file that a job or check names appears above the list, with the jobs that name it, and the sidebar entry carries a warning. A missing prompt file is listed under Prompt files. Used by shows whether a job is disabled, suspended, not yet synced or admin-only. “Not used by any job” means no command or prompt-file reference was found in your scheduling files. Inline prompts that mention a script are counted separately; a mention does not mean the script runs. Relative paths in commands and references from other scripts are not tracked.
 
 When writing a script, put a one-line description in a comment or module docstring immediately after the shebang, before any code:
 

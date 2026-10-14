@@ -1031,7 +1031,7 @@ it('puts the bot section immediately after Pinned and opens only it by default',
   const headings = Array.from(sidebar.querySelectorAll('.cat-label-text')).map(
     (el) => el.textContent,
   );
-  expect(headings).toEqual(['Pinned', 'Istota', 'Scripts', 'Linked folders', 'Connections']);
+  expect(headings).toEqual(['Pinned', 'Istota', 'Linked folders', 'Connections']);
   for (const shown of ['Rooms', 'Groups', 'Configuration', 'Skill instructions']) {
     expect(within(sidebar).getByRole('link', { name: shown })).toBeTruthy();
   }
