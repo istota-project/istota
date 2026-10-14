@@ -87,3 +87,119 @@ def test_describe_prompt_heading():
     from istota.workspace.scripts import describe
 
     assert describe("prompts/report.md", b"\n## Summarize   this week\nDetails", kind="prompt") == "Summarize this week"
+
+
+@pytest.mark.parametrize("root", [
+    "", "/data/workspace", "$ISTOTA_WORKSPACE_PATH", "${ISTOTA_WORKSPACE_PATH}",
+    "$NEXTCLOUD_MOUNT_PATH", "${NEXTCLOUD_MOUNT_PATH}",
+])
+def test_find_script_paths_absolute_forms(root):
+    from pathlib import Path
+
+    from istota.workspace.scripts import find_script_paths
+
+    text = f'python "{root}/Users/alice/istota/scripts/reports/weekly.py"'
+    assert find_script_paths(
+        text, user_id="alice", bot_dir="istota", workspace_path=Path("/data/workspace"),
+    ) == ["reports/weekly.py"]
+
+
+@pytest.mark.parametrize("terminator", [" ", "\t", "\n", "'", '"', "`", ";", "|", "&", "<", ">", "(", ")"])
+def test_find_script_paths_terminators(terminator, config):
+    from istota.workspace.scripts import find_script_paths
+
+    assert find_script_paths(
+        f"/Users/alice/istota/scripts/x.py{terminator}other",
+        user_id="alice", bot_dir="istota", workspace_path=config.workspace_path,
+    ) == ["x.py"]
+
+
+@pytest.mark.parametrize("suffix", [".", ",", ":", ".,:"])
+def test_find_script_paths_trailing_punctuation(suffix, config):
+    from istota.workspace.scripts import find_script_paths
+
+    assert find_script_paths(
+        f"See /Users/alice/istota/scripts/x.py{suffix}",
+        user_id="alice", bot_dir="istota", workspace_path=config.workspace_path,
+    ) == ["x.py"]
+
+
+@pytest.mark.parametrize("text", [
+    "/backup/Users/alice/istota/scripts/x.py",
+    "/backup/data/workspace/Users/alice/istota/scripts/x.py",
+    "relative/Users/alice/istota/scripts/x.py",
+    "$OTHER/Users/alice/istota/scripts/x.py",
+    "${OTHER}/Users/alice/istota/scripts/x.py",
+    "/Users/bob/istota/scripts/x.py",
+    "/Users/alice/other/scripts/x.py",
+    "scripts/x.py",
+    "/Users/alice/istota/scripts/../config/x",
+    "/Users/alice/istota/scripts/lib/../x.py",
+    "/Users/alice/istota/scripts/lib/..",
+    "/Users/alice/istota/scripts/lib/..:",
+    "/Users/alice/istota/scripts/",
+    "/Users/alice/istota/scripts/./",
+])
+def test_find_script_paths_non_matches(text):
+    from pathlib import Path
+
+    from istota.workspace.scripts import find_script_paths
+
+    assert find_script_paths(
+        text, user_id="alice", bot_dir="istota", workspace_path=Path("/data/workspace"),
+    ) == []
+
+
+def test_find_script_paths_resolved_workspace(config, tmp_path):
+    from istota.workspace.scripts import find_script_paths
+
+    link = tmp_path / "workspace-link"
+    link.symlink_to(config.workspace_path, target_is_directory=True)
+    text = (
+        f"python {link}/Users/alice/istota/scripts/linked.py && "
+        f"python {link.resolve()}/Users/alice/istota/scripts/resolved.py"
+    )
+    assert find_script_paths(
+        text, user_id="alice", bot_dir="istota", workspace_path=link,
+    ) == ["linked.py", "resolved.py"]
+
+
+def test_find_script_paths_normalizes_and_deduplicates(config):
+    from istota.workspace.scripts import find_script_paths
+
+    text = (
+        "python /Users/alice/istota/scripts/lib/./x.py; "
+        "python /Users/alice/istota/scripts/lib//x.py"
+    )
+    assert find_script_paths(
+        text, user_id="alice", bot_dir="istota", workspace_path=config.workspace_path,
+    ) == ["lib/x.py"]
+
+
+def test_find_script_paths_literal_identifiers(config):
+    from istota.workspace.scripts import find_script_paths
+
+    text = (
+        "/Users/alice.test/my.bot/scripts/x.py "
+        "/Users/aliceXtest/myXbot/scripts/wrong.py"
+    )
+    assert find_script_paths(
+        text, user_id="alice.test", bot_dir="my.bot", workspace_path=config.workspace_path,
+    ) == ["x.py"]
+
+
+def test_find_bare_mentions_existing_only():
+    from istota.workspace.scripts import find_bare_mentions
+
+    text = "Use `scripts/lib/./x.py`, then scripts/x.py. Create scripts/missing.py. Repeat scripts/x.py."
+    assert find_bare_mentions(text, {"x.py", "lib/x.py", "unused.py"}) == ["lib/x.py", "x.py"]
+
+
+@pytest.mark.parametrize("text", [
+    "scripts/x.py.bak", "other-scripts/x.py", "other/scripts/x.py",
+    "/Users/bob/istota/scripts/x.py", "scripts/lib/../x.py", "scripts/",
+])
+def test_find_bare_mentions_non_matches(text):
+    from istota.workspace.scripts import find_bare_mentions
+
+    assert find_bare_mentions(text, {"x.py"}) == []
