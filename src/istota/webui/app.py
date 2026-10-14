@@ -8187,6 +8187,9 @@ _AUX_TS_ABOVE = "tasks.created_at >= datetime(?, '-1 hour')"
 # as the COALESCE fallback source and for `_task_duration_seconds`.
 _AUX_COLUMNS = (
     "SELECT id, prompt, result, status, error, confirmation_prompt, declinable, "
+    "(private_park = 1 AND EXISTS (SELECT 1 FROM whatsapp_skill_requests r "
+    "WHERE r.id = tasks.whatsapp_confirmation_request_id AND r.kind = 'location_share')) "
+    "AS location_private_park, "
     "created_at, actions_taken, execution_trace, started_at, completed_at, "
     f"model_used, attachments, {_AUX_TURN_TS} AS turn_ts FROM tasks "
 )
@@ -8814,7 +8817,7 @@ def _chat_room_messages(
         elif status == "pending_confirmation":
             # An email thread room records the mail; its task's question is
             # the host's private room's, so here it is no turn at all (#665).
-            if thread_room:
+            if thread_room or r["location_private_park"]:
                 continue
             messages.append(_assistant_message_dict(
                 r, r["confirmation_prompt"] or r["result"] or "", status, confirmation=True,
@@ -11417,6 +11420,10 @@ def _chat_confirm_task(
                 detail=(_CONFIRM_PREVIEW_CHANGED if preview_digest is not None
                         else _CONFIRM_UNAVAILABLE),
             )
+        if db.get_task(conn, task.id).status == "cancelled":
+            conn.commit()
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail=confirmations.CANCELLED_APPROVAL_ACK)
 
 
 # Ceiling on an edited draft body. Not a policy about email length — it exists

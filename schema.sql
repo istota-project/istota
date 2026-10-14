@@ -2011,7 +2011,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post', 'purchase', 'recovery_fill', 'location_share')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -2045,6 +2045,76 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_request_held_task
 ON whatsapp_skill_requests(origin_task_id) WHERE state = 'held';
 CREATE INDEX IF NOT EXISTS idx_whatsapp_request_queue
 ON whatsapp_skill_requests(state, queue_deadline);
+
+-- Consent metadata only; observations stay in the owner's module database.
+CREATE TABLE IF NOT EXISTS location_share_grants (
+    id TEXT PRIMARY KEY,
+    owner_user_id TEXT NOT NULL,
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    request_id TEXT UNIQUE REFERENCES whatsapp_skill_requests(id) ON DELETE SET NULL,
+    request_key TEXT NOT NULL,
+    precision TEXT NOT NULL CHECK (precision IN ('exact','area')),
+    duration_seconds INTEGER NOT NULL CHECK (typeof(duration_seconds) = 'integer' AND duration_seconds BETWEEN 300 AND 86400),
+    audience_json TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    room_epoch INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','active','revoked','expired','cancelled')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT,
+    expires_at TEXT,
+    closed_at TEXT,
+    close_reason TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_location_share_request
+ON location_share_grants(owner_user_id, origin_task_id, request_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_location_share_active
+ON location_share_grants(owner_user_id, room_token) WHERE state='active';
+CREATE INDEX IF NOT EXISTS idx_location_share_room
+ON location_share_grants(room_token, state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_location_share_owner
+ON location_share_grants(owner_user_id, state);
+
+-- Runtime connections leave foreign_keys off. Preserve consent tombstones
+-- and close held requests even when cleanup uses a direct DELETE.
+CREATE TRIGGER IF NOT EXISTS location_share_task_deleted
+BEFORE DELETE ON tasks
+BEGIN
+    UPDATE location_share_grants SET
+        state=CASE WHEN state='held' THEN 'cancelled' ELSE state END,
+        closed_at=CASE WHEN state='held' THEN datetime('now') ELSE closed_at END,
+        close_reason=CASE WHEN state='held' THEN 'task_deleted' ELSE close_reason END,
+        origin_task_id=NULL WHERE origin_task_id=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS location_share_request_closed
+AFTER UPDATE OF state ON whatsapp_skill_requests
+WHEN NEW.state IN ('cancelled','expired','failed')
+BEGIN
+    UPDATE location_share_grants SET
+        state=CASE WHEN NEW.state='expired' THEN 'expired' ELSE 'cancelled' END,
+        closed_at=COALESCE(NEW.closed_at, datetime('now')),
+        close_reason=COALESCE(NEW.error_code, NEW.state)
+    WHERE request_id=NEW.id AND state='held';
+END;
+CREATE TRIGGER IF NOT EXISTS location_share_request_deleted
+BEFORE DELETE ON whatsapp_skill_requests
+BEGIN
+    UPDATE location_share_grants SET
+        state=CASE WHEN state='held' THEN 'cancelled' ELSE state END,
+        closed_at=CASE WHEN state='held' THEN datetime('now') ELSE closed_at END,
+        close_reason=CASE WHEN state='held' THEN 'request_deleted' ELSE close_reason END,
+        request_id=NULL WHERE request_id=OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS location_share_room_deleted
+BEFORE DELETE ON rooms
+BEGIN
+    UPDATE whatsapp_skill_requests SET state='cancelled', error_code='room_deleted',
+        closed_at=datetime('now'), updated_at=datetime('now')
+    WHERE state='held' AND id IN (
+        SELECT request_id FROM location_share_grants WHERE room_token=OLD.token
+    );
+    DELETE FROM location_share_grants WHERE room_token=OLD.token;
+END;
 
 -- A recipient's block on one asker. Asking is open by default between users of
 -- one installation (ISSUE-566); db._migrate_relay_blocks keeps a copy of this

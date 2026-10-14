@@ -37,7 +37,7 @@ from istota.location.models import (
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 # Tables in FK-target-first order: places -> visits -> location_pings,
@@ -198,6 +198,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     heuristic. Both default correctly for existing rows: a measured point
     that is not so marked, and an accuracy nobody recorded.
 
+    v5: index phone observations by parsed instant for room snapshots.
+
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(location_pings)")}
     missing = {"source", "client_id", "vertical_accuracy", "wifi_zone"} - cols
@@ -243,6 +245,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_location_pings_client_id "
         "ON location_pings(client_id) WHERE client_id IS NOT NULL"
+    )
+
+    # After the source-column migration for pre-v2 databases. Parsed instants
+    # avoid lexical ordering of offsets and a full history sort on every share.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_location_pings_observed "
+        "ON location_pings(source, julianday(timestamp) DESC, id DESC)"
     )
 
 

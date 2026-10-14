@@ -447,3 +447,41 @@ def test_unavailable_vector_extension_refuses_without_changes(database, monkeypa
     assert room_relocate.migrate_database(database) == 1
     assert "refusal: vector_extension_unavailable" in capsys.readouterr().err
     assert snapshot(database) == before
+
+
+@pytest.mark.parametrize("state,expected", [("held", "cancelled"), ("active", "revoked"), ("revoked", "revoked")])
+def test_location_grants_move_without_reauthorizing_frozen_terms(database, state, expected):
+    with db.get_db(database) as conn:
+        old = legacy(conn)
+        destination = {"grant_id": "share", "room_token": old, "precision": "area",
+                       "duration_seconds": 3600, "audience": ["alice", "bob"],
+                       "binding_fingerprint": "original-binding", "room_epoch": 0}
+        request(conn, "share-request", destination, kind="location_share",
+                origin={"surface": "talk", "room_token": old}, fingerprint="original-binding")
+        request_state = "held" if state == "held" else "approved"
+        conn.execute("UPDATE whatsapp_skill_requests SET state=? WHERE id='share-request'", (request_state,))
+        conn.execute(
+            "INSERT INTO location_share_grants "
+            "(id,owner_user_id,room_token,request_id,request_key,precision,duration_seconds,"
+            "audience_json,binding_fingerprint,room_epoch,state) "
+            "VALUES ('share','alice',?,'share-request','share','area',3600,?, 'original-binding',0,?)",
+            (old, json.dumps(["alice", "bob"]), state),
+        )
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        new = conn.execute("SELECT new_token FROM room_token_migration WHERE old_token=?", (old,)).fetchone()[0]
+        grant = conn.execute("SELECT * FROM location_share_grants WHERE id='share'").fetchone()
+        assert grant["room_token"] == new
+        assert grant["state"] == expected
+        assert grant["binding_fingerprint"] == "original-binding"
+        if state != "revoked":
+            assert grant["close_reason"] == "room_identity_changed"
+        stored = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id='share-request'").fetchone()
+        assert stored["state"] == ("cancelled" if state == "held" else "approved")
+        assert json.loads(stored["destination"]) == destination
+        assert stored["preview"] == "Exact preview"
+        assert stored["preview_digest"] == stored["approved_digest"] == "preview-digest"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    after = snapshot(database)
+    assert room_relocate.migrate_database(database) == 0
+    assert snapshot(database) == after

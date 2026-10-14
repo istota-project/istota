@@ -3627,12 +3627,21 @@ def process_one_task(
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
-    credential_question = relay_question if relay_question and relay_question["kind"] in ("purchase", "recovery_fill") else None
-    if credential_question and not success and not dry_run:
+        if relay_question is None:
+            # A stopped request's preview remains private after its hold ends.
+            stopped_location = conn.execute(
+                "SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? "
+                "AND kind='location_share' AND state IN ('cancelled','expired','failed') "
+                "ORDER BY rowid DESC LIMIT 1", (task_id,),
+            ).fetchone()
+            if stopped_location is not None:
+                relay_question = dict(stopped_location)
+    authorization_question = relay_question if relay_question and relay_question["kind"] in ("purchase", "recovery_fill", "location_share") else None
+    if authorization_question and not success and not dry_run:
         from istota.relay.relays import close_task_questions
         with db.get_db(config.db_path) as conn:
             close_task_questions(conn, task_id, reason="attempt_failed")
-    if relay_question and credential_question is None and not dry_run:
+    if relay_question and authorization_question is None and not dry_run:
         if run_coro(present_question(config, task=task, success=success)):
             if event_writer is not None:
                 event_writer.finish()
@@ -3651,7 +3660,7 @@ def process_one_task(
         # in the room after all, so it is dropped rather than replayed.
         _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
         with db.get_db(config.db_path) as conn:
-            if credential_question:
+            if authorization_question:
                 from istota.relay.relays import close_task_questions
                 close_task_questions(conn, task_id, reason="turn_declined")
             db.update_task_status(
@@ -3740,8 +3749,8 @@ def process_one_task(
         and asks_for_confirmation(result)
     )
 
-    if credential_question and success and not dry_run:
-        result = credential_question["preview"]
+    if authorization_question and success and not dry_run:
+        result = authorization_question["preview"]
         is_confirmation_request = True
 
     # The room was switched off while this task ran (multiplayer D12): its
@@ -3845,20 +3854,41 @@ def process_one_task(
     voice_notes_to_remove: list[tuple[int, str, str]] | None = None
 
     with db.get_db(config.db_path) as conn:
+        if not dry_run and authorization_question and authorization_question["kind"] == "location_share":
+            from istota.relay.requests import write_transaction
+            # Keep this lock through parking so stop cannot race the state check.
+            with write_transaction(conn):
+                current_request = conn.execute(
+                    "SELECT state FROM whatsapp_skill_requests WHERE id=?",
+                    (authorization_question["id"],),
+                ).fetchone()
+                stopped_location = current_request is None or current_request["state"] != "held"
+                if stopped_location:
+                    db.cancel_task(conn, task_id)
+            if stopped_location:
+                conn.commit()
+                if event_writer is not None:
+                    event_writer.emit("cancelled")
+                    event_writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+                    event_writer.finish()
+                return (task_id, False)
         if success:
             if is_confirmation_request:
                 # Set task to pending confirmation instead of completing
                 db.set_task_confirmation(
                     conn, task_id, result, actions_taken=actions_taken,
                     execution_trace=confirmations.trace_with_gate(
-                        task.execution_trace, attempt_trace, prompt=result,
+                        task.execution_trace, attempt_trace,
+                        prompt=("Location sharing awaiting private approval."
+                                if authorization_question and authorization_question["kind"] == "location_share"
+                                else result),
                     ),
                 )
-                if credential_question:
+                if authorization_question:
                     from istota.relay.requests import associate_confirmation
                     associate_confirmation(
                         conn, actor_user_id=task.user_id, task_id=task_id,
-                        request_id=credential_question["id"], preview_digest=credential_question["preview_digest"],
+                        request_id=authorization_question["id"], preview_digest=authorization_question["preview_digest"],
                     )
                 db.log_task(conn, task_id, "info", "Task awaiting user confirmation")
                 # Talk confirmations post the prompt to the room; web/stream
@@ -3994,8 +4024,9 @@ def process_one_task(
                 # the bell renders the question from the live task, and a guest
                 # proposal's preview only in the authenticated bell.
                 bell_only = private_park is not None and private_park.dest is None
-                if credential_question is not None:
-                    _park_title = (confirmation_source.RECOVERY_FILL_TITLE if credential_question["kind"] == "recovery_fill"
+                if authorization_question is not None:
+                    _park_title = (confirmation_source.RECOVERY_FILL_TITLE if authorization_question["kind"] == "recovery_fill"
+                                   else confirmation_source.LOCATION_SHARE_TITLE if authorization_question["kind"] == "location_share"
                                    else confirmation_source.PURCHASE_TITLE)
                     _park_body = (confirmation_source.PARK_BELL_BODY if bell_only
                                   else confirmation_source.PARK_BODY)
@@ -4613,7 +4644,11 @@ def process_one_task(
             })
         if not decision.will_retry and not flags["is_requeued"]:
             if is_confirmation_request:
-                event_writer.emit("confirmation", {"prompt": result})
+                event_writer.emit("confirmation", {
+                    "prompt": ("Location sharing awaiting private approval."
+                               if authorization_question and authorization_question["kind"] == "location_share"
+                               else result),
+                })
             elif success:
                 # Full answer — see ISSUE-178 — and only where every stored
                 # row is the result unchanged. Otherwise the frame carries no

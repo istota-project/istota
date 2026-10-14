@@ -24,6 +24,7 @@ subcommands also need the framework-side geocode caches and read
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -86,6 +87,81 @@ def _connect_location() -> sqlite3.Connection:
 
 def _tz_name(args) -> str:
     return getattr(args, "tz", None) or os.environ.get("TZ", "America/Los_Angeles")
+
+
+def cmd_share(args):
+    from istota import db
+    from istota.config import load_config
+    from istota.location.sharing import request_location_share, share_location_snapshot
+    from istota.relay.requests import RequestError
+
+    actor = os.environ.get("ISTOTA_USER_ID", "")
+    task = os.environ.get("ISTOTA_TASK_ID", "")
+    path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not actor or not task.isdecimal() or not path:
+        raise RequestError("task_unavailable")
+    try:
+        with db.get_db(Path(path)) as conn:
+            options = dict(actor_user_id=actor, task_id=int(task), request_key=args.request_key,
+                           room=args.room, precision=args.precision, now=datetime.now(timezone.utc))
+            if args.duration_seconds is not None:
+                result = request_location_share(
+                    conn, load_config(), duration_seconds=args.duration_seconds, **options)
+            else:
+                result = share_location_snapshot(
+                    conn, load_config(), allow_last_known=args.last_known, **options)
+    except sqlite3.Error:
+        raise RequestError("location_temporarily_unavailable") from None
+    print(json.dumps(result))
+
+
+def _manage_sharing(args, *, stop):
+    from istota import db
+    from istota.config import load_config
+    from istota.location import sharing
+    from istota.relay.requests import RequestError
+    from istota.rooms import private_replies
+    from istota.rooms.scopes import canonical_token
+
+    actor = os.environ.get("ISTOTA_USER_ID", "")
+    task_id = os.environ.get("ISTOTA_TASK_ID", "")
+    path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not actor or not task_id.isdecimal() or not path:
+        raise RequestError("task_unavailable")
+    try:
+        with db.get_db(Path(path)) as conn:
+            task = sharing._interactive_task(
+                conn, load_config(), actor_user_id=actor, task_id=int(task_id))
+            own = canonical_token(conn, task.conversation_token)
+            shared = private_replies.is_shared_room(conn, own, is_group_chat=task.is_group_chat)
+            now = datetime.now(timezone.utc)
+            if not stop:
+                result = sharing.list_location_shares(
+                    conn, actor_user_id=actor, room_token=own if shared else None, now=now)
+            else:
+                target = None
+                if not args.all:
+                    if shared:
+                        target = own
+                        if args.room and private_replies._post_target(conn, task, actor, args.room) != own:
+                            raise RequestError("private_turn_required")
+                    else:
+                        if not args.room:
+                            raise RequestError("no_target_room")
+                        target = private_replies._post_target(conn, task, actor, args.room)
+                result = sharing.revoke_location_shares(
+                    conn, actor_user_id=actor, room_token=target, all_rooms=args.all, now=now)
+    except sqlite3.Error:
+        raise RequestError("location_temporarily_unavailable") from None
+    print(json.dumps(result))
+
+
+def cmd_sharing(args):
+    _manage_sharing(args, stop=False)
+
+
+def cmd_unshare(args):
+    _manage_sharing(args, stop=True)
 
 
 def cmd_current(args):
@@ -770,11 +846,36 @@ def cmd_import_garmin_tracks(args):
     }))
 
 
+
+def _share_duration(value):
+    match = re.fullmatch(r"([0-9]+)(s|m|h)", value)
+    if match:
+        seconds = int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]]
+        if 300 <= seconds <= 86400:
+            return seconds
+    raise argparse.ArgumentTypeError("Use a duration from 5m to 24h, with s, m or h units")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Location tracking CLI")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("current", aliases=["last"], help="Current location and visit")
+
+    sub.add_parser("sharing", help="List your location sharing")
+    unshare = sub.add_parser("unshare", help="Stop sharing your location")
+    scope = unshare.add_mutually_exclusive_group()
+    scope.add_argument("--room", default=None)
+    scope.add_argument("--all", action="store_true")
+
+    share = sub.add_parser("share", help="Share an observation or request timed room access")
+    share.add_argument("--request-key", required=True)
+    share.add_argument("--room", default=None)
+    share.add_argument("--precision", choices=["exact", "area"], default="exact")
+    mode = share.add_mutually_exclusive_group()
+    mode.add_argument("--last-known", action="store_true")
+    mode.add_argument("--for", dest="duration_seconds", type=_share_duration,
+                      help="Request timed sharing, for example 30m or 1h")
 
     hist = sub.add_parser("history", help="Recent location pings")
     hist.add_argument("--limit", type=int, default=0)
@@ -875,6 +976,9 @@ def main():
     args = parse_and_resolve(parser)
 
     commands = {
+        "share": cmd_share,
+        "sharing": cmd_sharing,
+        "unshare": cmd_unshare,
         "current": cmd_current,
         "last": cmd_current,  # alias — natural name an LLM reaches for
         "history": cmd_history,
