@@ -38,7 +38,7 @@
       <p class="caption">Loading scripts…</p>
     {:else if error}
       <p class="form-error" role="alert">{error}</p>
-      <Button variant="ghost" size="sm" onclick={onRetry}>Retry scripts</Button>
+      <Button variant="secondary" size="sm" onclick={onRetry}>Retry scripts</Button>
     {:else}
       <a
         class="view-btn"
