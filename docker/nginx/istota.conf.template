@@ -86,6 +86,24 @@ location /istota/ {
     proxy_set_header X-Forwarded-Proto $forwarded_proto;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
+    # nginx's own 502 while `web` restarts (an update, a crash) becomes the
+    # starting-up page. Without `proxy_intercept_errors` an error the app sends
+    # itself is never replaced.
+    error_page 502 =503 /_istota_starting;
+}
+
+# The starting-up page, as a 503 the client should retry. Internal: reachable
+# only through the error_page above. `add_header` here replaces the server
+# level's, so X-Robots-Tag is repeated. X-Istota-Upstream is what the page's
+# poll reads to tell this answer from the app's own.
+location = /_istota_starting {
+    internal;
+    alias /etc/istota-nginx/starting.html;
+    default_type text/html;
+    add_header Retry-After 5 always;
+    add_header Cache-Control "no-store" always;
+    add_header X-Istota-Upstream "unavailable" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
 }
 
 # Meta's Cloud API webhook, an exact-match location, so nginx picks it before
