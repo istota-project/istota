@@ -108,9 +108,9 @@ def _nextcloud(body: dict) -> dict:
 
 
 class TestTheEntry:
-    async def test_nextcloud_comes_first_then_whatsapp(self, tmp_path):
+    async def test_nextcloud_comes_first_then_whatsapp_then_google(self, tmp_path):
         body, _ = await _index(_make_config(tmp_path))
-        assert [c["id"] for c in body["connections"]] == ["nextcloud", "whatsapp"]
+        assert [c["id"] for c in body["connections"]] == ["nextcloud", "whatsapp", "google_workspace"]
 
     async def test_the_configured_facts(self, tmp_path):
         body, _ = await _index(_make_config(tmp_path, bot_username="istota-bot"))
@@ -207,7 +207,7 @@ class TestTheCheck:
                 at=datetime.now(timezone.utc) - timedelta(seconds=bound + 120))
         assert _nextcloud((await _index(config))[0])["check"]["stale"] is True
 
-    async def test_an_unreadable_report_still_answers_both_entries(self, tmp_path, monkeypatch,
+    async def test_an_unreadable_report_still_answers_all_entries(self, tmp_path, monkeypatch,
                                                                    caplog):
         config = _make_config(tmp_path)
 
@@ -217,7 +217,7 @@ class TestTheCheck:
         monkeypatch.setattr(doctor, "read_reports", broken)
         with caplog.at_level("WARNING", logger="istota.webui.app"):
             body, _ = await _index(config)
-        assert [c["id"] for c in body["connections"]] == ["nextcloud", "whatsapp"]
+        assert [c["id"] for c in body["connections"]] == ["nextcloud", "whatsapp", "google_workspace"]
         assert _nextcloud(body)["check"] is None
         assert "nextcloud_connection_report_unread" in caplog.text
         assert APP_PASSWORD not in caplog.text

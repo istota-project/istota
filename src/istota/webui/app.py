@@ -70,7 +70,7 @@ from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
 from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
-from istota.config import load_config, refresh_user_profiles_if_changed
+from istota.config import Config, load_config, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
 from istota.storage import NOTES_MAX_BYTES
@@ -5707,6 +5707,47 @@ def _nextcloud_connection_payload(config) -> dict:
     return payload
 
 
+def _google_workspace_connection_payload(config: Config) -> dict:
+    """Loaded configuration only; presence does not verify Google credentials."""
+    from istota.credentials.google_scopes import offered_services, unoffered_scopes
+    from istota.webui.origin import external_origin
+
+    google = config.google_workspace
+    missing = []
+    if not google.client_id.strip():
+        missing.append("client_id")
+    secret_set = bool(google.client_secret.strip())
+    if not secret_set:
+        missing.append("client_secret")
+    try:
+        hostname, scheme = external_origin(config)
+    except ValueError:
+        redirect_uri = None
+        missing.append("site_hostname")
+    else:
+        redirect_uri = f"{scheme}://{hostname}/istota/google/callback"
+    if not google.scopes:
+        missing.append("scopes")
+    if not google.enabled:
+        status = "disabled"
+    elif missing:
+        status = "incomplete"
+    else:
+        status = "configured"
+    return {
+        "id": "google_workspace",
+        "label": "Google Workspace",
+        "enabled": bool(google.enabled),
+        "client_id": google.client_id,
+        "client_secret_set": secret_set,
+        "redirect_uri": redirect_uri,
+        "services": offered_services(google.scopes),
+        "additional_scopes": unoffered_scopes(google.scopes),
+        "missing": missing,
+        "status": status,
+    }
+
+
 def _whatsapp_connection_payload() -> dict:
     """One card's worth of facts about the deployment's WhatsApp link.
 
@@ -5779,7 +5820,8 @@ async def admin_connections(_: dict = Depends(_require_admin)):
     payload = await asyncio.to_thread(_whatsapp_connection_payload)
     if payload["pairing_supported"] and payload["enabled"]:
         payload["pairing"] = await asyncio.to_thread(_pairing_state_payload)
-    return {"connections": [nextcloud, payload]}
+    google = _google_workspace_connection_payload(config)
+    return {"connections": [nextcloud, payload, google]}
 
 
 @api_router.get("/admin/connections/whatsapp/pairing")

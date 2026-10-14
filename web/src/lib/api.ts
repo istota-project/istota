@@ -1191,8 +1191,23 @@ export interface AdminNextcloudConnection {
   check: AdminNextcloudCheck | null;
 }
 
-/** One deployment-level connection: Nextcloud first, then WhatsApp. */
-export type AdminConnection = AdminNextcloudConnection | AdminWhatsAppConnection;
+/** Google application configuration; never carries the client secret. */
+export interface AdminGoogleWorkspaceConnection {
+  id: 'google_workspace';
+  label: string;
+  enabled: boolean;
+  client_id: string;
+  client_secret_set: boolean;
+  redirect_uri: string | null;
+  services: GoogleOfferedService[];
+  additional_scopes: string[];
+  missing: ('client_id' | 'client_secret' | 'site_hostname' | 'scopes')[];
+  status: 'disabled' | 'incomplete' | 'configured';
+}
+
+/** Deployment connections in order: Nextcloud, WhatsApp, Google Workspace. */
+export type AdminConnection =
+  AdminNextcloudConnection | AdminWhatsAppConnection | AdminGoogleWorkspaceConnection;
 
 export interface AdminBrowsers {
   status: 'ok' | 'disabled' | 'unavailable';
