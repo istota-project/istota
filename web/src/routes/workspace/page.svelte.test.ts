@@ -130,7 +130,7 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
   expect(screen.getByText('No access')).toBeTruthy();
   const legend = container.querySelector('details .reach-legend')!;
   expect(legend).toHaveTextContent(
-    'in the sidebar means a task in your private room can reach that place, or for a room folder, a task in that room. Places without it are visible to you only.',
+    'in the sidebar means your tasks can reach that place, in any of your rooms, or for a room folder, only in that room. Places without it are visible to you only.',
   );
   expect(within(legend as HTMLElement).getByRole('img', { name: 'The robot icon' })).toBeTruthy();
 });
@@ -151,7 +151,7 @@ it('marks the places a task can reach and describes the mark without renaming th
   }
   expect(
     within(sidebar).getByText(
-      'Istota can use these in your private room, and a room folder in that room.',
+      'Istota can use these in your tasks, in any of your rooms. A room folder only in its own room.',
     ),
   ).toBeTruthy();
 });
@@ -183,7 +183,9 @@ it('leaves the Nextcloud row unmarked and drops the legend when nothing is reach
   const link = await within(sidebar).findByRole('link', { name: 'Nextcloud' });
   expect(link).not.toHaveAttribute('aria-describedby');
   expect(link.querySelector('.task-reach')).toBeNull();
-  expect(within(sidebar).queryByText('Istota can use these in your private room.')).toBeNull();
+  expect(
+    within(sidebar).queryByText('Istota can use these in your tasks, in any of your rooms.'),
+  ).toBeNull();
 });
 
 it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () => {

@@ -13,9 +13,9 @@
     <summary>How Istota reaches your files</summary>
     <div class="reach-body">
       <p class="reach-legend">
-        <Bot size={14} role="img" aria-label="The robot icon" /> in the sidebar means a task in your private
-        room can reach that place, or for a room folder, a task in that room. Places without it are visible
-        to you only.
+        <Bot size={14} role="img" aria-label="The robot icon" /> in the sidebar means your tasks can reach
+        that place, in any of your rooms, or for a room folder, only in that room. Places without it are
+        visible to you only.
       </p>
       {#each notes as note}<p>{note}</p>{/each}
       <dl>
