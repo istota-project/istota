@@ -2,6 +2,7 @@
   import { fileLinks } from '$lib/fileViewer/links';
   import hljs from 'highlight.js/lib/common';
   import { Button, TextArea } from '$lib/components/ui';
+  import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import { renderDocument, renderUntrustedDocument } from '$lib/markdown';
   import {
     presentationFor,
@@ -62,6 +63,8 @@
         readonly
         spellcheck="false"
         aria-label={`Source of ${name}`}
+        onfocus={pinViewportZoom}
+        onblur={releaseViewportZoom}
       />
     {/if}
   </div>
@@ -103,8 +106,13 @@
     margin-bottom: var(--space-3);
   }
   .file-body {
+    /* Escapes the 16px touch floor; see TextFileEditor.svelte. */
+    --file-text: var(--text-sm);
     font-size: var(--text-base);
     overflow-wrap: anywhere;
+  }
+  .file-body :global(textarea) {
+    font-size: var(--file-text);
   }
   pre {
     white-space: pre-wrap;

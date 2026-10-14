@@ -275,10 +275,11 @@ input[type='week']::-webkit-date-and-time-value {
    fallback and start clamping a control that asks for something larger. It
    names --text-sm, which on the control is already floored.
 
-   The one control this does not reach is the chat composer's textarea, whose
-   size is inherited from the pill around it (every internal metric there is
-   em-relative to that one font-size). It carries its own guard — see the
-   viewport swap in Composer.svelte. */
+   Three textareas opt out on purpose: the chat composer's, whose size is
+   inherited from the pill around it (every internal metric there is
+   em-relative to that one font-size), and the file editor's and plain-text
+   file view's, which keep desktop density on a phone. Each pins the viewport's
+   zoom while focused instead (zoomPin.ts); touchZoom.test.ts lists them. */
 @media (pointer: coarse) {
   input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']),
   select,

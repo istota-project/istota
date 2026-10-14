@@ -27,6 +27,7 @@
     Reply,
   } from '@lucide/svelte';
   import { IconButton } from '$lib/components/ui';
+  import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import {
     uploadChatAttachment,
     chatConfigOnce,
@@ -548,20 +549,6 @@
     applyHeight();
   }
 
-  // iOS Safari auto-zooms when a focused input renders below 16px. Rather than
-  // inflating the field's font (which throws off its height vs. the buttons),
-  // pin the viewport's maximum-scale only while the textarea is focused, then
-  // restore it on blur so pinch-to-zoom keeps working everywhere else.
-  // Both strings must keep viewport-fit=cover (app.html sets it): dropping it on
-  // focus would re-letterbox the page mid-interaction and jump the layout.
-  const VIEWPORT_DEFAULT = 'width=device-width, initial-scale=1, viewport-fit=cover';
-  const VIEWPORT_NO_ZOOM =
-    'width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover';
-
-  function setViewport(content: string) {
-    const meta = document.querySelector('meta[name="viewport"]');
-    if (meta) meta.setAttribute('content', content);
-  }
   // Attaching a file costs the keyboard, and it should not.
   //
   // The tap on the button is handled — it cancels its own focus shift, see
@@ -627,11 +614,13 @@
     input.value = '';
   }
 
+  // The field keeps its pill's size rather than the 16px floor, so it pins
+  // the zoom while focused instead; see zoomPin.ts.
   function onFocus() {
-    setViewport(VIEWPORT_NO_ZOOM);
+    pinViewportZoom();
   }
   function onBlur() {
-    setViewport(VIEWPORT_DEFAULT);
+    releaseViewportZoom();
     // iOS scrolls the *window* to bring a focused field above the keyboard and
     // does not reliably undo it on dismissal. The app is exactly one viewport
     // tall with its own internal scrollers, so a non-zero window scroll has

@@ -159,6 +159,15 @@ const SIZED_ELSEWHERE = new Map([
       'is em-relative to it, so the composer carries its own focus-time viewport ' +
       'guard instead',
   ],
+  [
+    '/lib/components/TextFileEditor.svelte: .text-file-editor :global(textarea)',
+    'a file editor keeps its desktop density on a phone, resolved on the wrapper ' +
+      'outside the floor, and pins the zoom while focused instead',
+  ],
+  [
+    '/lib/components/viewer/TextPreview.svelte: .file-body :global(textarea)',
+    'the plain-text source view, sized like the file editor for the same reason',
+  ],
 ]);
 
 describe('stylesheets do not slip under the floor', () => {
@@ -220,5 +229,16 @@ describe('stylesheets do not slip under the floor', () => {
       }
     }
     for (const key of SIZED_ELSEWHERE.keys()) expect(live).toContain(key);
+  });
+
+  it('pins the zoom in every component an exemption names', () => {
+    // An exempt control renders under 16px on purpose, so the floor no longer
+    // stops iOS zooming on focus; the viewport pin is what does.
+    for (const key of SIZED_ELSEWHERE.keys()) {
+      const file = key.slice(0, key.indexOf(': '));
+      const source = readFileSync(resolve(SRC, '.' + file), 'utf8');
+      expect(source, file).toContain('pinViewportZoom');
+      expect(source, file).toContain('releaseViewportZoom');
+    }
   });
 });
