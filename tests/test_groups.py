@@ -11,7 +11,7 @@ that matter are the ones a later stage builds an authorization gate on:
 - an archived group is out of every membership answer while its rows stay
   readable to the operator (the umbrella's answer to the groups spec's open
   question 3);
-- `kind` and `role` are recorded and decide nothing.
+- `kind` is display-only; owner policy is tested in test_group_policy.py.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def _rows(conn, sql, *params):
 
 
 class TestTheMigration:
-    TABLES = ("groups", "group_members", "group_kv")
+    TABLES = ("groups", "group_members", "group_kv", "group_events")
 
     def test_the_migration_builds_what_schema_sql_declares(self, tmp_path):
         """Both copies of the DDL, executed: `_run_migrations` on a database
@@ -328,6 +328,14 @@ def cfg(tmp_path, db_path):
 
 
 def _run(capsys, fn, **kwargs):
+    if fn is cli.cmd_group_create:
+        kwargs.setdefault("owners", ["alice"])
+    if fn in (cli.cmd_group_add_member, cli.cmd_group_remove_member, cli.cmd_group_archive):
+        kwargs.setdefault("acknowledge_history", True)
+        kwargs.setdefault("confirm", True)
+        with db.get_db(cli._group_config(_Args(**kwargs)).db_path) as conn:
+            group = db.get_group(conn, kwargs["group_id"], include_archived=True)
+            kwargs.setdefault("revision", group["revision"] if group else 0)
     fn(_Args(**kwargs))
     return capsys.readouterr()
 
@@ -380,7 +388,7 @@ class TestTheCli:
                  user_id="alcie", role="member")
         assert exc.value.code == 1
         with db.get_db(db_path) as conn:
-            assert db.group_membership_history(conn, "family") == []
+            assert len(db.group_membership_history(conn, "family")) == 1
 
     def test_add_member_refuses_an_archived_group(self, cfg, capsys):
         _run(capsys, cli.cmd_group_create, config=cfg, group_id="family",
@@ -395,7 +403,7 @@ class TestTheCli:
              kind="family", name=None)
         with pytest.raises(SystemExit):
             _run(capsys, cli.cmd_group_remove_member, config=cfg,
-                 group_id="family", user_id="alice")
+                 group_id="family", user_id="bob")
 
     def test_list_and_archive(self, cfg, capsys):
         _run(capsys, cli.cmd_group_create, config=cfg, group_id="family",
@@ -451,29 +459,35 @@ class TestTheCli:
                                  group_id="family", namespace="ns").out)
         assert [e["value"] for e in listed["entries"]] == ["plain text", 2]
 
-    def test_a_repeated_add_says_nothing_changed(self, cfg, db_path, capsys):
-        _run(capsys, cli.cmd_group_create, config=cfg, group_id="family",
-             kind="family", name=None)
-        _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family",
-             user_id="alice", role="member")
-        out = _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family",
-                   user_id="alice", role="owner").out
-        assert "already a member" in out
+    def test_a_role_change_updates_the_current_membership(self, cfg, db_path, capsys):
+        _run(capsys, cli.cmd_group_create, config=cfg, group_id="family", kind="family", name=None)
+        _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family", user_id="bob", role="member")
+        _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family", user_id="bob", role="owner")
         with db.get_db(db_path) as conn:
-            assert [h["role"] for h in db.group_membership_history(conn, "family")] \
-                == ["member"]
+            assert [h["role"] for h in db.group_membership_history(conn, "family")] == ["owner", "owner"]
+
+    def test_cli_requires_owners_and_history_acknowledgement(self, cfg, db_path, capsys):
+        with pytest.raises(SystemExit):
+            _run(capsys, cli.cmd_group_create, config=cfg, group_id="family", kind="family", name=None, owners=[])
+        _run(capsys, cli.cmd_group_create, config=cfg, group_id="family", kind="family", name=None)
+        with pytest.raises(SystemExit):
+            _run(capsys, cli.cmd_group_add_member, config=cfg, group_id="family", user_id="bob", role="member", acknowledge_history=False)
+        with db.get_db(db_path) as conn:
+            assert db.list_group_members(conn, "family") == ["alice"]
 
     def test_the_parser_reaches_every_verb(self, cfg, monkeypatch, capsys):
         """Through `main`, so the subparser and the dispatch table agree."""
         for argv in (
-            ["group", "create", "family", "--kind", "family", "--name", "F"],
-            ["group", "add-member", "family", "alice", "--role", "owner"],
+            ["group", "create", "family", "--kind", "family", "--name", "F", "--owner", "alice"],
+            ["group", "add-member", "family", "alice", "--role", "owner", "--revision", "1"],
+            ["group", "update", "family", "--name", "F", "--revision", "1"],
+            ["group", "ensure-storage", "family"],
             ["group", "list", "--all"],
             ["group", "show", "family"],
             ["group", "kv-list", "family", "ns"],
             ["group", "kv-get", "family", "ns", "k"],
-            ["group", "remove-member", "family", "alice"],
-            ["group", "archive", "family"],
+            ["group", "remove-member", "family", "alice", "--revision", "1"],
+            ["group", "archive", "family", "--revision", "2", "--confirm"],
         ):
             monkeypatch.setattr("sys.argv", ["istota", "-c", cfg, *argv])
             cli.main()
@@ -481,7 +495,7 @@ class TestTheCli:
 
 
 # ---------------------------------------------------------------------------
-# `kind` and `role` decide nothing (D1, D2)
+# `kind` remains display-only
 # ---------------------------------------------------------------------------
 
 
@@ -552,7 +566,7 @@ def _reads_groups(func: ast.AST) -> bool:
 
 @functools.lru_cache(maxsize=None)
 def _parsed(root: Path) -> tuple:
-    # The two inertness guards walk the same tree; parse it once per run.
+    # Parse once for the policy guard and its negative controls.
     parsed = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -582,6 +596,11 @@ def _branching_reads(field: str, root: Path = SRC) -> list[str]:
     found = []
     for path, tree, deciding, readers in _parsed(root):
         where = path.relative_to(root)
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.body and isinstance(node.body[0], ast.Expr):
+                    docstrings.add(id(node.body[0].value))
         hits = set()
         for node, name in _field_reads(tree, field):
             if id(node) in deciding and re.search(r"group(?!_chat)", name, re.I):
@@ -593,6 +612,7 @@ def _branching_reads(field: str, root: Path = SRC) -> list[str]:
         found.extend(f"{where}:{line} {name}.{field}" for line, name in sorted(hits))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in docstrings \
                     and not re.match(r"(?i)\s*CREATE\b", node.value) \
                     and _DECIDING_SQL[field].search(node.value):
                 found.append(f"{where}:{node.lineno} SQL on {field}")
@@ -603,12 +623,6 @@ def test_kind_is_display_only():
     """No code decides on a group's `kind` (D1). The day it gates behaviour,
     two features have been built where one was specced."""
     assert _branching_reads("kind") == []
-
-
-def test_role_is_inert():
-    """`group_members.role` is recorded and read by nothing in v1 (D2): every
-    membership write goes through the already-privileged operator CLI."""
-    assert _branching_reads("role") == []
 
 
 _PLANTED = {
@@ -655,3 +669,37 @@ def test_a_display_read_is_not_a_branch(tmp_path):
     )
     assert _branching_reads("kind", planted) == []
     assert _branching_reads("role", planted) == []
+
+
+def test_management_migration_preserves_ownerless_history(tmp_path):
+    path = tmp_path / "old.db"
+    db.init_db(path)
+    with db.get_db(path) as conn:
+        db.create_group(conn, "family", kind="family", display_name="F", created_by="alice")
+        db.add_group_member(conn, "family", "alice", added_by="op")
+        conn.commit()
+        # Reproduce the pre-management schema on a database with real rows.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(groups)")}
+        if "revision" in columns:
+            conn.execute("ALTER TABLE groups DROP COLUMN revision")
+        conn.execute("DROP TABLE IF EXISTS group_events")
+        conn.execute("DELETE FROM _migration_state WHERE name = 'group_management_v1'")
+    db.init_db(path)
+    db.init_db(path)
+    with db.get_db(path) as conn:
+        assert db.get_group(conn, "family")["revision"] == 0
+        assert [h["role"] for h in db.group_membership_history(conn, "family")] == ["member"]
+        assert list(conn.execute("SELECT * FROM group_events")) == []
+        assert conn.execute("SELECT 1 FROM _migration_state WHERE name = 'group_management_v1'").fetchone()
+
+
+def test_sql_guard_ignores_prose_but_finds_sql_literals(tmp_path):
+    planted = tmp_path / "src"
+    planted.mkdir()
+    (planted / "prose.py").write_text(
+        '"""The groups may change where another kind is used."""\n'
+        'QUERY = "SELECT * FROM groups WHERE kind = 1"\n'
+        'COMMENTED = "-- query\\nSELECT * FROM groups WHERE kind = 1"\n'
+    )
+    hits = _branching_reads("kind", planted)
+    assert len(hits) == 2 and ":2 SQL" in hits[0] and ":3 SQL" in hits[1]

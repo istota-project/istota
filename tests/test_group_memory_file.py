@@ -13,7 +13,7 @@ import threading
 import pytest
 
 from istota import cli, db, storage
-from istota.config import Config
+from istota.config import Config, UserConfig
 
 
 @pytest.fixture
@@ -70,10 +70,12 @@ class TestTheSeed:
 
     def test_the_operator_cli_seeds_on_create(self, config, capsys, monkeypatch):
         db.init_db(config.db_path)
+        config.users["alice"] = UserConfig()
         monkeypatch.setattr(cli, "load_config", lambda path=None: config)
 
         class Args:
             group_id = "fam"
+            owners = ["alice"]
             kind = "family"
             name = "The Fam"
             config = None

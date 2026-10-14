@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- New groups require at least one owner. Group administration now records membership and role changes, refuses stale edits, and prevents the last owner from leaving other members without a replacement. The operator CLI requires a revision for changes and acknowledgement before giving a new member access to existing group memory.
+
 - **Installing and updating need no tag or key.** `install.sh --server` and `--local` install the newest signed release, verified against the project's release key, and `istota-stack update` with no tag moves to the newest one. `--tag` and `--signing-key` still pick a specific release or a fork's key. See docs/getting-started/quickstart-server.md.
 
 ### Removed

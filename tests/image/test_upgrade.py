@@ -657,6 +657,21 @@ class TestTheOldDatabaseSurvives:
             f"schema did not move with it."
         )
 
+    def test_group_management_schema_is_present(self, volume_upgrade, istota_image):
+        checked = _docker_run(
+            istota_image, volume_upgrade.config_dir, volume_upgrade.db_dir,
+            ["-c", "python - <<'PY'\n"
+             "import sqlite3\n"
+             "conn = sqlite3.connect('/data/db/istota.db')\n"
+             "columns = {r[1]: r for r in conn.execute('PRAGMA table_info(groups)')}\n"
+             "assert columns['revision'][2:5] == ('INTEGER', 1, '0')\n"
+             "assert {r[1] for r in conn.execute('PRAGMA table_info(group_events)')} == "
+             "{'id', 'group_id', 'actor_id', 'event_type', 'subject_user_id', 'details_json', 'created_at'}\n"
+             "assert [r[2] for r in conn.execute('PRAGMA index_info(idx_group_events_group)')] == ['group_id', 'id']\n"
+             "PY"],
+        )
+        assert checked.returncode == 0, checked.stderr
+
     def test_the_seeded_rows_survived_the_migration(self, volume_upgrade):
         """A migration that drops the table it is migrating also reports success.
 

@@ -1203,6 +1203,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_epochs(conn)
     _migrate_email_thread_members(conn)
     _migrate_groups(conn)
+    _migrate_group_management(conn)
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
@@ -8790,7 +8791,8 @@ _GROUPS_DDL = (
     display_name TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     created_by   TEXT NOT NULL,
-    archived_at  TEXT
+    archived_at  TEXT,
+    revision     INTEGER NOT NULL DEFAULT 0
 )""",
     """CREATE TABLE IF NOT EXISTS group_members (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8816,6 +8818,16 @@ _GROUPS_DDL = (
     PRIMARY KEY (group_id, namespace, key)
 )""",
     "CREATE INDEX IF NOT EXISTS idx_group_kv_ns ON group_kv(group_id, namespace)",
+    """CREATE TABLE IF NOT EXISTS group_events (
+    id INTEGER PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    subject_user_id TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_group_events_group ON group_events(group_id, id)",
 )
 
 
@@ -8871,6 +8883,14 @@ def _migrate_email_thread_members(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('email_thread_members_v1')"
+    )
+
+
+def _migrate_group_management(conn: sqlite3.Connection) -> None:
+    """Retain legacy roles; no owner is inferred from group provenance."""
+    _add_columns(conn, "groups", {"revision": "INTEGER NOT NULL DEFAULT 0"})
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) VALUES ('group_management_v1')"
     )
 
 
@@ -10905,6 +10925,7 @@ def _group_dict(row: sqlite3.Row) -> dict:
         "created_at": row["created_at"],
         "created_by": row["created_by"],
         "archived_at": row["archived_at"],
+        "revision": row["revision"],
     }
 
 
