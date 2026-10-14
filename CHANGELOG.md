@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- While the web app restarts after an update, the browser shows a "Starting up" page in the login page's style instead of nginx's bare 502. It reloads itself once the app answers, and says so if the wait runs long.
+
 - Files now has Scripts and Prompt files entries under the assistant's section, listing each file with its description and the scheduled jobs or heartbeat checks that reference it. Missing targets are listed above the files and flagged in the sidebar; choosing a file previews it and Reveal opens its folder.
 
 - Admin → Connections now shows Google Workspace setup status, its callback URL and allowed service access. Configure opens the Google settings in the existing editor; each user still connects their own Google account in Settings → Connections.
