@@ -129,6 +129,52 @@ it('keeps the standard sidebar uncluttered and shows access beside the folder pa
   expect(screen.getByText('No access')).toBeTruthy();
 });
 
+it('marks the places a task can reach and describes the mark without renaming the link', async () => {
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await openSection('Rooms');
+  for (const label of ['My files', 'Project room']) {
+    const link = await within(sidebar).findByRole('link', { name: label });
+    expect(link).toHaveAccessibleName(label);
+    expect(link).toHaveAccessibleDescription('Istota can read and change these files');
+    const describedBy = link.getAttribute('aria-describedby')!;
+    expect(link.querySelector(`[id="${describedBy}"]`)).toHaveTextContent(
+      'Istota can read and change these files',
+    );
+  }
+  expect(within(sidebar).getByText('Istota can use these in your private room.')).toBeTruthy();
+});
+
+it('leaves the Nextcloud row unmarked and drops the legend when nothing is reachable', async () => {
+  api.getWorkspacePlaces.mockResolvedValue({
+    places: [
+      {
+        ...home,
+        id: 'nextcloud',
+        kind: 'nextcloud',
+        label: 'Nextcloud',
+        view_root: null,
+        reach: { private: 'none', shared_member: 'none', restricted: 'none', note: '' },
+      },
+    ],
+    notes: [],
+  });
+  api.getWorkspaceListing.mockResolvedValue({
+    place: 'nextcloud',
+    path: '',
+    entries: [],
+    truncated: false,
+    skipped_names: 0,
+  });
+  render(Workspace);
+  const sidebar = await screen.findByRole('complementary');
+  await openSection('Connections');
+  const link = await within(sidebar).findByRole('link', { name: 'Nextcloud' });
+  expect(link).not.toHaveAttribute('aria-describedby');
+  expect(link.querySelector('.task-reach')).toBeNull();
+  expect(within(sidebar).queryByText('Istota can use these in your private room.')).toBeNull();
+});
+
 it('keeps untrusted room labels inert in the sidebar and breadcrumbs', async () => {
   api.getWorkspacePlaces.mockResolvedValue({
     places: [{ ...room, label: '<b>Project room</b>' }],

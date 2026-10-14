@@ -2,6 +2,8 @@
   import { CategoryGroup } from '$lib/components/ui';
   import { Folder, House, MessageSquare, Users, Cloud, Paperclip } from '@lucide/svelte';
   import type { WorkspacePlace } from '$lib/api';
+  import TaskReachIcon from './TaskReachIcon.svelte';
+  import { reachesTasks } from './reach';
   let {
     places,
     selected,
@@ -37,10 +39,14 @@
           class:active={selected === place.id}
           href={href(place.id)}
           aria-current={selected === place.id ? 'page' : undefined}
+          aria-describedby={reachesTasks(place.reach.private)
+            ? `task-reach-${place.id}`
+            : undefined}
           onclick={(event) => onNavigate(event, place.id)}
         >
           {#if place.kind === 'talk'}<Paperclip size={14} />{:else}<group.icon size={14} />{/if}
           <span class="view-name" title={place.label}>{place.label}</span>
+          <TaskReachIcon access={place.reach.private} id={`task-reach-${place.id}`} />
         </a>
       {/each}
     </CategoryGroup>

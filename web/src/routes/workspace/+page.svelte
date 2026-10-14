@@ -43,7 +43,8 @@
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';
-  import { placeForRef } from '$lib/components/workspace/reach';
+  import { placeForRef, reachesTasks } from '$lib/components/workspace/reach';
+  import { Bot } from '@lucide/svelte';
   import PinnedList from '$lib/components/workspace/PinnedList.svelte';
   import FileTable from '$lib/components/workspace/FileTable.svelte';
 
@@ -458,6 +459,11 @@
           {href}
           onNavigate={navigate}
         />
+        {#if places.some((place) => reachesTasks(place.reach.private))}
+          <p class="caption reach-legend">
+            <Bot size={14} aria-hidden="true" />Istota can use these in your private room.
+          </p>
+        {/if}
       </Sidebar>
     {/if}
   {/snippet}
@@ -710,6 +716,16 @@
 </Modal>
 
 <style>
+  .reach-legend {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-2) 0 0;
+    padding: 0 var(--space-2);
+  }
+  .reach-legend :global(svg) {
+    flex-shrink: 0;
+  }
   .pin-error {
     padding: var(--space-2) var(--space-3);
     display: flex;
