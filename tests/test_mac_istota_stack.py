@@ -57,8 +57,16 @@ with open(os.environ["STUB_CALLS"], "a") as fh:
 
 
 def save():
-    with open(state_path, "w") as fh:
+    # Through a rename: a running `setup --web` stub reads the state while others write it.
+    tmp = f"{state_path}.{os.getpid()}"
+    with open(tmp, "w") as fh:
         json.dump(state, fh)
+    os.replace(tmp, state_path)
+
+
+def reload():
+    with open(state_path) as fh:
+        return json.load(fh)
 
 
 def out(text):
@@ -83,6 +91,20 @@ if name == "lsof":
     sys.exit(1)
 
 if name == "open":
+    state["opened"] = True
+    save()
+    sys.exit(0)
+
+if name == "curl":
+    # The setup page's state, one entry of page_states per call, the last
+    # repeated; an empty entry is a page that does not answer yet.
+    with open(os.environ["STUB_CALLS"]) as fh:
+        asked = sum(1 for line in fh if json.loads(line)["cmd"] == "curl")
+    states = state.get("page_states", [])
+    phase = states[min(asked, len(states)) - 1] if states else ""
+    if not phase:
+        sys.exit(7)
+    out(json.dumps({"phase": phase, "rerun": True}))
     sys.exit(0)
 
 if name == "git":
@@ -181,7 +203,8 @@ if verb == "shell":
     vm = state.setdefault("vm", {})
     if command[:2] == ["sh", "-c"]:
         out(f"tag={vm.get('tag', '')}\nunsigned={vm.get('unsigned', '')}\n"
-            f"config={1 if vm.get('config') else 0}\nadmin={vm.get('admin', '')}\n")
+            f"config={1 if vm.get('config') else 0}\nadmin={vm.get('admin', '')}\n"
+            f"publish={vm.get('publish', '')}\n")
         sys.exit(0)
     if command[:1] != ["istota-stack"]:
         sys.exit(0)
@@ -208,6 +231,29 @@ if verb == "shell":
             vm["tag"] = stack[-1]
             vm["unsigned"] = "1" if "--unsigned" in stack else ""
         save()
+        sys.exit(rc)
+    if stack[:1] == ["setup-cancel"]:
+        state["cancelled"] = True
+        save()
+        sys.exit(0)
+    if stack[:2] == ["setup", "--web"]:
+        code = "ABCDE-FGHJK-MNPQR-STVWX"
+        out("Open this address in your browser to set up Istota:\n\n"
+            f"  http://localhost:{state.get('setup_url_port', 8080)}/istota/setup#code={code}\n\n"
+            f"Setup code (if you open the page some other way): {code}\n")
+        deadline = time.time() + state.get("setup_web_sleep", 0)
+        while time.time() < deadline:
+            time.sleep(0.05)
+            now = reload()
+            if now.get("cancelled"):
+                sys.exit(now.get("cancel_rc", 1))
+            if now.get("opened") and state.get("finish_on_open"):
+                break
+        rc = state.get("setup_web_rc", 0)
+        if rc == 0:
+            state = reload()
+            state.setdefault("vm", {})["config"] = True
+            save()
         sys.exit(rc)
     if stack[:1] == ["setup"]:
         vm["config"] = True
@@ -330,7 +376,7 @@ def mac(tmp_path) -> Mac:
     stub = stubs / "stub"
     stub.write_text(STUB.replace("{python}", sys.executable))
     stub.chmod(0o755)
-    for name in ("limactl", "security", "lsof", "open", "uname", "git"):
+    for name in ("limactl", "security", "lsof", "open", "uname", "git", "curl"):
         (stubs / name).symlink_to(stub)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"key": KEY}))
@@ -931,6 +977,21 @@ class TestTheVmsLife:
         assert _resolved(running.home / "Istota") in result.stdout
         assert ["compose", "ps"] in running.stack_calls()
 
+    def test_status_names_a_publish_port_that_is_not_the_forward(self, running):
+        """#749: nginx on a port Lima does not forward is not Lima's fault."""
+        running.set(vm={**running.state()["vm"], "publish": "127.0.0.1:8080:80"})
+        result = running.run("status")
+        assert result.returncode == 0, result.stderr
+        assert ("nginx publishes on 8080, but Lima forwards 8181: run "
+                "`istota-stack setup --web --force` and keep localhost:8181") in result.stdout
+        assert "Lima's forward is not up" not in result.stdout
+
+    def test_status_blames_the_forward_when_the_publish_port_is_right(self, running):
+        running.set(vm={**running.state()["vm"], "publish": "127.0.0.1:8181:80"})
+        result = running.run("status")
+        assert "nothing listens on 8181: Lima's forward is not up" in result.stdout
+        assert "nginx publishes" not in result.stdout
+
     def test_status_says_when_the_marker_is_gone(self, running):
         (running.home / "Istota" / ".istota-workspace").unlink()
         result = running.run("status")
@@ -948,6 +1009,192 @@ class TestTheVmsLife:
     def test_shell(self, running):
         assert running.run("shell").returncode == 0
         assert running.calls("limactl")[-1] == ["shell", "istota"]
+
+
+def _vm_probe_text() -> str:
+    text = MAC_CLI.read_text()
+    start = text.index("VM_PROBE='") + len("VM_PROBE='")
+    return text[start:text.index("'\n", start)]
+
+
+class TestTheProbe:
+    """VM_PROBE is shell text run in the VM; here it runs against a stand-in
+    for /srv/app/istota."""
+
+    def test_it_reports_the_host_port_nginx_publishes_on(self, tmp_path):
+        stack = tmp_path / "stack"
+        (stack / "config").mkdir(parents=True)
+        (stack / ".env").write_text(
+            "ISTOTA_TAG=v1.2.0\nNGINX_PUBLISH=127.0.0.1:8080:80\nNGINX_PUBLISH_TLS=\n"
+            "NGINX_PUBLISH=127.0.0.1:8181:80\n"
+        )
+        probe = _vm_probe_text().replace("s=/srv/app/istota", f"s={stack}")
+        result = subprocess.run(["sh", "-c", probe], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert "tag=v1.2.0" in lines
+        assert "publish=127.0.0.1:8181:80" in lines
+
+    def test_no_env_reports_an_empty_publish(self, tmp_path):
+        probe = _vm_probe_text().replace("s=/srv/app/istota", f"s={tmp_path}")
+        result = subprocess.run(["sh", "-c", probe], capture_output=True, text=True, timeout=30)
+        assert "publish=" in result.stdout.splitlines()
+
+
+def _run_in_terminal(mac: Mac, *args: str, timeout: float = 60, **extra_env: str) -> tuple[int, str]:
+    """The script with a terminal on stdin and stdout, as a person runs it."""
+    import threading
+
+    master, slave = os.openpty()
+    proc = subprocess.Popen(
+        [BASH, str(MAC_CLI), *args], stdin=slave, stdout=slave, stderr=slave,
+        env={**mac.env, **extra_env},
+    )
+    os.close(slave)
+    chunks: list[bytes] = []
+
+    def read() -> None:
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:
+                return
+            if not data:
+                return
+            chunks.append(data)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        rc = proc.wait(timeout=timeout)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    reader.join(5)
+    os.close(master)
+    return rc, b"".join(chunks).decode(errors="replace")
+
+
+SETUP_URL = "http://localhost:8181/istota/setup#code=ABCDE-FGHJK-MNPQR-STVWX"
+SETUP_STATE_URL = "http://localhost:8181/istota/api/setup/state"
+
+
+class TestTheSetupVerb:
+    """The Mac's `setup`: the forwarded port written first, then the VM's
+    setup, and with --web the browser opened on the page once it answers."""
+
+    @pytest.fixture
+    def running(self, mac):
+        assert _create(mac, "--port", "8181").returncode == 0
+        mac.calls_path.unlink()
+        mac.set(setup_url_port=8181)
+        return mac
+
+    def _old_port(self, mac: Mac) -> None:
+        vm = mac.state()["vm"]
+        mac.set(vm={**vm, "host_env": {**vm.get("host_env", {}), "LOCAL_FORWARD_PORT": "8080"}})
+
+    def test_web_force_runs_the_vms_local_web_setup(self, running):
+        result = running.run("setup", "--web", "--force")
+        assert result.returncode == 0, result.stdout + result.stderr
+        setups = [c for c in running.stack_calls() if c[:1] == ["setup"]]
+        assert setups == [["setup", "--web", "--local", "--force"]]
+        assert SETUP_URL in result.stdout
+
+    def test_a_local_given_by_hand_is_passed_once(self, running):
+        assert running.run("setup", "--web", "--local", "--force").returncode == 0
+        setups = [c for c in running.stack_calls() if c[:1] == ["setup"]]
+        assert setups == [["setup", "--web", "--local", "--force"]]
+
+    def test_the_forwarded_port_is_written_first_when_it_differs(self, running):
+        self._old_port(running)
+        result = running.run("setup", "--web", "--force")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = running.stack_calls()
+        write = calls.index(["host-env", "LOCAL_FORWARD_PORT=8181"])
+        assert write < calls.index(["setup", "--web", "--local", "--force"])
+        assert running.state()["vm"]["host_env"]["LOCAL_FORWARD_PORT"] == "8181"
+
+    def test_a_port_already_right_is_only_read(self, running):
+        """A write takes the stack lock and would wait behind a running setup."""
+        assert running.run("setup", "--web", "--force").returncode == 0
+        calls = running.stack_calls()
+        assert ["host-env", "LOCAL_FORWARD_PORT"] in calls
+        assert not any(c[:1] == ["host-env"] and "=" in c[-1] for c in calls)
+
+    def test_the_terminal_setup_writes_the_port_then_forwards(self, running):
+        self._old_port(running)
+        result = running.run("setup", "--force")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = running.stack_calls()
+        assert calls.index(["host-env", "LOCAL_FORWARD_PORT=8181"]) < calls.index(["setup", "--force"])
+        assert running.calls("curl") == []
+
+    def test_the_vms_status_comes_back(self, running):
+        running.set(setup_web_rc=3)
+        result = running.run("setup", "--web", "--force")
+        assert result.returncode == 3
+
+    def test_no_vm_is_refused_before_anything(self, mac):
+        result = mac.run("setup", "--web")
+        assert result.returncode == 1
+        assert "istota-stack create" in result.stderr
+        assert mac.stack_calls() == []
+
+    def test_it_opens_the_page_only_once_it_answers_locked(self, running):
+        """A code minted while the old stack still held the port would open
+        the running app, which answers `configured`; the page is opened when
+        the setup server itself answers, and not before."""
+        running.set(page_states=["", "configured", "locked"], setup_web_sleep=20, finish_on_open=True)
+        rc, output = _run_in_terminal(running, "setup", "--web", "--force")
+        assert rc == 0, output
+        assert running.calls("open") == [[SETUP_URL]]
+        order = [c["cmd"] for c in running.all_calls() if c["cmd"] in ("curl", "open")]
+        assert order == ["curl", "curl", "curl", "open"]
+        assert all(SETUP_STATE_URL in argv for argv in running.calls("curl"))
+
+    def test_without_a_terminal_nothing_is_opened(self, running):
+        running.set(page_states=["locked"], setup_web_sleep=3)
+        result = running.run("setup", "--web", "--force")
+        assert result.returncode == 0, result.stderr
+        assert running.calls("open") == []
+        assert SETUP_URL in result.stdout
+
+    def test_it_stops_waiting_for_the_page(self, running):
+        running.set(page_states=["configured"], setup_web_sleep=4)
+        rc, output = _run_in_terminal(running, "setup", "--web", "--force", ISTOTA_SETUP_PAGE_WAIT="1")
+        assert rc == 0, output
+        assert running.calls("open") == []
+        assert "did not answer" in output
+        assert SETUP_URL in output
+
+    def test_nothing_is_left_behind(self, running):
+        running.set(page_states=["locked"], setup_web_sleep=20, finish_on_open=True)
+        rc, output = _run_in_terminal(running, "setup", "--web", "--force")
+        assert rc == 0, output
+        assert list(running.root.glob("istota-setup.*")) == []
+
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+    def test_a_signal_cancels_the_vms_setup(self, running, sig):
+        """Where a signal does not cross limactl, `setup-cancel` ends the VM's
+        run, whose abort branch puts the old setup back; its status comes back."""
+        running.set(setup_web_sleep=30, cancel_rc=1)
+        proc = subprocess.Popen(
+            [BASH, str(MAC_CLI), "setup", "--web", "--force"], stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=running.env,
+        )
+        deadline = time.time() + 20
+        while not any(c[:2] == ["setup", "--web"] for c in running.stack_calls()):
+            assert time.time() < deadline, "the VM's setup never started"
+            time.sleep(0.05)
+        time.sleep(0.3)
+        started = time.time()
+        proc.send_signal(sig)
+        stdout, stderr = proc.communicate(timeout=20)
+        assert time.time() - started < 10
+        assert proc.returncode == 1, stdout + stderr
+        assert ["setup-cancel"] in running.stack_calls()
+        assert running.state().get("cancelled") is True
 
 
 class TestDestroy:

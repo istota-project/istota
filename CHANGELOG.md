@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Upgrade note.** Enable the People API in the Google Cloud project, select Contacts in Google Workspace settings and reconnect existing Google connections. Operators with an explicit scope ceiling must add both Contacts read-only scopes; see [Contacts setup](docs/features/contacts.md).
 
-- **Change the setup in a browser.** `istota-stack setup --web --force` opens the setup page over a configured stack, filled in with the current answers. The stack is stopped while the page is open. If you close the page or cancel with `istota-stack setup-cancel`, the previous setup is put back and the stack starts again.
+- **Change the setup in a browser.** `istota-stack setup --web --force` opens the setup page over a configured stack, filled in with the current answers. The stack is stopped while the page is open. If you close the page or cancel with `istota-stack setup-cancel`, the previous setup is put back and the stack starts again. On a Mac the same command opens the page in your browser once it is ready, and Ctrl-C cancels it. `istota-stack status` now says when the web page is published on a port other than the one the Mac forwards, rather than blaming Lima.
 
 ### Changed
 

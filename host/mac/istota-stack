@@ -18,6 +18,11 @@
 #                               start the VM when you log in, or not
 #   istota-stack allow-host-port N | deny-host-port N
 #                               let containers reach TCP port N on the Mac's loopback, or not
+#   istota-stack setup [--web] [--force] [setup's options]
+#                               the VM's setup, after writing the port Lima forwards
+#                               into its host.env; --web runs it in the browser,
+#                               opened once the page answers; Ctrl-C cancels it and
+#                               the previous setup is put back
 #   istota-stack update [tag]   the VM's `update` (no tag: the newest release), then
 #                               these scripts from its checkout
 #   istota-stack destroy [--force] [--purge]
@@ -32,8 +37,8 @@
 #                               databases, files, settings and keys; ~/.istota is left as it is
 #
 # Every other verb is the VM's own `istota-stack`, run as root in the VM with
-# its arguments unchanged and its exit status passed back (setup, apply,
-# rollback, exec, compose, up, down, ...). `apply <plan>` and
+# its arguments unchanged and its exit status passed back (apply, rollback,
+# setup-cancel, exec, compose, up, down, ...). `apply <plan>` and
 # `import-bare-metal <dir>` take a path on the Mac, copied into the VM for the
 # call and removed afterwards, as is apply's `--secrets-file <file>`. `istota`
 # beside this script is the VM's `istota`.
@@ -147,15 +152,16 @@ require_running() {
 }
 
 # What the create steps ask of the VM, in one call: the deployed tag, whether
-# it was installed unsigned, whether setup has written a config, and the first
-# admin. Constant text, so nothing from the Mac is interpreted by the guest.
+# it was installed unsigned, whether setup has written a config, the first
+# admin, and the address nginx publishes on. Constant text, so nothing from the Mac is interpreted by the guest.
 # Expanded in the VM, not here.
 # shellcheck disable=SC2016
 VM_PROBE='s=/srv/app/istota
 printf "tag=%s\n" "$(sed -n "s/^ISTOTA_TAG=//p" "$s/.env" 2>/dev/null | tail -n 1)"
 printf "unsigned=%s\n" "$(sed -n "s/^ISTOTA_TAG_UNSIGNED=//p" "$s/.env" 2>/dev/null | tail -n 1)"
 if [ -f "$s/config/config.toml" ]; then echo config=1; else echo config=0; fi
-printf "admin=%s\n" "$(sed -n "/^[[:space:]]*[^#[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*\$//;p;q;}" "$s/config/admins" 2>/dev/null)"'
+printf "admin=%s\n" "$(sed -n "/^[[:space:]]*[^#[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*\$//;p;q;}" "$s/config/admins" 2>/dev/null)"
+printf "publish=%s\n" "$(sed -n "s/^NGINX_PUBLISH=//p" "$s/.env" 2>/dev/null | tail -n 1)"'
 
 probe_value() {
     printf '%s\n' "$1" | sed -n "s/^$2=//p" | tail -n 1
@@ -772,6 +778,93 @@ write_forward_port() {
     fi
 }
 
+# How long the browser waits for the setup page once the VM has printed its address.
+SETUP_PAGE_WAIT="${ISTOTA_SETUP_PAGE_WAIT:-120}"
+
+# Reads the VM's setup output in $1 for the page's address, then opens it once
+# the setup server itself answers `locked`. Before that the port may still be
+# the old stack's, which answers `configured` and drops the code in the fragment.
+watch_setup_page() {
+    local out="$1" url="" base deadline answer
+    while [ -z "$url" ]; do
+        # A pty gives the VM's lines a carriage return.
+        url="$(tr -d '\r' < "$out" | grep -m 1 -E '^ *http://localhost:[0-9]+/istota/setup#code=' | sed 's/^ *//')" || true
+        [ -n "$url" ] || sleep 1
+    done
+    base="${url%%/istota/setup#*}"
+    deadline=$((SECONDS + SETUP_PAGE_WAIT))
+    while :; do
+        answer="$(curl -fsS --max-time 5 "${base}/istota/api/setup/state" 2>/dev/null)" || answer=""
+        if printf '%s' "$answer" | grep -Eq '"phase": *"locked"'; then
+            open "$url" || true
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            log "the setup page did not answer within ${SETUP_PAGE_WAIT}s; open the address above once it does."
+            return 0
+        fi
+        sleep 1
+    done
+}
+
+# A signal while the VM's setup runs: ask the VM to end it, so its abort branch
+# puts the previous setup back even where the signal does not cross limactl.
+cancel_web_setup() {
+    log "cancelling the setup in the VM"
+    vm_stack setup-cancel </dev/null >&2 || true
+}
+
+# Runs the VM's `setup --web --local "$@"`, opens the page once it answers,
+# and returns the VM verb's exit status.
+web_setup() {
+    require_running
+    write_forward_port
+    local out pid rc arg watcher="" args=()
+    for arg in "$@"; do [ "$arg" = --local ] || args+=("$arg"); done
+    out="$(mktemp "${TMPDIR:-/tmp}/istota-setup.XXXXXX")"
+    # Only a terminal has a browser to open; the address is printed either way.
+    if [ -t 1 ]; then
+        watch_setup_page "$out" &
+        watcher=$!
+    fi
+    trap cancel_web_setup INT TERM
+    # A job and `wait`, so a trap runs at once rather than when the run ends
+    # (up to an idle hour). Its stdin is kept, so with a terminal limactl
+    # gives the VM's run a pty and Ctrl-C reaches it there too.
+    limactl shell --workdir / "$INSTANCE" sudo istota-stack setup --web --local ${args[@]+"${args[@]}"} \
+        <&0 > >(tee "$out") &
+    pid=$!
+    while :; do
+        rc=0
+        wait "$pid" || rc=$?
+        # Still there (or not yet reaped): a trap interrupted the wait.
+        kill -0 "$pid" 2>/dev/null || break
+    done
+    trap - INT TERM
+    if [ -n "$watcher" ]; then
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+    fi
+    rm -f "$out"
+    return "$rc"
+}
+
+# The VM's setup, with this Mac's forwarded port written first so nginx and
+# the setup page publish where Lima forwards. --web is web_setup.
+cmd_setup() {
+    local arg web="" rest=() rc=0
+    for arg in "$@"; do
+        if [ "$arg" = --web ]; then web=1; else rest+=("$arg"); fi
+    done
+    if [ -n "$web" ]; then
+        web_setup ${rest[@]+"${rest[@]}"} || rc=$?
+        exit "$rc"
+    fi
+    require_running
+    write_forward_port
+    forward setup "$@"
+}
+
 cmd_start() {
     [ "$#" -eq 0 ] || usage_error
     local status folder
@@ -811,7 +904,7 @@ cmd_stop() {
 
 cmd_status() {
     [ "$#" -eq 0 ] || usage_error
-    local status folder port marker autostart probe holders
+    local status folder port marker autostart probe holders published
     status="$(instance_status)"
     folder="$(workspace_or_default)"
     port="$(port_or_default)"
@@ -830,7 +923,13 @@ cmd_status() {
     echo "Deployed:   $(probe_value "$probe" tag)"
     if command -v lsof >/dev/null 2>&1; then
         holders="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u || true)"
-        if [ -z "$holders" ]; then
+        # NGINX_PUBLISH is ADDR:HOSTPORT:80; the host port is what Lima forwards to.
+        published="$(probe_value "$probe" publish)"
+        published="${published%:*}"
+        published="${published##*:}"
+        if [ -z "$holders" ] && valid_port "$published" && [ "$published" != "$port" ]; then
+            echo "Port:       nginx publishes on ${published}, but Lima forwards ${port}: run \`istota-stack setup --web --force\` and keep localhost:${port}"
+        elif [ -z "$holders" ]; then
             echo "Port:       nothing listens on ${port}: Lima's forward is not up"
         elif grep -qvxE 'limactl|ssh' <<<"$holders"; then
             echo "Port:       ${port} is held by $(printf '%s' "$holders" | tr '\n' ' ')and not by Lima"
@@ -1461,6 +1560,7 @@ main() {
         autostart) cmd_autostart "$@" ;;
         allow-host-port) cmd_host_port allow "$@" ;;
         deny-host-port) cmd_host_port deny "$@" ;;
+        setup) cmd_setup "$@" ;;
         update) cmd_update "$@" ;;
         destroy) cmd_destroy "$@" ;;
         apply|import-bare-metal) cmd_with_path "$command" "$@" ;;
