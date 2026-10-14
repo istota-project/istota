@@ -1,6 +1,7 @@
 <script lang="ts" generics="T extends TextFile">
   import type { Snippet } from 'svelte';
   import { Modal, Button, TextArea } from '$lib/components/ui';
+  import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import { TextFileConflictError, TextFileInvalidError, TextFileLockedError } from '$lib/api';
   import type { TextFile } from './textFile';
 
@@ -173,6 +174,8 @@
         spellcheck="false"
         aria-label={ariaLabel}
         placeholder={empty ? placeholder : ''}
+        onfocus={pinViewportZoom}
+        onblur={releaseViewportZoom}
       />
 
       <div class="row">
@@ -223,6 +226,10 @@
 
 <style>
   .text-file-editor {
+    /* Resolved here, outside the textarea, so it escapes the 16px touch floor:
+       a file wants its desktop density on a phone. The zoom that floor prevents
+       is held off by the focus-time viewport pin instead (zoomPin.ts). */
+    --file-text: var(--text-sm);
     height: 100%;
     display: flex;
     flex-direction: column;
@@ -230,6 +237,7 @@
     min-height: 0;
   }
   .text-file-editor :global(textarea) {
+    font-size: var(--file-text);
     flex: 1;
     min-height: 0;
     resize: none;
