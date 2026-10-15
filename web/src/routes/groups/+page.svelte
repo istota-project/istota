@@ -7,6 +7,7 @@
     Sidebar,
     SidebarToggle,
     Button,
+    CardGrid,
     EmptyState,
     PageLoading,
   } from '$lib/components/ui';
@@ -174,15 +175,15 @@
   {:else if detail && selected}
     <div class="settings groups-page">
       {#key detail.group_id}
-        <div class="overview card-grid">
-          <div class="wide"><GroupNotebook groupId={detail.group_id} /></div>
+        <CardGrid masonry>
+          <div class="wide" data-width="wide"><GroupNotebook groupId={detail.group_id} /></div>
           <SettingsCard title="Members">
             {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
             <GroupMembers group={detail} onChanged={changed} />
           </SettingsCard>
           <GroupRooms rooms={detail.rooms} />
           {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
-        </div>
+        </CardGrid>
       {/key}
     </div>
   {/if}
@@ -192,19 +193,9 @@
   .settings.groups-page {
     max-width: var(--content-max);
   }
-  .overview {
-    --card-min: 320px;
-    --card-gap: var(--space-4);
-  }
+  /* A column so the notebook's card takes the height masonry snaps it to. */
   .wide {
     display: flex;
     flex-direction: column;
-  }
-  /* Two tracks exist from about 660px of column (two 320px minimums and the
-     gap); below that a span would add an implicit column and overflow. */
-  @container settings (min-width: 680px) {
-    .wide {
-      grid-column: span 2;
-    }
   }
 </style>
