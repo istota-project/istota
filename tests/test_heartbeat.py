@@ -198,8 +198,6 @@ name = "slow-check"
 type = "self-check"
 interval_minutes = 30
 cooldown_minutes = 60
-
-[checks.config]
 execution_test = false
 ```
 """)
@@ -213,6 +211,7 @@ execution_test = false
         assert checks[0].interval_minutes == 30
         assert checks[0].cooldown_minutes == 60
         assert "interval_minutes" not in checks[0].config
+        assert checks[0].config["execution_test"] is False
 
 
 # ---------------------------------------------------------------------------

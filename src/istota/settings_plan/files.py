@@ -222,18 +222,21 @@ def _heartbeat_document(content, user):
     field_path = ["users", user, "heartbeat"]
     diagnostics = []
     parsed = heartbeat.parse_heartbeat_text(content, user, diagnostics=diagnostics, include_empty=True)
+    # The path says where, never what: a diagnostic name, or the schema's
+    # field names and indexes, so the operator can find the line to fix.
     if diagnostics:
-        raise ExecutionError("heartbeat_file_invalid", field_path)
+        raise ExecutionError("heartbeat_file_invalid", [*field_path, diagnostics[0]])
     span = find_toml_block(content)
     data = tomllib.loads(content[span[0]:span[1]]) if span is not None else {}
     raw = {name: data[name] for name in ("settings", "checks") if name in data}
     try:
         validate_user_plan(user, {"heartbeat": raw})
-        # reset is plan metadata, never a file-authored check field.
-        if any("reset" in item for item in raw.get("checks", [])):
-            raise ExecutionError("heartbeat_file_invalid", field_path)
-    except SchemaError:
-        raise ExecutionError("heartbeat_file_invalid", field_path) from None
+    except SchemaError as error:
+        raise ExecutionError("heartbeat_file_invalid", error.problem["path"]) from None
+    # reset is plan metadata, never a file-authored check field.
+    for index, item in enumerate(raw.get("checks", [])):
+        if "reset" in item:
+            raise ExecutionError("heartbeat_file_invalid", [*field_path, "checks", index, "reset"])
     settings, checks = parsed if parsed is not None else (heartbeat.HeartbeatSettings(), [])
     definitions = []
     for check in checks:

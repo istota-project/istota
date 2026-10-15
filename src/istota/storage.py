@@ -172,7 +172,6 @@ lookahead_hours = 24
 [[checks]]
 name = "overdue-tasks"
 type = "task-deadline"
-source = "file"
 warn_hours_before = 24
 
 [[checks]]
@@ -180,8 +179,6 @@ name = "system-health"
 type = "self-check"
 interval_minutes = 30                  # Run every 30 min (expensive: spawns Claude)
 cooldown_minutes = 60
-
-[checks.config]
 execution_test = true                  # Test actual Claude CLI invocation
 ```
 
@@ -191,7 +188,7 @@ execution_test = true                  # Test actual Claude CLI invocation
 - **shell-command** — Run command, evaluate condition (`command`, `condition`, `message`, `timeout`)
 - **url-health** — HTTP health check, admin-only (`url`, `expected_status`, `timeout`)
 - **calendar-conflicts** — Find overlapping events (`lookahead_hours`)
-- **task-deadline** — Check for overdue tasks (`source`, `warn_hours_before`)
+- **task-deadline** — Check for overdue tasks (`warn_hours_before`)
 - **self-check** — System health diagnostics: Claude binary, bwrap, DB, failure rate, execution test (`execution_test`)
 
 ## Per-Check Fields

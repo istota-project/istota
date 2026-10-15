@@ -70,7 +70,6 @@ Find overlapping calendar events.
 
 ### task-deadline
 Check for overdue tasks from TASKS.md.
-- `source`: Currently only `"file"` is supported
 - `warn_hours_before`: Hours before deadline to warn (default: 24)
 
 Tasks should use deadline markers: `@due(2024-01-15)` or `(due: 2024-01-15)`
@@ -85,10 +84,10 @@ name = "system-health"
 type = "self-check"
 interval_minutes = 30
 cooldown_minutes = 60
-
-[checks.config]
 execution_test = true
 ```
+
+A check's own settings go directly under its `[[checks]]` entry, as above. A nested `[checks.config]` table is not read: its values are ignored.
 
 ## Quiet Hours
 

@@ -442,6 +442,24 @@ def test_heartbeat_invalid_current_file_is_not_erased(install, block, caplog):
     assert "private-placeholder" not in str(error.value) + caplog.text
 
 
+@pytest.mark.parametrize("block, where", [
+    ('[[checks]]\nname = "a"\ntype = "self-check"\n[[checks]]\nname = "b"\ntype = "url-health"\n'
+     'url = "https://example.com"\ndescription = "private-placeholder"\n', ["checks", 1, "description"]),
+    ('[[checks]]\nname = "a"\ntype = "url-health"\nurl = "https://example.com"\ntimeout = "private-placeholder"\n',
+     ["checks", 0, "timeout"]),
+    ('[[checks]]\nname = "a"\ntype = "self-check"\nreset = ["interval_minutes"]\n', ["checks", 0, "reset"]),
+    ('broken = [\n', ["invalid_toml"]),
+])
+def test_a_snapshot_refusal_says_where_in_heartbeat_md_and_not_what(install, block, where):
+    from istota.settings_plan.files import snapshot_heartbeat
+
+    install[2].with_name("HEARTBEAT.md").write_text("```toml\n" + block + "```\n")
+    with pytest.raises(engine.ExecutionError, match="heartbeat_file_invalid") as error:
+        snapshot_heartbeat(install[1], "alice")
+    assert error.value.path == ["users", "alice", "heartbeat", *where]
+    assert "private-placeholder" not in repr(error.value.path)
+
+
 def test_heartbeat_new_checks_validate_without_running(install, monkeypatch):
     from istota import heartbeat
 
@@ -595,3 +613,20 @@ def test_heartbeat_cli_dry_run_write_and_repeat(install, tmp_path, monkeypatch, 
         assert report["restart_required"] is False
         if flags:
             assert path.read_bytes() == before
+
+
+def test_the_shipped_heartbeat_examples_pass_the_snapshot_validator():
+    """The example file and the skill's example teach the form users copy; a
+    field the daemon does not read made a copied file unexportable."""
+    import re
+    from pathlib import Path
+
+    from istota import storage
+    from istota.settings_plan.files import _heartbeat_document
+
+    _heartbeat_document(storage.HEARTBEAT_EXAMPLE, "alice")
+    skill = (Path(storage.__file__).parent / "skills" / "heartbeat" / "skill.md").read_text()
+    blocks = [match.group(0) for match in re.finditer(r"```toml\n.*?```", skill, re.S)]
+    assert blocks
+    for block in blocks:
+        _heartbeat_document(block + "\n", "alice")
