@@ -541,6 +541,111 @@ export async function markInvoicePending(invoice_number: string): Promise<Invoic
   );
 }
 
+export interface GenerateInvoicesRequest {
+  period?: string;
+  client?: string;
+  entity?: string;
+  /** Bill exactly these entries; `period` is ignored. Never empty. */
+  entry_uids?: string[];
+  /** uid to etag; a changed entry answers 409 with `stale` uids. */
+  etags?: Record<string, string>;
+  dry_run: boolean;
+}
+
+export interface GeneratedInvoice {
+  invoice_number: string;
+  client_key: string;
+  client: string;
+  group: string;
+  items: number;
+  total: number;
+  terms: string;
+  entity?: string;
+  entry_uids: string[];
+  entry_descriptions: string[];
+}
+
+export interface GenerateInvoicesResponse {
+  status: string;
+  dry_run: boolean;
+  invoice_count: number;
+  total: number;
+  invoices: GeneratedInvoice[];
+  /** No client is emailed. */
+  notifications: 'none';
+}
+
+/**
+ * Preview (`dry_run: true`) or issue invoices. A 409 carries `stale` (uids
+ * whose etag changed) or an already-invoiced entry; read `ApiError.status`.
+ */
+export async function generateInvoices(
+  body: GenerateInvoicesRequest,
+): Promise<GenerateInvoicesResponse> {
+  return apiFetch<GenerateInvoicesResponse>('/invoices/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface VoidInvoiceRequest {
+  reason?: string;
+  replaced_by?: string[];
+  /** Required to void a paid invoice; without it the answer is 409, code `paid`. */
+  force?: boolean;
+  delete_pdf?: boolean;
+}
+
+export interface VoidInvoiceResponse {
+  status: string;
+  invoice: InvoiceRow;
+  entries_released: number;
+}
+
+/**
+ * Void an invoice. Errors carry `payload.code`: `not_found` (404), `paid` or
+ * `already_voided` (409), `unknown_replacement` (400).
+ */
+export async function voidInvoice(
+  invoice_number: string,
+  body: VoidInvoiceRequest = {},
+): Promise<VoidInvoiceResponse> {
+  return apiFetch<VoidInvoiceResponse>(`/invoices/${encodeURIComponent(invoice_number)}/void`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface ManualInvoiceItem {
+  /** A configured service billed by `qty`, or omit for a manual `amount`. */
+  service?: string;
+  qty?: number;
+  amount?: number;
+  description: string;
+}
+
+export interface CreateInvoiceRequest {
+  client: string;
+  entity?: string;
+  items: ManualInvoiceItem[];
+}
+
+export interface CreateInvoiceResponse {
+  status: string;
+  invoice: InvoiceRow;
+}
+
+/** Create a manual invoice, the same as `invoice create`. */
+export async function createInvoice(body: CreateInvoiceRequest): Promise<CreateInvoiceResponse> {
+  return apiFetch<CreateInvoiceResponse>('/invoices', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /** URL for the generated invoice PDF — open in a new tab / download. */
 export function invoicePdfUrl(invoice_number: string): string {
   return `${base}/api/money/invoices/${encodeURIComponent(invoice_number)}/pdf`;

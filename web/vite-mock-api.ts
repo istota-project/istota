@@ -8138,6 +8138,172 @@ const handlers: MockHandler[] = [
         return { status: 'ok', entries: rows, totals };
       }
 
+      // --- Generate, void and create (#756) ---
+      const nextInvoiceNumber = () => {
+        const highest = Math.max(
+          0,
+          ...invoices.map((i) => Number(i.invoice_number.replace('INV-', ''))),
+        );
+        return `INV-${String(highest + 1).padStart(6, '0')}`;
+      };
+
+      if (path === '/invoices/generate' && method === 'POST') {
+        if (typeof body?.dry_run !== 'boolean') {
+          return { __status: 400, status: 'error', error: 'dry_run is required' };
+        }
+        const etags: Record<string, string> = body.etags ?? {};
+        const stale = Object.entries(etags)
+          .filter(([uid, etag]) => {
+            const entry = work.find((w) => w.uid === uid);
+            return !entry || workEtag(entry) !== etag;
+          })
+          .map(([uid]) => uid);
+        if (stale.length) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: 'work entries changed since they were read',
+            stale,
+          };
+        }
+        const uids: string[] | undefined = body.entry_uids;
+        if (uids) {
+          const missing = uids.filter((u) => !work.some((w) => w.uid === u));
+          if (missing.length) {
+            return { __status: 404, status: 'error', error: `no work entry with uid ${missing}` };
+          }
+          const billed = uids.filter((u) => work.find((w) => w.uid === u)?.invoice);
+          if (billed.length) {
+            return {
+              __status: 409,
+              status: 'error',
+              error: `work entry already invoiced: ${billed}`,
+            };
+          }
+        }
+        const candidates = work.filter(
+          (w) =>
+            !w.invoice &&
+            findService(w.service) &&
+            findClient(w.client) &&
+            (uids ? uids.includes(w.uid) : !body.client || w.client === body.client),
+        );
+        const groups = new Map<string, Work[]>();
+        for (const w of candidates) {
+          const key = w.separate ? `${w.client}:${w.uid}` : `${w.client}:${w.service}`;
+          groups.set(key, [...(groups.get(key) ?? []), w]);
+        }
+        let number = Number(nextInvoiceNumber().replace('INV-', ''));
+        const generated = [...groups.values()].map((entries) => {
+          const client = findClient(entries[0].client);
+          const total = entries.reduce((s, w) => s + (workAmount(w) ?? 0), 0);
+          const invoice_number = `INV-${String(number++).padStart(6, '0')}`;
+          return {
+            invoice_number,
+            client_key: entries[0].client,
+            client: client?.name ?? entries[0].client,
+            group: entries[0].service,
+            items: entries.length,
+            total: Math.round(total * 100) / 100,
+            terms: '30',
+            entry_uids: entries.map((w) => w.uid),
+            entry_descriptions: entries.map((w) => w.description),
+          };
+        });
+        if (!body.dry_run) {
+          for (const g of generated) {
+            for (const w of work) if (g.entry_uids.includes(w.uid)) w.invoice = g.invoice_number;
+            invoices.unshift({
+              invoice_number: g.invoice_number,
+              client: g.client,
+              client_key: g.client_key,
+              date: today(),
+              total: g.total,
+              status: 'outstanding',
+              ...unvoided,
+            });
+          }
+        }
+        return {
+          status: 'ok',
+          dry_run: body.dry_run,
+          invoice_count: generated.length,
+          total: generated.reduce((s, g) => s + g.total, 0),
+          invoices: generated,
+          notifications: 'none',
+        };
+      }
+
+      const voidMatch = path.match(/^\/invoices\/([^/]+)\/void$/);
+      if (voidMatch && method === 'POST') {
+        const number = decodeURIComponent(voidMatch[1]);
+        const inv = invoices.find((i) => i.invoice_number === number);
+        if (!inv) {
+          return { __status: 404, status: 'error', error: 'not found', code: 'not_found' };
+        }
+        if (inv.status === 'voided') {
+          return {
+            __status: 409,
+            status: 'error',
+            error: `Invoice ${number} already voided on ${inv.voided_at?.slice(0, 10)}`,
+            code: 'already_voided',
+          };
+        }
+        if (inv.status === 'paid' && !body?.force) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: `Invoice ${number} has been marked as paid`,
+            code: 'paid',
+          };
+        }
+        const replacedBy: string[] = body?.replaced_by ?? [];
+        const unknown = replacedBy.find((n) => !invoices.some((i) => i.invoice_number === n));
+        if (unknown) {
+          return {
+            __status: 400,
+            status: 'error',
+            error: `Replacement invoice ${unknown} not found`,
+            code: 'unknown_replacement',
+          };
+        }
+        const released = work.filter((w) => w.invoice === number);
+        for (const w of released) {
+          w.invoice = '';
+          w.paid_date = null;
+        }
+        inv.was_paid = inv.status === 'paid';
+        inv.status = 'voided';
+        delete inv.paid_date;
+        inv.voided_at = new Date().toISOString();
+        inv.void_reason = body?.reason ?? '';
+        inv.replaced_by = replacedBy;
+        if (body?.delete_pdf) inv.has_pdf = false;
+        return { status: 'ok', invoice: inv, entries_released: released.length };
+      }
+
+      if (path === '/invoices' && method === 'POST') {
+        const client = findClient(body?.client);
+        if (!client) return { __status: 400, status: 'error', error: 'unknown client' };
+        const items: { service?: string; qty?: number; amount?: number }[] = body?.items ?? [];
+        if (!items.length) return { __status: 400, status: 'error', error: 'no line items' };
+        const total = items.reduce((s, item) => {
+          const svc = item.service ? findService(item.service) : undefined;
+          return s + (svc ? (item.qty ?? 0) * svc.rate : (item.amount ?? 0));
+        }, 0);
+        const inv: Invoice = {
+          invoice_number: nextInvoiceNumber(),
+          client: client.name,
+          client_key: client.key,
+          date: today(),
+          total: Math.round(total * 100) / 100,
+          status: 'outstanding',
+          ...unvoided,
+        };
+        invoices.unshift(inv);
+        return { status: 'ok', invoice: inv };
+      }
+
       // --- Invoice action routes (must precede the broad /invoices match) ---
       const action = path.match(/^\/invoices\/([^/]+)\/(mark-paid|mark-pending|pdf)$/);
       if (action) {
