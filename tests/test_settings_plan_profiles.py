@@ -254,3 +254,17 @@ def test_selected_users_do_not_validate_unselected_destinations(install):
     context, operations = preview(install, {"alice": {"profile": {"default_room": "absent"}}, "bob": {}}, users=["bob"])
     assert set(context.profiles) == {"bob"}
     assert engine.execute_plan(operations, context).exit_code == 2
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_nav_badge_preference_snapshot_apply(install, enabled):
+    from istota.settings_plan.profiles import snapshot_profile
+
+    _, database = install
+    desired = snapshot_profile(user_profiles.UserProfile("alice", show_nav_unread_badges=enabled))
+    assert desired["profile"]["show_nav_unread_badges"] is enabled
+    context, operations = preview(install, {"alice": desired})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert user_profiles.get_profile(database, "alice").show_nav_unread_badges is enabled
+    context, operations = preview(install, {"alice": desired})
+    assert engine.execute_plan(operations, context).exit_code == 0

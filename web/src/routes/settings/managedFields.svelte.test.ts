@@ -30,6 +30,7 @@ function profile(managed: string[]): UserProfile {
     default_room: '',
     briefing_email_html: true,
     timezone_follow_location: false,
+    show_nav_unread_badges: false,
     external_turn_display: 'collapsed',
     relay_delivery: '',
     relay_delivery_options: [],
@@ -113,4 +114,13 @@ describe('managed fields on /settings', () => {
     const quiet = screen.getByRole('textbox', { name: /Quiet email senders/ });
     expect(quiet).not.toBeDisabled();
   });
+});
+
+it('disables the managed navigation preference', async () => {
+  currentProfile.value = profile(['show_nav_unread_badges']);
+  render(Harness, { component: PreferencesPage, layout: SettingsLayout, user: person });
+  expect(
+    await screen.findByRole('checkbox', { name: /Show unread counts in navigation/ }),
+  ).toBeDisabled();
+  expect(screen.getByText(BADGE)).toBeInTheDocument();
 });

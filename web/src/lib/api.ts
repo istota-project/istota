@@ -156,6 +156,8 @@ export async function changePassword(
 }
 
 export interface User {
+  // Absent in older cached identities; treat as false.
+  show_nav_unread_badges?: boolean;
   // Absent on cached records from before email authentication.
   auth?: UserAuth;
   username: string;
@@ -2082,6 +2084,7 @@ export interface UserProfile {
   // Opt-in: follow the GPS timezone on travel (ISSUE-096). Off by default —
   // it overwrites the timezone the user chose above.
   timezone_follow_location: boolean;
+  show_nav_unread_badges: boolean;
   // How much of a turn that arrived from outside the room (today, mirrored
   // email) the transcript shows. The row is always there whatever this says —
   // `hidden` withholds the body, never the turn.

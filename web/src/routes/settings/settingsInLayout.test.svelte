@@ -13,10 +13,13 @@
   import Layout from '../+layout.svelte';
   import SettingsLayout from './+layout.svelte';
   import Settings from './+page.svelte';
+  import type { Component } from 'svelte';
+
+  let { component: Page = Settings }: { component?: Component } = $props();
 </script>
 
 <Layout>
   <SettingsLayout>
-    <Settings />
+    <Page />
   </SettingsLayout>
 </Layout>

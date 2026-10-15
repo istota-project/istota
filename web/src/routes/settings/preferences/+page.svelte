@@ -120,6 +120,18 @@
 
     <SettingsCard title="Preferences" description="How Istota behaves for your account.">
       <SettingsField
+        label="Show unread counts in navigation"
+        checkbox
+        badge={managedBadge(profile, 'show_nav_unread_badges')}
+        hint="Show unread counts beside Chat, Briefings and Feeds."
+      >
+        <input
+          type="checkbox"
+          bind:checked={profile.show_nav_unread_badges}
+          disabled={isManaged(profile, 'show_nav_unread_badges')}
+        />
+      </SettingsField>
+      <SettingsField
         label="Trusted email senders (fnmatch patterns, comma-separated)"
         badge={managedBadge(profile, 'trusted_email_senders')}
       >

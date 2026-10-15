@@ -37,6 +37,7 @@ await fillApiDouble(api, {
       external_turn_display: 'collapsed',
       relay_delivery: '',
       timezone_follow_location: false,
+      show_nav_unread_badges: false,
       delivery_surfaces: ['talk'],
     },
   })),

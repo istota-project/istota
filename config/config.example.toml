@@ -1396,6 +1396,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 
 [users.alice]
 display_name = "Alice"
+# show_nav_unread_badges = false  # unread counts beside Chat, Briefings and Feeds; saved profile wins
 email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"  # IANA timezone for briefing scheduling
 # alerts_channel = "alertsroom456"  # Talk room for confirmations and security alerts

@@ -3622,3 +3622,29 @@ class TestWebAuthMethods:
         assert cfg.web.auth_sign_in_code_ttl_minutes == expected
         assert "auth_login_link_ttl_minutes is retired" in caplog.text
         assert "unknown" not in caplog.text.lower()
+
+
+@pytest.mark.parametrize("value", [None, True, False])
+def test_nav_badge_preference_config(tmp_path, value):
+    path = tmp_path / "config.toml"
+    field = "" if value is None else f"show_nav_unread_badges = {str(value).lower()}\n"
+    path.write_text("[users.alice]\n" + field)
+    assert load_config(path).users["alice"].show_nav_unread_badges is (value is True)
+
+
+def test_nav_badge_preference_survives_config_reload(tmp_path):
+    from istota import db, user_profiles
+    from istota.lib import toml_write
+
+    database = tmp_path / "framework.db"
+    db.init_db(database)
+    user_profiles.ensure_profile(database, "alice")
+    path = tmp_path / "config.toml"
+    path.write_text(toml_write.dumps({
+        "db_path": str(database),
+        "users": {"alice": {"show_nav_unread_badges": False}},
+    }))
+    user_profiles.update_profile(database, "alice", show_nav_unread_badges=True)
+    assert load_config(path).users["alice"].show_nav_unread_badges is True
+    user_profiles.update_profile(database, "alice", show_nav_unread_badges=False)
+    assert load_config(path).users["alice"].show_nav_unread_badges is False

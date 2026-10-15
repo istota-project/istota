@@ -191,3 +191,8 @@ class TestDuplicateAddresses:
             assert duplicate_email_addresses(conn) == {
                 "shared@example.com": ["alice", "bob", "carol (login)"],
             }
+
+
+def test_nav_badge_preference_is_self_editable_only():
+    assert "show_nav_unread_badges" in SELF_EDITABLE_FIELDS
+    assert "show_nav_unread_badges" not in ADMIN_EDITABLE_FIELDS

@@ -489,3 +489,36 @@ class TestRelayDelivery:
 
     def test_values_are_the_no_preference_and_the_three_kinds(self):
         assert user_profiles.RELAY_DELIVERY_VALUES == ("", "room", "whatsapp", "sms")
+
+
+class TestNavUnreadBadges:
+    def test_default_and_round_trip(self, db_path):
+        assert user_profiles.ensure_profile(db_path, "alice").show_nav_unread_badges is False
+        for value in (True, False):
+            user_profiles.update_profile(db_path, "alice", show_nav_unread_badges=value)
+            assert user_profiles.get_profile(db_path, "alice").show_nav_unread_badges is value
+
+    def test_seed_import_and_db_precedence(self, db_path):
+        config = UserConfig(show_nav_unread_badges=True)
+        assert user_profiles.ensure_profile(db_path, "alice", seed_from=config).show_nav_unread_badges
+        assert user_profiles.import_from_user_configs(db_path, {"bob": config}) == 1
+        assert user_profiles.get_profile(db_path, "bob").show_nav_unread_badges
+        user_profiles.update_profile(db_path, "alice", show_nav_unread_badges=False)
+        assert user_profiles.import_from_user_configs(db_path, {"alice": config}) == 0
+        user_profiles.merge_into_user_config(user_profiles.get_profile(db_path, "alice"), config)
+        assert config.show_nav_unread_badges is False
+
+    def test_upgrade_preserves_existing_profile(self, db_path):
+        from istota import db
+
+        user_profiles.ensure_profile(db_path, "alice", display_name="Alice", timezone="Europe/Paris")
+        with db.get_db(db_path) as conn:
+            conn.execute("ALTER TABLE user_profiles DROP COLUMN show_nav_unread_badges")
+        assert user_profiles.get_profile(db_path, "alice").show_nav_unread_badges is False
+        db.init_db(db_path)
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.show_nav_unread_badges is False
+        assert (profile.display_name, profile.timezone) == ("Alice", "Europe/Paris")
+        user_profiles.update_profile(db_path, "alice", show_nav_unread_badges=True)
+        db.init_db(db_path)
+        assert user_profiles.get_profile(db_path, "alice").show_nav_unread_badges is True

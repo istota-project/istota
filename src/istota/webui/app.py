@@ -1950,6 +1950,13 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
     method = "none" if _no_auth_mode() else request.session["auth"]["method"]
     identity = getattr(request.state, "web_auth_identity", None)
     username = user["username"]
+    show_nav_unread_badges = False
+    if _config:
+        from istota import user_profiles
+
+        profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, username)
+        preferences = profile if profile is not None else _config.users.get(username)
+        show_nav_unread_badges = bool(getattr(preferences, "show_nav_unread_badges", False))
     is_admin = _user_is_web_admin(username)
     features: dict = {
         "chat": True,  # web chat is always-on
@@ -2015,6 +2022,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "username": username,
         "display_name": user.get("display_name", username),
         "bot_name": _config.bot_name if _config else "Istota",
+        "show_nav_unread_badges": show_nav_unread_badges,
         "is_admin": is_admin,
         "features": features,
         "contact": contact,
@@ -14919,6 +14927,7 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "routing":                {"type": "routing"},
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
+    "show_nav_unread_badges": {"type": "bool", "strict": True},
     "external_turn_display":  {
         "type": "enum", "values": user_profiles.EXTERNAL_TURN_DISPLAY_VALUES,
     },
@@ -15639,7 +15648,7 @@ def coerce_profile_field(
     if t == "bool":
         if isinstance(value, bool):
             return value
-        if isinstance(value, str):
+        if isinstance(value, str) and not spec.get("strict", False):
             return value.lower() in ("1", "true", "yes", "on")
         raise ValueError(f"{field} must be boolean")
     if t == "enum":
@@ -15756,6 +15765,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         profile = user_profiles.ensure_profile(
             _config.db_path, user["username"],
             display_name=user.get("display_name") or user["username"],
+            seed_from=_config.users.get(user["username"]),
         )
     with _db.get_db(_config.db_path) as conn:
         managed = sorted(user_profiles.managed_fields(conn, user["username"]))
@@ -15780,6 +15790,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "routing": profile.routing,
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
+        "show_nav_unread_badges": profile.show_nav_unread_badges,
         "external_turn_display": profile.external_turn_display or "collapsed",
         "relay_delivery": profile.relay_delivery,
         "relay_delivery_options": _relay_delivery_options(user["username"]),

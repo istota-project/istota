@@ -849,6 +849,7 @@ class UserConfig:
     default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
+    show_nav_unread_badges: bool = False
     # The KDBX credential vault, operator-set. Empty means this user's vault is
     # whatever their `{bot_dir}/vault/` folder holds, which is the ordinary
     # route and is every user by default; a relative path resolves under
@@ -3098,6 +3099,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             user_data.get("external_turn_display", "collapsed") or "collapsed",
         ),
         briefing_email_html=bool(user_data.get("briefing_email_html", True)),
+        show_nav_unread_badges=bool(user_data.get("show_nav_unread_badges", False)),
         timezone_follow_location=bool(
             user_data.get("timezone_follow_location", False)
         ),
