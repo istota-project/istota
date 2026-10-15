@@ -68,7 +68,7 @@ istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
 istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
-istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--whatsapp-number E164 | --clear-whatsapp | --reset-whatsapp-identity] [--whatsapp-bsuid BSUID] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--default-briefings | --no-default-briefings] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--whatsapp-number E164 | --clear-whatsapp | --reset-whatsapp-identity] [--whatsapp-bsuid BSUID] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
 ```
 
 `istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
@@ -78,7 +78,7 @@ istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR 
 `--whatsapp-number` binds a bootstrap E.164 number for the WhatsApp surface, used for the first binding and as an outbound fallback; `--whatsapp-bsuid` enrolls the business-scoped user id explicitly, which is the only route for a WhatsApp user with a username and no reachable number. The two may be given together. `--reset-whatsapp-identity` clears the learned identity and keeps the number, `--clear-whatsapp` removes the binding. Changing the number discards the 24-hour service window along with everything else learned about the previous holder. See [WhatsApp](../features/whatsapp.md).
 
 
-`--default-briefings` / `--no-default-briefings` controls whether the shared `[[default_briefings]]` set is seeded into this user (on by default). Seeding is one-time per briefing name, so a later opt-in never clobbers briefings the user has edited.
+The former `--default-briefings` flags are retired and return a migration diagnostic. Manage All users delivery mutes in Briefings; use `istota briefings migrate` for existing defaults.
 
 `--default-destination` sets the fallback delivery surface (`talk` | `email` | `ntfy` | `web` | `surface:channel` | comma list). `--route` is repeatable and sets a purpose-keyed override; `PURPOSE` is one of `reply`, `alert`, `log`, `briefing`, `notification`. See [per-user delivery routing](../configuration/per-user.md#delivery-routing).
 
@@ -125,7 +125,9 @@ briefing-source `path`, with no convention-default filename).
 
 ### Briefings
 
-`istota briefings` is the unified tree. Schedule and delivery are framework-owned (`briefing_configs`); content (blocks and their sources) lives in the per-user briefings module DB.
+`istota briefings` is the unified tree. Group definitions live in the framework DB and use `group list --group-id ID --actor USER` or `group save --group-id ID --actor USER --file definition.json --revision N`. Revision 0 creates a disabled draft; later saves require the current revision. The actor must be a current owner, or an admin for All users. See [group migration commands](../deployment/migrating-group-briefings.md) for `migrate report|import|review|cutover|rollback` and their required flags.
+
+For personal briefings, schedule and delivery are framework-owned (`briefing_configs`); content (blocks and their sources) lives in the per-user briefings module DB.
 
 ```bash
 # Every briefing name this user actually has, with block counts and the

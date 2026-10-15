@@ -520,3 +520,10 @@ For new features:
 5. Run tests and iterate until all pass
 6. Run `ruff check --output-format concise src tests testbed docker/browser docker/devbox docker/istota scripts`, plus the `web/` checks above if the change touched the frontend
 7. Commit
+
+
+### Group briefing upgrade witness
+
+`rtk test scripts/qtest scripts/test-upgrade.sh --from-floor --shape volume` includes `TestGroupBriefingsUpgrade`. It seeds the floor release’s actual schema with personal schedules, a legacy opt-out, a publishing job and timestamped shared content. Separate image processes initialize/import, publish with partial SMTP outcomes, restart, retry failed delivery, acknowledge uncertain delivery and roll back the producer retirement. The witness asserts that the old schema lacks the group tables/columns, new exclusions default empty, CRON respects retirement, import preserves edits, and retries preserve the edition and send identities without model calls. SMTP is replaced at its provider boundary; no live mail, model or Chrome service is exercised.
+
+Use a current image built from the tested production commit. The image fixture’s tag includes HEAD and the Dockerfile, but does not hash uncommitted source edits. Build after committing a production fix, or explicitly rebuild before supplying `ISTOTA_IMAGE_TAG`. The scoped artifact negative control builds `docker/test/Dockerfile.no-forge` with `--build-arg BASE=<tested-image>` and runs the same driver with `ISTOTA_IMAGE_TAG=<control-image>` and `-- -k test_no_check_fails`. It must fail specifically on `developer.forge_binaries`, rather than a fixture or startup error.

@@ -211,7 +211,7 @@ A bare `[sleep_cycle]` header keeps `enabled = True` (the old loader made it fal
 
 `[briefings] newsletter_max_links_per_source` (20; 0 unlimited): dropped anchors keep their text.
 
-`BriefingConfig.blocks` is a raw passthrough read once by the seeder (`briefings/_migrate.normalize_block_specs` → `_seed_blocks`), `compare=False`, never persisted. Blocks are the sole content model: `components` is a migration-read carrier, TOML `components =` warns, `output` is a column. `[briefing_defaults]` and the legacy generator are gone. `[[default_briefings]]` is seeded into opted-in users (`UserConfig.default_briefings`, column default 1) before the DB overlay; a user briefing of the same name wins.
+`BriefingConfig.blocks` is a raw passthrough read once by the seeder (`briefings/_migrate.normalize_block_specs` → `_seed_blocks`), `compare=False`, never persisted. Blocks are the sole content model: `components` is a migration-read carrier, TOML `components =` warns, `output` is a column. `[briefing_defaults]` and the legacy generator are gone. `[[default_briefings]]` and `UserConfig.default_briefings` are migration inputs only. After schema initialization, `group_migrate.preserve_legacy_defaults` preserves effective schedules/content for the captured old registry once; new accounts receive no copied defaults. Group definitions use the `group_briefings` plan/snapshot adapter and the same owner, revision, source-grant and migration checks as the web editor. See `briefings.md` for cutover and retirement.
 
 ## Per-user profile fields
 

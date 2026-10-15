@@ -1182,3 +1182,52 @@ class TestAnOlderImageRefusesANewerSchema:
 
     def test_the_rollback_preflight_says_so_without_writing(self, rollback_boot):
         assert rollback_boot.check_exit == 3, rollback_boot.check_output
+
+
+class TestGroupBriefingsUpgrade:
+    def test_old_defaults_and_publisher_survive_upgrade_and_partial_delivery_restart(
+        self, volume_upgrade, istota_image, tmp_path,
+    ):
+        config_dir = tmp_path / "config"
+        shutil.copytree(volume_upgrade.config_dir, config_dir)
+        config_file = config_dir / "config.toml"
+        config = tomllib.loads(config_file.read_text())
+        config["workspace_path"] = "/data/db/workspace"
+        config.pop("nextcloud_mount_path", None)
+        config.pop("workspace_mount_path", None)
+        config["nextcloud"]["url"] = ""
+        config["email"].update(enabled=True, bot_email="bot@example.com")
+        config["briefing_shared_blocks"] = []
+        config["default_briefings"] = [{"name": "daily", "cron": "0 7 * * *", "output": "email",
+            "blocks": [{"title": "News", "render_mode": "structured", "sources": [
+                {"kind": "shared_block", "config": {"name": "retained"}}]}]}]
+        config_file.write_text(toml_write.dumps(config))
+        db_dir = tmp_path / "db"
+        path = upgrade.build_anchor_db(REPO, volume_upgrade.anchor.commit, db_dir / "istota.db")
+        with sqlite3.connect(path) as conn:
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='group_briefing_configs'").fetchone()
+            assert "system_key" not in {row[1] for row in conn.execute("PRAGMA table_info(groups)")}
+            assert "excluded_user_ids_json" not in {row[1] for row in conn.execute("PRAGMA table_info(group_briefing_configs)")}
+            for user in ("upgradeuser", "bob", "carol", "dave"):
+                conn.execute("INSERT INTO user_profiles(user_id,email_addresses,default_briefings) VALUES (?,?,?)",
+                             (user, json.dumps([user + "@example.com"]), int(user != "bob")))
+            conn.execute("INSERT INTO briefing_configs(user_id,name,cron_expression,conversation_token,components,output) VALUES ('upgradeuser','daily','0 9 * * *','','{}','email')")
+            conn.execute("INSERT INTO scheduled_jobs(user_id,name,cron_expression,prompt,publish_shared_kv) "
+                         "VALUES ('upgradeuser','publisher','0 6 * * *','Public news','news')")
+            conn.execute("INSERT INTO shared_kv(namespace,key,value,written_by,updated_at) "
+                         "VALUES ('briefing_shared_blocks','retained',?,'upgradeuser','2026-01-01 00:00:00')",
+                         (json.dumps({"text": "Retained public story", "trusted": True}),))
+        conn.close()
+        for phase in ("prepare", "resume"):
+            migrated = _docker_run(istota_image, config_dir, db_dir, ["-c", _istota("init")])
+            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+            witnessed = _docker_run(istota_image, config_dir, db_dir,
+                ["-c", "ISTOTA_ADMINS_FILE=/data/config/admins python /seed/group_briefing_state.py " + phase], mounts=[(SEED_DIR, "/seed")])
+            assert witnessed.returncode == 0, witnessed.stdout + witnessed.stderr
+            observed = json.loads(witnessed.stdout)
+            if phase == "prepare":
+                assert observed == {"partial": {"upgradeuser": "sent", "bob": "skipped", "carol": "failed", "dave": "uncertain"},
+                                    "default_exclusions": []}
+            else:
+                assert observed == {"retried": ["carol@example.com"], "acknowledged": ["dave@example.com"],
+                                    "same_edition": True, "retirement_survived_restart": True, "rollback": True}
