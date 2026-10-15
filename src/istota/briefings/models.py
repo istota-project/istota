@@ -106,7 +106,7 @@ class BlockSource:
     ``config`` is a decoded JSON dict, kind-specific (see the module docs).
     """
 
-    id: int
+    id: int | str
     block_id: int
     position: int
     kind: str
@@ -224,4 +224,133 @@ def validate_shared_block_payload(payload: dict) -> dict:
         "enabled": bool(payload.get("enabled", True)),
         "trusted": bool(payload.get("trusted", False)),
         "sources": sources,
+    }
+
+
+GROUP_SOURCE_KINDS = frozenset({
+    "browse", "markets", "group_memory", "group_file", "shared_block",
+    "personal_file", "personal_calendar",
+})
+GROUP_CHANNELS = ("in_app", "email", "talk", "ntfy")
+
+
+def _group_text(value, field, *, required=False, limit=20000):
+    if not isinstance(value, str) or len(value) > limit or (required and not value.strip()):
+        raise ValueError(f"invalid {field}")
+    return value.strip()
+
+
+def _group_sources(raw, seen):
+    if not isinstance(raw, list):
+        raise ValueError("sources must be a list")
+    sources = []
+    for source in raw:
+        if not isinstance(source, dict) or set(source) - {"id", "kind", "config"}:
+            raise ValueError("invalid source")
+        source_id = _group_text(source.get("id"), "source id", required=True, limit=100)
+        if not _SLUG_RE.fullmatch(source_id) or source_id in seen:
+            raise ValueError("source ids must be unique slugs")
+        seen.add(source_id)
+        kind = source.get("kind")
+        if not isinstance(kind, str) or kind not in GROUP_SOURCE_KINDS:
+            raise ValueError("source kind is not allowed for group briefings")
+        config = source.get("config", {})
+        if not isinstance(config, dict):
+            raise ValueError("source config must be an object")
+        sources.append({"id": source_id, "kind": kind, "config": config})
+    return sources
+
+
+def normalize_group_generation(mode: str, raw: dict) -> dict:
+    """Strict group input validation; personal seeding's fail-soft parser cannot be used."""
+    if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
+        raise ValueError("generation version must be 1")
+    common = {"version", "contains_personal_information", "audience_acknowledged"}
+    allowed = common | ({"prompt", "research", "inputs"} if mode == "prompt" else {"blocks"})
+    if set(raw) - allowed:
+        raise ValueError("unknown generation setting")
+    result = {"version": 1}
+    for flag in ("contains_personal_information", "audience_acknowledged"):
+        value = raw.get(flag, False)
+        if type(value) is not bool:
+            raise ValueError(f"{flag} must be a boolean")
+        result[flag] = value
+    seen = set()
+    if mode == "prompt":
+        result["prompt"] = _group_text(raw.get("prompt"), "generation prompt", required=True)
+        research = raw.get("research", {})
+        if not isinstance(research, dict) or set(research) - {"enabled", "prompt", "allowed_domains"}:
+            raise ValueError("invalid research settings")
+        enabled = research.get("enabled", False)
+        if type(enabled) is not bool:
+            raise ValueError("research enabled must be a boolean")
+        prompt = _group_text(research.get("prompt", ""), "research prompt", required=enabled)
+        domains = research.get("allowed_domains", [])
+        if not isinstance(domains, list):
+            raise ValueError("allowed domains must be a list")
+        normalized_domains = []
+        for domain in domains:
+            value = _group_text(domain, "allowed domain", required=True, limit=253).lower()
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", value):
+                raise ValueError("allowed domains must be hostnames")
+            normalized_domains.append(value)
+        result["research"] = {"enabled": enabled, "prompt": prompt, "allowed_domains": sorted(set(normalized_domains))}
+        result["inputs"] = _group_sources(raw.get("inputs", []), seen)
+    else:
+        blocks = raw.get("blocks")
+        if not isinstance(blocks, list) or not blocks:
+            raise ValueError("blocks mode requires blocks")
+        result["blocks"] = []
+        for block in blocks:
+            if not isinstance(block, dict) or set(block) - {"title", "directive", "render_mode", "options", "sources"}:
+                raise ValueError("invalid block")
+            sources = _group_sources(block.get("sources"), seen)
+            if not sources:
+                raise ValueError("each block requires a source")
+            render_mode = block.get("render_mode", "structured" if sources[0]["kind"] in STRUCTURED_KINDS else "synthesis")
+            if render_mode not in RENDER_MODES:
+                raise ValueError("invalid block render mode")
+            options = block.get("options", {})
+            if not isinstance(options, dict):
+                raise ValueError("block options must be an object")
+            directive = block.get("directive")
+            if directive is not None:
+                directive = _group_text(directive, "block directive") or None
+            result["blocks"].append({
+                "title": _group_text(block.get("title"), "block title", required=True, limit=200),
+                "directive": directive, "render_mode": render_mode, "options": options, "sources": sources,
+            })
+    # Roundtrip rejects non-JSON inputs and prevents caller mutations of snapshots.
+    return json.loads(json.dumps(result, allow_nan=False))
+
+
+def validate_group_definition_payload(payload: dict) -> dict:
+    from croniter import croniter
+    from zoneinfo import ZoneInfo
+
+    if not isinstance(payload, dict) or set(payload) - {
+        "name", "title", "cron", "timezone", "enabled", "generation_mode", "generation", "channel",
+    }:
+        raise ValueError("invalid definition fields")
+    name = _group_text(payload.get("name"), "name", required=True, limit=100)
+    if not _SLUG_RE.fullmatch(name):
+        raise ValueError("name must be a slug")
+    cron = _group_text(payload.get("cron"), "cron", required=True, limit=100)
+    if len(cron.split()) != 5 or not croniter.is_valid(cron):
+        raise ValueError("invalid cron expression")
+    zone = _group_text(payload.get("timezone"), "timezone", required=True, limit=100)
+    ZoneInfo(zone)
+    mode = payload.get("generation_mode")
+    if mode not in ("prompt", "blocks"):
+        raise ValueError("generation mode must be prompt or blocks")
+    channel = payload.get("channel", "in_app")
+    if channel not in GROUP_CHANNELS:
+        raise ValueError("invalid delivery channel")
+    enabled = payload.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("enabled must be a boolean")
+    return {
+        "name": name, "title": _group_text(payload.get("title", ""), "title", limit=200),
+        "cron": cron, "timezone": zone, "generation_mode": mode, "channel": channel,
+        "enabled": enabled, "generation": normalize_group_generation(mode, payload.get("generation")),
     }

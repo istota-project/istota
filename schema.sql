@@ -2471,3 +2471,81 @@ CREATE TABLE IF NOT EXISTS workspace_pins (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (user_id, provider, ref)
 );
+
+-- One common group briefing edition and its audience.
+CREATE TABLE IF NOT EXISTS group_briefing_configs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL REFERENCES groups(group_id),
+        name TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        cron TEXT NOT NULL,
+        timezone TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        generation_mode TEXT NOT NULL CHECK (generation_mode IN ('prompt', 'blocks')),
+        generation_json TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(group_id, name)
+    );
+
+CREATE TABLE IF NOT EXISTS group_briefing_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+        occurrence_key TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('publish', 'preview')),
+        due_at TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN (
+            'queued', 'researching', 'generating', 'preview_ready', 'published',
+            'failed', 'superseded', 'cancelled')),
+        attempt_token TEXT,
+        lease_expires_at TEXT,
+        research_json TEXT,
+        research_attempt_token TEXT,
+        subject TEXT,
+        body_md TEXT,
+        provenance_json TEXT NOT NULL DEFAULT '{}',
+        usage_json TEXT NOT NULL DEFAULT '{}',
+        error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        published_at TEXT,
+        UNIQUE(definition_id, occurrence_key)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_group_briefing_run_claim ON group_briefing_runs(state, lease_expires_at);
+
+CREATE TRIGGER IF NOT EXISTS group_briefing_immutable_edition
+        BEFORE UPDATE ON group_briefing_runs
+        WHEN OLD.state IN ('published', 'preview_ready')
+        BEGIN SELECT RAISE(ABORT, 'edition immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS group_briefing_immutable_target
+        BEFORE UPDATE OF group_id ON group_briefing_configs
+        WHEN NEW.group_id != OLD.group_id
+        BEGIN SELECT RAISE(ABORT, 'target immutable'); END;
+
+CREATE TABLE IF NOT EXISTS group_briefing_recipients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES group_briefing_runs(id),
+        user_id TEXT NOT NULL,
+        membership_id INTEGER NOT NULL REFERENCES group_members(id),
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN (
+            'pending', 'sending', 'sent', 'failed', 'uncertain', 'skipped')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry_at TEXT,
+        send_identity TEXT,
+        provider_reference TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(run_id, user_id, channel)
+    );
+
+CREATE INDEX IF NOT EXISTS idx_group_briefing_recipient_retry ON group_briefing_recipients(state, next_retry_at);

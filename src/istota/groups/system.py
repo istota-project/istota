@@ -48,27 +48,32 @@ def eligible_user_ids(conn, config) -> set[str]:
 
 def reconcile_all_users(conn, config, *, registry_complete: bool | None = None) -> dict:
     """Reconcile before taking an audience snapshot; never remove on a failed load."""
-    complete = config._user_registry_complete if registry_complete is None else registry_complete
     with _transaction(conn):
-        row = conn.execute("SELECT group_id FROM groups WHERE system_key = ?", (ALL_USERS,)).fetchone()
-        if row is None:
-            # Neither a display-name nor an id collision transfers old history.
-            group_id = "all-users"
-            while db.get_group(conn, group_id, include_archived=True) is not None:
-                group_id = "all-users-" + uuid4().hex[:12]
-            db.create_group(conn, group_id, kind="group", display_name="All users", created_by="__system__")
-            conn.execute("UPDATE groups SET system_key = ? WHERE group_id = ?", (ALL_USERS, group_id))
-            _event(conn, group_id, "__system__", "created", details={"system_key": ALL_USERS})
-        else:
-            group_id = row["group_id"]
-        eligible = eligible_user_ids(conn, config)
-        for user_id in sorted(eligible):
-            sync_account_membership(conn, user_id)
-        if complete:
-            for user_id in db.list_group_members(conn, group_id):
-                if user_id not in eligible:
-                    sync_account_membership(conn, user_id, enabled=False)
-        return db.get_group(conn, group_id)
+        return reconcile_all_users_in_transaction(conn, config, registry_complete=registry_complete)
+
+
+def reconcile_all_users_in_transaction(conn, config, *, registry_complete: bool | None = None) -> dict:
+    """Let an edition and its current audience commit together."""
+    complete = config._user_registry_complete if registry_complete is None else registry_complete
+    row = conn.execute("SELECT group_id FROM groups WHERE system_key = ?", (ALL_USERS,)).fetchone()
+    if row is None:
+        # Neither a display-name nor an id collision transfers old history.
+        group_id = "all-users"
+        while db.get_group(conn, group_id, include_archived=True) is not None:
+            group_id = "all-users-" + uuid4().hex[:12]
+        db.create_group(conn, group_id, kind="group", display_name="All users", created_by="__system__")
+        conn.execute("UPDATE groups SET system_key = ? WHERE group_id = ?", (ALL_USERS, group_id))
+        _event(conn, group_id, "__system__", "created", details={"system_key": ALL_USERS})
+    else:
+        group_id = row["group_id"]
+    eligible = eligible_user_ids(conn, config)
+    for user_id in sorted(eligible):
+        sync_account_membership(conn, user_id)
+    if complete:
+        for user_id in db.list_group_members(conn, group_id):
+            if user_id not in eligible:
+                sync_account_membership(conn, user_id, enabled=False)
+    return db.get_group(conn, group_id)
 
 
 def ensure_all_users_group(conn, config) -> dict:
