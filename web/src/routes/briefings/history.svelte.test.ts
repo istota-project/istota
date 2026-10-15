@@ -42,6 +42,7 @@ const items: BriefingArchiveItem[] = [
   ...item,
   generated_at: '2026-01-01T12:00:00Z',
   task_id: null,
+  read_at: '2026-01-01T12:00:00Z',
   delivered_to: [],
 }));
 const currentUrl = () => __history.entries[__history.index].url;

@@ -4820,6 +4820,7 @@ async function uploadFromShell(item: Picked): Promise<ChatAttachment> {
 
 export interface BriefingArchiveItem {
   id: number;
+  read_at: string | null;
   briefing_name: string;
   subject: string;
   generated_at: string;
@@ -4881,6 +4882,12 @@ export async function getBriefingArchive(
 
 export async function getBriefingArchiveItem(id: number): Promise<BriefingArchiveItem> {
   return apiFetch<BriefingArchiveItem>(`/briefings/archive/${id}`);
+}
+
+export async function markBriefingArchiveRead(
+  id: number,
+): Promise<{ id: number; read_at: string }> {
+  return apiFetch(`/briefings/archive/${id}/read`, { method: 'POST' });
 }
 
 export async function deleteBriefingArchiveItem(id: number): Promise<void> {
