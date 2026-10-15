@@ -15961,73 +15961,44 @@ def _write_self_profile(
 # ============================================================================
 # Phase 7b — User-managed briefings (briefing_configs table)
 # ============================================================================
-#
-# Briefings can be declared in two places:
-#   1. config.toml / per-user TOML  — Ansible-managed (legacy, being retired)
-#   2. briefing_configs DB table    — web UI / `istota briefing ensure`
-#
-# Both sources are merged at config-load time in ``_apply_user_briefings``.
-# DB rows replace TOML rows of the same name. The web UI only writes to (2);
-# TOML briefings appear with ``"managed": "config"`` so the UI can render
-# them as read-only.
 
-def _briefing_to_dict(b, *, managed: str) -> dict:
-    """Serialize a BriefingConfig (TOML) or UserBriefing (DB) for the API."""
-    out = {
-        "managed": managed,
-        "name": getattr(b, "name", "") or "",
-        "cron": getattr(b, "cron", "") or "",
-        "title": getattr(b, "title", "") or "",
-        "conversation_token": getattr(b, "conversation_token", "") or "",
-        "output": getattr(b, "output", "talk") or "talk",
-        "enabled": bool(getattr(b, "enabled", True)),
+def _briefing_to_dict(b) -> dict:
+    """Serialize a UserBriefing row for the API.
+
+    ``managed`` is the constant ``"db"``, kept for one release so a cached
+    client that still checks it keeps working; nothing current reads it.
+    """
+    return {
+        "managed": "db",
+        "id": int(b.id),
+        "name": b.name or "",
+        "cron": b.cron or "",
+        "title": b.title or "",
+        "conversation_token": b.conversation_token or "",
+        "output": b.output or "talk",
+        "enabled": bool(b.enabled),
     }
-    if managed == "db":
-        out["id"] = int(getattr(b, "id", 0))
-    return out
 
 
 @api_router.get("/settings/briefings")
 async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
-    """List the current user's briefings, merged from TOML + DB.
+    """List the current user's briefings from ``briefing_configs``.
 
     Response: ``{"briefings": [{...}], "rooms": [{token, name, channel}]}``.
-    Each entry carries ``managed: "config" | "db"`` so the UI can render
-    TOML rows as read-only. ``rooms`` is the Talk conversations a briefing can
-    be delivered to — the same `_user_talk_rooms` list the routing rows offer,
-    rather than a second answer to the same question (ISSUE-475). The briefings
-    form still asks for the token as free text; pointing it at this list is the
-    obvious follow-on and is not part of that change.
+    ``rooms`` is the Talk conversations a briefing can be delivered to — the
+    same `_user_talk_rooms` list the routing rows offer, rather than a second
+    answer to the same question (ISSUE-475). The briefings form still asks for
+    the token as free text; pointing it at this list is the obvious follow-on
+    and is not part of that change.
     """
     if _config is None:
         return {"briefings": [], "rooms": []}
 
     from istota import user_briefings as _ub
 
-    username = user["username"]
-    out: list[dict] = []
-
-    db_rows = _ub.list_briefings(_config.db_path, username)
-    db_names = {r.name for r in db_rows}
-
-    uc = _config.get_user(username)
-    if uc:
-        for b in uc.briefings:
-            # Skip DB-merged copies: the current DB query is authoritative,
-            # and a stale in-memory copy from startup must not resurface a
-            # briefing the user has since deleted as "managed=config".
-            if getattr(b, "from_db", False):
-                continue
-            if b.name in db_names:
-                # The DB entry will be rendered below with its real id.
-                continue
-            out.append(_briefing_to_dict(b, managed="config"))
-
-    for r in db_rows:
-        out.append(_briefing_to_dict(r, managed="db"))
-
+    rows = _ub.list_briefings(_config.db_path, user["username"])
     return {
-        "briefings": out,
+        "briefings": [_briefing_to_dict(r) for r in rows],
         "rooms": _user_talk_rooms(user["username"]),
         "outputs": _registered_delivery_surfaces(),
     }

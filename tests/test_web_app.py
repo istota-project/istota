@@ -5156,7 +5156,7 @@ class TestResourcesSettingsRemoved:
 
 @_needs_web_deps
 class TestBriefingEndpoints:
-    """Settings → briefings: list TOML+DB merged, upsert/delete DB rows."""
+    """Settings → briefings: list and upsert/delete briefing_configs rows."""
 
     @pytest.fixture(autouse=True)
     def _setup_db(self, monkeypatch, tmp_path):
@@ -5198,11 +5198,13 @@ class TestBriefingEndpoints:
         resp = await client.get("/istota/callback", follow_redirects=False)
         return resp.cookies
 
-    async def test_list_includes_toml_and_db(self, tmp_path, client, app):
+    async def test_list_is_db_rows_only_each_with_an_id(self, tmp_path, client, app):
+        # "morning" is only in the loaded config, never in briefing_configs:
+        # with the TOML input retired, nothing outside the table is listed.
         from istota import user_briefings
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
-        user_briefings.ensure_briefing(
+        evening, _ = user_briefings.ensure_briefing(
             self._db_path, user_id="alice", name="evening",
             cron="0 19 * * *", conversation_token="logtoken", output="talk",
         )
@@ -5210,9 +5212,9 @@ class TestBriefingEndpoints:
         resp = await client.get("/istota/api/settings/briefings", cookies=cookies)
         assert resp.status_code == 200
         body = resp.json()
-        managed = {(b["name"], b["managed"]) for b in body["briefings"]}
-        assert ("morning", "config") in managed
-        assert ("evening", "db") in managed
+        assert [(b["name"], b["id"]) for b in body["briefings"]] == [("evening", evening.id)]
+        # Kept as a constant for one release so a cached client still works.
+        assert all(b["managed"] == "db" for b in body["briefings"])
         # rooms come from log_channel / alerts_channel
         room_tokens = {r["token"] for r in body["rooms"]}
         assert "logtoken" in room_tokens

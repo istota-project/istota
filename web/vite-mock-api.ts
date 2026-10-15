@@ -7315,6 +7315,16 @@ const handlers: MockHandler[] = [
       enabled: boolean;
     }[] = [
       {
+        id: 199,
+        name: 'morning',
+        cron: '0 7 * * 1-5',
+        // Blank exercises the derived-title placeholder in the editor.
+        title: '',
+        conversation_token: 'abc123',
+        output: 'talk',
+        enabled: true,
+      },
+      {
         id: 200,
         name: 'evening',
         cron: '0 18 * * 1-5',
@@ -7342,24 +7352,10 @@ const handlers: MockHandler[] = [
         enabled: false,
       },
     ];
-    const tomlBriefings = [
-      {
-        name: 'morning',
-        cron: '0 7 * * 1-5',
-        // Blank exercises the derived-title placeholder in the editor.
-        title: '',
-        conversation_token: 'abc123',
-        output: 'talk' as const,
-        enabled: true,
-      },
-    ];
     return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
       if (url === '/istota/api/settings/briefings' && method === 'GET') {
         return {
-          briefings: [
-            ...tomlBriefings.map((b) => ({ managed: 'config', ...b })),
-            ...mockDbBriefings.map((b) => ({ managed: 'db', ...b })),
-          ],
+          briefings: mockDbBriefings.map((b) => ({ managed: 'db', ...b })),
           rooms: [
             { token: 'abc123', name: 'Log channel' },
             { token: 'def456', name: 'Alerts channel' },

@@ -306,7 +306,7 @@
           },
         },
       ];
-    if (personalName && schedule?.managed === 'db' && schedule.id !== undefined) {
+    if (personalName && schedule?.id !== undefined) {
       const row = schedule;
       return [
         { label: 'Duplicate', disabled: busy, onSelect: () => void clonePersonal(row) },

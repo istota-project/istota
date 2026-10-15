@@ -403,13 +403,15 @@ describe('edition reader transitions', () => {
   });
 });
 
-it.each(['db', 'config'] as const)(
-  'shows block settings only on a user-managed briefing (%s)',
-  async (managed) => {
+it.each([true, false])(
+  'shows block settings only while the briefing has a schedule row (%s)',
+  async (live) => {
     selectedBriefingId.set(edition.id);
     briefingArchiveCount.set(1);
     api.getBriefingArchiveItem.mockResolvedValueOnce(edition);
-    api.getBriefings.mockResolvedValue({ briefings: [{ name: edition.briefing_name, managed }] });
+    api.getBriefings.mockResolvedValue({
+      briefings: live ? [{ id: 1, name: edition.briefing_name }] : [],
+    });
     api.getBriefingConfig.mockResolvedValue({
       briefings: [
         { name: edition.briefing_name, blocks: [{ id: edition.document!.blocks[1].block_id }] },
@@ -419,7 +421,7 @@ it.each(['db', 'config'] as const)(
     await screen.findByRole('heading', { name: 'Calendar' });
     await waitFor(() => expect(api.getBriefingConfig).toHaveBeenCalled());
     await tick();
-    if (managed === 'db') {
+    if (live) {
       await fireEvent.click(await screen.findByRole('button', { name: 'Settings for Calendar' }));
       expect(goto).toHaveBeenCalledWith(
         `/istota/briefings/settings?name=${edition.briefing_name}&block=${edition.document!.blocks[1].block_id}`,

@@ -123,7 +123,7 @@
         if (
           !active ||
           !schedules?.briefings.some(
-            (briefing) => briefing.name === name && briefing.managed === 'db',
+            (briefing) => briefing.name === name && briefing.id !== undefined,
           )
         )
           return;

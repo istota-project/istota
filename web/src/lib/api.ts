@@ -2184,8 +2184,9 @@ export async function updateProfile(
 // --- Phase 7b: briefings ---
 
 export interface UserBriefingRow {
-  managed: 'config' | 'db';
-  id?: number;
+  // Always 'db'; kept on the wire for one release so a cached client works.
+  managed?: 'db';
+  id: number;
   name: string;
   cron: string;
   // Display title for the rendered briefing (email subject, archive entry).

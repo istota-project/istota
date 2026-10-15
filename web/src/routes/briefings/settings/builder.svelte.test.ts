@@ -122,7 +122,6 @@ beforeEach(() => {
         title: '',
         output: 'email',
         enabled: true,
-        managed: 'db',
       },
       {
         id: 2,
@@ -131,7 +130,6 @@ beforeEach(() => {
         title: '',
         output: 'web',
         enabled: false,
-        managed: 'db',
       },
     ],
     outputs: ['email', 'web'],
@@ -418,6 +416,15 @@ describe('briefing block builder', () => {
     expect(api.upsertBriefing).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'morning-copy', enabled: false }),
     );
+  });
+
+  it('edits every schedule row, with no administrator lock, keyed by its id alone', async () => {
+    await mount();
+    expect(screen.queryByText('Set by your administrator')).toBeNull();
+    expect(screen.getByRole('textbox', { name: /^Schedule/ })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: /^Enabled/ })).toBeEnabled();
+    await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+    expect(await screen.findByRole('menuitem', { name: 'Duplicate' })).toBeInTheDocument();
   });
 
   it('opens an empty disabled schedule by URL with its schedule beside its content', async () => {

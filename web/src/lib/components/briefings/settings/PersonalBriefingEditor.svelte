@@ -7,7 +7,7 @@
     type BriefingRoomOption,
     type UserBriefingRow,
   } from '$lib/api';
-  import { Input, NoticeBanner, Select, type SelectOption } from '$lib/components/ui';
+  import { Input, Select, type SelectOption } from '$lib/components/ui';
   import { notifyError } from '$lib/stores/notices';
   import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -74,7 +74,6 @@
     });
   });
 
-  const managed = $derived(schedule?.managed === 'config');
   const dirty = $derived(!!saved && JSON.stringify(draft) !== saved);
   const outputOptions = $derived(
     [...new Set([...outputs, draft.output])].map((o) => ({ value: o, label: channelLabel(o) })),
@@ -109,17 +108,11 @@
     }
   }
 
-  useSettingsSave(() => (managed ? null : { dirty, saving, save }));
+  useSettingsSave(() => ({ dirty, saving, save }));
 </script>
 
 <SettingsCard title="Schedule and delivery">
-  {#if managed}
-    <NoticeBanner title="Set by your administrator" variant="info">
-      This schedule comes from the deployment's configuration and cannot be changed here. Its
-      content below is still yours to edit.
-    </NoticeBanner>
-  {/if}
-  <fieldset class="fields" disabled={managed}>
+  <fieldset class="fields">
     <SettingsField
       label="Title"
       hint="Shown on every edition, followed by its date. Leave blank to use the name."
@@ -139,7 +132,6 @@
           options={outputOptions}
           onValueChange={(v) => (draft.output = v)}
           ariaLabel="Delivery"
-          disabled={managed}
           fullWidth
         />
       </SettingsField>
@@ -157,7 +149,6 @@
             onValueChange={(v) => (draft.conversation_token = v)}
             placeholder="Choose a room"
             ariaLabel="Talk room"
-            disabled={managed}
             fullWidth
           />
         </SettingsField>
