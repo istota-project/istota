@@ -33,7 +33,7 @@ import {
   briefingArchiveCount,
   briefingArchiveError,
   selectedBriefingId,
-  selectedBriefingGroup,
+  selectedGroupEdition,
   briefingFilterName,
 } from '$lib/stores/briefings';
 import Layout from './+layout.svelte';
@@ -54,7 +54,7 @@ beforeEach(() => {
   briefingArchiveCount.set(null);
   briefingArchiveError.set(null);
   selectedBriefingId.set(null);
-  selectedBriefingGroup.set('');
+  selectedGroupEdition.set(null);
   briefingFilterName.set('');
 });
 

@@ -6,14 +6,19 @@
   import { masonry } from '$lib/masonry';
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';
+  import type { Snippet } from 'svelte';
 
   let {
     edition,
     showMetadata = true,
     editableBlockIds = [],
     onEditBlock,
+    meta,
+    actions,
   }: {
     edition: BriefingArchiveItem;
+    meta?: Snippet;
+    actions?: Snippet;
     showMetadata?: boolean;
     editableBlockIds?: number[];
     onEditBlock?: (blockId: number) => void;
@@ -58,7 +63,10 @@
 
 <article class="content-frame edition">
   <header class="edition-head">
-    <h1>{edition.subject || edition.briefing_name}</h1>
+    <div class="edition-title">
+      <h1>{edition.subject || edition.briefing_name}</h1>
+      {#if actions}{@render actions()}{/if}
+    </div>
     {#if showMetadata}
       <p class="caption">
         {formatDateTime(edition.generated_at, { dateStyle: 'medium', timeStyle: 'short' })}
@@ -67,6 +75,7 @@
         {/if}
       </p>
     {/if}
+    {#if meta}{@render meta()}{/if}
   </header>
   {#if document}
     <div class="edition-grid" use:masonry>
@@ -120,7 +129,15 @@
     overflow-wrap: anywhere;
   }
 
+  .edition-title {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
   .edition-head h1 {
+    flex: 1;
+    min-width: 0;
     margin: 0 0 var(--space-2);
     font-size: var(--text-xl);
   }

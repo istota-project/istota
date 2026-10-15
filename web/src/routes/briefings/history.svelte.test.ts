@@ -26,7 +26,7 @@ import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import {
   selectedBriefingId,
-  selectedBriefingGroup,
+  selectedGroupEdition,
   briefingFilterName,
   briefingArchiveCount,
   briefingArchiveError,
@@ -69,7 +69,7 @@ beforeEach(() => {
   });
   __history.reset('/istota/briefings/');
   selectedBriefingId.set(null);
-  selectedBriefingGroup.set('');
+  selectedGroupEdition.set(null);
   briefingFilterName.set('');
   briefingArchiveCount.set(null);
   briefingArchiveError.set(null);
@@ -86,16 +86,6 @@ async function openReader() {
   await tick();
 }
 
-async function chooseName(name: string) {
-  const trigger = screen.getByRole('button', { name: 'Filter by briefing' });
-  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
-  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
-  await fireEvent.click(trigger);
-  const option = await screen.findByRole('option', { name });
-  await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
-  await fireEvent.click(option);
-}
-
 describe('briefing selection history', () => {
   it('pushes an item once, then restores the reader on Back and Forward', async () => {
     await openReader();
@@ -109,21 +99,6 @@ describe('briefing selection history', () => {
     __history.forward();
     await waitFor(() => expect(get(selectedBriefingId)).toBe(1));
     expect(__history.entries).toHaveLength(2);
-  });
-
-  it('pushes a name filter and keeps it when selecting an item', async () => {
-    await openReader();
-    await chooseName('Morning');
-    await waitFor(() => expect(currentUrl()).toBe('/istota/briefings/?id=2&name=Morning'));
-    await fireEvent.click(screen.getByRole('button', { name: /Earlier news/ }));
-    expect(currentUrl()).toBe('/istota/briefings/?id=1&name=Morning');
-    expect(__history.entries).toHaveLength(3);
-    __history.back();
-    await waitFor(() => expect(get(selectedBriefingId)).toBe(2));
-    __history.back();
-    await waitFor(() => expect(get(briefingFilterName)).toBe(''));
-    await waitFor(() => expect(get(briefingArchiveCount)).toBe(3));
-    expect(get(selectedBriefingId)).toBe(3);
   });
 
   it('restores a reload selection before the archive request resolves', async () => {
@@ -165,26 +140,6 @@ describe('briefing selection history', () => {
     expect(currentUrl()).toBe('/istota/briefings/?id=3');
     expect(getBriefingArchive).toHaveBeenLastCalledWith({ limit: '20', offset: '0' });
     expect(__history.entries).toHaveLength(1);
-  });
-
-  it('ignores a filter response that arrives after Back restored All', async () => {
-    await openReader();
-    let finish!: (value: ReturnType<typeof archive>) => void;
-    vi.mocked(getBriefingArchive).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
-    await chooseName('Morning');
-    expect(currentUrl()).toBe('/istota/briefings/?name=Morning');
-    __history.back();
-    await waitFor(() => expect(get(briefingFilterName)).toBe(''));
-    await waitFor(() => expect(get(selectedBriefingId)).toBe(3));
-    finish(archive('Morning'));
-    await tick();
-    expect(get(briefingArchiveCount)).toBe(3);
-    expect(currentUrl()).toBe('/istota/briefings/?id=3');
   });
 
   it('replaces Back onto an item removed from the archive', async () => {
@@ -352,7 +307,10 @@ describe('edition reader transitions', () => {
             fail = reject;
           }),
       );
-      await chooseName('Morning');
+      window.history.replaceState(null, '', '/istota/briefings/?name=Morning');
+      page.url = new URL(window.location.href);
+      page.state = {};
+      await waitFor(() => expect(get(briefingFilterName)).toBe('Morning'));
       expect(screen.queryByText(/No briefings yet/)).toBeNull();
       expect(screen.getByText('Loading…')).toBeInTheDocument();
       expect(screen.queryByRole('heading', { name: 'Evening news' })).toBeNull();
@@ -508,6 +466,21 @@ it('opens a group run without confusing the same personal archive id and links b
     source_scopes: {},
   });
   api.getGroupBriefings.mockResolvedValue({ items: [definition] });
+  api.getGroupEditions.mockResolvedValue({
+    items: [
+      {
+        scope: 'group',
+        run_id: 3,
+        group_id: 'team',
+        group_label: 'Team',
+        briefing_name: 'news',
+        briefing_title: 'Group news',
+        subject: 'Group edition',
+        published_at: '2026-10-15T07:00:00Z',
+      },
+    ],
+    total: 1,
+  });
   api.getGroupBriefing.mockResolvedValue(definition);
   api.getGroupBriefingRuns.mockResolvedValue({ items: [run], total: 1 });
   api.getGroupBriefingRun.mockResolvedValue(run);
@@ -519,9 +492,12 @@ it('opens a group run without confusing the same personal archive id and links b
   });
   render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
   await screen.findByText('One common group body');
+  // The sidebar lists the group edition beside personal ones, marked by its group.
+  expect(await screen.findByText('Team', { selector: '.archive-audience span' })).toBeTruthy();
   expect(screen.queryByText('Personal body must stay hidden')).toBeNull();
-  expect(get(selectedBriefingGroup)).toBe('team');
-  expect(screen.queryByRole('button', { name: 'Briefing actions' })).toBeNull();
+  expect(get(selectedGroupEdition)).toEqual({ group: 'team', briefing: 'news', run: 3 });
+  // A group edition is read-only here: no delete, retry or edit actions.
+  expect(screen.queryByRole('button', { name: 'Edition actions' })).toBeNull();
   expect(api.getGroupBriefingRun).toHaveBeenCalledWith('team', 'news', 3);
   expect(api.markBriefingArchiveRead).not.toHaveBeenCalled();
   expect(screen.queryByRole('button', { name: 'Mark all briefings as read' })).toBeNull();
@@ -531,5 +507,5 @@ it('opens a group run without confusing the same personal archive id and links b
   page.state = {};
   await screen.findByText('Personal body must stay hidden');
   expect(screen.queryByText('One common group body')).toBeNull();
-  expect(get(selectedBriefingGroup)).toBe('');
+  expect(get(selectedGroupEdition)).toBeNull();
 });

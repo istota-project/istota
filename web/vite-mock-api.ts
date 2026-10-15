@@ -5918,6 +5918,21 @@ function mockGroups(path: string, method: string) {
   if (path === '/istota/api/groups/team/memory/activity') return { entries: [], next_cursor: null };
   return undefined;
 }
+// The mock's stand-in for `briefings.document.edition_preview`.
+function mockPreview(markdown: string | undefined): string {
+  const plain = (markdown ?? '')
+    .split('\n')
+    .filter((line) => !line.startsWith('Incomplete sources:'))
+    .join('\n')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s*(?:[-*+]|\d+[.)]|#+|\|)\s*/gm, '')
+    .replace(/[*_`|]/g, '')
+    .split(/\s+/)
+    .join(' ')
+    .trim();
+  return plain.length <= 160 ? plain : `${plain.slice(0, 159).trimEnd()}…`;
+}
+
 // The built-in All users group: automatic membership, no owners, admin-authored briefings.
 const mockAllUsersMembers = [
   { user_id: 'carol', display_name: 'Carol', role: 'member' },
@@ -6000,9 +6015,11 @@ const groupBriefingState = (() => {
           kind: 'personal_calendar',
           config: {
             owner_id: 'carol',
-            calendar: 'https://cloud.example.com/remote.php/dav/calendars/carol/work/',
+            calendar_url: 'https://cloud.example.com/remote.php/dav/calendars/carol/work/',
             fields: ['time', 'title'],
-            window: 'next_7_days',
+            include_private: false,
+            lookback_days: 0,
+            lookahead_days: 7,
           },
         },
       ],
@@ -6348,6 +6365,29 @@ function mockGroupBriefings(path: string, method: string, body: any) {
         shared_block: 'Installation-shared',
       },
     };
+  if (path === '/istota/api/briefings/group-editions' && method === 'GET') {
+    const label = (g: string) => (g === 'team' ? 'Team' : 'All users');
+    const published = st.runs
+      .filter((r) => r.mode === 'publish' && r.state === 'published')
+      .map((r) => {
+        const def = st.definitions.find((d) => d.id === r.definition_id)!;
+        return {
+          scope: 'group',
+          run_id: r.id,
+          group_id: def.group_id,
+          group_label: label(def.group_id),
+          briefing_name: def.name,
+          briefing_title: def.title,
+          subject: r.subject ?? null,
+          published_at: r.published_at!,
+          preview: mockPreview(
+            r.document ? r.document.blocks.map((b) => b.body_md).join('\n') : r.body_md,
+          ),
+        };
+      })
+      .sort((a, b) => b.published_at.localeCompare(a.published_at));
+    return { items: published, total: published.length };
+  }
   const resources = path.match(/^\/istota\/api\/groups\/([^/]+)\/briefing-resources$/);
   if (resources && method === 'GET')
     return {
@@ -8211,9 +8251,12 @@ const handlers: MockHandler[] = [
         const selected = name ? archive.filter((a) => a.briefing_name === name) : archive;
         const offset = Math.max(0, Number(qs.get('offset') || 0));
         const limit = Math.max(1, Number(qs.get('limit') || 50));
-        const items = selected
-          .slice(offset, offset + limit)
-          .map(({ document: _document, ...row }) => row);
+        const items = selected.slice(offset, offset + limit).map(({ document, ...row }) => ({
+          ...row,
+          preview: mockPreview(
+            document ? document.blocks.map((b) => b.body_md).join('\n') : row.body_md,
+          ),
+        }));
         return { items, total: selected.length, briefing_names: briefingNames };
       }
       const am = p.match(/^\/archive\/(\d+)$/);

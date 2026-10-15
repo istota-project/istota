@@ -6,9 +6,13 @@
   import { page } from '$app/state';
   import {
     getBriefingTargets,
+    getBriefings,
     getGroupBriefings,
-    type BriefingTarget,
+    getGroupEditions,
     type GroupBriefingDefinition,
+    type UserBriefingRow,
+    type BriefingTarget,
+    type GroupEditionSummary,
     getBriefingArchive,
     getBriefingArchiveItem,
     deleteBriefingArchiveItem,
@@ -17,7 +21,8 @@
   } from '$lib/api';
   import {
     selectedBriefingId,
-    selectedBriefingGroup,
+    selectedGroupEdition,
+    briefingDeleteRequest,
     briefingFilterName,
     briefingArchiveCount,
     briefingArchiveError,
@@ -29,18 +34,18 @@
     ShellHeader,
     Sidebar,
     SidebarToggle,
+    CategoryGroup,
     Chip,
     Select,
-    KebabMenu,
     ConfirmDialog,
     EmptyState,
     PageLoading,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { CheckCheck, Cog } from '@lucide/svelte';
+  import { CheckCheck, Cog, Layers, Plus, Send, Users } from '@lucide/svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyError } from '$lib/stores/notices';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();
@@ -51,8 +56,30 @@
   let items = $state<BriefingArchiveItem[]>([]);
   let total = $state(0);
   let targets = $state<BriefingTarget[]>([]);
-  let groupDefinitions = $state<GroupBriefingDefinition[]>([]);
+  let groupItems = $state<GroupEditionSummary[]>([]);
+  let groupTotal = $state(0);
+  // A display filter over the list, not a selection: it is not in the URL.
   let audience = $state('all');
+  const showPersonal = $derived(audience === 'all' || audience === 'user');
+  const showGroups = $derived(audience !== 'user' && targets.length > 0);
+  type Entry =
+    | { kind: 'user'; at: string; item: BriefingArchiveItem }
+    | { kind: 'group'; at: string; item: GroupEditionSummary };
+  // One list, newest first, with each source's loaded pages interleaved.
+  const entries = $derived(
+    [
+      ...(showPersonal
+        ? items.map((item): Entry => ({ kind: 'user', at: item.generated_at, item }))
+        : []),
+      ...(showGroups
+        ? groupItems.map((item): Entry => ({ kind: 'group', at: item.published_at, item }))
+        : []),
+    ].sort((a, b) => b.at.localeCompare(a.at)),
+  );
+  const listTotal = $derived((showPersonal ? total : 0) + (showGroups ? groupTotal : 0));
+  const hasMore = $derived(
+    (showPersonal && items.length < total) || (showGroups && groupItems.length < groupTotal),
+  );
   const audienceOptions = $derived([
     { value: 'all', label: 'All' },
     { value: 'user', label: 'Just me' },
@@ -65,6 +92,12 @@
 
   // The archived briefing pending a delete confirmation (null = no dialog).
   let deleteTarget = $state<BriefingArchiveItem | null>(null);
+  $effect(() => {
+    const request = $briefingDeleteRequest;
+    if (!request) return;
+    deleteTarget = request;
+    briefingDeleteRequest.set(null);
+  });
   let deleteError = $state('');
   let markAllTarget = $state<{ name: string; username: string } | null>(null);
   let markingAllRead = $state(false);
@@ -78,8 +111,38 @@
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/briefings/settings`));
 
+  // The settings sidebar: every briefing the caller can open, under its audience,
+  // then the two settings sections that are not one briefing.
+  let settingsSidebarOpen = $state(false);
+  let personalBriefings = $state<UserBriefingRow[]>([]);
+  let groupBriefings = $state<Record<string, GroupBriefingDefinition[]>>({});
+  const settingsParams = $derived(onSettings ? page.url.searchParams : new URLSearchParams());
+  const settingsView = $derived(settingsParams.get('view') ?? '');
+  const settingsUrl = (query: Record<string, string>) =>
+    `${base}/briefings/settings/?${new URLSearchParams(query)}`;
+  function settingsActive(query: Record<string, string>): boolean {
+    const keys = ['view', 'name', 'group', 'briefing', 'new'];
+    return keys.every((key) => (settingsParams.get(key) ?? '') === (query[key] ?? ''));
+  }
+  let settingsIndexGeneration = 0;
+  async function loadSettingsIndex() {
+    const generation = ++settingsIndexGeneration;
+    const [personal, ...groups] = await Promise.allSettled([
+      getBriefings(),
+      ...targets.map((target) => getGroupBriefings(target.group_id!)),
+    ]);
+    if (generation !== settingsIndexGeneration) return;
+    if (personal.status === 'fulfilled') personalBriefings = personal.value?.briefings ?? [];
+    groupBriefings = Object.fromEntries(
+      targets.map((target, index) => {
+        const result = groups[index];
+        return [target.group_id!, result.status === 'fulfilled' ? (result.value?.items ?? []) : []];
+      }),
+    );
+  }
+
   let onReader = $derived(
-    page.url.pathname.startsWith(`${base}/briefings`) && !onSettings && !$selectedBriefingGroup,
+    page.url.pathname.startsWith(`${base}/briefings`) && !onSettings && !$selectedGroupEdition,
   );
 
   $effect(() => {
@@ -111,14 +174,22 @@
     }
   }
 
-  type BriefingSelection = { id: number | null; name: string; group?: string };
+  type BriefingSelection = {
+    id: number | null;
+    name: string;
+    group?: string;
+    briefing?: string;
+    run?: number;
+  };
   let initialized = $state(false);
   let loadGeneration = 0;
 
   function encodeSelection(selection: BriefingSelection): Params {
     const params: Params = {};
-    if (selection.group) {
+    if (selection.group && selection.briefing && selection.run) {
       params.group = selection.group;
+      params.briefing = selection.briefing;
+      params.run = String(selection.run);
       return params;
     }
     if (selection.id !== null) params.id = String(selection.id);
@@ -132,9 +203,11 @@
   }
 
   function applySelection(selection: BriefingSelection): void | Promise<void> {
-    selectedBriefingGroup.set(selection.group ?? '');
-    if (selection.group) audience = selection.group;
-    else if (audience !== 'user') audience = 'all';
+    selectedGroupEdition.set(
+      selection.group && selection.briefing && selection.run
+        ? { group: selection.group, briefing: selection.briefing, run: selection.run }
+        : null,
+    );
     const nameChanged = selection.name !== $briefingFilterName;
     briefingFilterName.set(selection.name);
     selectedBriefingId.set(selection.id);
@@ -146,24 +219,25 @@
 
   const briefingSel = createUrlSelection<BriefingSelection>({
     key: 'briefings',
-    params: ['id', 'name', 'group'],
+    params: ['id', 'name', 'group', 'briefing', 'run'],
     encode: encodeSelection,
     decode(params) {
       if (onSettings) return null;
       const id = Number(params.id);
+      const run = Number(params.run);
       return {
         id: Number.isSafeInteger(id) && id > 0 ? id : null,
         name: params.name ?? '',
         group: params.group ?? '',
+        briefing: params.briefing ?? '',
+        run: Number.isSafeInteger(run) && run > 0 ? run : undefined,
       };
     },
     read: () =>
       initialized && !onSettings
-        ? {
-            id: $selectedBriefingGroup ? null : $selectedBriefingId,
-            name: $briefingFilterName,
-            group: $selectedBriefingGroup,
-          }
+        ? $selectedGroupEdition
+          ? { id: null, name: $briefingFilterName, ...$selectedGroupEdition }
+          : { id: $selectedBriefingId, name: $briefingFilterName }
         : null,
     apply: applySelection,
   });
@@ -252,20 +326,64 @@
 
   function pickName(name: string) {
     const selection = { id: null, name };
-    if (onSettings || $selectedBriefingGroup) goto(readerUrl(selection));
+    if (onSettings) goto(readerUrl(selection));
     else briefingSel.push(selection);
   }
 
   function pickItem(id: number) {
     sidebarOpen = false;
     const selection = { id, name: $briefingFilterName };
-    if (onSettings || $selectedBriefingGroup) goto(readerUrl(selection));
+    if (onSettings) goto(readerUrl(selection));
     else briefingSel.push(selection);
   }
 
+  function pickGroupEdition(item: GroupEditionSummary) {
+    sidebarOpen = false;
+    const selection = {
+      id: null,
+      name: $briefingFilterName,
+      group: item.group_id,
+      briefing: item.briefing_name,
+      run: item.run_id,
+    };
+    if (onSettings) goto(readerUrl(selection));
+    else briefingSel.push(selection);
+  }
+
+  let groupGeneration = 0;
+  async function loadGroupEditions(reset = true) {
+    if (audience === 'user' || !targets.length) return;
+    const generation = ++groupGeneration;
+    try {
+      const response = await getGroupEditions({
+        group: audience === 'all' ? undefined : audience,
+        limit: PAGE,
+        offset: reset ? 0 : groupItems.length,
+      });
+      if (generation !== groupGeneration) return;
+      groupItems = reset ? response.items : [...groupItems, ...response.items];
+      groupTotal = response.total;
+    } catch {
+      if (generation === groupGeneration && reset) {
+        groupItems = [];
+        groupTotal = 0;
+      }
+    }
+  }
+
   function loadMore() {
-    offset += PAGE;
-    void load(false);
+    if (showPersonal && items.length < total) {
+      offset += PAGE;
+      void load(false);
+    }
+    if (showGroups && groupItems.length < groupTotal) void loadGroupEditions(false);
+  }
+
+  function chooseAudience(value: string) {
+    audience = value;
+    groupItems = [];
+    groupTotal = 0;
+    void loadGroupEditions();
   }
 
   async function performDelete() {
@@ -298,6 +416,29 @@
 
   const fmtDate = (iso: string) => formatDateTime(iso, { dateStyle: 'medium', timeStyle: 'short' });
 
+  // A mail-list row: the briefing's name and when, then who it was for. The
+  // edition subject repeats both, so only its part before the date is used.
+  function rowView(entry: Entry) {
+    if (entry.kind === 'user') {
+      const item = entry.item;
+      return {
+        title: (item.subject || '').split(' — ')[0] || item.briefing_name,
+        audience: 'Just me',
+        preview: item.preview ?? '',
+        unread: !item.read_at,
+        active: !$selectedGroupEdition && item.id === $selectedBriefingId,
+      };
+    }
+    const item = entry.item;
+    return {
+      title: item.briefing_title || (item.subject || '').split(' — ')[0] || item.briefing_name,
+      audience: item.group_label,
+      preview: item.preview ?? '',
+      unread: false,
+      active: $selectedGroupEdition?.run === item.run_id,
+    };
+  }
+
   // Refresh the archive when the settings page reports a schedule change.
   let lastNonce = 0;
   $effect(() => {
@@ -306,26 +447,26 @@
       lastNonce = n;
       offset = 0;
       void load();
+      void loadGroupEditions();
+      if (targetsLoaded) void loadSettingsIndex();
     }
   });
+  let targetsLoaded = $state(false);
 
   onMount(() => {
     mounted = true;
     const selection = briefingSel.current();
     if (selection) void applySelection(selection);
     else {
-      selectedBriefingGroup.set('');
+      selectedGroupEdition.set(null);
       void load();
     }
     void getBriefingTargets()
-      .then(async (response) => {
+      .then((response) => {
         targets = response.targets.filter((target) => target.scope === 'group');
-        const result = await Promise.allSettled(
-          targets.map((target) => getGroupBriefings(target.group_id!)),
-        );
-        groupDefinitions = result.flatMap((item) =>
-          item.status === 'fulfilled' ? item.value.items : [],
-        );
+        targetsLoaded = true;
+        void loadSettingsIndex();
+        return loadGroupEditions();
       })
       .catch(() => {});
     initialized = true;
@@ -345,15 +486,23 @@
   {#snippet header()}
     <ShellHeader
       title="Briefings"
-      onTitleClick={onSettings ? undefined : () => (sidebarOpen = !sidebarOpen)}
-      titleActionLabel="open archive"
+      onTitleClick={onSettings
+        ? () => (settingsSidebarOpen = !settingsSidebarOpen)
+        : () => (sidebarOpen = !sidebarOpen)}
+      titleActionLabel={onSettings ? 'open settings sections' : 'open archive'}
     >
       {#snippet leading()}
-        {#if !onSettings}
+        {#if onSettings}
+          <SidebarToggle
+            open={settingsSidebarOpen}
+            label="Settings"
+            onclick={() => (settingsSidebarOpen = !settingsSidebarOpen)}
+          />
+        {:else}
           <SidebarToggle
             open={sidebarOpen}
             label="Archive"
-            count={total}
+            count={listTotal}
             onclick={() => (sidebarOpen = !sidebarOpen)}
           />
         {/if}
@@ -364,23 +513,12 @@
             value={audience}
             options={audienceOptions}
             ariaLabel="Filter by audience"
-            onValueChange={(value) => {
-              audience = value;
-              if (value === 'all' || value === 'user') {
-                selectedBriefingGroup.set('');
-                void goto(readerUrl({ id: $selectedBriefingId, name: $briefingFilterName }));
-              } else void goto(readerUrl({ id: null, name: '', group: value }));
-            }}
+            onValueChange={chooseAudience}
           />
         {/if}
-        {#if !onSettings && names.length > 1}
-          <Select
-            value={$briefingFilterName}
-            options={nameOptions}
-            onValueChange={(v) => pickName(v)}
-            ariaLabel="Filter by briefing"
-          />
-        {/if}
+        {#if !onSettings}<Button href={`${base}/briefings/settings/?new=1`} size="sm"
+            >New briefing</Button
+          >{/if}
       {/snippet}
       {#snippet tools()}
         {#if onReader}
@@ -398,9 +536,6 @@
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
 			     put whether or not the open page offers a save. Renders nothing
 			     unless one is registered. -->
-        {#if !onSettings}<Button href={`${base}/briefings/settings?new=1`} size="sm"
-            >New briefing</Button
-          >{/if}
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Briefing settings">
           <Cog size={14} />
@@ -410,61 +545,129 @@
   {/snippet}
 
   {#snippet sidebar()}
-    {#if !onSettings}
+    {#if onSettings}
+      <Sidebar
+        title="Settings"
+        open={settingsSidebarOpen}
+        onClose={() => (settingsSidebarOpen = false)}
+      >
+        <div class="views">
+          <a
+            class="view-btn"
+            class:active={settingsActive({ new: '1' })}
+            href={settingsUrl({ new: '1' })}
+            onclick={() => (settingsSidebarOpen = false)}
+          >
+            <Plus size={14} />
+            <span class="view-name">New briefing</span>
+          </a>
+        </div>
+        <CategoryGroup label="Just me" count={personalBriefings.length}>
+          <div class="views">
+            {#each personalBriefings as item (item.name)}
+              {@const query = { name: item.name }}
+              <a
+                class="view-btn"
+                class:active={settingsActive(query)}
+                href={settingsUrl(query)}
+                onclick={() => (settingsSidebarOpen = false)}
+              >
+                <span class="view-name">{item.title || item.name}</span>
+                {#if !item.enabled}<span class="view-state">Off</span>{/if}
+              </a>
+            {/each}
+          </div>
+        </CategoryGroup>
+        {#each targets as target (target.group_id)}
+          {@const items = groupBriefings[target.group_id!] ?? []}
+          {#if items.length || target.capabilities.author_briefings}
+            <CategoryGroup label={target.label} count={items.length}>
+              <div class="views">
+                {#each items as item (item.id)}
+                  {@const query = { group: target.group_id!, briefing: item.name }}
+                  <a
+                    class="view-btn"
+                    class:active={settingsActive(query)}
+                    href={settingsUrl(query)}
+                    onclick={() => (settingsSidebarOpen = false)}
+                  >
+                    <span class="view-name">{item.title || item.name}</span>
+                    {#if !item.enabled}<span class="view-state">Draft</span>{/if}
+                  </a>
+                {/each}
+              </div>
+            </CategoryGroup>
+          {/if}
+        {/each}
+        <div class="views settings-sections">
+          <a
+            class="view-btn"
+            class:active={settingsView === 'delivery'}
+            href={settingsUrl({ view: 'delivery' })}
+            onclick={() => (settingsSidebarOpen = false)}
+          >
+            <Send size={14} />
+            <span class="view-name">Delivery</span>
+          </a>
+          {#if identity.user.features?.admin}
+            <a
+              class="view-btn"
+              class:active={settingsView === 'shared'}
+              href={settingsUrl({ view: 'shared' })}
+              onclick={() => (settingsSidebarOpen = false)}
+            >
+              <Layers size={14} />
+              <span class="view-name">Shared blocks</span>
+            </a>
+          {/if}
+        </div>
+      </Sidebar>
+    {:else}
       <Sidebar
         title="Archive"
-        count={total}
+        count={listTotal}
         open={sidebarOpen}
         onClose={() => (sidebarOpen = false)}
       >
-        {#if audience !== 'user'}
-          {#each groupDefinitions.filter((item) => audience === 'all' || item.group_id === audience) as item (`${item.group_id}:${item.id}`)}
-            <a
-              class="archive-btn"
-              href={`${base}/briefings/?group=${encodeURIComponent(item.group_id)}&briefing=${encodeURIComponent(item.name)}`}
-            >
-              <span class="archive-subject">{item.title || item.name}</span>
-              <span class="archive-date"
-                >{targets.find((target) => target.group_id === item.group_id)?.label} · {item.channel}</span
-              >
-              <span class="archive-date"
-                >{item.enabled ? item.cron : 'Disabled'} · {item.timezone}</span
-              >
-              <span class="archive-date"
-                >Next: {item.next_run ? fmtDate(item.next_run) : 'None'} · Last: {item.last_run
-                  ?.state ?? 'None'}</span
-              >
-            </a>
-          {/each}
+        {#if deleteError}
+          <p class="sidebar-error">{deleteError}</p>
         {/if}
-        {#if audience === 'all' || audience === 'user'}
-          {#if deleteError}
-            <p class="sidebar-error">{deleteError}</p>
-          {/if}
-          {#if items.length === 0 && $briefingArchiveCount === null}
-            <PageLoading />
-          {:else if items.length === 0 && $briefingArchiveError}
-            <p class="sidebar-error">{$briefingArchiveError}</p>
-          {:else if items.length === 0}
-            <EmptyState size="sm">No briefings yet.</EmptyState>
-          {:else}
-            {#each items as item (item.id)}
-              <div class="list-row archive-row" class:active={item.id === $selectedBriefingId}>
-                <button class="archive-btn" type="button" onclick={() => pickItem(item.id)}>
-                  <span class="archive-subject">{item.subject || item.briefing_name}</span>
-                  <span class="archive-date">Just me · {fmtDate(item.generated_at)}</span>
-                </button>
-                <KebabMenu
-                  ariaLabel="Briefing actions"
-                  items={[{ label: 'Delete', danger: true, onSelect: () => (deleteTarget = item) }]}
-                />
-              </div>
-            {/each}
-            {#if items.length < total}
-              <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
-                {loadingMore ? 'Loading…' : 'Load older'}
+        {#if entries.length === 0 && showPersonal && $briefingArchiveCount === null}
+          <PageLoading />
+        {:else if entries.length === 0 && showPersonal && $briefingArchiveError}
+          <p class="sidebar-error">{$briefingArchiveError}</p>
+        {:else if entries.length === 0}
+          <EmptyState size="sm">No briefings yet.</EmptyState>
+        {:else}
+          {#each entries as entry (entry.kind === 'user' ? `u${entry.item.id}` : `g${entry.item.run_id}`)}
+            {@const row = rowView(entry)}
+            <div class="list-row archive-row" class:active={row.active}>
+              <button
+                class="archive-btn"
+                type="button"
+                onclick={() =>
+                  entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
+              >
+                <span class="archive-line">
+                  <span class="unread" class:on={row.unread} aria-hidden="true"></span>
+                  <span class="archive-subject">{row.title}</span>
+                  <time class="archive-date" datetime={entry.at} title={fmtDate(entry.at)}
+                    >{formatRelative(entry.at)}</time
+                  >
+                </span>
+                <span class="archive-audience">
+                  {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
+                  <span>{row.audience}</span>
+                  {#if row.unread}<span class="visually-hidden">, unread</span>{/if}
+                </span>
+                {#if row.preview}<span class="archive-preview">{row.preview}</span>{/if}
               </button>
-            {/if}
+            </div>
+          {/each}
+          {#if hasMore}
+            <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
+              {loadingMore ? 'Loading…' : 'Load older'}
+            </button>
           {/if}
         {/if}
       </Sidebar>
@@ -500,10 +703,8 @@
 {/if}
 
 <style>
-  /* Row = clickable title button (flex:1) + a kebab sibling. A KebabMenu is
-     itself a <button>, so it can't be nested inside .archive-btn; the row's
-     layout and hover come from `.sidebar .list-row` in lib/styles/sidebar.css,
-     shared with the chat sidebar. */
+  /* The row's layout and hover come from `.sidebar .list-row` in
+     lib/styles/sidebar.css, shared with the chat sidebar. */
   .archive-btn {
     display: flex;
     flex-direction: column;
@@ -524,23 +725,84 @@
     color: var(--text-primary);
   }
 
+  .archive-line {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  /* Holds its width when read, so titles stay aligned down the list. */
+  .unread {
+    flex-shrink: 0;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    align-self: center;
+  }
+
+  .unread.on {
+    background: var(--accent-blue);
+  }
+
   .archive-subject {
+    flex: 1;
+    min-width: 0;
     font-size: var(--text-sm);
     font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .archive-date {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .archive-audience {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    /* Under the title, past the dot's column. */
+    padding-left: calc(0.4rem + var(--space-2));
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+  }
+
+  .archive-preview {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
-    white-space: normal;
-    line-height: 1.4;
-    min-height: 2.8em;
     overflow: hidden;
+    padding-left: calc(0.4rem + var(--space-2));
+    font-size: var(--text-xs);
+    line-height: 1.4;
+    color: var(--text-muted);
     overflow-wrap: anywhere;
   }
 
-  .archive-date {
+  .archive-audience span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .view-state {
+    flex-shrink: 0;
+    margin-left: auto;
     font-size: var(--text-xs);
     color: var(--text-dim);
+  }
+
+  .settings-sections {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-subtle);
   }
 
   .load-more {

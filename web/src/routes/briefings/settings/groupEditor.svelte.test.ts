@@ -5,95 +5,77 @@ import { page } from '../../../../vitest-stubs/app-state.svelte';
 import type { User } from '$lib/api';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
-await fillApiDouble(api, {
-  getBriefings: vi.fn(async () => ({ briefings: [], rooms: [], outputs: ['email'] })),
-  getBrowsePresets: vi.fn(async () => ({ presets: [] })),
-  getFeedOptions: vi.fn(async () => ({ available: false, subscriptions: [], categories: [] })),
-  getBriefingConfig: vi.fn(async () => ({
-    briefings: [],
-    schedule_names: [],
-    source_kinds: [],
-    structured_kinds: [],
-  })),
-  getBriefingPathSuggestions: vi.fn(async () => ({ paths: [] })),
-  getSharedBlockOptions: vi.fn(async () => ({ options: [] })),
-  getProfile: vi.fn(async () => ({ profile: { briefing_email_html: true } })),
-  getBriefingTargets: vi.fn(async () => ({
-    targets: [
-      { scope: 'user', label: 'Just me', capabilities: { author_briefings: true } },
-      {
-        scope: 'group',
-        group_id: 'research',
-        label: 'Research',
-        member_count: 3,
-        capabilities: { author_briefings: true },
-      },
-    ],
-    channels: ['in_app', 'email'],
-    timezone: 'Europe/Berlin',
-    source_scopes: {
-      personal_file: 'Personal contribution',
-      personal_calendar: 'Personal contribution',
-      group_memory: 'Current group',
-      markets: 'Public',
-    },
-  })),
-  getBriefingResources: vi.fn(async () => ({
-    files: ['notes.md'],
-    calendars: [{ value: 'https://calendar.example.com/alice/work/', label: 'My work calendar' }],
-    calendar_unavailable: false,
-  })),
-  getGroupBriefings: vi.fn(async () => ({ items: [] })),
-});
+await fillApiDouble(api);
 import Page from './+page.svelte';
+import Layout from '../+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
-const person = { username: 'alice', features: { briefings: true, admin: false } } as User;
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-});
-it('starts at Just me and keeps the group audience visible beside the editor', async () => {
-  render(Harness, { component: Page, user: person });
-  await fireEvent.click(await screen.findByRole('button', { name: 'New briefing' }));
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Distribution target' })).toHaveTextContent(
-      'Just me',
-    ),
-  );
-  await pick('Distribution target', 'Research (3 members)');
-  expect(screen.getByText(/Generated once per run/)).toHaveTextContent('Research');
-  expect(screen.getByLabelText(/^Timezone/)).toHaveValue('Europe/Berlin');
-  expect(screen.getByLabelText(/^Generation prompt/)).toBeInTheDocument();
-  expect(screen.queryByLabelText('Conversation token')).not.toBeInTheDocument();
-});
 
+const alice = { username: 'alice', features: { briefings: true, admin: false } } as User;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 let saved: any;
 let approvals: any[];
-const caps = { author_briefings: true, generate_briefings: true };
-const makeDefinition = () => ({
-  id: 7,
+let caps: { author_briefings: boolean; generate_briefings: boolean };
+
+const research = {
+  scope: 'group',
   group_id: 'research',
-  name: 'news',
-  title: 'News',
-  cron: '0 7 * * *',
-  timezone: 'Europe/Berlin',
-  channel: 'email',
-  enabled: false,
-  revision: 1,
-  generation_mode: 'prompt',
-  generation: {
-    version: 1,
-    prompt: 'Summarize the news',
-    research: { enabled: false, prompt: '' },
-    inputs: [],
-  },
-  capabilities: caps,
-  source_approvals: [],
-});
+  label: 'Research',
+  member_count: 3,
+  capabilities: { author_briefings: true, receive_briefings: true },
+};
+const other = {
+  scope: 'group',
+  group_id: 'other',
+  label: 'Other',
+  member_count: 1,
+  capabilities: { author_briefings: true, receive_briefings: true },
+};
+
+function definition() {
+  return {
+    id: 7,
+    group_id: 'research',
+    name: 'news',
+    title: 'News',
+    cron: '0 7 * * *',
+    timezone: 'Europe/Berlin',
+    channel: 'email',
+    enabled: false,
+    revision: 1,
+    excluded_user_ids: [],
+    generation_mode: 'prompt',
+    generation: {
+      version: 1,
+      prompt: 'Summarize the news',
+      research: { enabled: false, prompt: '' },
+      inputs: [],
+    },
+  };
+}
+
+function contribution(owner: string, approved = false) {
+  const source = {
+    id: 'notes',
+    kind: 'personal_file',
+    config: { owner_id: owner, path: 'notes.md' },
+  };
+  saved.generation.inputs = [source];
+  approvals = [
+    {
+      source_id: 'notes',
+      owner_id: owner,
+      resource: { kind: source.kind, config: source.config },
+      approved,
+      warning: 'server wording',
+      grant_revision: approved ? 1 : 0,
+      definition_revision: 1,
+      audience_contract: { version: 1, future_members: true, retained_history: true },
+    },
+  ];
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  page.url = new URL('http://localhost/istota/briefings/settings');
   vi.stubGlobal(
     'ResizeObserver',
     class {
@@ -102,437 +84,39 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  saved = makeDefinition();
+  saved = definition();
   approvals = [];
-  api.getGroup.mockResolvedValue({
-    members: [
-      { user_id: 'alice', display_name: 'Alice', role: 'owner' },
-      { user_id: 'bob', display_name: 'Bob', role: 'member' },
-    ],
+  caps = { author_briefings: true, generate_briefings: true };
+  api.getBriefings.mockResolvedValue({ briefings: [], rooms: [], outputs: ['email', 'talk'] });
+  api.getBrowsePresets.mockResolvedValue({ presets: [] });
+  api.getFeedOptions.mockResolvedValue({ available: false, subscriptions: [], categories: [] });
+  api.getBriefingConfig.mockResolvedValue({
+    briefings: [],
+    schedule_names: [],
+    source_kinds: [],
+    structured_kinds: [],
+    block_templates: [],
   });
-  api.getGroupBriefings.mockImplementation(async () => ({ items: [] }));
-  api.getGroupBriefing.mockImplementation(async () =>
-    clone({ ...saved, source_approvals: approvals }),
-  );
-  api.getBriefingAudience.mockImplementation(async () =>
-    clone({
-      member_count: 3,
-      deliverable: 1,
-      excluded: 0,
-      muted: 1,
-      missing_destination: 1,
-      sources: approvals,
-    }),
-  );
-  api.saveGroupBriefing.mockImplementation(async (group, payload) => {
-    saved = {
-      ...clone(payload),
-      id: 7,
-      group_id: group,
-      revision: payload.revision + 1,
-      capabilities: caps,
-    };
-    return clone(saved);
-  });
-  api.approveBriefingSource.mockImplementation(async () => {
-    approvals[0].approved = true;
-    return clone(approvals[0]);
-  });
-  api.revokeBriefingSource.mockImplementation(async () => {
-    approvals[0].approved = false;
-    return clone(approvals[0]);
-  });
-  api.runGroupBriefing.mockResolvedValue({
-    id: 19,
-    run_id: 19,
-    group_id: 'research',
-    definition_id: 7,
-    mode: 'preview',
-    state: 'preview_ready',
-    subject: 'Draft news',
-    body_md: 'Private preview body',
-  });
-});
-async function pick(label: string, option: string) {
-  const trigger = screen.getByRole('button', { name: label });
-  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
-  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
-  await fireEvent.click(trigger);
-  const item = await screen.findByRole('option', { name: option });
-  await fireEvent.pointerUp(item, { pointerType: 'mouse', button: 0 });
-  await fireEvent.click(item);
-  await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'));
-}
-async function newGroup() {
-  render(Harness, { component: Page, user: person });
-  await fireEvent.click(await screen.findByRole('button', { name: 'New briefing' }));
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Distribution target' })).toHaveTextContent(
-      'Just me',
-    ),
-  );
-  await pick('Distribution target', 'Research (3 members)');
-  await fireEvent.input(screen.getByLabelText('Name', { exact: true }), {
-    target: { value: 'news' },
-  });
-  await fireEvent.input(screen.getByLabelText(/^Generation prompt/), {
-    target: { value: 'Summarize the news' },
-  });
-}
-async function existingGroup() {
-  api.getGroupBriefings.mockImplementation(async (group) => ({
-    items: group === saved.group_id ? [clone({ ...saved, source_approvals: approvals })] : [],
-  }));
-  render(Harness, { component: Page, user: person });
-  await fireEvent.click(await screen.findByRole('button', { name: 'Edit news' }));
-  await screen.findByRole('button', { name: 'Preview' });
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Reload saved briefing' })).not.toBeDisabled(),
-  );
-}
-function personalSource(owner = 'alice') {
-  const source = {
-    id: 'selected',
-    kind: 'personal_file',
-    config: { owner_id: owner, path: 'notes.md' },
-  };
-  saved.generation.inputs = [source];
-  approvals = [
-    {
-      source_id: 'selected',
-      owner_id: owner,
-      resource: { kind: source.kind, config: source.config },
-      approved: false,
-      warning: `${owner}'s notes.md is used each run for Research via Email (3 members). Future members can read retained editions. Copies cannot be recalled.`,
-      grant_revision: 0,
-      definition_revision: 1,
-      audience_contract: {
-        version: 1,
-        group_id: 'research',
-        future_members: true,
-        retained_history: true,
-        recurring_use: true,
-        copies_cannot_recall: true,
-      },
-    },
-  ];
-}
-it('saves a disabled prompt draft, reviews recipient counts and previews without publishing', async () => {
-  await newGroup();
-  await pick('Delivery channel', 'Email');
-  await fireEvent.click(screen.getByLabelText('Public research', { exact: true }));
-  expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled();
-  await fireEvent.input(screen.getByLabelText(/^Public research prompt/), {
-    target: { value: 'Find public news' },
-  });
-  expect(screen.queryByText(/domain allowlist/i)).not.toBeInTheDocument();
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Preview' })).not.toBeDisabled());
-  expect(api.saveGroupBriefing).toHaveBeenCalledWith(
-    'research',
-    expect.objectContaining({
-      enabled: false,
-      revision: 0,
-      channel: 'email',
-      generation_mode: 'prompt',
-      generation: expect.objectContaining({
-        prompt: 'Summarize the news',
-        research: { enabled: true, prompt: 'Find public news' },
-      }),
-    }),
-    undefined,
-  );
-  expect(screen.getByText(/1 deliverable/)).toHaveTextContent('1 muted · 1 missing destinations');
-  expect(screen.getByRole('button', { name: 'Distribution target' })).toBeDisabled();
-  await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
-  await screen.findByText('Private preview body');
-  expect(api.runGroupBriefing).toHaveBeenCalledWith(
-    'research',
-    'news',
-    'preview',
-    expect.any(String),
-  );
-  expect(api.runGroupBriefing).toHaveBeenCalledTimes(1);
-  await fireEvent.click(screen.getByRole('button', { name: 'Enable schedule' }));
-  await waitFor(() =>
-    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
-      'research',
-      expect.objectContaining({ enabled: true, revision: 1 }),
-      'news',
-    ),
-  );
-});
-it('requires unchecked source consent and renews it after a channel change', async () => {
-  personalSource();
-  await existingGroup();
-  expect(screen.getByText('Personal contribution: personal_file · alice · notes.md')).toBeVisible();
-  const checkbox = screen.getByRole('checkbox', {
-    name: /I approve recurring sharing of selected/,
-  });
-  expect(checkbox).not.toBeChecked();
-  expect(screen.getByRole('button', { name: 'Approve source' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Enable schedule' })).toBeDisabled();
-  await fireEvent.click(checkbox);
-  await fireEvent.click(screen.getByRole('button', { name: 'Approve source' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Preview' })).not.toBeDisabled());
-  expect(api.approveBriefingSource).toHaveBeenCalledWith(
-    'research',
-    'news',
-    expect.objectContaining({ source_id: 'selected', definition_revision: 1, grant_revision: 0 }),
-    undefined,
-  );
-  expect(screen.getByText(/alice's notes.md is used each run/)).toBeVisible();
-  await pick('Delivery channel', 'In app');
-  expect(screen.getByRole('button', { name: 'Enable schedule' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
-});
-it('never lets an author approve another member’s contribution', async () => {
-  personalSource('bob');
-  await existingGroup();
-  expect(screen.getByText('Only bob can approve or revoke this source.')).toBeVisible();
-  expect(screen.queryByRole('button', { name: 'Approve source' })).not.toBeInTheDocument();
-  expect(screen.queryByLabelText('Personal file')).not.toBeInTheDocument();
-});
-it('keeps the audience outside collapsed content on a narrow screen and duplicates disabled', async () => {
-  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 });
-  await existingGroup();
-  await fireEvent.keyDown(screen.getByLabelText('Actions for Selected inputs'), { key: 'Enter' });
-  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
-  await fireEvent.click(
-    within(await screen.findByRole('dialog', { name: 'Edit block' })).getByRole('button', {
-      name: 'Cancel',
-    }),
-  );
-  expect(screen.getByText(/Generated once per run/)).toBeVisible();
-  await fireEvent.click(screen.getByRole('button', { name: 'Duplicate for group' }));
-  expect(screen.getByRole('button', { name: 'Distribution target' })).not.toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() =>
-    expect(api.saveGroupBriefing).toHaveBeenCalledWith(
-      'research',
-      expect.objectContaining({
-        enabled: false,
-        revision: 0,
-        name: expect.stringMatching(/^news-copy-/),
-      }),
-      undefined,
-    ),
-  );
-});
-it('keeps a conflicted draft and removes management after an ownership refusal', async () => {
-  await existingGroup();
-  await fireEvent.input(screen.getByLabelText(/^Generation prompt/), {
-    target: { value: 'My unsaved prompt' },
-  });
-  api.saveGroupBriefing.mockRejectedValueOnce(
-    Object.assign(new Error('revision_conflict'), { status: 409 }),
-  );
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await screen.findByText('revision_conflict');
-  expect(screen.getByLabelText(/^Generation prompt/)).toHaveValue('My unsaved prompt');
-  api.saveGroupBriefing.mockRejectedValueOnce(
-    Object.assign(new Error('briefing_forbidden'), { status: 403 }),
-  );
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await screen.findByText('briefing_forbidden');
-  expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Preview' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('combobox', { name: 'Excluded users' })).not.toBeInTheDocument();
-});
-
-it('reuses ordered block editing and preserves saved source identities', async () => {
-  saved.generation_mode = 'blocks';
-  saved.generation = {
-    version: 1,
-    blocks: [
-      {
-        title: 'Notebook',
-        directive: '',
-        render_mode: 'structured',
-        options: {},
-        sources: [{ id: 'notebook-source', kind: 'group_memory', config: {} }],
-      },
-      {
-        title: 'Markets',
-        directive: '',
-        render_mode: 'structured',
-        options: {},
-        sources: [{ id: 'market-source', kind: 'markets', config: {} }],
-      },
-    ],
-  };
-  await existingGroup();
-  await fireEvent.keyDown(screen.getByLabelText('Actions for Markets'), { key: 'Enter' });
-  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Move up' }));
-  await fireEvent.keyDown(screen.getByLabelText('Actions for Markets'), { key: 'Enter' });
-  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
-  const editor = await screen.findByRole('dialog', { name: 'Edit block' });
-  expect(within(editor).queryByRole('button', { name: 'Preview' })).not.toBeInTheDocument();
-  expect(within(editor).queryByLabelText('Enabled')).not.toBeInTheDocument();
-  await fireEvent.input(within(editor).getByLabelText('Title'), {
-    target: { value: 'Market update' },
-  });
-  await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));
-  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() => expect(api.saveGroupBriefing).toHaveBeenCalled());
-  const payload = api.saveGroupBriefing.mock.calls[0][1];
-  expect(payload.generation.blocks.map((b: any) => [b.title, b.sources[0].id])).toEqual([
-    ['Market update', 'market-source'],
-    ['Notebook', 'notebook-source'],
-  ]);
-  expect(api.putBriefingBlock).not.toHaveBeenCalled();
-  expect(api.putBriefingSource).not.toHaveBeenCalled();
-});
-it('lets a member select and approve only their own requested calendar', async () => {
-  saved.capabilities = { author_briefings: false, generate_briefings: false };
-  delete saved.generation;
-  approvals = [
-    {
-      source_id: 'calendar',
-      owner_id: 'alice',
-      resource: { kind: 'personal_calendar', config: { owner_id: 'alice' } },
-      approved: false,
-      warning:
-        'This calendar is shared every run with current and future Research members via Email. Retained editions remain readable; copies cannot be recalled.',
-      definition_revision: 1,
-      grant_revision: 0,
-      audience_contract: { version: 1, group_id: 'research' },
-    },
-  ];
-  api.getGroupBriefings.mockImplementation(async (group) => ({
-    items: group === saved.group_id ? [clone({ ...saved, source_approvals: approvals })] : [],
-  }));
-  render(Harness, { component: Page, user: person });
-  await fireEvent.click(await screen.findByRole('button', { name: 'Review sources for news' }));
-  await screen.findByRole('button', { name: 'Personal calendar' });
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Approve source' })).toBeDisabled(),
-  );
-  await pick('Personal calendar', 'My work calendar');
-  expect(screen.getByRole('checkbox', { name: 'time' })).toBeChecked();
-  expect(screen.getByRole('checkbox', { name: 'title' })).toBeChecked();
-  expect(screen.getByRole('checkbox', { name: /Include private-marked/ })).not.toBeChecked();
-  const consent = screen.getByRole('checkbox', { name: /I approve recurring sharing/ });
-  expect(consent).not.toBeChecked();
-  await fireEvent.click(consent);
-  await pick('Days ahead', '7');
-  expect(consent).not.toBeChecked();
-  await fireEvent.click(consent);
-  await fireEvent.click(screen.getByRole('button', { name: 'Approve source' }));
-  await waitFor(() =>
-    expect(api.approveBriefingSource).toHaveBeenCalledWith(
-      'research',
-      'news',
-      expect.objectContaining({ source_id: 'calendar' }),
-      {
-        owner_id: 'alice',
-        calendar_url: 'https://calendar.example.com/alice/work/',
-        fields: ['time', 'title'],
-        include_private: false,
-        lookback_days: 0,
-        lookahead_days: 7,
-      },
-    ),
-  );
-  expect(api.saveGroupBriefing).not.toHaveBeenCalled();
-  expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument();
-});
-
-it('preselects the All users group link and explains future installation membership', async () => {
-  page.url = new URL('http://localhost/istota/briefings/settings?new=1&group=everyone');
-  api.getBriefingTargets.mockResolvedValueOnce({
+  api.getSharedBlockOptions.mockResolvedValue({ options: [] });
+  api.getProfile.mockResolvedValue({ profile: { briefing_email_html: true } });
+  api.getBriefingArchive.mockResolvedValue({ items: [], total: 0, briefing_names: [] });
+  api.getGroupEditions.mockResolvedValue({ items: [], total: 0 });
+  api.getBriefingTargets.mockResolvedValue({
     targets: [
-      {
-        scope: 'group',
-        group_id: 'everyone',
-        label: 'All users',
-        system_key: 'all_users',
-        member_count: 4,
-        capabilities: caps,
-      },
+      { scope: 'user', label: 'Just me', capabilities: { author_briefings: true } },
+      research,
+      other,
     ],
-    channels: ['in_app'],
-    timezone: 'UTC',
+    channels: ['in_app', 'email'],
+    timezone: 'Europe/Berlin',
     source_scopes: {},
   });
-  render(Harness, {
-    component: Page,
-    user: { ...person, features: { ...person.features, admin: true } },
+  api.getBriefingResources.mockResolvedValue({
+    files: ['notes.md'],
+    calendars: [],
+    calendar_unavailable: false,
   });
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Distribution target' })).toHaveTextContent(
-      'All users (4 members)',
-    ),
-  );
-  expect(
-    screen.getByText(/Everyone currently using this installation and anyone who joins later/),
-  ).toBeVisible();
-  expect(screen.getByLabelText(/^Timezone/)).toHaveValue('UTC');
-  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
-});
-
-it('selects current members with the shared multiselect and preserves absent selections', async () => {
-  api.getGroup.mockResolvedValue({
-    members: [
-      { user_id: 'alice', display_name: 'Alice', role: 'owner' },
-      { user_id: 'bob', display_name: 'Bob', role: 'member' },
-    ],
-  });
-  saved.excluded_user_ids = ['departed'];
-  await existingGroup();
-  expect(
-    screen.getByText(/Excluded members receive no deliveries or in-app notifications/),
-  ).toBeVisible();
-  expect(screen.getByRole('button', { name: 'Remove departed' })).toBeVisible();
-  const search = screen.getByRole('combobox', { name: 'Excluded users' });
-  await fireEvent.input(search, { target: { value: 'Bob' } });
-  await fireEvent.keyDown(search, { key: 'ArrowDown' });
-  await fireEvent.keyDown(search, { key: 'Enter' });
-  await screen.findByRole('button', { name: 'Remove Bob' });
-  await fireEvent.keyDown(search, { key: 'Escape' });
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() =>
-    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
-      'research',
-      expect.objectContaining({ excluded_user_ids: ['departed', 'bob'], revision: 1 }),
-      'news',
-    ),
-  );
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled(),
-  );
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove departed' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Remove Bob' }));
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() =>
-    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
-      'research',
-      expect.objectContaining({ excluded_user_ids: [], revision: 2 }),
-      'news',
-    ),
-  );
-});
-
-it('filters duplicated exclusions to the new group', async () => {
-  saved.excluded_user_ids = ['bob', 'departed'];
-  const discovery = await api.getBriefingTargets();
-  api.getBriefingTargets.mockResolvedValueOnce({
-    ...discovery,
-    targets: [
-      ...discovery.targets,
-      {
-        scope: 'group',
-        group_id: 'other',
-        label: 'Other',
-        member_count: 1,
-        capabilities: caps,
-      },
-    ],
-  });
-  api.getGroup.mockImplementation(async (group) => ({
+  api.getGroup.mockImplementation(async (group: string) => ({
     members:
       group === 'other'
         ? [{ user_id: 'alice', display_name: 'Alice', role: 'owner' }]
@@ -541,35 +125,331 @@ it('filters duplicated exclusions to the new group', async () => {
             { user_id: 'bob', display_name: 'Bob', role: 'member' },
           ],
   }));
-  await existingGroup();
-  await fireEvent.click(screen.getByRole('button', { name: 'Duplicate for group' }));
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Distribution target' })).not.toBeDisabled(),
+  api.getGroupBriefings.mockImplementation(async (group: string) => ({
+    items: group === 'research' ? [clone({ ...saved, capabilities: caps })] : [],
+  }));
+  api.getGroupBriefing.mockImplementation(async () =>
+    clone({ ...saved, capabilities: caps, source_approvals: approvals }),
   );
-  expect(screen.queryByRole('button', { name: 'Remove departed' })).toBeNull();
-  await pick('Distribution target', 'Other (1 members)');
+  api.getBriefingAudience.mockImplementation(async () => ({
+    member_count: 3,
+    deliverable: 1,
+    excluded: 0,
+    muted: 1,
+    missing_destination: 1,
+    sources: clone(approvals),
+  }));
+  api.getGroupBriefingRuns.mockResolvedValue({ items: [], total: 0 });
+  api.saveGroupBriefing.mockImplementation(async (group: string, payload: any) => {
+    saved = { ...clone(payload), id: 7, group_id: group, revision: payload.revision + 1 };
+    return clone({ ...saved, capabilities: caps });
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+// The layout reads the browser's location as well as the page store.
+function visit(path: string) {
+  window.history.replaceState(null, '', path);
+  page.url = new URL(window.location.href);
+}
+
+async function openEditor(user = alice) {
+  visit('/istota/briefings/settings/?group=research&briefing=news');
+  render(Harness, { layout: Layout, component: Page, user });
+  await screen.findByRole('heading', { name: 'News' });
+}
+
+it('edits a group briefing in place and saves it through the header save', async () => {
+  await openEditor();
+  expect(screen.getByText(/^Research · 3 members · generated once/)).toBeInTheDocument();
+  await fireEvent.input(screen.getByRole('textbox', { name: /^Title/ }), {
+    target: { value: 'Morning news' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled(),
-  );
-  expect(screen.queryByRole('button', { name: 'Remove Bob' })).toBeNull();
-  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() =>
-    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
-      'other',
-      expect.objectContaining({ excluded_user_ids: [], revision: 0 }),
-      undefined,
+    expect(api.saveGroupBriefing).toHaveBeenCalledWith(
+      'research',
+      expect.objectContaining({ title: 'Morning news', revision: 1, enabled: false }),
+      'news',
     ),
   );
 });
 
-it('preserves personal information classification but requires fresh audience acknowledgement on copy', async () => {
-  saved.generation.contains_personal_information = true;
-  saved.generation.audience_acknowledged = true;
-  await existingGroup();
-  await fireEvent.click(screen.getByRole('button', { name: 'Duplicate for group' }));
-  expect(
-    await screen.findByLabelText(/^My prompt or directives contain personal information/),
-  ).toBeChecked();
-  expect(screen.getByLabelText(/^I approve recurring disclosure/)).not.toBeChecked();
+it('says why it cannot run and keeps generation off until an owner approves', async () => {
+  contribution('bob');
+  await openEditor();
+  expect(screen.getByText('Waiting for Bob')).toBeInTheDocument();
+  // An author never approves another member's resource.
+  expect(screen.queryByRole('button', { name: 'Review' })).toBeNull();
+  expect(screen.getByText('Every shared personal source needs its owner’s approval.')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Generate now' })).toBeDisabled();
+});
+
+it('asks the resource owner for an unchecked, explicit approval', async () => {
+  contribution('alice');
+  api.approveBriefingSource.mockImplementation(async () => {
+    approvals[0].approved = true;
+    return clone(approvals[0]);
+  });
+  await openEditor();
+  expect(screen.getByText('Needs your approval')).toBeInTheDocument();
+  await fireEvent.click(screen.getByRole('button', { name: 'Review' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Share your file' });
+  expect(within(dialog).getByText(/Research \(3 members\), including future members/)).toBeTruthy();
+  expect(within(dialog).getByText(/copies already sent cannot be recalled/)).toBeTruthy();
+  const agree = within(dialog).getByRole('checkbox', { name: /I agree to share this/ });
+  expect(agree).not.toBeChecked();
+  expect(within(dialog).getByRole('button', { name: 'Approve' })).toBeDisabled();
+  await fireEvent.click(agree);
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Approve' }));
+  await waitFor(() =>
+    expect(api.approveBriefingSource).toHaveBeenCalledWith(
+      'research',
+      'news',
+      expect.objectContaining({ source_id: 'notes' }),
+      expect.objectContaining({ owner_id: 'alice', path: 'notes.md' }),
+    ),
+  );
+  expect(await screen.findByText('Approved')).toBeInTheDocument();
+});
+
+it('shows a contributing member only their own sources and no editing', async () => {
+  contribution('alice');
+  caps = { author_briefings: false, generate_briefings: false };
+  await openEditor();
+  expect(screen.getByText(/Only the group's owners can change this briefing/)).toBeTruthy();
+  expect(screen.queryByRole('heading', { name: 'Schedule and delivery' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Editions' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+});
+
+it('keeps the draft and says so plainly when ownership is lost mid-edit', async () => {
+  await openEditor();
+  await fireEvent.input(screen.getByRole('textbox', { name: /^Title/ }), {
+    target: { value: 'Kept draft' },
+  });
+  api.saveGroupBriefing.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  expect(await screen.findByText('You can no longer edit this briefing')).toBeInTheDocument();
+  expect(screen.getByRole('textbox', { name: /^Title/ })).toHaveValue('Kept draft');
+});
+
+it('retries failed deliveries from the saved edition after a duplicate warning', async () => {
+  api.getGroupBriefingRuns.mockResolvedValue({
+    items: [
+      {
+        id: 3,
+        run_id: 3,
+        group_id: 'research',
+        definition_id: 7,
+        mode: 'publish',
+        state: 'published',
+        created_at: '2026-10-15T07:00:00Z',
+        published_at: '2026-10-15T07:00:00Z',
+      },
+    ],
+    total: 1,
+  });
+  api.getGroupBriefingDelivery.mockResolvedValue({
+    counts: { sent: 1, failed: 1, uncertain: 1 },
+    recipients: [],
+  });
+  api.retryGroupBriefingDelivery.mockResolvedValue({ retried: 2 });
+  await openEditor();
+  expect(await screen.findByText('1 sent · 1 failed · 1 uncertain')).toBeInTheDocument();
+  await fireEvent.keyDown(screen.getByLabelText('Edition actions'), { key: 'Enter' });
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Retry failed deliveries' }));
+  const confirm = await screen.findByRole('dialog', { name: 'Retry failed deliveries' });
+  expect(confirm).toHaveTextContent(/could get it twice/);
+  await fireEvent.click(within(confirm).getByRole('button', { name: 'Retry' }));
+  await waitFor(() =>
+    expect(api.retryGroupBriefingDelivery).toHaveBeenCalledWith('research', 'news', 3, true),
+  );
+  expect(api.runGroupBriefing).not.toHaveBeenCalled();
+});
+
+it('creates a group briefing as a disabled prompt draft from New briefing', async () => {
+  visit('/istota/briefings/settings/?new=1&group=research');
+  render(Harness, { layout: Layout, component: Page, user: alice });
+  const audience = await screen.findByRole('radiogroup', { name: 'Who the briefing is for' });
+  await waitFor(() =>
+    expect(within(audience).getByRole('radio', { name: /Research/ })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    ),
+  );
+  await fireEvent.input(screen.getByRole('textbox', { name: /^Title/ }), {
+    target: { value: 'Team news' },
+  });
+  await fireEvent.input(screen.getByRole('textbox', { name: /^What should it cover/ }), {
+    target: { value: 'What shipped this week' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Create briefing' }));
+  await waitFor(() =>
+    expect(api.saveGroupBriefing).toHaveBeenCalledWith(
+      'research',
+      expect.objectContaining({
+        name: 'team-news',
+        enabled: false,
+        revision: 0,
+        timezone: 'Europe/Berlin',
+        generation_mode: 'prompt',
+        generation: expect.objectContaining({ prompt: 'What shipped this week' }),
+      }),
+    ),
+  );
+});
+
+it('duplicates to another group as a fresh draft and lists what it leaves out', async () => {
+  saved.generation_mode = 'blocks';
+  saved.excluded_user_ids = ['bob'];
+  saved.generation = {
+    version: 1,
+    contains_personal_information: true,
+    audience_acknowledged: true,
+    blocks: [
+      {
+        title: 'Notes',
+        directive: null,
+        render_mode: 'synthesis',
+        options: {},
+        sources: [{ id: 'memory', kind: 'group_memory', config: {} }],
+      },
+    ],
+  };
+  await openEditor();
+  await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Duplicate to a group' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Duplicate to a group' });
+  await fireEvent.click(within(dialog).getByRole('radio', { name: /Other/ }));
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Create copy' }));
+  await waitFor(() => expect(api.saveGroupBriefing).toHaveBeenCalledTimes(1));
+  const [group, payload] = api.saveGroupBriefing.mock.calls[0];
+  expect(group).toBe('other');
+  expect(payload).toMatchObject({
+    enabled: false,
+    revision: 0,
+    excluded_user_ids: [],
+    generation: { contains_personal_information: true, audience_acknowledged: false },
+  });
+  expect(payload.generation.blocks[0].sources[0].id).not.toBe('memory');
+});
+
+it('lists personal-only sources a group copy cannot keep', async () => {
+  visit('/istota/briefings/settings/?name=morning');
+  api.getBriefings.mockResolvedValue({
+    briefings: [
+      {
+        id: 1,
+        name: 'morning',
+        cron: '0 7 * * *',
+        title: '',
+        output: 'email',
+        enabled: true,
+        managed: 'db',
+      },
+    ],
+    rooms: [],
+    outputs: ['email'],
+  });
+  api.getBriefingConfig.mockResolvedValue({
+    briefings: [
+      {
+        name: 'morning',
+        blocks: [
+          {
+            id: 1,
+            briefing_name: 'morning',
+            position: 0,
+            title: 'Day',
+            directive: '',
+            render_mode: 'synthesis',
+            options: {},
+            sources: [
+              { id: 1, position: 0, kind: 'calendar', config: {}, enabled: true },
+              { id: 2, position: 1, kind: 'markets', config: {}, enabled: false },
+              {
+                id: 3,
+                position: 2,
+                kind: 'browse',
+                config: { url: 'https://example.com' },
+                enabled: true,
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    schedule_names: ['morning'],
+    source_kinds: ['calendar', 'markets', 'browse'],
+    structured_kinds: [],
+    block_templates: [],
+  });
+  render(Harness, { layout: Layout, component: Page, user: alice });
+  await screen.findByRole('heading', { name: 'Morning Briefing' });
+  await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Duplicate to a group' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Duplicate to a group' });
+  expect(within(dialog).getByText('Day: calendar')).toBeInTheDocument();
+  expect(within(dialog).getByText('Day: markets (switched off)')).toBeInTheDocument();
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Create copy' }));
+  await waitFor(() => expect(api.saveGroupBriefing).toHaveBeenCalledTimes(1));
+  const payload = api.saveGroupBriefing.mock.calls[0][1];
+  expect(payload.generation.blocks[0].sources.map((s: { kind: string }) => s.kind)).toEqual([
+    'browse',
+  ]);
+});
+
+it('offers no switch-off for a group source in the block editor', async () => {
+  saved.generation_mode = 'blocks';
+  saved.generation = {
+    version: 1,
+    blocks: [
+      {
+        title: 'Markets',
+        directive: null,
+        render_mode: 'structured',
+        options: {},
+        sources: [{ id: 'm', kind: 'markets', config: {} }],
+      },
+    ],
+  };
+  await openEditor();
+  await fireEvent.keyDown(screen.getByLabelText('Actions for Markets'), { key: 'Enter' });
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+  const editor = await screen.findByRole('dialog', { name: 'Edit block' });
+  expect(within(editor).queryByLabelText('Enabled')).not.toBeInTheDocument();
+  expect(within(editor).queryByRole('button', { name: 'Preview' })).not.toBeInTheDocument();
+});
+
+it('mutes group briefings from Delivery, with a group-wide row that covers each briefing', async () => {
+  api.getGroupDeliveryPreferences.mockResolvedValue({ outbound_muted: false, in_app_muted: false });
+  api.getGroupBriefingPreferences.mockResolvedValue({ outbound_muted: false, in_app_muted: false });
+  api.saveGroupDeliveryPreferences.mockImplementation(
+    async (_group: string, prefs: object) => prefs,
+  );
+  visit('/istota/briefings/settings/?view=delivery');
+  render(Harness, { layout: Layout, component: Page, user: alice });
+  const all = await screen.findByRole('checkbox', {
+    name: 'Mute delivery of all Research briefings',
+  });
+  const one = screen.getByRole('checkbox', { name: 'Mute delivery of News' });
+  expect(one).not.toBeDisabled();
+  await fireEvent.click(all);
+  expect(one).toBeChecked();
+  expect(one).toBeDisabled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(api.saveGroupDeliveryPreferences).toHaveBeenCalledWith('research', {
+      outbound_muted: true,
+      in_app_muted: false,
+    }),
+  );
+  // The briefing's own choice is untouched; the group row covers it.
+  expect(api.saveGroupBriefingPreferences).not.toHaveBeenCalled();
 });

@@ -18,7 +18,7 @@
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import GroupRooms from '$lib/components/groups/GroupRooms.svelte';
   import GroupFiles from '$lib/components/groups/GroupFiles.svelte';
-  import GroupBriefings from '$lib/components/briefings/GroupBriefings.svelte';
+  import GroupBriefings from '$lib/components/groups/GroupBriefings.svelte';
   type Selection = { group: string };
   const current = getCurrentUser();
   const user = $derived(current.user);
@@ -188,13 +188,10 @@
             <GroupMembers group={detail} onChanged={changed} />
           </SettingsCard>
           <GroupRooms rooms={detail.rooms} />
-          {#if detail.capabilities.read_briefings}<div class="wide">
-              <GroupBriefings
-                groupId={detail.group_id}
-                label={detail.display_name}
-                canCreate={detail.capabilities.author_briefings}
-              />
-            </div>{/if}
+          {#if detail.capabilities.read_briefings}<GroupBriefings
+              groupId={detail.group_id}
+              canAuthor={!!detail.capabilities.author_briefings}
+            />{/if}
           {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
         </div>
       {/key}

@@ -4855,6 +4855,8 @@ export interface BriefingArchiveItem {
   task_id: number | null;
   delivered_to: string[];
   body_md?: string;
+  /** The first words as one plain line, for list rows. */
+  preview?: string;
 }
 
 export interface BriefingArchiveResponse {
@@ -6462,6 +6464,26 @@ export interface GroupBriefingRun {
   error_code?: string | null;
   created_at?: string;
   published_at?: string | null;
+}
+export interface GroupEditionSummary {
+  scope: 'group';
+  run_id: number;
+  group_id: string;
+  group_label: string;
+  briefing_name: string;
+  briefing_title: string;
+  subject: string | null;
+  published_at: string;
+  preview?: string;
+}
+export function getGroupEditions(
+  params: { group?: string; limit?: number; offset?: number } = {},
+): Promise<{ items: GroupEditionSummary[]; total: number }> {
+  const query = new URLSearchParams();
+  if (params.group) query.set('group', params.group);
+  query.set('limit', String(params.limit ?? 20));
+  query.set('offset', String(params.offset ?? 0));
+  return apiFetch(`/briefings/group-editions?${query}`);
 }
 export function getBriefingTargets(): Promise<{
   targets: BriefingTarget[];

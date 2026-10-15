@@ -460,11 +460,43 @@ it('opens group briefings through Groups when personal Briefings is disabled', a
     ...group,
     capabilities: { ...group.capabilities, read_briefings: true, author_briefings: true },
   });
-  api.getGroupBriefings.mockResolvedValue({ items: [] });
+  api.getGroupBriefings.mockResolvedValue({
+    items: [
+      {
+        id: 1,
+        group_id: 'team',
+        name: 'digest',
+        title: 'Team digest',
+        enabled: true,
+        channel: 'email',
+        last_run: { id: 9, state: 'published', published_at: '2026-10-15T07:00:00Z' },
+      },
+      {
+        id: 2,
+        group_id: 'team',
+        name: 'draft',
+        title: 'Research',
+        enabled: false,
+        channel: 'in_app',
+      },
+    ],
+  });
   render(Groups);
   await screen.findByRole('heading', { name: 'Briefings' });
-  expect(await screen.findByRole('link', { name: 'New group briefing' })).toHaveAttribute(
+  // An index into Briefings: read the latest edition there, or edit in settings.
+  expect(await screen.findByRole('link', { name: 'Team digest' })).toHaveAttribute(
     'href',
-    '/briefings/settings?group=team&new=1',
+    '/briefings/?group=team&briefing=digest&run=9',
   );
+  expect(screen.queryByRole('link', { name: 'Research' })).toBeNull();
+  expect(screen.getByText('In app · Draft')).toBeTruthy();
+  expect(screen.getAllByRole('link', { name: 'Edit' })[0]).toHaveAttribute(
+    'href',
+    '/briefings/settings/?group=team&briefing=digest',
+  );
+  expect(screen.getByRole('link', { name: 'New briefing' })).toHaveAttribute(
+    'href',
+    '/briefings/settings/?group=team&new=1',
+  );
+  expect(screen.queryByRole('checkbox')).toBeNull();
 });

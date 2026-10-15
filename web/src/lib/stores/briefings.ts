@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import type { BriefingArchiveItem } from '$lib/api';
 
 // Reader selection shared between the briefings layout (archive sidebar) and
 // the reader page (main pane), mirroring the feeds store split.
@@ -28,5 +29,15 @@ export const briefingArchiveError = writable<string | null>(null);
 // sidebar can refresh without a full navigation.
 export const briefingsRefreshNonce = writable(0);
 
-// Group runs are never personal archive ids.
-export const selectedBriefingGroup = writable<string>('');
+// A group edition is addressed by group, definition and run, never by a
+// personal archive id; while one is selected the personal id is ignored.
+export interface GroupEditionSelection {
+  group: string;
+  briefing: string;
+  run: number;
+}
+export const selectedGroupEdition = writable<GroupEditionSelection | null>(null);
+
+// The reader asks to delete the personal edition on screen; the layout owns the
+// confirmation and the archive list it has to update.
+export const briefingDeleteRequest = writable<BriefingArchiveItem | null>(null);
