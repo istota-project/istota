@@ -345,6 +345,29 @@ describe('briefing block builder', () => {
     expect(within(dialog).getByRole('button', { name: 'Delete' })).not.toBeDisabled();
   });
 
+  it('explains why an empty block duplicate requires a source and keeps its saved order', async () => {
+    const legacy = structuredClone(blocks);
+    legacy[0].sources = [];
+    api.getBriefingConfig.mockResolvedValue({
+      briefings: [{ name: 'morning', blocks: legacy }],
+      schedule_names: ['morning'],
+      source_kinds: ['calendar'],
+      structured_kinds: [],
+      block_templates: templates,
+    });
+    await mount();
+    await menu('Headlines', 'Duplicate');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Add a source to this block before duplicating it.',
+    );
+    expect(api.putBriefingBlock).not.toHaveBeenCalled();
+    expect(
+      within(screen.getByRole('list', { name: 'Briefing blocks' }))
+        .getAllByRole('heading')
+        .map((heading) => heading.textContent),
+    ).toEqual(['Headlines', 'Tasks']);
+  });
+
   it('keeps legacy zero-source blocks when duplicating a whole briefing', async () => {
     const legacy = structuredClone(blocks[0]);
     legacy.sources = [];

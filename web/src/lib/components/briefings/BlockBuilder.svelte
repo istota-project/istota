@@ -152,6 +152,10 @@
 
   async function duplicate(block: BriefingBlock) {
     if (busy) return;
+    if (block.sources.length === 0) {
+      error = 'Add a source to this block before duplicating it.';
+      return;
+    }
     busy = true;
     error = '';
     try {
