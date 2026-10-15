@@ -1,18 +1,7 @@
-"""Generation pipeline for the briefings module.
+"""Gather sources once and snapshot an edition before the single model call.
 
-``assemble_briefing_input`` reads a briefing's blocks from the module DB,
-resolves each block's sources (via ``sources/*``, fail-soft), and builds a
-prompt grouped **by block** — per block: its title, directive, and the
-normalized gathered content of its enabled sources tagged by provenance. The
-model synthesizes each block into one coherent titled section and returns the
-existing ``{subject, body}`` envelope.
-
-``archive_briefing`` persists a rendered briefing to ``briefing_archive`` and
-prunes past the retention window.
-
-The single model invocation and the ``{subject, body}`` contract are unchanged
-from the legacy path; only the *input assembly* differs (grouped by block, with
-per-block synthesis directives).
+The model returns version-2 block bodies. Completion joins them to the protected
+manifest, then archives the document and its deterministic linear projection.
 """
 
 from __future__ import annotations
@@ -24,7 +13,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from istota.briefings import db as briefings_db
-from istota.briefings.models import BriefingBlock, BriefingsContext
+from istota.briefings.models import BriefingBlock, BriefingsContext, presentation_for_options
 from istota.briefings.sources import GatheredSource, SourceContext, gather_sources, raise_for_refused, resolve_source
 
 
@@ -36,14 +25,16 @@ class BriefingInput:
     """The assembled input for one briefing generation.
 
     ``prompt`` is the full model prompt (grouped by block). ``block_meta`` is
-    per-block source provenance recorded on the archive row. ``rendered_blocks``
-    is the count of non-empty blocks — 0 means nothing to say (caller may skip).
+    per-block source provenance keyed by numeric ID. ``manifest`` snapshots the
+    non-empty blocks in saved order, independent of later definition changes.
+    ``rendered_blocks`` counts those blocks.
     """
 
     briefing_name: str
     prompt: str
     block_meta: dict = field(default_factory=dict)
     rendered_blocks: int = 0
+    manifest: dict = field(default_factory=dict)
 
 
 def default_briefing_title(briefing_name: str) -> str:
@@ -220,6 +211,7 @@ def assemble_briefing_input(
     *,
     conn=None,
     now: datetime | None = None,
+    title: str | None = None,
 ) -> BriefingInput | None:
     """Assemble the block-grouped prompt for ``briefing_name``.
 
@@ -245,10 +237,8 @@ def assemble_briefing_input(
         f"Current time: {time_str} ({tz_str})",
         "",
         "Below are the briefing's content blocks, in order. Each block lists "
-        "its sources' gathered content. Produce ONE section per non-empty "
-        "block, titled with the block title exactly as given (use it verbatim "
-        "as the section header — do not add, remove, or change emojis or "
-        "wording), in this exact order.",
+        "its sources' gathered content. Return one body for each Block ID. "
+        "Keep block titles out of body_md; the delivery layer supplies them.",
     ]
 
     # Previous-briefing dedup, reusing the legacy digest store.
@@ -309,6 +299,11 @@ def assemble_briefing_input(
     gathered_by_slot = {(bi, si): result for (bi, si, _), result in zip(enabled_sources, gathered)}
 
     block_meta: dict = {}
+    manifest = {
+        "version": 1,
+        "title": title or resolve_briefing_title(app_config, ctx.user_id, briefing_name, now),
+        "blocks": [],
+    }
     rendered = 0
 
     for bi, block in enumerate(blocks):
@@ -319,7 +314,7 @@ def assemble_briefing_input(
         ]
 
         non_empty = [g for g in gathered if g.ok and not g.is_empty]
-        block_meta[block.title] = {
+        block_meta[block.id] = {
             "sources": len(block.sources),
             "gathered": len(non_empty),
             "kinds": [g.kind for g in gathered],
@@ -328,9 +323,18 @@ def assemble_briefing_input(
         if not non_empty:
             continue  # omit an all-empty block — no empty header
 
+        manifest["blocks"].append({
+            "block_id": block.id,
+            "title": block.title,
+            "render_mode": block.render_mode,
+            "presentation": presentation_for_options(block.options),
+            "source_count": len(gathered),
+            "source_status": "partial" if any(not g.ok for g in gathered) else "complete",
+        })
         rendered += 1
         lines.append("")
         lines.append(f"### Block: {block.title}")
+        lines.append(f"Block ID: {block.id}")
         directive = (block.directive or "").strip() or _default_directive(block)
         lines.append(directive)
         opts = block.options or {}
@@ -344,22 +348,18 @@ def assemble_briefing_input(
 
     lines += [
         "",
-        "Format the briefing following the section format in the briefing "
-        "skill reference. Title each section with its block title verbatim as a "
-        "plain label (not a markdown heading); use the emoji only if the block "
-        "title itself includes one — never add your own. Output one section per "
-        "block above, in the given order, omitting any block with no content. "
-        "NO tables.",
+        "Format each block body following the briefing skill reference. "
+        "Do not repeat block titles or add section headings. NO tables.",
         "",
         "CRITICAL: Your entire response must be a single JSON object with this "
-        'exact format:\n{"body": "<briefing content here>"}\n\n'
-        "The body field contains the full briefing text, one section per block "
-        "titled by its block title. Use \\n for newlines within the body "
-        "string. Do NOT write a title or subject line for the briefing as a "
-        "whole — the delivery layer supplies it. Do NOT output "
-        "anything outside the JSON object — no preamble, no commentary, no code "
-        "fences. Do NOT send emails or use any email commands. Delivery is "
-        "handled by the scheduler.",
+        'format:\n{"version": 2, "blocks": [{"block_id": 42, "body_md": "<content>"}]}\n\n'
+        "Use each supplied Block ID exactly once, with an integer block_id and "
+        "a string body_md. If a requested block has nothing useful to include, "
+        "return its ID with an empty body_md string. Do not omit requested IDs "
+        "or invent IDs. Use \\n for newlines inside strings. Do NOT write a title "
+        "or subject line for the briefing as a whole. Do NOT output anything "
+        "outside the JSON object: no preamble, commentary or code fences. Do "
+        "NOT send emails or use email commands. Delivery is handled by the scheduler.",
     ]
 
     return BriefingInput(
@@ -367,6 +367,7 @@ def assemble_briefing_input(
         prompt="\n".join(lines),
         block_meta=block_meta,
         rendered_blocks=rendered,
+        manifest=manifest,
     )
 
 
@@ -379,6 +380,7 @@ def archive_briefing(
     task_id: int | None = None,
     block_meta: dict | None = None,
     delivered_to: list[str] | None = None,
+    document: dict | None = None,
     retention_days: int = 90,
     now: datetime | None = None,
 ) -> int | None:
@@ -399,6 +401,7 @@ def archive_briefing(
                 task_id=task_id,
                 block_meta=block_meta or {},
                 delivered_to=delivered_to or [],
+                document=document,
             )
             briefings_db.prune_archive(
                 conn, briefing_name=briefing_name,

@@ -17,15 +17,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - All users is a built-in group whose membership follows enabled installation accounts. Its notebook, files and retained briefing history are shared with current and future users; membership cannot be changed by hand.
 
+
+
+- Briefing previews show saved edition content with proposed block titles, order and widths in Web, HTML email and plain text. You can preview an unsaved block draft without saving, generating content or sending mail.
+- Briefing block saves can include all sources in one update, with editable presets for the existing source types. Invalid or failed saves leave the saved block and source order intact.
 - `istota snapshot --format ansible` writes the settings as a `group_vars` file for the Ansible management role, so a snapshot goes into an inventory as it is: `istota snapshot --format ansible | ansible-vault encrypt --output FILE -`.
 
 ### Changed
 
+- Briefing settings has a preset picker and a block editor that saves a complete draft. You can set card widths, move blocks by keyboard or touch, and keep editing disabled briefings; cancellation and failed saves preserve saved content. Preview and Add block sit together as compact buttons, and preview cards stand out from the surrounding panel.
+- New briefing editions use masonry cards that adapt to the reader pane, with wider blocks where configured, matching heights for similar cards, and small gaps filled to match neighboring bottom edges. Every card shows its full content. Card headers have expand controls and settings for user-managed blocks; archive titles wrap across two lines. Older editions keep their complete linear view.
+- Briefing emails keep every section in order, with a heading in HTML and usable article links in plain text. Source availability warnings appear only as icons with explanations in the web reader; email content omits those notices. Switching off HTML or a rendering failure still delivers the complete plain edition.
 - The Ansible management role takes the application settings only as `istota_plan`, with credentials in `istota_plan_secrets`. `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets` are gone, and so is the generated config reference in `defaults/main.yml`; set the plan from `istota snapshot --format json`. `istota migrate role-vars` now writes the old per-user credentials as `istota_plan_secrets` and leaves the plan to the VM's snapshot.
 - `[security] vault_fetch_limit_per_task` now counts distinct credentials rather than reads. A credential already served in a task attempt can be read again at no cost, so a WordPress session no longer runs out after ten calls against one site. A name not yet served, whether absent or refused, is still charged every time, and setting the limit to `1` limits a task to one credential.
 
 ### Fixed
 
+- Generated briefings keep their saved block titles, order and presentation even if a definition changes or is deleted during generation. Malformed or empty generation results retry quietly before delivery.
 - `istota apply` accepts a scheduled job whose room is shared, and a target that replies into that same room, as the scheduler already did: the job runs there with every scope withheld. A target into any other shared room is still refused.
 - A delivery route switched off in the web UI (stored as `none`) no longer makes `istota apply` and `istota user ensure` refuse the profile with `profile_refused`.
 - When `istota apply` refuses a scheduled job, the error now gives the job's position in the plan rather than in CRON.md, which a snapshot orders differently.

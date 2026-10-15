@@ -631,24 +631,21 @@ def _legacy_briefing_subject(task: db.Task) -> str:
 
 
 def _briefing_email_bodies(
-    config: "Config", task: db.Task, body: str, fmt: str,
+    config: "Config", task: db.Task, body: str, fmt: str, *,
+    briefing_document: dict | None = None,
 ) -> tuple[str, str | None, str]:
-    """Resolve ``(plain_body, html_body, content_type)`` for a briefing email.
+    """Resolve plain and optional HTML alternatives at the one mail-body seam.
 
-    Briefing bodies are markdown written for chat, so email has always
-    flattened them with ``strip_markdown`` — which also destroys the article
-    links the news sections now carry. With the per-user preference on (the
-    default) the flattened text becomes the ``text/plain`` fallback and a
-    rendered HTML part rides alongside it, so the links are clickable without
-    losing anything for a plain-only client.
-
-    ``html_body`` of ``None`` means "send single-part exactly as before": the
-    preference is off, the render failed (it returns ``""``), or this is not a
-    briefing task.
+    A validated edition supplies complete ordered sections in both formats.
+    Body-only briefings retain their existing Markdown/HTML conversion. HTML
+    opt-out or an empty render sends only plain text; other task types pass
+    through unchanged.
     """
     from ...skills.briefing import (
         _strip_html,
         render_briefing_html,
+        render_briefing_document_html,
+        render_briefing_document_plain,
         strip_markdown,
     )
 
@@ -656,6 +653,11 @@ def _briefing_email_bodies(
         return body, None, fmt
 
     want_html = config.briefing_email_html_for(task.user_id)
+
+    if briefing_document is not None:
+        plain = render_briefing_document_plain(briefing_document)
+        rich = render_briefing_document_html(briefing_document) if want_html else None
+        return plain, rich or None, "plain"
 
     if fmt == "html":
         # Rare hand-authored path: the model already produced HTML. Pass it
@@ -672,6 +674,7 @@ def _briefing_email_bodies(
 
 async def deliver_email_result(
     config: "Config", task: db.Task, message: str, *, subject: str | None = None,
+    briefing_document: dict | None = None,
 ) -> bool:
     """Send task result as email reply, or fresh email for scheduled/briefing jobs.
 
@@ -707,9 +710,12 @@ async def deliver_email_result(
             logger.warning("No email address for user %s (task %d)", task.user_id, task.id)
             return False
         plain, html_body, content_type = _briefing_email_bodies(
-            config, task, message, "plain",
+            config, task, message, "plain", briefing_document=briefing_document,
         )
-        legacy_subject = subject or _legacy_briefing_subject(task)
+        legacy_subject = subject or (
+            briefing_document["title"] if briefing_document is not None
+            else _legacy_briefing_subject(task)
+        )
         may_send, draft_id = _hold_if_unapproved(
             config, task,
             to_addr=user_config.email_addresses[0],
@@ -747,7 +753,7 @@ async def deliver_email_result(
     # the user's preference allows it, render an HTML alternative alongside.
     # Non-briefing tasks come back untouched (html_body None).
     body_text, html_body, content_type = _briefing_email_bodies(
-        config, task, parsed["body"], parsed["format"],
+        config, task, parsed["body"], parsed["format"], briefing_document=briefing_document,
     )
 
     with db.get_db(config.db_path) as conn:
@@ -804,8 +810,10 @@ async def deliver_email_result(
         logger.warning("No email address for user %s (task %d)", task.user_id, task.id)
         return False
 
-    # Use parsed subject if provided, otherwise fall back to prompt excerpt
-    subject = parsed["subject"] if parsed["subject"] else f"[{config.bot_name}] {task.prompt[:80]}"
+    if task.source_type == "briefing" and briefing_document is not None:
+        subject = subject or briefing_document["title"]
+    else:
+        subject = parsed["subject"] or f"[{config.bot_name}] {task.prompt[:80]}"
 
     # Addressed to the user's own address, so both live policies clear it —
     # checked anyway, because "this branch only ever mails the user" is an

@@ -2958,14 +2958,19 @@ def _parse_briefing_specs(
                 b.get("name", "?"),
             )
         raw_blocks = b.get("blocks", [])
+        if isinstance(raw_blocks, list):
+            from istota.briefings.models import validate_block_options
+
+            for block in raw_blocks:
+                if isinstance(block, dict) and isinstance(block.get("options"), dict):
+                    validate_block_options(block["options"])
         briefings.append(BriefingConfig(
             name=b.get("name", ""),
             cron=b.get("cron", ""),
             title=b.get("title", ""),
             conversation_token=b.get("conversation_token", ""),
             output=b.get("output", "talk"),
-            # Raw parsed dict passthrough — normalisation is the seeder's job so
-            # the config layer stays decoupled from module internals.
+            # Keep authored definitions; the seeder supplies content defaults.
             blocks=list(raw_blocks) if isinstance(raw_blocks, list) else [],
         ))
     return briefings

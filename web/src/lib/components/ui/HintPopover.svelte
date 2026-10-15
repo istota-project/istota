@@ -1,14 +1,16 @@
 <script lang="ts">
   import { Popover } from 'bits-ui';
+  import { TriangleAlert } from '@lucide/svelte';
 
   interface Props {
     /** The guidance text. Nothing renders when blank. */
     text?: string;
     /** Accessible name for the trigger; defaults to a generic phrasing. */
     label?: string;
+    variant?: 'hint' | 'warning';
   }
 
-  let { text, label = 'More information' }: Props = $props();
+  let { text, label = 'More information', variant = 'hint' }: Props = $props();
 
   /** The trigger props bits-ui hands to the `child` snippet, typed enough to
    *  re-invoke the click handler our own wrapper shadows. */
@@ -41,6 +43,7 @@
           tabindex="0"
           aria-label={label}
           class="ui-hint-trigger touch-target"
+          class:warning={variant === 'warning'}
           onclick={(e) => {
             // This span sits inside the field's <label>, so a click on it also
             // activates the label and focuses the input behind the popover.
@@ -48,8 +51,10 @@
             e.preventDefault();
             e.stopPropagation();
             trigger.onclick?.(e);
-          }}>?</span
+          }}
         >
+          {#if variant === 'warning'}<TriangleAlert size={14} aria-hidden="true" />{:else}?{/if}
+        </span>
       {/snippet}
     </Popover.Trigger>
     <Popover.Portal>
@@ -82,6 +87,14 @@
   .ui-hint-trigger:focus-visible {
     color: var(--text-primary);
     border-color: var(--text-muted);
+  }
+
+  .ui-hint-trigger.warning {
+    width: 1.25rem;
+    height: 1.25rem;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--status-warn-fg);
   }
 
   :global(.ui-hint-content) {

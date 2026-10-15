@@ -21,7 +21,7 @@ function block(answer: SharedBlockRunAnswer | null): SharedBlock {
     render_mode: 'structured',
     enabled: true,
     trusted: true,
-    sources: [],
+    sources: [{ kind: 'markets', config: { indices: ['^EXAMPLE'] } }],
     created_at: null,
     updated_at: null,
     status: {
@@ -95,6 +95,27 @@ async function pressRunNow() {
 }
 
 describe('Shared block Run now', () => {
+  it('keeps the shared source editor and admin save working', async () => {
+    answers.queue = [null];
+    api.putSharedBlock.mockResolvedValueOnce({ status: 'ok' });
+    render(Harness, { component: Page, user: admin });
+    const trigger = await screen.findByLabelText('Shared block actions');
+    await fireEvent.keyDown(trigger, { key: 'Enter' });
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+    const indices = await screen.findByRole('textbox', { name: /Indices/ });
+    await fireEvent.input(indices, { target: { value: '^SAMPLE' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save shared block' }));
+    await waitFor(() =>
+      expect(api.putSharedBlock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'mk',
+          render_mode: 'structured',
+          sources: [{ kind: 'markets', config: { indices: ['^SAMPLE'] } }],
+        }),
+      ),
+    );
+  });
+
   it('waits past a stale answer for its own, and reports what the run came to', async () => {
     answers.queue = [
       { id: 'req-1', outcome: 'regenerated', at: '2026-10-11T00:00:00Z' },

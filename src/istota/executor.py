@@ -7522,9 +7522,9 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     Returns the prompt when the module is enabled and the briefing has blocks
     (running the one-time components→blocks migration first); ``None`` when the
     module is disabled for the user, the briefing has no blocks, or any error
-    occurs — the caller treats ``None`` as a task failure. Also stashes
-    per-block provenance in the task's control directory, which the scheduler
-    reads when archiving the rendered briefing.
+    occurs — the caller treats ``None`` as a task failure. Writes a required,
+    validated manifest and source provenance in the protected control directory
+    for completion normalization and archival.
 
     Not "a deferred file", which it used to be and which means something
     specific here: a deferred op is model-authored, lives in the writable
@@ -7535,6 +7535,8 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
         from . import briefings as briefings_module
         from .briefings import ensure_initialised
         from .briefings.generate import assemble_briefing_input
+        from .briefings.document import validate_briefing_manifest
+        from .scheduler import briefing_title_for_task
     except Exception:  # noqa: BLE001
         return None
 
@@ -7564,6 +7566,7 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
         with db.get_db(config.db_path) as conn:
             assembled = assemble_briefing_input(
                 ctx, task.briefing_name, config, conn=conn,
+                title=briefing_title_for_task(config, task),
             )
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -7575,50 +7578,22 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     if assembled is None:
         return None  # no blocks after migration → task fails (quiet retry)
 
-    # Stash per-block provenance for the scheduler's archive write.
-    #
-    # In the control directory rather than the model's working directory, for
-    # the reason every framework-authored per-task file is there: the daemon
-    # writes it and the daemon reads it back. The old location was per *user*
-    # and bound read-write into the sandbox, so a concurrent task of the same
-    # user could plant a dangling symlink at a not-yet-started task's filename
-    # and redirect this write, which `write_text` would have followed.
-    #
-    # `ensure_task_control_dir` rather than threading the path through
-    # `build_deferred_briefing_prompt`: it is idempotent, and `execute_task`
-    # created this exact directory a few dozen lines above the call that
-    # reaches here. A second call is one `mkdir(exist_ok=True)` and three mode
-    # assertions per briefing task, against a parameter on two signatures with
-    # one caller between them.
-    #
-    # Still best-effort, and the `RuntimeError` this can now raise is caught
-    # by the same `except`: the archive works with empty `block_meta`. The
-    # *reader* swallows its own failure identically
-    # (`scheduler._maybe_archive_briefing`), which is why both ends moved in
-    # one commit and why the test asserts the archived provenance is
-    # non-empty rather than that the archive ran.
+    # The daemon's snapshot must survive until completion. It belongs beside
+    # the protected prompt files, never in the model-writable deferred directory.
     try:
         import json as _json
 
+        manifest = validate_briefing_manifest(assembled.manifest)
         control_dir = ensure_task_control_dir(config, task.user_id, task.id)
         _write_control_file(control_dir / "briefing_meta.json", _json.dumps({
+            "version": 1,
             "briefing_name": task.briefing_name,
             "block_meta": assembled.block_meta,
+            "manifest": manifest,
         }))
-    except Exception as e:  # noqa: BLE001
-        # Best-effort — the archive still works with empty `block_meta` — but
-        # not silent. `execute_task` has already created this directory for
-        # this same `(user_id, task_id)` and failed the task if it could not,
-        # so the only way the `ensure_` call here raises is that a level was
-        # removed, replaced or re-owned *during* the task: the conditions the
-        # resolver's guards exist to detect. Swallowing that without a word
-        # made it indistinguishable from a briefings-module hiccup, and since
-        # the reader swallows its own miss too, the whole operator-visible
-        # trace was an archive row with no provenance in it.
-        logger.warning(
-            "briefing provenance not stashed for task %s (%s): %s",
-            task.id, task.briefing_name, e,
-        )
+    except Exception:  # noqa: BLE001 — preparation fails before invoking the model
+        logger.warning("briefing manifest preparation failed for task %s", task.id)
+        return None
 
     return assembled.prompt
 

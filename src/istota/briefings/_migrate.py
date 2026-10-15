@@ -25,6 +25,7 @@ from istota.briefings.models import (
     SOURCE_KINDS,
     STRUCTURED_KINDS,
     BriefingsContext,
+    validate_block_options,
 )
 
 
@@ -214,7 +215,7 @@ def _normalize_source(raw, *, briefing_name: str) -> dict | None:
 
 
 def normalize_block_specs(raw, *, briefing_name: str = "?") -> list[dict]:
-    """Coerce config-authored ``blocks`` into seeder spec dicts (total, fail-soft).
+    """Coerce config-authored ``blocks`` into validated seeder spec dicts.
 
     Produces the same ``{"title", "directive", "render_mode", "options",
     "sources": [{"kind", "config"}]}`` shape :func:`blocks_from_components`
@@ -222,7 +223,8 @@ def normalize_block_specs(raw, *, briefing_name: str = "?") -> list[dict]:
 
     Best-effort throughout: a non-list input, a non-dict block, a titleless
     block, an unknown source kind, or a block that ends up with zero valid
-    sources is skipped with a WARNING — this never raises. ``render_mode``
+    sources is skipped with a WARNING. Invalid presentation raises before any
+    seed writes; other legacy coercions remain fail-soft. ``render_mode``
     defaults by the first source kind (``structured`` for
     :data:`STRUCTURED_KINDS`, else ``synthesis``) when omitted, mirroring the
     legacy components translation.
@@ -230,6 +232,10 @@ def normalize_block_specs(raw, *, briefing_name: str = "?") -> list[dict]:
     if not isinstance(raw, list):
         return []
 
+    # Check new layout metadata before any definitions can be seeded.
+    for entry in raw:
+        if isinstance(entry, dict) and isinstance(entry.get("options"), dict):
+            validate_block_options(entry["options"])
     specs: list[dict] = []
     for entry in raw:
         try:
