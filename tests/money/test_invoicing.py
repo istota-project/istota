@@ -1500,6 +1500,184 @@ class TestSeparateAndNamedEntries:
         assert len(list((tmp_path / "invoices").rglob("*.pdf"))) == 1
 
 
+class TestVoidWithCleanup:
+    """#755: the void core the CLI and the web route share."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        return TestTransactionalGeneration()._setup(tmp_path, monkeypatch)
+
+    def _issue(self, tmp_path, monkeypatch, *, qty=8):
+        from istota.money.core.invoicing import generate_invoices_for_period
+        from istota.money.work import add_work_entry
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=qty)
+        (result,) = generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path,
+        )
+        return Path(result["file"])
+
+    def _void(self, tmp_path, number="INV-000001", **kwargs):
+        from istota.money.core.invoicing import void_invoice_with_cleanup
+
+        return void_invoice_with_cleanup(
+            tmp_path, number, invoice_output_dir=tmp_path / "invoices", **kwargs,
+        )
+
+    def test_a_kept_pdf_is_renamed_void_and_still_found(self, tmp_path, monkeypatch):
+        from istota.money.work import get_invoice
+
+        pdf = self._issue(tmp_path, monkeypatch)
+        result = self._void(tmp_path, reason="wrong client")
+
+        renamed = pdf.with_name(f"{pdf.stem}-VOID.pdf")
+        assert not pdf.exists()
+        assert renamed.read_bytes() == b"%PDF-1.4"
+        assert renamed.name.startswith("Invoice-000001-") and renamed.name.endswith("-VOID.pdf")
+        record = get_invoice(tmp_path, "INV-000001")
+        assert record.pdf_path == str(renamed) == result["pdf_path"]
+        assert record.status == "voided"
+        assert record.void_reason == "wrong client"
+        assert result["entries_voided"] == 1
+        assert result["was_paid"] is False
+        assert find_invoice_pdf(tmp_path / "invoices", "INV-000001") == renamed
+
+    def test_delete_pdf_removes_the_file_and_empties_the_path(self, tmp_path, monkeypatch):
+        from istota.money.work import get_invoice
+
+        pdf = self._issue(tmp_path, monkeypatch)
+        result = self._void(tmp_path, delete_pdf=True)
+
+        assert result["pdf_deleted"] is True
+        assert list((tmp_path / "invoices").rglob("*.pdf")) == []
+        assert get_invoice(tmp_path, "INV-000001").pdf_path == ""
+        assert not pdf.exists()
+
+    def test_overdue_state_is_cleared_in_the_same_transaction(self, tmp_path, monkeypatch):
+        from istota.money import db
+        from istota.money.work import db_path_for
+
+        self._issue(tmp_path, monkeypatch)
+        with db.get_db(db_path_for(tmp_path)) as conn:
+            db.mark_invoice_overdue_notified(conn, "INV-000001")
+        result = self._void(tmp_path)
+
+        assert result["db_cleanup"] == {"overdue_notifications_cleared": 1}
+        with db.get_db(db_path_for(tmp_path)) as conn:
+            assert db.get_notified_overdue_invoices(conn) == set()
+
+    def test_a_failed_rename_rolls_the_void_back(self, tmp_path, monkeypatch):
+        from istota.money.work import get_invoice, load_work_entries
+
+        pdf = self._issue(tmp_path, monkeypatch)
+
+        def refuse(self, target):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(Path, "rename", refuse)
+        with pytest.raises(OSError, match="read-only"):
+            self._void(tmp_path)
+        monkeypatch.undo()
+
+        assert pdf.exists()
+        record = get_invoice(tmp_path, "INV-000001")
+        assert record.status == "open"
+        assert record.pdf_path == str(pdf)
+        assert load_work_entries(tmp_path)[0].invoice == "INV-000001"
+
+    def test_a_refused_void_touches_no_file(self, tmp_path, monkeypatch):
+        from istota.money.work import VoidError, mark_paid
+
+        pdf = self._issue(tmp_path, monkeypatch)
+        mark_paid(tmp_path, "INV-000001", "2026-04-15")
+        with pytest.raises(VoidError) as raised:
+            self._void(tmp_path, delete_pdf=True)
+        assert raised.value.code == "paid"
+        assert pdf.exists()
+
+    def test_a_paid_invoice_voids_with_force(self, tmp_path, monkeypatch):
+        from istota.money.work import get_invoice, mark_paid
+
+        self._issue(tmp_path, monkeypatch)
+        mark_paid(tmp_path, "INV-000001", "2026-04-15")
+        result = self._void(tmp_path, force=True)
+        assert result["was_paid"] is True
+        assert get_invoice(tmp_path, "INV-000001").was_paid is True
+
+    def test_an_invoice_with_no_pdf_voids(self, tmp_path, monkeypatch):
+        from istota.money.work import get_invoice
+
+        pdf = self._issue(tmp_path, monkeypatch)
+        pdf.unlink()
+        result = self._void(tmp_path, delete_pdf=True)
+        assert result["pdf_deleted"] is False
+        assert get_invoice(tmp_path, "INV-000001").status == "voided"
+
+
+class TestCreateManualInvoice:
+    """The manual-invoice core shared by ``invoice create`` and the web route."""
+
+    def _create(self, tmp_path, monkeypatch, lines, **kwargs):
+        from istota.money.core.invoicing import create_manual_invoice
+
+        config_file, config = TestTransactionalGeneration()._setup(tmp_path, monkeypatch)
+        return create_manual_invoice(
+            config=config, data_dir=tmp_path, accounting_path=tmp_path,
+            invoice_output_dir=tmp_path / "invoices", client_key="acme",
+            lines=lines, config_path=config_file, **kwargs,
+        ), config_file
+
+    def test_stores_the_invoice_with_its_total(self, tmp_path, monkeypatch):
+        from istota.money.work import get_invoice, load_work_entries
+
+        result, config_file = self._create(tmp_path, monkeypatch, [
+            {"service": "dev", "qty": 2, "description": "Fix"},
+            {"description": "Travel", "amount": 300},
+        ])
+
+        assert result["invoice_number"] == "INV-000001"
+        assert result["total"] == 600.0
+        record = get_invoice(tmp_path, "INV-000001")
+        assert record.manual is True
+        assert record.total == 600.0
+        assert record.pdf_path == result["file"]
+        assert Path(result["file"]).exists()
+        assert sorted(record.entry_uids) == sorted(result["entry_uids"])
+        services = sorted(e.service for e in load_work_entries(tmp_path))
+        assert services == ["_manual", "dev"]
+        assert parse_invoicing_config(config_file).next_invoice_number == 2
+
+    @pytest.mark.parametrize("lines, message", [
+        ([], "No line items"),
+        ([{"service": "nope", "qty": 1}], "Service 'nope' not found"),
+        ([{"description": "Travel"}], "amount"),
+        ([{"description": "Travel", "amount": "lots"}], "amount"),
+        ([{"description": "Travel", "amount": float("nan")}], "amount"),
+    ])
+    def test_a_bad_line_is_refused_before_anything_is_written(
+        self, tmp_path, monkeypatch, lines, message,
+    ):
+        from istota.money.work import list_invoices, load_work_entries
+
+        with pytest.raises(ValueError, match=message):
+            self._create(tmp_path, monkeypatch, lines)
+        assert list_invoices(tmp_path) == []
+        assert load_work_entries(tmp_path) == []
+        assert list((tmp_path / "invoices").rglob("*.pdf")) == []
+
+    def test_an_unknown_client_is_refused(self, tmp_path, monkeypatch):
+        from istota.money.core.invoicing import create_manual_invoice
+
+        _, config = TestTransactionalGeneration()._setup(tmp_path, monkeypatch)
+        with pytest.raises(ValueError, match="Client 'globex' not found"):
+            create_manual_invoice(
+                config=config, data_dir=tmp_path, accounting_path=tmp_path,
+                invoice_output_dir=tmp_path / "invoices", client_key="globex",
+                lines=[{"description": "x", "amount": 1}],
+            )
+
+
 class TestInvoiceHtmlEscaping:
     """Names, addresses and descriptions are user input — typed into the CLI
     once, and into a browser form since. An unescaped `&` in a company name is

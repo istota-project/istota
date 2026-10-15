@@ -1015,27 +1015,113 @@ def invoice_issue_date(entries: list[WorkEntry]) -> date | None:
     return max(e.date for e in entries)
 
 
-def void_invoice(
-    data_dir: Path, invoice_number: str, *, conn: sqlite3.Connection | None = None,
-) -> int:
-    """Void an invoice and release its entries. Returns the count released.
+class VoidError(ValueError):
+    """A void the store refused. ``code`` says why, for a caller mapping it.
 
-    The invoice row stays, with ``status = 'voided'``, and its lines stay
-    listed with ``active = 0``. An unknown or already voided invoice returns 0.
+    ``not_found``, ``already_voided``, ``paid`` (a paid invoice without
+    ``force``) or ``unknown_replacement`` (a ``replaced_by`` number with no
+    invoice row).
     """
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class VoidResult:
+    """What :func:`void_invoice` did: the entries it released and the row it left."""
+    number: str
+    released: int
+    was_paid: bool
+    voided_at: str
+    pdf_path: str
+    reason: str
+    replaced_by: list[str]
+
+
+def void_invoice(
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    reason: str = "",
+    replaced_by: tuple[str, ...] | list[str] = (),
+    force: bool = False,
+    pdf_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> VoidResult:
+    """Void an invoice and release its entries, in one transaction.
+
+    The invoice row stays, with ``status = 'voided'``, the reason and its
+    replacements, and its lines stay listed with ``active = 0``. A paid invoice
+    needs ``force`` and is recorded with ``was_paid``. ``pdf_path``, when
+    given, replaces the stored path (the caller renamed or deleted the file).
+    Every refusal is a :class:`VoidError` raised before anything is written.
+    """
+    replacements = list(dict.fromkeys(n.strip() for n in replaced_by if n and n.strip()))
     with write_transaction(data_dir, conn) as c:
         row = _invoice_row(c, invoice_number)
-        if row is None or row["status"] == "voided":
-            return 0
+        if row is None:
+            raise VoidError(f"Invoice {invoice_number} not found", code="not_found")
+        if row["status"] == "voided":
+            voided_on = (row["voided_at"] or "")[:10]
+            raise VoidError(
+                f"Invoice {invoice_number} already voided on {voided_on}",
+                code="already_voided",
+            )
+        was_paid = row["status"] == "paid"
+        if was_paid and not force:
+            raise VoidError(
+                f"Invoice {invoice_number} has been marked as paid. Use --force to void anyway.",
+                code="paid",
+            )
+        for number in replacements:
+            if number == invoice_number:
+                raise VoidError(
+                    f"Invoice {invoice_number} cannot replace itself",
+                    code="unknown_replacement",
+                )
+            if _invoice_row(c, number) is None:
+                raise VoidError(
+                    f"Replacement invoice {number} not found",
+                    code="unknown_replacement",
+                )
         released = c.execute(
             "UPDATE invoice_lines SET active = 0 WHERE invoice_number = ? AND active = 1",
             (invoice_number,),
         ).rowcount
+        voided_at = _now()
+        stored_pdf = row["pdf_path"] if pdf_path is None else str(pdf_path)
         c.execute(
-            "UPDATE invoices SET status = 'voided', voided_at = ?, was_paid = ? WHERE number = ?",
-            (_now(), int(row["status"] == "paid"), invoice_number),
+            "UPDATE invoices SET status = 'voided', voided_at = ?, was_paid = ?, "
+            "void_reason = ?, replaced_by = ?, pdf_path = ? WHERE number = ?",
+            (voided_at, int(was_paid), reason or "", json.dumps(replacements),
+             stored_pdf, invoice_number),
         )
-        return released
+        return VoidResult(
+            number=invoice_number, released=released, was_paid=was_paid,
+            voided_at=voided_at, pdf_path=stored_pdf,
+            reason=reason or "", replaced_by=replacements,
+        )
+
+
+def get_invoice(
+    data_dir: Path, invoice_number: str, *, conn: sqlite3.Connection | None = None,
+) -> InvoiceRecord | None:
+    """One invoice record by number, voided or not, or None."""
+    with _reading(data_dir, conn) as c:
+        row = _invoice_row(c, invoice_number)
+        if row is None:
+            return None
+        uids = [
+            r["entry_uid"] for r in c.execute(
+                "SELECT l.entry_uid FROM invoice_lines l "
+                "JOIN work_entries e ON e.uid = l.entry_uid "
+                "WHERE l.invoice_number = ? ORDER BY e.date, e.created_at, e.uid",
+                (invoice_number,),
+            )
+        ]
+        return _invoice_from_row(row, uids)
 
 
 def list_invoices(

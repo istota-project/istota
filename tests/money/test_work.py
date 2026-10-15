@@ -33,6 +33,8 @@ from istota.money.work import (
     remove_work_entry_by_uid,
     update_work_entry,
     update_work_entry_by_uid,
+    VoidError,
+    get_invoice,
     void_invoice,
     write_transaction,
 )
@@ -375,8 +377,9 @@ class TestVoidInvoice:
         assign_invoice_number(data_dir, [1, 2], "INV-000001")
         mark_paid(data_dir, "INV-000001", "2026-04-15")
 
-        count = void_invoice(data_dir, "INV-000001")
-        assert count == 2
+        result = void_invoice(data_dir, "INV-000001", force=True)
+        assert result.released == 2
+        assert result.was_paid is True
 
         entries = load_work_entries(data_dir)
         assert all(e.invoice == "" for e in entries)
@@ -389,7 +392,7 @@ class TestVoidInvoice:
         assign_invoice_number(data_dir, [1, 2], "INV-000001")
         mark_paid(data_dir, "INV-000001", "2026-04-15")
 
-        void_invoice(data_dir, "INV-000001")
+        void_invoice(data_dir, "INV-000001", force=True)
 
         (record,) = list_invoices(data_dir)
         assert record.status == "voided"
@@ -402,24 +405,80 @@ class TestVoidInvoice:
         add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
         assign_invoice_number(data_dir, [1], "INV-000001")
 
-        count = void_invoice(data_dir, "INV-000001")
-        assert count == 1
+        result = void_invoice(data_dir, "INV-000001")
+        assert result.released == 1
+        assert result.was_paid is False
         entries = load_work_entries(data_dir)
         assert entries[0].invoice == ""
         assert list_invoices(data_dir)[0].was_paid is False
 
-    def test_void_nonexistent_invoice(self, data_dir):
-        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
-        count = void_invoice(data_dir, "INV-999999")
-        assert count == 0
-
-    def test_voiding_twice_does_nothing_the_second_time(self, data_dir):
+    def test_a_paid_invoice_needs_force_and_is_left_alone_without_it(self, data_dir):
         add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
         assign_invoice_number(data_dir, [1], "INV-000001")
-        void_invoice(data_dir, "INV-000001")
+        mark_paid(data_dir, "INV-000001", "2026-04-15")
+
+        with pytest.raises(VoidError) as raised:
+            void_invoice(data_dir, "INV-000001")
+        assert raised.value.code == "paid"
+        record = get_invoice(data_dir, "INV-000001")
+        assert record.status == "paid"
+        assert load_work_entries(data_dir)[0].invoice == "INV-000001"
+
+    def test_void_nonexistent_invoice(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        with pytest.raises(VoidError, match="not found") as raised:
+            void_invoice(data_dir, "INV-999999")
+        assert raised.value.code == "not_found"
+
+    def test_voiding_twice_is_refused_with_the_first_date(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assign_invoice_number(data_dir, [1], "INV-000001")
+        void_invoice(data_dir, "INV-000001", reason="first")
         first = list_invoices(data_dir)[0].voided_at
-        assert void_invoice(data_dir, "INV-000001") == 0
-        assert list_invoices(data_dir)[0].voided_at == first
+        with pytest.raises(VoidError, match=f"already voided on {first[:10]}") as raised:
+            void_invoice(data_dir, "INV-000001", reason="second")
+        assert raised.value.code == "already_voided"
+        record = list_invoices(data_dir)[0]
+        assert record.voided_at == first
+        assert record.void_reason == "first"
+
+    def test_reason_and_replacements_are_recorded(self, data_dir):
+        for day in ("01", "02", "03"):
+            add_work_entry(data_dir, f"2026-03-{day}", "acme", "dev", qty=8)
+        assign_invoice_number(data_dir, [1, 2], "INV-000251")
+        void_invoice(data_dir, "INV-000251")
+        assign_invoice_number(data_dir, [1], "INV-000253")
+        assign_invoice_number(data_dir, [2], "INV-000254")
+        assign_invoice_number(data_dir, [3], "INV-000255")
+        void_invoice(data_dir, "INV-000255", reason="billed twice",
+                     replaced_by=["INV-000253", " INV-000254 ", "INV-000253"])
+
+        record = get_invoice(data_dir, "INV-000255")
+        assert record.void_reason == "billed twice"
+        assert record.replaced_by == ["INV-000253", "INV-000254"]
+
+    def test_an_unknown_replacement_is_refused_and_nothing_is_written(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assign_invoice_number(data_dir, [1], "INV-000001")
+
+        for replaced_by in (["INV-000999"], ["INV-000001"]):
+            with pytest.raises(VoidError) as raised:
+                void_invoice(data_dir, "INV-000001", replaced_by=replaced_by)
+            assert raised.value.code == "unknown_replacement"
+        record = get_invoice(data_dir, "INV-000001")
+        assert record.status == "open"
+        assert record.replaced_by == []
+        assert load_work_entries(data_dir)[0].invoice == "INV-000001"
+
+    def test_a_new_pdf_path_is_stored_with_the_void(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)
+        assign_invoice_number(data_dir, [1], "INV-000001")
+        result = void_invoice(data_dir, "INV-000001", pdf_path="/x/Invoice-000001-VOID.pdf")
+        assert result.pdf_path == "/x/Invoice-000001-VOID.pdf"
+        assert get_invoice(data_dir, "INV-000001").pdf_path == "/x/Invoice-000001-VOID.pdf"
+
+    def test_get_invoice_unknown_is_none(self, data_dir):
+        assert get_invoice(data_dir, "INV-000404") is None
 
     def test_void_does_not_affect_other_invoices(self, data_dir):
         add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=8)

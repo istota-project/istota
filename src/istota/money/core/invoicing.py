@@ -906,3 +906,257 @@ def delete_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> bool:
         return False
     pdf.unlink()
     return True
+
+
+# =============================================================================
+# Void and manual creation (shared by the CLI and the web routes)
+# =============================================================================
+
+
+def _void_pdf_path(pdf: Path) -> Path:
+    """``Invoice-000251-10_15_2026.pdf`` → ``Invoice-000251-10_15_2026-VOID.pdf``."""
+    return pdf.with_name(f"{pdf.stem}-VOID{pdf.suffix}")
+
+
+def void_invoice_with_cleanup(
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    invoice_output_dir: Path | None,
+    reason: str = "",
+    replaced_by: tuple[str, ...] | list[str] = (),
+    force: bool = False,
+    delete_pdf: bool = False,
+) -> dict:
+    """Void an invoice, clear its DB state and set its PDF aside.
+
+    One transaction voids the row, releases its entries and runs
+    :func:`istota.money.db.clear_invoice_state`. A kept PDF is renamed to
+    ``…-VOID.pdf`` inside that transaction and renamed back if the commit
+    fails, so the stored ``pdf_path`` names the file on disk. With
+    ``delete_pdf`` the path is emptied and the file removed after the commit,
+    since a deletion cannot be undone. A refusal is a
+    :class:`istota.money.work.VoidError` raised before anything changes.
+    """
+    from istota.money.db import clear_invoice_state
+    from istota.money.work import get_invoice, void_invoice, write_transaction
+
+    pdf: Path | None = None
+    renamed_to: Path | None = None
+    try:
+        with write_transaction(data_dir) as conn:
+            record = get_invoice(data_dir, invoice_number, conn=conn)
+            if record is not None:
+                if record.pdf_path and Path(record.pdf_path).is_file():
+                    pdf = Path(record.pdf_path)
+                elif invoice_output_dir is not None:
+                    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
+            new_pdf_path: str | None = None
+            if pdf is not None:
+                new_pdf_path = "" if delete_pdf else str(_void_pdf_path(pdf))
+            result = void_invoice(
+                data_dir, invoice_number, reason=reason, replaced_by=replaced_by,
+                force=force, pdf_path=new_pdf_path, conn=conn,
+            )
+            db_cleanup = clear_invoice_state(conn, invoice_number)
+            if pdf is not None and not delete_pdf:
+                target = _void_pdf_path(pdf)
+                pdf.rename(target)
+                renamed_to = target
+    except Exception:
+        # The commit failed after the rename: put the file back where the
+        # still-open invoice's row says it is.
+        if renamed_to is not None and pdf is not None:
+            renamed_to.rename(pdf)
+        raise
+
+    out = {
+        "invoice_number": invoice_number,
+        "entries_voided": result.released,
+        "was_paid": result.was_paid,
+        "voided_at": result.voided_at,
+        "void_reason": result.reason,
+        "replaced_by": result.replaced_by,
+        "pdf_path": result.pdf_path,
+    }
+    if db_cleanup:
+        out["db_cleanup"] = db_cleanup
+    if delete_pdf:
+        deleted = False
+        if pdf is not None:
+            try:
+                pdf.unlink()
+                deleted = True
+            except OSError as exc:
+                logger.error("invoice_void_pdf_delete_failed invoice=%s error=%s", invoice_number, exc)
+        out["pdf_deleted"] = deleted
+    return out
+
+
+def _finite_number(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
+def _manual_line(line, services: dict[str, ServiceConfig]) -> tuple[str, float | None, float | None, str]:
+    """Validate one manual-invoice line: ``(service, qty, amount, description)``."""
+    if not isinstance(line, dict):
+        raise ValueError("Each line item must be an object")
+    service = line.get("service") or ""
+    description = line.get("description") or ""
+    if not isinstance(service, str) or not isinstance(description, str):
+        raise ValueError("A line item's service and description must be text")
+    if service:
+        if service not in services:
+            available = ", ".join(services)
+            raise ValueError(f"Service '{service}' not found. Available: {available}")
+        qty = line.get("qty")
+        if qty is not None and not _finite_number(qty):
+            raise ValueError(f"Invalid qty for service '{service}'")
+        return service, (float(qty) if qty is not None else None), None, description
+    amount = line.get("amount")
+    if not _finite_number(amount):
+        raise ValueError(f"A manual item needs a numeric amount: {description or 'no description'}")
+    return "_manual", None, float(amount), description
+
+
+def create_manual_invoice(
+    *,
+    config: InvoicingConfig,
+    data_dir: Path,
+    accounting_path: Path,
+    invoice_output_dir: Path,
+    client_key: str,
+    lines: list[dict],
+    entity: str | None = None,
+    db_path: Path | None = None,
+    config_path: Path | None = None,
+) -> dict:
+    """Create a one-off invoice from line items, render its PDF and record it.
+
+    Each line is ``{"service", "qty", "description"}`` for a configured service,
+    or ``{"description", "amount"}`` for a manual item. Every check runs before
+    the PDF is rendered, and a bad line, client or entity is a ``ValueError``.
+    The entries and the invoice are written in one transaction after the PDF
+    exists; if that fails the PDF is deleted and :class:`InvoiceRecordError`
+    is raised.
+    """
+    from istota.money.work import create_invoice, insert_entry, write_transaction
+
+    client_config = config.clients.get(client_key)
+    if not client_config:
+        available = ", ".join(config.clients)
+        raise ValueError(f"Client '{client_key}' not found. Available: {available}")
+    if entity:
+        if entity not in config.companies:
+            available = ", ".join(config.companies)
+            raise ValueError(f"Entity '{entity}' not found. Available: {available}")
+        resolved_entity = config.companies[entity]
+    else:
+        resolved_entity = resolve_entity(config, client_config=client_config)
+
+    if not lines:
+        raise ValueError("No line items specified. Use --service/--qty or --item")
+    parsed = [_manual_line(line, config.services) for line in lines]
+
+    invoice_number = max(
+        config.next_invoice_number,
+        highest_existing_invoice_number(data_dir) + 1,
+    )
+    invoice_date = date.today()
+    number_str = format_invoice_number(invoice_number)
+
+    inv_entries = [
+        WorkEntry(
+            date=invoice_date, client=client_key.lower(), service=service,
+            qty=qty, amount=amount, description=description,
+            entity=entity or "", uid=new_txn_id(),
+        )
+        for service, qty, amount, description in parsed
+    ]
+    items = build_line_items(
+        [e for e in inv_entries if e.service != "_manual"], config.services,
+    )
+    for e in inv_entries:
+        if e.service == "_manual":
+            items.append(InvoiceLineItem(
+                display_name=e.description or "Manual item", description="",
+                quantity=1, rate=e.amount or 0, discount=0, amount=e.amount or 0,
+            ))
+    total = sum(i.amount for i in items)
+    due_date = (
+        invoice_date + timedelta(days=client_config.terms)
+        if isinstance(client_config.terms, int) else None
+    )
+    inv = Invoice(
+        number=number_str, date=invoice_date, due_date=due_date,
+        client=client_config, company=resolved_entity,
+        items=items, total=total, group_name="",
+    )
+
+    html_text = generate_invoice_html(
+        inv, logo_path=_resolve_logo(accounting_path, resolved_entity.logo),
+    )
+    pdf_path = (
+        invoice_output_dir / str(invoice_date.year)
+        / f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
+    )
+    generate_invoice_pdf(html_text, pdf_path, root=accounting_path)
+
+    try:
+        with write_transaction(data_dir) as conn:
+            for new_entry in inv_entries:
+                insert_entry(conn, new_entry)
+            create_invoice(
+                conn, number=number_str, client=client_key.lower(),
+                entity=resolved_entity.key or entity or config.default_entity,
+                group_name="", issue_date=invoice_date, total=round(total, 2),
+                entry_uids=[e.uid for e in inv_entries], pdf_path=str(pdf_path),
+                manual=True,
+            )
+    except Exception as exc:
+        # Never leave a PDF behind for an invoice that was not recorded.
+        pdf_path.unlink(missing_ok=True)
+        raise InvoiceRecordError(f"could not record {number_str}: {exc}") from exc
+
+    persist_next_invoice_number(invoice_number + 1, db_path=db_path, config_path=config_path)
+
+    return {
+        "invoice_number": number_str,
+        "client_key": client_key.lower(),
+        "client": client_config.name,
+        "total": round(total, 2),
+        "due_date": due_date.isoformat() if due_date else str(client_config.terms),
+        "file": str(pdf_path),
+        "entry_uids": [e.uid for e in inv_entries],
+    }
+
+
+_LISTED_STATUS = {"open": "outstanding", "paid": "paid", "voided": "voided"}
+
+
+def invoice_summary(record, config: InvoicingConfig | None) -> dict:
+    """One invoice as ``invoice list`` and ``GET /invoices`` show it.
+
+    ``record`` is an :class:`InvoiceRecord`. The total is the stored snapshot,
+    never recomputed from the entries. An open invoice shows as
+    ``outstanding``.
+    """
+    client_config = config.clients.get(record.client) if config is not None else None
+    row = {
+        "invoice_number": record.number,
+        "client": client_config.name if client_config else record.client,
+        "client_key": record.client,
+        "date": record.issue_date.isoformat(),
+        "total": round(record.total, 2),
+        "status": _LISTED_STATUS.get(record.status, record.status),
+        "voided_at": record.voided_at,
+        "void_reason": record.void_reason,
+        "replaced_by": list(record.replaced_by),
+    }
+    if record.status == "paid" and record.paid_date:
+        row["paid_date"] = record.paid_date.isoformat()
+    if record.status == "voided":
+        row["was_paid"] = record.was_paid
+    return row

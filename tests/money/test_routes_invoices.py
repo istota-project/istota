@@ -261,3 +261,85 @@ class TestInvoicePaymentMatches:
 
     def test_no_config_has_no_reviews(self, make_client):
         assert make_client().get("/api/money/invoices").json()["payment_reviews"] == []
+
+
+class TestInvoiceRowFields:
+    """#755: GET /invoices carries the void record and whether a PDF exists."""
+
+    def _issue(self, data_dir: Path, number: str, total: float, *, pdf: bool = True) -> str:
+        from istota.money.work import create_invoice, load_work_entries, write_transaction
+
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1, description=number)
+        uid = next(e.uid for e in load_work_entries(data_dir) if e.description == number)
+        pdf_path = ""
+        if pdf:
+            year_dir = data_dir / "invoices" / "2026"
+            year_dir.mkdir(parents=True, exist_ok=True)
+            path = year_dir / f"Invoice-{number[4:]}-03_02_2026.pdf"
+            path.write_bytes(b"%PDF-1.4")
+            pdf_path = str(path)
+        with write_transaction(data_dir) as conn:
+            create_invoice(
+                conn, number=number, client="acme", entity="", group_name="",
+                issue_date=date(2026, 3, 2), total=total, entry_uids=[uid], pdf_path=pdf_path,
+            )
+        return pdf_path
+
+    def _client(self, make_client, tmp_path):
+        from istota.money.core.invoicing import void_invoice_with_cleanup
+
+        self._issue(tmp_path, "INV-000001", 2300.0)
+        self._issue(tmp_path, "INV-000002", 1200.0)
+        self._issue(tmp_path, "INV-000003", 1100.0, pdf=False)
+        void_invoice_with_cleanup(
+            tmp_path, "INV-000001", invoice_output_dir=tmp_path / "invoices",
+            reason="two jobs", replaced_by=["INV-000002", "INV-000003"],
+        )
+        return make_client(_write_invoicing_config(tmp_path, "invoices"))
+
+    def test_rows_carry_status_void_record_and_has_pdf(self, make_client, tmp_path):
+        client = self._client(make_client, tmp_path)
+        data = client.get("/api/money/invoices").json()
+        rows = {row["invoice_number"]: row for row in data["invoices"]}
+
+        voided = rows["INV-000001"]
+        assert voided["status"] == "voided"
+        assert voided["voided_at"]
+        assert voided["void_reason"] == "two jobs"
+        assert voided["replaced_by"] == ["INV-000002", "INV-000003"]
+        assert voided["total"] == 2300.0
+        # The renamed VOID copy is still the invoice's PDF.
+        assert voided["has_pdf"] is True
+
+        assert rows["INV-000002"]["status"] == "outstanding"
+        assert rows["INV-000002"]["has_pdf"] is True
+        assert rows["INV-000002"]["voided_at"] is None
+        assert rows["INV-000002"]["void_reason"] == ""
+        assert rows["INV-000002"]["replaced_by"] == []
+        assert rows["INV-000003"]["has_pdf"] is False
+
+        assert data["invoice_count"] == 3
+        assert data["outstanding_count"] == 2
+
+    def test_totals_are_the_stored_snapshot(self, make_client, tmp_path):
+        client = self._client(make_client, tmp_path)
+        rows = {r["invoice_number"]: r for r in client.get("/api/money/invoices").json()["invoices"]}
+        # One hour of dev at the config's 150 would be 150; the invoice billed 1200.
+        assert rows["INV-000002"]["total"] == 1200.0
+
+    def test_include_voided_false_filters_them_out(self, make_client, tmp_path):
+        client = self._client(make_client, tmp_path)
+        data = client.get("/api/money/invoices?include_voided=false").json()
+        assert [row["invoice_number"] for row in data["invoices"]] == ["INV-000002", "INV-000003"]
+        assert data["outstanding_count"] == 2
+
+    def test_a_voided_invoice_cannot_be_marked_paid(self, make_client, tmp_path):
+        client = self._client(make_client, tmp_path)
+        resp = client.post("/api/money/invoices/INV-000001/mark-paid", json={})
+        assert resp.status_code == 404
+
+    def test_the_voided_pdf_still_downloads(self, make_client, tmp_path):
+        client = self._client(make_client, tmp_path)
+        resp = client.get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 200
+        assert "VOID" in resp.headers["content-disposition"]

@@ -399,18 +399,24 @@ async def api_clients(user_ctx: UserContext = Depends(get_user_config)):
     return {"status": "ok", "clients": clients}
 
 
+def _invoice_output_dir(data_dir: Path, config) -> Path:
+    """Where the invoice PDFs are: the config's ``invoice_output`` under ``data_dir``."""
+    if config is not None and getattr(config, "invoice_output", None):
+        return data_dir / config.invoice_output
+    return data_dir / "invoices" / "generated"
+
+
 @router.get("/invoices")
 async def api_invoices(
     client: str | None = None,
     show_all: bool = False,
+    include_voided: bool = True,
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money import db
+    from istota.money.core.invoicing import find_invoice_pdf, invoice_summary
     from istota.money.invoice_review import list_reviews
-    from istota.money.core.invoicing import build_line_items
-    from istota.money.work import (
-        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
-    )
+    from istota.money.work import list_invoices
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -431,42 +437,16 @@ async def api_invoices(
         if row["status"] == "settled" and row["decided_by"] == "auto"
     }
 
-    invoice_numbers = get_invoice_numbers(data_dir)
+    output_dir = _invoice_output_dir(data_dir, config)
     invoices = []
-    for inv_num in invoice_numbers:
-        inv_entries = get_entries_for_invoice(data_dir, inv_num)
-        if not inv_entries:
+    for record in list_invoices(data_dir, client=client, include_voided=include_voided):
+        if record.status == "paid" and not show_all:
             continue
-        if client and not any(e.client == client for e in inv_entries):
-            continue
-
-        items = build_line_items(inv_entries, config.services)
-        total = sum(item.amount for item in items)
-        is_paid = all(e.paid_date is not None for e in inv_entries)
-        paid_date_val = inv_entries[0].paid_date
-
-        if is_paid and not show_all:
-            continue
-
-        client_key = inv_entries[0].client
-        client_config = config.clients.get(client_key)
-        client_name = client_config.name if client_config else client_key
-        # The invoice's own date, not the earliest work on it — which is what
-        # this used to show under the same `date` label.
-        inv_date = invoice_issue_date(inv_entries)
-
-        invoice_info = {
-            "invoice_number": inv_num,
-            "client": client_name,
-            "client_key": client_key,
-            "date": inv_date.isoformat(),
-            "total": round(total, 2),
-            "status": "paid" if is_paid else "outstanding",
-        }
-        if is_paid and paid_date_val:
-            invoice_info["paid_date"] = paid_date_val.isoformat()
-            if auto_settled.get(inv_num) == invoice_info["paid_date"]:
-                invoice_info["paid_by_sync_date"] = auto_settled[inv_num]
+        invoice_info = invoice_summary(record, config)
+        invoice_info["has_pdf"] = find_invoice_pdf(output_dir, record.number) is not None
+        paid_date = invoice_info.get("paid_date")
+        if paid_date and auto_settled.get(record.number) == paid_date:
+            invoice_info["paid_by_sync_date"] = auto_settled[record.number]
         invoices.append(invoice_info)
 
     outstanding = [i for i in invoices if i["status"] == "outstanding"]
@@ -708,11 +688,9 @@ async def api_invoice_pdf(
 
     # Prefer the invoicing config's output dir; fall back to the conventional
     # location. config.invoice_output defaults to "invoices/generated".
-    invoice_output_dir = data_dir / "invoices" / "generated"
+    invoice_output_dir = _invoice_output_dir(data_dir, None)
     try:
-        config = _load_invoicing_config(user_ctx)
-        if config is not None and getattr(config, "invoice_output", None):
-            invoice_output_dir = data_dir / config.invoice_output
+        invoice_output_dir = _invoice_output_dir(data_dir, _load_invoicing_config(user_ctx))
     except Exception:
         # Fall back to the default location, but make the miss visible — a
         # custom invoice_output we couldn't read would otherwise 404 silently.

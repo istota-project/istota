@@ -7,7 +7,7 @@ import json
 import logging
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -1162,13 +1162,12 @@ def invoice_generate(ctx, period, client, entity, entry_uids, dry_run):
 @invoice.command("list")
 @click.option("--client", "-c", help="Filter by client")
 @click.option("--all", "-a", "show_all", is_flag=True, help="Show all invoices (including paid)")
+@click.option("--active", is_flag=True, help="Leave voided invoices out")
 @pass_ctx
-def invoice_list(ctx, client, show_all):
-    """List invoices (outstanding by default)."""
-    from istota.money.core.invoicing import build_line_items
-    from istota.money.work import (
-        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
-    )
+def invoice_list(ctx, client, show_all, active):
+    """List invoices: outstanding and voided by default, paid with --all."""
+    from istota.money.core.invoicing import invoice_summary
+    from istota.money.work import list_invoices
 
     try:
         config, _, _ = _load_invoicing_config(ctx)
@@ -1177,43 +1176,11 @@ def invoice_list(ctx, client, show_all):
         return
 
     data_dir = _require_data_dir(ctx)
-    invoice_numbers = get_invoice_numbers(data_dir)
-
     invoices = []
-    for inv_num in invoice_numbers:
-        inv_entries = get_entries_for_invoice(data_dir, inv_num)
-        if not inv_entries:
+    for record in list_invoices(data_dir, client=client, include_voided=not active):
+        if record.status == "paid" and not show_all:
             continue
-
-        if client and not any(e.client == client for e in inv_entries):
-            continue
-
-        items = build_line_items(inv_entries, config.services)
-        total = sum(item.amount for item in items)
-
-        is_paid = all(e.paid_date is not None for e in inv_entries)
-        paid_date_val = inv_entries[0].paid_date
-
-        if is_paid and not show_all:
-            continue
-
-        client_key = inv_entries[0].client
-        client_config = config.clients.get(client_key)
-        client_name = client_config.name if client_config else client_key
-        # The invoice's own date, not the earliest work on it — which is what
-        # this used to show under the same `date` label.
-        inv_date = invoice_issue_date(inv_entries)
-
-        invoice_info = {
-            "invoice_number": inv_num,
-            "client": client_name,
-            "date": inv_date.isoformat(),
-            "total": round(total, 2),
-            "status": "paid" if is_paid else "outstanding",
-        }
-        if is_paid and paid_date_val:
-            invoice_info["paid_date"] = paid_date_val.isoformat()
-        invoices.append(invoice_info)
+        invoices.append(invoice_summary(record, config))
 
     outstanding = [i for i in invoices if i["status"] == "outstanding"]
     _output({
@@ -1329,18 +1296,10 @@ def invoice_paid(ctx, invoice_number, payment_date, bank, no_post, ledger):
 def invoice_create(ctx, client_key, service, qty, description, item, entity):
     """Create a manual single invoice.
 
-    Creates work entries with the invoice number pre-assigned and
-    generates a PDF. The invoice is visible to 'invoice list' and 'invoice paid'.
+    Creates work entries on a new invoice and generates a PDF. The invoice is
+    visible to 'invoice list' and 'invoice paid'.
     """
-    from istota.money.core.invoicing import (
-        generate_invoice_html, generate_invoice_pdf,
-        format_invoice_number, highest_existing_invoice_number,
-        persist_next_invoice_number,
-        resolve_entity as resolve_entity_fn, build_line_items,
-    )
-    from istota.money.core.ids import new_txn_id
-    from istota.money.core.models import InvoiceLineItem, Invoice, WorkEntry
-    from istota.money.work import create_invoice, insert_entry, write_transaction
+    from istota.money.core.invoicing import create_manual_invoice
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -1348,131 +1307,39 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
         _output({"status": "error", "error": str(e)})
         return
 
-    client_config = config.clients.get(client_key)
-    if not client_config:
-        available = list(config.clients.keys())
-        _output({"status": "error", "error": f"Client '{client_key}' not found. Available: {', '.join(available)}"})
-        return
-
-    if entity:
-        if entity not in config.companies:
-            available = list(config.companies.keys())
-            _output({"status": "error", "error": f"Entity '{entity}' not found. Available: {', '.join(available)}"})
-            return
-        resolved_entity = config.companies[entity]
-    else:
-        resolved_entity = resolve_entity_fn(config, client_config=client_config)
-
-    service_entries = []
+    lines = []
     if service:
-        if service not in config.services:
-            available = list(config.services.keys())
-            _output({"status": "error", "error": f"Service '{service}' not found. Available: {', '.join(available)}"})
+        lines.append({"service": service, "qty": qty, "description": description or ""})
+    for item_str in item:
+        parts = item_str.rsplit(" ", 1)
+        if len(parts) != 2:
+            _output({"status": "error", "error": f"Invalid item format: {item_str}. Use: \"description\" amount"})
             return
-        service_entries.append((service, qty, description or "", entity or ""))
-
-    manual_items = []
-    if item:
-        for item_str in item:
-            parts = item_str.rsplit(" ", 1)
-            if len(parts) != 2:
-                _output({"status": "error", "error": f"Invalid item format: {item_str}. Use: \"description\" amount"})
-                return
-            desc = parts[0].strip('"').strip("'")
-            try:
-                amt = float(parts[1])
-            except ValueError:
-                _output({"status": "error", "error": f"Invalid amount in item: {parts[1]}"})
-                return
-            manual_items.append((desc, amt))
-
-    if not service_entries and not manual_items:
-        _output({"status": "error", "error": "No line items specified. Use --service/--qty or --item"})
-        return
-
-    data_dir = _require_data_dir(ctx)
-    invoice_number = max(
-        config.next_invoice_number,
-        highest_existing_invoice_number(data_dir) + 1,
-    )
-    invoice_date = date.today()
-    number_str = format_invoice_number(invoice_number)
-
-    # The entries are built in memory and written with the invoice, in one
-    # transaction after the PDF exists.
-    inv_entries = [
-        WorkEntry(date=invoice_date, client=client_key.lower(), service=svc_key,
-                  qty=svc_qty, description=svc_desc, entity=svc_entity, uid=new_txn_id())
-        for svc_key, svc_qty, svc_desc, svc_entity in service_entries
-    ] + [
-        WorkEntry(date=invoice_date, client=client_key.lower(), service="_manual",
-                  amount=amt, description=desc, entity=entity or "", uid=new_txn_id())
-        for desc, amt in manual_items
-    ]
-
-    items = build_line_items(
-        [e for e in inv_entries if e.service != "_manual"],
-        config.services,
-    )
-    for e in inv_entries:
-        if e.service == "_manual":
-            items.append(InvoiceLineItem(
-                display_name=e.description or "Manual item",
-                description="",
-                quantity=1, rate=e.amount or 0,
-                discount=0, amount=e.amount or 0,
-            ))
-
-    total = sum(i.amount for i in items)
-    due_date = invoice_date + timedelta(days=client_config.terms) if isinstance(client_config.terms, int) else None
-
-    inv = Invoice(
-        number=number_str,
-        date=invoice_date, due_date=due_date,
-        client=client_config, company=resolved_entity,
-        items=items, total=total, group_name="",
-    )
-
-    logo_path = None
-    if resolved_entity.logo:
-        logo_path = accounting_path / resolved_entity.logo
-        if not logo_path.exists():
-            logo_path = None
-    html = generate_invoice_html(inv, logo_path=logo_path)
-    output_dir = invoice_output_dir / str(invoice_date.year)
-    pdf_filename = f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
-    pdf_path = output_dir / pdf_filename
-    generate_invoice_pdf(html, pdf_path, root=accounting_path)
+        try:
+            amount = float(parts[1])
+        except ValueError:
+            _output({"status": "error", "error": f"Invalid amount in item: {parts[1]}"})
+            return
+        lines.append({"description": parts[0].strip('"').strip("'"), "amount": amount})
 
     try:
-        with write_transaction(data_dir) as conn:
-            for new_entry in inv_entries:
-                insert_entry(conn, new_entry)
-            create_invoice(
-                conn, number=number_str, client=client_key.lower(),
-                entity=resolved_entity.key or entity or config.default_entity,
-                group_name="", issue_date=invoice_date, total=round(total, 2),
-                entry_uids=[e.uid for e in inv_entries], pdf_path=str(pdf_path),
-                manual=True,
-            )
-    except Exception as exc:
-        # Never leave a PDF behind for an invoice that was not recorded.
-        pdf_path.unlink(missing_ok=True)
-        _output({"status": "error", "error": f"could not record {number_str}: {exc}"})
+        result = create_manual_invoice(
+            config=config, data_dir=_require_data_dir(ctx),
+            accounting_path=accounting_path, invoice_output_dir=invoice_output_dir,
+            client_key=client_key, lines=lines, entity=entity,
+            db_path=ctx.db_path, config_path=ctx.invoicing_config_path,
+        )
+    except Exception as e:
+        _output({"status": "error", "error": str(e)})
         return
-
-    persist_next_invoice_number(
-        invoice_number + 1, db_path=ctx.db_path,
-        config_path=ctx.invoicing_config_path,
-    )
 
     _output({
         "status": "ok",
-        "invoice_number": inv.number,
-        "client": client_config.name,
-        "total": round(total, 2),
-        "due_date": due_date.isoformat() if due_date else str(client_config.terms),
-        "file": str(pdf_path),
+        "invoice_number": result["invoice_number"],
+        "client": result["client"],
+        "total": result["total"],
+        "due_date": result["due_date"],
+        "file": result["file"],
     })
 
 
@@ -1581,60 +1448,43 @@ def invoice_unpaid(ctx, invoice_number):
 
 @invoice.command("void")
 @click.argument("invoice_number")
+@click.option("--reason", default="", help="Why the invoice was voided")
+@click.option("--replaced-by", "replaced_by", default="", metavar="N,N",
+              help="Invoices that replace this one, comma-separated")
 @click.option("--force", is_flag=True, help="Void even if invoice has been paid")
-@click.option("--delete-pdf", is_flag=True, help="Delete the generated PDF file")
+@click.option("--delete-pdf", is_flag=True, help="Delete the PDF instead of renaming it -VOID")
 @pass_ctx
-def invoice_void(ctx, invoice_number, force, delete_pdf):
-    """Void an invoice, clearing it from work entries.
+def invoice_void(ctx, invoice_number, reason, replaced_by, force, delete_pdf):
+    """Void an invoice and release its work entries.
 
-    Removes the invoice number and paid_date from all associated work entries,
-    cleans up DB state (overdue notifications), and optionally deletes the PDF.
+    The invoice keeps its record, with the reason and its replacements, and
+    stays in 'invoice list' as voided. Its entries can be invoiced again. The
+    PDF is renamed to ...-VOID.pdf, or deleted with --delete-pdf.
     """
-    from istota.money.work import get_entries_for_invoice, void_invoice
+    from istota.money.core.invoicing import void_invoice_with_cleanup
 
     data_dir = _require_data_dir(ctx)
-    entries = get_entries_for_invoice(data_dir, invoice_number)
-    if not entries:
-        _output({"status": "error", "error": f"Invoice {invoice_number} not found"})
+    try:
+        _, _, invoice_output_dir = _load_invoicing_config(ctx)
+    except click.ClickException:
+        invoice_output_dir = None
+
+    try:
+        voided = void_invoice_with_cleanup(
+            data_dir, invoice_number, invoice_output_dir=invoice_output_dir,
+            reason=reason, replaced_by=replaced_by.split(","), force=force,
+            delete_pdf=delete_pdf,
+        )
+    except Exception as e:
+        _output({"status": "error", "error": str(e)})
         return
 
-    is_paid = any(e.paid_date is not None for e in entries)
-    if is_paid and not force:
-        _output({
-            "status": "error",
-            "error": f"Invoice {invoice_number} has been marked as paid. Use --force to void anyway.",
-        })
-        return
-
-    from istota.money.db import clear_invoice_state
-    from istota.money.work import write_transaction
-
-    with write_transaction(data_dir) as conn:
-        count = void_invoice(data_dir, invoice_number, conn=conn)
-        db_cleanup = clear_invoice_state(conn, invoice_number)
-
-    # Optionally delete PDF
-    pdf_deleted = False
-    if delete_pdf:
-        try:
-            _, _, invoice_output_dir = _load_invoicing_config(ctx)
-            from istota.money.core.invoicing import delete_invoice_pdf
-            pdf_deleted = delete_invoice_pdf(invoice_output_dir, invoice_number)
-        except click.ClickException:
-            pass
-
-    result = {
+    count = voided["entries_voided"]
+    _output({
         "status": "ok",
-        "invoice_number": invoice_number,
-        "entries_voided": count,
-        "was_paid": is_paid,
-        "message": f"Voided invoice {invoice_number} ({count} work entries cleared)",
-    }
-    if db_cleanup:
-        result["db_cleanup"] = db_cleanup
-    if delete_pdf:
-        result["pdf_deleted"] = pdf_deleted
-    _output(result)
+        **voided,
+        "message": f"Voided invoice {invoice_number} ({count} work entries released)",
+    })
 
 
 def _apply_monarch_status(out: dict, monarch_result: dict | None) -> None:

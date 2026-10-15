@@ -300,6 +300,21 @@ class TestCommandDispatch:
         assert "--force" in args
         assert "--delete-pdf" in args
 
+    def test_invoice_void_passes_reason_and_replacements(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "void", "INV-000001", "--reason", "split in two",
+              "--replaced-by", "INV-000002,INV-000003"])
+        args = captured[-1]
+        assert args[args.index("--reason") + 1] == "split in two"
+        assert args[args.index("--replaced-by") + 1] == "INV-000002,INV-000003"
+
+    def test_invoice_list_active(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "list", "--active"])
+        assert captured[-1] == ["invoice", "list", "--active"]
+
     def test_invoice_unpaid(self, captured):
         from istota.skills.money import main
 

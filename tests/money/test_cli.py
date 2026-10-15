@@ -795,6 +795,104 @@ class TestInvoiceVoid:
         assert output["entries_voided"] == 1
 
 
+class TestInvoiceVoidRecord:
+    """#755: a void keeps its record, with a reason and replacements."""
+
+    @staticmethod
+    def _fake_pdf(html, output_path, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"%PDF-1.4")
+
+    def _create(self, runner, tmp_path, ctx, qty="8"):
+        result = _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", qty],
+            tmp_path=tmp_path, obj=ctx)
+        return json.loads(result.output)
+
+    def test_reason_and_replacements_are_recorded_and_listed(self, runner, tmp_path, invoicing_ctx):
+        with patch("istota.money.core.invoicing.generate_invoice_pdf", self._fake_pdf):
+            first = self._create(runner, tmp_path, invoicing_ctx)
+            self._create(runner, tmp_path, invoicing_ctx, qty="4")
+            self._create(runner, tmp_path, invoicing_ctx, qty="2")
+
+        result = _invoke(runner, [
+            "invoice", "void", "INV-000001", "--reason", "two jobs on one invoice",
+            "--replaced-by", "INV-000002,INV-000003",
+        ], tmp_path=tmp_path, obj=invoicing_ctx)
+        output = json.loads(result.output)
+        assert output["status"] == "ok", output
+        assert output["void_reason"] == "two jobs on one invoice"
+        assert output["replaced_by"] == ["INV-000002", "INV-000003"]
+
+        original = Path(first["file"])
+        renamed = original.with_name(f"{original.stem}-VOID.pdf")
+        assert not original.exists() and renamed.exists()
+        assert output["pdf_path"] == str(renamed)
+
+        listed = json.loads(_invoke(runner, ["invoice", "list"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        rows = {row["invoice_number"]: row for row in listed["invoices"]}
+        voided = rows["INV-000001"]
+        assert voided["status"] == "voided"
+        assert voided["voided_at"]
+        assert voided["void_reason"] == "two jobs on one invoice"
+        assert voided["replaced_by"] == ["INV-000002", "INV-000003"]
+        assert voided["total"] == 1200.0
+        assert listed["invoice_count"] == 3
+        assert listed["outstanding_count"] == 2
+
+        active = json.loads(_invoke(runner, ["invoice", "list", "--active"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert [row["invoice_number"] for row in active["invoices"]] == ["INV-000002", "INV-000003"]
+        assert active["outstanding_count"] == 2
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_an_unknown_replacement_is_an_error(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        self._create(runner, tmp_path, invoicing_ctx)
+        result = _invoke(runner, ["invoice", "void", "INV-000001", "--replaced-by", "INV-000009"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert "INV-000009" in output["error"]
+        listed = json.loads(_invoke(runner, ["invoice", "list"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert listed["invoices"][0]["status"] == "outstanding"
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_voiding_twice_says_when(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        from datetime import date as _date
+
+        self._create(runner, tmp_path, invoicing_ctx)
+        _invoke(runner, ["invoice", "void", "INV-000001"], tmp_path=tmp_path, obj=invoicing_ctx)
+        result = _invoke(runner, ["invoice", "void", "INV-000001"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert output["error"].endswith(f"already voided on {_date.today().isoformat()}")
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_paid_voided_invoice_reports_it_was_paid(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        self._create(runner, tmp_path, invoicing_ctx)
+        _invoke(runner, ["invoice", "paid", "INV-000001", "-d", "2026-04-15", "--no-post"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        _invoke(runner, ["invoice", "void", "INV-000001", "--force"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        listed = json.loads(_invoke(runner, ["invoice", "list"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        (row,) = listed["invoices"]
+        assert row["status"] == "voided"
+        assert row["was_paid"] is True
+        assert "paid_date" not in row
+        assert listed["outstanding_count"] == 0
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_manual_invoice_lists_its_stored_total(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        _invoke(runner, ["invoice", "create", "acme", "--item", '"Custom work" 500'],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        listed = json.loads(_invoke(runner, ["invoice", "list"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert listed["invoices"][0]["total"] == 500.0
+
+
 class TestInvoiceListDate:
     """ISSUE-256: `invoice list` reports the invoice's date, not its first work."""
 
