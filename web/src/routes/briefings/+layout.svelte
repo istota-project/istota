@@ -18,6 +18,7 @@
   } from '$lib/stores/briefings';
   import {
     AppShell,
+    Button,
     ShellHeader,
     Sidebar,
     SidebarToggle,
@@ -279,6 +280,9 @@
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
 			     put whether or not the open page offers a save. Renders nothing
 			     unless one is registered. -->
+        {#if !onSettings}<Button href={`${base}/briefings/settings?new=1`} size="sm"
+            >New briefing</Button
+          >{/if}
         <HeaderSave />
         <Chip icon checked={onSettings} onclick={toggleSettings} title="Briefing settings">
           <Cog size={14} />

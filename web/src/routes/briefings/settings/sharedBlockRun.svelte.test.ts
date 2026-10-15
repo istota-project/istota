@@ -37,6 +37,12 @@ function block(answer: SharedBlockRunAnswer | null): SharedBlock {
 }
 
 await fillApiDouble(api, {
+  getBriefingTargets: vi.fn(async () => ({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  })),
   getBriefings: vi.fn(async () => ({ briefings: [], rooms: [], outputs: ['email'] })),
   getBrowsePresets: vi.fn(async () => ({ presets: [] })),
   getFeedOptions: vi.fn(async () => ({ available: false, subscriptions: [], categories: [] })),

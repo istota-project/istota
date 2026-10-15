@@ -137,6 +137,12 @@ beforeEach(() => {
     outputs: ['email', 'web'],
     rooms: [],
   });
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
   api.getBriefingConfig.mockResolvedValue({
     briefings: [{ name: 'morning', blocks: structuredClone(blocks) }],
     schedule_names: ['morning'],

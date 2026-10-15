@@ -24,6 +24,10 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
+    allowPreview?: boolean;
+    userId?: string;
+    fileOptions?: string[];
+    calendarOptions?: SelectOption[];
     onSave: (payload: BriefingBlockSave) => Promise<void>;
     onCancel: () => void;
   }
@@ -35,6 +39,10 @@
     rssOptions,
     sharedBlockOptions,
     feedsAvailable,
+    allowPreview = true,
+    userId = '',
+    fileOptions = [],
+    calendarOptions = [],
     onSave,
     onCancel,
   }: Props = $props();
@@ -212,7 +220,11 @@
               fullWidth
               ariaLabel={`Source ${index + 1} type`}
               onValueChange={(kind) => {
-                draft.sources[index] = { ...source, kind, config: {} };
+                draft.sources[index] = {
+                  ...source,
+                  kind,
+                  config: kind.startsWith('personal_') ? { owner_id: userId } : {},
+                };
               }}
             />
           </SettingsField>
@@ -232,6 +244,9 @@
             {browseOptions}
             {rssOptions}
             {sharedBlockOptions}
+            {userId}
+            {fileOptions}
+            {calendarOptions}
           />
         </div>
       {/each}
@@ -241,7 +256,14 @@
         placeholder="Add source…"
         ariaLabel="Add source"
         onValueChange={(kind) => {
-          draft.sources = [...draft.sources, { kind, config: {}, enabled: true }];
+          draft.sources = [
+            ...draft.sources,
+            {
+              kind,
+              config: kind.startsWith('personal_') ? { owner_id: userId } : {},
+              enabled: true,
+            },
+          ];
         }}
       />
       {#if !feedsAvailable}<p class="caption">
@@ -294,13 +316,15 @@
   </fieldset>
   {#if error}<div role="alert" class="banner error">{error}</div>{/if}
   {#snippet footer()}
-    <Button
-      variant="secondary"
-      onclick={() => {
-        previewing = true;
-      }}
-      disabled={saving}>Preview</Button
-    >
+    {#if allowPreview}
+      <Button
+        variant="secondary"
+        onclick={() => {
+          previewing = true;
+        }}
+        disabled={saving}>Preview</Button
+      >
+    {/if}
     <Button variant="secondary" onclick={close} disabled={saving}>Cancel</Button>
     <Button variant="primary" onclick={save} loading={saving} loadingLabel="Saving…"
       >Save block</Button

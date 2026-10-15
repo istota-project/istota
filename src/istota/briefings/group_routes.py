@@ -4,6 +4,7 @@ from fastapi.responses import Response
 
 from istota import db
 from istota.briefings import group_store as store, source_grants
+from istota.briefings.models import GROUP_SOURCE_KINDS
 from istota.groups.policy import GroupError
 from istota.groups.routes import _payload, _run, _summary, _user
 from istota.groups.system import eligible_user_ids
@@ -83,7 +84,12 @@ def _targets(conn, config, actor):
         targets.append({"scope": "group", "group_id": group["group_id"], "label": group["display_name"],
                         "system_key": group["system_key"], "capabilities": caps,
                         "member_count": len(set(db.list_group_members(conn, group["group_id"])) & eligible)})
-    return {"targets": targets, "channels": store.available_channels(config)}
+    return {"targets": targets, "channels": store.available_channels(config),
+            "timezone": config.briefings.shared_block_timezone,
+            "source_scopes": {kind: ("Personal contribution" if kind.startswith("personal_") else
+                                     "Current group" if kind.startswith("group_") else
+                                     "Installation-shared" if kind == "shared_block" else "Public")
+                              for kind in sorted(GROUP_SOURCE_KINDS)}}
 
 
 def _definitions(conn, config, actor, group_id, name=None):
@@ -198,6 +204,29 @@ def _audience(conn, config, actor, group_id, name):
                  actor_id=actor, is_admin=caps["author_briefings"])
                  for source in store.definition_sources(definition) if source["kind"] in ("personal_file", "personal_calendar")]
     return {**result, **counts, "sources": approvals}
+
+
+def _resources(conn, config, actor, group_id, query):
+    from istota.briefings.routes import _walk_text_files
+    from istota.briefings.sources.contributions import _calendar_client
+    from istota.skills.calendar import owned_calendars
+    _access(conn, config, actor, group_id)
+    root = config.workspace_root(actor)
+    files = _walk_text_files(root, query) if root is not None and root.is_dir() else []
+    calendars = []
+    calendar_unavailable = False
+    try:
+        with _calendar_client(config) as client:
+            calendars = [{"label": name, "value": url} for name, url in owned_calendars(client, actor)]
+    except Exception:
+        calendar_unavailable = True
+    return {"files": files, "calendars": calendars, "calendar_unavailable": calendar_unavailable}
+
+
+@router.get("/groups/{group_id}/briefing-resources")
+async def resources(group_id: str, request: Request, q: str = Query("", max_length=1000),
+                    user: dict = Depends(require_auth)):
+    return await _run(request, user, _resources, group_id, q, read=True)
 
 
 @router.get("/briefings/targets")

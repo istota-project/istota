@@ -6332,3 +6332,186 @@ export function archiveAdminGroup(
 ): Promise<{ group_id: string; revision: number; archived_at: string }> {
   return groupRequest(`/admin${groupPath(id)}/archive`, 'POST', payload);
 }
+// Group briefing authoring uses the same authenticated API boundary as Groups.
+export interface BriefingTarget {
+  scope: 'user' | 'group';
+  group_id?: string;
+  label: string;
+  system_key?: string | null;
+  member_count?: number;
+  capabilities: { author_briefings: boolean; generate_briefings?: boolean };
+}
+export interface GroupBriefingSource {
+  id: string;
+  kind: string;
+  config: Record<string, unknown>;
+}
+export interface GroupBriefingGeneration {
+  version: number;
+  contains_personal_information?: boolean;
+  audience_acknowledged?: boolean;
+  prompt?: string;
+  research?: { enabled: boolean; prompt: string; allowed_domains?: string[] };
+  inputs?: GroupBriefingSource[];
+  blocks?: {
+    title: string;
+    directive: string | null;
+    render_mode: string;
+    options: Record<string, unknown>;
+    sources: GroupBriefingSource[];
+  }[];
+}
+export interface BriefingSourceApproval {
+  source_id: string;
+  owner_id: string;
+  resource: { kind: string; config: Record<string, unknown> };
+  approved: boolean;
+  warning: string;
+  audience_contract: Record<string, unknown>;
+  grant_revision: number;
+  definition_revision: number;
+}
+export interface GroupBriefingDefinition {
+  id: number;
+  group_id: string;
+  name: string;
+  title: string;
+  cron: string;
+  timezone: string;
+  enabled: boolean;
+  channel: string;
+  revision: number;
+  generation_mode?: 'prompt' | 'blocks';
+  generation?: GroupBriefingGeneration;
+  capabilities: BriefingTarget['capabilities'];
+  source_approvals?: BriefingSourceApproval[];
+}
+export type GroupBriefingPayload = Pick<
+  GroupBriefingDefinition,
+  | 'name'
+  | 'title'
+  | 'cron'
+  | 'timezone'
+  | 'enabled'
+  | 'channel'
+  | 'revision'
+  | 'generation_mode'
+  | 'generation'
+>;
+export interface BriefingAudience {
+  member_count: number;
+  deliverable: number;
+  muted: number;
+  missing_destination: number;
+  sources: BriefingSourceApproval[];
+}
+export interface GroupBriefingRun {
+  id: number;
+  run_id: number;
+  group_id: string;
+  definition_id: number;
+  mode: 'preview' | 'publish';
+  state: string;
+  subject?: string;
+  body_md?: string;
+  error_code?: string | null;
+  created_at?: string;
+  published_at?: string | null;
+}
+export function getBriefingTargets(): Promise<{
+  targets: BriefingTarget[];
+  channels: string[];
+  timezone: string;
+  source_scopes: Record<string, string>;
+}> {
+  return apiFetch('/briefings/targets');
+}
+function groupBriefingPath(group: string, name?: string) {
+  return `/groups/${encodeURIComponent(group)}/briefings${name === undefined ? '' : '/' + encodeURIComponent(name)}`;
+}
+export function getGroupBriefings(group: string): Promise<{ items: GroupBriefingDefinition[] }> {
+  return apiFetch(groupBriefingPath(group));
+}
+export function getGroupBriefing(group: string, name: string): Promise<GroupBriefingDefinition> {
+  return apiFetch(groupBriefingPath(group, name));
+}
+export function saveGroupBriefing(
+  group: string,
+  payload: GroupBriefingPayload,
+  name?: string,
+): Promise<GroupBriefingDefinition> {
+  return apiFetch(groupBriefingPath(group, name), {
+    method: name === undefined ? 'POST' : 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+export function getBriefingAudience(group: string, name: string): Promise<BriefingAudience> {
+  return apiFetch(groupBriefingPath(group, name) + '/audience');
+}
+export function getBriefingResources(
+  group: string,
+  query = '',
+): Promise<{
+  files: string[];
+  calendars: { value: string; label: string }[];
+  calendar_unavailable: boolean;
+}> {
+  return apiFetch(
+    `/groups/${encodeURIComponent(group)}/briefing-resources?q=${encodeURIComponent(query)}`,
+  );
+}
+export function approveBriefingSource(
+  group: string,
+  name: string,
+  state: BriefingSourceApproval,
+  resource?: Record<string, unknown>,
+): Promise<BriefingSourceApproval> {
+  return apiFetch(
+    groupBriefingPath(group, name) + `/sources/${encodeURIComponent(state.source_id)}/approval`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_definition_revision: state.definition_revision,
+        expected_grant_revision: state.grant_revision,
+        acknowledged: true,
+        audience_contract: state.audience_contract,
+        ...(resource ? { resource_config: resource } : {}),
+      }),
+    },
+  );
+}
+export function revokeBriefingSource(
+  group: string,
+  name: string,
+  state: BriefingSourceApproval,
+): Promise<BriefingSourceApproval> {
+  return apiFetch(
+    groupBriefingPath(group, name) + `/sources/${encodeURIComponent(state.source_id)}/approval`,
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_grant_revision: state.grant_revision }),
+    },
+  );
+}
+export function runGroupBriefing(
+  group: string,
+  name: string,
+  mode: 'preview' | 'publish',
+  requestId: string,
+): Promise<GroupBriefingRun> {
+  return apiFetch(groupBriefingPath(group, name) + '/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, request_id: requestId }),
+  });
+}
+export function getGroupBriefingRun(
+  group: string,
+  name: string,
+  run: number,
+): Promise<GroupBriefingRun> {
+  return apiFetch(groupBriefingPath(group, name) + `/runs/${run}`);
+}

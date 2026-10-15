@@ -5,7 +5,7 @@
   // are advisory and never write the draft.
   import { onDestroy } from 'svelte';
   import { checkBriefingPath, getBriefingPathSuggestions } from '$lib/api';
-  import { AutocompleteInput, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { AutocompleteInput, Button, Input, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
   interface Props {
@@ -15,6 +15,10 @@
     browseOptions?: SelectOption[];
     rssOptions?: SelectOption[];
     sharedBlockOptions?: SelectOption[];
+    userId?: string;
+    fileOptions?: string[];
+    calendarOptions?: SelectOption[];
+    ownerFixed?: boolean;
   }
 
   let {
@@ -24,6 +28,10 @@
     browseOptions = [],
     rssOptions = [],
     sharedBlockOptions = [],
+    userId = '',
+    fileOptions = [],
+    calendarOptions = [],
+    ownerFixed = false,
   }: Props = $props();
 
   let pathSuggestions = $state<string[]>([]);
@@ -105,7 +113,116 @@
   const browseValue = $derived(config.preset ? `preset:${config.preset}` : '__custom__');
 </script>
 
-{#if fileKinds.includes(kind)}
+{#if kind === 'group_memory'}
+  <p class="caption">This group's notebook, selected explicitly for the common edition.</p>
+{:else if kind === 'group_file'}
+  <SettingsField
+    label="Group file path"
+    hint="One text or Markdown file relative to this group's folder."
+    ><Input
+      value={String(config.path ?? '')}
+      oninput={(e) => onChange({ path: e.currentTarget.value })}
+    /></SettingsField
+  >
+{:else if kind === 'personal_file' || kind === 'personal_calendar'}
+  {#if !ownerFixed}
+    <SettingsField
+      label="Source owner"
+      hint="A current member's user id. Only that member can select and approve their own resource."
+      ><Input
+        value={String(config.owner_id ?? userId)}
+        oninput={(e) =>
+          onChange({
+            owner_id: e.currentTarget.value,
+            path: undefined,
+            calendar_url: undefined,
+            fields: undefined,
+            lookback_days: undefined,
+            lookahead_days: undefined,
+            include_private: undefined,
+          })}
+      /></SettingsField
+    >
+  {/if}
+  {#if config.owner_id === userId}
+    {#if kind === 'personal_file'}
+      <SettingsField
+        label="Personal file"
+        hint="One exact text or Markdown file relative to your folder. Its full contents may be summarized or quoted."
+        ><AutocompleteInput
+          value={String(config.path ?? '')}
+          options={fileOptions}
+          onValueChange={(v) => onChange({ path: v })}
+          ariaLabel="Personal file"
+        /></SettingsField
+      >
+    {:else}
+      <SettingsField labelled={false} label="Personal calendar"
+        ><Select
+          value={String(config.calendar_url ?? '')}
+          options={calendarOptions}
+          placeholder="Select your calendar"
+          onValueChange={(v) =>
+            onChange({
+              calendar_url: v,
+              fields: config.fields ?? ['time', 'title'],
+              include_private: config.include_private ?? false,
+              lookback_days: config.lookback_days ?? 0,
+              lookahead_days: config.lookahead_days ?? 1,
+            })}
+          ariaLabel="Personal calendar"
+          fullWidth
+        /></SettingsField
+      >
+      <p class="caption">Disclosed fields (time and title by default):</p>
+      {#each ['time', 'title', 'description', 'attendees', 'links', 'location'] as field}
+        <SettingsField label={field} checkbox
+          ><input
+            type="checkbox"
+            checked={((config.fields as string[]) ?? ['time', 'title']).includes(field)}
+            onchange={(e) => {
+              const fields = (config.fields as string[]) ?? ['time', 'title'];
+              onChange({
+                fields: e.currentTarget.checked
+                  ? [...fields, field]
+                  : fields.filter((f) => f !== field),
+              });
+            }}
+          /></SettingsField
+        >
+      {/each}
+      <SettingsField labelled={false} label="Days back"
+        ><Select
+          value={String(config.lookback_days ?? 0)}
+          options={[0, 1, 7, 30].map((n) => ({ value: String(n), label: String(n) }))}
+          onValueChange={(v) => onChange({ lookback_days: Number(v) })}
+          ariaLabel="Days back"
+        /></SettingsField
+      >
+      <SettingsField labelled={false} label="Days ahead"
+        ><Select
+          value={String(config.lookahead_days ?? 1)}
+          options={[1, 7, 14, 30].map((n) => ({ value: String(n), label: String(n) }))}
+          onValueChange={(v) => onChange({ lookahead_days: Number(v) })}
+          ariaLabel="Days ahead"
+        /></SettingsField
+      >
+      <SettingsField
+        label="Include private-marked events"
+        checkbox
+        hint="Excluded by default. Including them requires explicit approval."
+        ><input
+          type="checkbox"
+          checked={config.include_private === true}
+          onchange={(e) => onChange({ include_private: e.currentTarget.checked })}
+        /></SettingsField
+      >
+    {/if}
+  {:else}<p class="caption">
+      Save the draft to request this member's contribution. Their private resources are only visible
+      to them.
+    </p>{/if}
+{:else if fileKinds.includes(kind)}
   <SettingsField
     label="File path"
     hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's folder. Required, with no default."

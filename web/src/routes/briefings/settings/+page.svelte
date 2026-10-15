@@ -36,6 +36,7 @@
   } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import GroupBriefingEditor from '$lib/components/briefings/GroupBriefingEditor.svelte';
   import BlockBuilder from '$lib/components/briefings/BlockBuilder.svelte';
   import SourceConfigFields from '$lib/components/briefings/SourceConfigFields.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
@@ -43,6 +44,9 @@
   import { formatDateTime } from '$lib/dateFormat';
   import { MANAGED_BADGE, isManaged } from '$lib/settings/managed';
 
+  let groupActive = $state(false);
+  let groupCopy = $state<{ briefing: UserBriefingRow; blocks: BriefingBlock[] } | null>(null);
+  let creatingPersonal = $state(false);
   let loading = $state(true);
   let error = $state('');
   /* Both read the identity the root layout resolved rather than a `/me` of this
@@ -587,6 +591,15 @@
       { label: 'Edit', onSelect: () => editBriefing(b) },
       { label: 'Duplicate', onSelect: () => void cloneBriefing(b) },
       {
+        label: 'Duplicate for group',
+        onSelect: () => {
+          groupCopy = {
+            briefing: b,
+            blocks: config?.briefings.find((item) => item.name === b.name)?.blocks ?? [],
+          };
+        },
+      },
+      {
         label: 'Delete',
         danger: true,
         onSelect: () => (confirmDelete = { id: b.id!, label: b.name }),
@@ -662,305 +675,335 @@
   {loading}
   {error}
 >
-  {#if !moduleEnabled}
-    <div class="banner info">
-      Briefings module is disabled. Enable it in
-      <a href="{base}/settings">Settings → Preferences</a> to manage schedules and content.
-    </div>
-  {:else}
-    <SettingsCard
-      title="Briefing"
-      description="Choose a briefing to edit its schedule and ordered content blocks."
-    >
-      {#if config}
-        <SettingsField label="Briefing" labelled={false}>
-          <Select
-            value={selectedName}
-            options={allNames.map((name) => ({
-              value: name,
-              label: `${name}${briefings.find((briefing) => briefing.name === name)?.enabled === false ? ' (disabled)' : ''}`,
-            }))}
-            onValueChange={(value) => {
-              selectedName = value;
-            }}
-            ariaLabel="Briefing"
-            fullWidth
-          />
-        </SettingsField>
-        {#if selectedName}
-          <div class="schedule-summary" aria-label="Selected briefing schedule">
-            {#if selectedSchedule}
-              <div class="schedule-text">
-                <strong>{selectedSchedule.title || derivedTitle(selectedName)}</strong>
-                <p class="caption">
-                  <code>{selectedSchedule.cron}</code> · {selectedSchedule.output}{selectedSchedule.enabled
-                    ? ''
-                    : ' · Disabled'}
-                </p>
-                {#if selectedSchedule.conversation_token}<p class="caption">
-                    Talk room: {selectedSchedule.conversation_token}
-                  </p>{/if}
-                {#if selectedSchedule.managed === 'config'}<p class="caption">
-                    Schedule managed by config.toml.
-                  </p>{/if}
-              </div>
-              {#if selectedSchedule.managed === 'db' && selectedSchedule.id !== undefined}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onclick={() => selectedSchedule && editBriefing(selectedSchedule)}
-                  >Edit schedule</Button
-                >
-                <KebabMenu items={briefingMenu(selectedSchedule)} ariaLabel="Briefing actions" />
-              {/if}
-            {:else}<p class="caption">
-                No schedule. Add one below using this briefing's name.
-              </p>{/if}
-          </div>
-          {#key selectedName}
-            <BlockBuilder
-              briefingName={selectedName}
-              editBlockId={page.url.searchParams.get('name') === selectedName
-                ? Number(page.url.searchParams.get('block')) || null
-                : null}
-              blocks={currentBlocks}
-              templates={config.block_templates ?? []}
-              {sourceKinds}
-              {browseOptions}
-              {rssOptions}
-              sharedBlockOptions={sharedBlockSelectOptions}
-              feedsAvailable={!!feedOptions?.available && rssOptions.length > 0}
-              onChange={updateBlocks}
-            />
-          {/key}
-        {:else}<EmptyState>No briefings scheduled yet. Add one below.</EmptyState>{/if}
-      {/if}
-      <details class="schedule-form" open={!!briefingEditingName || allNames.length === 0}>
-        <summary
-          >{briefingEditingName ? `Edit ${briefingEditingName} schedule` : 'Add briefing'}</summary
-        >
-        <form class="add-form" onsubmit={submitBriefing}>
-          <h3>{briefingEditingName ? `Edit ${briefingEditingName}` : 'Add briefing'}</h3>
-          <div class="add-grid">
-            <SettingsField label="Name">
-              <input
-                type="text"
-                placeholder="morning"
-                bind:value={newBriefing.name}
-                disabled={!!briefingEditingName}
-              />
-            </SettingsField>
-            <SettingsField
-              label="Title"
-              hint="Shown as the email subject and the archive entry. Leave it blank to derive one from the name. The run date is appended automatically."
-            >
-              <input
-                type="text"
-                placeholder={derivedTitle(newBriefing.name || 'morning')}
-                bind:value={newBriefing.title}
-              />
-            </SettingsField>
-            <SettingsField label="Cron (user TZ)">
-              <input type="text" placeholder="0 7 * * 1-5" bind:value={newBriefing.cron} />
-            </SettingsField>
-            <SettingsField label="Output">
-              <Select
-                value={newBriefing.output}
-                options={briefingOutputOptions}
-                onValueChange={(v) => (newBriefing.output = v)}
-                ariaLabel="Output"
-                fullWidth
-              />
-            </SettingsField>
-            <SettingsField label="Conversation token">
-              <input
-                type="text"
-                placeholder="Talk room token"
-                bind:value={newBriefing.conversation_token}
-              />
-            </SettingsField>
-            <SettingsField label="Enabled" checkbox>
-              <input type="checkbox" bind:checked={newBriefing.enabled} />
-            </SettingsField>
-          </div>
-          <div class="add-actions">
-            <Button variant="secondary" size="sm" type="submit" disabled={briefingSaving}>
-              {briefingSaving ? 'Saving…' : briefingEditingName ? 'Save changes' : '+ Add briefing'}
-            </Button>
-            {#if briefingEditingName}
-              <Button variant="secondary" size="sm" onclick={resetBriefingForm}>Cancel</Button>
-            {/if}
-          </div>
-          {#if briefingError}
-            <div class="banner error">{briefingError}</div>
-          {/if}
-        </form>
-      </details>
-    </SettingsCard>
-
-    <SettingsCard
-      title="Email delivery"
-      description="Applies to every briefing you have delivered by email."
-    >
-      <SettingsField
-        label="Send as HTML"
-        checkbox
-        badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
-        hint="Renders the briefing as formatted mail, so a news source that supplied an article URL becomes a clickable link. A plain-text copy is always sent alongside it for clients that prefer one. Untick for plain text only."
-        error={emailHtmlError}
-      >
-        <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
-      </SettingsField>
-    </SettingsCard>
-
-    {#if isAdmin}
+  <GroupBriefingEditor
+    templates={config?.block_templates ?? []}
+    {browseOptions}
+    sharedBlockOptions={sharedBlockSelectOptions}
+    copy={groupCopy}
+    onGroupActive={(active) => {
+      groupActive = active;
+    }}
+    onPersonalNew={() => {
+      resetBriefingForm();
+      newBriefing.enabled = false;
+      creatingPersonal = true;
+    }}
+  />
+  {#if !groupActive}
+    {#if !moduleEnabled}
+      <div class="banner info">
+        Briefings module is disabled. Enable it in
+        <a href="{base}/settings">Settings → Preferences</a> to manage schedules and content.
+      </div>
+    {:else}
       <SettingsCard
-        title="Shared blocks ({sharedBlocks.length})"
-        description="Admin only. Content generated once globally and read by any user via a Shared source. Structured blocks are stored verbatim (no LLM). Only user-agnostic sources are allowed."
+        title="Briefing"
+        description="Choose a briefing to edit its schedule and ordered content blocks."
       >
-        {#if sharedError}
-          <div class="banner error">{sharedError}</div>
+        {#if config}
+          <SettingsField label="Briefing" labelled={false}>
+            <Select
+              value={selectedName}
+              options={allNames.map((name) => ({
+                value: name,
+                label: `${name}${briefings.find((briefing) => briefing.name === name)?.enabled === false ? ' (disabled)' : ''}`,
+              }))}
+              onValueChange={(value) => {
+                selectedName = value;
+              }}
+              ariaLabel="Briefing"
+              fullWidth
+            />
+          </SettingsField>
+          {#if selectedName}
+            <div class="schedule-summary" aria-label="Selected briefing schedule">
+              {#if selectedSchedule}
+                <div class="schedule-text">
+                  <strong>{selectedSchedule.title || derivedTitle(selectedName)}</strong>
+                  <p class="caption">
+                    <code>{selectedSchedule.cron}</code> · {selectedSchedule.output}{selectedSchedule.enabled
+                      ? ''
+                      : ' · Disabled'}
+                  </p>
+                  {#if selectedSchedule.conversation_token}<p class="caption">
+                      Talk room: {selectedSchedule.conversation_token}
+                    </p>{/if}
+                  {#if selectedSchedule.managed === 'config'}<p class="caption">
+                      Schedule managed by config.toml.
+                    </p>{/if}
+                </div>
+                {#if selectedSchedule.managed === 'db' && selectedSchedule.id !== undefined}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onclick={() => selectedSchedule && editBriefing(selectedSchedule)}
+                    >Edit schedule</Button
+                  >
+                  <KebabMenu items={briefingMenu(selectedSchedule)} ariaLabel="Briefing actions" />
+                {/if}
+              {:else}<p class="caption">
+                  No schedule. Add one below using this briefing's name.
+                </p>{/if}
+            </div>
+            {#key selectedName}
+              <BlockBuilder
+                briefingName={selectedName}
+                editBlockId={page.url.searchParams.get('name') === selectedName
+                  ? Number(page.url.searchParams.get('block')) || null
+                  : null}
+                blocks={currentBlocks}
+                templates={config.block_templates ?? []}
+                {sourceKinds}
+                {browseOptions}
+                {rssOptions}
+                sharedBlockOptions={sharedBlockSelectOptions}
+                feedsAvailable={!!feedOptions?.available && rssOptions.length > 0}
+                onChange={updateBlocks}
+              />
+            {/key}
+          {:else}<EmptyState>No briefings scheduled yet. Add one below.</EmptyState>{/if}
         {/if}
-
-        {#if sharedBlocks.length === 0}
-          <EmptyState>No shared blocks yet.</EmptyState>
-        {:else}
-          <div class="table-scroll">
-            <table class="grid sb-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Cron ({sharedBlockTimezone})</th>
-                  <th class="col-render">Render</th>
-                  <th>Trust</th>
-                  <th>Last run</th>
-                  <th class="actions"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each sharedBlocks as b (b.name)}
-                  <tr>
-                    <td class="sb-name">
-                      <strong>{b.name}</strong>
-                      {#if !b.enabled}<span class="muted small"> (disabled)</span>{/if}
-                      {#if b.status.has_content}
-                        <div class="muted small sb-preview" title={b.status.value_preview ?? ''}>
-                          {(b.status.value_preview ?? '').slice(0, 60)}
-                        </div>
-                      {/if}
-                    </td>
-                    <td class="nowrap"><code>{b.cron}</code></td>
-                    <td class="col-render"><span class="render-pill">{b.render_mode}</span></td>
-                    <td class="small">{b.trusted ? 'trusted' : 'untrusted'}</td>
-                    <td class="small nowrap">{fmtLastRun(b.status.last_run_at)}</td>
-                    <td class="actions">
-                      <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-
-        {#if !sharedDraft}
-          <div style="margin-top: 0.75rem;">
-            <Button variant="secondary" size="sm" onclick={startNewShared}
-              >+ New shared block</Button
-            >
-          </div>
-        {:else}
-          <div class="shared-editor">
-            <h4>{sharedEditingName ? `Edit ${sharedEditingName}` : 'New shared block'}</h4>
-            <div class="sb-grid">
-              <SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
+        <details
+          class="schedule-form"
+          open={creatingPersonal || !!briefingEditingName || allNames.length === 0}
+        >
+          <summary
+            >{briefingEditingName
+              ? `Edit ${briefingEditingName} schedule`
+              : 'Add briefing'}</summary
+          >
+          <form class="add-form" onsubmit={submitBriefing}>
+            <h3>{briefingEditingName ? `Edit ${briefingEditingName}` : 'Add briefing'}</h3>
+            <div class="add-grid">
+              <SettingsField label="Name">
                 <input
                   type="text"
-                  placeholder="world-headlines"
-                  bind:value={sharedDraft.name}
-                  disabled={!!sharedEditingName}
+                  placeholder="morning"
+                  bind:value={newBriefing.name}
+                  disabled={!!briefingEditingName}
                 />
               </SettingsField>
-              <SettingsField label={`Cron (${sharedBlockTimezone})`}>
-                <input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
+              <SettingsField
+                label="Title"
+                hint="Shown as the email subject and the archive entry. Leave it blank to derive one from the name. The run date is appended automatically."
+              >
+                <input
+                  type="text"
+                  placeholder={derivedTitle(newBriefing.name || 'morning')}
+                  bind:value={newBriefing.title}
+                />
               </SettingsField>
-            </div>
-            <SettingsField label="Title">
-              <input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
-            </SettingsField>
-            <SettingsField label="Render mode">
-              <Select
-                value={sharedDraft.render_mode}
-                options={RENDER_OPTIONS}
-                onValueChange={(v) => sharedDraft && (sharedDraft.render_mode = v)}
-                ariaLabel="Render mode"
-                fullWidth
-              />
-            </SettingsField>
-            {#if sharedDraft.render_mode === 'synthesis'}
-              <SettingsField label="Directive" hint="How to synthesize the sources.">
-                <textarea rows="2" bind:value={sharedDraft.directive}></textarea>
+              <SettingsField label="Cron (user TZ)">
+                <input type="text" placeholder="0 7 * * 1-5" bind:value={newBriefing.cron} />
               </SettingsField>
-            {/if}
-            <div class="sb-grid">
-              <SettingsField label="Trusted" checkbox hint="Only for injection-safe content.">
-                <input type="checkbox" bind:checked={sharedDraft.trusted} />
+              <SettingsField label="Output">
+                <Select
+                  value={newBriefing.output}
+                  options={briefingOutputOptions}
+                  onValueChange={(v) => (newBriefing.output = v)}
+                  ariaLabel="Output"
+                  fullWidth
+                />
+              </SettingsField>
+              <SettingsField label="Conversation token">
+                <input
+                  type="text"
+                  placeholder="Talk room token"
+                  bind:value={newBriefing.conversation_token}
+                />
               </SettingsField>
               <SettingsField label="Enabled" checkbox>
-                <input type="checkbox" bind:checked={sharedDraft.enabled} />
+                <input type="checkbox" bind:checked={newBriefing.enabled} />
               </SettingsField>
             </div>
-
-            <div class="shared-sources">
-              <div class="shared-sources-head">
-                <span class="field-label">Sources</span>
-                <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button
-                >
-              </div>
-              {#if sharedDraft.sources.length === 0}
-                <p class="muted small">
-                  No sources — add at least one browse/markets/email source.
-                </p>
+            <div class="add-actions">
+              <Button variant="secondary" size="sm" type="submit" disabled={briefingSaving}>
+                {briefingSaving
+                  ? 'Saving…'
+                  : briefingEditingName
+                    ? 'Save changes'
+                    : '+ Add briefing'}
+              </Button>
+              {#if briefingEditingName}
+                <Button variant="secondary" size="sm" onclick={resetBriefingForm}>Cancel</Button>
               {/if}
-              {#each sharedDraft.sources as src, i (i)}
-                <div class="sb-source">
-                  <span class="sb-source-remove">
-                    <IconButton
-                      label="Remove source {i + 1}"
-                      title="Remove source"
-                      size="sm"
-                      danger
-                      onclick={() => removeSharedSource(i)}>×</IconButton
-                    >
-                  </span>
-                  <SettingsField label="Type">
-                    <Select
-                      value={src.kind}
-                      options={sharedKindOptions}
-                      onValueChange={(v) => setSharedSourceKind(i, v)}
-                      ariaLabel="Source kind"
-                      fullWidth
-                    />
-                  </SettingsField>
-                  <SourceConfigFields
-                    kind={src.kind}
-                    config={src.config}
-                    onChange={(patch) => patchSharedSourceConfig(i, patch)}
-                    {browseOptions}
-                  />
-                </div>
-              {/each}
             </div>
+            {#if briefingError}
+              <div class="banner error">{briefingError}</div>
+            {/if}
+          </form>
+        </details>
+      </SettingsCard>
 
-            <div class="source-form-actions">
-              <Button variant="secondary" size="sm" onclick={cancelShared}>Cancel</Button>
-              <Button variant="primary" size="sm" onclick={saveShared} disabled={sharedSaving}
-                >{sharedSaving ? 'Saving…' : 'Save shared block'}</Button
+      <SettingsCard
+        title="Email delivery"
+        description="Applies to every briefing you have delivered by email."
+      >
+        <SettingsField
+          label="Send as HTML"
+          checkbox
+          badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
+          hint="Renders the briefing as formatted mail, so a news source that supplied an article URL becomes a clickable link. A plain-text copy is always sent alongside it for clients that prefer one. Untick for plain text only."
+          error={emailHtmlError}
+        >
+          <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
+        </SettingsField>
+      </SettingsCard>
+
+      {#if isAdmin}
+        <SettingsCard
+          title="Shared blocks ({sharedBlocks.length})"
+          description="Admin only. Content generated once globally and read by any user via a Shared source. Structured blocks are stored verbatim (no LLM). Only user-agnostic sources are allowed."
+        >
+          {#if sharedError}
+            <div class="banner error">{sharedError}</div>
+          {/if}
+
+          {#if sharedBlocks.length === 0}
+            <EmptyState>No shared blocks yet.</EmptyState>
+          {:else}
+            <div class="table-scroll">
+              <table class="grid sb-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Cron ({sharedBlockTimezone})</th>
+                    <th class="col-render">Render</th>
+                    <th>Trust</th>
+                    <th>Last run</th>
+                    <th class="actions"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each sharedBlocks as b (b.name)}
+                    <tr>
+                      <td class="sb-name">
+                        <strong>{b.name}</strong>
+                        {#if !b.enabled}<span class="muted small"> (disabled)</span>{/if}
+                        {#if b.status.has_content}
+                          <div class="muted small sb-preview" title={b.status.value_preview ?? ''}>
+                            {(b.status.value_preview ?? '').slice(0, 60)}
+                          </div>
+                        {/if}
+                      </td>
+                      <td class="nowrap"><code>{b.cron}</code></td>
+                      <td class="col-render"><span class="render-pill">{b.render_mode}</span></td>
+                      <td class="small">{b.trusted ? 'trusted' : 'untrusted'}</td>
+                      <td class="small nowrap">{fmtLastRun(b.status.last_run_at)}</td>
+                      <td class="actions">
+                        <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+
+          {#if !sharedDraft}
+            <div style="margin-top: 0.75rem;">
+              <Button variant="secondary" size="sm" onclick={startNewShared}
+                >+ New shared block</Button
               >
             </div>
-          </div>
-        {/if}
-      </SettingsCard>
+          {:else}
+            <div class="shared-editor">
+              <h4>{sharedEditingName ? `Edit ${sharedEditingName}` : 'New shared block'}</h4>
+              <div class="sb-grid">
+                <SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
+                  <input
+                    type="text"
+                    placeholder="world-headlines"
+                    bind:value={sharedDraft.name}
+                    disabled={!!sharedEditingName}
+                  />
+                </SettingsField>
+                <SettingsField label={`Cron (${sharedBlockTimezone})`}>
+                  <input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
+                </SettingsField>
+              </div>
+              <SettingsField label="Title">
+                <input
+                  type="text"
+                  placeholder="🌍 World headlines"
+                  bind:value={sharedDraft.title}
+                />
+              </SettingsField>
+              <SettingsField label="Render mode">
+                <Select
+                  value={sharedDraft.render_mode}
+                  options={RENDER_OPTIONS}
+                  onValueChange={(v) => sharedDraft && (sharedDraft.render_mode = v)}
+                  ariaLabel="Render mode"
+                  fullWidth
+                />
+              </SettingsField>
+              {#if sharedDraft.render_mode === 'synthesis'}
+                <SettingsField label="Directive" hint="How to synthesize the sources.">
+                  <textarea rows="2" bind:value={sharedDraft.directive}></textarea>
+                </SettingsField>
+              {/if}
+              <div class="sb-grid">
+                <SettingsField label="Trusted" checkbox hint="Only for injection-safe content.">
+                  <input type="checkbox" bind:checked={sharedDraft.trusted} />
+                </SettingsField>
+                <SettingsField label="Enabled" checkbox>
+                  <input type="checkbox" bind:checked={sharedDraft.enabled} />
+                </SettingsField>
+              </div>
+
+              <div class="shared-sources">
+                <div class="shared-sources-head">
+                  <span class="field-label">Sources</span>
+                  <Button variant="secondary" size="sm" onclick={addSharedSource}
+                    >+ Add source</Button
+                  >
+                </div>
+                {#if sharedDraft.sources.length === 0}
+                  <p class="muted small">
+                    No sources — add at least one browse/markets/email source.
+                  </p>
+                {/if}
+                {#each sharedDraft.sources as src, i (i)}
+                  <div class="sb-source">
+                    <span class="sb-source-remove">
+                      <IconButton
+                        label="Remove source {i + 1}"
+                        title="Remove source"
+                        size="sm"
+                        danger
+                        onclick={() => removeSharedSource(i)}>×</IconButton
+                      >
+                    </span>
+                    <SettingsField label="Type">
+                      <Select
+                        value={src.kind}
+                        options={sharedKindOptions}
+                        onValueChange={(v) => setSharedSourceKind(i, v)}
+                        ariaLabel="Source kind"
+                        fullWidth
+                      />
+                    </SettingsField>
+                    <SourceConfigFields
+                      kind={src.kind}
+                      config={src.config}
+                      onChange={(patch) => patchSharedSourceConfig(i, patch)}
+                      {browseOptions}
+                    />
+                  </div>
+                {/each}
+              </div>
+
+              <div class="source-form-actions">
+                <Button variant="secondary" size="sm" onclick={cancelShared}>Cancel</Button>
+                <Button variant="primary" size="sm" onclick={saveShared} disabled={sharedSaving}
+                  >{sharedSaving ? 'Saving…' : 'Save shared block'}</Button
+                >
+              </div>
+            </div>
+          {/if}
+        </SettingsCard>
+      {/if}
     {/if}
   {/if}
 </SettingsLayout>

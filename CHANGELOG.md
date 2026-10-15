@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Briefings can be drafted for a group with a prompt or the existing block editor, an explicit timezone and a delivery channel. Owners can review the audience and generate a private preview; personal file and calendar sources require their contributor’s approval before previewing or enabling the schedule.
+
 - Group briefing APIs let current owners manage the same definitions after an ownership change. Members can read and download retained editions, mute their own delivery, and approve or revoke their own contributed sources; in-app notices carry no private content.
 
 - Group briefings send the saved edition through each member’s selected email, private Talk or ntfy destination. Retries preserve confirmed message parts, respect mutes and access changes, and require acknowledgement when delivery may already have succeeded.

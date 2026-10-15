@@ -212,3 +212,37 @@ async def test_notification_write_failure_stays_pending_and_mutes_prevent_notice
         conn.commit()
         queue_deliveries(conn, config, now=NOW)
         assert [r[0] for r in conn.execute("SELECT user_id FROM notifications WHERE source='group_briefing'")] == ["alice"]
+
+
+async def test_editor_defaults_and_own_resources_only(client, configured, tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from istota.briefings.sources import contributions
+    from istota.skills import calendar
+    config = configured._config
+    config.workspace_path = tmp_path / "workspace"
+    config.briefings.shared_block_timezone = "Europe/Berlin"
+    for user in ("alice", "bob"):
+        root = config.workspace_root(user)
+        root.mkdir(parents=True)
+        (root / f"{user}.md").write_text("PRIVATE FILE CONTENT")
+    monkeypatch.setattr(contributions, "_calendar_client", lambda config: nullcontext(object()))
+    def owned(client, user):
+        assert user == "alice"
+        return [("My calendar", "https://calendar.example.com/alice/personal/")]
+    monkeypatch.setattr(calendar, "owned_calendars", owned)
+    targets = (await client.get(BASE + "/briefings/targets")).json()
+    assert targets["timezone"] == "Europe/Berlin"
+    assert targets["source_scopes"]["personal_file"] == "Personal contribution"
+    assert targets["source_scopes"]["group_memory"] == "Current group"
+    assert targets["source_scopes"]["shared_block"] == "Installation-shared"
+    assert targets["source_scopes"]["browse"] == "Public"
+    url = BASE + "/groups/family/briefing-resources"
+    response = await client.get(url + "?owner_id=bob")
+    assert response.status_code == 200, response.text
+    assert response.json()["files"] == ["alice.md"]
+    assert response.json()["calendars"] == [{"value": "https://calendar.example.com/alice/personal/", "label": "My calendar"}]
+    assert "PRIVATE FILE CONTENT" not in response.text and "bob.md" not in response.text
+    session(client, configured, "admin")
+    assert (await client.get(url)).status_code == 404
+    client.cookies.clear()
+    assert (await client.get(url)).status_code == 401
