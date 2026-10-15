@@ -1736,6 +1736,17 @@ class TestConcurrentIssuers:
         assert [r.client for r in list_invoices(tmp_path)] == ["acme"]
         assert [p.name for p in pdf.parent.iterdir()] == [pdf.name]
 
+    def test_publishing_never_replaces_a_pdf(self, tmp_path, monkeypatch):
+        from istota.money.core.invoicing import generate_invoice_pdf
+
+        self._setup(tmp_path, monkeypatch)
+        pdf = tmp_path / "invoices" / "2026" / "Invoice-000001-03_10_2026.pdf"
+        generate_invoice_pdf("first", pdf, root=tmp_path)
+        with pytest.raises(FileExistsError):
+            generate_invoice_pdf("second", pdf, root=tmp_path)
+        assert pdf.read_text() == "first"
+        assert [p.name for p in pdf.parent.iterdir()] == [pdf.name]
+
     def test_a_stale_manual_number_does_not_touch_the_winners_pdf(self, tmp_path, monkeypatch):
         from istota.money.core import invoicing as invoicing_mod
         from istota.money.core.invoicing import create_manual_invoice

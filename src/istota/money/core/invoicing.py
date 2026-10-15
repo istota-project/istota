@@ -9,6 +9,7 @@ entries at invoice time — income is recognized when payment is recorded
 from __future__ import annotations
 
 import base64
+import errno
 import html
 import logging
 import mimetypes
@@ -575,6 +576,7 @@ def _generate_invoices(
                 # line index rather than being billed twice.
                 published = False
                 try:
+                    _refuse_taken_pdf_name(pdf_path)
                     generate_invoice_pdf(html, pdf_path, root=accounting_path)
                     published = True
                     with write_transaction(data_dir) as conn:
@@ -661,6 +663,16 @@ def _issue_lock_path(data_dir: Path) -> Path:
     from istota.money.work import db_path_for
 
     return db_path_for(data_dir).parent / ".invoice-issue.lock"
+
+
+def _refuse_taken_pdf_name(pdf_path: Path) -> None:
+    """Refuse before rendering when something already holds the PDF's name.
+
+    ``generate_invoice_pdf`` refuses the same at publish time; checking first
+    skips a render that could not be kept.
+    """
+    if os.path.lexists(pdf_path):
+        raise FileExistsError(errno.EEXIST, "an invoice PDF already has this name", pdf_path.name)
 
 
 @contextmanager
@@ -1248,6 +1260,7 @@ def _issue_manual_invoice(
     )
     published = False
     try:
+        _refuse_taken_pdf_name(pdf_path)
         generate_invoice_pdf(html_text, pdf_path, root=accounting_path)
         published = True
         with write_transaction(data_dir) as conn:
