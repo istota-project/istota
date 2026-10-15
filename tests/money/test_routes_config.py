@@ -576,9 +576,8 @@ def _seed_work(ctx, **kwargs):
 def _quarantine_year(ctx, year: int = 2026) -> None:
     """Write a year file whose second row the loader can't model.
 
-    `_load_year` skips such a row and records the year as quarantined — it
-    does not raise — so the row is invisible to a reference count and a guard
-    built on that count fails open.
+    The work-log import refuses such a file, so the work store stays blocked
+    and a reference count over it cannot be taken.
     """
     work_dir = ctx.data_dir / "invoices" / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -642,18 +641,18 @@ class TestEntityGuardUsesTheRealDefault:
         assert resp.status_code == 200
 
 
-class TestGuardsFailClosedOnQuarantine:
-    """A row the loader skipped is invisible to the count, so a guard built on
-    it reads zero. The strict deletes refuse; the soft client delete doesn't."""
+class TestGuardsFailClosedOnABlockedWorkStore:
+    """A year file the import refuses leaves the work store unreadable, so a
+    count would be a guess. The strict deletes refuse; the soft client delete
+    doesn't."""
 
     def test_service_delete_refused(self, ctx, client):
         config_store.upsert_service(ctx.db_path, "consulting", display_name="Consulting")
         _quarantine_year(ctx)
 
         resp = client.delete("/istota/api/money/config/services/consulting")
-        assert resp.status_code == 409
-        assert "can't read" in resp.json()["error"]
-        assert resp.json()["references"]["quarantined"] == ["2026.toml"]
+        assert resp.status_code == 500
+        assert "work log migration blocked" in resp.json()["error"]
         assert "consulting" in config_store.load_invoicing(ctx.db_path).services
 
     def test_entity_delete_refused(self, ctx, client):
@@ -662,8 +661,8 @@ class TestGuardsFailClosedOnQuarantine:
         _quarantine_year(ctx)
 
         resp = client.delete("/istota/api/money/config/companies/spare")
-        assert resp.status_code == 409
-        assert "can't read" in resp.json()["error"]
+        assert resp.status_code == 500
+        assert "work log migration blocked" in resp.json()["error"]
 
     def test_client_delete_still_allowed(self, ctx, client):
         """It destroys nothing, so refusing would strand the user."""
@@ -674,13 +673,13 @@ class TestGuardsFailClosedOnQuarantine:
         assert resp.status_code == 200
         assert "acme" not in config_store.load_invoicing(ctx.db_path).clients
 
-    def test_a_clean_store_reports_no_quarantine(self, ctx, client):
+    def test_a_clean_store_deletes_an_unused_service(self, ctx, client):
         config_store.upsert_service(ctx.db_path, "design", display_name="Design")
         _seed_work(ctx, service="dev")
 
         resp = client.delete("/istota/api/money/config/services/design")
         assert resp.status_code == 200
-        assert resp.json()["references"]["quarantined"] == []
+        assert resp.json()["references"] == {"work_entries": 0, "invoices": 0}
 
 
 class TestClientReferenceCountIsCaseInsensitive:

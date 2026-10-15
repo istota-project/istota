@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -121,6 +122,7 @@
     info = '';
     try {
       const result = await putFeedsConfig(config);
+      invalidateNavUnreadCounts();
       info = `Saved (${result.sync.feeds_added} added, ${result.sync.feeds_updated} updated, ${result.sync.categories_added} new categories).`;
       initialJson = JSON.stringify(config);
       // Pull diagnostics back so last_poll_at etc. update

@@ -37,9 +37,9 @@ import {
   briefingFilterName,
 } from '$lib/stores/briefings';
 import Layout from './+layout.svelte';
+import Harness from '$lib/currentUserHarness.test.svelte';
+import type { User } from '$lib/api';
 import Page from './+page.svelte';
-
-const children = (() => {}) as unknown as import('svelte').Snippet;
 
 const EMPTY = { items: [], total: 0, briefing_names: [] };
 
@@ -64,25 +64,25 @@ describe('the layout, whose fetch it is', () => {
   it('publishes the failure instead of swallowing it', async () => {
     vi.mocked(getBriefingArchive).mockRejectedValue(new TypeError('Failed to fetch'));
 
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await vi.waitFor(() => expect(get(briefingArchiveError)).toBe('Failed to load briefings'));
   });
 
   it('clears it once the archive loads again', async () => {
     vi.mocked(getBriefingArchive).mockRejectedValue(new TypeError('Failed to fetch'));
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await vi.waitFor(() => expect(get(briefingArchiveError)).toBeTruthy());
     cleanup();
 
     vi.mocked(getBriefingArchive).mockResolvedValue(EMPTY);
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await vi.waitFor(() => expect(get(briefingArchiveError)).toBeNull());
   });
 
   it('does not tell the sidebar there are no briefings', async () => {
     vi.mocked(getBriefingArchive).mockRejectedValue(new TypeError('Failed to fetch'));
 
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await vi.waitFor(() => expect(get(briefingArchiveError)).toBeTruthy());
     expect(screen.queryByText('No briefings yet.')).toBeNull();
   });

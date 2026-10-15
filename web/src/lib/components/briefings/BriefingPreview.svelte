@@ -106,6 +106,7 @@
         const document = previewDocument(name, definitions, saved);
         edition = {
           id: 0,
+          read_at: null,
           briefing_name: name,
           subject: document.title,
           generated_at: saved?.generated_at ?? '',

@@ -15,9 +15,10 @@
  * reported — `reload()` does not reject, so the page has to read its answer.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
-import type { User } from '$lib/api';
+import type { User, UserProfile } from '$lib/api';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
 const SHELL_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.10.0';
 
@@ -55,10 +56,13 @@ const profile = {
     routing: {},
     default_destination: 'talk',
     default_room: '',
+    external_turn_display: 'collapsed',
     delivery_surfaces: ['talk'],
   },
 };
 
+const savedPreference = { value: false };
+const updateProfile = vi.fn<(patch: Partial<UserProfile>) => Promise<object>>();
 const online = writable(true);
 const getMe = vi.fn<() => Promise<User>>();
 const readUser = vi.fn<(userId: string | null) => Promise<User | null>>();
@@ -76,15 +80,21 @@ vi.mock('$lib/stores/notifications', async (importOriginal) => {
 
 vi.mock('$lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('$lib/api')>();
-  return {
+  const api = {} as ApiDouble;
+  await fillApiDouble(api, {
     ...actual,
     getMe: () => getMe(),
-    getProfile: async () => profile,
+    getNavUnreadCounts: async () => ({ enabled: true, chat: 4, briefings: 2, feeds: 108 }),
+    getProfile: async () =>
+      structuredClone({
+        profile: { ...profile.profile, show_nav_unread_badges: savedPreference.value },
+      }),
     getSettingsServices: async () => ({ services: [] }),
     getModules: async () => ({ modules: [] }),
-    updateProfile: async () => ({}),
+    updateProfile: (patch: Partial<UserProfile>) => updateProfile(patch),
     disconnectNextcloudToken: async () => ({}),
-  };
+  });
+  return api;
 });
 
 vi.mock('$lib/offline/db', async (importOriginal) => {
@@ -106,11 +116,21 @@ vi.mock('$lib/offline/lastUser', async (importOriginal) => {
   };
 });
 
+const navUnread = await import('$lib/stores/navUnread');
+const startNavUnreadPoll = vi.spyOn(navUnread, 'startNavUnreadPoll');
+const stopNavUnreadPoll = vi.spyOn(navUnread, 'stopNavUnreadPoll');
+
 // Imported after the mocks, so the components' own imports resolve to them.
 const SettingsInLayout = (await import('./settingsInLayout.test.svelte')).default;
+const PreferenceProbe = (await import('./navPreferenceProbe.test.svelte')).default;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  savedPreference.value = false;
+  updateProfile.mockImplementation(async (patch) => {
+    savedPreference.value = patch.show_nav_unread_badges ?? savedPreference.value;
+    return {};
+  });
   online.set(true);
   seedUserId.mockReturnValue('alice');
   readUser.mockResolvedValue(null);
@@ -185,4 +205,89 @@ describe('the settings page re-resolving the identity', () => {
     expect(screen.getByText('Alice Live')).toBeTruthy();
     expect(screen.queryByText('Alice Cached')).toBeNull();
   });
+});
+
+describe('navigation preference through the root identity', () => {
+  const label = /Show unread counts in navigation/;
+
+  beforeEach(() => {
+    getMe.mockImplementation(async () => ({
+      ...person(),
+      show_nav_unread_badges: savedPreference.value,
+    }));
+  });
+
+  it('defaults off and saves only the changed field before reloading the root identity', async () => {
+    const view = render(SettingsInLayout, { component: PreferenceProbe });
+    const checkbox = await screen.findByRole('checkbox', { name: label });
+    expect(checkbox).not.toBeChecked();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+    await fireEvent.click(checkbox);
+    expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('true'),
+    );
+    expect(startNavUnreadPoll).toHaveBeenCalledWith('alice');
+    expect(await screen.findByRole('link', { name: 'Chat, 4 unread messages' })).toHaveTextContent(
+      '4',
+    );
+    expect(updateProfile).toHaveBeenCalledExactlyOnceWith({ show_nav_unread_badges: true });
+    expect(getMe).toHaveBeenCalledTimes(3);
+    view.unmount();
+    render(SettingsInLayout, { component: PreferenceProbe });
+    const restored = await screen.findByRole('checkbox', { name: label });
+    expect(restored).toBeChecked();
+    await screen.findByRole('link', { name: 'Chat, 4 unread messages' });
+    stopNavUnreadPoll.mockClear();
+    await fireEvent.click(restored);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false'),
+    );
+    expect(stopNavUnreadPoll).toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: 'Chat' }).querySelector('.count-pill')).toBeNull();
+    expect(updateProfile).toHaveBeenLastCalledWith({ show_nav_unread_badges: false });
+  });
+
+  it('discarding an unsaved edit leaves the account preference off', async () => {
+    const view = render(SettingsInLayout, { component: PreferenceProbe });
+    await fireEvent.click(await screen.findByRole('checkbox', { name: label }));
+    view.unmount();
+    render(SettingsInLayout, { component: PreferenceProbe });
+    expect(await screen.findByRole('checkbox', { name: label })).not.toBeChecked();
+    expect(updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('a save failure keeps the confirmed preference and the edit', async () => {
+    updateProfile.mockRejectedValueOnce(new Error('Save refused'));
+    render(SettingsInLayout, { component: PreferenceProbe });
+    await fireEvent.click(await screen.findByRole('checkbox', { name: label }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByText('Save refused')).toBeInTheDocument();
+    expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
+    expect(screen.getByRole('checkbox', { name: label })).toBeChecked();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+    expect(getMe).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed post-save identity reload retains the last confirmed preference', async () => {
+    render(SettingsInLayout, { component: PreferenceProbe });
+    await fireEvent.click(await screen.findByRole('checkbox', { name: label }));
+    getMe.mockRejectedValueOnce(new Error('Reload failed'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByText('Could not confirm your account details.')).toBeInTheDocument();
+    expect(savedPreference.value).toBe(true);
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
+  });
+});
+
+it('hands a newly confirmed account to the poll owner on identity reload', async () => {
+  getMe
+    .mockResolvedValueOnce({ ...person(), show_nav_unread_badges: true })
+    .mockResolvedValue({ ...person('Bob'), username: 'bob', show_nav_unread_badges: true });
+  render(SettingsInLayout);
+  await screen.findByText('Identity');
+  expect(startNavUnreadPoll.mock.calls).toEqual([['alice'], ['bob']]);
 });

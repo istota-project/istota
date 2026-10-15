@@ -606,3 +606,136 @@ class TestPreview:
             cfg.users["alice"].disabled_modules = ["briefings"]
             assert gate_client.post(path, json={"document": document}, headers=headers).status_code == 403
             assert not cfg.module_db_path("alice", "briefings").exists()
+
+
+class TestArchiveReads:
+    def test_gets_do_not_read_and_post_is_idempotent(self, ctx, client):
+        with bdb.connect(ctx.db_path) as conn:
+            aid = bdb.insert_archive(conn, briefing_name="Morning", subject="One", body_md="Body")
+            other = bdb.insert_archive(conn, briefing_name="Evening", subject="Two", body_md="Body")
+            conn.commit()
+        listing = client.get("/istota/api/briefings/archive").json()
+        assert all(row["read_at"] is None for row in listing["items"])
+        assert client.get(f"/istota/api/briefings/archive/{aid}").json()["read_at"] is None
+        with bdb.connect(ctx.db_path) as conn:
+            assert bdb.count_unread_archive(conn) == 2
+        response = client.post(f"/istota/api/briefings/archive/{aid}/read")
+        assert response.status_code == 200
+        assert response.json() == {"id": aid, "read_at": response.json()["read_at"]}
+        assert response.json()["read_at"] is not None
+        assert client.post(f"/istota/api/briefings/archive/{aid}/read").json() == response.json()
+        assert client.get(f"/istota/api/briefings/archive/{aid}").json()["read_at"] == response.json()["read_at"]
+        with bdb.connect(ctx.db_path) as conn:
+            assert bdb.get_archived(conn, other).read_at is None
+            bdb.delete_archived(conn, aid)
+            conn.commit()
+        assert client.post(f"/istota/api/briefings/archive/{aid}/read").status_code == 404
+
+    @pytest.mark.parametrize("name", ["Morning", " Morning "])
+    def test_bulk_reads_beyond_page_and_exact_name(self, ctx, client, name):
+        with bdb.connect(ctx.db_path) as conn:
+            for _ in range(125):
+                bdb.insert_archive(conn, briefing_name=name, subject="One", body_md="Body")
+            bdb.insert_archive(conn, briefing_name="morning", subject="Other", body_md="Body")
+            conn.commit()
+        url = "/istota/api/briefings/mark-as-read"
+        response = client.post(url, json={"scope": "briefing", "briefing_name": name})
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "updated": 125}
+        with bdb.connect(ctx.db_path) as conn:
+            assert bdb.count_unread_archive(conn) == 1
+        assert client.post(url, json={"scope": "briefing", "briefing_name": "Missing"}).json()["updated"] == 0
+        assert client.post(url, json={"scope": "all"}).json() == {"status": "ok", "updated": 1}
+        assert client.post(url, json={"scope": "all"}).json()["updated"] == 0
+
+    @pytest.mark.parametrize("body", [
+        "not json", "null", "[]", '"all"', '{}', '{"scope": "other"}',
+        '{"scope": "briefing"}', '{"scope": "briefing", "briefing_name": ""}',
+        '{"scope": "briefing", "briefing_name": 1}',
+        '{"scope": "briefing", "briefing_name": null}',
+        '{"scope": "all", "briefing_name": "Morning"}',
+        '{"scope": "all", "briefing_name": null}',
+        '{"scope": "all", "user_id": "bob"}',
+        '{"scope": "all", "db_path": "/tmp/other.db"}',
+    ])
+    def test_bulk_rejects_malformed_payload(self, client, body):
+        response = client.post(
+            "/istota/api/briefings/mark-as-read", content=body,
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 400
+
+
+@pytest.fixture
+async def host_client(tmp_path, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from unittest.mock import MagicMock
+    from tests.test_web_app import _make_config
+    import istota.webui.app as host
+
+    cfg = _make_config(tmp_path)
+    monkeypatch.setattr(host, "_config", cfg)
+    monkeypatch.setattr(host, "_oauth", MagicMock())
+    monkeypatch.setattr(host.app.state, "istota_config", cfg, raising=False)
+    monkeypatch.setattr(host.app.state, "briefings_initialised_dbs", set(), raising=False)
+    async with AsyncClient(transport=ASGITransport(app=host.app), base_url="https://example.com") as client:
+        yield client, cfg
+
+
+class TestArchiveReadHostGates:
+    @pytest.mark.parametrize("url,body", [
+        ("/istota/api/briefings/archive/1/read", None),
+        ("/istota/api/briefings/mark-as-read", {"scope": "all"}),
+    ])
+    async def test_auth_origin_module_and_user_isolation(self, host_client, url, body):
+        from unittest.mock import AsyncMock
+        from istota import user_profiles
+        from istota.briefings._loader import resolve_for_user
+        from istota.briefings._migrate import ensure_initialised
+        import istota.webui.app as host
+
+        client, cfg = host_client
+        paths = {}
+        for username in ("alice", "bob"):
+            ctx = resolve_for_user(username, cfg)
+            ensure_initialised(ctx, app_config=cfg)
+            paths[username] = ctx.db_path
+            with bdb.connect(ctx.db_path) as conn:
+                assert bdb.insert_archive(conn, briefing_name="Morning", subject=username, body_md="Body") == 1
+                conn.commit()
+        headers = {"origin": "https://example.com"}
+        assert (await client.post(url, json=body, headers=headers)).status_code == 401
+        host._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
+        assert (await client.get("/istota/callback", follow_redirects=False)).status_code == 302
+        assert (await client.post(url, json=body)).status_code == 403
+        assert (await client.post(url, json=body, headers={"origin": "https://other.example.com"})).status_code == 403
+        user_profiles.update_profile(cfg.db_path, "alice", disabled_modules=["briefings"])
+        assert (await client.post(url, json=body, headers=headers)).status_code == 404
+        for path in paths.values():
+            with bdb.connect(path) as conn:
+                assert bdb.count_unread_archive(conn) == 1
+        user_profiles.update_profile(cfg.db_path, "alice", disabled_modules=[])
+        response = await client.post(url, json=body, headers=headers)
+        assert response.status_code == 200
+        with bdb.connect(paths["alice"]) as conn:
+            assert bdb.count_unread_archive(conn) == 0
+        with bdb.connect(paths["bob"]) as conn:
+            assert bdb.count_unread_archive(conn) == 1
+        host._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "bob"})
+        assert (await client.get("/istota/callback", follow_redirects=False)).status_code == 302
+        assert (await client.post(url, json=body, headers=headers)).status_code == 200
+        with bdb.connect(paths["bob"]) as conn:
+            assert bdb.count_unread_archive(conn) == 0
+
+
+def test_deleted_archive_acknowledgment_cannot_read_replacement(ctx, client):
+    with bdb.connect(ctx.db_path) as conn:
+        old_id = bdb.insert_archive(conn, briefing_name="Morning", subject="Old", body_md="Old body")
+        conn.commit()
+    assert client.get(f"/istota/api/briefings/archive/{old_id}").status_code == 200
+    assert client.delete(f"/istota/api/briefings/archive/{old_id}").status_code == 200
+    with bdb.connect(ctx.db_path) as conn:
+        new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+        conn.commit()
+    assert client.post(f"/istota/api/briefings/archive/{old_id}/read").status_code == 404
+    assert client.get(f"/istota/api/briefings/archive/{new_id}").json()["read_at"] is None

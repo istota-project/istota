@@ -43,10 +43,12 @@ function row(overrides: Partial<WorkEntryRow> = {}): WorkEntryRow {
     discount: 0,
     description: 'API work',
     entity: 'main',
+    separate: false,
     invoice: '',
     paid_date: null,
     computed_amount: 450,
     editable: true,
+    deletable: true,
     warnings: [],
     ...overrides,
   };
@@ -170,6 +172,25 @@ describe('WorkEntryForm', () => {
     mount({ entry: row({ qty: null }), onSave });
     await fireEvent.click(screen.getByText('Save'));
     expect(onSave.mock.calls[0][0].qty).toBeNull();
+  });
+
+  it('seeds Invoice separately from the entry and sends it back', async () => {
+    const onSave = vi.fn();
+    mount({ entry: row({ separate: true }), onSave });
+    const box = screen.getByLabelText(/^Invoice separately/) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+
+    await fireEvent.click(box);
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave.mock.calls[0][0].separate).toBe(false);
+  });
+
+  it('turns Invoice separately on for an entry that had it off', async () => {
+    const onSave = vi.fn();
+    mount({ entry: row({ separate: false }), onSave });
+    await fireEvent.click(screen.getByLabelText(/^Invoice separately/));
+    await fireEvent.click(screen.getByText('Save'));
+    expect(onSave.mock.calls[0][0].separate).toBe(true);
   });
 
   it('will not save without a client', async () => {

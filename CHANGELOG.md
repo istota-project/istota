@@ -26,13 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All users is a built-in group whose membership follows enabled installation accounts. Its notebook, files and retained briefing history are shared with current and future users; membership cannot be changed by hand.
 
 
+- Settings → Preferences can show unread counts beside Chat, Briefings and Feeds, including in the navigation menu. The choice is saved to your account and starts off.
+- Briefings remembers which editions you have read and lets you mark the whole archive or one briefing’s editions as read from the header. Existing archive entries start as read when upgrading.
 
 - Briefing previews show saved edition content with proposed block titles, order and widths in Web, HTML email and plain text. You can preview an unsaved block draft without saving, generating content or sending mail.
 - Briefing block saves can include all sources in one update, with editable presets for the existing source types. Invalid or failed saves leave the saved block and source order intact.
 - `istota snapshot --format ansible` writes the settings as a `group_vars` file for the Ansible management role, so a snapshot goes into an inventory as it is: `istota snapshot --format ansible | ansible-vault encrypt --output FILE -`.
+- **Invoicing from the web.** The Invoices page can generate invoices after a preview, create a manual invoice, void an invoice and preview its PDF in the file viewer, and a work entry's menu has Generate invoice. No email is sent to clients.
+- **Bill one piece of work on its own.** A work entry marked Invoice separately always gets an invoice of its own, and `invoice generate --entry UID` bills exactly the entries you name.
+- **Voided invoices stay on record.** A void keeps the invoice's total, the work it covered, a reason and the invoices that replace it, and the voided invoice still shows in the invoice list. Its PDF is kept with a `-VOID` suffix unless you ask for it to be deleted, and its number is never reused.
 
 ### Changed
 
+- **The work log and invoices moved into the money database.** Each invoice now has a record with the total it was issued at, split by income account, so a later rate change no longer alters past invoices, `invoice paid` books exactly that total (manual items included, where a manual-only invoice used to be refused as having no billable items), and generating, voiding and paying each happen in one step that cannot be left half done. An invoice is paid as a whole; payment is no longer recorded per work entry. See `docs/features/money.md`.
+  **Upgrade note:** the yearly `invoices/work/{year}.toml` files are imported the first time the work log is used and then renamed `{year}.toml.migrated`; edits to them no longer do anything. If the import refuses (an unreadable file, an entry with no uid, a duplicated uid, or one invoice's entries disagreeing on the paid date), work and invoice commands fail with `work log migration blocked` until an operator fixes it and runs `istota money work migrate -u USER`. A number voided before the upgrade stays a gap.
+- `invoice generate --period` help now says what it does: it bills unbilled work dated on or before the end of that month, earlier months included.
 - Briefing settings has a preset picker and a block editor that saves a complete draft. You can set card widths, move blocks by keyboard or touch, and keep editing disabled briefings; cancellation and failed saves preserve saved content. Preview and Add block sit together as compact buttons, and preview cards stand out from the surrounding panel.
 - New briefing editions use masonry cards that adapt to the reader pane, with wider blocks where configured, matching heights for similar cards, and small gaps filled to match neighboring bottom edges. Every card shows its full content. Card headers have expand controls and settings for user-managed blocks; archive titles wrap across two lines. Older editions keep their complete linear view.
 - Briefing emails keep every section in order, with a heading in HTML and usable article links in plain text. Source availability warnings appear only as icons with explanations in the web reader; email content omits those notices. Switching off HTML or a rendering failure still delivers the complete plain edition.
@@ -41,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Switching briefing types no longer flashes “No briefings yet” while the archive loads. The archive sidebar also waits for its first load before showing an empty state.
 - Generated briefings keep their saved block titles, order and presentation even if a definition changes or is deleted during generation. Malformed or empty generation results retry quietly before delivery.
 - `istota apply` accepts a scheduled job whose room is shared, and a target that replies into that same room, as the scheduler already did: the job runs there with every scope withheld. A target into any other shared room is still refused.
 - A delivery route switched off in the web UI (stored as `none`) no longer makes `istota apply` and `istota user ensure` refuse the profile with `profile_refused`.

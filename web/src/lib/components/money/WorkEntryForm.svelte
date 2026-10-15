@@ -6,7 +6,7 @@
     quantityFieldFor,
     type WorkEntrySavePayload,
   } from '$lib/money/workEntryPayload';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Modal, Button, Field, Select, type SelectOption } from '$lib/components/ui';
   import { formatDecimal } from '$lib/format';
 
   interface Props {
@@ -57,6 +57,7 @@
   let discount = $state(untrack(() => (entry?.discount ? String(entry.discount) : '')));
   let description = $state(untrack(() => entry?.description ?? ''));
   let entity = $state(untrack(() => entry?.entity ?? ''));
+  let separate = $state(untrack(() => entry?.separate ?? false));
   let open = $state(true);
 
   const clientOptions = $derived.by<SelectOption[]>(() => {
@@ -158,6 +159,7 @@
         discount: num(discount) ?? 0,
         description: description.trim(),
         entity,
+        separate,
       }),
     );
   }
@@ -174,6 +176,7 @@
     // would otherwise select *and* save in one keystroke, writing a
     // half-filled entry.
     if (!(target instanceof HTMLInputElement)) return;
+    if (target.type === 'checkbox') return;
     // A stray Enter while typing prose shouldn't commit either.
     if (target.dataset.multiline === 'true') return;
     handleSave();
@@ -235,6 +238,16 @@
     {/if}
   </label>
 
+  <div class="separate">
+    <Field
+      label="Invoice separately"
+      checkbox
+      hint="This entry always gets an invoice of its own, whatever the client's bundling rules say."
+    >
+      <input type="checkbox" bind:checked={separate} />
+    </Field>
+  </div>
+
   {#if preview}
     <div class="preview">{preview}</div>
   {/if}
@@ -284,6 +297,10 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     margin: 0 0 var(--space-3);
+  }
+
+  .separate {
+    margin-bottom: var(--space-3);
   }
 
   .preview {

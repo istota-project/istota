@@ -25,6 +25,7 @@ PROFILE_FIELDS = {
     "external_turn_display": str, "relay_delivery": str, "sms_phone_number": str,
     "max_foreground_workers": int, "max_background_workers": int,
     "briefing_email_html": bool, "timezone_follow_location": bool,
+    "show_nav_unread_badges": bool,
 }
 JOB_FIELDS = {
     "name": str, "cron": str, "prompt": str, "command": str, "prompt_file": str,

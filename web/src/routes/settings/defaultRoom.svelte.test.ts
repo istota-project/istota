@@ -39,6 +39,7 @@ function profile(defaultRoom = ''): UserProfile {
     default_room: defaultRoom,
     briefing_email_html: true,
     timezone_follow_location: false,
+    show_nav_unread_badges: false,
     external_turn_display: 'collapsed',
     relay_delivery: '',
     delivery_surfaces: ['talk', 'email', 'ntfy', 'web'],

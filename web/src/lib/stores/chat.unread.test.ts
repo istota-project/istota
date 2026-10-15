@@ -14,6 +14,8 @@ import type { ChatRoom } from '$lib/api';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('./navUnread', () => ({ invalidateNavUnreadCounts }));
 
 vi.mock('$lib/stores/persisted', () => ({
   loadSetting: vi.fn(() => null),
@@ -41,6 +43,7 @@ async function freshSession() {
 
 describe('chat store — unread indicators', () => {
   beforeEach(() => {
+    invalidateNavUnreadCounts.mockClear();
     Object.values(api).forEach((v) => {
       if (typeof v === 'function' && 'mockReset' in v) (v as any).mockReset();
     });
@@ -67,6 +70,47 @@ describe('chat store — unread indicators', () => {
     // the open room was persisted read
     expect(api.markRoomRead).toHaveBeenCalledWith(1);
   });
+
+  it.each([false, true])(
+    'refreshes counts only after a successful read, failure=%s',
+    async (fails) => {
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2, 3)] });
+      const s = await freshSession();
+      await s.init();
+      await Promise.resolve();
+      invalidateNavUnreadCounts.mockClear();
+      if (fails) api.markRoomRead.mockRejectedValue(new Error('refused'));
+      await s.selectRoom(2);
+      await Promise.resolve();
+      expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+      s.teardown();
+    },
+  );
+
+  it.each([false, true])(
+    'invalidates successful bulk reads and listing changes, failure=%s',
+    async (fails) => {
+      api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+      const s = await freshSession();
+      await s.init();
+      await Promise.resolve();
+      invalidateNavUnreadCounts.mockClear();
+      api.markAllRoomsRead.mockImplementation(async () => {
+        if (fails) throw new Error('refused');
+        return { ok: true, updated: 3 };
+      });
+      await s.markAllRead();
+      expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+      invalidateNavUnreadCounts.mockClear();
+      api.updateChatRoom.mockImplementation(async () => {
+        if (fails) throw new Error('refused');
+        return { ...room(1), listed: true };
+      });
+      await s.updateRoomSettings(1, { listed: true }).catch(() => {});
+      expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+      s.teardown();
+    },
+  );
 
   it('selectRoom optimistically clears the chip and persists', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1, 0), room(2, 3)] });

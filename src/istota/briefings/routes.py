@@ -18,6 +18,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -123,6 +124,7 @@ def _map_archive(row: ArchivedBriefing, *, with_body: bool = True) -> dict:
         "generated_at": row.generated_at,
         "task_id": row.task_id,
         "delivered_to": row.delivered_to,
+        "read_at": row.read_at,
     }
     if with_body:
         out["body_md"] = row.body_md
@@ -199,6 +201,55 @@ def get_archive_item(
     if not row:
         raise HTTPException(404, "briefing not found")
     return {**_map_archive(row), "document": row.document}
+
+
+@router.post("/archive/{archive_id}/read")
+def mark_archive_item_read(
+    archive_id: int,
+    _: None = Depends(verify_origin),
+    ctx: BriefingsContext = Depends(get_user_context),
+) -> dict:
+    with bdb.connect(ctx.db_path) as conn:
+        row = bdb.mark_archived_read(conn, archive_id)
+        conn.commit()
+    if row is None:
+        raise HTTPException(404, "briefing not found")
+    return {"id": row.id, "read_at": row.read_at}
+
+
+@router.post("/mark-as-read")
+async def mark_archive_as_read(
+    request: Request,
+    _: None = Depends(verify_origin),
+    ctx: BriefingsContext = Depends(get_user_context),
+) -> dict:
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "expected a JSON object")
+    if not isinstance(body, dict) or body.get("scope") not in ("all", "briefing"):
+        raise HTTPException(400, "scope must be all or briefing")
+    briefing_name = None
+    if body["scope"] == "all":
+        if set(body) != {"scope"}:
+            raise HTTPException(400, "scope=all accepts only scope")
+    else:
+        briefing_name = body.get("briefing_name")
+        if (
+            set(body) != {"scope", "briefing_name"}
+            or not isinstance(briefing_name, str)
+            or not briefing_name
+        ):
+            raise HTTPException(400, "scope=briefing requires a non-empty briefing_name")
+
+    def _update():
+        with bdb.connect(ctx.db_path) as conn:
+            updated = bdb.mark_archive_as_read(conn, briefing_name=briefing_name)
+            conn.commit()
+        return updated
+
+    updated = await asyncio.to_thread(_update)
+    return {"status": "ok", "updated": updated}
 
 
 @router.delete("/archive/{archive_id}")

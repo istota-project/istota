@@ -1,9 +1,8 @@
 """What still points at an invoicing record, and whether it may be deleted.
 
 Shared by the web routes and ``istota money client|company|service remove``.
-It lives outside ``config_store`` because the references being counted are not
-in the config DB at all: work entries are TOML files in the user's workspace,
-so the scan needs a ``data_dir`` the store never sees.
+It lives outside ``config_store`` because the references being counted are
+work entries, which ``work.py`` reads through the user's ``data_dir``.
 
 The three guards differ in strictness, matching how badly the absence corrupts
 things:
@@ -24,8 +23,8 @@ things:
 A scan that cannot complete refuses the delete for the two strict kinds:
 proceeding would delete blind, which is the failure the guards exist to
 prevent. The soft client case degrades to an unknown count instead, since
-refusing there would strand a user behind a broken year file for a delete that
-destroys nothing.
+refusing there would strand a user behind a blocked work store for a delete
+that destroys nothing.
 """
 
 from __future__ import annotations
@@ -55,33 +54,20 @@ class ReferenceScan:
         return self.blocked_reason is None and self.scan_failed is None
 
 
-def _work_entries(data_dir: Path | None) -> tuple[list, list[str]]:
-    """Work entries plus the year files whose rows could not be read.
-
-    An absent ``data_dir`` (a user who has never invoiced) is zero references
-    rather than a blocked delete.
-    """
-    from istota.money.work import load_work_entries, quarantined_years
+def _work_entries(data_dir: Path | None) -> list:
+    """Every work entry. An absent ``data_dir`` is zero references."""
+    from istota.money.work import load_work_entries
 
     if not data_dir:
-        return [], []
-    entries = load_work_entries(data_dir)
-    return entries, sorted(quarantined_years(data_dir))
-
-
-def _quarantine_reason(kind: str, key: str, quarantined: list[str]) -> str:
-    return (
-        f"cannot tell what references {kind} '{key}': "
-        f"{', '.join(quarantined)} has an entry this version can't read, and a "
-        "row it names would not be counted. Fix the row by hand and retry."
-    )
+        return []
+    return load_work_entries(data_dir)
 
 
 def service_references(
     db_path: Path | str, data_dir: Path | None, key: str,
 ) -> ReferenceScan:
     try:
-        entries, quarantined = _work_entries(data_dir)
+        entries = _work_entries(data_dir)
     except Exception as exc:  # noqa: BLE001
         logger.warning("config_delete_reference_scan_failed kind=service error=%s", exc)
         return ReferenceScan(scan_failed=str(exc))
@@ -90,10 +76,7 @@ def service_references(
     refs = {
         "work_entries": len(matching),
         "invoices": len({e.invoice for e in matching if e.invoice}),
-        "quarantined": quarantined,
     }
-    if quarantined:
-        return ReferenceScan(refs, blocked_reason=_quarantine_reason("service", key, quarantined))
     if matching:
         plural = "y" if len(matching) == 1 else "ies"
         return ReferenceScan(
@@ -113,14 +96,14 @@ def client_references(
     zero for entries it plainly owns.
     """
     try:
-        entries, quarantined = _work_entries(data_dir)
+        entries = _work_entries(data_dir)
     except Exception as exc:  # noqa: BLE001
         logger.warning("config_delete_reference_scan_failed kind=client error=%s", exc)
         return ReferenceScan(references={}, scan_failed=str(exc))
 
     wanted = key.lower()
     matching = [e for e in entries if e.client.lower() == wanted]
-    return ReferenceScan({"work_entries": len(matching), "quarantined": quarantined})
+    return ReferenceScan({"work_entries": len(matching)})
 
 
 def entity_references(
@@ -159,7 +142,7 @@ def entity_references(
     )
 
     try:
-        entries, quarantined = _work_entries(data_dir)
+        entries = _work_entries(data_dir)
     except Exception as exc:  # noqa: BLE001
         logger.warning("config_delete_reference_scan_failed kind=entity error=%s", exc)
         return ReferenceScan(scan_failed=str(exc))
@@ -170,11 +153,8 @@ def entity_references(
         "work_entries": len(pinned),
         "default_entity": stored_default == key,
         "default_for_clients": fallback_clients,
-        "quarantined": quarantined,
     }
 
-    if quarantined:
-        return ReferenceScan(refs, blocked_reason=_quarantine_reason("entity", key, quarantined))
     if clients:
         return ReferenceScan(refs, blocked_reason=(
             f"entity '{key}' is used by {len(clients)} client(s): {', '.join(clients)}"

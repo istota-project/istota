@@ -9,7 +9,7 @@ reads back ``busy_timeout = 30000`` whether or not the pragma ran —
 fact so the matrix below is read for what it is.
 
 What discriminates, therefore, is the *matrix*, not any one row: ``foreign_keys``
-is off by default and on in five callers, ``synchronous`` is FULL by default and
+is off by default and on in seven callers, ``synchronous`` is FULL by default and
 NORMAL in exactly one, ``row_factory`` is absent in two, ``busy_timeout`` is
 5000 in one, and the commit/rollback pair differs three ways. A change to
 ``open_db``'s defaults moves some subset of those and cannot move all of them
@@ -519,7 +519,7 @@ class TestConnectReadOnly:
 #: ``name -> (opener, expected pragmas)``. The openers each build the caller's
 #: own helper against a scratch file. Read the *columns*, counted over all
 #: fourteen converted callers (the twelve below plus the two bare ones in
-#: ``TestTheBareCallers``): ``foreign_keys`` splits them 5/9, ``synchronous``
+#: ``TestTheBareCallers``): ``foreign_keys`` splits them 7/7, ``synchronous``
 #: 1/13, ``row_factory`` 12/2 and ``busy_timeout`` 12/2 — ``money.config_store``
 #: and ``money.cli`` are the two that wait five seconds. Nothing about
 #: ``open_db``'s defaults can move all four at once, which is what makes this a
@@ -543,8 +543,9 @@ _EXPECTED = {
     "location.db.with_geocode_conn": {
         "busy_timeout": 30000, "foreign_keys": 0, "synchronous": 2, "row_factory": True,
     },
+    # On since the invoice lines reference invoices and work entries.
     "money.db.get_db": {
-        "busy_timeout": 30000, "foreign_keys": 0, "synchronous": 2, "row_factory": True,
+        "busy_timeout": 30000, "foreign_keys": 1, "synchronous": 2, "row_factory": True,
     },
     # The one caller that waits five seconds rather than thirty, and the one the
     # spec's round-2 note singles out: raising it is a real change to what
@@ -682,7 +683,7 @@ class TestTheBareCallers:
         try:
             assert _pragmas(conn) == {
                 "busy_timeout": 5000,
-                "foreign_keys": 0,
+                "foreign_keys": 1,
                 "synchronous": 2,
                 "row_factory": True,
             }

@@ -104,6 +104,7 @@ class UserProfile:
     # Follow the user's GPS timezone on travel (ISSUE-096). Default OFF: this
     # rewrites a setting the user chose, so it is opted into, not inferred.
     timezone_follow_location: bool = False
+    show_nav_unread_badges: bool = False
     # Per-user Google Workspace scope selection: {service -> off|readonly|full},
     # clamped at connect time to the operator's [google_workspace] scopes
     # ceiling. Empty is "unset" and resolves to the whole ceiling, which is
@@ -120,7 +121,7 @@ _PROFILE_COLUMNS = (
     "routing", "default_destination", "default_room",
     "outbound_approval", "external_turn_display", "relay_delivery",
     "default_briefings", "briefing_email_html",
-    "timezone_follow_location",
+    "timezone_follow_location", "show_nav_unread_badges",
     "google_scopes",
 )
 
@@ -138,6 +139,7 @@ _BOOL_COLUMN_DEFAULTS = {
     "default_briefings": True,
     "briefing_email_html": True,
     "timezone_follow_location": False,
+    "show_nav_unread_badges": False,
 }
 _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
 _E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
@@ -154,7 +156,7 @@ SELF_EDITABLE_FIELDS = (
     "email_addresses", "trusted_email_senders", "quiet_email_senders",
     "disabled_skills", "disabled_modules",
     "default_destination", "default_room", "routing",
-    "briefing_email_html", "timezone_follow_location",
+    "briefing_email_html", "timezone_follow_location", "show_nav_unread_badges",
     "external_turn_display", "relay_delivery",
 )
 ADMIN_EDITABLE_FIELDS = (
@@ -457,6 +459,9 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         timezone_follow_location=_coerce_bool(
             _row_get(row, "timezone_follow_location"), False,
         ),
+        show_nav_unread_badges=_coerce_bool(
+            _row_get(row, "show_nav_unread_badges"), False,
+        ),
         google_scopes=_parse_json_dict(_row_get(row, "google_scopes")),
     )
 
@@ -646,6 +651,9 @@ def _seeded_profile(
         ),
         timezone_follow_location=_coerce_bool(
             _attr(seed_from, "timezone_follow_location"), False,
+        ),
+        show_nav_unread_badges=_coerce_bool(
+            _attr(seed_from, "show_nav_unread_badges"), False,
         ),
     )
 
@@ -1006,6 +1014,7 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         1 if profile.default_briefings else 0,
         1 if profile.briefing_email_html else 0,
         1 if profile.timezone_follow_location else 0,
+        1 if profile.show_nav_unread_badges else 0,
         json.dumps(dict(profile.google_scopes)),
     )
     cols_sql = ", ".join(insert_cols)
@@ -1085,6 +1094,9 @@ def import_from_user_configs(
             timezone_follow_location=_coerce_bool(
                 getattr(user_config, "timezone_follow_location", False), False,
             ),
+            show_nav_unread_badges=_coerce_bool(
+                getattr(user_config, "show_nav_unread_badges", False), False,
+            ),
         )
         try:
             _insert(db_path, profile, replace=False)
@@ -1125,6 +1137,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     )
     setattr(user_config, "default_briefings", bool(profile.default_briefings))
     setattr(user_config, "briefing_email_html", bool(profile.briefing_email_html))
+    setattr(user_config, "show_nav_unread_badges", bool(profile.show_nav_unread_badges))
     setattr(
         user_config, "timezone_follow_location",
         bool(profile.timezone_follow_location),

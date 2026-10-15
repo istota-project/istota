@@ -109,38 +109,38 @@ class TestClientReferences:
         assert scan.references["work_entries"] == 1
 
 
-class TestQuarantineIsNotZero:
-    """`_load_year` skips an unreadable row without raising, so it is invisible
-    to a count — and a guard built on that count fails open."""
+class TestBlockedWorkStoreIsNotZero:
+    """A year file the import refuses leaves the store unreadable, so its
+    entries are uncounted rather than zero: the strict guards refuse."""
 
-    def _quarantine(self, ctx):
+    def _block(self, ctx):
         work_dir = ctx.data_dir / "invoices" / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
         (work_dir / "2026.toml").write_text(
             "[[entries]]\n"
-            'date = 2026-03-01\nclient = "acme"\nservice = "dev"\nqty = 1\n\n'
+            'uid = "a"\ndate = 2026-03-01\nclient = "acme"\nservice = "dev"\nqty = 1\n\n'
             "[[entries]]\n"
-            'date = 2026-03-02\nclient = "acme"\n'
+            'uid = "b"\ndate = 2026-03-02\nclient = "acme"\n'
         )
 
     def test_service_scan_blocks(self, ctx):
-        self._quarantine(ctx)
+        self._block(ctx)
         scan = config_refs.service_references(ctx.db_path, ctx.data_dir, "consulting")
         assert not scan.allowed
-        assert scan.references["quarantined"] == ["2026.toml"]
+        assert "work log migration blocked" in scan.scan_failed
 
     def test_entity_scan_blocks(self, ctx):
         config_store.upsert_company(ctx.db_path, "main", name="Main")
         config_store.upsert_company(ctx.db_path, "spare", name="Spare")
-        self._quarantine(ctx)
+        self._block(ctx)
         scan = config_refs.entity_references(ctx.db_path, ctx.data_dir, "spare")
         assert not scan.allowed
 
     def test_client_scan_reports_but_allows(self, ctx):
-        self._quarantine(ctx)
+        self._block(ctx)
         scan = config_refs.client_references(ctx.db_path, ctx.data_dir, "acme")
-        assert scan.allowed
-        assert scan.references["quarantined"] == ["2026.toml"]
+        assert scan.scan_failed
+        assert scan.references == {}
 
 
 class TestScanFailure:

@@ -300,6 +300,29 @@ class TestCommandDispatch:
         assert "--force" in args
         assert "--delete-pdf" in args
 
+    def test_invoice_void_passes_reason_and_replacements(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "void", "INV-000001", "--reason", "split in two",
+              "--replaced-by", "INV-000002,INV-000003"])
+        args = captured[-1]
+        assert args[args.index("--reason") + 1] == "split in two"
+        assert args[args.index("--replaced-by") + 1] == "INV-000002,INV-000003"
+
+    def test_invoice_generate_passes_each_entry(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "generate", "--entry", "u1", "--entry", "u2", "--dry-run"])
+        assert captured[-1] == [
+            "invoice", "generate", "--entry", "u1", "--entry", "u2", "--dry-run",
+        ]
+
+    def test_invoice_list_active(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "list", "--active"])
+        assert captured[-1] == ["invoice", "list", "--active"]
+
     def test_invoice_unpaid(self, captured):
         from istota.skills.money import main
 
@@ -321,6 +344,26 @@ class TestCommandDispatch:
         assert "--date" in args and "2026-02-01" in args
         # --qty is parsed as float by argparse; str(4.0) -> "4.0"
         assert "--qty" in args and "4.0" in args
+
+    def test_work_add_passes_separate(self, captured):
+        from istota.skills.money import main
+
+        main(["work", "add", "--date", "2026-02-01", "--client", "acme",
+              "--service", "dev", "--separate"])
+        assert captured[-1][-1] == "--separate"
+
+        main(["work", "add", "--date", "2026-02-01", "--client", "acme", "--service", "dev"])
+        assert not {"--separate", "--no-separate"} & set(captured[-1])
+
+    def test_work_update_passes_separate_either_way(self, captured):
+        from istota.skills.money import main
+
+        main(["work", "update", "5", "--separate"])
+        assert captured[-1] == ["work", "update", "5", "--separate"]
+        main(["work", "update", "5", "--no-separate"])
+        assert captured[-1] == ["work", "update", "5", "--no-separate"]
+        main(["work", "update", "5", "--qty", "2"])
+        assert not {"--separate", "--no-separate"} & set(captured[-1])
 
     def test_unknown_command_exits(self):
         from istota.skills.money import main

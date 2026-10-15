@@ -1,6 +1,7 @@
 """Tests for the briefings module SQLite layer."""
 
 from datetime import datetime, timedelta, timezone
+import json
 import sqlite3
 
 import pytest
@@ -269,7 +270,7 @@ class TestDocumentStorage:
         bdb.init_db(path)
         bdb.init_db(path)
         with bdb.connect(path) as conn:
-            assert bdb.meta_get(conn, "version") == "2"
+            assert bdb.meta_get(conn, "version") == "3"
             archived = bdb.get_archived(conn, 1)
             assert (archived.subject, archived.body_md, archived.document) == (
                 "Original title", "# Original body", None,
@@ -427,3 +428,165 @@ class TestPreviewBlockIdentity:
             bdb.delete_block(conn, old)
         conn.commit()
         assert bdb.add_block(conn, briefing_name="M", title="New block") > old
+
+
+class TestArchiveReadState:
+    @pytest.mark.parametrize("interrupted", [False, True])
+    def test_v1_upgrade_backfills_only_historical_rows(self, tmp_path, monkeypatch, interrupted):
+        path = tmp_path / "v1.db"
+        with bdb.connect(path) as conn:
+            # Version 1's actual archive shape, with no read column or index.
+            conn.executescript("""
+                CREATE TABLE briefing_archive (
+                    id INTEGER PRIMARY KEY, briefing_name TEXT NOT NULL,
+                    subject TEXT, body_md TEXT NOT NULL, generated_at TEXT NOT NULL,
+                    task_id INTEGER, block_meta TEXT NOT NULL DEFAULT '{}',
+                    delivered_to TEXT NOT NULL DEFAULT '[]'
+                );
+                CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_meta VALUES ('version', '1');
+                INSERT INTO schema_meta VALUES ('migrated_from_components:Morning', '1');
+                INSERT INTO briefing_archive (briefing_name, subject, body_md, generated_at)
+                    VALUES ('Morning', 'Old edition', 'Body', '2026-01-01T00:00:00Z'),
+                           ('Evening', 'Older edition', 'Body', '2026-01-01T01:00:00Z');
+            """)
+        if interrupted:
+            def fail_timestamp():
+                raise RuntimeError("interrupted backfill")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(bdb, "_now_iso", fail_timestamp)
+                with pytest.raises(RuntimeError, match="interrupted backfill"):
+                    bdb.init_db(path)
+            with bdb.connect(path) as conn:
+                assert bdb.meta_get(conn, "version") == "1"
+                assert "read_at" not in {
+                    row["name"] for row in conn.execute("PRAGMA table_info(briefing_archive)")
+                }
+        bdb.init_db(path)
+        with bdb.connect(path) as conn:
+            rows = bdb.list_archive(conn)
+            assert len({row.read_at for row in rows}) == 1
+            assert rows[0].read_at is not None
+            assert datetime.fromisoformat(rows[0].read_at).tzinfo is not None
+            assert bdb.meta_get(conn, "version") == "3"
+            assert bdb.meta_get(conn, "migrated_from_components:Morning") == "1"
+            assert bdb.count_unread_archive(conn) == 0
+            new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+            conn.commit()
+        bdb.init_db(path)
+        with bdb.connect(path) as conn:
+            assert bdb.get_archived(conn, new_id).read_at is None
+            assert bdb.count_unread_archive(conn) == 1
+            assert conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'idx_archive_unread'"
+            ).fetchone()[0].endswith("WHERE read_at IS NULL")
+
+    def test_single_read_preserves_first_timestamp_and_missing_id(self, conn, monkeypatch):
+        first = bdb.insert_archive(conn, briefing_name="Morning", subject="One", body_md="Body")
+        second = bdb.insert_archive(conn, briefing_name="Morning", subject="Two", body_md="Body")
+        assert bdb.get_archived(conn, first).read_at is None
+        assert bdb.count_unread_archive(conn) == 2
+        monkeypatch.setattr(bdb, "_now_iso", lambda: "2026-10-01T10:00:00Z")
+        read = bdb.mark_archived_read(conn, first)
+        assert read.id == first
+        assert read.read_at == "2026-10-01T10:00:00Z"
+        monkeypatch.setattr(bdb, "_now_iso", lambda: "2026-10-02T10:00:00Z")
+        assert bdb.mark_archived_read(conn, first).read_at == read.read_at
+        assert bdb.mark_archived_read(conn, 999) is None
+        assert bdb.get_archived(conn, second).read_at is None
+        assert bdb.count_unread_archive(conn) == 1
+
+    def test_bulk_exact_scope_all_pages_and_later_arrivals(self, conn, monkeypatch):
+        assert bdb.mark_archive_as_read(conn) == 0
+        ids = [bdb.insert_archive(conn, briefing_name="Morning", subject=str(i), body_md="Body")
+               for i in range(125)]
+        for name in ("morning", "Morning extra", " Morning "):
+            bdb.insert_archive(conn, briefing_name=name, subject="Other", body_md="Body")
+        monkeypatch.setattr(bdb, "_now_iso", lambda: "2026-10-01T10:00:00Z")
+        first = bdb.mark_archived_read(conn, ids[0])
+        monkeypatch.setattr(bdb, "_now_iso", lambda: "2026-10-02T10:00:00Z")
+        assert bdb.mark_archive_as_read(conn, briefing_name="Morning") == 124
+        assert bdb.get_archived(conn, ids[0]).read_at == first.read_at
+        assert bdb.get_archived(conn, ids[-1]).read_at == "2026-10-02T10:00:00Z"
+        assert bdb.count_unread_archive(conn) == 3
+        assert bdb.mark_archive_as_read(conn, briefing_name="Morning") == 0
+        assert bdb.mark_archive_as_read(conn, briefing_name="Missing") == 0
+        assert bdb.mark_archive_as_read(conn) == 3
+        assert bdb.mark_archive_as_read(conn) == 0
+        conn.commit()
+        later = bdb.insert_archive(conn, briefing_name="Morning", subject="Later", body_md="Body")
+        assert bdb.get_archived(conn, later).read_at is None
+        assert bdb.count_unread_archive(conn) == 1
+
+    def test_reads_belong_to_callers_transaction(self, conn):
+        aid = bdb.insert_archive(conn, briefing_name="Morning", subject="One", body_md="Body")
+        conn.commit()
+        bdb.mark_archived_read(conn, aid)
+        conn.rollback()
+        assert bdb.get_archived(conn, aid).read_at is None
+        bdb.mark_archive_as_read(conn)
+        conn.rollback()
+        assert bdb.count_unread_archive(conn) == 1
+
+
+def test_v2_upgrade_preserves_document_and_backfills_reads(tmp_path):
+    path = tmp_path / "v2.db"
+    document = {"version": 1, "title": "Archived edition", "blocks": []}
+    with bdb.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE briefing_archive (
+                id INTEGER PRIMARY KEY, briefing_name TEXT NOT NULL,
+                subject TEXT, body_md TEXT NOT NULL, generated_at TEXT NOT NULL,
+                task_id INTEGER, block_meta TEXT NOT NULL DEFAULT '{}',
+                delivered_to TEXT NOT NULL DEFAULT '[]', document_json TEXT
+            );
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES ('version', '2');
+        """)
+        conn.execute(
+            "INSERT INTO briefing_archive (briefing_name, body_md, generated_at, document_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("Morning", "Archived body", "2026-01-01T00:00:00Z", json.dumps(document)),
+        )
+        conn.commit()
+    bdb.init_db(path)
+    with bdb.connect(path) as conn:
+        item = bdb.get_archived(conn, 1)
+        assert item.document == document
+        assert item.body_md == "Archived body"
+        assert item.read_at is not None
+        assert bdb.meta_get(conn, "version") == "3"
+        new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+        conn.commit()
+    bdb.init_db(path)
+    with bdb.connect(path) as conn:
+        assert bdb.get_archived(conn, new_id).read_at is None
+        assert bdb.count_unread_archive(conn) == 1
+
+
+@pytest.mark.parametrize("retire", ["delete", "prune"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_archive_identity_survives_retirement(conn, retire, legacy):
+    if legacy:
+        conn.execute(
+            "INSERT INTO briefing_archive (id, briefing_name, body_md, generated_at) "
+            "VALUES (41, 'Morning', 'Old body', '2000-01-01T00:00:00Z')"
+        )
+        old_id = 41
+    else:
+        old_id = bdb.insert_archive(
+            conn, briefing_name="Morning", subject="Old", body_md="Old body",
+            generated_at="2000-01-01T00:00:00Z",
+        )
+    conn.commit()
+    if retire == "delete":
+        assert bdb.delete_archived(conn, old_id)
+    else:
+        assert bdb.prune_archive(conn, briefing_name="Morning", retention_days=1) == 1
+    conn.commit()
+    new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+    conn.commit()
+    assert new_id > old_id
+    assert bdb.mark_archived_read(conn, old_id) is None
+    assert bdb.get_archived(conn, new_id).read_at is None

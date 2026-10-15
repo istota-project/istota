@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
+  import { onMount, tick } from 'svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
     getBriefingTargets,
     type BriefingTarget,
     getBriefingArchiveItem,
+    markBriefingArchiveRead,
     getBriefings,
     getBriefingConfig,
     type BriefingArchiveItem,
@@ -17,7 +20,7 @@
   } from '$lib/stores/briefings';
   import GroupBriefings from '$lib/components/briefings/GroupBriefings.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
-  import { EmptyState, PageLoading } from '$lib/components/ui';
+  import { Button, EmptyState, PageLoading } from '$lib/components/ui';
 
   let groupTarget = $state<BriefingTarget | null>(null);
   $effect(() => {
@@ -39,6 +42,74 @@
   let editableBlockIds = $state<number[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let readErrorId = $state<number | null>(null);
+  let visible = $state(false);
+  let mounted = false;
+  const pendingReads = new Set<number>();
+  const confirmedReads = new Map<number, string>();
+
+  onMount(() => {
+    mounted = true;
+    const updateVisibility = () => {
+      visible = document.visibilityState === 'visible';
+    };
+    updateVisibility();
+    document.addEventListener('visibilitychange', updateVisibility);
+    return () => {
+      mounted = false;
+      document.removeEventListener('visibilitychange', updateVisibility);
+    };
+  });
+
+  async function acknowledgeRead(id: number, stillPresented = () => true) {
+    await tick();
+    if (
+      !mounted ||
+      $selectedBriefingGroup ||
+      !stillPresented() ||
+      document.visibilityState !== 'visible' ||
+      $selectedBriefingId !== id ||
+      current?.id !== id ||
+      loading ||
+      error ||
+      current.read_at ||
+      pendingReads.has(id)
+    )
+      return;
+
+    const confirmed = confirmedReads.get(id);
+    if (confirmed) {
+      current = { ...current, read_at: confirmed };
+      return;
+    }
+    pendingReads.add(id);
+    readErrorId = null;
+    try {
+      const result = await markBriefingArchiveRead(id);
+      invalidateNavUnreadCounts();
+      confirmedReads.set(id, result.read_at);
+      if (mounted && $selectedBriefingId === id && current?.id === id) {
+        current = { ...current, read_at: result.read_at };
+        readErrorId = null;
+      }
+    } catch {
+      if (mounted && $selectedBriefingId === id && current?.id === id) readErrorId = id;
+    } finally {
+      pendingReads.delete(id);
+    }
+  }
+
+  // Only a new presentation schedules an attempt. Read errors and pending
+  // requests are deliberately outside the effect's dependencies.
+  $effect(() => {
+    const id = $selectedBriefingGroup ? null : $selectedBriefingId;
+    if (!visible || id == null || current?.id !== id || loading || error) return;
+    let active = true;
+    void acknowledgeRead(id, () => active);
+    return () => {
+      active = false;
+    };
+  });
 
   $effect(() => {
     const name = current?.briefing_name;
@@ -76,6 +147,7 @@
   // Fetch the full briefing (with body) whenever the selection changes.
   $effect(() => {
     const id = $selectedBriefingGroup ? null : $selectedBriefingId;
+    readErrorId = null;
     if (id == null) {
       current = null;
       loading = false;
@@ -121,6 +193,12 @@
     <p class="center-msg error">{error}</p>
   {:else if current}
     <p class="caption">Just me</p>
+    {#if readErrorId === current.id && current.id === $selectedBriefingId && !loading}
+      <div class="banner error" role="alert">
+        Could not mark this briefing as read.
+        <Button size="sm" onclick={() => acknowledgeRead(current!.id)}>Retry</Button>
+      </div>
+    {/if}
     {#key current.id}<BriefingEdition
         edition={current}
         {editableBlockIds}

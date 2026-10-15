@@ -1,18 +1,21 @@
-"""SQLite persistence for dedup tracking and schedule state.
+"""SQLite persistence for money: dedup tracking, schedule state, work and invoices.
 
-Single-user per instance — no user_id parameter in public API.
-Work entries are stored in plaintext TOML files (see work.py).
+Single-user per instance — no user_id parameter in public API. Work entries,
+invoices and invoice lines are read and written through ``work.py``.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from istota.lib import sqlite_util
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA = """\
@@ -86,6 +89,54 @@ CREATE TABLE IF NOT EXISTS kv_store (
     value TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS work_entries (
+    uid TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    client TEXT NOT NULL,
+    service TEXT NOT NULL,
+    qty REAL,
+    amount REAL,
+    discount REAL NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
+    entity TEXT NOT NULL DEFAULT '',
+    separate INTEGER NOT NULL DEFAULT 0,
+    extra TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_entries_date ON work_entries(date);
+
+CREATE TABLE IF NOT EXISTS invoices (
+    number TEXT PRIMARY KEY,
+    client TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    group_name TEXT NOT NULL DEFAULT '',
+    issue_date TEXT NOT NULL,
+    total REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open','paid','voided')),
+    paid_date TEXT,
+    voided_at TEXT,
+    was_paid INTEGER NOT NULL DEFAULT 0,
+    void_reason TEXT NOT NULL DEFAULT '',
+    replaced_by TEXT NOT NULL DEFAULT '[]',
+    pdf_path TEXT NOT NULL DEFAULT '',
+    manual INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    -- {income account: amount} at issue, summing to total; payment posts this.
+    income_lines TEXT NOT NULL DEFAULT '{}'
+);
+
+-- An entry is invoiced while it has an active line. The partial unique index
+-- makes billing one entry twice a constraint error rather than a code path.
+CREATE TABLE IF NOT EXISTS invoice_lines (
+    invoice_number TEXT NOT NULL REFERENCES invoices(number),
+    entry_uid TEXT NOT NULL REFERENCES work_entries(uid),
+    active INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (invoice_number, entry_uid)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_lines_one_active
+    ON invoice_lines(entry_uid) WHERE active = 1;
 """
 
 
@@ -95,10 +146,11 @@ def get_db(db_path: Path | str):
 
     journal_mode (WAL) is set once by ``init_db`` and persists in the SQLite
     file header — not re-issued here. 30s busy handler absorbs any residual
-    contention instead of raising SQLITE_BUSY.
+    contention instead of raising SQLITE_BUSY. Foreign keys are on for the
+    invoice lines' references to invoices and work entries.
     """
     with sqlite_util.open_db(
-        db_path, foreign_keys=False, commit=True, rollback_on_error=True,
+        db_path, foreign_keys=True, commit=True, rollback_on_error=True,
     ) as conn:
         yield conn
 
@@ -112,6 +164,7 @@ def init_db(db_path: Path | str) -> None:
         # reader/writer concurrency. Issued unconditionally so a relocated
         # DELETE-mode DB converts on first touch; no-op once WAL.
         conn.execute("PRAGMA journal_mode=WAL")
+        _drop_empty_legacy_work_entries(conn)
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
         sqlite_util.add_columns(
@@ -120,10 +173,54 @@ def init_db(db_path: Path | str) -> None:
              "income_account": "TEXT NOT NULL DEFAULT ''"},
             commit=True,
         )
+        sqlite_util.add_columns(
+            conn, "invoices", {"income_lines": "TEXT NOT NULL DEFAULT '{}'"}, commit=True,
+        )
         # Portfolio schema family (runtime import: portfolio pulls in the
         # importers package, which must not load at db-module import time).
         from istota.money import portfolio
         portfolio.ensure_schema(conn)
+
+
+def legacy_work_entries_rows(conn: sqlite3.Connection) -> int | None:
+    """Rows in a `work_entries` table from the pre-TOML schema, or None.
+
+    That schema keyed entries by an integer id with an `invoice_number` column
+    and no `uid`. ``CREATE TABLE IF NOT EXISTS`` leaves it standing, and every
+    insert into the current table then fails on the missing column.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(work_entries)")}
+    if not columns or "uid" in columns:
+        return None
+    return conn.execute("SELECT COUNT(*) FROM work_entries").fetchone()[0]
+
+
+def _drop_empty_legacy_work_entries(conn: sqlite3.Connection) -> None:
+    """Replace an empty pre-TOML `work_entries` so SCHEMA can create the current one.
+
+    A table with rows is left alone; the work log import refuses over it.
+    Foreign keys go off first: `invoice_lines`, created over the old table by an
+    earlier run of SCHEMA, names a `uid` it lacks, and the implicit delete in
+    ``DROP TABLE`` would fail on that mismatch. The shape and count are read
+    again under ``BEGIN IMMEDIATE`` so a concurrent ``init_db`` that already
+    replaced the table is not dropped in turn.
+    """
+    if legacy_work_entries_rows(conn) != 0:
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if legacy_work_entries_rows(conn) == 0:
+            conn.execute("DROP INDEX IF EXISTS idx_work_uninvoiced")
+            conn.execute("DROP INDEX IF EXISTS idx_work_by_invoice")
+            conn.execute("DROP TABLE work_entries")
+            logger.info("money_db_dropped_empty_legacy_work_entries")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _legacy_monarch_index(conn: sqlite3.Connection) -> bool:

@@ -30,6 +30,8 @@ export interface WorkEntryFormState {
   discount: number;
   description: string;
   entity: string;
+  /** Left out when the form has no control for it, so a save never clears it. */
+  separate?: boolean;
 }
 
 /**
@@ -56,6 +58,7 @@ export function buildWorkEntryPayload(state: WorkEntryFormState): WorkEntrySaveP
     description: state.description,
     entity: state.entity,
   };
+  if (state.separate !== undefined) payload.separate = state.separate;
 
   // Adding has no stored value to protect; a changed service invalidates the
   // one that's there. Either way both fields are sent explicitly.

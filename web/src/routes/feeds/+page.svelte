@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { PageLoading } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
@@ -182,7 +183,9 @@
       clearTimeout(flushMaxTimer);
       flushMaxTimer = null;
     }
-    updateEntriesStatus(ids, 'read').catch(() => {});
+    updateEntriesStatus(ids, 'read')
+      .then(invalidateNavUnreadCounts)
+      .catch(() => {});
   }
 
   function handleViewed(id: number) {
@@ -387,6 +390,7 @@
         : { before_id: maxId };
       try {
         await markAsRead(scope, opts);
+        invalidateNavUnreadCounts();
         feedsRefreshNonce.update((n) => n + 1);
       } catch {
         // non-fatal

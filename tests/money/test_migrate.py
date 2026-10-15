@@ -517,7 +517,9 @@ class TestBackfillWorkEntryIds:
         ctx = self._ctx(tmp_path)
         year = self._write_legacy_entry(ctx)
         _migrate.ensure_initialised(ctx)
-        assert "uid = " in year.read_text()
+        # Stamped, imported, then renamed aside by the import.
+        assert not year.exists()
+        assert "uid = " in year.with_name(year.name + ".migrated").read_text()
 
 
 MONARCH_TOML_BAD_ACCOUNT = """\

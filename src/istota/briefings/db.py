@@ -22,7 +22,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal
 
 from istota.lib import sqlite_util
 from istota.briefings.models import (
@@ -42,7 +42,7 @@ from istota.lib.timestamps import iso_now as _now_iso
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_SQL = """
@@ -79,10 +79,13 @@ CREATE TABLE IF NOT EXISTS briefing_archive (
     task_id INTEGER,
     block_meta TEXT NOT NULL DEFAULT '{}',
     delivered_to TEXT NOT NULL DEFAULT '[]',
+    read_at TEXT,
     document_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_archive_name_time
     ON briefing_archive(briefing_name, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_archive_unread
+    ON briefing_archive(id) WHERE read_at IS NULL;
 
 -- Phase 2 substrate (created now, UNUSED until continuous ingestion).
 CREATE TABLE IF NOT EXISTS briefing_items (
@@ -117,7 +120,15 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE briefing_archive ADD COLUMN document_json TEXT")
 
 
-_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _migrate_v2)]
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE briefing_archive ADD COLUMN read_at TEXT")
+    conn.execute("UPDATE briefing_archive SET read_at = ?", (_now_iso(),))
+
+
+_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
+    (2, _migrate_v2),
+    (3, _migrate_v2_to_v3),
+]
 
 
 def init_db(db_path: Path) -> None:
@@ -129,6 +140,8 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
+        # Keep the column, historical backfill and version stamp atomic.
+        conn.execute("BEGIN IMMEDIATE")
         current = _read_schema_version(conn)
         for target_version, migrate in _MIGRATIONS:
             if current < target_version:
@@ -137,6 +150,10 @@ def init_db(db_path: Path) -> None:
                     "briefings_db_migrated from=v%s to=v%s", current, target_version,
                 )
                 current = target_version
+                conn.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'version'",
+                    (str(current),),
+                )
         conn.executescript(SCHEMA_SQL)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
@@ -191,14 +208,18 @@ def _next_block_position(conn: sqlite3.Connection, briefing_name: str) -> int:
     return int(row["p"])
 
 
-def _block_id_high_water(conn: sqlite3.Connection) -> int:
+def _id_high_water(conn: sqlite3.Connection, kind: Literal["block", "archive"]) -> int:
+    table, key = {
+        "block": ("briefing_blocks", "block_id_high_water"),
+        "archive": ("briefing_archive", "archive_id_high_water"),
+    }[kind]
     # Reserve under the write lock; SQLite's implicit rowids reuse deleted IDs.
     created = conn.execute(
-        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('block_id_high_water', '0')",
+        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, '0')", (key,),
     ).rowcount
-    highest = int(meta_get(conn, "block_id_high_water") or "0")
-    highest = max(highest, conn.execute("SELECT COALESCE(MAX(id), 0) FROM briefing_blocks").fetchone()[0])
-    if created:
+    highest = int(meta_get(conn, key) or "0")
+    highest = max(highest, conn.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0])
+    if created and kind == "block":
         # Seed older DBs from snapshots too, since their live blocks may be gone.
         for row in conn.execute("SELECT document_json FROM briefing_archive WHERE document_json IS NOT NULL"):
             try:
@@ -207,7 +228,7 @@ def _block_id_high_water(conn: sqlite3.Connection) -> int:
                 continue
             for block in document["blocks"]:
                 highest = max(highest, block["block_id"])
-    meta_set(conn, "block_id_high_water", str(highest))
+    meta_set(conn, key, str(highest))
     return highest
 
 
@@ -225,7 +246,7 @@ def add_block(
     options = validate_block_options(options if options is not None else {})
     if position is None:
         position = _next_block_position(conn, briefing_name)
-    block_id = _block_id_high_water(conn) + 1
+    block_id = _id_high_water(conn, "block") + 1
     meta_set(conn, "block_id_high_water", str(block_id))
     now = _now_iso()
     cur = conn.execute(
@@ -283,7 +304,7 @@ def update_block(
 
 def delete_block(conn: sqlite3.Connection, block_id: int) -> None:
     """Delete a block (its sources cascade)."""
-    _block_id_high_water(conn)
+    _id_high_water(conn, "block")
     conn.execute("DELETE FROM briefing_blocks WHERE id = ?", (block_id,))
 
 
@@ -557,16 +578,18 @@ def insert_archive(
         document = validate_briefing_document(document)
         if subject != document["title"] or body_md != document_to_markdown(document):
             raise ValueError("briefing_document_archive_mismatch")
+    archive_id = _id_high_water(conn, "archive") + 1
+    meta_set(conn, "archive_id_high_water", str(archive_id))
     cur = conn.execute(
         """
         INSERT INTO briefing_archive(
-            briefing_name, subject, body_md, generated_at, task_id,
+            id, briefing_name, subject, body_md, generated_at, task_id,
             block_meta, delivered_to, document_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
-            briefing_name, subject, body_md, generated_at or _now_iso(),
+            archive_id, briefing_name, subject, body_md, generated_at or _now_iso(),
             task_id, json.dumps(block_meta or {}),
             json.dumps(delivered_to or []),
             json.dumps(document) if document is not None else None,
@@ -585,6 +608,7 @@ def get_archived(conn: sqlite3.Connection, archive_id: int) -> ArchivedBriefing 
 def delete_archived(conn: sqlite3.Connection, archive_id: int) -> bool:
     """Delete a single archived briefing by id. Returns True if a row was
     removed (False when the id doesn't exist)."""
+    _id_high_water(conn, "archive")
     cur = conn.execute("DELETE FROM briefing_archive WHERE id = ?", (archive_id,))
     return bool(cur.rowcount)
 
@@ -637,6 +661,37 @@ def count_archive(
     return int(row["c"])
 
 
+def count_unread_archive(conn: sqlite3.Connection) -> int:
+    """Count unread rendered entries across the complete archive."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM briefing_archive WHERE read_at IS NULL",
+    ).fetchone()
+    return int(row["c"])
+
+
+def mark_archived_read(
+    conn: sqlite3.Connection, archive_id: int,
+) -> ArchivedBriefing | None:
+    """Record the first read time in the caller's transaction."""
+    conn.execute(
+        "UPDATE briefing_archive SET read_at = COALESCE(read_at, ?) WHERE id = ?",
+        (_now_iso(), archive_id),
+    )
+    return get_archived(conn, archive_id)
+
+
+def mark_archive_as_read(
+    conn: sqlite3.Connection, *, briefing_name: str | None = None,
+) -> int:
+    """Mark currently unread rows in an exact name scope, or the whole archive."""
+    sql = "UPDATE briefing_archive SET read_at = ? WHERE read_at IS NULL"
+    params: list = [_now_iso()]
+    if briefing_name is not None:
+        sql += " AND briefing_name = ?"
+        params.append(briefing_name)
+    return conn.execute(sql, params).rowcount
+
+
 def prune_archive(
     conn: sqlite3.Connection,
     *,
@@ -653,6 +708,7 @@ def prune_archive(
     now = now or datetime.now(timezone.utc)
     cutoff = now.timestamp() - retention_days * 86400
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+    _id_high_water(conn, "archive")
     cur = conn.execute(
         "DELETE FROM briefing_archive "
         "WHERE briefing_name = ? AND generated_at < ?",
@@ -726,5 +782,6 @@ def _row_to_archived(row: sqlite3.Row) -> ArchivedBriefing:
         task_id=row["task_id"],
         block_meta=parse_json_dict(row["block_meta"]),
         delivered_to=parse_json_list(row["delivered_to"]),
+        read_at=row["read_at"],
         document=document,
     )

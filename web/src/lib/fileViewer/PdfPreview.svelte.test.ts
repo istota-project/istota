@@ -66,4 +66,16 @@ describe('PDF lifecycle', () => {
     render(PdfPreview, { url: '/doc.pdf' });
     expect(await screen.findByText(message)).toBeTruthy();
   });
+  it.each([
+    ['ResponseException', 404, 404],
+    ['InvalidPDFException', undefined, null],
+  ])('reports a %s load failure with its HTTP status', async (name, status, expected) => {
+    load.mockReturnValue({
+      promise: Promise.reject(Object.assign(new Error('internal'), { name, status })),
+      destroy,
+    } as never);
+    const onLoadError = vi.fn();
+    render(PdfPreview, { url: '/doc.pdf', onLoadError });
+    await waitFor(() => expect(onLoadError).toHaveBeenCalledExactlyOnceWith(expected));
+  });
 });

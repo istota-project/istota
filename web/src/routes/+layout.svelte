@@ -10,6 +10,7 @@
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
   import {
+    CountPill,
     NotificationBell,
     SearchButton,
     SearchDialog,
@@ -18,6 +19,7 @@
   } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
+  import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
@@ -51,6 +53,30 @@
   // to reach, and nothing that is painted: a cached user renders exactly as a
   // live one does, because it is the same record.
   let live = $state(false);
+
+  const chatCount = $derived.by(() =>
+    user?.show_nav_unread_badges ? $navUnreadCounts.chat : null,
+  );
+  const briefingsCount = $derived.by(() =>
+    user?.show_nav_unread_badges ? $navUnreadCounts.briefings : null,
+  );
+  const feedsCount = $derived.by(() =>
+    user?.show_nav_unread_badges ? $navUnreadCounts.feeds : null,
+  );
+  const chatLabel = $derived(unreadLabel('Chat', chatCount, 'message', 'messages'));
+  const briefingsLabel = $derived(
+    unreadLabel('Briefings', briefingsCount, 'briefing', 'briefings'),
+  );
+  const feedsLabel = $derived(unreadLabel('Feeds', feedsCount, 'entry', 'entries'));
+
+  function unreadLabel(
+    section: string,
+    count: number | null,
+    singular: string,
+    plural: string,
+  ): string {
+    return count ? `${section}, ${count} unread ${count === 1 ? singular : plural}` : section;
+  }
 
   // A notice comments on the surface that raised it, so leaving that surface
   // retires it: an error is pinned until acknowledged, and without this one
@@ -234,6 +260,8 @@
    * supplied, and only the caller knows which of the two its own screen needs.
    */
   function expireSession() {
+    loadGeneration += 1;
+    stopNavUnreadPoll();
     // The session is over, so the pointer that says whose cache to read before
     // the next one resolves goes with it (ISSUE-202). Whoever signs in next
     // writes their own on the first config read; until then a cold launch with
@@ -274,6 +302,8 @@
       // authenticated endpoint fails, backs off, and is then indistinguishable
       // from a real outage at the next login.
       startNotificationPoll();
+      if (fresh.show_nav_unread_badges === true) startNavUnreadPoll(fresh.username);
+      else stopNavUnreadPoll();
       return true;
     } catch (e) {
       if (e instanceof AuthError) {
@@ -387,7 +417,11 @@
   // a *synchronous* `onMount` callback — returning one from the async hook above
   // is silently dropped, which would leave the poll running against a torn-down
   // layout.
-  onMount(() => () => stopNotificationPoll());
+  onMount(() => () => {
+    loadGeneration += 1;
+    stopNotificationPoll();
+    stopNavUnreadPoll();
+  });
 
   function isActive(path: string): boolean {
     const current = page.url.pathname;
@@ -423,7 +457,14 @@
       Istota
     </a>
     <div class="nav-links">
-      <a href="{base}/chat" class:active={isActive('/chat')}>Chat</a>
+      <a
+        href="{base}/chat"
+        class:active={isActive('/chat')}
+        aria-label={chatLabel}
+        title={chatLabel}
+      >
+        Chat<CountPill count={chatCount ?? 0} title={chatLabel} />
+      </a>
       {#if user.features.workspace}
         <a href="{base}/files" class:active={isActive('/files')}>Files</a>
       {/if}
@@ -431,10 +472,24 @@
         <a href="{base}/groups/" class:active={isActive('/groups')}>Groups</a>
       {/if}
       {#if user.features.briefings}
-        <a href="{base}/briefings" class:active={isActive('/briefings')}>Briefings</a>
+        <a
+          href="{base}/briefings"
+          class:active={isActive('/briefings')}
+          aria-label={briefingsLabel}
+          title={briefingsLabel}
+        >
+          Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} />
+        </a>
       {/if}
       {#if user.features.feeds}
-        <a href="{base}/feeds" class:active={isActive('/feeds')}>Feeds</a>
+        <a
+          href="{base}/feeds"
+          class:active={isActive('/feeds')}
+          aria-label={feedsLabel}
+          title={feedsLabel}
+        >
+          Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} />
+        </a>
       {/if}
       {#if user.features.location}
         <a href="{base}/location" class:active={isActive('/location')}>Location</a>
@@ -498,7 +553,9 @@
                   href="{base}/chat"
                   class="app-nav-menu-link"
                   class:active={isActive('/chat')}
-                  {...props}>Chat</a
+                  {...props}
+                  aria-label={chatLabel}
+                  title={chatLabel}>Chat<CountPill count={chatCount ?? 0} title={chatLabel} /></a
                 >
               {/snippet}
             </DropdownMenu.Item>
@@ -533,7 +590,10 @@
                     href="{base}/briefings"
                     class="app-nav-menu-link"
                     class:active={isActive('/briefings')}
-                    {...props}>Briefings</a
+                    {...props}
+                    aria-label={briefingsLabel}
+                    title={briefingsLabel}
+                    >Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} /></a
                   >
                 {/snippet}
               </DropdownMenu.Item>
@@ -545,7 +605,10 @@
                     href="{base}/feeds"
                     class="app-nav-menu-link"
                     class:active={isActive('/feeds')}
-                    {...props}>Feeds</a
+                    {...props}
+                    aria-label={feedsLabel}
+                    title={feedsLabel}
+                    >Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} /></a
                   >
                 {/snippet}
               </DropdownMenu.Item>
@@ -718,7 +781,9 @@
   }
 
   :global(.app-nav-menu-link) {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
     font-size: var(--text-base);
     color: var(--text-muted);
