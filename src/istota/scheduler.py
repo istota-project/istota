@@ -4988,6 +4988,7 @@ def process_one_task(
             email_result = result
         email_ok = asyncio.run(post_result_to_email(
             config, task, email_result, subject=email_subject,
+            briefing_document=briefing_document,
         ))
         if not email_ok:
             with db.get_db(config.db_path) as conn:
@@ -5407,6 +5408,7 @@ async def post_result_to_talk(
 
 async def post_result_to_email(
     config: Config, task: db.Task, message: str, *, subject: str | None = None,
+    briefing_document: dict | None = None,
 ) -> bool:
     """Send a task result as an email reply / fresh email. Returns True on success.
 
@@ -5422,7 +5424,9 @@ async def post_result_to_email(
     flag, which the ``Transport.deliver`` protocol (``int | None``) discards for
     a surface with no message-id concept."""
     from .transport.email import deliver_email_result
-    return await deliver_email_result(config, task, message, subject=subject)
+    return await deliver_email_result(
+        config, task, message, subject=subject, briefing_document=briefing_document,
+    )
 
 
 def _deferred_briefing_placeholder(briefing_name: str) -> str:

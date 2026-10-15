@@ -633,3 +633,39 @@ class TestRenderBriefingHtml:
             lambda lines: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         assert mod.render_briefing_html("some text") == ""
+
+
+class TestDocumentEmailRendering:
+    def test_plain_link_destinations_survive_formatting(self):
+        url = "https://example.com/a_b_c?first=one_two&second=three_four#part_five"
+        md = f"* **[Story]({url})**\n+ [{url}]({url})\n- _Last item_"
+        assert strip_markdown(md, preserve_links=True) == (
+            f"- Story ({url})\n- {url}\n- Last item"
+        )
+        # The opt-in does not change the existing body-only conversion.
+        assert strip_markdown("[Story](https://example.com/story)") == "Story"
+
+    def test_document_titles_are_literal_in_both_formats(self):
+        document = {
+            "version": 1, "title": "Edition", "blocks": [{
+                "block_id": 1, "title": '<img src="x"> & **literal**',
+                "kind": "future-kind", "body_md": "**Full** fallback",
+                "presentation": {"width": "full"}, "source_status": "partial",
+            }],
+        }
+        rich = briefing_mod.render_briefing_document_html(document)
+        plain = briefing_mod.render_briefing_document_plain(document)
+        assert '<h2>&lt;img src=&quot;x&quot;&gt; &amp; **literal**</h2>' in rich
+        assert "<p><strong>Full</strong> fallback</p>" in rich
+        assert "Some sources unavailable." in rich
+        assert plain == '<img src="x"> & **literal**\nSome sources unavailable.\n\nFull fallback'
+        assert "style=" not in rich and "<style" not in rich and "<head" not in rich
+
+    def test_document_html_failure_returns_empty(self, monkeypatch):
+        def fail(lines):
+            raise RuntimeError("render failed")
+
+        monkeypatch.setattr(briefing_mod, "_render_blocks", fail)
+        document = {"blocks": [{"title": "Notes", "body_md": "Complete body",
+                                "source_status": "complete"}]}
+        assert briefing_mod.render_briefing_document_html(document) == ""

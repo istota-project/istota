@@ -739,6 +739,7 @@ class TestGenerationHandoff:
         email.assert_awaited_once()
         assert email.call_args.args[2] == body
         assert email.call_args.kwargs["subject"] == document["title"]
+        assert email.call_args.kwargs["briefing_document"] == document
         ntfy.assert_awaited_once()
         assert ntfy.call_args.args[1] == body
         assert ntfy.call_args.kwargs["options"].title == document["title"]

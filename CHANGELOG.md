@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Briefing emails keep every section in order, with a heading in HTML and usable article links in plain text. Switching off HTML or a rendering failure still delivers the complete plain edition.
 - The Ansible management role takes the application settings only as `istota_plan`, with credentials in `istota_plan_secrets`. `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets` are gone, and so is the generated config reference in `defaults/main.yml`; set the plan from `istota snapshot --format json`. `istota migrate role-vars` now writes the old per-user credentials as `istota_plan_secrets` and leaves the plan to the VM's snapshot.
 - `[security] vault_fetch_limit_per_task` now counts distinct credentials rather than reads. A credential already served in a task attempt can be read again at no cost, so a WordPress session no longer runs out after ten calls against one site. A name not yet served, whether absent or refused, is still charged every time, and setting the limit to `1` limits a task to one credential.
 

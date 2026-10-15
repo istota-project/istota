@@ -15,7 +15,7 @@ orchestration in ``deliver_email_result``.
 """
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1197,3 +1197,113 @@ class TestDeliveryLegApprovalGate:
         draft = _drafts(db_path)[0]
         assert draft["room_token"] == task.conversation_token
         assert draft["origin_target"] == f"room:{task.conversation_token}"
+
+
+@pytest.fixture
+def edition_document():
+    url = "https://example.com/a_b_c?first=one_two&second=three_four#part_five"
+    return {
+        "version": 1, "title": "Saved edition", "blocks": [
+            {"block_id": 9, "title": '<img src="x"> & **Headlines**',
+             "kind": "markdown", "body_md": (
+                 f"**[Story]({url})**\n\n"
+                 "Second paragraph\n\nThird paragraph\n\nFourth paragraph\n\n"
+                 + "\n".join(f"- Item {i}" for i in range(1, 8))
+                 + '\n\n<script>unsafe</script> [bad](javascript:bad) '
+                 + '[quote](https://example.com/a"onmouseover=bad)'
+             ), "presentation": {"width": "wide"}, "source_status": "partial"},
+            {"block_id": 3, "title": "Calendar", "kind": "markdown",
+             "body_md": f"Final block\n\n[{url}]({url})",
+             "presentation": {"width": "auto"}, "source_status": "complete"},
+        ],
+    }
+
+
+class TestBriefingDocumentEmail:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["raw", "structured", "deferred", "document_title"])
+    async def test_document_reaches_real_mime(self, db_path, tmp_path, edition_document, path):
+        from istota.briefings.document import document_to_markdown
+        from istota.scheduler import post_result_to_email
+
+        config = _config(db_path, tmp_path)
+        task = _make_task(db_path, source_type="briefing")
+        body = document_to_markdown(edition_document)
+        message = body if path == "raw" else _structured("Unrelated body subject", body)
+        if path == "deferred":
+            _write_deferred_output(tmp_path, task, subject="Unrelated body subject", body=body)
+        smtp = MagicMock()
+        with patch("smtplib.SMTP", return_value=smtp), patch("istota.skills.email._save_to_sent"):
+            assert await post_result_to_email(
+                config, task, message,
+                subject=None if path == "document_title" else "Saved edition",
+                briefing_document=edition_document,
+            )
+        smtp.send_message.assert_called_once()
+        msg = smtp.send_message.call_args.args[0]
+        assert msg.get_content_type() == "multipart/alternative"
+        parts = list(msg.iter_parts())
+        assert [part.get_content_type() for part in parts] == ["text/plain", "text/html"]
+        plain, rich = [part.get_content() for part in parts]
+        assert str(msg["Subject"]) == "Saved edition"
+        assert '<h2>&lt;img src=&quot;x&quot;&gt; &amp; **Headlines**</h2>' in rich
+        assert rich.index("Headlines") < rich.index("<h2>Calendar</h2>")
+        assert plain.index("Headlines") < plain.index("Calendar")
+        for content in (plain, rich):
+            assert "Some sources unavailable." in content
+            assert "Fourth paragraph" in content and "Item 7" in content and "Final block" in content
+        url = "https://example.com/a_b_c?first=one_two&second=three_four#part_five"
+        assert f"Story ({url})" in plain
+        assert plain.count(url) == 2  # A URL used as its own label appears once.
+        assert f'<a href="{url.replace("&", "&amp;")}">Story</a>' in rich
+        assert "<script>" not in rich and "<img " not in rich and "javascript:" not in rich
+        assert '"onmouseover' not in rich
+        assert "style=" not in rich and "<style" not in rich and "<head" not in rich
+        assert "<details" not in rich and "hidden" not in rich
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["opt_out", "empty_render", "render_failure"])
+    async def test_plain_mime_keeps_complete_document(
+        self, db_path, tmp_path, edition_document, mode, monkeypatch,
+    ):
+        from istota.briefings.document import document_to_markdown
+
+        config = _config(db_path, tmp_path)
+        config.users["alice"].briefing_email_html = mode != "opt_out"
+        if mode == "empty_render":
+            monkeypatch.setattr("istota.skills.briefing.render_briefing_document_html", lambda document: "")
+        task = _make_task(db_path, source_type="briefing")
+        smtp = MagicMock()
+        with (
+            patch("smtplib.SMTP", return_value=smtp),
+            patch("istota.skills.email._save_to_sent"),
+            patch("istota.skills.briefing._render_blocks", side_effect=RuntimeError("render failed")) as render_blocks,
+        ):
+            assert await deliver_email_result(
+                config, task, document_to_markdown(edition_document),
+                subject="Saved edition", briefing_document=edition_document,
+            )
+        if mode == "opt_out":
+            render_blocks.assert_not_called()
+        msg = smtp.send_message.call_args.args[0]
+        assert msg.get_content_type() == "text/plain" and not msg.is_multipart()
+        plain = msg.get_content()
+        assert "Fourth paragraph" in plain and "Item 7" in plain and "Final block" in plain
+        assert plain.index("Headlines") < plain.index("Calendar")
+        assert "Some sources unavailable." in plain
+        assert "Story (https://example.com/a_b_c?first=one_two&second=three_four#part_five)" in plain
+
+
+    @pytest.mark.asyncio
+    async def test_non_briefing_ignores_document(self, db_path, tmp_path, edition_document):
+        config = _config(db_path, tmp_path)
+        task = _make_task(db_path, source_type="scheduled")
+        smtp = MagicMock()
+        with patch("smtplib.SMTP", return_value=smtp), patch("istota.skills.email._save_to_sent"):
+            assert await deliver_email_result(
+                config, task, _structured("Ordinary mail", "**Ordinary** body"),
+                briefing_document=edition_document,
+            )
+        msg = smtp.send_message.call_args.args[0]
+        assert msg.get_content_type() == "text/plain" and not msg.is_multipart()
+        assert msg.get_content().strip() == "**Ordinary** body"
