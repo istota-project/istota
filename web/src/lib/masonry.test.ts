@@ -14,7 +14,7 @@ describe('masonry placement', () => {
   it('packs different heights into the shortest column without shrinking content', () => {
     expect(layoutMasonry([card(100), card(200), card(90)], 2, 16)).toEqual([
       { column: 0, span: 1, top: 0, height: 100 },
-      { column: 1, span: 1, top: 0, height: 200 },
+      { column: 1, span: 1, top: 0, height: 216 },
       { column: 0, span: 1, top: 116, height: 100 },
     ]);
   });
@@ -71,6 +71,20 @@ describe('masonry placement', () => {
     );
     expect(placed[1].height).toBe(100);
     expect(placed[2].height).toBe(100);
+  });
+  it('snaps a card to a neighbor bottom within a step even when they start at different tops', () => {
+    const groups = (rooms: number) =>
+      layoutMasonry([card(650, 'wide'), card(396), card(rooms), card(264)], 3, 24);
+    const bottom = (p: { top: number; height: number }) => p.top + p.height;
+
+    const shorter = groups(220);
+    expect(bottom(shorter[2])).toBe(bottom(shorter[0]));
+    expect(shorter[0].height).toBe(650);
+
+    const longer = groups(250);
+    expect(bottom(longer[0])).toBe(bottom(longer[2]));
+    expect(longer[2].height).toBe(250);
+    expect(longer[3].top).toBe(bottom(longer[0]) + 24);
   });
   it('handles an empty edition', () => {
     expect(layoutMasonry([], 2, 16)).toEqual([]);

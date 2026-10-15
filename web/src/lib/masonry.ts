@@ -32,14 +32,42 @@ export function layoutMasonry(
     return { column, top };
   }
 
+  // A card with nothing below it yet. Its bottom is an edge a later row may snap
+  // to, since grid rounding alone leaves cards that start at different tops
+  // ending a few pixels apart.
+  function isOpen(item: MasonryPlacement) {
+    for (let c = item.column; c < item.column + item.span; c++)
+      if (bottoms[c] !== item.top + item.height + gap) return false;
+    return true;
+  }
+
   function settle() {
+    const edges = placed.filter((item) => !pending.includes(item) && isOpen(item));
+    const top = pending[0]?.top ?? 0;
     const sorted = [...pending].sort((a, b) => a.height - b.height);
     for (let start = 0; start < sorted.length;) {
       let end = start + 1;
       while (end < sorted.length && sorted[end].height - sorted[start].height <= heightStep) end++;
-      const height = Math.ceil(sorted[end - 1].height / heightStep) * heightStep;
-      for (let i = start; i < end; i++) sorted[i].height = height;
+      const need = top + sorted[end - 1].height;
+      const above = edges
+        .map((item) => item.top + item.height)
+        .filter((edge) => edge >= need && edge - need <= heightStep);
+      let bottom = top + Math.ceil(sorted[end - 1].height / heightStep) * heightStep;
+      const below = edges
+        .map((item) => item.top + item.height)
+        .filter((edge) => edge < need && need - edge <= heightStep);
+      if (above.length) bottom = Math.min(...above);
+      else if (below.some((edge) => bottom - edge > heightStep)) bottom = need;
+      for (const item of edges) {
+        const edge = item.top + item.height;
+        if (edge < bottom && bottom - edge <= heightStep) item.height = bottom - item.top;
+      }
+      for (let i = start; i < end; i++) sorted[i].height = bottom - top;
       start = end;
+    }
+    for (const item of edges) {
+      for (let c = item.column; c < item.column + item.span; c++)
+        bottoms[c] = item.top + item.height + gap;
     }
     for (const item of pending) {
       for (let c = item.column; c < item.column + item.span; c++)
