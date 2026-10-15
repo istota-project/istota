@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Upgrades with legacy default briefings can initialize the database and start the container. Startup now creates the migration journal before preserving the old schedules.
+
 - Switching briefing types no longer flashes “No briefings yet” while the archive loads. The archive sidebar also waits for its first load before showing an empty state.
 - Generated briefings keep their saved block titles, order and presentation even if a definition changes or is deleted during generation. Malformed or empty generation results retry quietly before delivery.
 - `istota apply` accepts a scheduled job whose room is shared, and a target that replies into that same room, as the scheduler already did: the job runs there with every scope withheld. A target into any other shared room is still refused.

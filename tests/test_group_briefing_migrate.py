@@ -581,3 +581,26 @@ def test_publisher_inventory_excludes_proven_retired_default_copies(publisher):
         publisher_preview(conn, config, result["definition_id"])
         migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
                                     replacements={}, confirmed=True)
+
+
+@pytest.mark.parametrize("check_only", [False, True])
+def test_cli_init_can_upgrade_legacy_defaults_before_loading_overlays(tmp_path, monkeypatch, capsys, check_only):
+    from tests.test_schema_version import _invoke
+    path, document = legacy(tmp_path, monkeypatch)
+    with db.get_db(document["db_path"]) as conn:
+        conn.execute("DROP TABLE group_briefing_migrations")
+    # Ordinary loads still refuse until init has made preservation possible.
+    with pytest.raises(ValueError, match="requires istota init"):
+        load_config(path)
+    args = ("init", "--check-schema") if check_only else ("init",)
+    code, _, error = _invoke(monkeypatch, capsys, path, *args)
+    assert code == 0, error
+    with db.get_db(document["db_path"]) as conn:
+        journal = conn.execute("SELECT 1 FROM sqlite_master WHERE name='group_briefing_migrations'").fetchone()
+    if check_only:
+        assert journal is None
+        assert user_briefings.list_briefings(document["db_path"]) == []
+    else:
+        assert journal is not None
+        assert len(user_briefings.list_briefings(document["db_path"])) == 3
+        assert load_config(path).users["alice"].briefings[0].name == "daily"

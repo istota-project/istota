@@ -84,7 +84,9 @@ def _refuse_newer_schema(refusal) -> int:
 
 def cmd_init(args):
     """Initialize the database."""
-    config = load_config(Path(args.config) if args.config else None)
+    path = Path(args.config) if args.config else None
+    # Schema preparation must precede DB overlays and legacy-default capture.
+    config = load_config(path, apply_db_overlays=False)
     if getattr(args, "check_schema", False):
         refusal = db.check_schema_version(config.db_path)
         return _refuse_newer_schema(refusal) if refusal is not None else 0
@@ -93,6 +95,7 @@ def cmd_init(args):
         db.init_db(config.db_path)
     except db.SchemaTooNew as refusal:
         return _refuse_newer_schema(refusal)
+    config = load_config(path)
     print(f"Database initialized at {config.db_path}")
     _init_sync_operator_persona(config)
     _init_retire_user_personas(config)

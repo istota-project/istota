@@ -381,7 +381,7 @@ class TestInit:
         from istota import cli
 
         config, root = setup
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=relocate_rooms)) in (None, 0)
         assert (root / "PERSONA.md").read_text() == SHIPPED
         assert _state(config)["last_good_text"] == SHIPPED
@@ -397,7 +397,7 @@ class TestInit:
         target = root / "elsewhere.md"
         target.write_text("not the persona")
         (root / "PERSONA.md").symlink_to(target)
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
 
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=False)) is None
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 0
@@ -412,7 +412,7 @@ class TestInit:
         from istota import cli
 
         config, _root = setup
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
 
         def _boom(_config):
             raise RuntimeError("unexpected")

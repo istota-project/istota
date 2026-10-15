@@ -69,7 +69,7 @@ from istota.lib.mountinfo import covering_mount
 from istota.lib.workspace_marker import (
     FSTYPE_ENV, MARKER_NAME, expected_fstype, marker_present, marker_required, undeclared_mount)
 
-config = load_config(Path(sys.argv[1]))
+config = load_config(Path(sys.argv[1]), apply_db_overlays=False)
 refusals = []
 url = config.nextcloud.url
 if url and urlsplit(url).hostname == "nextcloud":
