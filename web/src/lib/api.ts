@@ -6339,7 +6339,12 @@ export interface BriefingTarget {
   label: string;
   system_key?: string | null;
   member_count?: number;
-  capabilities: { author_briefings: boolean; generate_briefings?: boolean };
+  capabilities: {
+    author_briefings: boolean;
+    generate_briefings?: boolean;
+    read_briefings?: boolean;
+    receive_briefings?: boolean;
+  };
 }
 export interface GroupBriefingSource {
   id: string;
@@ -6372,6 +6377,8 @@ export interface BriefingSourceApproval {
   definition_revision: number;
 }
 export interface GroupBriefingDefinition {
+  next_run?: string | null;
+  last_run?: { id: number; state: string; published_at: string | null } | null;
   id: number;
   group_id: string;
   name: string;
@@ -6429,7 +6436,9 @@ export function getBriefingTargets(): Promise<{
 function groupBriefingPath(group: string, name?: string) {
   return `/groups/${encodeURIComponent(group)}/briefings${name === undefined ? '' : '/' + encodeURIComponent(name)}`;
 }
-export function getGroupBriefings(group: string): Promise<{ items: GroupBriefingDefinition[] }> {
+export function getGroupBriefings(
+  group: string,
+): Promise<{ items: GroupBriefingDefinition[]; capabilities: BriefingTarget['capabilities'] }> {
   return apiFetch(groupBriefingPath(group));
 }
 export function getGroupBriefing(group: string, name: string): Promise<GroupBriefingDefinition> {
@@ -6514,4 +6523,66 @@ export function getGroupBriefingRun(
   run: number,
 ): Promise<GroupBriefingRun> {
   return apiFetch(groupBriefingPath(group, name) + `/runs/${run}`);
+}
+
+export interface BriefingDelivery {
+  counts: Record<string, number>;
+  recipients: {
+    user_id: string;
+    display_name: string;
+    channel: string;
+    state: string;
+    attempts: number;
+    error_code: string | null;
+  }[];
+}
+export interface BriefingDeliveryPreferences {
+  outbound_muted: boolean;
+  in_app_muted: boolean;
+}
+export function getGroupBriefingRuns(
+  group: string,
+  name: string,
+  offset = 0,
+): Promise<{ items: GroupBriefingRun[]; total: number }> {
+  return apiFetch(groupBriefingPath(group, name) + `/runs?limit=20&offset=${offset}`);
+}
+export function getGroupBriefingDelivery(
+  group: string,
+  name: string,
+  run: number,
+): Promise<BriefingDelivery> {
+  return apiFetch(groupBriefingPath(group, name) + `/runs/${run}/delivery`);
+}
+export function retryGroupBriefingDelivery(
+  group: string,
+  name: string,
+  run: number,
+  acknowledgeDuplicates = false,
+): Promise<{ retried: number }> {
+  return apiFetch(groupBriefingPath(group, name) + `/runs/${run}/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ acknowledge_duplicates: acknowledgeDuplicates }),
+  });
+}
+export function getGroupBriefingPreferences(
+  group: string,
+  name: string,
+): Promise<BriefingDeliveryPreferences> {
+  return apiFetch(groupBriefingPath(group, name) + '/delivery');
+}
+export function saveGroupBriefingPreferences(
+  group: string,
+  name: string,
+  preferences: BriefingDeliveryPreferences,
+): Promise<BriefingDeliveryPreferences> {
+  return apiFetch(groupBriefingPath(group, name) + '/delivery', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preferences),
+  });
+}
+export function groupBriefingDownloadUrl(group: string, name: string, run: number): string {
+  return `${base}/api${groupBriefingPath(group, name)}/runs/${run}/download`;
 }

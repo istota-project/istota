@@ -1,8 +1,12 @@
 """Group definition and edition HTTP adapters over the framework stores."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from croniter import croniter
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
-from istota import db
+from istota import db, modules
 from istota.briefings import group_store as store, source_grants
 from istota.briefings.models import GROUP_SOURCE_KINDS
 from istota.groups.policy import GroupError
@@ -98,12 +102,19 @@ def _definitions(conn, config, actor, group_id, name=None):
     items = []
     for item in definitions:
         view = _definition_view(item, caps)
+        view["next_run"] = (croniter(item["cron"], datetime.now(ZoneInfo(item["timezone"]))).get_next(datetime).isoformat()
+                            if item["enabled"] and modules.module_available("briefings") else None)
+        # Preview status is private; members see only retained published history.
+        predicate = "definition_id=? AND mode='publish'" + ("" if caps["author_briefings"] else " AND state='published'")
+        last = conn.execute(f"SELECT id, state, published_at FROM group_briefing_runs WHERE {predicate} ORDER BY id DESC LIMIT 1",
+                            (item["id"],)).fetchone()
+        view["last_run"] = dict(last) if last else None
         view["source_approvals"] = [source_grants.source_approval_state(
             conn, config, item["id"], source["id"], actor_id=actor, is_admin=caps["author_briefings"])
             for source in store.definition_sources(item) if source["kind"] in ("personal_file", "personal_calendar")
             and (caps["author_briefings"] or source["config"]["owner_id"] == actor)]
         items.append(view)
-    return items[0] if definition else {"group_id": group_id, "items": items}
+    return items[0] if definition else {"group_id": group_id, "items": items, "capabilities": caps}
 
 
 def _save(conn, config, actor, group_id, payload, name=None):

@@ -33,6 +33,7 @@ import {
   briefingArchiveCount,
   briefingArchiveError,
   selectedBriefingId,
+  selectedBriefingGroup,
   briefingFilterName,
 } from '$lib/stores/briefings';
 import Layout from './+layout.svelte';
@@ -44,9 +45,16 @@ const EMPTY = { items: [], total: 0, briefing_names: [] };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
   briefingArchiveCount.set(null);
   briefingArchiveError.set(null);
   selectedBriefingId.set(null);
+  selectedBriefingGroup.set('');
   briefingFilterName.set('');
 });
 

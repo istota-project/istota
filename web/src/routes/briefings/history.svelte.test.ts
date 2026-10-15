@@ -26,6 +26,7 @@ import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import {
   selectedBriefingId,
+  selectedBriefingGroup,
   briefingFilterName,
   briefingArchiveCount,
   briefingArchiveError,
@@ -53,6 +54,12 @@ const archive = (name = '') => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
   api.getBriefings.mockResolvedValue({ briefings: [] });
   api.getBriefingConfig.mockResolvedValue({ briefings: [] });
   vi.mocked(getBriefingArchiveItem).mockImplementation(async (id) => {
@@ -62,6 +69,7 @@ beforeEach(() => {
   });
   __history.reset('/istota/briefings/');
   selectedBriefingId.set(null);
+  selectedBriefingGroup.set('');
   briefingFilterName.set('');
   briefingArchiveCount.set(null);
   briefingArchiveError.set(null);
@@ -400,3 +408,65 @@ it.each(['db', 'config'] as const)(
     } else expect(screen.queryByRole('button', { name: /^Settings for / })).toBeNull();
   },
 );
+
+it('opens a group run without confusing the same personal archive id and links back to personal reading', async () => {
+  __history.reset('/istota/briefings/?group=team&briefing=news&run=3');
+  const definition = {
+    id: 7,
+    group_id: 'team',
+    name: 'news',
+    title: 'Group news',
+    channel: 'email',
+    cron: '0 7 * * *',
+    timezone: 'UTC',
+    enabled: true,
+    capabilities: { author_briefings: false },
+  };
+  const run = {
+    id: 3,
+    group_id: 'team',
+    definition_id: 7,
+    run_id: 3,
+    state: 'published',
+    mode: 'publish',
+    subject: 'Group edition',
+    body_md: 'One common group body',
+    published_at: '2026-10-15T07:00:00Z',
+  };
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [
+      {
+        scope: 'group',
+        group_id: 'team',
+        label: 'Team',
+        capabilities: { author_briefings: false },
+      },
+    ],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
+  api.getGroupBriefings.mockResolvedValue({ items: [definition] });
+  api.getGroupBriefing.mockResolvedValue(definition);
+  api.getGroupBriefingRuns.mockResolvedValue({ items: [run], total: 1 });
+  api.getGroupBriefingRun.mockResolvedValue(run);
+  api.getGroupBriefingDelivery.mockResolvedValue({ counts: { sent: 2 }, recipients: [] });
+  api.getGroupBriefingPreferences.mockResolvedValue({ outbound_muted: false, in_app_muted: false });
+  api.getBriefingArchiveItem.mockResolvedValue({
+    ...items[0],
+    body_md: 'Personal body must stay hidden',
+  });
+  render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+  await screen.findByText('One common group body');
+  expect(screen.queryByText('Personal body must stay hidden')).toBeNull();
+  expect(get(selectedBriefingGroup)).toBe('team');
+  expect(screen.queryByRole('button', { name: 'Briefing actions' })).toBeNull();
+  expect(api.getGroupBriefingRun).toHaveBeenCalledWith('team', 'news', 3);
+  // The personal archive and group run keep separate URL identities.
+  window.history.replaceState(null, '', '/istota/briefings/?id=3');
+  page.url = new URL(window.location.href);
+  page.state = {};
+  await screen.findByText('Personal body must stay hidden');
+  expect(screen.queryByText('One common group body')).toBeNull();
+  expect(get(selectedBriefingGroup)).toBe('');
+});

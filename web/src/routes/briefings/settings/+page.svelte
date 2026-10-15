@@ -675,20 +675,22 @@
   {loading}
   {error}
 >
-  <GroupBriefingEditor
-    templates={config?.block_templates ?? []}
-    {browseOptions}
-    sharedBlockOptions={sharedBlockSelectOptions}
-    copy={groupCopy}
-    onGroupActive={(active) => {
-      groupActive = active;
-    }}
-    onPersonalNew={() => {
-      resetBriefingForm();
-      newBriefing.enabled = false;
-      creatingPersonal = true;
-    }}
-  />
+  {#key page.url.searchParams.get('group') + ':' + page.url.searchParams.get('briefing')}
+    <GroupBriefingEditor
+      templates={config?.block_templates ?? []}
+      {browseOptions}
+      sharedBlockOptions={sharedBlockSelectOptions}
+      copy={groupCopy}
+      onGroupActive={(active) => {
+        groupActive = active;
+      }}
+      onPersonalNew={() => {
+        resetBriefingForm();
+        newBriefing.enabled = false;
+        creatingPersonal = true;
+      }}
+    />
+  {/key}
   {#if !groupActive}
     {#if !moduleEnabled}
       <div class="banner info">

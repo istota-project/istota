@@ -4,6 +4,10 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import {
+    getBriefingTargets,
+    getGroupBriefings,
+    type BriefingTarget,
+    type GroupBriefingDefinition,
     getBriefingArchive,
     getBriefingArchiveItem,
     deleteBriefingArchiveItem,
@@ -11,6 +15,7 @@
   } from '$lib/api';
   import {
     selectedBriefingId,
+    selectedBriefingGroup,
     briefingFilterName,
     briefingArchiveCount,
     briefingArchiveError,
@@ -39,6 +44,14 @@
 
   let items = $state<BriefingArchiveItem[]>([]);
   let total = $state(0);
+  let targets = $state<BriefingTarget[]>([]);
+  let groupDefinitions = $state<GroupBriefingDefinition[]>([]);
+  let audience = $state('all');
+  const audienceOptions = $derived([
+    { value: 'all', label: 'All' },
+    { value: 'user', label: 'Just me' },
+    ...targets.map((target) => ({ value: target.group_id!, label: target.label })),
+  ]);
   let names = $state<string[]>([]);
   let offset = $state(0);
   let sidebarOpen = $state(false);
@@ -56,12 +69,16 @@
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/briefings/settings`));
 
-  type BriefingSelection = { id: number | null; name: string };
+  type BriefingSelection = { id: number | null; name: string; group?: string };
   let initialized = $state(false);
   let loadGeneration = 0;
 
   function encodeSelection(selection: BriefingSelection): Params {
     const params: Params = {};
+    if (selection.group) {
+      params.group = selection.group;
+      return params;
+    }
     if (selection.id !== null) params.id = String(selection.id);
     if (selection.name) params.name = selection.name;
     return params;
@@ -73,6 +90,9 @@
   }
 
   function applySelection(selection: BriefingSelection): void | Promise<void> {
+    selectedBriefingGroup.set(selection.group ?? '');
+    if (selection.group) audience = selection.group;
+    else if (audience !== 'user') audience = 'all';
     const nameChanged = selection.name !== $briefingFilterName;
     briefingFilterName.set(selection.name);
     selectedBriefingId.set(selection.id);
@@ -84,7 +104,7 @@
 
   const briefingSel = createUrlSelection<BriefingSelection>({
     key: 'briefings',
-    params: ['id', 'name'],
+    params: ['id', 'name', 'group'],
     encode: encodeSelection,
     decode(params) {
       if (onSettings) return null;
@@ -92,10 +112,17 @@
       return {
         id: Number.isSafeInteger(id) && id > 0 ? id : null,
         name: params.name ?? '',
+        group: params.group ?? '',
       };
     },
     read: () =>
-      initialized && !onSettings ? { id: $selectedBriefingId, name: $briefingFilterName } : null,
+      initialized && !onSettings
+        ? {
+            id: $selectedBriefingGroup ? null : $selectedBriefingId,
+            name: $briefingFilterName,
+            group: $selectedBriefingGroup,
+          }
+        : null,
     apply: applySelection,
   });
 
@@ -179,14 +206,14 @@
 
   function pickName(name: string) {
     const selection = { id: null, name };
-    if (onSettings) goto(readerUrl(selection));
+    if (onSettings || $selectedBriefingGroup) goto(readerUrl(selection));
     else briefingSel.push(selection);
   }
 
   function pickItem(id: number) {
     sidebarOpen = false;
     const selection = { id, name: $briefingFilterName };
-    if (onSettings) goto(readerUrl(selection));
+    if (onSettings || $selectedBriefingGroup) goto(readerUrl(selection));
     else briefingSel.push(selection);
   }
 
@@ -238,7 +265,21 @@
   onMount(() => {
     const selection = briefingSel.current();
     if (selection) void applySelection(selection);
-    else void load();
+    else {
+      selectedBriefingGroup.set('');
+      void load();
+    }
+    void getBriefingTargets()
+      .then(async (response) => {
+        targets = response.targets.filter((target) => target.scope === 'group');
+        const result = await Promise.allSettled(
+          targets.map((target) => getGroupBriefings(target.group_id!)),
+        );
+        groupDefinitions = result.flatMap((item) =>
+          item.status === 'fulfilled' ? item.value.items : [],
+        );
+      })
+      .catch(() => {});
     initialized = true;
   });
 </script>
@@ -267,6 +308,20 @@
         {/if}
       {/snippet}
       {#snippet nav()}
+        {#if !onSettings && targets.length}
+          <Select
+            value={audience}
+            options={audienceOptions}
+            ariaLabel="Filter by audience"
+            onValueChange={(value) => {
+              audience = value;
+              if (value === 'all' || value === 'user') {
+                selectedBriefingGroup.set('');
+                void goto(readerUrl({ id: $selectedBriefingId, name: $briefingFilterName }));
+              } else void goto(readerUrl({ id: null, name: '', group: value }));
+            }}
+          />
+        {/if}
         {#if !onSettings && names.length > 1}
           <Select
             value={$briefingFilterName}
@@ -299,30 +354,52 @@
         open={sidebarOpen}
         onClose={() => (sidebarOpen = false)}
       >
-        {#if deleteError}
-          <p class="sidebar-error">{deleteError}</p>
-        {/if}
-        {#if items.length === 0 && $briefingArchiveError}
-          <p class="sidebar-error">{$briefingArchiveError}</p>
-        {:else if items.length === 0}
-          <EmptyState size="sm">No briefings yet.</EmptyState>
-        {:else}
-          {#each items as item (item.id)}
-            <div class="list-row archive-row" class:active={item.id === $selectedBriefingId}>
-              <button class="archive-btn" type="button" onclick={() => pickItem(item.id)}>
-                <span class="archive-subject">{item.subject || item.briefing_name}</span>
-                <span class="archive-date">{fmtDate(item.generated_at)}</span>
-              </button>
-              <KebabMenu
-                ariaLabel="Briefing actions"
-                items={[{ label: 'Delete', danger: true, onSelect: () => (deleteTarget = item) }]}
-              />
-            </div>
+        {#if audience !== 'user'}
+          {#each groupDefinitions.filter((item) => audience === 'all' || item.group_id === audience) as item (`${item.group_id}:${item.id}`)}
+            <a
+              class="archive-btn"
+              href={`${base}/briefings/?group=${encodeURIComponent(item.group_id)}&briefing=${encodeURIComponent(item.name)}`}
+            >
+              <span class="archive-subject">{item.title || item.name}</span>
+              <span class="archive-date"
+                >{targets.find((target) => target.group_id === item.group_id)?.label} · {item.channel}</span
+              >
+              <span class="archive-date"
+                >{item.enabled ? item.cron : 'Disabled'} · {item.timezone}</span
+              >
+              <span class="archive-date"
+                >Next: {item.next_run ? fmtDate(item.next_run) : 'None'} · Last: {item.last_run
+                  ?.state ?? 'None'}</span
+              >
+            </a>
           {/each}
-          {#if items.length < total}
-            <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
-              {loadingMore ? 'Loading…' : 'Load older'}
-            </button>
+        {/if}
+        {#if audience === 'all' || audience === 'user'}
+          {#if deleteError}
+            <p class="sidebar-error">{deleteError}</p>
+          {/if}
+          {#if items.length === 0 && $briefingArchiveError}
+            <p class="sidebar-error">{$briefingArchiveError}</p>
+          {:else if items.length === 0}
+            <EmptyState size="sm">No briefings yet.</EmptyState>
+          {:else}
+            {#each items as item (item.id)}
+              <div class="list-row archive-row" class:active={item.id === $selectedBriefingId}>
+                <button class="archive-btn" type="button" onclick={() => pickItem(item.id)}>
+                  <span class="archive-subject">{item.subject || item.briefing_name}</span>
+                  <span class="archive-date">Just me · {fmtDate(item.generated_at)}</span>
+                </button>
+                <KebabMenu
+                  ariaLabel="Briefing actions"
+                  items={[{ label: 'Delete', danger: true, onSelect: () => (deleteTarget = item) }]}
+                />
+              </div>
+            {/each}
+            {#if items.length < total}
+              <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
+                {loadingMore ? 'Loading…' : 'Load older'}
+              </button>
+            {/if}
           {/if}
         {/if}
       </Sidebar>

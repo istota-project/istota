@@ -246,3 +246,19 @@ async def test_editor_defaults_and_own_resources_only(client, configured, tmp_pa
     assert (await client.get(url)).status_code == 404
     client.cookies.clear()
     assert (await client.get(url)).status_code == 401
+
+
+async def test_reader_schedule_summary_excludes_private_preview(client, configured):
+    from datetime import datetime, timezone
+    definition, run = await publish(client, configured)
+    preview = await client.post(ROOT + "/daily/runs", json={"request_id": str(uuid4()), "mode": "preview"})
+    assert preview.status_code == 200
+    session(client, configured, "bob")
+    item = (await client.get(ROOT)).json()["items"][0]
+    assert datetime.fromisoformat(item["next_run"]) > datetime.now(timezone.utc)
+    assert item["last_run"]["id"] == run["id"]
+    assert item["last_run"]["state"] == "published"
+    assert "body_md" not in str(item["last_run"])
+    session(client, configured, "alice")
+    assert (await client.put(ROOT + "/daily", json={**payload(enabled=False, channel="in_app"), "revision": 2})).status_code == 200
+    assert (await client.get(ROOT)).json()["items"][0]["next_run"] is None

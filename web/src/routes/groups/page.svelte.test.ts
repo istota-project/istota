@@ -454,3 +454,17 @@ it('explains automatic membership and future history beside shared content', asy
   expect(screen.getByRole('heading', { name: 'Notebook' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: 'Shared files' })).toBeTruthy();
 });
+
+it('opens group briefings through Groups when personal Briefings is disabled', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    capabilities: { ...group.capabilities, read_briefings: true, author_briefings: true },
+  });
+  api.getGroupBriefings.mockResolvedValue({ items: [] });
+  render(Groups);
+  await screen.findByRole('heading', { name: 'Briefings' });
+  expect(await screen.findByRole('link', { name: 'New group briefing' })).toHaveAttribute(
+    'href',
+    '/briefings/settings?group=team&new=1',
+  );
+});

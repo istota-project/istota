@@ -2,6 +2,8 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
+    getBriefingTargets,
+    type BriefingTarget,
     getBriefingArchiveItem,
     getBriefings,
     getBriefingConfig,
@@ -9,12 +11,30 @@
   } from '$lib/api';
   import {
     selectedBriefingId,
+    selectedBriefingGroup,
     briefingArchiveCount,
     briefingArchiveError,
   } from '$lib/stores/briefings';
+  import GroupBriefings from '$lib/components/briefings/GroupBriefings.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
   import { EmptyState, PageLoading } from '$lib/components/ui';
 
+  let groupTarget = $state<BriefingTarget | null>(null);
+  $effect(() => {
+    const group = $selectedBriefingGroup;
+    groupTarget = null;
+    if (!group) return;
+    let active = true;
+    getBriefingTargets()
+      .then((response) => {
+        if (active)
+          groupTarget = response.targets.find((target) => target.group_id === group) ?? null;
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  });
   let current = $state<BriefingArchiveItem | null>(null);
   let editableBlockIds = $state<number[]>([]);
   let loading = $state(false);
@@ -55,7 +75,7 @@
 
   // Fetch the full briefing (with body) whenever the selection changes.
   $effect(() => {
-    const id = $selectedBriefingId;
+    const id = $selectedBriefingGroup ? null : $selectedBriefingId;
     if (id == null) {
       current = null;
       loading = false;
@@ -89,11 +109,18 @@
 </svelte:head>
 
 <div class="content-frame reader">
-  {#if loading}
+  {#if $selectedBriefingGroup}
+    {#key $selectedBriefingGroup}<GroupBriefings
+        groupId={$selectedBriefingGroup}
+        label={groupTarget?.label ?? 'Group'}
+        canCreate={groupTarget?.capabilities.author_briefings ?? false}
+      />{/key}
+  {:else if loading}
     <PageLoading />
   {:else if error}
     <p class="center-msg error">{error}</p>
   {:else if current}
+    <p class="caption">Just me</p>
     {#key current.id}<BriefingEdition
         edition={current}
         {editableBlockIds}

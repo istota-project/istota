@@ -27,3 +27,6 @@ export const briefingArchiveError = writable<string | null>(null);
 // Bumped by the settings page after a schedule change so the reader's archive
 // sidebar can refresh without a full navigation.
 export const briefingsRefreshNonce = writable(0);
+
+// Group runs are never personal archive ids.
+export const selectedBriefingGroup = writable<string>('');
