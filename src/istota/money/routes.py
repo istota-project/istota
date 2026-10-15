@@ -406,6 +406,49 @@ def _invoice_output_dir(data_dir: Path, config) -> Path:
     return data_dir / "invoices" / "generated"
 
 
+def _invoice_pdf_flags(records, output_dir: Path) -> dict[str, bool]:
+    """Whether each invoice's PDF is on disk, by number.
+
+    A row's stored ``pdf_path`` under the output tree is checked with one
+    ``is_file``. Only a row without one costs a listing, and the output tree
+    is listed at most once per call: on a slow mount a glob per invoice was
+    the cost of the whole page. A path outside the tree is looked up by name
+    there too, which is where the PDF route looks.
+    """
+    from istota.money.core.invoicing import parse_invoice_number
+
+    flags: dict[str, bool] = {}
+    names: list[str] | None = None
+    for record in records:
+        stored = Path(record.pdf_path) if record.pdf_path else None
+        if stored is not None and stored.is_relative_to(output_dir):
+            flags[record.number] = stored.is_file()
+            continue
+        if names is None:
+            names = _invoice_pdf_names(output_dir)
+        number = parse_invoice_number(record.number)
+        prefix = f"Invoice-{number:06d}-" if number is not None else None
+        flags[record.number] = prefix is not None and any(
+            name.startswith(prefix) for name in names
+        )
+    return flags
+
+
+def _invoice_pdf_names(output_dir: Path) -> list[str]:
+    """Every ``*.pdf`` name in the output tree's year folders, read once."""
+    names: list[str] = []
+    try:
+        year_dirs = [d for d in output_dir.iterdir() if d.is_dir()]
+    except OSError:
+        return names
+    for year_dir in year_dirs:
+        try:
+            names.extend(p.name for p in year_dir.glob("*.pdf"))
+        except OSError:
+            continue
+    return names
+
+
 @router.get("/invoices")
 async def api_invoices(
     client: str | None = None,
@@ -414,7 +457,7 @@ async def api_invoices(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money import db
-    from istota.money.core.invoicing import find_invoice_pdf, invoice_summary
+    from istota.money.core.invoicing import invoice_summary
     from istota.money.invoice_review import list_reviews
     from istota.money.work import list_invoices
 
@@ -437,13 +480,16 @@ async def api_invoices(
         if row["status"] == "settled" and row["decided_by"] == "auto"
     }
 
-    output_dir = _invoice_output_dir(data_dir, config)
+    records = [
+        record
+        for record in list_invoices(data_dir, client=client, include_voided=include_voided)
+        if record.status != "paid" or show_all
+    ]
+    has_pdf = _invoice_pdf_flags(records, _invoice_output_dir(data_dir, config))
     invoices = []
-    for record in list_invoices(data_dir, client=client, include_voided=include_voided):
-        if record.status == "paid" and not show_all:
-            continue
+    for record in records:
         invoice_info = invoice_summary(record, config)
-        invoice_info["has_pdf"] = find_invoice_pdf(output_dir, record.number) is not None
+        invoice_info["has_pdf"] = has_pdf[record.number]
         paid_date = invoice_info.get("paid_date")
         if paid_date and auto_settled.get(record.number) == paid_date:
             invoice_info["paid_by_sync_date"] = auto_settled[record.number]
@@ -731,14 +777,14 @@ async def _json_object_body(request: Request, *, empty_ok: bool) -> dict | None:
 
 def _invoice_row(data_dir: Path, number: str, config) -> dict | None:
     """One invoice as ``GET /invoices`` lists it."""
-    from istota.money.core.invoicing import find_invoice_pdf, invoice_summary
+    from istota.money.core.invoicing import invoice_summary
     from istota.money.work import get_invoice
 
     record = get_invoice(data_dir, number)
     if record is None:
         return None
     row = invoice_summary(record, config)
-    row["has_pdf"] = find_invoice_pdf(_invoice_output_dir(data_dir, config), number) is not None
+    row["has_pdf"] = _invoice_pdf_flags([record], _invoice_output_dir(data_dir, config))[number]
     return row
 
 

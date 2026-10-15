@@ -330,6 +330,45 @@ class TestInvoiceRowFields:
         # One hour of dev at the config's 150 would be 150; the invoice billed 1200.
         assert rows["INV-000002"]["total"] == 1200.0
 
+    def test_has_pdf_reads_stored_paths_and_lists_the_tree_once(
+        self, make_client, tmp_path, monkeypatch,
+    ):
+        from istota.money import routes
+        from istota.money.core import invoicing
+
+        self._issue(tmp_path, "INV-000001", 100.0)
+        stored = Path(self._issue(tmp_path, "INV-000002", 100.0))
+        stored.unlink()
+        self._issue(tmp_path, "INV-000003", 100.0, pdf=False)
+        self._issue(tmp_path, "INV-000004", 100.0, pdf=False)
+        # A PDF on disk for a row that recorded none, as an import before the
+        # path was stored would leave.
+        (tmp_path / "invoices" / "2026" / "Invoice-000004-03_02_2026.pdf").write_bytes(b"%PDF")
+        client = make_client(_write_invoicing_config(tmp_path, "invoices"))
+
+        def no_glob(*args, **kwargs):
+            raise AssertionError("has_pdf globbed per invoice")
+
+        listings = []
+        real_names = routes._invoice_pdf_names
+
+        def counting(output_dir):
+            listings.append(output_dir)
+            return real_names(output_dir)
+
+        monkeypatch.setattr(invoicing, "find_invoice_pdf", no_glob)
+        monkeypatch.setattr(routes, "_invoice_pdf_names", counting)
+        rows = {
+            r["invoice_number"]: r["has_pdf"]
+            for r in client.get("/api/money/invoices").json()["invoices"]
+        }
+
+        assert rows == {
+            "INV-000001": True, "INV-000002": False,
+            "INV-000003": False, "INV-000004": True,
+        }
+        assert len(listings) == 1
+
     def test_include_voided_false_filters_them_out(self, make_client, tmp_path):
         client = self._client(make_client, tmp_path)
         data = client.get("/api/money/invoices?include_voided=false").json()
