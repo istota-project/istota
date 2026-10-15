@@ -360,6 +360,21 @@ def _refusals(log: LegacyLog) -> str | None:
     return None
 
 
+def _legacy_table_refusal(conn) -> str | None:
+    """An old-schema `work_entries` that ``init_db`` kept because it has rows."""
+    from istota.money import db  # noqa: PLC0415
+
+    rows = db.legacy_work_entries_rows(conn)
+    if not rows:
+        return None
+    return (
+        f"money.db has a work_entries table from an older schema holding {rows} rows "
+        "(integer id and invoice_number, no uid). Nothing reads it; check the rows "
+        "are also in the TOML work log, back up money.db, drop the table, and run "
+        "`istota money work migrate -u USER`"
+    )
+
+
 def _restore_refusal(data_dir: Path) -> str | None:
     """Why a database with no import record must not import again, or None.
 
@@ -530,7 +545,9 @@ def migrate_work_log(
                 return MigrationReport("already")
             log = load_legacy(data_dir)
             years = sorted(log.source_hashes)
-            reason = _restore_refusal(data_dir) or _refusals(log)
+            reason = (
+                _legacy_table_refusal(conn) or _restore_refusal(data_dir) or _refusals(log)
+            )
             if reason:
                 conn.rollback()
                 logger.warning("work_log_migration_refused reason=%s", reason)

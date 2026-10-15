@@ -7,12 +7,15 @@ invoices and invoice lines are read and written through ``work.py``.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from istota.lib import sqlite_util
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA = """\
@@ -161,6 +164,7 @@ def init_db(db_path: Path | str) -> None:
         # reader/writer concurrency. Issued unconditionally so a relocated
         # DELETE-mode DB converts on first touch; no-op once WAL.
         conn.execute("PRAGMA journal_mode=WAL")
+        _drop_empty_legacy_work_entries(conn)
         conn.executescript(SCHEMA)
         _migrate_monarch_synced_columns(conn)
         sqlite_util.add_columns(
@@ -176,6 +180,47 @@ def init_db(db_path: Path | str) -> None:
         # importers package, which must not load at db-module import time).
         from istota.money import portfolio
         portfolio.ensure_schema(conn)
+
+
+def legacy_work_entries_rows(conn: sqlite3.Connection) -> int | None:
+    """Rows in a `work_entries` table from the pre-TOML schema, or None.
+
+    That schema keyed entries by an integer id with an `invoice_number` column
+    and no `uid`. ``CREATE TABLE IF NOT EXISTS`` leaves it standing, and every
+    insert into the current table then fails on the missing column.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(work_entries)")}
+    if not columns or "uid" in columns:
+        return None
+    return conn.execute("SELECT COUNT(*) FROM work_entries").fetchone()[0]
+
+
+def _drop_empty_legacy_work_entries(conn: sqlite3.Connection) -> None:
+    """Replace an empty pre-TOML `work_entries` so SCHEMA can create the current one.
+
+    A table with rows is left alone; the work log import refuses over it.
+    Foreign keys go off first: `invoice_lines`, created over the old table by an
+    earlier run of SCHEMA, names a `uid` it lacks, and the implicit delete in
+    ``DROP TABLE`` would fail on that mismatch. The shape and count are read
+    again under ``BEGIN IMMEDIATE`` so a concurrent ``init_db`` that already
+    replaced the table is not dropped in turn.
+    """
+    if legacy_work_entries_rows(conn) != 0:
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if legacy_work_entries_rows(conn) == 0:
+            conn.execute("DROP INDEX IF EXISTS idx_work_uninvoiced")
+            conn.execute("DROP INDEX IF EXISTS idx_work_by_invoice")
+            conn.execute("DROP TABLE work_entries")
+            logger.info("money_db_dropped_empty_legacy_work_entries")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _legacy_monarch_index(conn: sqlite3.Connection) -> bool:
