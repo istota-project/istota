@@ -14,9 +14,14 @@ FILE_MAX_BYTES = 64 * 1024
 
 def _read_file(config, resource):
     root = config.workspace_root(resource["owner_id"])
+    return read_text_file(root, resource["path"].split("/"))
+
+
+def read_text_file(root, parts):
+    """Read one text leaf through Workspace's pinned directory primitives."""
     if root is None:
         return {"status": "refused", "error_code": "file_root_unavailable"}
-    *dirs, leaf = resource["path"].split("/")
+    *dirs, leaf = parts
     try:
         fd = open_overlay_dir(root, *dirs, raise_errors=True)
     except OSError:
@@ -25,6 +30,8 @@ def _read_file(config, resource):
         return {"status": "refused", "error_code": "file_directory_refused"}
     try:
         data, reason, size = read_overlay_bytes(Path(leaf), max_bytes=FILE_MAX_BYTES + 1, dir_fd=fd)
+    except OSError:
+        return {"status": "refused", "error_code": "file_read_refused"}
     finally:
         os.close(fd)
     if reason or (size is not None and (size > FILE_MAX_BYTES or len(data or b"") > FILE_MAX_BYTES)):

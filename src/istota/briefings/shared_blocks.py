@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
 from istota.briefings.generate import _render_source
 from istota.briefings.models import ALLOWED_SHARED_SOURCE_KINDS
-from istota.briefings.sources import GatheredSource, SourceContext, resolve_source
+from istota.briefings.sources import GatheredSource, SourceContext, gather_sources, raise_for_refused, resolve_source
 
 
 logger = logging.getLogger(__name__)
@@ -114,18 +113,7 @@ def _gather_shared(config, sources: list[dict], now: datetime | None) -> list[Ga
                 kind=kind, title=kind, provenance=f"({kind} source error)", ok=False,
             )
 
-    if not sources:
-        return []
-    # Reassemble by source index, not completion order — a structured block's
-    # verbatim concatenation (``_assemble_verbatim``) splices sources in this
-    # order, so it must match the configured source order regardless of which
-    # worker finishes first. Mirrors the per-user pipeline's slot dict.
-    by_index: dict[int, GatheredSource] = {}
-    with ThreadPoolExecutor(max_workers=min(8, len(sources))) as pool:
-        futures = {pool.submit(_one, s): i for i, s in enumerate(sources)}
-        for fut in as_completed(futures):
-            by_index[futures[fut]] = fut.result()
-    return [by_index[i] for i in range(len(sources))]
+    return gather_sources(sources, _one)
 
 
 def _section_directive(block_def) -> str:
@@ -156,6 +144,7 @@ def _assemble_verbatim(gathered: list[GatheredSource]) -> str | None:
     list so verbatim still has something to splice. Returns ``None`` when nothing
     was produced, so the caller keeps the prior value (last-known-good).
     """
+    raise_for_refused(gathered)
     parts: list[str] = []
     for gs in gathered:
         if not gs.ok or gs.is_empty:

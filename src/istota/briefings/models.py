@@ -237,6 +237,25 @@ CALENDAR_LOOKBACK_DAYS = (0, 1, 7, 30)
 CALENDAR_LOOKAHEAD_DAYS = (1, 7, 14, 30)
 
 
+def normalize_text_file_reference(raw):
+    path = _group_text(raw, "file path", required=True, limit=1000)
+    if (any(part in ("", ".", "..") for part in path.split("/"))
+            or any(c in path for c in ("\\", "\0", ":"))
+            or not path.lower().endswith((".txt", ".md", ".markdown"))):
+        raise ValueError("select one relative text file")
+    return path
+
+
+def normalize_group_resource_config(kind, config):
+    if kind == "group_memory":
+        if config:
+            raise ValueError("group memory takes no resource override")
+        return {}
+    if set(config) != {"path"}:
+        raise ValueError("select one group file")
+    return {"path": normalize_text_file_reference(config["path"])}
+
+
 def normalize_contribution_config(kind, config, *, allow_pending=False):
     """One resource and a bounded disclosure, independent of caller authority."""
     from urllib.parse import unquote, urlsplit
@@ -253,12 +272,7 @@ def normalize_contribution_config(kind, config, *, allow_pending=False):
     if allow_pending and set(config) == {"owner_id"}:
         return {"owner_id": owner}
     if kind == "personal_file":
-        path = _group_text(config.get("path"), "file path", required=True, limit=1000)
-        if (any(part in ("", ".", "..") for part in path.split("/"))
-                or any(c in path for c in ("\\", "\0", ":"))
-                or not path.lower().endswith((".txt", ".md", ".markdown"))):
-            raise ValueError("select one relative text file")
-        return {"owner_id": owner, "path": path}
+        return {"owner_id": owner, "path": normalize_text_file_reference(config.get("path"))}
     url = _group_text(config.get("calendar_url"), "calendar reference", required=True, limit=2000)
     parsed = urlsplit(url)
     if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
@@ -306,6 +320,8 @@ def _group_sources(raw, seen):
             raise ValueError("source config must be an object")
         if kind in ("personal_file", "personal_calendar"):
             config = normalize_contribution_config(kind, config, allow_pending=True)
+        elif kind in ("group_memory", "group_file"):
+            config = normalize_group_resource_config(kind, config)
         sources.append({"id": source_id, "kind": kind, "config": config})
     return sources
 
