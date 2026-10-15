@@ -29,8 +29,11 @@
     PageLoading,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
+  import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
+  import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
+  import { notifyError } from '$lib/stores/notices';
 
   let entries: WorkEntryRow[] = $state([]);
   let totals: WorkTotals = $state({
@@ -62,6 +65,10 @@
 
   let confirmOpen = $state(false);
   let pendingDelete: WorkEntryRow | null = $state(null);
+
+  // The entry being invoiced on its own, and the invoiced entry whose invoice is being voided.
+  let generating: WorkEntryRow | null = $state(null);
+  let voiding: WorkEntryRow | null = $state(null);
 
   const statusOptions: SelectOption[] = [
     { value: 'uninvoiced', label: 'Uninvoiced' },
@@ -166,9 +173,18 @@
     formError = '';
   }
 
-  /** A 409 means the agent (or another tab) got there first — offer a reload. */
+  function errorCode(e: unknown): string {
+    return e instanceof ApiError && e.status === 409 ? (e.payload?.code ?? '') : '';
+  }
+
+  /**
+   * The agent (or another tab) got there first — offer a reload. A stale etag
+   * and an entry invoiced since it was read are both that; a refusal that
+   * reloading would not change (`on_voided_invoice`) is not.
+   */
   function isConflict(e: unknown): boolean {
-    return e instanceof ApiError && e.status === 409;
+    const code = errorCode(e);
+    return code === 'conflict' || code === 'invoiced';
   }
 
   async function handleSave(data: WorkEntrySavePayload) {
@@ -213,6 +229,11 @@
     } catch (e) {
       if (isConflict(e)) {
         conflict = 'This entry was changed elsewhere — it was not deleted.';
+      } else if (errorCode(e) === 'on_voided_invoice') {
+        notifyError(
+          'This entry is listed on a voided invoice, which keeps its record of it, so it cannot be deleted.',
+        );
+        await load();
       } else {
         error = e instanceof Error ? e.message : 'Failed to delete work entry';
       }
@@ -223,6 +244,16 @@
 
   function viewInvoice() {
     goto(`${base}/money/business/invoices`);
+  }
+
+  function afterGenerate(_result: unknown, matchedPreview: boolean) {
+    if (matchedPreview) generating = null;
+    load();
+  }
+
+  function afterVoid() {
+    voiding = null;
+    load();
   }
 
   async function reloadFromConflict() {
@@ -236,7 +267,7 @@
     if (!entry.editable) {
       if (entry.invoice) {
         return [
-          { label: 'Invoiced — void the invoice to edit', onSelect: () => {}, disabled: true },
+          { label: `Void ${entry.invoice}…`, onSelect: () => (voiding = entry), danger: true },
           { label: `View invoice ${entry.invoice}`, onSelect: viewInvoice },
         ];
       }
@@ -250,7 +281,10 @@
     }
     return [
       { label: 'Edit', onSelect: () => openEdit(entry), disabled: busy },
-      { label: 'Delete', onSelect: () => askDelete(entry), danger: true, disabled: busy },
+      { label: 'Generate invoice', onSelect: () => (generating = entry), disabled: busy },
+      entry.deletable
+        ? { label: 'Delete', onSelect: () => askDelete(entry), danger: true, disabled: busy }
+        : { label: 'Delete — listed on a voided invoice', onSelect: () => {}, disabled: true },
     ];
   }
 
@@ -434,6 +468,23 @@
     onCancel={closeForm}
     error={formError}
     {saving}
+  />
+{/if}
+
+{#if generating}
+  <GenerateInvoicesDialog
+    selection={{ entry_uids: [generating.uid], etags: { [generating.uid]: generating.etag } }}
+    onIssued={afterGenerate}
+    onClose={() => (generating = null)}
+  />
+{/if}
+
+{#if voiding}
+  <VoidInvoiceDialog
+    invoiceNumber={voiding.invoice}
+    paid={!!voiding.paid_date}
+    onVoided={afterVoid}
+    onCancel={() => (voiding = null)}
   />
 {/if}
 

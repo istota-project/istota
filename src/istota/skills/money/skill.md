@@ -134,11 +134,14 @@ Rules the user wrote in the browser, rules migrated from the old Monarch maps an
 ## Invoice commands
 
 ```bash
-# Generate invoices for a billing period
+# Generate invoices: all unbilled work dated on or before the end of 2026-02
 istota-skill money invoice generate --period 2026-02 [--client acme] [--entity ENTITY] [--dry-run]
 
-# List invoices (outstanding by default)
-istota-skill money invoice list [--client acme] [--all]
+# Bill exactly the named entries (repeat --entry; --period is ignored)
+istota-skill money invoice generate --entry UID [--entry UID2] [--dry-run]
+
+# List invoices: outstanding and voided by default, paid too with --all
+istota-skill money invoice list [--client acme] [--all] [--active]
 
 # Record invoice payment (cash-basis: income recognized at payment time)
 istota-skill money invoice paid INV-000001 --date 2026-02-15 [--bank Assets:Bank:Savings] [--no-post] [--ledger NAME]
@@ -150,11 +153,19 @@ istota-skill money invoice create acme --item "Travel expenses 340.50"
 # Reopen a paid invoice, keeping the invoice number (inverse of `invoice paid`)
 istota-skill money invoice unpaid INV-000001
 
-# Void an invoice (clears work entries, optionally deletes PDF)
-istota-skill money invoice void INV-000001 [--force] [--delete-pdf]
+# Void an invoice: releases its work entries and keeps the invoice on record
+istota-skill money invoice void INV-000001 [--reason "Wrong rate"] [--replaced-by INV-000002,INV-000003] [--force] [--delete-pdf]
 ```
 
-Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`. Use `--no-post` when the bank transaction was already imported.
+Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`, which books the invoice's issued total split by income account as it was at issue (manual items under `Income:Services`), never a recomputation at current rates. Use `--no-post` when the bank transaction was already imported.
+
+**`--period` is an upper bound.** It bills every unbilled entry dated on or before the end of that month, earlier months included. To bill one piece of work on its own, pass its `uid` with `--entry` (read uids from `work list`). Named entries must exist and be unbilled, or the command fails and writes nothing. They still group by the normal rules, so entries named together can share one invoice. Run with `--dry-run` first and show the user what would be issued.
+
+**Grouping.** A client's unbilled work for one entity goes on one invoice, split only by the client's bundles and the services it bills separately. An entry flagged `separate` always gets an invoice of its own. Set it with `--separate` on `work add` or `work update`, and clear it with `--no-separate`; the web UI's work form has the same flag ("Invoice separately"). `work list` shows it on each entry.
+
+**Invoice records.** Every issued number has a record that is never deleted, and numbers are never reused. An invoice's total is fixed when it is issued, so a later rate change does not alter it. `invoice list` reports each invoice's `status` (`outstanding`, `paid` or `voided`); a voided one also carries `voided_at`, `void_reason` and `replaced_by`. Voided invoices are left out of the outstanding count, and `--active` hides them.
+
+**Voiding.** `invoice void` marks the invoice voided, records the reason and the invoices that replace it, and releases its work entries so they can be billed again. The voided invoice still lists the entries it covered. Every `--replaced-by` number must already exist; nothing fills it in automatically. A paid invoice needs `--force`. The PDF is kept and renamed with a `-VOID` suffix, unless `--delete-pdf` is given. Voiding twice is refused with the date of the first void.
 
 ### Payments matched automatically
 
@@ -177,7 +188,7 @@ Ambiguity is never resolved by guessing. Two open invoices that fit one credit, 
 
 Run `invoice review list` to see open reviews with the credit's ledger id and each live candidate's number, client and total. Use `invoice review settle LEDGER_TXN_ID --invoice INV-NNNNNN` to choose a candidate; it uses the credit's date and makes no ledger posting. Use `invoice review dismiss LEDGER_TXN_ID` for a credit that was not an invoice payment. `invoice review list --all` includes decided rows. `invoice matches [--invoice INV-NNNNNN]` shows settled and reverted history. `invoice unpaid` marks the match reverted without reopening its review. `--no-match-invoices` turns the whole thing off for a run (on both `sync-monarch` and `run-scheduled` — unlike `--skip-monarch`, which would also skip the ledger sync), and `invoice unpaid <number>` undoes a match that was wrong. The `invoice_matching` key only appears when there was something to report.
 
-An invoice is left out of matching entirely when its total can't be stated exactly: partly paid, or carrying a work entry whose service is no longer in the config. Matching on a total that isn't what the client owes is how the wrong invoice gets settled. The date filter uses the invoice's own issue date, which is recorded on its work entries. An invoice raised before that field existed has none, and falls back to the latest work billed on it as a lower bound — that never rejects a real payment, but it does admit credits from the gap between the last work and the invoice going out.
+Matching compares the credit with the total stored when the invoice was issued. An invoice is left out of matching when it is paid or voided, or when it carries a work entry whose service is no longer in the config (a manual invoice's free-amount lines count as such). The date filter uses the invoice's issue date. An invoice raised before issue dates were recorded was given the latest work billed on it as its date, which never rejects a real payment but can admit a credit from the gap between that work and the invoice going out.
 
 ## Work log commands
 
@@ -186,16 +197,13 @@ An invoice is left out of matching entirely when its total can't be stated exact
 istota-skill money work list [--client acme] [--period 2026-02] [--uninvoiced] [--invoiced]
 
 # Add a work entry
-istota-skill money work add --date 2026-02-01 --client acme --service consulting --qty 4 [--description "Architecture review"] [--amount 100] [--discount 10] [--entity ENTITY]
+istota-skill money work add --date 2026-02-01 --client acme --service consulting --qty 4 [--description "Architecture review"] [--amount 100] [--discount 10] [--entity ENTITY] [--separate]
 
 # Update a work entry
-istota-skill money work update 5 [--qty 8] [--description "Updated"]
+istota-skill money work update 5 [--qty 8] [--description "Updated"] [--separate | --no-separate]
 
 # Remove an uninvoiced work entry
 istota-skill money work remove 3
-
-# Stamp a stable uid on any entry lacking one (idempotent; runs automatically on init)
-istota-skill money work backfill-ids
 ```
 
 **Entry identity.** `work list` returns both an `id` (1-based display index) and a
@@ -204,14 +212,33 @@ shifts whenever an entry is inserted before it — so re-run `work list` immedia
 before acting on an index, never reuse one from earlier in the conversation. The
 web UI addresses entries by `uid` for exactly this reason.
 
-**Hand-editing the year files.** `{workspace}/{BOT_DIR}/money/invoices/work/{year}.toml`
-is meant to be hand-editable, but any programmatic write rewrites the whole file
-from the serializer:
+**Billed entries are locked.** An entry on an open or paid invoice cannot be
+updated or removed; void the invoice first. An entry a voided invoice still
+lists can be edited and billed again, but not removed, because the voided
+invoice keeps its record of it.
 
-- Keep the `uid` line when you edit an entry — dropping it orphans the entry
-  from the web UI until the next backfill (which assigns a *new* uid).
-- Custom keys survive; **comments do not**, and neither do nested tables. Put
-  anything you need to keep in a `description` or a scalar key of your own.
+**Where the work log lives.** Work entries and invoices are stored in the
+user's money database, not in files. The yearly `invoices/work/{year}.toml`
+files of older installs were imported once and renamed to
+`{year}.toml.migrated`; nothing reads them after that, and editing one changes
+nothing. A `{year}.toml` that reappears later (a sync conflict, a restored
+copy) is renamed aside the same way and never read.
+
+**When the import is blocked.** The import runs by itself the first time the
+work log is used, and only goes ahead when it can verify every entry and
+invoice it wrote. If it refuses, every `work` and `invoice` command returns
+`{"status": "error", "error": "work log migration blocked: <reason>"}` and
+writes nothing, and the web pages show the same message. Do not try to work
+around it. Tell the user the reason and that an operator runs the fix:
+
+- an entry with no uid: `istota money work backfill-ids -u USER`, then
+  `istota money work migrate -u USER`
+- an unreadable year file, a uid used twice, or one invoice's entries
+  disagreeing on the paid date: correct the named file by hand, then
+  `istota money work migrate -u USER`
+
+`istota money work migrate -u USER --dry-run` checks the import and reports
+the counts without writing anything.
 
 ## Invoicing config: clients, entities and services
 
@@ -226,15 +253,14 @@ proposing a change:
   accepted and then silently billed as hours, and `--schedule weekly` was
   accepted and then never fired. An existing record that already holds such a
   value stays editable: only a field you actually change is checked.
-- **A service any work entry names cannot be deleted.** Removing it would
-  unbill that work *and* shrink the rendered total of every past invoice
-  containing such an entry, since invoice totals are rebuilt from live config.
-  Reassign or remove the entries first. An entity is likewise protected while a
-  client names it, a work entry pins it, or it is the entity blank-entity
-  clients bill under. Deleting a *client* is allowed — its entries and invoices
-  survive, showing the raw key instead of a name. If a year file holds a row
-  this version can't read, the two strict deletes refuse rather than counting
-  it as zero: fix the row first.
+- **A service any work entry names cannot be deleted.** Its unbilled work
+  could no longer be billed, and its invoices could no longer be matched to
+  payments. Reassign or remove the entries first. An entity is likewise
+  protected while a client names it, a work entry pins it, or it is the entity
+  blank-entity clients bill under. Deleting a *client* is allowed — its
+  entries and invoices survive, showing the raw key instead of a name. While
+  the work log import is blocked, the two strict deletes refuse rather than
+  counting entries as zero.
 - **Client keys are lowercase.** Work entries store the client lowercased, so a
   mixed-case key matches no entry and that client's work is never billed. Entity
   and service keys are unconstrained.

@@ -9,7 +9,9 @@ from croniter import croniter
 
 from istota import db, user_briefings
 from istota.briefings import _migrate, db as bdb
-from istota.briefings.models import BriefingBlock, BlockSource, parse_json_dict
+from istota.briefings.models import (
+    BriefingBlock, BlockSource, parse_json_dict, presentation_for_options, validate_block_options,
+)
 from istota.config import BriefingConfig, _apply_user_briefings
 from istota.config_editor.secrets import redact_document
 from istota.lib.sqlite_util import connect_read_only
@@ -170,6 +172,8 @@ def snapshot_blocks(conn, name, user):
             block = {field: row["block"][field] for field in BLOCK_FIELDS}
             block["directive"] = "" if block["directive"] is None else block["directive"]
             block["options"] = parse_json_dict(block["options"], strict=True)
+            if "presentation" in block["options"]:
+                block["options"]["presentation"] = presentation_for_options(block["options"])
             block["sources"] = []
             for source in row["sources"]:
                 if source["enabled"] not in (0, 1):
@@ -319,6 +323,8 @@ def plan_blocks(plan, user, context, options):
 
 def apply_blocks(conn, name, definitions):
     """Reconcile positions through module helpers, retaining ordinary-update IDs."""
+    for definition in definitions:
+        validate_block_options(definition["options"])
     previous = bdb.list_blocks(conn, name)
     for index, definition in enumerate(definitions):
         fields = {field: definition[field] for field in BLOCK_FIELDS}

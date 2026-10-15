@@ -38,9 +38,9 @@ CASH_CLASS = "Cash & Equivalents"
 HISTORY_GROUP_BYS = ("total", "group", "account_type", "asset_class")
 
 # schema_meta is shared with config_store; CREATE IF NOT EXISTS keeps whichever
-# family initialises first authoritative. The positions FK cascade clause is
-# decorative (PRAGMA foreign_keys is not set on db.get_db connections) —
-# delete_snapshot deletes position rows explicitly.
+# family initialises first authoritative. db.get_db turns foreign_keys on, so
+# the positions cascade fires there; delete_snapshot still deletes position
+# rows explicitly, for a connection opened without it.
 PORTFOLIO_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,

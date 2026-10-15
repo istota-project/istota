@@ -330,3 +330,54 @@ describe('workspace file viewer through the host', () => {
     },
   );
 });
+describe('url sources', () => {
+  const url = '/istota/api/money/invoices/INV-000010/pdf';
+  function openUrl() {
+    render(FileViewerHost);
+    viewer.openFile(url, { kind: 'url', url, name: 'INV-000010', mime: 'application/pdf' });
+  }
+  function loadFails(status: number) {
+    vi.mocked(getDocument).mockReturnValue({
+      promise: Promise.reject(
+        Object.assign(new Error(`Unexpected server response (${status})`), {
+          name: 'ResponseException',
+          status,
+        }),
+      ),
+      destroy: vi.fn(async () => {}),
+    } as never);
+  }
+  it('renders the PDF from the URL with no preview call', async () => {
+    const getPage = vi.fn(async () => ({
+      getViewport: ({ scale }: { scale: number }) => ({ width: 600 * scale, height: 800 * scale }),
+      render: () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
+      cleanup: vi.fn(),
+    }));
+    vi.mocked(getDocument).mockReturnValue({
+      promise: Promise.resolve({ numPages: 1, getPage }),
+      destroy: vi.fn(async () => {}),
+    } as never);
+    openUrl();
+    await screen.findByRole('img', { name: 'PDF page 1' });
+    expect(getDocument).toHaveBeenCalledWith(expect.objectContaining({ url }));
+    expect(preview).not.toHaveBeenCalled();
+    expect(previewNextcloudFile).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'INV-000010' })).toBeTruthy();
+    const download = screen.getByRole('link', { name: 'Download' });
+    expect(download).toHaveAttribute('href', url);
+    expect(download).toHaveAttribute('download', '');
+  });
+  it('says there is no PDF on a 404 and hides Download', async () => {
+    loadFails(404);
+    openUrl();
+    expect(await screen.findByText('No PDF for this invoice')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Download' })).toBeNull();
+  });
+  it('keeps Download when the PDF fails for another reason', async () => {
+    loadFails(500);
+    openUrl();
+    expect(await screen.findByText(/Couldn.t load this PDF/)).toBeTruthy();
+    expect(screen.queryByText('No PDF for this invoice')).toBeNull();
+    expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute('href', url);
+  });
+});

@@ -1,5 +1,7 @@
 import type { Plugin } from 'vite';
 import type {
+  BriefingArchiveItem,
+  BriefingDocument,
   WorkspacePin,
   WorkspacePlace,
   WorkspaceEntry,
@@ -9,6 +11,7 @@ import type {
   AdminUsers,
 } from './src/lib/api';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -6465,7 +6468,7 @@ const handlers: MockHandler[] = [
 
   // Phase 7b — briefings
   (() => {
-    let nextBriefingId = 200;
+    let nextBriefingId = 203;
     const mockDbBriefings: {
       id: number;
       name: string;
@@ -6474,7 +6477,35 @@ const handlers: MockHandler[] = [
       conversation_token: string;
       output: string;
       enabled: boolean;
-    }[] = [];
+    }[] = [
+      {
+        id: 200,
+        name: 'evening',
+        cron: '0 18 * * 1-5',
+        title: 'Evening Digest',
+        conversation_token: 'abc123',
+        output: 'email',
+        enabled: true,
+      },
+      {
+        id: 201,
+        name: 'weekly',
+        cron: '0 9 * * 0',
+        title: 'Weekly Review',
+        conversation_token: '',
+        output: 'email',
+        enabled: true,
+      },
+      {
+        id: 202,
+        name: 'weekend',
+        cron: '0 10 * * 6',
+        title: 'Weekend Reading',
+        conversation_token: '',
+        output: 'email',
+        enabled: false,
+      },
+    ];
     const tomlBriefings = [
       {
         name: 'morning',
@@ -6549,7 +6580,6 @@ const handlers: MockHandler[] = [
       'todos',
       'reminders',
       'notes',
-      'kv',
       'shared_block',
     ];
     const STRUCTURED_KINDS = ['markets', 'calendar'];
@@ -6658,23 +6688,28 @@ const handlers: MockHandler[] = [
       sources: Src[];
     }
     let nextBlockId = 500;
-    let nextSourceId = 900;
+    let nextSourceId = 2000;
     const blocks: Block[] = [
       {
         id: 401,
         briefing_name: 'morning',
         position: 0,
-        title: 'World news',
-        directive: 'Summarize the top world stories in 4-5 bullet points.',
+        title: 'World headlines',
+        directive: '',
         render_mode: 'synthesis',
-        options: {},
+        options: {
+          presentation: {
+            width: 'wide',
+          },
+        },
         sources: [
-          { id: 801, position: 0, kind: 'browse', config: { preset: 'ap' }, enabled: true },
           {
-            id: 802,
-            position: 1,
-            kind: 'rss',
-            config: { feed_ref: { kind: 'subscription', value: 12 }, limit: 8 },
+            id: 1401,
+            position: 0,
+            kind: 'browse',
+            config: {
+              preset: 'ap',
+            },
             enabled: true,
           },
         ],
@@ -6683,30 +6718,594 @@ const handlers: MockHandler[] = [
         id: 402,
         briefing_name: 'morning',
         position: 1,
-        title: 'Markets',
-        directive: 'Overnight index moves and notable movers.',
+        title: 'Today’s calendar',
+        directive: '',
         render_mode: 'structured',
-        options: {},
-        sources: [{ id: 803, position: 0, kind: 'markets', config: {}, enabled: true }],
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1402,
+            position: 0,
+            kind: 'calendar',
+            config: {},
+            enabled: true,
+          },
+        ],
       },
       {
         id: 403,
         briefing_name: 'morning',
         position: 2,
-        title: 'Todos & notes',
+        title: 'Markets',
         directive: '',
-        render_mode: 'synthesis',
-        options: {},
+        render_mode: 'structured',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
         sources: [
           {
-            id: 804,
+            id: 1403,
             position: 0,
-            kind: 'todos',
-            config: { path: 'shared/team-todo.md' },
+            kind: 'markets',
+            config: {},
             enabled: true,
           },
-          { id: 805, position: 1, kind: 'notes', config: {}, enabled: false },
         ],
+      },
+      {
+        id: 404,
+        briefing_name: 'morning',
+        position: 3,
+        title: 'Tasks and reminders',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1404,
+            position: 0,
+            kind: 'todos',
+            config: {
+              path: 'shared/team-todo.md',
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 405,
+        briefing_name: 'morning',
+        position: 4,
+        title: 'From the newsletters',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'wide',
+          },
+        },
+        sources: [
+          {
+            id: 1405,
+            position: 0,
+            kind: 'email',
+            config: {
+              max_messages: 8,
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 406,
+        briefing_name: 'morning',
+        position: 5,
+        title: 'Notebook',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'full',
+          },
+        },
+        sources: [
+          {
+            id: 1406,
+            position: 0,
+            kind: 'notes',
+            config: {
+              path: 'istota/notes/agenda.md',
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 407,
+        briefing_name: 'morning',
+        position: 6,
+        title: 'Shared reading',
+        directive: '',
+        render_mode: 'structured',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1407,
+            position: 0,
+            kind: 'shared_block',
+            config: {
+              name: 'world-headlines',
+              max_age_hours: 24,
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 411,
+        briefing_name: 'evening',
+        position: 0,
+        title: 'The day in brief',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'wide',
+          },
+        },
+        sources: [
+          {
+            id: 1411,
+            position: 0,
+            kind: 'browse',
+            config: {
+              preset: 'reuters',
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 412,
+        briefing_name: 'evening',
+        position: 1,
+        title: 'Tomorrow',
+        directive: '',
+        render_mode: 'structured',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1412,
+            position: 0,
+            kind: 'calendar',
+            config: {},
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 413,
+        briefing_name: 'evening',
+        position: 2,
+        title: 'Loose ends',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1413,
+            position: 0,
+            kind: 'reminders',
+            config: {
+              path: 'shared/reminders.md',
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 414,
+        briefing_name: 'evening',
+        position: 3,
+        title: 'Worth a longer read',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'full',
+          },
+        },
+        sources: [
+          {
+            id: 1414,
+            position: 0,
+            kind: 'rss',
+            config: {
+              feed_ref: {
+                kind: 'subscription',
+                value: 12,
+              },
+              limit: 8,
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 421,
+        briefing_name: 'weekly',
+        position: 0,
+        title: 'The week’s themes',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'wide',
+          },
+        },
+        sources: [
+          {
+            id: 1421,
+            position: 0,
+            kind: 'rss',
+            config: {
+              feed_ref: {
+                kind: 'category',
+                value: 2,
+              },
+              limit: 12,
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 422,
+        briefing_name: 'weekly',
+        position: 1,
+        title: 'What moved forward',
+        directive: '',
+        render_mode: 'synthesis',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1422,
+            position: 0,
+            kind: 'notes',
+            config: {
+              path: 'istota/notes/agenda.md',
+            },
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 423,
+        briefing_name: 'weekly',
+        position: 2,
+        title: 'Next week',
+        directive: '',
+        render_mode: 'structured',
+        options: {
+          presentation: {
+            width: 'auto',
+          },
+        },
+        sources: [
+          {
+            id: 1423,
+            position: 0,
+            kind: 'calendar',
+            config: {},
+            enabled: true,
+          },
+        ],
+      },
+      {
+        id: 424,
+        briefing_name: 'weekly',
+        position: 3,
+        title: 'Reading shelf',
+        directive: '',
+        render_mode: 'structured',
+        options: {
+          presentation: {
+            width: 'full',
+          },
+        },
+        sources: [
+          {
+            id: 1424,
+            position: 0,
+            kind: 'shared_block',
+            config: {
+              name: 'world-headlines',
+            },
+            enabled: true,
+          },
+        ],
+      },
+    ];
+    const mockBlockBodies: Record<number, string> = {
+      '401':
+        '**A simpler city timetable**\n\nA coordinated timetable shortens transfers on three busy routes. [Read the report](https://example.com/news/transit_pilot?edition=morning_one).\n\n**The open library archive**\n\nThe collection includes maps, photographs and local newspapers. [Explore the archive](https://example.com/news/library).\n\n**An open research dataset**\n\nA new release makes earlier measurements easier to compare. [Dataset notes](https://example.com/research/open-data).\n\n**More to read**\n\n- A regional rail connection returns.\n- A repair workshop opens.\n- The museum announces evening hours.\n- A restoration trial publishes results.\n- A garden shares its growing guide.\n- A new route connects two parks.',
+      '402':
+        '- **09:00** Planning check-in\n  - Review the current priorities.\n- **11:00** Design workshop\n- **14:30** Project review\n- **17:00** Time for a walk',
+      '403':
+        '| Market | Level | Move |\n| --- | ---: | ---: |\n| Broad market | 5,432 | +0.4% |\n| Technology | 17,800 | +0.7% |\n| Global index | 3,210 | −0.2% |\n\nIllustrative figures for layout testing. [Market notes](https://example.com/markets).',
+      '404':
+        '- Finish the workshop outline.\n- Send the project note.\n- Book a bike service.\n- Review the reading list.\n- Bring the library book.\n- Check next week’s plan.\n- Water the plants.\n\nThe outline is the only time-sensitive task today.',
+      '405':
+        '**Reading a long project**\n\nA design note considers how headings, examples and generous spacing make a long document easier to scan. [Read the essay](https://example.com/letters/reading_long_projects?issue=42).\n\n**An afternoon outdoors**\n\nA short guide collects accessible walks close to public transport. [Walking guide](https://example.com/letters/walking).\n\nThe remaining newsletters were announcements and receipts.',
+      '406':
+        'Keep the morning list short enough to remember.\n\n> Leave a little space between what is urgent and what is useful.\n\nThe next workshop should start with a concrete example.\n\nA long URL checks wrapping: https://example.com/notes/a-very-long-reference-path-that-must-wrap-without-making-the-page-scroll-sideways?first_value=one_two_three&another_value=four_five_six\n\nThis fifth paragraph remains available in the full-block viewer and every delivery preview.',
+      '407':
+        '- [Public maps](https://example.com/shared/maps)\n- [Repairing everyday objects](https://example.com/shared/repair)\n- [Organizing a reading group](https://example.com/shared/reading)',
+      '411':
+        '**The transit pilot moves ahead**\n\nThe final timetable includes an extra late weekday service. [Evening update](https://example.com/evening/transit).\n\n**The library archive is busy**\n\nThe historical map collection drew interest today. [Library note](https://example.com/evening/library).',
+      '412':
+        '- **10:00** Working session\n- **13:30** Draft review\n- **16:00** Open time\n\nPrepare the two-page example before the working session.',
+      '413':
+        '- Reply to the workshop invitation.\n- Set out the library book.\n- Share the revised outline.',
+      '414':
+        '**A useful public space**\n\nA photo essay follows a square from the first delivery to the last bus. [Read the essay](https://example.com/evening/public-space).\n\n**A history of everyday tools**\n\nA collection tells a story about repair and changing materials. [Read the feature](https://example.com/evening/tools).',
+      '421':
+        'Useful infrastructure, access to information, and time to repair things kept recurring this week. [Weekly reading](https://example.com/weekly/themes).\n\nA short list for next week:\n\n- Follow the transit results.\n- Read one long piece without multitasking.\n- Make time for an unfinished project.',
+      '422':
+        '- Workshop outline completed.\n- Project notes reorganized.\n- Reading list reduced to five pieces.\n\nChoose the next example next week.',
+      '423':
+        '| Day | Focus |\n| --- | --- |\n| Monday | Preparation |\n| Tuesday | Working session |\n| Wednesday | Review |\n| Thursday | Reading and writing |\n| Friday | Close open loops |',
+      '424':
+        '- [Public spaces](https://example.com/weekly/spaces)\n- [The open archive](https://example.com/weekly/archive)\n- [Repair and reuse](https://example.com/weekly/repair)\n- [A field guide](https://example.com/weekly/guide)\n- [The long interview](https://example.com/weekly/interview)\n- [Walking notes](https://example.com/weekly/walks)',
+    };
+    const mockLinearBodies: Record<string, string> = {
+      morning:
+        'World headlines\n\n**A simpler city timetable**\n\nA coordinated timetable shortens transfers on three busy routes. [Read the report](https://example.com/news/transit_pilot?edition=morning_one).\n\n**The open library archive**\n\nThe collection includes maps, photographs and local newspapers. [Explore the archive](https://example.com/news/library).\n\n**An open research dataset**\n\nA new release makes earlier measurements easier to compare. [Dataset notes](https://example.com/research/open-data).\n\n**More to read**\n\n- A regional rail connection returns.\n- A repair workshop opens.\n- The museum announces evening hours.\n- A restoration trial publishes results.\n- A garden shares its growing guide.\n- A new route connects two parks.\n\nToday’s calendar\n\n- **09:00** Planning check-in\n  - Review the current priorities.\n- **11:00** Design workshop\n- **14:30** Project review\n- **17:00** Time for a walk\n\nMarkets\n\n| Market | Level | Move |\n| --- | ---: | ---: |\n| Broad market | 5,432 | +0.4% |\n| Technology | 17,800 | +0.7% |\n| Global index | 3,210 | −0.2% |\n\nIllustrative figures for layout testing. [Market notes](https://example.com/markets).\n\nTasks and reminders\n\n- Finish the workshop outline.\n- Send the project note.\n- Book a bike service.\n- Review the reading list.\n- Bring the library book.\n- Check next week’s plan.\n- Water the plants.\n\nThe outline is the only time-sensitive task today.\n\nFrom the newsletters\n\n**Reading a long project**\n\nA design note considers how headings, examples and generous spacing make a long document easier to scan. [Read the essay](https://example.com/letters/reading_long_projects?issue=42).\n\n**An afternoon outdoors**\n\nA short guide collects accessible walks close to public transport. [Walking guide](https://example.com/letters/walking).\n\nThe remaining newsletters were announcements and receipts.\n\nNotebook\n\nKeep the morning list short enough to remember.\n\n> Leave a little space between what is urgent and what is useful.\n\nThe next workshop should start with a concrete example.\n\nA long URL checks wrapping: https://example.com/notes/a-very-long-reference-path-that-must-wrap-without-making-the-page-scroll-sideways?first_value=one_two_three&another_value=four_five_six\n\nThis fifth paragraph remains available in the full-block viewer and every delivery preview.\n\nShared reading\n\n- [Public maps](https://example.com/shared/maps)\n- [Repairing everyday objects](https://example.com/shared/repair)\n- [Organizing a reading group](https://example.com/shared/reading)',
+      evening:
+        'The day in brief\n\n**The transit pilot moves ahead**\n\nThe final timetable includes an extra late weekday service. [Evening update](https://example.com/evening/transit).\n\n**The library archive is busy**\n\nThe historical map collection drew interest today. [Library note](https://example.com/evening/library).\n\nTomorrow\n\n- **10:00** Working session\n- **13:30** Draft review\n- **16:00** Open time\n\nPrepare the two-page example before the working session.\n\nLoose ends\n\n- Reply to the workshop invitation.\n- Set out the library book.\n- Share the revised outline.\n\nWorth a longer read\n\n**A useful public space**\n\nA photo essay follows a square from the first delivery to the last bus. [Read the essay](https://example.com/evening/public-space).\n\n**A history of everyday tools**\n\nA collection tells a story about repair and changing materials. [Read the feature](https://example.com/evening/tools).',
+      weekly:
+        'The week’s themes\n\nUseful infrastructure, access to information, and time to repair things kept recurring this week. [Weekly reading](https://example.com/weekly/themes).\n\nA short list for next week:\n\n- Follow the transit results.\n- Read one long piece without multitasking.\n- Make time for an unfinished project.\n\nWhat moved forward\n\n- Workshop outline completed.\n- Project notes reorganized.\n- Reading list reduced to five pieces.\n\nChoose the next example next week.\n\nNext week\n\n| Day | Focus |\n| --- | --- |\n| Monday | Preparation |\n| Tuesday | Working session |\n| Wednesday | Review |\n| Thursday | Reading and writing |\n| Friday | Close open loops |\n\nReading shelf\n\n- [Public spaces](https://example.com/weekly/spaces)\n- [The open archive](https://example.com/weekly/archive)\n- [Repair and reuse](https://example.com/weekly/repair)\n- [A field guide](https://example.com/weekly/guide)\n- [The long interview](https://example.com/weekly/interview)\n- [Walking notes](https://example.com/weekly/walks)',
+    };
+    const blockTemplates = [
+      {
+        id: 'feeds',
+        label: 'News from feeds',
+        description: 'Choose a feed subscription or category.',
+        block: {
+          title: 'News from feeds',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'rss',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'websites',
+        label: 'News from websites',
+        description: 'Choose a site preset or enter a URL.',
+        block: {
+          title: 'News from websites',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'browse',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'newsletters',
+        label: 'Newsletters',
+        description: 'Summarize newsletters from your email sources.',
+        block: {
+          title: 'Newsletters',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'email',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'calendar',
+        label: 'Calendar',
+        description: 'Show your upcoming calendar events.',
+        block: {
+          title: 'Calendar',
+          directive: '',
+          render_mode: 'structured',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'calendar',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'markets',
+        label: 'Markets',
+        description: 'Show the current market summary.',
+        block: {
+          title: 'Markets',
+          directive: '',
+          render_mode: 'structured',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'markets',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'tasks',
+        label: 'Tasks',
+        description: 'Choose a file containing your tasks.',
+        block: {
+          title: 'Tasks',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'todos',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'notes',
+        label: 'Notes',
+        description: 'Choose a file containing your notes.',
+        block: {
+          title: 'Notes',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'notes',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'reminder',
+        label: 'Reminder',
+        description: 'Choose a file containing your reminders.',
+        block: {
+          title: 'Reminder',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'reminders',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'shared',
+        label: 'Shared content',
+        description: 'Choose an available shared block.',
+        block: {
+          title: 'Shared content',
+          directive: '',
+          render_mode: 'structured',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [
+            {
+              kind: 'shared_block',
+              config: {},
+              enabled: true,
+            },
+          ],
+        },
+      },
+      {
+        id: 'custom',
+        label: 'Custom',
+        description: 'Start with a title and add your own sources.',
+        block: {
+          title: 'Custom',
+          directive: '',
+          render_mode: 'synthesis',
+          options: {
+            presentation: {
+              width: 'auto',
+            },
+          },
+          sources: [],
+        },
       },
     ];
 
@@ -6719,36 +7318,90 @@ const handlers: MockHandler[] = [
       'inbox/dropped-note.md',
     ];
 
-    const archive = [
-      {
-        id: 1,
-        briefing_name: 'morning',
-        subject: 'Morning briefing — Mon Jul 20',
-        generated_at: new Date(Date.now() - 3600_000).toISOString(),
-        task_id: 4201,
-        delivered_to: ['talk'],
-        body_md:
-          '# Morning briefing\n\n## World news\n\n- Mock story one about global affairs.\n- Mock story two about the economy.\n\n## Markets\n\n| Index | Level | Change |\n| --- | --- | --- |\n| S&P 500 | 5,432 | +0.4% |\n| Nasdaq | 17,800 | +0.7% |\n',
-      },
-      {
-        id: 2,
-        briefing_name: 'morning',
-        subject: 'Morning briefing — Fri Jul 17',
-        generated_at: new Date(Date.now() - 3 * 86400_000).toISOString(),
-        task_id: 4198,
-        delivered_to: ['talk', 'email'],
-        body_md:
-          '# Morning briefing\n\n## World news\n\n- An older mock story.\n- Another older mock story.\n',
-      },
-    ];
-    const briefingNames = [...new Set(archive.map((a) => a.briefing_name))];
-
+    const archive: BriefingArchiveItem[] = [];
+    for (const [name, label, count, hours] of [
+      ['morning', 'Morning Briefing', 10, 1],
+      ['evening', 'Evening Digest', 4, 14],
+      ['weekly', 'Weekly Review', 3, 48],
+    ] as const) {
+      for (let day = 0; day < count; day++) {
+        const generated = new Date(
+          Date.now() - (hours + day * (name === 'weekly' ? 168 : 24)) * 3600_000,
+        );
+        const title = `${label} — ${generated.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}`;
+        const document: BriefingDocument = {
+          version: 1,
+          title,
+          blocks: blocks
+            .filter((b) => b.briefing_name === name)
+            .map((b) => ({
+              block_id: b.id,
+              title: b.title,
+              kind: 'markdown',
+              body_md: mockBlockBodies[b.id],
+              presentation: b.options.presentation as { width: 'auto' | 'wide' | 'full' },
+              source_status: b.id === 401 && day === 0 ? 'partial' : 'complete',
+            })),
+        };
+        archive.push({
+          id: archive.length + 1,
+          briefing_name: name,
+          subject: title,
+          generated_at: generated.toISOString(),
+          task_id: 4200 + archive.length,
+          delivered_to: ['talk', 'email'],
+          body_md: mockLinearBodies[name],
+          document,
+        });
+      }
+    }
+    archive.push({
+      id: 18,
+      briefing_name: 'morning',
+      subject: 'An earlier morning briefing',
+      generated_at: new Date(Date.now() - 480 * 3600_000).toISOString(),
+      task_id: 4100,
+      delivered_to: ['talk'],
+      body_md:
+        '## World news\n\nA legacy edition without stored block boundaries.\n\n- A short news item.\n- Another item with a [source](https://example.com/legacy).\n\n## Markets\n\nThe original linear content remains fully readable.',
+      document: null,
+    });
+    archive.sort((a, b) => b.generated_at.localeCompare(a.generated_at));
+    const briefingNames = ['morning', 'evening', 'weekly', 'weekend'];
     const configResponse = () => ({
-      briefings: [{ name: 'morning', blocks }],
-      schedule_names: ['morning'],
+      briefings: [
+        ...new Set([...briefingNames, ...blocks.map((block) => block.briefing_name)]),
+      ].map((name) => ({
+        name,
+        blocks: blocks
+          .filter((b) => b.briefing_name === name)
+          .sort((a, b) => a.position - b.position),
+      })),
+      schedule_names: briefingNames,
       source_kinds: SOURCE_KINDS,
       structured_kinds: STRUCTURED_KINDS,
+      block_templates: blockTemplates,
     });
+    // Keep development email previews on the production renderer.
+    const renderPreview = (document: unknown) =>
+      JSON.parse(
+        execFileSync(
+          'uv',
+          [
+            'run',
+            '--no-sync',
+            'python',
+            '-c',
+            'import json,sys; from istota.briefings.models import validate_briefing_document; from istota.briefings.document import document_to_markdown; from istota.skills.briefing import render_briefing_document_plain,render_briefing_document_html; d=validate_briefing_document(json.load(sys.stdin)); print(json.dumps(dict(body_md=document_to_markdown(d),plain=render_briefing_document_plain(d),html=render_briefing_document_html(d))))',
+          ],
+          {
+            cwd: resolve(dirname(fileURLToPath(import.meta.url)), '..'),
+            input: JSON.stringify(document),
+            encoding: 'utf8',
+            maxBuffer: 8 * 1024 * 1024,
+          },
+        ),
+      );
 
     return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
       const p = (url.split('?')[0] || '').replace('/istota/api/briefings', '');
@@ -6756,11 +7409,14 @@ const handlers: MockHandler[] = [
       // Archive list (paged, optional ?name= filter)
       if (p === '/archive' && method === 'GET') {
         const qs = new URLSearchParams(url.split('?')[1] || '');
-        const name = qs.get('name');
-        const items = (name ? archive.filter((a) => a.briefing_name === name) : archive).map(
-          ({ body_md, ...rest }) => rest,
-        );
-        return { items, total: items.length, briefing_names: briefingNames };
+        const name = qs.get('briefing_name');
+        const selected = name ? archive.filter((a) => a.briefing_name === name) : archive;
+        const offset = Math.max(0, Number(qs.get('offset') || 0));
+        const limit = Math.max(1, Number(qs.get('limit') || 50));
+        const items = selected
+          .slice(offset, offset + limit)
+          .map(({ document: _document, ...row }) => row);
+        return { items, total: selected.length, briefing_names: briefingNames };
       }
       const am = p.match(/^\/archive\/(\d+)$/);
       if (am && method === 'GET') {
@@ -6775,40 +7431,80 @@ const handlers: MockHandler[] = [
       }
 
       if (p === '/config' && method === 'GET') return configResponse();
+      if (p === '/preview' && method === 'POST') {
+        try {
+          return renderPreview((body as { document?: unknown })?.document);
+        } catch {
+          return {
+            __status: 400,
+            detail:
+              'Preview could not render. Ensure the checkout has its Python dependencies installed.',
+          };
+        }
+      }
 
-      // Block upsert / reorder / delete
+      // Preserve source and layout edits during a mock styling session.
       if (p === '/blocks' && method === 'PUT') {
-        const b = (body ?? {}) as Record<string, unknown>;
-        const reorder = b.reorder as { ordered_ids?: number[] } | undefined;
-        if (reorder?.ordered_ids) {
+        const b = (body ?? {}) as Record<string, any>;
+        const reorder = b.reorder as { briefing_name?: string; ordered_ids?: number[] } | undefined;
+        if (reorder) {
+          const current = blocks.filter((row) => row.briefing_name === reorder.briefing_name);
           const order = reorder.ordered_ids;
-          blocks.sort((x, y) => order.indexOf(x.id) - order.indexOf(y.id));
-          blocks.forEach((blk, i) => (blk.position = i));
-          return { status: 'ok' };
+          if (
+            !Array.isArray(order) ||
+            order.length !== current.length ||
+            new Set(order).size !== current.length ||
+            order.some((id) => !current.some((row) => row.id === id))
+          )
+            return { __status: 400, detail: 'Provide every block once.' };
+          order.forEach((id, position) => {
+            blocks.find((row) => row.id === id)!.position = position;
+          });
+          return { status: 'ok', reordered: order.length };
         }
         const id = Number(b.id) || 0;
-        if (id) {
-          const blk = blocks.find((x) => x.id === id);
-          if (blk) {
-            if (b.title !== undefined) blk.title = String(b.title);
-            if (b.directive !== undefined) blk.directive = String(b.directive);
-            if (b.render_mode !== undefined) blk.render_mode = String(b.render_mode);
-            if (b.position !== undefined) blk.position = Number(b.position);
-            return { status: 'ok', block: blk };
+        const current = id ? blocks.find((row) => row.id === id) : undefined;
+        if (id && !current) return { __status: 404, detail: 'Block not found.' };
+        const options = b.options ?? current?.options ?? {};
+        if (options.presentation && !['auto', 'wide', 'full'].includes(options.presentation.width))
+          return { __status: 400, detail: 'Invalid width.' };
+        if (b.sources !== undefined) {
+          if (!Array.isArray(b.sources) || (!current && !b.sources.length))
+            return { __status: 400, detail: 'Add at least one source.' };
+          const ids = new Set<number>();
+          for (const source of b.sources) {
+            if (
+              !SOURCE_KINDS.includes(source.kind) ||
+              (source.id !== undefined &&
+                (ids.has(source.id) || !current?.sources.some((row) => row.id === source.id)))
+            )
+              return { __status: 400, detail: 'Invalid source.' };
+            if (source.id !== undefined) ids.add(source.id);
           }
         }
-        const blk: Block = {
-          id: nextBlockId++,
-          briefing_name: String(b.briefing_name ?? 'morning'),
-          position: Number(b.position ?? blocks.length),
-          title: String(b.title ?? 'New block'),
-          directive: String(b.directive ?? ''),
-          render_mode: String(b.render_mode ?? 'synthesis'),
-          options: {},
-          sources: [],
+        const name = current?.briefing_name ?? String(b.briefing_name ?? 'morning');
+        const saved: Block = {
+          id: current?.id ?? nextBlockId++,
+          briefing_name: name,
+          position: current?.position ?? blocks.filter((row) => row.briefing_name === name).length,
+          title: String(b.title ?? current?.title ?? 'New block'),
+          directive: String(b.directive ?? current?.directive ?? ''),
+          render_mode: String(b.render_mode ?? current?.render_mode ?? 'synthesis'),
+          options,
+          sources:
+            b.sources === undefined
+              ? (current?.sources ?? [])
+              : b.sources.map((source: any, position: number) => ({
+                  id: source.id ?? nextSourceId++,
+                  position,
+                  kind: source.kind,
+                  config: source.config ?? {},
+                  enabled: source.enabled !== false,
+                })),
         };
-        blocks.push(blk);
-        return { status: 'ok', block: blk };
+        if (current) blocks[blocks.indexOf(current)] = saved;
+        else blocks.push(saved);
+        return { status: 'ok', block: saved };
       }
       const bm = p.match(/^\/blocks\/(\d+)$/);
       if (bm && method === 'DELETE') {
@@ -7469,9 +8165,15 @@ const handlers: MockHandler[] = [
       client_key: string;
       date: string;
       total: number;
-      status: string;
+      status: 'outstanding' | 'paid' | 'voided';
       paid_date?: string;
+      voided_at: string | null;
+      void_reason: string;
+      replaced_by: string[];
+      was_paid?: boolean;
+      has_pdf: boolean;
     }
+    const unvoided = { voided_at: null, void_reason: '', replaced_by: [], has_pdf: true };
     const invoices: Invoice[] = [
       {
         invoice_number: 'INV-000042',
@@ -7480,6 +8182,7 @@ const handlers: MockHandler[] = [
         date: '2026-05-15',
         total: 4500,
         status: 'outstanding',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000041',
@@ -7489,6 +8192,7 @@ const handlers: MockHandler[] = [
         total: 1800,
         status: 'paid',
         paid_date: '2026-05-10',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000040',
@@ -7497,6 +8201,7 @@ const handlers: MockHandler[] = [
         date: '2026-04-15',
         total: 3200,
         status: 'outstanding',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000039',
@@ -7504,7 +8209,12 @@ const handlers: MockHandler[] = [
         client_key: 'hooli',
         date: '2026-03-31',
         total: 950,
-        status: 'draft',
+        status: 'voided',
+        voided_at: '2026-04-02T09:30:00Z',
+        void_reason: 'Billed two jobs on one invoice',
+        replaced_by: ['INV-000040'],
+        was_paid: false,
+        has_pdf: true,
       },
     ];
 
@@ -7590,6 +8300,7 @@ const handlers: MockHandler[] = [
       discount: number;
       description: string;
       entity: string;
+      separate?: boolean;
       invoice: string;
       paid_date: string | null;
     }
@@ -7697,7 +8408,7 @@ const handlers: MockHandler[] = [
 
     function workEtag(w: Work): string {
       // Cheap content hash — enough for the mock's conflict path.
-      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}`;
+      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}|${!!w.separate}`;
       let hash = 0;
       for (let i = 0; i < body.length; i++) hash = (hash * 31 + body.charCodeAt(i)) | 0;
       return (hash >>> 0).toString(16);
@@ -7711,6 +8422,7 @@ const handlers: MockHandler[] = [
       if (!client) warnings.push('unknown_client');
       return {
         ...w,
+        separate: !!w.separate,
         index,
         etag: workEtag(w),
         client_name: client?.name ?? w.client,
@@ -7718,6 +8430,7 @@ const handlers: MockHandler[] = [
         service_type: svc?.type ?? '',
         computed_amount: workAmount(w),
         editable: !!w.uid && !w.invoice,
+        deletable: !!w.uid && !w.invoice,
         warnings,
       };
     }
@@ -7930,7 +8643,6 @@ const handlers: MockHandler[] = [
           work_entries: pinned,
           default_entity: isDefault,
           default_for_clients: fallbackClients,
-          quarantined: [],
         };
         if (!clients.length && !pinned && !isDefault && !fallbackClients) return null;
         let error: string;
@@ -7967,7 +8679,7 @@ const handlers: MockHandler[] = [
           error:
             `service '${row.key}' is used by ${entries.length} work ` +
             `entr${entries.length === 1 ? 'y' : 'ies'}`,
-          references: { work_entries: entries.length, invoices: invoices.size, quarantined: [] },
+          references: { work_entries: entries.length, invoices: invoices.size },
         };
       },
     });
@@ -8061,6 +8773,7 @@ const handlers: MockHandler[] = [
             'discount',
             'description',
             'entity',
+            'separate',
           ] as const) {
             if (body && key in body) (entry as any)[key] = body[key];
           }
@@ -8081,6 +8794,7 @@ const handlers: MockHandler[] = [
           discount: body?.discount ?? 0,
           description: body?.description ?? '',
           entity: body?.entity ?? '',
+          separate: body?.separate === true,
           invoice: '',
           paid_date: null,
         };
@@ -8119,6 +8833,172 @@ const handlers: MockHandler[] = [
         else if (status === 'paid') rows = rows.filter((r) => r.paid_date);
 
         return { status: 'ok', entries: rows, totals };
+      }
+
+      // --- Generate, void and create (#756) ---
+      const nextInvoiceNumber = () => {
+        const highest = Math.max(
+          0,
+          ...invoices.map((i) => Number(i.invoice_number.replace('INV-', ''))),
+        );
+        return `INV-${String(highest + 1).padStart(6, '0')}`;
+      };
+
+      if (path === '/invoices/generate' && method === 'POST') {
+        if (typeof body?.dry_run !== 'boolean') {
+          return { __status: 400, status: 'error', error: 'dry_run is required' };
+        }
+        const etags: Record<string, string> = body.etags ?? {};
+        const stale = Object.entries(etags)
+          .filter(([uid, etag]) => {
+            const entry = work.find((w) => w.uid === uid);
+            return !entry || workEtag(entry) !== etag;
+          })
+          .map(([uid]) => uid);
+        if (stale.length) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: 'work entries changed since they were read',
+            stale,
+          };
+        }
+        const uids: string[] | undefined = body.entry_uids;
+        if (uids) {
+          const missing = uids.filter((u) => !work.some((w) => w.uid === u));
+          if (missing.length) {
+            return { __status: 404, status: 'error', error: `no work entry with uid ${missing}` };
+          }
+          const billed = uids.filter((u) => work.find((w) => w.uid === u)?.invoice);
+          if (billed.length) {
+            return {
+              __status: 409,
+              status: 'error',
+              error: `work entry already invoiced: ${billed}`,
+            };
+          }
+        }
+        const candidates = work.filter(
+          (w) =>
+            !w.invoice &&
+            findService(w.service) &&
+            findClient(w.client) &&
+            (uids ? uids.includes(w.uid) : !body.client || w.client === body.client),
+        );
+        const groups = new Map<string, Work[]>();
+        for (const w of candidates) {
+          const key = w.separate ? `${w.client}:${w.uid}` : `${w.client}:${w.service}`;
+          groups.set(key, [...(groups.get(key) ?? []), w]);
+        }
+        let number = Number(nextInvoiceNumber().replace('INV-', ''));
+        const generated = [...groups.values()].map((entries) => {
+          const client = findClient(entries[0].client);
+          const total = entries.reduce((s, w) => s + (workAmount(w) ?? 0), 0);
+          const invoice_number = `INV-${String(number++).padStart(6, '0')}`;
+          return {
+            invoice_number,
+            client_key: entries[0].client,
+            client: client?.name ?? entries[0].client,
+            group: entries[0].service,
+            items: entries.length,
+            total: Math.round(total * 100) / 100,
+            terms: '30',
+            entry_uids: entries.map((w) => w.uid),
+            entry_descriptions: entries.map((w) => w.description),
+          };
+        });
+        if (!body.dry_run) {
+          for (const g of generated) {
+            for (const w of work) if (g.entry_uids.includes(w.uid)) w.invoice = g.invoice_number;
+            invoices.unshift({
+              invoice_number: g.invoice_number,
+              client: g.client,
+              client_key: g.client_key,
+              date: today(),
+              total: g.total,
+              status: 'outstanding',
+              ...unvoided,
+            });
+          }
+        }
+        return {
+          status: 'ok',
+          dry_run: body.dry_run,
+          invoice_count: generated.length,
+          total: generated.reduce((s, g) => s + g.total, 0),
+          invoices: generated,
+          notifications: 'none',
+        };
+      }
+
+      const voidMatch = path.match(/^\/invoices\/([^/]+)\/void$/);
+      if (voidMatch && method === 'POST') {
+        const number = decodeURIComponent(voidMatch[1]);
+        const inv = invoices.find((i) => i.invoice_number === number);
+        if (!inv) {
+          return { __status: 404, status: 'error', error: 'not found', code: 'not_found' };
+        }
+        if (inv.status === 'voided') {
+          return {
+            __status: 409,
+            status: 'error',
+            error: `Invoice ${number} already voided on ${inv.voided_at?.slice(0, 10)}`,
+            code: 'already_voided',
+          };
+        }
+        if (inv.status === 'paid' && !body?.force) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: `Invoice ${number} has been marked as paid`,
+            code: 'paid',
+          };
+        }
+        const replacedBy: string[] = body?.replaced_by ?? [];
+        const unknown = replacedBy.find((n) => !invoices.some((i) => i.invoice_number === n));
+        if (unknown) {
+          return {
+            __status: 400,
+            status: 'error',
+            error: `Replacement invoice ${unknown} not found`,
+            code: 'unknown_replacement',
+          };
+        }
+        const released = work.filter((w) => w.invoice === number);
+        for (const w of released) {
+          w.invoice = '';
+          w.paid_date = null;
+        }
+        inv.was_paid = inv.status === 'paid';
+        inv.status = 'voided';
+        delete inv.paid_date;
+        inv.voided_at = new Date().toISOString();
+        inv.void_reason = body?.reason ?? '';
+        inv.replaced_by = replacedBy;
+        if (body?.delete_pdf) inv.has_pdf = false;
+        return { status: 'ok', invoice: inv, entries_released: released.length };
+      }
+
+      if (path === '/invoices' && method === 'POST') {
+        const client = findClient(body?.client);
+        if (!client) return { __status: 400, status: 'error', error: 'unknown client' };
+        const items: { service?: string; qty?: number; amount?: number }[] = body?.items ?? [];
+        if (!items.length) return { __status: 400, status: 'error', error: 'no line items' };
+        const total = items.reduce((s, item) => {
+          const svc = item.service ? findService(item.service) : undefined;
+          return s + (svc ? (item.qty ?? 0) * svc.rate : (item.amount ?? 0));
+        }, 0);
+        const inv: Invoice = {
+          invoice_number: nextInvoiceNumber(),
+          client: client.name,
+          client_key: client.key,
+          date: today(),
+          total: Math.round(total * 100) / 100,
+          status: 'outstanding',
+          ...unvoided,
+        };
+        invoices.unshift(inv);
+        return { status: 'ok', invoice: inv };
       }
 
       // --- Invoice action routes (must precede the broad /invoices match) ---
@@ -8189,11 +9069,14 @@ const handlers: MockHandler[] = [
 
       if (path === '/invoices' && method === 'GET') {
         const showAll = q.get('show_all') === 'true';
-        const list = showAll ? invoices : invoices.filter((i) => i.status !== 'paid');
-        const outstanding = invoices.filter((i) => i.status === 'outstanding');
+        const includeVoided = q.get('include_voided') !== 'false';
+        const list = invoices.filter(
+          (i) => (showAll || i.status !== 'paid') && (includeVoided || i.status !== 'voided'),
+        );
+        const outstanding = list.filter((i) => i.status === 'outstanding');
         return {
           status: 'ok',
-          invoice_count: invoices.length,
+          invoice_count: list.length,
           outstanding_count: outstanding.length,
           invoices: list,
         };

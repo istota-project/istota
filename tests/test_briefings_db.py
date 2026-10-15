@@ -1,6 +1,8 @@
 """Tests for the briefings module SQLite layer."""
 
 from datetime import datetime, timedelta, timezone
+import json
+import sqlite3
 
 import pytest
 
@@ -120,12 +122,13 @@ class TestBlockCrud:
         bdb.reorder_blocks(conn, "M", [c, a, b])
         assert [x.title for x in bdb.list_blocks(conn, "M")] == ["C", "A", "B"]
 
-    def test_reorder_ignores_foreign_ids(self, conn):
+    def test_reorder_rejects_foreign_ids(self, conn):
         a = bdb.add_block(conn, briefing_name="M", title="A")
         b = bdb.add_block(conn, briefing_name="M", title="B")
         foreign = bdb.add_block(conn, briefing_name="OTHER", title="Z")
-        bdb.reorder_blocks(conn, "M", [b, a, foreign])
-        assert [x.title for x in bdb.list_blocks(conn, "M")] == ["B", "A"]
+        with pytest.raises(ValueError, match="permutation"):
+            bdb.reorder_blocks(conn, "M", [b, a, foreign])
+        assert [x.title for x in bdb.list_blocks(conn, "M")] == ["A", "B"]
 
     def test_list_briefing_names(self, conn):
         bdb.add_block(conn, briefing_name="M", title="A")
@@ -247,6 +250,186 @@ class TestArchive:
         assert bdb.delete_archived(conn, 999) is False
 
 
+class TestDocumentStorage:
+    def test_fresh_and_v1_upgrade_keep_legacy_archive(self, tmp_path):
+        path = tmp_path / "briefings.db"
+        # Build the version-1 schema independently of the current schema text.
+        with bdb.connect(path) as conn:
+            conn.executescript("""
+                CREATE TABLE briefing_archive (
+                    id INTEGER PRIMARY KEY, briefing_name TEXT NOT NULL,
+                    subject TEXT, body_md TEXT NOT NULL, generated_at TEXT NOT NULL,
+                    task_id INTEGER, block_meta TEXT NOT NULL DEFAULT '{}',
+                    delivered_to TEXT NOT NULL DEFAULT '[]');
+                CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_meta VALUES ('version', '1');
+                INSERT INTO briefing_archive (briefing_name, subject, body_md, generated_at)
+                    VALUES ('morning', 'Original title', '# Original body', '2026-01-01');
+            """)
+            conn.commit()
+        bdb.init_db(path)
+        bdb.init_db(path)
+        with bdb.connect(path) as conn:
+            assert bdb.meta_get(conn, "version") == "3"
+            archived = bdb.get_archived(conn, 1)
+            assert (archived.subject, archived.body_md, archived.document) == (
+                "Original title", "# Original body", None,
+            )
+            assert conn.execute("SELECT document_json FROM briefing_archive").fetchone()[0] is None
+        fresh = tmp_path / "fresh.db"
+        bdb.init_db(fresh)
+        with bdb.connect(fresh) as conn:
+            assert "document_json" in {r["name"] for r in conn.execute("PRAGMA table_info(briefing_archive)")}
+
+    def test_document_round_trip_and_corrupt_fallback(self, conn, caplog):
+        document = {"version": 1, "title": "Edition", "blocks": [
+            {"block_id": 42, "title": "News", "kind": "markdown", "body_md": "Complete body",
+             "presentation": {"width": "wide"}, "source_status": "complete"},
+        ]}
+        aid = bdb.insert_archive(conn, briefing_name="morning", subject="Edition",
+                                  body_md="News\n\nComplete body", document=document)
+        assert bdb.get_archived(conn, aid).document == document
+        for corrupt in ('not json', '{"version": 99}', '[]'):
+            conn.execute("UPDATE briefing_archive SET document_json = ? WHERE id = ?", (corrupt, aid))
+            archived = bdb.get_archived(conn, aid)
+            assert archived.document is None and archived.body_md == "News\n\nComplete body"
+        assert "briefing_document_invalid" in caplog.text
+        assert "not json" not in caplog.text
+
+    def test_invalid_document_write_cannot_change_archive(self, conn):
+        with pytest.raises(ValueError):
+            bdb.insert_archive(conn, briefing_name="morning", subject="Edition", body_md="Body",
+                               document={"version": 99})
+        assert bdb.count_archive(conn) == 0
+
+    def test_invalid_presentation_update_leaves_other_fields_unchanged(self, conn):
+        bid = bdb.add_block(conn, briefing_name="morning", title="Original", options={"tone": "neutral"})
+        with pytest.raises(ValueError, match="presentation"):
+            bdb.update_block(conn, bid, title="Changed", options={"presentation": {"width": "bad"}})
+        block = bdb.get_block(conn, bid)
+        assert block.title == "Original" and block.options == {"tone": "neutral"}
+
+    def test_old_invalid_presentation_is_read_as_auto(self, conn, caplog):
+        bid = bdb.add_block(conn, briefing_name="morning", title="Old")
+        conn.execute("UPDATE briefing_blocks SET options = ? WHERE id = ?",
+                     ('{"tone":"neutral","presentation":{"width":"bad"}}', bid))
+        assert bdb.get_block(conn, bid).options == {"tone": "neutral", "presentation": {"width": "auto"}}
+        assert "briefing_presentation_invalid" in caplog.text
+
+
+class TestDefinitionSave:
+    def test_complete_edit_retains_ids_and_replaces_order(self, conn):
+        original = bdb.save_block_definition(conn, payload={
+            "briefing_name": "M", "title": "News", "directive": "Brief",
+            "options": {"custom": 42, "presentation": {"width": "wide"}},
+            "sources": [{"kind": "notes", "config": {"path": "shared/notes.md"}},
+                        {"kind": "calendar"}, {"kind": "markets"}],
+        })
+        first, second, removed = original.sources
+        saved = bdb.save_block_definition(conn, payload={
+            "id": original.id, "title": "Changed", "directive": "",
+            "sources": [{"id": second.id, "kind": "calendar", "enabled": False},
+                        {"id": first.id, "kind": "todos", "config": {"path": "shared/tasks.md"}},
+                        {"kind": "reminders", "config": {"path": "shared/reminders.md"}}],
+        })
+        assert saved.title == "Changed" and saved.directive == ""
+        assert saved.options == original.options
+        assert [s.id for s in saved.sources[:2]] == [second.id, first.id]
+        assert [s.position for s in saved.sources] == [0, 1, 2]
+        assert [s.kind for s in saved.sources] == ["calendar", "todos", "reminders"]
+        assert saved.sources[0].enabled is False
+        assert saved.sources[1].config == {"path": "shared/tasks.md"}
+        assert removed.id not in [s.id for s in saved.sources]
+
+    def test_more_new_sources_before_retained_source_do_not_collide(self, conn):
+        original = bdb.save_block_definition(conn, payload={
+            "briefing_name": "M", "title": "News", "sources": [{"kind": "notes"}],
+        })
+        retained = original.sources[0]
+        saved = bdb.save_block_definition(conn, payload={
+            "id": original.id, "sources": [{"kind": "calendar"}, {"kind": "markets"},
+                                          {"id": retained.id, "kind": "notes"}],
+        })
+        assert [source.kind for source in saved.sources] == ["calendar", "markets", "notes"]
+        assert saved.sources[2].id == retained.id
+
+    @pytest.mark.parametrize("creating", [False, True])
+    def test_late_database_failure_rolls_back_only_definition(self, conn, creating):
+        bid = bdb.add_block(conn, briefing_name="M", title="Original")
+        sid = bdb.add_source(conn, block_id=bid, kind="notes")
+        conn.commit()
+        # A real storage failure after block writes must undo the whole save,
+        # while preserving a caller's unrelated uncommitted work.
+        conn.execute("""CREATE TRIGGER refuse_calendar BEFORE INSERT ON briefing_block_sources
+                        WHEN NEW.kind = 'calendar'
+                        BEGIN SELECT RAISE(ABORT, 'calendar refused'); END""")
+        unrelated = bdb.add_block(conn, briefing_name="Other", title="Keep")
+        payload = {"title": "Changed", "sources": [{"kind": "notes"}, {"kind": "calendar"}]}
+        payload.update({"briefing_name": "M"} if creating else {"id": bid})
+        with pytest.raises(sqlite3.IntegrityError, match="calendar refused"):
+            bdb.save_block_definition(conn, payload=payload)
+        conn.commit()
+        assert bdb.get_block(conn, unrelated).title == "Keep"
+        blocks = bdb.list_blocks(conn, "M")
+        assert len(blocks) == 1
+        assert blocks[0].title == "Original"
+        assert [s.id for s in blocks[0].sources] == [sid]
+
+
+class TestPreviewBlockIdentity:
+    def test_deleted_highest_block_cannot_inherit_archived_preview_content(self, conn):
+        from istota.briefings.document import document_to_markdown
+
+        old = bdb.add_block(conn, briefing_name="M", title="Old")
+        document = {"version": 1, "title": "Old edition", "blocks": [{
+            "block_id": old, "title": "Old", "kind": "markdown", "body_md": "Private old content",
+            "presentation": {"width": "auto"}, "source_status": "complete",
+        }]}
+        bdb.insert_archive(conn, briefing_name="M", subject=document["title"],
+                           body_md=document_to_markdown(document), document=document)
+        conn.commit()
+        bdb.delete_block(conn, old)
+        conn.commit()
+        # An existing v2 DB has no sequence metadata yet.
+        conn.execute("DELETE FROM schema_meta WHERE key = 'block_id_high_water'")
+        conn.commit()
+        new = bdb.add_block(conn, briefing_name="M", title="Unrelated new block")
+        assert new > old
+        assert new not in {block["block_id"] for block in document["blocks"]}
+        bdb.delete_block(conn, new)
+        conn.commit()
+        assert bdb.add_block(conn, briefing_name="Other", title="Next") > new
+
+    def test_repeated_delete_recreate_and_rollback_keep_identity(self, conn):
+        first = bdb.add_block(conn, briefing_name="M", title="First")
+        conn.commit()
+        bdb.delete_block(conn, first)
+        conn.commit()
+        second = bdb.add_block(conn, briefing_name="M", title="Second")
+        conn.commit()
+        assert second > first
+        conn.execute("SAVEPOINT aborted")
+        aborted = bdb.add_block(conn, briefing_name="M", title="Aborted")
+        conn.execute("ROLLBACK TO aborted")
+        conn.execute("RELEASE aborted")
+        assert bdb.add_block(conn, briefing_name="M", title="Actual") == aborted
+
+
+    @pytest.mark.parametrize("scope", ["block", "briefing"])
+    def test_upgrade_delete_before_first_allocation_preserves_inflight_identity(self, conn, scope):
+        old = bdb.add_block(conn, briefing_name="M", title="In-flight edition block")
+        conn.commit()
+        # Simulate an older DB with a generated manifest but no archive yet.
+        conn.execute("DELETE FROM schema_meta WHERE key = 'block_id_high_water'")
+        conn.commit()
+        if scope == "briefing":
+            bdb.delete_briefing_definitions(conn, "M")
+        else:
+            bdb.delete_block(conn, old)
+        conn.commit()
+        assert bdb.add_block(conn, briefing_name="M", title="New block") > old
+
+
 class TestArchiveReadState:
     @pytest.mark.parametrize("interrupted", [False, True])
     def test_v1_upgrade_backfills_only_historical_rows(self, tmp_path, monkeypatch, interrupted):
@@ -286,7 +469,7 @@ class TestArchiveReadState:
             assert len({row.read_at for row in rows}) == 1
             assert rows[0].read_at is not None
             assert datetime.fromisoformat(rows[0].read_at).tzinfo is not None
-            assert bdb.meta_get(conn, "version") == "2"
+            assert bdb.meta_get(conn, "version") == "3"
             assert bdb.meta_get(conn, "migrated_from_components:Morning") == "1"
             assert bdb.count_unread_archive(conn) == 0
             new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
@@ -344,4 +527,39 @@ class TestArchiveReadState:
         assert bdb.get_archived(conn, aid).read_at is None
         bdb.mark_archive_as_read(conn)
         conn.rollback()
+        assert bdb.count_unread_archive(conn) == 1
+
+
+def test_v2_upgrade_preserves_document_and_backfills_reads(tmp_path):
+    path = tmp_path / "v2.db"
+    document = {"version": 1, "title": "Archived edition", "blocks": []}
+    with bdb.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE briefing_archive (
+                id INTEGER PRIMARY KEY, briefing_name TEXT NOT NULL,
+                subject TEXT, body_md TEXT NOT NULL, generated_at TEXT NOT NULL,
+                task_id INTEGER, block_meta TEXT NOT NULL DEFAULT '{}',
+                delivered_to TEXT NOT NULL DEFAULT '[]', document_json TEXT
+            );
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES ('version', '2');
+        """)
+        conn.execute(
+            "INSERT INTO briefing_archive (briefing_name, body_md, generated_at, document_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("Morning", "Archived body", "2026-01-01T00:00:00Z", json.dumps(document)),
+        )
+        conn.commit()
+    bdb.init_db(path)
+    with bdb.connect(path) as conn:
+        item = bdb.get_archived(conn, 1)
+        assert item.document == document
+        assert item.body_md == "Archived body"
+        assert item.read_at is not None
+        assert bdb.meta_get(conn, "version") == "3"
+        new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+        conn.commit()
+    bdb.init_db(path)
+    with bdb.connect(path) as conn:
+        assert bdb.get_archived(conn, new_id).read_at is None
         assert bdb.count_unread_archive(conn) == 1

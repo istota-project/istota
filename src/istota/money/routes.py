@@ -22,11 +22,13 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi import File as FastAPIFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.routing import APIRoute
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.cli import UserContext
 from istota.money.config_store import FILING_STATUSES
 from istota.money.core.tax_data import load_tax_rates
+from istota.money.work import WorkStoreBlocked
 from istota.webui.router_stubs import require_auth, verify_origin
 
 logger = logging.getLogger(__name__)
@@ -122,7 +124,26 @@ def _resolve_user_ledger(user_ctx: UserContext, ledger_name: str | None):
 # ---------------------------------------------------------------------------
 
 
-router = APIRouter()
+class _MoneyRoute(APIRoute):
+    """Answers a blocked work log import with 503 and the CLI's error text.
+
+    Any route can reach the work store, directly or through invoicing and
+    review helpers, so this sits on the router rather than in each handler.
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def guarded(request: Request):
+            try:
+                return await handler(request)
+            except WorkStoreBlocked as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=503)
+
+        return guarded
+
+
+router = APIRouter(route_class=_MoneyRoute)
 
 
 @router.get("/me")
@@ -378,18 +399,67 @@ async def api_clients(user_ctx: UserContext = Depends(get_user_config)):
     return {"status": "ok", "clients": clients}
 
 
+def _invoice_output_dir(data_dir: Path, config) -> Path:
+    """Where the invoice PDFs are: the config's ``invoice_output`` under ``data_dir``."""
+    if config is not None and getattr(config, "invoice_output", None):
+        return data_dir / config.invoice_output
+    return data_dir / "invoices" / "generated"
+
+
+def _invoice_pdf_flags(records, output_dir: Path) -> dict[str, bool]:
+    """Whether each invoice's PDF is on disk, by number.
+
+    A row's stored ``pdf_path`` under the output tree is checked with one
+    ``is_file``. Only a row without one costs a listing, and the output tree
+    is listed at most once per call: on a slow mount a glob per invoice was
+    the cost of the whole page. A path outside the tree is looked up by name
+    there too, which is where the PDF route looks.
+    """
+    from istota.money.core.invoicing import parse_invoice_number
+
+    flags: dict[str, bool] = {}
+    names: list[str] | None = None
+    for record in records:
+        stored = Path(record.pdf_path) if record.pdf_path else None
+        if stored is not None and stored.is_relative_to(output_dir):
+            flags[record.number] = stored.is_file()
+            continue
+        if names is None:
+            names = _invoice_pdf_names(output_dir)
+        number = parse_invoice_number(record.number)
+        prefix = f"Invoice-{number:06d}-" if number is not None else None
+        flags[record.number] = prefix is not None and any(
+            name.startswith(prefix) for name in names
+        )
+    return flags
+
+
+def _invoice_pdf_names(output_dir: Path) -> list[str]:
+    """Every ``*.pdf`` name in the output tree's year folders, read once."""
+    names: list[str] = []
+    try:
+        year_dirs = [d for d in output_dir.iterdir() if d.is_dir()]
+    except OSError:
+        return names
+    for year_dir in year_dirs:
+        try:
+            names.extend(p.name for p in year_dir.glob("*.pdf"))
+        except OSError:
+            continue
+    return names
+
+
 @router.get("/invoices")
 async def api_invoices(
     client: str | None = None,
     show_all: bool = False,
+    include_voided: bool = True,
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money import db
+    from istota.money.core.invoicing import invoice_summary
     from istota.money.invoice_review import list_reviews
-    from istota.money.core.invoicing import build_line_items
-    from istota.money.work import (
-        get_invoice_numbers, get_entries_for_invoice, invoice_issue_date,
-    )
+    from istota.money.work import list_invoices
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -410,42 +480,19 @@ async def api_invoices(
         if row["status"] == "settled" and row["decided_by"] == "auto"
     }
 
-    invoice_numbers = get_invoice_numbers(data_dir)
+    records = [
+        record
+        for record in list_invoices(data_dir, client=client, include_voided=include_voided)
+        if record.status != "paid" or show_all
+    ]
+    has_pdf = _invoice_pdf_flags(records, _invoice_output_dir(data_dir, config))
     invoices = []
-    for inv_num in invoice_numbers:
-        inv_entries = get_entries_for_invoice(data_dir, inv_num)
-        if not inv_entries:
-            continue
-        if client and not any(e.client == client for e in inv_entries):
-            continue
-
-        items = build_line_items(inv_entries, config.services)
-        total = sum(item.amount for item in items)
-        is_paid = all(e.paid_date is not None for e in inv_entries)
-        paid_date_val = inv_entries[0].paid_date
-
-        if is_paid and not show_all:
-            continue
-
-        client_key = inv_entries[0].client
-        client_config = config.clients.get(client_key)
-        client_name = client_config.name if client_config else client_key
-        # The invoice's own date, not the earliest work on it — which is what
-        # this used to show under the same `date` label.
-        inv_date = invoice_issue_date(inv_entries)
-
-        invoice_info = {
-            "invoice_number": inv_num,
-            "client": client_name,
-            "client_key": client_key,
-            "date": inv_date.isoformat(),
-            "total": round(total, 2),
-            "status": "paid" if is_paid else "outstanding",
-        }
-        if is_paid and paid_date_val:
-            invoice_info["paid_date"] = paid_date_val.isoformat()
-            if auto_settled.get(inv_num) == invoice_info["paid_date"]:
-                invoice_info["paid_by_sync_date"] = auto_settled[inv_num]
+    for record in records:
+        invoice_info = invoice_summary(record, config)
+        invoice_info["has_pdf"] = has_pdf[record.number]
+        paid_date = invoice_info.get("paid_date")
+        if paid_date and auto_settled.get(record.number) == paid_date:
+            invoice_info["paid_by_sync_date"] = auto_settled[record.number]
         invoices.append(invoice_info)
 
     outstanding = [i for i in invoices if i["status"] == "outstanding"]
@@ -513,7 +560,7 @@ async def api_invoice_details(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money.core.invoicing import build_line_items
-    from istota.money.work import get_entries_for_invoice
+    from istota.money.work import get_invoice, load_work_entries
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -526,7 +573,13 @@ async def api_invoice_details(
     if config is None:
         return JSONResponse({"error": "no invoicing config"}, status_code=404)
 
-    entries = get_entries_for_invoice(data_dir, invoice_number)
+    # By the invoice's own lines, active or not: a voided invoice still lists
+    # the work it billed.
+    record = get_invoice(data_dir, invoice_number)
+    if record is None:
+        return JSONResponse({"error": "invoice not found"}, status_code=404)
+    by_uid = {e.uid: e for e in load_work_entries(data_dir)}
+    entries = [by_uid[uid] for uid in record.entry_uids if uid in by_uid]
     if not entries:
         return JSONResponse({"error": "invoice not found"}, status_code=404)
 
@@ -625,7 +678,7 @@ async def api_invoice_mark_paid(
 
     from istota.money.work import (
         get_entries_for_invoice,
-        record_invoice_payment,
+        mark_paid,
     )
 
     data_dir = user_ctx.data_dir
@@ -641,7 +694,7 @@ async def api_invoice_mark_paid(
         body = {}
     paid_date = (body or {}).get("paid_date") or date.today().isoformat()
 
-    count = record_invoice_payment(data_dir, invoice_number, paid_date)
+    count = mark_paid(data_dir, invoice_number, paid_date)
     return {
         "status": "ok",
         "invoice_number": invoice_number,
@@ -687,11 +740,9 @@ async def api_invoice_pdf(
 
     # Prefer the invoicing config's output dir; fall back to the conventional
     # location. config.invoice_output defaults to "invoices/generated".
-    invoice_output_dir = data_dir / "invoices" / "generated"
+    invoice_output_dir = _invoice_output_dir(data_dir, None)
     try:
-        config = _load_invoicing_config(user_ctx)
-        if config is not None and getattr(config, "invoice_output", None):
-            invoice_output_dir = data_dir / config.invoice_output
+        invoice_output_dir = _invoice_output_dir(data_dir, _load_invoicing_config(user_ctx))
     except Exception:
         # Fall back to the default location, but make the miss visible — a
         # custom invoice_output we couldn't read would otherwise 404 silently.
@@ -712,6 +763,270 @@ async def api_invoice_pdf(
     )
 
 
+async def _json_object_body(request: Request, *, empty_ok: bool) -> dict | None:
+    """The request body as a dict, or None when it is not a JSON object."""
+    raw = await request.body()
+    if not raw.strip():
+        return {} if empty_ok else None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _invoice_row(data_dir: Path, number: str, config) -> dict | None:
+    """One invoice as ``GET /invoices`` lists it."""
+    from istota.money.core.invoicing import invoice_summary
+    from istota.money.work import get_invoice
+
+    record = get_invoice(data_dir, number)
+    if record is None:
+        return None
+    row = invoice_summary(record, config)
+    row["has_pdf"] = _invoice_pdf_flags([record], _invoice_output_dir(data_dir, config))[number]
+    return row
+
+
+_PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def _coerce_generate_body(body: dict) -> tuple[dict, str | None]:
+    """Validate ``POST /invoices/generate``'s body; ``(fields, error)``."""
+    dry_run = body.get("dry_run")
+    if not isinstance(dry_run, bool):
+        return {}, "dry_run is required and must be a boolean"
+    fields: dict = {"dry_run": dry_run}
+    for key in ("period", "client", "entity"):
+        value = body.get(key)
+        if value is not None and not isinstance(value, str):
+            return {}, f"invalid {key} — expected text"
+        fields[key] = value or None
+    if fields["period"] and not _PERIOD_RE.match(fields["period"]):
+        return {}, "invalid period — expected YYYY-MM"
+    uids = body.get("entry_uids")
+    if uids is not None:
+        # An empty list would fall through to "bill everything unbilled".
+        if not isinstance(uids, list) or not uids or not all(
+            isinstance(u, str) and u for u in uids
+        ):
+            return {}, "invalid entry_uids — expected a non-empty list of uids"
+    fields["entry_uids"] = uids
+    etags = body.get("etags")
+    if etags is not None:
+        if not isinstance(etags, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in etags.items()
+        ):
+            return {}, "invalid etags — expected an object of uid to etag"
+    fields["etags"] = etags or {}
+    return fields, None
+
+
+@router.post("/invoices/generate")
+async def api_invoices_generate(
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Preview (``dry_run``) or issue invoices, the same as ``invoice generate``.
+
+    When ``etags`` are given, every entry they name must still have that etag,
+    or the answer is 409 with the stale uids and nothing is generated. No
+    client is emailed by this or any other money path.
+    """
+    from istota.money.core.invoicing import (
+        EntrySelectionError,
+        InvoiceIssueBusy,
+        InvoiceRecordError,
+        generate_invoices_for_period,
+        invoice_issue_lock,
+    )
+    from istota.money.work import ensure_store, entry_etag, load_work_entries
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return _error("no data dir", 404)
+    ensure_store(data_dir)
+
+    body = await _json_object_body(request, empty_ok=False)
+    if body is None:
+        return _bad_body()
+    fields, err = _coerce_generate_body(body)
+    if err:
+        return _error(err, 400)
+
+    try:
+        config = _load_invoicing_config(user_ctx)
+    except Exception as exc:
+        return _error(str(exc), 500)
+    if config is None:
+        return _error("no invoicing config", 400)
+    output_dir = _invoice_output_dir(data_dir, config)
+    accounting_path = data_dir / config.accounting_path
+
+    # The etag check and the issue are one step under the store's issuing lock.
+    def run() -> list[dict] | JSONResponse:
+        with invoice_issue_lock(data_dir):
+            if fields["etags"]:
+                current = {e.uid: entry_etag(e) for e in load_work_entries(data_dir) if e.uid}
+                stale = [
+                    uid for uid, etag in fields["etags"].items() if current.get(uid) != etag
+                ]
+                if stale:
+                    return _error("work entries changed since they were read", 409, stale=stale)
+            return generate_invoices_for_period(
+                config=config, config_path=user_ctx.invoicing_config_path,
+                accounting_path=accounting_path, data_dir=data_dir,
+                period=fields["period"], client_filter=fields["client"],
+                entity_filter=fields["entity"], dry_run=fields["dry_run"],
+                invoice_output_dir=output_dir, db_path=user_ctx.db_path,
+                record_schedule=True, entry_uids=fields["entry_uids"],
+            )
+
+    try:
+        results = await asyncio.to_thread(run)
+    except EntrySelectionError as exc:
+        return _error(str(exc), 404 if exc.code == "not_found" else 409)
+    except InvoiceIssueBusy as exc:
+        return _error(str(exc), 503)
+    except InvoiceRecordError as exc:
+        return _error(str(exc), 500)
+    if isinstance(results, JSONResponse):
+        return results
+
+    for summary in results:
+        summary.pop("file", None)
+    return {
+        "status": "ok",
+        "dry_run": fields["dry_run"],
+        "invoice_count": len(results),
+        "total": round(sum(r["total"] for r in results), 2),
+        "invoices": results,
+        "notifications": "none",
+    }
+
+
+@router.post("/invoices/{invoice_number}/void")
+async def api_invoice_void(
+    invoice_number: str,
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Void an invoice, the same as ``invoice void``.
+
+    404 for an unknown invoice; 409 with ``code`` ``paid`` for a paid one
+    without ``force``, or ``already_voided``; 400 for an unknown replacement.
+    """
+    from istota.money.core.invoicing import void_invoice_with_cleanup
+    from istota.money.work import VoidError, ensure_store
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return _error("no data dir", 404)
+    ensure_store(data_dir)
+
+    body = await _json_object_body(request, empty_ok=True)
+    if body is None:
+        return _bad_body()
+    reason = body.get("reason") or ""
+    replaced_by = body.get("replaced_by") or []
+    force = body.get("force", False)
+    delete_pdf = body.get("delete_pdf", False)
+    if not isinstance(reason, str):
+        return _error("invalid reason — expected text", 400)
+    if not isinstance(replaced_by, list) or not all(isinstance(n, str) for n in replaced_by):
+        return _error("invalid replaced_by — expected a list of invoice numbers", 400)
+    if not isinstance(force, bool) or not isinstance(delete_pdf, bool):
+        return _error("force and delete_pdf must be booleans", 400)
+
+    try:
+        config = _load_invoicing_config(user_ctx)
+    except Exception:
+        logger.warning("invoice void: could not load invoicing config", exc_info=True)
+        config = None
+
+    try:
+        voided = void_invoice_with_cleanup(
+            data_dir, invoice_number,
+            invoice_output_dir=_invoice_output_dir(data_dir, config),
+            reason=reason.strip(), replaced_by=replaced_by, force=force,
+            delete_pdf=delete_pdf,
+        )
+    except VoidError as exc:
+        status = {"not_found": 404, "unknown_replacement": 400}.get(exc.code, 409)
+        return _error(str(exc), status, code=exc.code)
+
+    return {
+        "status": "ok",
+        "invoice": _invoice_row(data_dir, invoice_number, config),
+        "entries_released": voided["entries_voided"],
+    }
+
+
+@router.post("/invoices")
+async def api_invoice_create(
+    request: Request,
+    user_ctx: UserContext = Depends(get_user_config),
+    _csrf: None = Depends(verify_origin),
+):
+    """Create a manual invoice from line items, the same as ``invoice create``."""
+    from istota.money.core.invoicing import (
+        InvoiceIssueBusy,
+        InvoiceRecordError,
+        create_manual_invoice,
+    )
+    from istota.money.work import ensure_store
+
+    data_dir = user_ctx.data_dir
+    if not data_dir:
+        return _error("no data dir", 404)
+    ensure_store(data_dir)
+
+    body = await _json_object_body(request, empty_ok=False)
+    if body is None:
+        return _bad_body()
+    client_key = body.get("client")
+    entity = body.get("entity")
+    items = body.get("items")
+    if not isinstance(client_key, str) or not client_key.strip():
+        return _error("client is required", 400)
+    if entity is not None and not isinstance(entity, str):
+        return _error("invalid entity — expected text", 400)
+    if not isinstance(items, list) or not items:
+        return _error("items must be a non-empty list", 400)
+
+    try:
+        config = _load_invoicing_config(user_ctx)
+    except Exception as exc:
+        return _error(str(exc), 500)
+    if config is None:
+        return _error("no invoicing config", 400)
+
+    def run() -> dict:
+        return create_manual_invoice(
+            config=config, data_dir=data_dir,
+            accounting_path=data_dir / config.accounting_path,
+            invoice_output_dir=_invoice_output_dir(data_dir, config),
+            client_key=client_key.strip(), lines=items, entity=entity or None,
+            db_path=user_ctx.db_path, config_path=user_ctx.invoicing_config_path,
+        )
+
+    try:
+        result = await asyncio.to_thread(run)
+    except InvoiceIssueBusy as exc:
+        return _error(str(exc), 503)
+    except InvoiceRecordError as exc:
+        return _error(str(exc), 500)
+    except ValueError as exc:
+        return _error(str(exc), 400)
+
+    return {
+        "status": "ok",
+        "invoice": _invoice_row(data_dir, result["invoice_number"], config),
+    }
+
+
 # =============================================================================
 # Work entries
 # =============================================================================
@@ -722,6 +1037,7 @@ async def api_invoice_pdf(
 # able to stamp an invoice number, date it, or mark work paid.
 _WORK_WRITABLE_FIELDS = (
     "date", "client", "service", "qty", "amount", "discount", "description", "entity",
+    "separate",
 )
 
 _WORK_STATUSES = ("uninvoiced", "invoiced", "paid", "all")
@@ -738,8 +1054,11 @@ _WORK_REQUIRED_STRING_FIELDS = ("client", "service")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
 
-def _work_row(entry, config) -> dict:
+def _work_row(entry, config, listed: set[str] | frozenset[str] = frozenset()) -> dict:
     """Enrich a stored work entry into the web row shape.
+
+    ``listed`` is the uids any invoice lists (``work.listed_entry_uids``):
+    such an entry is not ``deletable`` even once its invoice is voided.
 
     ``computed_amount`` runs the same rate resolution invoice generation does
     (``entry_line_item``), so for an uninvoiced entry it is the number that
@@ -783,10 +1102,12 @@ def _work_row(entry, config) -> dict:
         "discount": entry.discount,
         "description": entry.description,
         "entity": entry.entity,
+        "separate": entry.separate,
         "invoice": entry.invoice,
         "paid_date": entry.paid_date.isoformat() if entry.paid_date else None,
         "computed_amount": computed,
         "editable": bool(entry.uid) and not entry.invoice,
+        "deletable": bool(entry.uid) and not entry.invoice and entry.uid not in listed,
         "warnings": warnings,
     }
 
@@ -823,29 +1144,45 @@ def _work_config_or_none(user_ctx: UserContext):
 
 def _work_entry_response(data_dir, uid: str, config) -> dict | None:
     """Re-read an entry by uid and render its row (fresh display index)."""
-    from istota.money.work import load_work_entries
+    from istota.money.work import listed_entry_uids, load_work_entries
 
     for entry in load_work_entries(data_dir):
         if entry.uid and entry.uid == uid:
-            return _work_row(entry, config)
+            return _work_row(entry, config, listed_entry_uids(data_dir))
     return None
 
 
-def _work_mutation_error(result, config) -> JSONResponse:
-    """Map a store mutation result onto the right status code."""
+def _work_mutation_error(result, config, data_dir) -> JSONResponse:
+    """Map a store mutation result onto the right status code.
+
+    Each 409 carries a ``code`` (``invoiced``, ``on_voided_invoice``,
+    ``conflict``) so a client can tell a stale etag from a refusal.
+    """
+    from istota.money.work import listed_entry_uids
+
     if result.status == "not_found":
         return JSONResponse({"status": "error", "error": "entry not found"}, status_code=404)
     if result.status == "invoiced":
         return JSONResponse(
-            {"status": "error", "error": "entry is invoiced"}, status_code=409,
+            {"status": "error", "error": "entry is invoiced", "code": "invoiced"},
+            status_code=409,
         )
-    if result.status == "conflict":
+    if result.status == "on_voided_invoice":
         return JSONResponse(
             {
                 "status": "error",
-                "error": "entry changed",
-                "entry": _work_row(result.entry, config) if result.entry else None,
+                "error": "entry is listed on a voided invoice",
+                "code": "on_voided_invoice",
             },
+            status_code=409,
+        )
+    if result.status == "conflict":
+        row = (
+            _work_row(result.entry, config, listed_entry_uids(data_dir))
+            if result.entry else None
+        )
+        return JSONResponse(
+            {"status": "error", "error": "entry changed", "code": "conflict", "entry": row},
             status_code=409,
         )
     return JSONResponse(
@@ -913,6 +1250,10 @@ def _coerce_work_fields(body: dict) -> tuple[dict, str | None]:
             return {}, f"invalid {key}"
         fields[key] = value
 
+    # A strict bool: 1, "true" or null here is a client bug, not a flag.
+    if "separate" in fields and not isinstance(fields["separate"], bool):
+        return {}, "invalid separate — expected true or false"
+
     return fields, None
 
 
@@ -924,7 +1265,7 @@ async def api_work_list(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """List work entries, enriched with display names and computed amounts."""
-    from istota.money.work import load_work_entries
+    from istota.money.work import listed_entry_uids, load_work_entries
 
     if status not in _WORK_STATUSES:
         return JSONResponse(
@@ -943,7 +1284,8 @@ async def api_work_list(
     if period:
         entries = [e for e in entries if e.date.isoformat().startswith(period)]
 
-    rows = [_work_row(e, config) for e in entries]
+    listed = listed_entry_uids(data_dir)
+    rows = [_work_row(e, config, listed) for e in entries]
     totals = _work_totals(rows)
 
     if status == "uninvoiced":
@@ -1013,6 +1355,7 @@ async def api_work_create(
         description=fields.get("description") or "",
         entity=fields.get("entity") or "",
         uid=uid,
+        separate=fields.get("separate", False),
     )
 
     row = _work_entry_response(data_dir, uid, config)
@@ -1031,7 +1374,7 @@ async def api_work_update(
     _csrf: None = Depends(verify_origin),
 ):
     """Update an uninvoiced work entry, addressed by its stable uid."""
-    from istota.money.work import update_work_entry_by_uid
+    from istota.money.work import listed_entry_uids, update_work_entry_by_uid
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -1064,13 +1407,16 @@ async def api_work_update(
         data_dir, uid, expect_etag=body.get("etag") or None, **fields,
     )
     if not result.ok:
-        return _work_mutation_error(result, config)
+        return _work_mutation_error(result, config, data_dir)
 
     # The mutation result carries the entry re-read *inside* the write lock,
     # with a display index that already accounts for a date move. Re-reading
     # here instead would return None if the entry vanished in between, and the
     # declared client type has no null case.
-    return {"status": "ok", "entry": _work_row(result.entry, config)}
+    return {
+        "status": "ok",
+        "entry": _work_row(result.entry, config, listed_entry_uids(data_dir)),
+    }
 
 
 @router.delete("/work/{uid}")
@@ -1089,7 +1435,7 @@ async def api_work_delete(
 
     result = remove_work_entry_by_uid(data_dir, uid, expect_etag=etag or None)
     if not result.ok:
-        return _work_mutation_error(result, _work_config_or_none(user_ctx))
+        return _work_mutation_error(result, _work_config_or_none(user_ctx), data_dir)
     return {"status": "ok", "uid": uid}
 
 

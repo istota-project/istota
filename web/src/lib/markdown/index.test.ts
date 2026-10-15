@@ -12,6 +12,7 @@ import {
   CHAT_FILES_PREFIX,
   renderDocument,
   renderMarkdown,
+  renderMarkdownPreview,
   renderUntrustedMarkdown,
 } from './index';
 import { chatFileUrl } from '$lib/api';
@@ -415,5 +416,85 @@ describe('document rendering', () => {
   it('exports the same prefix as the API file URL', () => {
     expect(CHAT_FILES_PREFIX).toBe('/istota/api/chat/files?');
     expect(chatFileUrl('/Users/alice/note.md').startsWith(CHAT_FILES_PREFIX)).toBe(true);
+  });
+});
+
+describe('complete Markdown previews', () => {
+  const dom = (html: string) => new DOMParser().parseFromString(html, 'text/html').body;
+
+  it('keeps three complete blocks, with no omitted links in the DOM', () => {
+    const paragraph =
+      'A long sentence with **emphasis** and [a source](https://example.com/a). '.repeat(30);
+    const result = renderMarkdownPreview(
+      `${paragraph}\n\n> A quote\n> with two lines\n\n\`\`\`js\nconst n = 1;\n\`\`\`\n\n[Omitted](https://example.com/omitted)`,
+    );
+    const body = dom(result.html);
+    expect(body.children).toHaveLength(3);
+    expect(body.querySelector('p')?.textContent).toBe(
+      'A long sentence with emphasis and a source. '.repeat(30).trim(),
+    );
+    expect(body.querySelector('blockquote')?.textContent).toContain('with two lines');
+    expect(body.querySelector('pre code')?.textContent).toBe('const n = 1;\n');
+    expect(body.querySelector('a[href="https://example.com/omitted"]')).toBeNull();
+    expect(result.truncated).toBe(true);
+  });
+
+  it('caps each top-level list at five whole items, including nested content', () => {
+    const list = Array.from(
+      { length: 7 },
+      (_, i) => `${i + 8}. Item ${i + 1}\n    - Nested ${i + 1}\n\n    Detail ${i + 1}`,
+    ).join('\n');
+    const result = renderMarkdownPreview(`${list}\n\nAfter list`);
+    const body = dom(result.html);
+    expect(body.querySelector('ol')?.getAttribute('start')).toBe('8');
+    expect(body.querySelectorAll('ol > li')).toHaveLength(5);
+    expect(body.textContent).toContain('Nested 5');
+    expect(body.textContent).toContain('Detail 5');
+    expect(body.textContent).not.toContain('Item 6');
+    expect(body.textContent).toContain('After list');
+    expect(result.truncated).toBe(true);
+  });
+
+  it('retains reference links whose definitions follow omitted content', () => {
+    const result = renderMarkdownPreview(
+      '[Read][story]\n\nTwo\n\nThree\n\nOmitted\n\n[story]: https://example.com/story "A source"',
+    );
+    expect(dom(result.html).querySelector('a')?.getAttribute('href')).toBe(
+      'https://example.com/story',
+    );
+    expect(dom(result.html).querySelector('a')?.getAttribute('title')).toBe('A source');
+  });
+
+  it('handles CRLF, setext headings, tables and empty content without slicing structures', () => {
+    const result = renderMarkdownPreview(
+      'Title\r\n=====\r\n\r\n| A | B |\r\n|---|---|\r\n| 1 | 2 |\r\n\r\nLast',
+    );
+    expect(dom(result.html).querySelector('h1')?.textContent).toBe('Title');
+    expect(dom(result.html).querySelectorAll('td')).toHaveLength(2);
+    expect(result.truncated).toBe(false);
+    expect(renderMarkdownPreview('')).toEqual({ html: '', truncated: false });
+  });
+
+  it('keeps the renderer admission rules for HTML, links and images', () => {
+    const result = renderMarkdownPreview(
+      '<script>alert(1)</script> [x](javascript:alert(1))\n\n![remote](https://example.com/pixel.png)\n\n![local](/istota/api/chat/files?path=%2FUsers%2Falice%2Fx.png)',
+    );
+    const body = dom(result.html);
+    expect(body.querySelector('script')).toBeNull();
+    expect(body.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(body.querySelectorAll('img')).toHaveLength(1);
+    expect(body.querySelector('img')?.getAttribute('src')).toContain('/istota/api/chat/files?');
+    expect(body.querySelector('a')?.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+});
+
+describe('preview list boundaries', () => {
+  it('retains every nested item and does not mark exactly five items as shortened', () => {
+    const nested = Array.from({ length: 8 }, (_, i) => `  - Nested ${i}`).join('\n');
+    const result = renderMarkdownPreview(`- Parent\n${nested}\n- Two\n- Three\n- Four\n- Five`);
+    const body = new DOMParser().parseFromString(result.html, 'text/html').body;
+    expect(body.querySelectorAll(':scope > ul > li')).toHaveLength(5);
+    expect(body.querySelectorAll('li li')).toHaveLength(8);
+    expect(result.truncated).toBe(false);
   });
 });

@@ -324,11 +324,6 @@ export interface ConfigReferences {
   default_entity?: boolean;
   /** Clients with a blank entity — they bill under whichever one is default. */
   default_for_clients?: number;
-  /**
-   * Year files holding a row this version can't read. Non-empty means the
-   * counts above are lower bounds, so the two strict deletes refuse.
-   */
-  quarantined?: string[];
 }
 
 export interface ConfigDeleteResponse {
@@ -432,10 +427,19 @@ export interface InvoiceRow {
   client: string;
   client_key: string;
   date: string;
+  /** What the invoice billed when it was issued; never recomputed. */
   total: number;
+  /** `outstanding`, `paid` or `voided`. */
   status: string;
   paid_date?: string;
   paid_by_sync_date?: string;
+  voided_at: string | null;
+  void_reason: string;
+  replaced_by: string[];
+  /** Present on a voided invoice only. */
+  was_paid?: boolean;
+  /** A PDF is on disk for this number (a voided one keeps its `-VOID` copy). */
+  has_pdf: boolean;
 }
 
 export interface InvoicePaymentReview {
@@ -458,10 +462,12 @@ export interface InvoicesResponse {
 export async function getInvoices(opts?: {
   client?: string;
   show_all?: boolean;
+  include_voided?: boolean;
 }): Promise<InvoicesResponse> {
   const params = new URLSearchParams();
   if (opts?.client) params.set('client', opts.client);
   if (opts?.show_all) params.set('show_all', 'true');
+  if (opts?.include_voided === false) params.set('include_voided', 'false');
   const qs = params.toString();
   return apiFetch<InvoicesResponse>(`/invoices${qs ? '?' + qs : ''}`);
 }
@@ -535,6 +541,111 @@ export async function markInvoicePending(invoice_number: string): Promise<Invoic
   );
 }
 
+export interface GenerateInvoicesRequest {
+  period?: string;
+  client?: string;
+  entity?: string;
+  /** Bill exactly these entries; `period` is ignored. Never empty. */
+  entry_uids?: string[];
+  /** uid to etag; a changed entry answers 409 with `stale` uids. */
+  etags?: Record<string, string>;
+  dry_run: boolean;
+}
+
+export interface GeneratedInvoice {
+  invoice_number: string;
+  client_key: string;
+  client: string;
+  group: string;
+  items: number;
+  total: number;
+  terms: string;
+  entity?: string;
+  entry_uids: string[];
+  entry_descriptions: string[];
+}
+
+export interface GenerateInvoicesResponse {
+  status: string;
+  dry_run: boolean;
+  invoice_count: number;
+  total: number;
+  invoices: GeneratedInvoice[];
+  /** No client is emailed. */
+  notifications: 'none';
+}
+
+/**
+ * Preview (`dry_run: true`) or issue invoices. A 409 carries `stale` (uids
+ * whose etag changed) or an already-invoiced entry; read `ApiError.status`.
+ */
+export async function generateInvoices(
+  body: GenerateInvoicesRequest,
+): Promise<GenerateInvoicesResponse> {
+  return apiFetch<GenerateInvoicesResponse>('/invoices/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface VoidInvoiceRequest {
+  reason?: string;
+  replaced_by?: string[];
+  /** Required to void a paid invoice; without it the answer is 409, code `paid`. */
+  force?: boolean;
+  delete_pdf?: boolean;
+}
+
+export interface VoidInvoiceResponse {
+  status: string;
+  invoice: InvoiceRow;
+  entries_released: number;
+}
+
+/**
+ * Void an invoice. Errors carry `payload.code`: `not_found` (404), `paid` or
+ * `already_voided` (409), `unknown_replacement` (400).
+ */
+export async function voidInvoice(
+  invoice_number: string,
+  body: VoidInvoiceRequest = {},
+): Promise<VoidInvoiceResponse> {
+  return apiFetch<VoidInvoiceResponse>(`/invoices/${encodeURIComponent(invoice_number)}/void`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface ManualInvoiceItem {
+  /** A configured service billed by `qty`, or omit for a manual `amount`. */
+  service?: string;
+  qty?: number;
+  amount?: number;
+  description: string;
+}
+
+export interface CreateInvoiceRequest {
+  client: string;
+  entity?: string;
+  items: ManualInvoiceItem[];
+}
+
+export interface CreateInvoiceResponse {
+  status: string;
+  invoice: InvoiceRow;
+}
+
+/** Create a manual invoice, the same as `invoice create`. */
+export async function createInvoice(body: CreateInvoiceRequest): Promise<CreateInvoiceResponse> {
+  return apiFetch<CreateInvoiceResponse>('/invoices', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /** URL for the generated invoice PDF — open in a new tab / download. */
 export function invoicePdfUrl(invoice_number: string): string {
   return `${base}/api/money/invoices/${encodeURIComponent(invoice_number)}/pdf`;
@@ -559,11 +670,15 @@ export interface WorkEntryRow {
   discount: number;
   description: string;
   entity: string;
+  /** Always invoiced on its own, whatever the client's bundling rules say. */
+  separate: boolean;
   invoice: string;
   paid_date: string | null;
   /** What this entry will bill for, using the same rate rules the invoice uses. */
   computed_amount: number | null;
   editable: boolean;
+  /** False while any invoice lists the entry, a voided one included. */
+  deletable: boolean;
   /** 'unknown_service' | 'unknown_client' | 'no_uid' */
   warnings: string[];
 }
@@ -592,6 +707,7 @@ export interface WorkEntryInput {
   discount?: number;
   description?: string;
   entity?: string;
+  separate?: boolean;
 }
 
 export async function getWorkEntries(opts?: {

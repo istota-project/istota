@@ -24,12 +24,15 @@
   let nextcloud = $derived(fileSource.kind === 'nextcloud');
   let fileUrl = $derived(nextcloud ? nextcloudFileUrl : chatFileUrl);
   let webUrl = $derived(fileSource.kind === 'nextcloud' ? fileSource.webUrl : null);
+  // A `url` source names a PDF endpoint directly: no preview call, no sniffing.
+  let direct = $derived(fileSource.kind === 'url' ? fileSource : null);
+  let missing = $state(false);
   let reconnect = $state(false);
   let preview = $state<FilePreview | null>(null);
   let error = $state('');
   let canDownload = $state(true);
   let source = $state(false);
-  let name = $derived(preview?.name ?? path.split('/').pop() ?? 'File');
+  let name = $derived(direct?.name ?? preview?.name ?? path.split('/').pop() ?? 'File');
   let markdown = $derived(preview?.kind === 'text' && presentationFor(name).kind === 'markdown');
   $effect(() => {
     const requested = path;
@@ -40,6 +43,8 @@
     source = false;
     canDownload = true;
     reconnect = false;
+    missing = false;
+    if (direct) return;
     const load = nextcloud ? previewNextcloudFile : previewChatFile;
     const urlFor = fileUrl;
     load(requested, controller.signal)
@@ -102,10 +107,24 @@
         target="_blank"
         rel="noopener noreferrer">Open in Nextcloud</Button
       >{/if}
-    {#if canDownload}<Button size="sm" href={fileUrl(path)} download={name}>Download</Button>{/if}
+    {#if direct}
+      {#if !missing}<Button size="sm" href={direct.url} download="">Download</Button>{/if}
+    {:else if canDownload}<Button size="sm" href={fileUrl(path)} download={name}>Download</Button
+      >{/if}
   {/snippet}
   <div class="file-content">
-    {#if error}
+    {#if direct}
+      {#if missing}
+        <p role="alert">No PDF for this invoice</p>
+      {:else}
+        <PdfPreview
+          url={direct.url}
+          onLoadError={(status) => {
+            if (status === 404) missing = true;
+          }}
+        />
+      {/if}
+    {:else if error}
       <p role="alert">{error}</p>
     {:else if !preview}
       <p class="muted">Loading…</p>

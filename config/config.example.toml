@@ -1434,6 +1434,7 @@ output = "talk,email"  # talk / email / ntfy, or a comma list (default: "talk")
   [[users.alice.briefings.blocks]]
   title = "Today"
   render_mode = "structured"
+  options = { presentation = { width = "wide" } }
 
     [[users.alice.briefings.blocks.sources]]
     kind = "calendar"
@@ -1441,7 +1442,7 @@ output = "talk,email"  # talk / email / ntfy, or a comma list (default: "talk")
 
     [[users.alice.briefings.blocks.sources]]
     kind = "todos"
-    config = {}
+    config = { path = "shared/tasks.md" }
 
   [[users.alice.briefings.blocks]]
   title = "Markets"
@@ -1460,7 +1461,7 @@ output = "email"
   title = "World News"
   directive = "3–5 stories, neutral tone, no markets."
   render_mode = "synthesis"          # synthesis | structured (omit to infer)
-  options = { story_count = 5 }
+  options = { story_count = 5, tone = "neutral", presentation = { width = "full" } }
 
     [[users.alice.briefings.blocks.sources]]
     kind = "rss"                     # a Feeds subscription or category
@@ -1519,7 +1520,8 @@ timezone = "America/Los_Angeles"
 #   - render_mode: "synthesis" (LLM writes prose) | "structured" (near-verbatim).
 #       Omit to infer: "structured" when the first source kind is markets or
 #       calendar, else "synthesis".
-#   - options: optional dict passed verbatim to the block (e.g. story_count)
+#   - options: story_count, tone and other generation options are retained
+#       presentation.width: "auto" (default), "wide" or "full"; future editions only
 #   - sources: ordered list of 1..N sources, each { kind, config }
 #
 # Source kinds (kind = ...) and typical config:

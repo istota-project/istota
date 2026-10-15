@@ -29,8 +29,12 @@ from istota.briefings.models import (
     ArchivedBriefing,
     BlockSource,
     BriefingBlock,
+    normalize_block_payload,
     parse_json_dict,
     parse_json_list,
+    presentation_for_options,
+    validate_block_options,
+    validate_briefing_document,
 )
 from istota.lib.timestamps import iso_now as _now_iso
 
@@ -38,7 +42,7 @@ from istota.lib.timestamps import iso_now as _now_iso
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_SQL = """
@@ -75,7 +79,8 @@ CREATE TABLE IF NOT EXISTS briefing_archive (
     task_id INTEGER,
     block_meta TEXT NOT NULL DEFAULT '{}',
     delivered_to TEXT NOT NULL DEFAULT '[]',
-    read_at TEXT
+    read_at TEXT,
+    document_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_archive_name_time
     ON briefing_archive(briefing_name, generated_at DESC);
@@ -109,13 +114,20 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 """
 
 
-def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(briefing_archive)")}
+    if "document_json" not in columns:
+        conn.execute("ALTER TABLE briefing_archive ADD COLUMN document_json TEXT")
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE briefing_archive ADD COLUMN read_at TEXT")
     conn.execute("UPDATE briefing_archive SET read_at = ?", (_now_iso(),))
 
 
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
-    (2, _migrate_v1_to_v2),
+    (2, _migrate_v2),
+    (3, _migrate_v2_to_v3),
 ]
 
 
@@ -196,6 +208,26 @@ def _next_block_position(conn: sqlite3.Connection, briefing_name: str) -> int:
     return int(row["p"])
 
 
+def _block_id_high_water(conn: sqlite3.Connection) -> int:
+    # Reserve under the write lock; SQLite's implicit rowids reuse deleted IDs.
+    created = conn.execute(
+        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('block_id_high_water', '0')",
+    ).rowcount
+    highest = int(meta_get(conn, "block_id_high_water") or "0")
+    highest = max(highest, conn.execute("SELECT COALESCE(MAX(id), 0) FROM briefing_blocks").fetchone()[0])
+    if created:
+        # Seed older DBs from snapshots too, since their live blocks may be gone.
+        for row in conn.execute("SELECT document_json FROM briefing_archive WHERE document_json IS NOT NULL"):
+            try:
+                document = validate_briefing_document(json.loads(row["document_json"]))
+            except (ValueError, TypeError):
+                continue
+            for block in document["blocks"]:
+                highest = max(highest, block["block_id"])
+    meta_set(conn, "block_id_high_water", str(highest))
+    return highest
+
+
 def add_block(
     conn: sqlite3.Connection,
     *,
@@ -207,19 +239,22 @@ def add_block(
     position: int | None = None,
 ) -> int:
     """Insert a block at ``position`` (default: append). Returns the row id."""
+    options = validate_block_options(options if options is not None else {})
     if position is None:
         position = _next_block_position(conn, briefing_name)
+    block_id = _block_id_high_water(conn) + 1
+    meta_set(conn, "block_id_high_water", str(block_id))
     now = _now_iso()
     cur = conn.execute(
         """
         INSERT INTO briefing_blocks(
-            briefing_name, position, title, directive, render_mode,
+            id, briefing_name, position, title, directive, render_mode,
             options, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
-            briefing_name, position, title, directive, render_mode,
+            block_id, briefing_name, position, title, directive, render_mode,
             json.dumps(options or {}), now, now,
         ),
     )
@@ -236,6 +271,8 @@ def update_block(
     options: dict | None = None,
 ) -> None:
     """Patch a block's mutable fields (only non-None args are applied)."""
+    if options is not None:
+        options = validate_block_options(options)
     sets: list[str] = []
     params: list = []
     if title is not None:
@@ -263,6 +300,7 @@ def update_block(
 
 def delete_block(conn: sqlite3.Connection, block_id: int) -> None:
     """Delete a block (its sources cascade)."""
+    _block_id_high_water(conn)
     conn.execute("DELETE FROM briefing_blocks WHERE id = ?", (block_id,))
 
 
@@ -350,8 +388,7 @@ def reorder_blocks(
 
     Two-phase to dodge the ``UNIQUE(briefing_name, position)`` constraint: park
     every block at a high, collision-free position, then set final positions.
-    ``ordered_ids`` must be exactly the briefing's block ids (any order); ids
-    not belonging to the briefing are ignored.
+    ``ordered_ids`` must be an exact permutation of this briefing's block ids.
     """
     valid = {
         r["id"]
@@ -360,10 +397,17 @@ def reorder_blocks(
             (briefing_name,),
         ).fetchall()
     }
-    target = [bid for bid in ordered_ids if bid in valid]
+    if (not isinstance(ordered_ids, list)
+            or any(type(bid) is not int for bid in ordered_ids)
+            or len(ordered_ids) != len(valid) or set(ordered_ids) != valid):
+        raise ValueError("ordered_ids must be an exact permutation of the briefing block ids")
+    target = ordered_ids
     now = _now_iso()
     # Phase 1: park out of the way (offset well past any real count).
-    offset = 1000000
+    offset = conn.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM briefing_blocks WHERE briefing_name = ?",
+        (briefing_name,),
+    ).fetchone()[0]
     for i, bid in enumerate(target):
         conn.execute(
             "UPDATE briefing_blocks SET position = ?, updated_at = ? WHERE id = ?",
@@ -422,6 +466,8 @@ def update_source(
     *,
     config: dict | None = None,
     enabled: bool | None = None,
+    kind: str | None = None,
+    position: int | None = None,
 ) -> None:
     sets: list[str] = []
     params: list = []
@@ -431,6 +477,12 @@ def update_source(
     if enabled is not None:
         sets.append("enabled = ?")
         params.append(1 if enabled else 0)
+    if kind is not None:
+        sets.append("kind = ?")
+        params.append(kind)
+    if position is not None:
+        sets.append("position = ?")
+        params.append(position)
     if not sets:
         return
     params.append(source_id)
@@ -453,6 +505,53 @@ def list_sources(conn: sqlite3.Connection, block_id: int) -> list[BlockSource]:
     return [_row_to_source(r) for r in rows]
 
 
+def save_block_definition(conn: sqlite3.Connection, *, payload: dict) -> BriefingBlock:
+    """Save a block and its optional complete source list as one transaction."""
+    values = normalize_block_payload(payload)
+    block_id = values.pop("id", None)
+    sources = values.pop("sources", None)
+    # A savepoint also preserves unrelated work in an existing caller transaction.
+    conn.execute("SAVEPOINT briefing_definition")
+    try:
+        existing = get_block(conn, block_id) if block_id is not None else None
+        if block_id is not None and existing is None:
+            raise LookupError("block not found")
+        existing_sources = {s.id: s for s in existing.sources} if existing else {}
+        if sources is not None:
+            for source in sources:
+                if "id" in source and source["id"] not in existing_sources:
+                    raise ValueError("source id does not belong to this block")
+        if existing:
+            if values.pop("briefing_name", existing.briefing_name) != existing.briefing_name:
+                raise ValueError("briefing_name cannot be changed")
+            update_block(conn, block_id, **values)
+        else:
+            block_id = add_block(conn, **values)
+        if sources is not None:
+            kept_ids = {source["id"] for source in sources if "id" in source}
+            # Keep omitted rows until insertion, so SQLite cannot reuse their ids.
+            # Park above both ranges so added sources cannot collide with them.
+            offset = max(max((s.position for s in existing_sources.values()), default=-1), len(sources)) + 1
+            for i, source_id in enumerate(existing_sources):
+                update_source(conn, source_id, position=offset + i)
+            for position, source in enumerate(sources):
+                fields = {k: source[k] for k in ("kind", "config", "enabled")}
+                if "id" in source:
+                    update_source(conn, source["id"], position=position, **fields)
+                else:
+                    add_source(conn, block_id=block_id, position=position, **fields)
+            for source_id in existing_sources:
+                if source_id not in kept_ids:
+                    delete_source(conn, source_id)
+        block = get_block(conn, block_id)
+        conn.execute("RELEASE SAVEPOINT briefing_definition")
+        return block
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT briefing_definition")
+        conn.execute("RELEASE SAVEPOINT briefing_definition")
+        raise
+
+
 # -- archive ------------------------------------------------------------------
 
 
@@ -466,20 +565,28 @@ def insert_archive(
     task_id: int | None = None,
     block_meta: dict | None = None,
     delivered_to: list[str] | None = None,
+    document: dict | None = None,
 ) -> int:
     """Persist one rendered briefing. Returns the row id."""
+    if document is not None:
+        from istota.briefings.document import document_to_markdown
+
+        document = validate_briefing_document(document)
+        if subject != document["title"] or body_md != document_to_markdown(document):
+            raise ValueError("briefing_document_archive_mismatch")
     cur = conn.execute(
         """
         INSERT INTO briefing_archive(
             briefing_name, subject, body_md, generated_at, task_id,
-            block_meta, delivered_to
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            block_meta, delivered_to, document_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
             briefing_name, subject, body_md, generated_at or _now_iso(),
             task_id, json.dumps(block_meta or {}),
             json.dumps(delivered_to or []),
+            json.dumps(document) if document is not None else None,
         ),
     )
     return int(cur.fetchone()["id"])
@@ -623,6 +730,9 @@ def meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 
 def _row_to_block(row: sqlite3.Row) -> BriefingBlock:
+    options = parse_json_dict(row["options"])
+    if "presentation" in options:
+        options["presentation"] = presentation_for_options(options)
     return BriefingBlock(
         id=row["id"],
         briefing_name=row["briefing_name"],
@@ -630,7 +740,7 @@ def _row_to_block(row: sqlite3.Row) -> BriefingBlock:
         title=row["title"],
         directive=row["directive"],
         render_mode=row["render_mode"],
-        options=parse_json_dict(row["options"]),
+        options=options,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -649,6 +759,12 @@ def _row_to_source(row: sqlite3.Row) -> BlockSource:
 
 
 def _row_to_archived(row: sqlite3.Row) -> ArchivedBriefing:
+    document = None
+    if row["document_json"] is not None:
+        try:
+            document = validate_briefing_document(json.loads(row["document_json"]))
+        except (TypeError, ValueError):
+            logger.warning("briefing_document_invalid archive_id=%s", row["id"])
     return ArchivedBriefing(
         id=row["id"],
         briefing_name=row["briefing_name"],
@@ -659,4 +775,5 @@ def _row_to_archived(row: sqlite3.Row) -> ArchivedBriefing:
         block_meta=parse_json_dict(row["block_meta"]),
         delivered_to=parse_json_list(row["delivered_to"]),
         read_at=row["read_at"],
+        document=document,
     )

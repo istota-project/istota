@@ -550,6 +550,8 @@ def cmd_invoice_generate(args):
         cli_args += ["--client", args.client]
     if args.entity:
         cli_args += ["--entity", args.entity]
+    for uid in args.entry or []:
+        cli_args += ["--entry", uid]
     if args.dry_run:
         cli_args.append("--dry-run")
     _output(_run(cli_args))
@@ -561,6 +563,8 @@ def cmd_invoice_list(args):
         cli_args += ["--client", args.client]
     if args.show_all:
         cli_args.append("--all")
+    if args.active:
+        cli_args.append("--active")
     _output(_run(cli_args))
 
 
@@ -621,6 +625,10 @@ def cmd_invoice_unpaid(args):
 
 def cmd_invoice_void(args):
     cli_args = ["invoice", "void", args.invoice_number]
+    if args.reason:
+        cli_args += ["--reason", args.reason]
+    if args.replaced_by:
+        cli_args += ["--replaced-by", args.replaced_by]
     if args.force:
         cli_args.append("--force")
     if args.delete_pdf:
@@ -663,6 +671,8 @@ def cmd_work_add(args):
         cli_args += ["--description", args.description]
     if args.entity:
         cli_args += ["--entity", args.entity]
+    if args.separate is not None:
+        cli_args.append("--separate" if args.separate else "--no-separate")
     _output(_run(cli_args))
 
 
@@ -684,6 +694,8 @@ def cmd_work_update(args):
         cli_args += ["--description", args.description]
     if args.entity is not None:
         cli_args += ["--entity", args.entity]
+    if args.separate is not None:
+        cli_args.append("--separate" if args.separate else "--no-separate")
     _output(_run(cli_args))
 
 
@@ -975,14 +987,19 @@ def build_parser():
     inv_sub = p_inv.add_subparsers(dest="invoice_command")
 
     p_inv_gen = inv_sub.add_parser("generate", help="Generate invoices")
-    p_inv_gen.add_argument("--period", "-p", help="Billing period (YYYY-MM)")
+    p_inv_gen.add_argument("--period", "-p", metavar="YYYY-MM",
+                           help="Bill unbilled work dated on or before the end of this "
+                                "month (earlier months included)")
     p_inv_gen.add_argument("--client", "-c", help="Filter by client")
     p_inv_gen.add_argument("--entity", "-e", help="Filter by entity")
+    p_inv_gen.add_argument("--entry", action="append", metavar="UID",
+                           help="Bill exactly this entry (repeatable); --period is ignored")
     p_inv_gen.add_argument("--dry-run", action="store_true", help="Preview only")
 
     p_inv_list = inv_sub.add_parser("list", help="List invoices")
     p_inv_list.add_argument("--client", "-c", help="Filter by client")
     p_inv_list.add_argument("--all", "-a", dest="show_all", action="store_true", help="Include paid")
+    p_inv_list.add_argument("--active", action="store_true", help="Leave voided invoices out")
 
     p_review = inv_sub.add_parser("review", help="Review synced invoice payments")
     review_sub = p_review.add_subparsers(dest="invoice_review_command")
@@ -1018,8 +1035,12 @@ def build_parser():
 
     p_inv_void = inv_sub.add_parser("void", help="Void an invoice")
     p_inv_void.add_argument("invoice_number", help="Invoice number")
+    p_inv_void.add_argument("--reason", help="Why the invoice was voided")
+    p_inv_void.add_argument("--replaced-by", dest="replaced_by", metavar="N,N",
+                            help="Invoices that replace this one, comma-separated")
     p_inv_void.add_argument("--force", action="store_true", help="Void even if paid")
-    p_inv_void.add_argument("--delete-pdf", action="store_true", help="Delete PDF file")
+    p_inv_void.add_argument("--delete-pdf", action="store_true",
+                            help="Delete the PDF instead of renaming it -VOID")
 
     # --- Work commands (nested subparser) ---
     p_work = sub.add_parser("work", help="Work log management")
@@ -1040,6 +1061,8 @@ def build_parser():
     p_wa.add_argument("--discount", type=float, help="Discount")
     p_wa.add_argument("--description", help="Description")
     p_wa.add_argument("--entity", "-e", help="Entity override")
+    p_wa.add_argument("--separate", action=argparse.BooleanOptionalAction, default=None,
+                      help="Always invoice this entry on its own")
 
     p_wu = work_sub.add_parser("update", help="Update work entry")
     p_wu.add_argument("entry_id", type=int, help="Entry ID")
@@ -1051,6 +1074,8 @@ def build_parser():
     p_wu.add_argument("--discount", type=float, help="Discount")
     p_wu.add_argument("--description", help="Description")
     p_wu.add_argument("--entity", "-e", help="Entity override")
+    p_wu.add_argument("--separate", action=argparse.BooleanOptionalAction, default=None,
+                      help="Always invoice this entry on its own")
 
     p_wr = work_sub.add_parser("remove", help="Remove work entry")
     p_wr.add_argument("entry_id", type=int, help="Entry ID")

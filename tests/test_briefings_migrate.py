@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 
 from istota.briefings import blocks_from_components, normalize_block_specs
 from istota.briefings import db as bdb
@@ -481,3 +483,38 @@ class TestConfigAuthoredBlocksSeeding:
             titles = [b.title for b in bdb.list_blocks(conn, "Morning")]
         # Sentinel already set → deleted block not resurrected, no dupes.
         assert titles == ["B"]
+
+
+@pytest.mark.parametrize("width", ["wide", "full"])
+def test_config_width_seeds_once_without_losing_options(tmp_path, width):
+    from istota.briefings import db as bdb
+    from istota.briefings._migrate import ensure_initialised
+    from istota.briefings.models import BriefingsContext
+    from istota.config import load_config
+    from istota.lib import toml_write
+
+    path = tmp_path / "config.toml"
+    path.write_text(toml_write.dumps({"users": {"alice": {"briefings": [
+        {"name": "morning", "blocks": [{"title": "News", "options": {
+            "custom": 42, "presentation": {"width": width}}, "sources": [{"kind": "notes"}]}]},
+    ]}}}))
+    config = load_config(path)
+    ctx = BriefingsContext("alice", tmp_path / "data", tmp_path / "briefings.db")
+    ensure_initialised(ctx, app_config=config)
+    ensure_initialised(ctx, app_config=config)
+    with bdb.connect(ctx.db_path) as conn:
+        block, = bdb.list_blocks(conn, "morning")
+        assert block.options == {"custom": 42, "presentation": {"width": width}}
+
+
+def test_invalid_new_config_width_refuses_before_seeding(tmp_path):
+    from istota.config import load_config
+    from istota.lib import toml_write
+
+    path = tmp_path / "config.toml"
+    path.write_text(toml_write.dumps({"users": {"alice": {"briefings": [
+        {"name": "morning", "blocks": [{"title": "News", "options": {
+            "presentation": {"width": "bad"}}, "sources": [{"kind": "notes"}]}]},
+    ]}}}))
+    with pytest.raises(ValueError, match="presentation"):
+        load_config(path)

@@ -19,6 +19,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ from istota.briefings._loader import UserNotFoundError, resolve_for_user
 from istota.briefings._migrate import ensure_initialised
 from istota.briefings.models import (
     ALLOWED_SHARED_SOURCE_KINDS,
+    BLOCK_TEMPLATES,
     RENDER_MODES,
     SOURCE_KINDS,
     STRUCTURED_KINDS,
@@ -37,9 +39,11 @@ from istota.briefings.models import (
     BriefingBlock,
     BriefingsContext,
     validate_shared_block_payload,
+    validate_briefing_document,
 )
 from istota.briefings.sources.browse import BROWSE_PRESETS
 from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import make_get_user_context, require_auth, verify_origin
 
 
@@ -153,8 +157,7 @@ def _schedule_names(cfg, username: str) -> list[str]:
     try:
         from istota.user_briefings import list_briefings
         for b in list_briefings(cfg.db_path, username):
-            if b.enabled:
-                _add(b.name)
+            _add(b.name)
     except Exception:  # noqa: BLE001
         pass
 
@@ -197,7 +200,7 @@ def get_archive_item(
         row = bdb.get_archived(conn, archive_id)
     if not row:
         raise HTTPException(404, "briefing not found")
-    return _map_archive(row)
+    return {**_map_archive(row), "document": row.document}
 
 
 @router.post("/archive/{archive_id}/read")
@@ -264,6 +267,45 @@ def delete_archive_item(
     return {"status": "ok"}
 
 
+@router.post("/preview")
+async def preview_document(
+    request: Request,
+    _: None = Depends(verify_origin),
+    user: dict = Depends(require_auth),
+) -> dict:
+    """Render inline content without initialising or consulting the content DB."""
+    from istota.briefings.document import document_to_markdown
+    from istota.skills.briefing import render_briefing_document_html, render_briefing_document_plain
+
+    cfg = _app_config(request)
+    if cfg is not None and not cfg.is_module_enabled(user["username"], "briefings"):
+        raise HTTPException(403, "briefings disabled")
+    try:
+        raw = await read_bounded_body(request, 2 * 1024 * 1024)
+    except BodyError as error:
+        raise HTTPException(error.status, "briefing preview body refused") from None
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError
+        document = payload.get("document")
+        if isinstance(document, dict) and isinstance(document.get("blocks"), list):
+            if len(document["blocks"]) > 100:
+                raise HTTPException(413, "too many preview blocks")
+            for block in document["blocks"]:
+                body = block.get("body_md") if isinstance(block, dict) else None
+                if isinstance(body, str) and len(body.encode("utf-8")) > 64 * 1024:
+                    raise HTTPException(413, "preview block too large")
+        document = validate_briefing_document(document)
+    except (ValueError, UnicodeError, RecursionError):
+        raise HTTPException(400, "invalid briefing preview document") from None
+    return {
+        "body_md": document_to_markdown(document),
+        "plain": render_briefing_document_plain(document),
+        "html": render_briefing_document_html(document),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Content model — config / blocks / sources
 # ---------------------------------------------------------------------------
@@ -291,6 +333,7 @@ def get_config(
         "schedule_names": _schedule_names(cfg, user["username"]),
         "source_kinds": list(SOURCE_KINDS),
         "structured_kinds": list(STRUCTURED_KINDS),
+        "block_templates": BLOCK_TEMPLATES,
     }
 
 
@@ -306,48 +349,29 @@ def put_block(
     Modes (by payload shape):
     * ``{"reorder": {"briefing_name", "ordered_ids": [...]}}`` — reorder.
     * ``{"id": N, ...}`` — update an existing block.
+    * Optional ``sources`` replaces the complete source list atomically.
     * ``{"briefing_name", "title", ...}`` — create a new block.
     """
     with bdb.connect(ctx.db_path) as conn:
-        if "reorder" in payload:
-            r = payload["reorder"]
-            name = (r.get("briefing_name") or "").strip()
-            ordered = [int(x) for x in (r.get("ordered_ids") or [])]
-            if not name:
-                raise HTTPException(400, "briefing_name required")
-            bdb.reorder_blocks(conn, name, ordered)
+        try:
+            if "reorder" in payload:
+                reorder = payload["reorder"]
+                if not isinstance(reorder, dict):
+                    raise ValueError("reorder must be an object")
+                name = reorder.get("briefing_name")
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("briefing_name required")
+                ordered = reorder.get("ordered_ids")
+                bdb.reorder_blocks(conn, name.strip(), ordered)
+                conn.commit()
+                return {"status": "ok", "reordered": len(ordered)}
+            block = bdb.save_block_definition(conn, payload=payload)
             conn.commit()
-            return {"status": "ok", "reordered": len(ordered)}
-
-        if payload.get("id"):
-            block_id = int(payload["id"])
-            existing = bdb.get_block(conn, block_id, with_sources=False)
-            if not existing:
-                raise HTTPException(404, "block not found")
-            bdb.update_block(
-                conn, block_id,
-                title=payload.get("title"),
-                directive=payload.get("directive"),
-                render_mode=_valid_render_mode(payload.get("render_mode")),
-                options=payload.get("options"),
-            )
-            conn.commit()
-            block = bdb.get_block(conn, block_id)
-            return {"status": "ok", "block": _map_block(block)}
-
-        name = (payload.get("briefing_name") or "").strip()
-        title = (payload.get("title") or "").strip()
-        if not name or not title:
-            raise HTTPException(400, "briefing_name and title required")
-        block_id = bdb.add_block(
-            conn, briefing_name=name, title=title,
-            directive=payload.get("directive"),
-            render_mode=_valid_render_mode(payload.get("render_mode")) or "synthesis",
-            options=payload.get("options") or {},
-        )
-        conn.commit()
-        block = bdb.get_block(conn, block_id)
-        return {"status": "ok", "block": _map_block(block)}
+        except LookupError:
+            raise HTTPException(404, "block not found") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+    return {"status": "ok", "block": _map_block(block)}
 
 
 @router.delete("/blocks/{block_id}")
@@ -756,10 +780,3 @@ def suggest_paths(
     root = cfg.workspace_root(user["username"]) if cfg is not None else None
     paths = _walk_text_files(root, q) if root is not None and root.is_dir() else []
     return {"paths": paths}
-
-
-def _valid_render_mode(value):
-    from istota.briefings.models import RENDER_MODES
-    if value is None:
-        return None
-    return value if value in RENDER_MODES else "synthesis"

@@ -776,3 +776,31 @@ class TestCoverageIsScopedByProfile:
             assert get_untraced_synced_count(conn, profile="home") == 1
             assert get_untraced_synced_count(conn, profile="biz") == 0
             assert get_untraced_synced_count(conn) == 1
+
+
+def test_an_invoices_table_without_income_lines_gains_the_column(tmp_path):
+    """A money.db created earlier on this branch still opens and stores the split."""
+    import sqlite3
+
+    path = tmp_path / "money.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE invoices (number TEXT PRIMARY KEY, client TEXT NOT NULL, "
+        "entity TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '', issue_date TEXT NOT NULL, "
+        "total REAL NOT NULL, status TEXT NOT NULL, paid_date TEXT, voided_at TEXT, "
+        "was_paid INTEGER NOT NULL DEFAULT 0, void_reason TEXT NOT NULL DEFAULT '', "
+        "replaced_by TEXT NOT NULL DEFAULT '[]', pdf_path TEXT NOT NULL DEFAULT '', "
+        "manual INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO invoices (number, client, entity, issue_date, total, status, created_at) "
+        "VALUES ('INV-000001', 'acme', '', '2026-03-01', 100, 'open', '2026-03-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    init_db(path)
+
+    with get_db(path) as conn:
+        row = conn.execute("SELECT income_lines FROM invoices").fetchone()
+    assert row["income_lines"] == "{}"
