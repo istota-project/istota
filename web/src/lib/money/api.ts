@@ -677,6 +677,8 @@ export interface WorkEntryRow {
   /** What this entry will bill for, using the same rate rules the invoice uses. */
   computed_amount: number | null;
   editable: boolean;
+  /** False while any invoice lists the entry, a voided one included. */
+  deletable: boolean;
   /** 'unknown_service' | 'unknown_client' | 'no_uid' */
   warnings: string[];
 }

@@ -1,7 +1,9 @@
 import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import Page from './+page.svelte';
+import { clearNotices, notices } from '$lib/stores/notices';
 
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
@@ -27,6 +29,7 @@ function entryRow(over: Record<string, unknown> = {}) {
     paid_date: null,
     computed_amount: 450,
     editable: true,
+    deletable: true,
     warnings: [],
     ...over,
   };
@@ -41,19 +44,38 @@ const BILLED = entryRow({
   description: 'Design pass',
   invoice: 'INV-000010',
   editable: false,
+  deletable: false,
+});
+const ON_VOIDED = entryRow({
+  uid: 'w3',
+  index: 3,
+  etag: 'etag-w3',
+  date: '2026-07-01',
+  description: 'Billed then voided',
+  deletable: false,
 });
 
 type Handler = (body: any) => Response | Promise<Response>;
 let posts: { url: string; body: any }[];
 let handlers: Record<string, Handler>;
+let deletes: string[];
+let deleteResponse: () => Response;
+let listed: ReturnType<typeof entryRow>[];
 
 beforeEach(() => {
   posts = [];
   handlers = {};
+  deletes = [];
+  deleteResponse = () => Response.json({ status: 'ok' });
+  listed = [UNBILLED, BILLED];
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       const path = url.replace('/istota/api/money', '');
+      if (init?.method === 'DELETE') {
+        deletes.push(path);
+        return deleteResponse();
+      }
       if (init?.method === 'POST') {
         const body = init.body ? JSON.parse(String(init.body)) : null;
         posts.push({ url: path, body });
@@ -64,7 +86,7 @@ beforeEach(() => {
       if (path.startsWith('/work?'))
         return Response.json({
           status: 'ok',
-          entries: [UNBILLED, BILLED],
+          entries: listed,
           totals: { uninvoiced_count: 1, uninvoiced_amount: 450, invoiced_count: 1, paid_count: 0 },
         });
       if (path === '/clients') return Response.json({ status: 'ok', clients: [] });
@@ -79,6 +101,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearNotices();
   vi.unstubAllGlobals();
 });
 
@@ -164,5 +187,53 @@ describe('an invoiced entry', () => {
       body: { reason: '', replaced_by: [], force: false },
     });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+});
+
+describe('deleting an entry', () => {
+  it('does not offer Delete for an entry a voided invoice lists', async () => {
+    listed = [UNBILLED, ON_VOIDED];
+    render(Page);
+    const triggers = await screen.findAllByLabelText('Actions');
+    await fireEvent.keyDown(triggers[1], { key: 'Enter' });
+    const item = await screen.findByRole('menuitem', { name: /listed on a voided invoice/ });
+    expect(item).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull();
+  });
+
+  it('says why a voided invoice blocks it, not that the entry changed', async () => {
+    deleteResponse = () =>
+      Response.json(
+        {
+          status: 'error',
+          error: 'entry is listed on a voided invoice',
+          code: 'on_voided_invoice',
+        },
+        { status: 409 },
+      );
+    render(Page);
+    await choose(0, 'Delete');
+    const confirm = await screen.findByRole('dialog');
+    await fireEvent.click(within(confirm).getByRole('button', { name: /Delete/ }));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+    await waitFor(() =>
+      expect(get(notices).map((n) => n.message)).toEqual([
+        expect.stringMatching(/listed on a voided invoice/),
+      ]),
+    );
+    expect(screen.queryByText(/changed elsewhere/)).toBeNull();
+  });
+
+  it('still reports a stale etag as changed elsewhere', async () => {
+    deleteResponse = () =>
+      Response.json(
+        { status: 'error', error: 'entry changed', code: 'conflict', entry: null },
+        { status: 409 },
+      );
+    render(Page);
+    await choose(0, 'Delete');
+    const confirm = await screen.findByRole('dialog');
+    await fireEvent.click(within(confirm).getByRole('button', { name: /Delete/ }));
+    expect(await screen.findByText(/changed elsewhere/)).toBeTruthy();
   });
 });

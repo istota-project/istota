@@ -33,6 +33,7 @@
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
+  import { notifyError } from '$lib/stores/notices';
 
   let entries: WorkEntryRow[] = $state([]);
   let totals: WorkTotals = $state({
@@ -172,9 +173,18 @@
     formError = '';
   }
 
-  /** A 409 means the agent (or another tab) got there first — offer a reload. */
+  function errorCode(e: unknown): string {
+    return e instanceof ApiError && e.status === 409 ? (e.payload?.code ?? '') : '';
+  }
+
+  /**
+   * The agent (or another tab) got there first — offer a reload. A stale etag
+   * and an entry invoiced since it was read are both that; a refusal that
+   * reloading would not change (`on_voided_invoice`) is not.
+   */
   function isConflict(e: unknown): boolean {
-    return e instanceof ApiError && e.status === 409;
+    const code = errorCode(e);
+    return code === 'conflict' || code === 'invoiced';
   }
 
   async function handleSave(data: WorkEntrySavePayload) {
@@ -219,6 +229,11 @@
     } catch (e) {
       if (isConflict(e)) {
         conflict = 'This entry was changed elsewhere — it was not deleted.';
+      } else if (errorCode(e) === 'on_voided_invoice') {
+        notifyError(
+          'This entry is listed on a voided invoice, which keeps its record of it, so it cannot be deleted.',
+        );
+        await load();
       } else {
         error = e instanceof Error ? e.message : 'Failed to delete work entry';
       }
@@ -267,7 +282,9 @@
     return [
       { label: 'Edit', onSelect: () => openEdit(entry), disabled: busy },
       { label: 'Generate invoice', onSelect: () => (generating = entry), disabled: busy },
-      { label: 'Delete', onSelect: () => askDelete(entry), danger: true, disabled: busy },
+      entry.deletable
+        ? { label: 'Delete', onSelect: () => askDelete(entry), danger: true, disabled: busy }
+        : { label: 'Delete — listed on a voided invoice', onSelect: () => {}, disabled: true },
     ];
   }
 

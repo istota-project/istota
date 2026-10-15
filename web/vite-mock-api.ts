@@ -7734,6 +7734,7 @@ const handlers: MockHandler[] = [
         service_type: svc?.type ?? '',
         computed_amount: workAmount(w),
         editable: !!w.uid && !w.invoice,
+        deletable: !!w.uid && !w.invoice,
         warnings,
       };
     }

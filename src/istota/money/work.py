@@ -830,13 +830,24 @@ def _remove(
             return WorkMutationResult("invoiced", entry)
         if expect_etag and entry_etag(entry) != expect_etag:
             return WorkMutationResult("conflict", entry)
-        listed = conn.execute(
-            "SELECT 1 FROM invoice_lines WHERE entry_uid = ?", (entry.uid,),
-        ).fetchone()
-        if listed is not None:
+        if entry.uid in _listed_uids(conn):
             return WorkMutationResult("on_voided_invoice", entry)
         conn.execute("DELETE FROM work_entries WHERE uid = ?", (entry.uid,))
         return WorkMutationResult("ok", entry)
+
+
+def _listed_uids(conn: sqlite3.Connection) -> set[str]:
+    return {r["entry_uid"] for r in conn.execute("SELECT DISTINCT entry_uid FROM invoice_lines")}
+
+
+def listed_entry_uids(data_dir: Path, *, conn: sqlite3.Connection | None = None) -> set[str]:
+    """Uids of the entries any invoice lists, voided ones included.
+
+    An entry here cannot be removed: a voided invoice keeps its record of the
+    entries it covered. This is the rule removal applies.
+    """
+    with _reading(data_dir, conn) as c:
+        return _listed_uids(c)
 
 
 def remove_work_entry_by_uid(

@@ -48,6 +48,7 @@ function row(overrides: Partial<WorkEntryRow> = {}): WorkEntryRow {
     paid_date: null,
     computed_amount: 450,
     editable: true,
+    deletable: true,
     warnings: [],
     ...overrides,
   };

@@ -1008,8 +1008,11 @@ _WORK_REQUIRED_STRING_FIELDS = ("client", "service")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
 
-def _work_row(entry, config) -> dict:
+def _work_row(entry, config, listed: set[str] | frozenset[str] = frozenset()) -> dict:
     """Enrich a stored work entry into the web row shape.
+
+    ``listed`` is the uids any invoice lists (``work.listed_entry_uids``):
+    such an entry is not ``deletable`` even once its invoice is voided.
 
     ``computed_amount`` runs the same rate resolution invoice generation does
     (``entry_line_item``), so for an uninvoiced entry it is the number that
@@ -1058,6 +1061,7 @@ def _work_row(entry, config) -> dict:
         "paid_date": entry.paid_date.isoformat() if entry.paid_date else None,
         "computed_amount": computed,
         "editable": bool(entry.uid) and not entry.invoice,
+        "deletable": bool(entry.uid) and not entry.invoice and entry.uid not in listed,
         "warnings": warnings,
     }
 
@@ -1094,34 +1098,45 @@ def _work_config_or_none(user_ctx: UserContext):
 
 def _work_entry_response(data_dir, uid: str, config) -> dict | None:
     """Re-read an entry by uid and render its row (fresh display index)."""
-    from istota.money.work import load_work_entries
+    from istota.money.work import listed_entry_uids, load_work_entries
 
     for entry in load_work_entries(data_dir):
         if entry.uid and entry.uid == uid:
-            return _work_row(entry, config)
+            return _work_row(entry, config, listed_entry_uids(data_dir))
     return None
 
 
-def _work_mutation_error(result, config) -> JSONResponse:
-    """Map a store mutation result onto the right status code."""
+def _work_mutation_error(result, config, data_dir) -> JSONResponse:
+    """Map a store mutation result onto the right status code.
+
+    Each 409 carries a ``code`` (``invoiced``, ``on_voided_invoice``,
+    ``conflict``) so a client can tell a stale etag from a refusal.
+    """
+    from istota.money.work import listed_entry_uids
+
     if result.status == "not_found":
         return JSONResponse({"status": "error", "error": "entry not found"}, status_code=404)
     if result.status == "invoiced":
         return JSONResponse(
-            {"status": "error", "error": "entry is invoiced"}, status_code=409,
+            {"status": "error", "error": "entry is invoiced", "code": "invoiced"},
+            status_code=409,
         )
     if result.status == "on_voided_invoice":
         return JSONResponse(
-            {"status": "error", "error": "entry is listed on a voided invoice"},
+            {
+                "status": "error",
+                "error": "entry is listed on a voided invoice",
+                "code": "on_voided_invoice",
+            },
             status_code=409,
         )
     if result.status == "conflict":
+        row = (
+            _work_row(result.entry, config, listed_entry_uids(data_dir))
+            if result.entry else None
+        )
         return JSONResponse(
-            {
-                "status": "error",
-                "error": "entry changed",
-                "entry": _work_row(result.entry, config) if result.entry else None,
-            },
+            {"status": "error", "error": "entry changed", "code": "conflict", "entry": row},
             status_code=409,
         )
     return JSONResponse(
@@ -1204,7 +1219,7 @@ async def api_work_list(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """List work entries, enriched with display names and computed amounts."""
-    from istota.money.work import load_work_entries
+    from istota.money.work import listed_entry_uids, load_work_entries
 
     if status not in _WORK_STATUSES:
         return JSONResponse(
@@ -1223,7 +1238,8 @@ async def api_work_list(
     if period:
         entries = [e for e in entries if e.date.isoformat().startswith(period)]
 
-    rows = [_work_row(e, config) for e in entries]
+    listed = listed_entry_uids(data_dir)
+    rows = [_work_row(e, config, listed) for e in entries]
     totals = _work_totals(rows)
 
     if status == "uninvoiced":
@@ -1312,7 +1328,7 @@ async def api_work_update(
     _csrf: None = Depends(verify_origin),
 ):
     """Update an uninvoiced work entry, addressed by its stable uid."""
-    from istota.money.work import update_work_entry_by_uid
+    from istota.money.work import listed_entry_uids, update_work_entry_by_uid
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -1345,13 +1361,16 @@ async def api_work_update(
         data_dir, uid, expect_etag=body.get("etag") or None, **fields,
     )
     if not result.ok:
-        return _work_mutation_error(result, config)
+        return _work_mutation_error(result, config, data_dir)
 
     # The mutation result carries the entry re-read *inside* the write lock,
     # with a display index that already accounts for a date move. Re-reading
     # here instead would return None if the entry vanished in between, and the
     # declared client type has no null case.
-    return {"status": "ok", "entry": _work_row(result.entry, config)}
+    return {
+        "status": "ok",
+        "entry": _work_row(result.entry, config, listed_entry_uids(data_dir)),
+    }
 
 
 @router.delete("/work/{uid}")
@@ -1370,7 +1389,7 @@ async def api_work_delete(
 
     result = remove_work_entry_by_uid(data_dir, uid, expect_etag=etag or None)
     if not result.ok:
-        return _work_mutation_error(result, _work_config_or_none(user_ctx))
+        return _work_mutation_error(result, _work_config_or_none(user_ctx), data_dir)
     return {"status": "ok", "uid": uid}
 
 

@@ -408,7 +408,42 @@ class TestDeleteWork:
         assign_invoice_number(tmp_path, [1], "INV-000001")
         resp = make_client().delete(f"/api/money/work/{uid}")
         assert resp.status_code == 409
+        assert resp.json()["code"] == "invoiced"
         assert len(load_work_entries(tmp_path)) == 1
+
+
+class TestEntryOnAVoidedInvoice:
+    """A voided invoice keeps its record of the entries it covered, so the row
+    says it cannot be deleted and the refusal names itself."""
+
+    def _voided(self, tmp_path) -> str:
+        from istota.money.work import void_invoice
+
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, description="voided")
+        add_work_entry(tmp_path, "2026-03-02", "acme", "dev", qty=1, description="plain")
+        assign_invoice_number(tmp_path, [1], "INV-000001")
+        void_invoice(tmp_path, "INV-000001")
+        return _uid_of(tmp_path, "voided")
+
+    def test_the_row_is_editable_but_not_deletable(self, make_client, tmp_path):
+        self._voided(tmp_path)
+        rows = {r["description"]: r for r in make_client().get("/api/money/work").json()["entries"]}
+        assert rows["voided"]["editable"] is True
+        assert rows["voided"]["deletable"] is False
+        assert rows["plain"]["deletable"] is True
+
+    def test_an_update_keeps_the_flag(self, make_client, tmp_path):
+        uid = self._voided(tmp_path)
+        resp = make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["deletable"] is False
+
+    def test_delete_is_refused_with_its_own_code(self, make_client, tmp_path):
+        uid = self._voided(tmp_path)
+        resp = make_client().delete(f"/api/money/work/{uid}")
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "on_voided_invoice"
+        assert len(load_work_entries(tmp_path)) == 2
 
 
 class TestEtagConcurrency:
@@ -434,6 +469,7 @@ class TestEtagConcurrency:
         assert resp.status_code == 409
         body = resp.json()
         assert body["error"] == "entry changed"
+        assert body["code"] == "conflict"
         # The conflict response carries the current server-side row.
         assert body["entry"]["qty"] == 99
         assert load_work_entries(tmp_path)[0].qty == 99
