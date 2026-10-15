@@ -73,7 +73,7 @@ istota-skill money run-scheduled [--dry-run] [--skip-monarch] [--no-match-invoic
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/create`, `monarch-category-map set`, `transaction-rules set`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `monarch-category-map list`, `transaction-rules list/test`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/record-void/create`, `monarch-category-map set`, `transaction-rules set`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `monarch-category-map list`, `transaction-rules list/test`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
 
 ## Adding transactions
 
@@ -155,6 +155,9 @@ istota-skill money invoice unpaid INV-000001
 
 # Void an invoice: releases its work entries and keeps the invoice on record
 istota-skill money invoice void INV-000001 [--reason "Wrong rate"] [--replaced-by INV-000002,INV-000003] [--force] [--delete-pdf]
+
+# Record a past gap in the numbering: a number voided before voids were recorded
+istota-skill money invoice record-void INV-000007 --client acme --date 2026-08-30 --total 689 --voided-on 2026-09-14 [--reason "Reissued as INV-000008"] [--replaced-by INV-000008] [--entity KEY] [--was-paid]
 ```
 
 Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`, which books the invoice's issued total split by income account as it was at issue (manual items under `Income:Services`), never a recomputation at current rates. Use `--no-post` when the bank transaction was already imported.
@@ -166,6 +169,8 @@ Cash-basis accounting: no ledger entries at invoice time; income recognized when
 **Invoice records.** Every issued number has a record that is never deleted, and numbers are never reused. An invoice's total is fixed when it is issued, so a later rate change does not alter it. `invoice list` reports each invoice's `status` (`outstanding`, `paid` or `voided`); a voided one also carries `voided_at`, `void_reason` and `replaced_by`. Voided invoices are left out of the outstanding count, and `--active` hides them.
 
 **Voiding.** `invoice void` marks the invoice voided, records the reason and the invoices that replace it, and releases its work entries so they can be billed again. The voided invoice still lists the entries it covered. Every `--replaced-by` number must already exist; nothing fills it in automatically. A paid invoice needs `--force`. The PDF is kept and renamed with a `-VOID` suffix, unless `--delete-pdf` is given. Voiding twice is refused with the date of the first void.
+
+**Recording a past void.** `invoice record-void` is for a number skipped before void records existed, which has no row to void. It writes the invoice already voided, with the client, issue date, total, void date, reason and replacements given, and covers no work entries (the work is on its replacements). It accepts only a number below the highest one issued that has no record, so the next number does not move. A PDF still on disk under that number is renamed with a `-VOID` suffix.
 
 ### Payments matched automatically
 

@@ -1495,6 +1495,54 @@ def invoice_void(ctx, invoice_number, reason, replaced_by, force, delete_pdf):
     })
 
 
+@invoice.command("record-void")
+@click.argument("invoice_number")
+@click.option("--client", "client_key", required=True, help="Client key")
+@click.option("--date", "issue_date", required=True, type=click.DateTime(formats=["%Y-%m-%d"]),
+              help="Date the invoice was issued (YYYY-MM-DD)")
+@click.option("--total", required=True, type=float, help="Invoice total")
+@click.option("--voided-on", "voided_on", required=True, type=click.DateTime(formats=["%Y-%m-%d"]),
+              help="Date it was voided (YYYY-MM-DD)")
+@click.option("--entity", "-e", default="", help="Entity key (default: the client's)")
+@click.option("--reason", default="", help="Why the invoice was voided")
+@click.option("--replaced-by", "replaced_by", default="", metavar="N,N",
+              help="Invoices that replace this one, comma-separated")
+@click.option("--was-paid", is_flag=True, help="It had been paid before it was voided")
+@pass_ctx
+def invoice_record_void(ctx, invoice_number, client_key, issue_date, total, voided_on,
+                        entity, reason, replaced_by, was_paid):
+    """Record a past invoice number that was voided with no record kept.
+
+    For a gap in the numbering left by a void from before voids were
+    recorded. It is written already voided and covers no work entries; a PDF
+    still on disk is renamed to ...-VOID.pdf.
+    """
+    from istota.money.core.invoicing import (
+        format_invoice_number, parse_invoice_number, record_past_void,
+    )
+
+    number = parse_invoice_number(invoice_number)
+    if number is None and invoice_number.strip().isdigit():
+        number = int(invoice_number)
+    if number is None:
+        _output({"status": "error", "error": f"Invalid invoice number: {invoice_number}"})
+        return
+    try:
+        config, _, invoice_output_dir = _load_invoicing_config(ctx)
+        recorded = record_past_void(
+            config, _require_data_dir(ctx), format_invoice_number(number),
+            invoice_output_dir=invoice_output_dir, client_key=client_key,
+            issue_date=issue_date.date(), total=total, voided_on=voided_on.date(),
+            entity=entity, reason=reason, replaced_by=replaced_by.split(","),
+            was_paid=was_paid,
+        )
+    except Exception as e:
+        _output({"status": "error", "error": str(e)})
+        return
+    _output({"status": "ok", **recorded,
+             "message": f"Recorded {recorded['invoice_number']} as voided"})
+
+
 def _apply_monarch_status(out: dict, monarch_result: dict | None) -> None:
     """Roll up nested Monarch sync errors to the outer envelope.
 

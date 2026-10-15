@@ -636,6 +636,21 @@ def cmd_invoice_void(args):
     _output(_run(cli_args))
 
 
+def cmd_invoice_record_void(args):
+    cli_args = ["invoice", "record-void", args.invoice_number,
+                "--client", args.client, "--date", args.date,
+                "--total", str(args.total), "--voided-on", args.voided_on]
+    if args.entity:
+        cli_args += ["--entity", args.entity]
+    if args.reason:
+        cli_args += ["--reason", args.reason]
+    if args.replaced_by:
+        cli_args += ["--replaced-by", args.replaced_by]
+    if args.was_paid:
+        cli_args.append("--was-paid")
+    _output(_run(cli_args))
+
+
 # ---------------------------------------------------------------------------
 # Work commands
 # ---------------------------------------------------------------------------
@@ -1042,6 +1057,22 @@ def build_parser():
     p_inv_void.add_argument("--delete-pdf", action="store_true",
                             help="Delete the PDF instead of renaming it -VOID")
 
+    p_inv_rv = inv_sub.add_parser(
+        "record-void", help="Record a past voided number that has no record",
+    )
+    p_inv_rv.add_argument("invoice_number", help="Invoice number")
+    p_inv_rv.add_argument("--client", required=True, help="Client key")
+    p_inv_rv.add_argument("--date", required=True, help="Issue date (YYYY-MM-DD)")
+    p_inv_rv.add_argument("--total", required=True, type=float, help="Invoice total")
+    p_inv_rv.add_argument("--voided-on", dest="voided_on", required=True,
+                          help="Date it was voided (YYYY-MM-DD)")
+    p_inv_rv.add_argument("--entity", "-e", help="Entity key (default: the client's)")
+    p_inv_rv.add_argument("--reason", help="Why the invoice was voided")
+    p_inv_rv.add_argument("--replaced-by", dest="replaced_by", metavar="N,N",
+                          help="Invoices that replace this one, comma-separated")
+    p_inv_rv.add_argument("--was-paid", action="store_true",
+                          help="It had been paid before it was voided")
+
     # --- Work commands (nested subparser) ---
     p_work = sub.add_parser("work", help="Work log management")
     work_sub = p_work.add_subparsers(dest="work_command")
@@ -1189,6 +1220,7 @@ def commands() -> dict:
         "invoice create": cmd_invoice_create,
         "invoice unpaid": cmd_invoice_unpaid,
         "invoice void": cmd_invoice_void,
+        "invoice record-void": cmd_invoice_record_void,
         "work list": cmd_work_list,
         "work add": cmd_work_add,
         "work update": cmd_work_update,

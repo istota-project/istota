@@ -332,7 +332,7 @@ def parse_invoice_number(number_str: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def highest_existing_invoice_number(data_dir: Path) -> int:
+def highest_existing_invoice_number(data_dir: Path, *, conn=None) -> int:
     """Return the highest invoice number ever issued (0 if none).
 
     Read from the ``invoices`` table, voided invoices included, so a voided
@@ -342,7 +342,7 @@ def highest_existing_invoice_number(data_dir: Path) -> int:
     from istota.money.work import list_invoices
 
     highest = 0
-    for inv in (record.number for record in list_invoices(data_dir)):
+    for inv in (record.number for record in list_invoices(data_dir, conn=conn)):
         n = parse_invoice_number(inv)
         if n is not None and n > highest:
             highest = n
@@ -1149,6 +1149,77 @@ def void_invoice_with_cleanup(
                 logger.error("invoice_void_pdf_delete_failed invoice=%s error=%s", invoice_number, exc)
         out["pdf_deleted"] = deleted
     return out
+
+
+def record_past_void(
+    config: InvoicingConfig,
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    invoice_output_dir: Path | None,
+    client_key: str,
+    issue_date: date,
+    total: float,
+    voided_on: date,
+    entity: str = "",
+    reason: str = "",
+    replaced_by: tuple[str, ...] | list[str] = (),
+    was_paid: bool = False,
+) -> dict:
+    """Record a number voided before void records existed, as a voided invoice.
+
+    The client and entity are checked against the config, the entity
+    resolved as a manual invoice's is. A PDF still on disk under the number
+    is renamed ``…-VOID.pdf``, as a live void does, and renamed back if the
+    write fails.
+    """
+    from istota.money.work import record_voided_invoice, write_transaction
+
+    client_config = config.clients.get(client_key)
+    if not client_config:
+        available = ", ".join(config.clients)
+        raise ValueError(f"Client '{client_key}' not found. Available: {available}")
+    if entity:
+        if entity not in config.companies:
+            available = ", ".join(config.companies)
+            raise ValueError(f"Entity '{entity}' not found. Available: {available}")
+    else:
+        entity = resolve_entity(config, client_config=client_config).key
+    if not _finite_number(total) or total <= 0:
+        raise ValueError("Total must be a positive number")
+    if voided_on < issue_date:
+        raise ValueError("The void date is before the issue date")
+
+    pdf = find_invoice_pdf(invoice_output_dir, invoice_number) if invoice_output_dir else None
+    target = _void_pdf_path(pdf) if pdf is not None else None
+    renamed = False
+    try:
+        with write_transaction(data_dir) as conn:
+            record = record_voided_invoice(
+                data_dir, invoice_number, client=client_key, entity=entity,
+                issue_date=issue_date, total=round(total, 2), voided_on=voided_on,
+                reason=reason, replaced_by=replaced_by, was_paid=was_paid,
+                pdf_path=str(target or ""), conn=conn,
+            )
+            if pdf is not None:
+                pdf.rename(target)
+                renamed = True
+    except Exception:
+        if renamed:
+            target.rename(pdf)
+        raise
+    return {
+        "invoice_number": record.number,
+        "client": record.client,
+        "entity": record.entity,
+        "date": record.issue_date.isoformat(),
+        "total": record.total,
+        "voided_at": record.voided_at,
+        "was_paid": record.was_paid,
+        "void_reason": record.void_reason,
+        "replaced_by": record.replaced_by,
+        "pdf_path": record.pdf_path,
+    }
 
 
 def _finite_number(value) -> bool:
