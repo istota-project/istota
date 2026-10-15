@@ -332,7 +332,7 @@ def parse_invoice_number(number_str: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def highest_existing_invoice_number(data_dir: Path) -> int:
+def highest_existing_invoice_number(data_dir: Path, *, conn=None) -> int:
     """Return the highest invoice number ever issued (0 if none).
 
     Read from the ``invoices`` table, voided invoices included, so a voided
@@ -342,7 +342,7 @@ def highest_existing_invoice_number(data_dir: Path) -> int:
     from istota.money.work import list_invoices
 
     highest = 0
-    for inv in (record.number for record in list_invoices(data_dir)):
+    for inv in (record.number for record in list_invoices(data_dir, conn=conn)):
         n = parse_invoice_number(inv)
         if n is not None and n > highest:
             highest = n
@@ -1169,17 +1169,22 @@ def record_past_void(
     """Record a number voided before void records existed, as a voided invoice.
 
     The client and entity are checked against the config, the entity
-    defaulting the way an entry's does. A PDF still on disk under the number
+    resolved as a manual invoice's is. A PDF still on disk under the number
     is renamed ``…-VOID.pdf``, as a live void does, and renamed back if the
     write fails.
     """
     from istota.money.work import record_voided_invoice, write_transaction
 
-    if client_key not in config.clients:
-        raise ValueError(f"Client '{client_key}' not found")
-    entity = entity or config.clients[client_key].entity or config.default_entity
-    if entity not in config.companies:
-        raise ValueError(f"Entity '{entity}' not found")
+    client_config = config.clients.get(client_key)
+    if not client_config:
+        available = ", ".join(config.clients)
+        raise ValueError(f"Client '{client_key}' not found. Available: {available}")
+    if entity:
+        if entity not in config.companies:
+            available = ", ".join(config.companies)
+            raise ValueError(f"Entity '{entity}' not found. Available: {available}")
+    else:
+        entity = resolve_entity(config, client_config=client_config).key
     if not _finite_number(total) or total <= 0:
         raise ValueError("Total must be a positive number")
     if voided_on < issue_date:

@@ -1150,7 +1150,9 @@ def record_voided_invoice(
     recorded, so the next number to issue does not move. Every refusal is a
     :class:`VoidError` raised before anything is written.
     """
-    from istota.money.core.invoicing import parse_invoice_number  # noqa: PLC0415
+    from istota.money.core.invoicing import (  # noqa: PLC0415
+        highest_existing_invoice_number, parse_invoice_number,
+    )
 
     replacements = list(dict.fromkeys(n.strip() for n in replaced_by if n and n.strip()))
     with write_transaction(data_dir, conn) as c:
@@ -1161,12 +1163,7 @@ def record_voided_invoice(
                 code="exists",
             )
         wanted = parse_invoice_number(invoice_number)
-        highest = max(
-            (parse_invoice_number(r["number"]) or 0
-             for r in c.execute("SELECT number FROM invoices")),
-            default=0,
-        )
-        if wanted is None or wanted >= highest:
+        if wanted is None or wanted >= highest_existing_invoice_number(data_dir, conn=c):
             raise VoidError(
                 f"Invoice {invoice_number} is not a gap below the highest issued "
                 f"number; only a skipped past number can be recorded",
