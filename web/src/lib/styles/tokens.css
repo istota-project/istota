@@ -283,6 +283,10 @@
 	   widen the column at exactly the setting a user picked to make lines
 	   easier to follow. */
   --content-max: 1280px;
+  /* The card panes' cap (briefings, groups, admin): wider than the dashboard
+     column because a pane holds a wall of cards rather than one reading
+     column. `px` for the same reason as the cap above. */
+  --card-pane-max: 1440px;
   /* The first-run setup page's column: one short form at a time. In `rem`,
      unlike the two caps around it, because it bounds a form's line length
      rather than a screen, and a form should widen with its text. */

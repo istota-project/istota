@@ -416,7 +416,7 @@
   let focusedEntryId: number | null = $state(null);
 </script>
 
-<div class="feed-page">
+<div class="feed-page card-pane">
   {#if loading}
     <PageLoading />
   {:else if error}
@@ -428,7 +428,10 @@
       class:hide-images={!$showImages}
       class:hide-text={!$showText}
     >
-      <CardGrid columns={$viewMode === 'list' ? 1 : 5}>
+      <CardGrid
+        columns={$viewMode === 'list' ? 1 : 5}
+        minAspectRatio={$viewMode === 'list' ? undefined : 1}
+      >
         {#each entries as entry (entry.id)}
           <div
             class="card-slot"
@@ -490,17 +493,25 @@
     display: flex;
     flex-direction: column;
     flex: 1 0 auto;
-    padding: var(--space-3);
+    /* Uncapped: the fourth and fifth columns need more than --card-pane-max. */
+    max-width: none;
   }
 
   /* Grid layout */
+  /* width: 100% because the auto margins shrink-wrap the column, and the grid
+     inside is a size container, which gives it no content width to wrap. */
   .feed-grid.list-view {
+    width: 100%;
     max-width: 640px;
     margin: 0 auto;
   }
 
+  /* A box of its own, so the grid's minimum height lands on it and the card
+     fills it; the card's overflow: hidden would otherwise clip at that height. */
   .feed-grid .card-slot {
-    display: contents;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
   }
 
   /* Cards */
@@ -509,7 +520,10 @@
     background: var(--surface-card);
     border-radius: var(--radius-card);
     overflow: hidden;
-    max-height: 420px;
+    flex: 1 0 auto;
+    /* Never shorter than the square the grid asks for on a wide column.
+       design-lint-allow: CardGrid's column width, defined on its tracks rather than in app.css. */
+    max-height: max(420px, var(--card-grid-track, 0px));
     display: flex;
     flex-direction: column;
   }

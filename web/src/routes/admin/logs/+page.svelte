@@ -353,7 +353,7 @@
   onDestroy(stopStream);
 </script>
 
-<div class="settings logs-page">
+<div class="settings logs-page card-pane">
   <!-- A field tier row: two Selects, two text inputs, a Chip and a Button in
        one bar. Without the scope the inputs are the only members iOS floors at
        16px, so on a phone they stand a head above everything beside them. -->

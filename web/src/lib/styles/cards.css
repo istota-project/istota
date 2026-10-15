@@ -27,6 +27,24 @@
    shared card visual lives scoped in health/+layout.svelte, mirroring how
    settings.css scopes `.settings .card`. */
 
+/* The content pane a `CardGrid` sits in: one inset on every side, which the
+   grid also uses as its gap, so the space around the cards is the space
+   between them. It caps at `--card-pane-max` and centres, so only past that
+   width does a margin add to the inset; feeds lifts the cap for its fourth and
+   fifth columns. `width: 100%` because the auto margins would otherwise
+   shrink-wrap it, and a `CardGrid` inside is a size container with no content
+   width to wrap. Loads after settings.css, so it
+   outranks the settings shell's own padding on a page that uses both. */
+.card-pane {
+  --card-pane-pad: var(--space-4);
+  width: 100%;
+  max-width: var(--card-pane-max);
+  margin-inline: auto;
+  padding: var(--card-pane-pad);
+  padding-bottom: max(var(--card-pane-pad), var(--safe-bottom));
+  box-sizing: border-box;
+}
+
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(var(--card-min, 240px), 100%), 1fr));

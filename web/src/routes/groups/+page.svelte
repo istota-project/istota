@@ -173,7 +173,7 @@
       >You do not belong to any groups.</EmptyState
     >
   {:else if detail && selected}
-    <div class="settings groups-page">
+    <div class="settings groups-page card-pane">
       {#key detail.group_id}
         <CardGrid masonry>
           <div class="wide" data-width="wide"><GroupNotebook groupId={detail.group_id} /></div>
@@ -190,9 +190,6 @@
 </AppShell>
 
 <style>
-  .settings.groups-page {
-    max-width: var(--content-max);
-  }
   /* A column so the notebook's card takes the height masonry snaps it to. */
   .wide {
     display: flex;

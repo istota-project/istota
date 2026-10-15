@@ -37,6 +37,16 @@ describe('CardGrid', () => {
     expect(raf).not.toHaveBeenCalled();
   });
 
+  it('sets the minimum ratio only when one is given', () => {
+    const plain = render(CardGrid, { children: cards });
+    expect(tracksOf(plain.container).classList.contains('aspect')).toBe(false);
+    cleanup();
+    const square = render(CardGrid, { minAspectRatio: 1, children: cards });
+    const tracks = tracksOf(square.container);
+    expect(tracks.classList.contains('aspect')).toBe(true);
+    expect(tracks.style.getPropertyValue('--card-grid-ratio')).toBe('1');
+  });
+
   it('runs the masonry layout when asked', () => {
     vi.stubGlobal(
       'ResizeObserver',
@@ -69,7 +79,13 @@ describe('CardGrid column steps', () => {
     ['108rem', 5],
   ])('steps up at %s to %i columns', (width, count) => {
     const block = css.split(`@container card-grid (min-width: ${width})`)[1] ?? '';
-    expect(block).toContain(`repeat(${count}, minmax(0, 1fr))`);
+    expect(block).toContain(`--card-grid-cols: ${count};`);
+  });
+
+  it('holds a card to the minimum ratio through its height', () => {
+    expect(css).toMatch(
+      /\.aspect[^>{]*> \*[^{]*\{ min-height: calc\(var\(--card-grid-track\) \/ var\(--card-grid-ratio\)\);/,
+    );
   });
 
   it('spans a wide card only where two columns exist', () => {

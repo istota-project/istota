@@ -55,7 +55,7 @@
   }
 </script>
 
-<article class="content-frame edition">
+<article class="edition">
   <header class="edition-head">
     <h1>{edition.subject || edition.briefing_name}</h1>
     {#if showMetadata}

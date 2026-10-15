@@ -388,7 +388,7 @@
 
 <!-- The AppShell + ShellHeader live in admin/+layout.svelte, shared with the
      Configuration and Logs sections. This page is the Status section's body. -->
-<div class="settings admin-page">
+<div class="settings admin-page card-pane">
   {#if loading && !stats}
     <PageLoading />
   {:else if error}

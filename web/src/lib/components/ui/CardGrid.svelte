@@ -10,12 +10,20 @@
     /** The most columns the grid grows to; it steps down to one as its container narrows. */
     columns?: CardGridColumns;
     masonry?: boolean;
+    /** Width over height a card may not go below, measured on one column: 1 keeps every card at least square. */
+    minAspectRatio?: number;
     /** Placement only, on the outer frame. */
     class?: string;
     children: Snippet;
   }
 
-  let { columns = 3, masonry = false, class: className = '', children }: Props = $props();
+  let {
+    columns = 3,
+    masonry = false,
+    minAspectRatio,
+    class: className = '',
+    children,
+  }: Props = $props();
 
   // Fixed at mount: the pages that use it never switch modes on a live grid.
   function layout(node: HTMLElement, enabled: boolean) {
@@ -24,7 +32,14 @@
 </script>
 
 <div class="card-grid-frame {className}">
-  <div class="card-grid-tracks" class:masonry data-columns={columns} use:layout={masonry}>
+  <div
+    class="card-grid-tracks"
+    class:masonry
+    class:aspect={minAspectRatio !== undefined}
+    data-columns={columns}
+    style:--card-grid-ratio={minAspectRatio}
+    use:layout={masonry}
+  >
     {@render children()}
   </div>
 </div>
@@ -38,10 +53,25 @@
     min-width: 0;
   }
 
+  /* `--card-grid-track` is one column's width. It resolves on the element that
+     reads it, against this frame's container, so a card can size from it. The
+     gap follows `.card-pane`'s padding, so the space between cards is the
+     space around them. */
   .card-grid-tracks {
+    --card-grid-cols: 1;
+    --card-grid-gap: var(--card-pane-pad, var(--space-4));
+    --card-grid-track: calc(
+      (100cqi - (var(--card-grid-cols) - 1) * var(--card-grid-gap)) / var(--card-grid-cols)
+    );
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-4);
+    grid-template-columns: repeat(var(--card-grid-cols), minmax(0, 1fr));
+    gap: var(--card-grid-gap);
+  }
+
+  /* A min-height rather than aspect-ratio: under overflow: hidden an
+     aspect-ratio is an exact height, and a long card would clip at it. */
+  .card-grid-tracks.aspect > :global(*) {
+    min-height: calc(var(--card-grid-track) / var(--card-grid-ratio));
   }
 
   .card-grid-tracks.masonry {
@@ -61,7 +91,7 @@
 
   @container card-grid (min-width: 40rem) {
     .card-grid-tracks:not([data-columns='1']) {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      --card-grid-cols: 2;
     }
     .card-grid-tracks:not([data-columns='1']) > :global([data-width='wide']) {
       grid-column: span 2;
@@ -70,19 +100,19 @@
 
   @container card-grid (min-width: 64rem) {
     .card-grid-tracks:is([data-columns='3'], [data-columns='4'], [data-columns='5']) {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      --card-grid-cols: 3;
     }
   }
 
   @container card-grid (min-width: 86rem) {
     .card-grid-tracks:is([data-columns='4'], [data-columns='5']) {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      --card-grid-cols: 4;
     }
   }
 
   @container card-grid (min-width: 108rem) {
     .card-grid-tracks[data-columns='5'] {
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      --card-grid-cols: 5;
     }
   }
 </style>

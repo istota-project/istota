@@ -159,7 +159,7 @@
   <title>Briefings</title>
 </svelte:head>
 
-<div class="content-frame reader">
+<div class="reader card-pane">
   {#if loading}
     <PageLoading />
   {:else if error}
@@ -201,21 +201,5 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    /* design-lint-allow: match the shared settings container's bottom spacing. */
-    padding: var(--space-6) var(--space-4) 4rem;
-    padding-bottom: max(4rem, var(--safe-bottom));
-  }
-
-  @media (max-width: 768px) {
-    .reader {
-      /* design-lint-allow: match the shared settings container's mobile bottom spacing. */
-      padding: var(--space-4) var(--space-3) 3rem;
-      padding-bottom: max(3rem, var(--safe-bottom));
-    }
-  }
-  @media (max-width: 640px) {
-    .reader {
-      padding-top: var(--space-3);
-    }
   }
 </style>

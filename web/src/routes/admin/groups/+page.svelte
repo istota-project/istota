@@ -230,7 +230,7 @@
   });
 </script>
 
-<div class="settings admin-page">
+<div class="settings admin-page card-pane">
   {#if loading}<PageLoading label="Loading groups…" />
   {:else if error}<div class="center-msg error">
       <p>{error}</p>
