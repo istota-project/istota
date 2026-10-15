@@ -145,18 +145,18 @@ def _is_migrated(conn: sqlite3.Connection) -> bool:
     return _store_record(conn) is not None
 
 
-# A refusal depends on the year files alone, so it is kept per process until
-# one of them changes; without this every money request re-parsed them all
-# and logged the refusal again. A failed import is retried, since a write
-# failure can be transient.
+# A refused or failed import is kept per process until a year file (or a
+# renamed-aside one) changes; without this every money request re-parsed them
+# all and logged the result again. `istota money work migrate` runs the import
+# directly, so a transient write failure is retried from there.
 _REFUSED: dict[tuple[str, str], tuple[tuple, str]] = {}
 
 
 def _year_files_fingerprint(data_dir: Path) -> tuple:
-    from istota.money.work_migrate import year_files  # noqa: PLC0415
+    from istota.money.work_migrate import set_aside_files, year_files  # noqa: PLC0415
 
     seen = []
-    for path in year_files(data_dir):
+    for path in [*year_files(data_dir), *set_aside_files(data_dir)]:
         try:
             st = path.stat()
         except FileNotFoundError:
@@ -204,7 +204,7 @@ def ensure_store(data_dir: Path) -> Path:
     report = migrate_work_log(data_dir, db_path=path)
     if not report.ok:
         message = f"work log migration blocked: {report.reason}"
-        if report.status == "refused":
+        if report.status in ("refused", "failed"):
             _REFUSED[cache_key] = (fingerprint, message)
         raise WorkStoreBlocked(message)
     _REFUSED.pop(cache_key, None)

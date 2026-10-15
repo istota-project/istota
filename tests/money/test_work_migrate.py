@@ -331,7 +331,17 @@ class TestRefusals:
     def test_an_entry_without_a_uid(self, data_dir, db_path, fixture_log):
         with (data_dir / "invoices" / "work" / "2026.toml").open("a") as f:
             f.write('\n[[entries]]\ndate = 2026-02-01\nclient = "acme"\nservice = "dev"\n')
-        self._refused(data_dir, db_path, "no uid")
+        report = self._refused(data_dir, db_path, "no uid")
+        assert "run `istota money work backfill-ids -u USER` first" in report.reason
+
+    def test_a_paid_date_without_an_invoice(self, data_dir, db_path, fixture_log):
+        with (data_dir / "invoices" / "work" / "2026.toml").open("a") as f:
+            f.write(
+                '\n[[entries]]\nuid = "u9"\ndate = 2026-02-01\nclient = "acme"\n'
+                'service = "dev"\npaid_date = 2026-02-10\n'
+            )
+        report = self._refused(data_dir, db_path, "paid_date set but no invoice on u9")
+        assert "remove the paid_date or add the invoice number" in report.reason
 
     def test_a_uid_shared_across_years(self, data_dir, db_path, fixture_log):
         with (data_dir / "invoices" / "work" / "2026.toml").open("a") as f:
@@ -706,6 +716,27 @@ class TestBlockedIsReportedOnce:
         refused = [r for r in caplog.records if "work_log_migration_refused" in r.getMessage()]
         assert len(refused) == 1
 
+    def test_a_failed_import_is_not_retried_on_every_open(
+        self, data_dir, db_path, fixture_log, monkeypatch,
+    ):
+        from istota.money import work_migrate
+
+        monkeypatch.setattr(work, "insert_entry", lambda conn, entry, **k: None)
+        parses = []
+        original = work_migrate.load_legacy
+
+        def counting(d):
+            parses.append(d)
+            return original(d)
+
+        monkeypatch.setattr(work_migrate, "load_legacy", counting)
+        for _ in range(3):
+            with pytest.raises(work.WorkStoreBlocked, match="write failed") as raised:
+                work.load_work_entries(data_dir)
+
+        assert len(parses) == 1
+        assert raised.value.repeated is True
+
     def test_fixing_the_file_runs_the_import_again(self, data_dir, db_path, fixture_log):
         _block(data_dir)
         with pytest.raises(work.WorkStoreBlocked):
@@ -724,6 +755,59 @@ class TestBlockedIsReportedOnce:
             import_work_log(ctx)
         blocked = [r for r in caplog.records if "money_work_log_import_blocked" in r.getMessage()]
         assert [r.levelno for r in blocked] == [logging.WARNING, logging.DEBUG]
+
+
+class TestRestoredDatabase:
+    """A money.db lost or restored from before the import must not import an empty log."""
+
+    def _lose_the_database(self, db_path):
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+    def test_set_aside_files_without_the_key_refuse(self, data_dir, db_path, fixture_log):
+        assert migrate_work_log(data_dir).status == "migrated"
+        aside = _set_aside(data_dir)
+        self._lose_the_database(db_path)
+
+        with pytest.raises(work.WorkStoreBlocked, match="restored from a backup") as raised:
+            work.ensure_store(data_dir)
+
+        message = str(raised.value)
+        assert "2025.toml.migrated" in message
+        assert "back to {year}.toml" in message
+        assert "`istota money work migrate -u USER`" in message
+        assert _key(db_path) is None
+        assert _row_counts(db_path)["work_entries"] == 0
+        assert _set_aside(data_dir) == aside
+
+    def test_renaming_the_files_back_recovers(self, data_dir, db_path, fixture_log):
+        assert migrate_work_log(data_dir).status == "migrated"
+        self._lose_the_database(db_path)
+        with pytest.raises(work.WorkStoreBlocked):
+            work.ensure_store(data_dir)
+
+        for path in (data_dir / "invoices" / "work").glob("*.toml.migrated"):
+            path.rename(path.with_name(path.name.removesuffix(".migrated")))
+
+        assert len(work.load_work_entries(data_dir)) == 6
+        assert _key(db_path) is not None
+
+    def test_one_year_back_and_one_still_aside_refuses(self, data_dir, db_path, fixture_log):
+        assert migrate_work_log(data_dir).status == "migrated"
+        self._lose_the_database(db_path)
+        wd = data_dir / "invoices" / "work"
+        (wd / "2026.toml.migrated").rename(wd / "2026.toml")
+
+        with pytest.raises(work.WorkStoreBlocked, match="2025.toml.migrated"):
+            work.ensure_store(data_dir)
+        assert _row_counts(db_path)["work_entries"] == 0
+
+    def test_a_copy_that_came_back_is_not_evidence(self, data_dir, db_path):
+        _write_years(data_dir, {2026: YEAR_2026})
+        wd = data_dir / "invoices" / "work"
+        (wd / "2025.toml.migrated-20260101T000000Z").write_text(YEAR_2025)
+
+        assert migrate_work_log(data_dir).status == "migrated"
 
 
 class TestBlockedRoutes:

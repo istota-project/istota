@@ -119,9 +119,11 @@ Invoices raised before issue dates were recorded were given a fallback date when
 
 Older installs kept the work log in `invoices/work/{year}.toml` files and had no invoice records. The first time the work log is used after the upgrade, those files are imported into the money database, building one invoice record per invoice number the entries carried. The import only goes ahead when it can re-read everything it wrote and match it field by field against the files. A voided invoice from before the upgrade left nothing in the files to rebuild, so its number stays a gap.
 
-After a successful import each file is renamed `{year}.toml.migrated` in place, unchanged. Nothing reads the renamed files; they are the copy to go back to. A `{year}.toml` that appears again later, from a sync conflict or a restored copy, is renamed aside the same way and never read.
+After a successful import each file is renamed `{year}.toml.migrated` in place, unchanged. Nothing reads the renamed files while the database holds the work log. A `{year}.toml` that appears again later, from a sync conflict or a restored copy, is renamed aside the same way and never read.
 
-The import refuses, writing nothing to the database and leaving the files untouched, when a year file cannot be read, an entry has no uid, two entries share a uid, or the entries on one invoice disagree on the paid date. Until it is fixed, every work and invoice command returns `work log migration blocked: <reason>` and the web money routes answer 503 with the same text. Fix it with the operator CLI:
+The renamed files are the copy to go back to if `money.db` is lost or restored from a backup taken before the import. The database then has no record of the import, and the import refuses rather than start an empty work log while a `{year}.toml.migrated` has no `{year}.toml` beside it. Rename each `{year}.toml.migrated` back to `{year}.toml` and run `istota money work migrate -u USER`.
+
+The import refuses, writing nothing to the database and leaving the files untouched, when a year file cannot be read, an entry has no uid, two entries share a uid, an entry has a paid date but no invoice, or the entries on one invoice disagree on the paid date. Until it is fixed, every work and invoice command returns `work log migration blocked: <reason>` and the web money routes answer 503 with the same text. Fix it with the operator CLI:
 
 ```bash
 istota money work backfill-ids -u USER    # gives every entry a uid

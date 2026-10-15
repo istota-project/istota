@@ -181,6 +181,21 @@ def load_legacy(data_dir: Path) -> LegacyLog:
 MIGRATED_SUFFIX = ".migrated"
 
 
+def set_aside_files(data_dir: Path) -> list[Path]:
+    """The ``{year}.toml.migrated*`` files an earlier import renamed aside."""
+    wd = legacy_work_dir(data_dir)
+    if not wd.is_dir():
+        return []
+    found = []
+    for f in sorted(wd.glob(f"*.toml{MIGRATED_SUFFIX}*")):
+        try:
+            int(f.name.split(".", 1)[0])
+        except ValueError:
+            continue
+        found.append(f)
+    return found
+
+
 def _set_aside_target(path: Path) -> Path:
     """``{year}.toml.migrated``, or a UTC-stamped name beside it if that exists."""
     target = path.with_name(path.name + MIGRATED_SUFFIX)
@@ -320,13 +335,20 @@ def _refusals(log: LegacyLog) -> str | None:
     if missing:
         return (
             f"{len(missing)} entr{'y has' if len(missing) == 1 else 'ies have'} no uid; "
-            "run `money work backfill-ids` first"
+            "run `istota money work backfill-ids -u USER` first"
         )
     seen: set[str] = set()
     for entry in log.entries:
         if entry.uid in seen:
             return f"uid {entry.uid} appears on more than one entry"
         seen.add(entry.uid)
+    unbilled_paid = [e.uid for e in log.entries if e.paid_date is not None and not e.invoice]
+    if unbilled_paid:
+        return (
+            f"paid_date set but no invoice on {', '.join(unbilled_paid)}; "
+            "the database keeps a paid date only on an invoice, so remove the "
+            "paid_date or add the invoice number to those rows by hand"
+        )
     paid: dict[str, set] = {}
     for entry in log.entries:
         if entry.invoice:
@@ -336,6 +358,32 @@ def _refusals(log: LegacyLog) -> str | None:
             shown = ", ".join(sorted(d.isoformat() if d else "unpaid" for d in dates))
             return f"entries on {number} disagree on paid_date ({shown})"
     return None
+
+
+def _restore_refusal(data_dir: Path) -> str | None:
+    """Why a database with no import record must not import again, or None.
+
+    A ``{year}.toml.migrated`` with no ``{year}.toml`` beside it means an
+    import already ran and took that year. With the key gone, ``money.db`` was
+    lost or restored from a snapshot taken before the import, and importing
+    what is left would start the work log over without that year.
+    """
+    # A stamped `.migrated-<time>` name is a copy that came back after the
+    # import, so the plain name alone is the evidence.
+    aside = [
+        p for p in set_aside_files(data_dir)
+        if p.name.endswith(".toml" + MIGRATED_SUFFIX)
+        and not p.with_name(p.name.removesuffix(MIGRATED_SUFFIX)).exists()
+    ]
+    if not aside:
+        return None
+    return (
+        f"money.db has no record of the work log import, but {aside[0].name} "
+        "shows it already ran; money.db was lost or restored from a backup "
+        "taken before the import. Rename each {year}.toml.migrated in "
+        "invoices/work/ back to {year}.toml and run "
+        "`istota money work migrate -u USER`"
+    )
 
 
 def _load_config(db_path: Path):
@@ -479,7 +527,7 @@ def migrate_work_log(
                 return MigrationReport("already")
             log = load_legacy(data_dir)
             years = sorted(log.source_hashes)
-            reason = _refusals(log)
+            reason = _restore_refusal(data_dir) or _refusals(log)
             if reason:
                 conn.rollback()
                 logger.warning("work_log_migration_refused reason=%s", reason)
