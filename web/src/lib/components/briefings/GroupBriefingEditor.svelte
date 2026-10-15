@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import {
     getBriefingTargets,
+    getGroup,
     getGroupBriefings,
     getGroupBriefing,
     saveGroupBriefing,
@@ -23,7 +24,7 @@
     type BriefingBlockTemplate,
     type UserBriefingRow,
   } from '$lib/api';
-  import { Button, Input, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Input, Select, MultiSelect, type SelectOption } from '$lib/components/ui';
   import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { getCurrentUser } from '$lib/userContext';
@@ -59,6 +60,8 @@
   let groupCron = $state('0 7 * * *');
   let groupTimezone = $state('UTC');
   let groupChannel = $state('in_app');
+  let excludedUsers = $state<string[]>([]);
+  let memberOptions = $state<SelectOption[]>([]);
   let groupMode = $state<'prompt' | 'blocks'>('prompt');
   let generationPrompt = $state('');
   let researchEnabled = $state(false);
@@ -119,6 +122,7 @@
       cron: groupCron,
       timezone: groupTimezone,
       channel: groupChannel,
+      excluded_user_ids: excludedUsers,
       revision: groupSaved?.revision ?? 0,
       enabled: false,
       generation_mode: groupMode,
@@ -194,6 +198,8 @@
     groupCron = '0 7 * * *';
     groupTimezone = deploymentTimezone;
     groupChannel = 'in_app';
+    excludedUsers = [];
+    memberOptions = [];
     groupMode = 'prompt';
     generationPrompt = '';
     researchEnabled = false;
@@ -211,17 +217,30 @@
   async function selectTarget(value: string) {
     if (groupSaved) return;
     targetId = value;
+    memberOptions = [];
     audience = null;
     checkedApprovals = {};
     contributionDrafts = {};
     audienceAcknowledged = false;
     preview = null;
     if (value) {
+      groupBusy = true;
       try {
+        const group = await getGroup(value);
+        if (targetId !== value) return;
+        memberOptions = group.members.map((m) => ({
+          value: m.user_id,
+          label: m.display_name || m.user_id,
+        }));
+        excludedUsers = excludedUsers.filter((id) => group.members.some((m) => m.user_id === id));
         resourceOptions = await getBriefingResources(value);
-      } catch {
-        resourceOptions = { files: [], calendars: [], calendar_unavailable: true };
+      } catch (e) {
+        if (targetId === value) handleGroupError(e);
+      } finally {
+        if (targetId === value) groupBusy = false;
       }
+    } else {
+      excludedUsers = [];
     }
   }
   async function refreshGroups() {
@@ -248,6 +267,7 @@
       groupCron = fresh.cron;
       groupTimezone = fresh.timezone;
       groupChannel = fresh.channel;
+      excludedUsers = fresh.excluded_user_ids ?? [];
       groupMode = fresh.generation_mode ?? 'prompt';
       const generation = fresh.generation ?? { version: 1 };
       generationPrompt = generation.prompt ?? '';
@@ -262,10 +282,18 @@
         : {
             member_count: groupTarget?.member_count ?? 0,
             deliverable: 0,
+            excluded: 0,
             muted: 0,
             missing_destination: 0,
             sources: fresh.source_approvals ?? [],
           };
+      if (fresh.capabilities.author_briefings) {
+        const group = await getGroup(targetId);
+        memberOptions = group.members.map((m) => ({
+          value: m.user_id,
+          label: m.display_name || m.user_id,
+        }));
+      }
       resourceOptions = await getBriefingResources(targetId);
     } catch (e) {
       handleGroupError(e);
@@ -298,6 +326,7 @@
         groupSaved?.name,
       );
       groupSaved = saved;
+      excludedUsers = saved.excluded_user_ids ?? excludedUsers;
       savedPayload = JSON.stringify(groupPayload);
       checkedApprovals = {};
       audience = await getBriefingAudience(targetId, saved.name);
@@ -379,10 +408,12 @@
     const title = b?.title ?? groupTitle;
     const cron = b?.cron ?? groupCron;
     const mode = b ? 'blocks' : groupMode;
+    const exclusions = b ? [] : [...excludedUsers];
     const prompt = generationPrompt;
     const research = researchPrompt;
     const researchOn = researchEnabled;
     startNew();
+    excludedUsers = exclusions;
     groupName = `${name}-copy-${crypto.randomUUID().slice(0, 8)}`;
     groupTitle = title;
     groupCron = cron;
@@ -524,6 +555,21 @@
           read retained editions.{/if}
       </div>
       {#if groupAuthor}
+        <SettingsField label="Excluded users" labelled={false}>
+          <MultiSelect
+            value={excludedUsers}
+            options={memberOptions}
+            onValueChange={(next) => (excludedUsers = next)}
+            disabled={groupBusy}
+            placeholder="Search members to exclude…"
+            emptyLabel="No members excluded."
+            ariaLabel="Excluded users"
+          />
+          <p class="caption">
+            Excluded members receive no deliveries or in-app notifications for this briefing. They
+            can still read its editions in group history.
+          </p>
+        </SettingsField>
         <div class="add-grid">
           <SettingsField label="Delivery channel" labelled={false}
             ><Select
@@ -667,7 +713,7 @@
     {#if audience && !groupDirty}
       {#if groupAuthor}<p>
           {audience.member_count} members · {audience.deliverable} deliverable · {audience.muted} muted
-          · {audience.missing_destination} missing destinations
+          · {audience.missing_destination} missing destinations · {audience.excluded} excluded
         </p>{/if}
       {#each audience.sources as approval (approval.source_id)}
         <div class="banner warning" role="note">

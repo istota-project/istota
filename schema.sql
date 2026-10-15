@@ -2490,6 +2490,7 @@ CREATE TABLE IF NOT EXISTS group_briefing_configs (
         updated_by TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        excluded_user_ids_json TEXT NOT NULL DEFAULT '[]',
         UNIQUE(group_id, name)
     );
 

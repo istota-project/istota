@@ -262,3 +262,74 @@ async def test_reader_schedule_summary_excludes_private_preview(client, configur
     session(client, configured, "alice")
     assert (await client.put(ROOT + "/daily", json={**payload(enabled=False, channel="in_app"), "revision": 2})).status_code == 200
     assert (await client.get(ROOT)).json()["items"][0]["next_run"] is None
+
+
+async def test_exclusion_owner_succession_and_revision(client, configured):
+    definition = await create(client)
+    raw = {**payload(enabled=False, channel="in_app", excluded_user_ids=["bob"]), "revision": 1}
+    response = await client.put(ROOT + "/daily", json=raw)
+    assert response.status_code == 200, response.text
+    assert response.json()["excluded_user_ids"] == ["bob"]
+    assert (await client.put(ROOT + "/daily", json=raw)).status_code == 409
+    session(client, configured, "bob")
+    assert "excluded_user_ids" not in (await client.get(ROOT + "/daily")).json()
+    assert (await client.put(ROOT + "/daily", json={**raw, "revision": 2})).status_code == 403
+    session(client, configured, "alice")
+    assert (await client.put(BASE + "/groups/family/members/bob", json={"revision": 0, "role": "owner"})).status_code == 200
+    assert (await client.put(BASE + "/groups/family/members/alice", json={"revision": 1, "role": "member"})).status_code == 200
+    assert (await client.put(ROOT + "/daily", json={**raw, "revision": 2})).status_code == 403
+    session(client, configured, "bob")
+    current = (await client.get(ROOT + "/daily")).json()
+    assert current["id"] == definition["id"] and current["excluded_user_ids"] == ["bob"]
+    assert (await client.put(ROOT + "/daily", json={**raw, "revision": 2, "excluded_user_ids": []})).status_code == 200
+
+
+async def test_excluded_delivery_retains_common_edition_read_and_download(client, configured, monkeypatch):
+    from unittest.mock import Mock
+    from types import SimpleNamespace
+    from istota import scheduler
+    from istota.brain import BrainResult
+    from istota.briefings.group_delivery import queue_deliveries
+    config = configured._config
+    config.email.enabled = True
+    config.email.bot_email = "bot@example.com"
+    for user in ("alice", "bob"):
+        from istota import user_profiles
+        user_profiles.update_profile(config.db_path, user, email_addresses=[f"{user}@example.com"])
+    brain = Mock(return_value=BrainResult(success=True, result_text="Common edition"))
+    monkeypatch.setattr("istota.brain.make_brain", lambda config: SimpleNamespace(execute=brain, resolve_model_name=lambda role: "test-model"))
+    monkeypatch.setattr("istota.brain.primary_brain_unavailable", lambda config: (True, None))
+    monkeypatch.setattr("istota.brain.report_brain_result", lambda *a, **kw: None)
+    sent = []
+    monkeypatch.setattr("istota.skills.email._send_smtp", lambda msg, config, **kw: sent.append(msg))
+    raw = payload(enabled=False, excluded_user_ids=["bob"])
+    response = await client.post(ROOT, json={**raw, "revision": 0})
+    assert response.status_code == 200, response.text
+    assert (await client.put(ROOT + "/daily", json={**raw, "enabled": True, "revision": 1})).status_code == 200
+    response = await client.post(ROOT + "/daily/runs", json={"request_id": str(uuid4()), "mode": "publish"})
+    run_id = response.json()["id"]
+    from istota.briefings.group_runs import advance_runs
+    with db.get_db(config.db_path) as conn:
+        tasks = advance_runs(conn, config)
+    assert len(tasks) == 1
+    assert scheduler.process_one_task(config, user_id="__briefings__") == (tasks[0], True)
+    with db.get_db(config.db_path) as conn:
+        tasks = queue_deliveries(conn, config)
+    for task in tasks:
+        assert scheduler.process_one_task(config, user_id="__briefings__") == (task, True)
+    assert len(sent) == 1 and sent[0]["To"] == "alice@example.com"
+    assert brain.call_count == 1
+    with db.get_db(config.db_path) as conn:
+        bob = [r for r in store.list_recipients(conn, run_id) if r["user_id"] == "bob"]
+        assert {r["channel"] for r in bob} == {"email", "in_app"}
+        assert all(r["state"] == "skipped" and r["error_code"] == "excluded" for r in bob)
+        assert conn.execute("SELECT COUNT(*) FROM notifications WHERE source='group_briefing' AND user_id='bob'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM group_briefing_runs").fetchone()[0] == 1
+    audience = (await client.get(ROOT + "/daily/audience")).json()
+    assert (audience["deliverable"], audience["excluded"], audience["muted"], audience["missing_destination"]) == (1, 1, 0, 0)
+    summary = (await client.get(ROOT + f"/daily/runs/{run_id}/delivery")).json()
+    assert summary["reasons"] == {"excluded": 2, "muted": 0, "missing_destination": 0}
+    session(client, configured, "bob")
+    url = ROOT + f"/daily/runs/{run_id}"
+    assert (await client.get(url)).json()["body_md"] == "Common edition"
+    assert (await client.get(url + "/download")).text == "Common edition"

@@ -6411,6 +6411,7 @@ export interface BriefingSourceApproval {
   definition_revision: number;
 }
 export interface GroupBriefingDefinition {
+  excluded_user_ids?: string[];
   next_run?: string | null;
   last_run?: { id: number; state: string; published_at: string | null } | null;
   id: number;
@@ -6436,10 +6437,12 @@ export type GroupBriefingPayload = Pick<
   | 'enabled'
   | 'channel'
   | 'revision'
+  | 'excluded_user_ids'
   | 'generation_mode'
   | 'generation'
 >;
 export interface BriefingAudience {
+  excluded: number;
   member_count: number;
   deliverable: number;
   muted: number;
@@ -6560,6 +6563,7 @@ export function getGroupBriefingRun(
 }
 
 export interface BriefingDelivery {
+  reasons?: { excluded: number; muted: number; missing_destination: number };
   counts: Record<string, number>;
   recipients: {
     user_id: string;
@@ -6614,7 +6618,10 @@ export function saveGroupBriefingPreferences(
   return apiFetch(groupBriefingPath(group, name) + '/delivery', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ outbound_muted: preferences.outbound_muted, in_app_muted: preferences.in_app_muted }),
+    body: JSON.stringify({
+      outbound_muted: preferences.outbound_muted,
+      in_app_muted: preferences.in_app_muted,
+    }),
   });
 }
 export function getGroupDeliveryPreferences(group: string): Promise<BriefingDeliveryPreferences> {

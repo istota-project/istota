@@ -104,6 +104,12 @@ beforeEach(() => {
   );
   saved = makeDefinition();
   approvals = [];
+  api.getGroup.mockResolvedValue({
+    members: [
+      { user_id: 'alice', display_name: 'Alice', role: 'owner' },
+      { user_id: 'bob', display_name: 'Bob', role: 'member' },
+    ],
+  });
   api.getGroupBriefings.mockImplementation(async () => ({ items: [] }));
   api.getGroupBriefing.mockImplementation(async () =>
     clone({ ...saved, source_approvals: approvals }),
@@ -112,6 +118,7 @@ beforeEach(() => {
     clone({
       member_count: 3,
       deliverable: 1,
+      excluded: 0,
       muted: 1,
       missing_destination: 1,
       sources: approvals,
@@ -173,8 +180,8 @@ async function newGroup() {
   });
 }
 async function existingGroup() {
-  api.getGroupBriefings.mockImplementation(async () => ({
-    items: [clone({ ...saved, source_approvals: approvals })],
+  api.getGroupBriefings.mockImplementation(async (group) => ({
+    items: group === saved.group_id ? [clone({ ...saved, source_approvals: approvals })] : [],
   }));
   render(Harness, { component: Page, user: person });
   await fireEvent.click(await screen.findByRole('button', { name: 'Edit news' }));
@@ -337,6 +344,7 @@ it('keeps a conflicted draft and removes management after an ownership refusal',
   await screen.findByText('briefing_forbidden');
   expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Preview', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('combobox', { name: 'Excluded users' })).not.toBeInTheDocument();
 });
 
 it('reuses ordered block editing and preserves saved source identities', async () => {
@@ -398,8 +406,8 @@ it('lets a member select and approve only their own requested calendar', async (
       audience_contract: { version: 1, group_id: 'research' },
     },
   ];
-  api.getGroupBriefings.mockImplementation(async () => ({
-    items: [clone({ ...saved, source_approvals: approvals })],
+  api.getGroupBriefings.mockImplementation(async (group) => ({
+    items: group === saved.group_id ? [clone({ ...saved, source_approvals: approvals })] : [],
   }));
   render(Harness, { component: Page, user: person });
   await fireEvent.click(await screen.findByRole('button', { name: 'Review sources for news' }));
@@ -468,4 +476,92 @@ it('preselects the All users group link and explains future installation members
   ).toBeVisible();
   expect(screen.getByLabelText(/^Timezone/)).toHaveValue('UTC');
   expect(screen.getByRole('button', { name: 'Preview', exact: true })).toBeDisabled();
+});
+
+it('selects current members with the shared multiselect and preserves absent selections', async () => {
+  api.getGroup.mockResolvedValue({
+    members: [
+      { user_id: 'alice', display_name: 'Alice', role: 'owner' },
+      { user_id: 'bob', display_name: 'Bob', role: 'member' },
+    ],
+  });
+  saved.excluded_user_ids = ['departed'];
+  await existingGroup();
+  expect(
+    screen.getByText(/Excluded members receive no deliveries or in-app notifications/),
+  ).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Remove departed' })).toBeVisible();
+  const search = screen.getByRole('combobox', { name: 'Excluded users' });
+  await fireEvent.input(search, { target: { value: 'Bob' } });
+  await fireEvent.keyDown(search, { key: 'ArrowDown' });
+  await fireEvent.keyDown(search, { key: 'Enter' });
+  await screen.findByRole('button', { name: 'Remove Bob' });
+  await fireEvent.keyDown(search, { key: 'Escape' });
+  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  await waitFor(() =>
+    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
+      'research',
+      expect.objectContaining({ excluded_user_ids: ['departed', 'bob'], revision: 1 }),
+      'news',
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled(),
+  );
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove departed' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove Bob' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  await waitFor(() =>
+    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
+      'research',
+      expect.objectContaining({ excluded_user_ids: [], revision: 2 }),
+      'news',
+    ),
+  );
+});
+
+it('filters duplicated exclusions to the new group', async () => {
+  saved.excluded_user_ids = ['bob', 'departed'];
+  const discovery = await api.getBriefingTargets();
+  api.getBriefingTargets.mockResolvedValueOnce({
+    ...discovery,
+    targets: [
+      ...discovery.targets,
+      {
+        scope: 'group',
+        group_id: 'other',
+        label: 'Other',
+        member_count: 1,
+        capabilities: caps,
+      },
+    ],
+  });
+  api.getGroup.mockImplementation(async (group) => ({
+    members:
+      group === 'other'
+        ? [{ user_id: 'alice', display_name: 'Alice', role: 'owner' }]
+        : [
+            { user_id: 'alice', display_name: 'Alice', role: 'owner' },
+            { user_id: 'bob', display_name: 'Bob', role: 'member' },
+          ],
+  }));
+  await existingGroup();
+  await fireEvent.click(screen.getByRole('button', { name: 'Duplicate for group' }));
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Distribution target' })).not.toBeDisabled(),
+  );
+  expect(screen.queryByRole('button', { name: 'Remove departed' })).toBeNull();
+  await pick('Distribution target', 'Other (1 members)');
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Save draft' })).not.toBeDisabled(),
+  );
+  expect(screen.queryByRole('button', { name: 'Remove Bob' })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
+  await waitFor(() =>
+    expect(api.saveGroupBriefing).toHaveBeenLastCalledWith(
+      'other',
+      expect.objectContaining({ excluded_user_ids: [], revision: 0 }),
+      undefined,
+    ),
+  );
 });

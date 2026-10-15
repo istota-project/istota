@@ -95,6 +95,7 @@ def get_definition(conn, definition_id):
         return None
     result = dict(row)
     result["generation"] = json.loads(result.pop("generation_json"))
+    result["excluded_user_ids"] = json.loads(result.pop("excluded_user_ids_json"))
     result["enabled"] = bool(result["enabled"])
     return result
 
@@ -133,6 +134,12 @@ def validate_definition_save(conn, config, group_id, payload, *, actor_id, expec
         raise GroupError(409, "immutable_name", "Briefing name is fixed")
     if expected_revision != (old["revision"] if old else 0):
         raise GroupError(409, "revision_conflict", "Briefing changed; reload before saving")
+    retained = set(old["excluded_user_ids"]) if old else set()
+    if old and "excluded_user_ids" not in payload:
+        value["excluded_user_ids"] = old["excluded_user_ids"]
+    current_members = set(db.list_group_members(conn, group_id))
+    if set(value["excluded_user_ids"]) - retained - current_members:
+        raise GroupError(422, "invalid_excluded_user", "New exclusions must be current group members")
     collision = conn.execute("SELECT id FROM group_briefing_configs WHERE group_id = ? AND name = ?",
                              (group_id, value["name"])).fetchone()
     if collision and (not old or collision["id"] != old["id"]):
@@ -158,13 +165,20 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
         candidate = {**value, "id": definition_id, "group_id": group_id}
         invalidate_changed_grants(conn, old, candidate)
         fields = (value["title"], value["cron"], value["timezone"], int(value["enabled"]),
-                  value["generation_mode"], _json(value["generation"]), value["channel"], actor_id)
+                  value["generation_mode"], _json(value["generation"]), value["channel"], _json(value["excluded_user_ids"]), actor_id)
         if old:
             conn.execute("""UPDATE group_briefing_configs SET title = ?, cron = ?, timezone = ?, enabled = ?,
-                            generation_mode = ?, generation_json = ?, channel = ?, updated_by = ?,
+                            generation_mode = ?, generation_json = ?, channel = ?, excluded_user_ids_json = ?, updated_by = ?,
                             revision = revision + 1, updated_at = datetime('now') WHERE id = ?""",
                          (*fields, definition_id))
             supersede_definition_runs(conn, definition_id)
+            for user_id in value["excluded_user_ids"]:
+                conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code='excluded' "
+                             "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
+                             "AND user_id=? AND state IN ('pending', 'failed')", (definition_id, user_id))
+                conn.execute("UPDATE group_briefing_recipients SET error_code='excluded' "
+                             "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
+                             "AND user_id=? AND state='sending'", (definition_id, user_id))
             if not value["enabled"]:
                 conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code='definition_disabled' "
                              "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
@@ -174,8 +188,8 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                              "AND state='sending'", (definition_id,))
         else:
             cursor = conn.execute("""INSERT INTO group_briefing_configs
-                (title, cron, timezone, enabled, generation_mode, generation_json, channel, updated_by,
-                 group_id, name, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (title, cron, timezone, enabled, generation_mode, generation_json, channel, excluded_user_ids_json, updated_by,
+                 group_id, name, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                   (*fields, group_id, value["name"], actor_id))
             definition_id = cursor.lastrowid
         definition = get_definition(conn, definition_id)
@@ -359,11 +373,12 @@ def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=Non
                     channels.append(definition["channel"])
                 for channel in channels:
                     muted_module = channel != "in_app" and not config.is_module_enabled(user_id, "briefings", conn=conn)
+                    refusal = "excluded" if user_id in definition["excluded_user_ids"] else "module_disabled" if muted_module else None
                     conn.execute("""INSERT INTO group_briefing_recipients
                         (run_id, user_id, membership_id, channel, state, error_code, created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                                 (run_id, user_id, member["id"], channel, "skipped" if muted_module else "pending",
-                                  "module_disabled" if muted_module else None, at, at))
+                                 (run_id, user_id, member["id"], channel, "skipped" if refusal else "pending",
+                                  refusal, at, at))
         return get_run(conn, run_id)
 
 
@@ -405,8 +420,8 @@ def get_recipient(conn, recipient_id):
 def delivery_refusal(conn, config, recipient):
     """Live checks for an already snapshotted member; never admit a new interval."""
     from istota.briefings.source_grants import validate_run_grants
-    if recipient["error_code"] == "definition_disabled":
-        return "definition_disabled"
+    if recipient["error_code"] in ("definition_disabled", "excluded"):
+        return recipient["error_code"]
     run = get_run(conn, recipient["run_id"])
     definition = get_definition(conn, run["definition_id"])
     if not definition or not db.get_group(conn, definition["group_id"]):
@@ -423,6 +438,8 @@ def delivery_refusal(conn, config, recipient):
         validate_run_grants(conn, config, run)
     except GroupError:
         return "source_approval_revoked"
+    if user in definition["excluded_user_ids"]:
+        return "excluded"
     prefs = delivery_preferences(conn, definition["group_id"], user, definition_id=definition["id"])
     if prefs["in_app_muted" if recipient["channel"] == "in_app" else "outbound_muted"]:
         return "muted"

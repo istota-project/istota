@@ -344,3 +344,47 @@ def test_delivery_columns_upgrade_an_existing_ledger(env):
         db._migrate_group_briefings(conn)
         assert {r["name"] for r in conn.execute("PRAGMA table_info(group_briefing_recipients)")} >= {
             "dispatch_token", "lease_expires_at", "destination_json", "destination_locked"}
+
+
+def test_after_publication_exclusion_cancels_both_legs_and_removal_never_backfills(env, clock, mail):
+    run = published(env)
+    with db.get_db(env.db_path) as conn:
+        store.set_delivery_preferences(conn, env, "team", actor_id="bob", outbound_muted=True,
+                                       in_app_muted=True, definition_id=run["definition_id"])
+        store.save_definition(conn, env, "team", payload(excluded_user_ids=["bob"]), actor_id="alice",
+                              expected_revision=1, definition_id=run["definition_id"])
+        bob = [r for r in store.list_recipients(conn, run["id"]) if r["user_id"] == "bob"]
+        assert len(bob) == 2 and all(r["state"] == "skipped" and r["error_code"] == "excluded" for r in bob)
+        current = store.save_definition(conn, env, "team", payload(excluded_user_ids=[]), actor_id="alice",
+                                       expected_revision=2, definition_id=run["definition_id"])
+        assert store.retry_deliveries(conn, env, run["id"], actor_id="alice", now=NOW) == 0
+        prefs = store.delivery_preferences(conn, "team", "bob", definition_id=current["id"])
+        assert prefs == {"outbound_muted": True, "in_app_muted": True}
+        next_run = enqueue(conn, env, current)
+        claim = store.claim_run(conn, run_id=next_run["id"], now=NOW)
+        store.publish_run(conn, env, next_run["id"], claim["attempt_token"], subject="Next", body_md="Next edition", now=NOW)
+    deliver(env)
+    assert [m["To"] for m in mail] == ["alice@example.com", "alice@example.com"]
+    with db.get_db(env.db_path) as conn:
+        assert all(r["error_code"] == "muted" for r in store.list_recipients(conn, next_run["id"]) if r["user_id"] == "bob")
+        assert conn.execute("SELECT COUNT(*) FROM notifications WHERE source='group_briefing' AND user_id='bob'").fetchone()[0] == 0
+
+
+def test_exclusion_stops_next_part_but_keeps_delivered_notice(env, clock, mail):
+    run = published(env)
+    from istota.briefings.group_delivery import queue_deliveries
+    with db.get_db(env.db_path) as conn:
+        queue_deliveries(conn, env, now=NOW)
+        recipient = legs(env, run)["bob"]
+        claim = store.claim_recipient(conn, env, recipient["id"], now=NOW)
+        store.prepare_delivery(conn, recipient["id"], claim["dispatch_token"], {"to": "bob@example.com"}, ["One", "Two"], now=NOW)
+        store.start_delivery_part(conn, env, recipient["id"], claim["dispatch_token"], 0, now=NOW)
+        store.save_definition(conn, env, "team", payload(excluded_user_ids=["bob"]), actor_id="alice",
+                              expected_revision=1, definition_id=run["definition_id"])
+        store.finish_delivery_part(conn, recipient["id"], claim["dispatch_token"], 0, "sent", now=NOW)
+        store.save_definition(conn, env, "team", payload(excluded_user_ids=[]), actor_id="alice",
+                              expected_revision=2, definition_id=run["definition_id"])
+        with pytest.raises(GroupError) as error:
+            store.start_delivery_part(conn, env, recipient["id"], claim["dispatch_token"], 1, now=NOW)
+        assert error.value.code == "excluded"
+        assert conn.execute("SELECT COUNT(*) FROM notifications WHERE source='group_briefing' AND user_id='bob'").fetchone()[0] == 1

@@ -135,7 +135,10 @@
     loading = true;
     error = '';
     try {
-      const [result, defaults] = await Promise.all([getGroupBriefings(groupId), getGroupDeliveryPreferences(groupId)]);
+      const [result, defaults] = await Promise.all([
+        getGroupBriefings(groupId),
+        getGroupDeliveryPreferences(groupId),
+      ]);
       if (!active || token !== request) return;
       definitions = result.items;
       groupPreferences = defaults;
@@ -248,14 +251,25 @@
   {#if loading}<PageLoading />{:else if !definitions.length && !error}<EmptyState size="sm"
       >No group briefings yet.</EmptyState
     >{/if}
-    {#if groupPreferences && !denied}
-      <div class="preferences">
-        <p class="caption">These defaults apply to current and future briefings in this group. Membership and history access stay available.</p>
-        <label><input type="checkbox" bind:checked={groupPreferences.outbound_muted} /> Mute external delivery for all briefings in this group</label>
-        <label><input type="checkbox" bind:checked={groupPreferences.in_app_muted} /> Mute notifications for all briefings in this group</label>
-        <Button size="sm" onclick={saveGroupPreferences} disabled={busy}>Save group delivery preferences</Button>
-      </div>
-    {/if}
+  {#if groupPreferences && !denied}
+    <div class="preferences">
+      <p class="caption">
+        These defaults apply to current and future briefings in this group. Membership and history
+        access stay available.
+      </p>
+      <label
+        ><input type="checkbox" bind:checked={groupPreferences.outbound_muted} /> Mute external delivery
+        for all briefings in this group</label
+      >
+      <label
+        ><input type="checkbox" bind:checked={groupPreferences.in_app_muted} /> Mute notifications for
+        all briefings in this group</label
+      >
+      <Button size="sm" onclick={saveGroupPreferences} disabled={busy}
+        >Save group delivery preferences</Button
+      >
+    </div>
+  {/if}
   {#if definitions.length}
     <div class="definition-list">
       {#each definitions as item (item.id)}
@@ -339,6 +353,10 @@
             .map(([state, count]) => `${count} ${state}`)
             .join(', ') || 'No recipients'}
         </p>
+        {#if author && delivery.reasons}<p class="caption">
+            {delivery.reasons.excluded} excluded · {delivery.reasons.muted} muted · {delivery
+              .reasons.missing_destination} missing destinations
+          </p>{/if}
         <ul>
           {#each delivery.recipients as recipient}<li>
               {recipient.display_name} · {recipient.channel} · {recipient.state}{recipient.error_code

@@ -224,12 +224,27 @@ it('lets a member change group-wide delivery defaults without leaving the group'
   api.getGroupDeliveryPreferences.mockResolvedValue({ outbound_muted: true, in_app_muted: true });
   api.saveGroupDeliveryPreferences.mockImplementation(async (_group, prefs) => prefs);
   await open();
-  const outbound = screen.getByRole('checkbox', { name: 'Mute external delivery for all briefings in this group' });
+  const outbound = screen.getByRole('checkbox', {
+    name: 'Mute external delivery for all briefings in this group',
+  });
   expect(outbound).toBeChecked();
   await fireEvent.click(outbound);
   await fireEvent.click(screen.getByRole('button', { name: 'Save group delivery preferences' }));
-  await waitFor(() => expect(api.saveGroupDeliveryPreferences).toHaveBeenCalledWith('team', {
-    outbound_muted: false, in_app_muted: true,
-  }));
+  await waitFor(() =>
+    expect(api.saveGroupDeliveryPreferences).toHaveBeenCalledWith('team', {
+      outbound_muted: false,
+      in_app_muted: true,
+    }),
+  );
   expect(screen.getByText('Retained group content')).toBeInTheDocument();
+});
+
+it('shows excluded delivery legs separately from mutes and missing destinations', async () => {
+  api.getGroupBriefingDelivery.mockResolvedValue({
+    counts: { sent: 2, skipped: 4 },
+    reasons: { excluded: 2, muted: 1, missing_destination: 1 },
+    recipients: [],
+  });
+  await open();
+  expect(screen.getByText('2 excluded · 1 muted · 1 missing destinations')).toBeVisible();
 });

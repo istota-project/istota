@@ -17,7 +17,7 @@ from istota.webui.router_stubs import require_auth, verify_origin
 router = APIRouter()
 DEFINITION_FIELDS = {"revision": (int,), "name": (str,), "title": (str,), "cron": (str,),
                      "timezone": (str,), "enabled": (bool,), "generation_mode": (str,),
-                     "generation": (dict,), "channel": (str,)}
+                     "generation": (dict,), "channel": (str,), "excluded_user_ids": (list,)}
 PREFERENCE_FIELDS = {"outbound_muted": (bool,), "in_app_muted": (bool,)}
 
 
@@ -151,9 +151,19 @@ def _read_edition(conn, config, actor, group_id, name, run_id, *, download=False
     if delivery:
         rows = store.list_recipients(conn, run_id)
         counts = {}
+        reasons = {"excluded": 0, "muted": 0, "missing_destination": 0}
         for row in rows:
             counts[row["state"]] = counts.get(row["state"], 0) + 1
-        return {"group_id": group_id, "counts": counts, "recipients": [
+            if row["state"] == "skipped":
+                reason = row["error_code"]
+                if reason in ("missing_email", "missing_talk", "missing_ntfy"):
+                    reason = "missing_destination"
+                if reason == "module_disabled":
+                    reason = "muted"
+                if reason in reasons:
+                    reasons[reason] += 1
+        return {"group_id": group_id, "counts": counts,
+                **({"reasons": reasons} if caps["author_briefings"] else {}), "recipients": [
             {**_user(config, r["user_id"]), **{k: r[k] for k in ("channel", "state", "attempts", "error_code")}}
             for r in rows if caps["author_briefings"] or r["user_id"] == actor]}
     if download:
@@ -193,8 +203,11 @@ def _audience(conn, config, actor, group_id, name):
     result = {"group_id": group_id, "member_count": len(members), "future_members_read_history": True}
     if not caps["author_briefings"]:
         return result
-    counts = {"deliverable": 0, "muted": 0, "missing_destination": 0}
+    counts = {"deliverable": 0, "muted": 0, "missing_destination": 0, "excluded": 0}
     for member in members:
+        if member in definition["excluded_user_ids"]:
+            counts["excluded"] += 1
+            continue
         channel = definition["channel"]
         prefs = store.delivery_preferences(conn, group_id, member, definition_id=definition["id"])
         if (prefs["in_app_muted" if channel == "in_app" else "outbound_muted"]

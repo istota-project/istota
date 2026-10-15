@@ -59,7 +59,7 @@ def test_draft_partial_update_snapshot_roundtrip_and_no_grants(install):
     document, _ = snapshot.gather(install[0])
     assert document["group_briefings"][0]["title"] == "Edited in DB"
     assert document["group_briefings"][0]["enabled"] is False
-    assert set(document["group_briefings"][0]) == set(definition()) | {"enabled"}
+    assert set(document["group_briefings"][0]) == set(definition()) | {"enabled", "excluded_user_ids"}
     assert execute(install, document["group_briefings"]).exit_code == 0
     selected, _ = snapshot.gather(install[0], users=["alice"])
     assert "group_briefings" not in selected
@@ -276,3 +276,41 @@ def test_snapshot_with_multiple_owners_only_authorizes_actual_writes(install):
         preview(install, document["group_briefings"])
     with db.get_db(install[1].db_path) as conn:
         assert store.list_definitions(conn, "other")[0]["title"] == "Daily"
+
+
+def test_exclusion_cli_apply_snapshot_and_partial_saves(install, tmp_path, capsys):
+    raw = definition(excluded_user_ids=["bob"])
+    raw.pop("group_id")
+    path = tmp_path / "definition.json"
+    path.write_text(json.dumps(raw))
+    args = ["group", "save", "--group-id", "team", "--actor", "alice", "--file", str(path), "--revision", "0"]
+    assert cli_briefings.dispatch(args, install[1]) == 0
+    assert json.loads(capsys.readouterr().out)["excluded_user_ids"] == ["bob"]
+    del raw["excluded_user_ids"]
+    path.write_text(json.dumps(raw))
+    args[-1] = "1"
+    assert cli_briefings.dispatch(args, install[1]) == 0
+    assert json.loads(capsys.readouterr().out)["excluded_user_ids"] == ["bob"]
+    assert execute(install, [{"group_id": "team", "name": "daily", "title": "Edited"}]).exit_code == 2
+    document, _ = snapshot.gather(install[0])
+    assert document["group_briefings"][0]["excluded_user_ids"] == ["bob"]
+    assert execute(install, document["group_briefings"]).exit_code == 0
+    with pytest.raises(engine.ExecutionError, match="invalid_excluded_user"):
+        preview(install, [{"group_id": "team", "name": "daily", "excluded_user_ids": ["admin"]}])
+    with pytest.raises(engine.ExecutionError, match="briefing_forbidden"):
+        preview(install, [{"group_id": "team", "name": "daily", "excluded_user_ids": []}], actor="bob")
+    assert execute(install, [{"group_id": "team", "name": "daily", "excluded_user_ids": []}]).exit_code == 2
+    document, _ = snapshot.gather(install[0])
+    assert document["group_briefings"][0]["excluded_user_ids"] == []
+
+
+def test_exclusion_keeps_source_grant_and_all_users_admin_exception(install):
+    from istota.briefings.source_grants import resolve_source_grant
+    from istota.groups.system import reconcile_all_users
+    saved, grant = approved_file(install)
+    assert execute(install, [{"group_id": "team", "name": "daily", "excluded_user_ids": ["bob"]}]).exit_code == 2
+    with db.get_db(install[1].db_path) as conn:
+        current = store.get_definition(conn, saved["id"])
+        assert resolve_source_grant(conn, install[1], current, "file")["id"] == grant["id"]
+        group = reconcile_all_users(conn, install[1])
+    assert execute(install, [definition(group_id=group["group_id"], excluded_user_ids=["bob"])], actor="admin").exit_code == 2

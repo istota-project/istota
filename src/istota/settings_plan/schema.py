@@ -40,7 +40,7 @@ BRIEFING_FIELDS = {
 }
 GROUP_BRIEFING_FIELDS = {
     "group_id": str, "name": str, "title": str, "cron": str, "timezone": str,
-    "enabled": bool, "generation_mode": str, "generation": dict, "channel": str,
+    "enabled": bool, "generation_mode": str, "generation": dict, "channel": str, "excluded_user_ids": list,
 }
 BLOCK_FIELDS = {"title": str, "directive": str, "render_mode": str, "options": dict, "sources": list}
 SOURCE_FIELDS = {"kind": str, "enabled": bool, "config": dict}

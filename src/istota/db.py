@@ -9062,6 +9062,7 @@ def _migrate_group_briefings(conn: sqlite3.Connection) -> None:
                      ("registry:v1", "registry", json.dumps({"capture": upgrading, "users": []})))
     for statement in _GROUP_BRIEFINGS_DDL:
         conn.execute(statement)
+    _add_columns(conn, "group_briefing_configs", {"excluded_user_ids_json": "TEXT NOT NULL DEFAULT '[]'"})
     _add_columns(conn, "group_briefing_recipients", {'dispatch_token': 'TEXT', 'lease_expires_at': 'TEXT', 'destination_json': 'TEXT', 'destination_locked': 'INTEGER NOT NULL DEFAULT 0'})
     conn.execute("""CREATE TABLE IF NOT EXISTS group_briefing_parts (
     recipient_id INTEGER NOT NULL REFERENCES group_briefing_recipients(id),

@@ -438,3 +438,48 @@ def test_scheduled_claim_waits_for_the_due_instant(env):
         run = store.enqueue_run(conn, env, definition["id"], due_at=NOW + timedelta(minutes=1), now=NOW)
         assert store.claim_run(conn, run_id=run["id"], now=NOW) is None
         assert store.claim_run(conn, run_id=run["id"], now=NOW + timedelta(minutes=1)) is not None
+
+
+def test_exclusions_preserve_absent_members_and_require_current_members_for_new_ids(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        first = define(conn, env, excluded_user_ids=["bob", "bob"])
+        assert first["excluded_user_ids"] == ["bob"]
+        db.end_group_membership(conn, "team", "bob", ended_by="alice")
+        conn.commit()
+        second = store.save_definition(conn, env, "team", payload(title="Changed"),
+            definition_id=first["id"], actor_id="alice", expected_revision=1)
+        assert second["excluded_user_ids"] == ["bob"]
+        third = store.save_definition(conn, env, "team", payload(excluded_user_ids=["bob"]),
+            definition_id=first["id"], actor_id="alice", expected_revision=2)
+        assert third["excluded_user_ids"] == ["bob"]
+        with pytest.raises(GroupError) as error:
+            store.save_definition(conn, env, "team", payload(excluded_user_ids=["carol"]),
+                definition_id=first["id"], actor_id="alice", expected_revision=3)
+        assert error.value.code == "invalid_excluded_user"
+        db.add_group_member(conn, "team", "bob", added_by="alice")
+        conn.commit()
+        assert store.get_definition(conn, first["id"])["excluded_user_ids"] == ["bob"]
+        cleared = store.save_definition(conn, env, "team", payload(excluded_user_ids=[]),
+            definition_id=first["id"], actor_id="alice", expected_revision=3)
+        assert cleared["excluded_user_ids"] == []
+
+
+@pytest.mark.parametrize("excluded", [None, "bob", [None], [1], [""], [" bob"]])
+def test_exclusions_reject_malformed_values(env, excluded):
+    with db.get_db(env.db_path) as conn, pytest.raises(GroupError) as error:
+        define(conn, env, excluded_user_ids=excluded)
+    assert error.value.code == "invalid_definition"
+
+
+def test_exclusions_upgrade_existing_definition_to_empty_default(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        first = define(conn, env)
+        conn.execute("ALTER TABLE group_briefing_configs DROP COLUMN excluded_user_ids_json")
+        conn.commit()
+        db._run_migrations(conn)
+        conn.commit()
+        db._run_migrations(conn)
+        assert store.get_definition(conn, first["id"])["excluded_user_ids"] == []
+        assert store.get_definition(conn, first["id"])["revision"] == 1

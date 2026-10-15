@@ -419,7 +419,7 @@ def validate_group_definition_payload(payload: dict) -> dict:
     from zoneinfo import ZoneInfo
 
     if not isinstance(payload, dict) or set(payload) - {
-        "name", "title", "cron", "timezone", "enabled", "generation_mode", "generation", "channel",
+        "name", "title", "cron", "timezone", "enabled", "generation_mode", "generation", "channel", "excluded_user_ids",
     }:
         raise ValueError("invalid definition fields")
     name = _group_text(payload.get("name"), "name", required=True, limit=100)
@@ -439,7 +439,13 @@ def validate_group_definition_payload(payload: dict) -> dict:
     enabled = payload.get("enabled", False)
     if type(enabled) is not bool:
         raise ValueError("enabled must be a boolean")
+    excluded = payload.get("excluded_user_ids", [])
+    if not isinstance(excluded, list) or any(
+        not isinstance(user, str) or not user or user != user.strip() for user in excluded
+    ):
+        raise ValueError("excluded_user_ids must be user ids")
     return {
+        "excluded_user_ids": sorted(set(excluded)),
         "name": name, "title": _group_text(payload.get("title", ""), "title", limit=200),
         "cron": cron, "timezone": zone, "generation_mode": mode, "channel": channel,
         "enabled": enabled, "generation": normalize_group_generation(mode, payload.get("generation")),
