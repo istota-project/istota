@@ -59,6 +59,7 @@ def _edition_view(run, *, body=False):
         result["subject"] = run["subject"]
         if body:
             result["body_md"] = run["body_md"]
+            result["document"] = run.get("document")
     return result
 
 
@@ -178,10 +179,10 @@ def _preferences(conn, config, actor, group_id, name=None, *, payload=None):
     _, definition = _access(conn, config, actor, group_id, name)
     definition_id = definition["id"] if definition else None
     if payload is not None:
-        preferences = store.set_delivery_preferences(conn, config, group_id, actor_id=actor,
+        store.set_delivery_preferences(conn, config, group_id, actor_id=actor,
                                                      definition_id=definition_id, **payload)
-    else:
-        preferences = store.delivery_preferences(conn, group_id, actor, definition_id=definition_id)
+    preferences = store.delivery_preferences(conn, group_id, actor, definition_id=definition_id,
+                                              include_group=definition_id is None)
     return {"group_id": group_id, **preferences}
 
 

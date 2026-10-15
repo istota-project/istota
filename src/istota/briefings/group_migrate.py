@@ -9,6 +9,7 @@ sentinel makes replay safe across these two databases.
 from contextlib import ExitStack
 from dataclasses import asdict
 import json
+import re
 
 from istota import db, user_briefings
 from istota.briefings import _migrate, db as bdb, group_store as store
@@ -173,6 +174,7 @@ def migration_report(conn, config, name=None):
                                "timezone": config.resolve_user_timezone(user, conn=conn), "current": current})
         definition = store.get_definition(conn, record["definition_id"]) if record["definition_id"] else None
         records.append({"name": name, "state": record["state"], "definition_id": record["definition_id"],
+                        "definition_name": definition["name"] if definition else None,
                         "revision": definition["revision"] if definition else None,
                         "timezone": definition["timezone"] if definition else None,
                         "source_issues": record.get("source_issues", []), "candidates": candidates,
@@ -225,8 +227,16 @@ def import_default(conn, config, name, *, actor_id, timezone):
         generation = {"version": 1, "blocks": blocks} if blocks else {
             "version": 1, "prompt": "Replace this migration draft with the intended group content.",
             "research": {"enabled": False}, "inputs": []}
+        # Leave room for a numeric suffix under the 100-character name limit.
+        stem = re.sub(r"[^a-z0-9_-]+", "-", legacy.name.lower())[:90].strip("-_") or "briefing"
+        target_name = stem
+        suffix = 2
+        while conn.execute("SELECT 1 FROM group_briefing_configs WHERE group_id=? AND name=?",
+                           (group["group_id"], target_name)).fetchone():
+            target_name = f"{stem}-{suffix}"
+            suffix += 1
         definition = store.save_definition(conn, config, group["group_id"], {
-            "name": legacy.name, "title": legacy.title, "cron": legacy.cron, "timezone": timezone,
+            "name": target_name, "title": legacy.title, "cron": legacy.cron, "timezone": timezone,
             "enabled": False, "channel": channel, "generation_mode": "blocks" if blocks else "prompt",
             "generation": generation}, actor_id=actor_id, is_admin=True, expected_revision=0, caller_transaction=True)
         record.update(source_issues=issues, imported_generation=definition["generation"], imported_revision=definition["revision"])

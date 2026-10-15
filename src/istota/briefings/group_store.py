@@ -203,7 +203,7 @@ def get_run(conn, run_id):
     if row is None:
         return None
     result = dict(row)
-    for field in ("snapshot", "request", "research", "provenance", "usage"):
+    for field in ("snapshot", "request", "research", "provenance", "usage", "document"):
         raw = result.pop(field + "_json")
         result[field] = json.loads(raw) if raw is not None else None
     return result
@@ -331,7 +331,17 @@ def list_recipients(conn, run_id):
     )]
 
 
-def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=None, usage=None, now=None):
+def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=None, usage=None,
+                document=None, now=None):
+    if document is not None:
+        from istota.briefings.document import document_to_markdown
+        from istota.briefings.models import validate_briefing_document
+        try:
+            document = validate_briefing_document(document)
+        except ValueError as exc:
+            raise GroupError(422, "invalid_document", "Edition document is invalid") from exc
+        if document["title"] != subject or document_to_markdown(document) != body_md:
+            raise GroupError(422, "invalid_document", "Edition document does not match its body")
     if not isinstance(subject, str) or not subject.strip() or not isinstance(body_md, str) or not body_md.strip():
         raise GroupError(422, "empty_edition", "An edition requires a subject and body")
     at = _timestamp(now)
@@ -350,11 +360,11 @@ def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=Non
             raise GroupError(409, "definition_disabled", "Briefing was disabled during generation")
         if _validate_run_sources(conn, config, definition) != run["snapshot"]["grants"]:
             raise GroupError(409, "source_approval_changed", "Source approval changed during generation")
-        conn.execute("""UPDATE group_briefing_runs SET state = ?, subject = ?, body_md = ?,
+        conn.execute("""UPDATE group_briefing_runs SET state = ?, subject = ?, body_md = ?, document_json = ?,
                         provenance_json = ?, usage_json = ?, published_at = ?, updated_at = ?,
                         attempt_token = NULL, lease_expires_at = NULL WHERE id = ?""",
                      ("published" if run["mode"] == "publish" else "preview_ready", subject, body_md,
-                      _json(provenance or {}), _json(usage or {}), at, at, run_id))
+                      _json(document) if document is not None else None, _json(provenance or {}), _json(usage or {}), at, at, run_id))
         if run["mode"] == "publish":
             # Reconcile in this transaction so a newly enabled account joins this
             # snapshot, while no historical interval is reused on rejoining.
@@ -382,10 +392,12 @@ def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=Non
         return get_run(conn, run_id)
 
 
-def delivery_preferences(conn, group_id, user_id, *, definition_id=None):
-    """Effective mutes are the union of group and definition preferences."""
-    rows = list(conn.execute("SELECT outbound_muted, in_app_muted FROM group_briefing_group_preferences "
-                             "WHERE group_id = ? AND user_id = ?", (group_id, user_id)))
+def delivery_preferences(conn, group_id, user_id, *, definition_id=None, include_group=True):
+    """Resolve effective mutes, or only local values for the settings editor."""
+    rows = []
+    if include_group:
+        rows.extend(conn.execute("SELECT outbound_muted, in_app_muted FROM group_briefing_group_preferences "
+                                 "WHERE group_id = ? AND user_id = ?", (group_id, user_id)))
     if definition_id is not None:
         rows.extend(conn.execute("SELECT outbound_muted, in_app_muted FROM group_briefing_preferences "
                                  "WHERE definition_id = ? AND user_id = ?", (definition_id, user_id)))
@@ -495,8 +507,10 @@ def prepare_delivery(conn, recipient_id, token, destination, parts, *, now=None)
     with _transaction(conn):
         row = _owned_recipient(conn, recipient_id, token, now)
         encoded = _json(destination)
-        if row["destination_locked"] and row["destination_json"] != encoded:
-            raise GroupError(409, "destination_changed", "Uncertain delivery keeps its original destination")
+        sent = conn.execute("SELECT 1 FROM group_briefing_parts WHERE recipient_id=? AND state='sent'",
+                            (recipient_id,)).fetchone()
+        if (row["destination_locked"] or sent) and row["destination_json"] != encoded:
+            raise GroupError(409, "destination_changed", "Accepted or uncertain delivery keeps its original destination")
         conn.execute("UPDATE group_briefing_recipients SET destination_json=? WHERE id=?", (encoded, recipient_id))
         if not conn.execute("SELECT 1 FROM group_briefing_parts WHERE recipient_id=?", (recipient_id,)).fetchone():
             for index, body in enumerate(parts):

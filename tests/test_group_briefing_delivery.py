@@ -27,13 +27,13 @@ def mail(env, monkeypatch):
     return sent
 
 
-def published(env, *, channel="email", body="Same **news** [article](https://example.com/article)"):
+def published(env, *, channel="email", body="Same **news** [article](https://example.com/article)", document=None):
     with db.get_db(env.db_path) as conn:
         definition = define(conn, env, channel=channel)
         run = enqueue(conn, env, definition)
         claim = store.claim_run(conn, run_id=run["id"], now=NOW)
         return store.publish_run(conn, env, run["id"], claim["attempt_token"],
-                                 subject="News", body_md=body, now=NOW)
+                                 subject="News", body_md=body, document=document, now=NOW)
 
 
 def deliver(env):
@@ -158,7 +158,8 @@ def test_claim_restart_and_stale_worker_are_held(env, clock, mail):
     assert [m["To"] for m in mail] == ["bob@example.com"]
 
 
-def test_talk_retry_preserves_confirmed_parts_and_reuses_reference(env, clock, monkeypatch):
+@pytest.mark.parametrize("change_destination", [False, True])
+def test_talk_retry_preserves_confirmed_parts_and_reuses_reference(env, clock, monkeypatch, change_destination):
     import httpx
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -183,7 +184,13 @@ def test_talk_retry_preserves_confirmed_parts_and_reuses_reference(env, clock, m
     assert legs(env, run)["alice"]["state"] == "failed"
     with db.get_db(env.db_path) as conn:
         assert store.retry_deliveries(conn, env, run["id"], actor_id="alice", now=NOW) == 1
+    if change_destination:
+        env.users["alice"].alerts_channel = "new-private"
     deliver(env)
+    if change_destination:
+        assert not any(p[0] == "new-private" for p in sent)
+        assert legs(env, run)["alice"]["error_code"] == "destination_changed"
+        return
     first = [p for p in sent if p[0] == "alice-private" and "(1/" in p[1]]
     second = [p for p in sent if p[0] == "alice-private" and "(2/" in p[1]]
     assert len(first) == 1 and len(second) == 2 and second[0][2] == second[1][2]
@@ -388,3 +395,15 @@ def test_exclusion_stops_next_part_but_keeps_delivered_notice(env, clock, mail):
             store.start_delivery_part(conn, env, recipient["id"], claim["dispatch_token"], 1, now=NOW)
         assert error.value.code == "excluded"
         assert conn.execute("SELECT COUNT(*) FROM notifications WHERE source='group_briefing' AND user_id='bob'").fetchone()[0] == 1
+
+
+def test_saved_document_keeps_its_sections_in_email(env, clock, mail):
+    from istota.briefings.document import document_to_markdown
+    document = {"version": 1, "title": "News", "blocks": [
+        {"block_id": 0, "title": "Markets", "kind": "markdown", "body_md": "Up today",
+         "presentation": {"width": "wide"}, "source_status": "complete"}]}
+    body = document_to_markdown(document)
+    run = published(env, body=body, document=document)
+    assert run["document"]["blocks"][0]["presentation"] == {"width": "wide"}
+    deliver(env)
+    assert "<h2>Markets</h2>" in mail[0].get_body(preferencelist=("html",)).get_content()

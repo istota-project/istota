@@ -333,3 +333,18 @@ async def test_excluded_delivery_retains_common_edition_read_and_download(client
     url = ROOT + f"/daily/runs/{run_id}"
     assert (await client.get(url)).json()["body_md"] == "Common edition"
     assert (await client.get(url + "/download")).text == "Common edition"
+
+
+async def test_editable_definition_mutes_do_not_copy_inherited_group_mutes(client, configured):
+    definition = await create(client)
+    group_url = BASE + "/groups/family/briefing-delivery"
+    local_url = ROOT + "/daily/delivery"
+    assert (await client.put(group_url, json={"outbound_muted": True, "in_app_muted": False})).status_code == 200
+    prefs = (await client.get(local_url)).json()
+    assert prefs["outbound_muted"] is False
+    saved = await client.put(local_url, json={"outbound_muted": prefs["outbound_muted"], "in_app_muted": True})
+    assert saved.json()["outbound_muted"] is False
+    assert (await client.put(group_url, json={"outbound_muted": False, "in_app_muted": False})).status_code == 200
+    with db.get_db(configured._config.db_path) as conn:
+        assert store.delivery_preferences(conn, "family", "alice", definition_id=definition["id"]) == {
+            "outbound_muted": False, "in_app_muted": True}

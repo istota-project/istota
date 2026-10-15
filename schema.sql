@@ -2528,6 +2528,7 @@ CREATE TABLE IF NOT EXISTS group_briefing_runs (
         research_attempt_token TEXT,
         subject TEXT,
         body_md TEXT,
+        document_json TEXT,
         provenance_json TEXT NOT NULL DEFAULT '{}',
         usage_json TEXT NOT NULL DEFAULT '{}',
         error_code TEXT,

@@ -76,7 +76,10 @@ def _send_part(config, recipient, run, destination, part):
     channel = recipient["channel"]
     if channel == "email":
         task = SimpleNamespace(user_id=recipient["user_id"], source_type="briefing")
-        plain, html, fmt = _briefing_email_bodies(config, task, part["body"], "plain")
+        # A split edition is mailed part by part as Markdown; a whole one keeps its sections.
+        document = run.get("document") if part["body"] == run["body_md"] else None
+        plain, html, fmt = _briefing_email_bodies(config, task, part["body"], "plain",
+                                                  briefing_document=document)
         return send_email(to=destination["to"], subject=run["subject"], body=plain,
                           html_body=html, content_type=fmt, config=get_email_config(config),
                           from_addr=config.email.bot_email,

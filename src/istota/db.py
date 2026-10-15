@@ -9012,6 +9012,7 @@ _GROUP_BRIEFINGS_DDL = (
         research_attempt_token TEXT,
         subject TEXT,
         body_md TEXT,
+        document_json TEXT,
         provenance_json TEXT NOT NULL DEFAULT '{}',
         usage_json TEXT NOT NULL DEFAULT '{}',
         error_code TEXT,
@@ -9068,6 +9069,7 @@ def _migrate_group_briefings(conn: sqlite3.Connection) -> None:
     for statement in _GROUP_BRIEFINGS_DDL:
         conn.execute(statement)
     _add_columns(conn, "group_briefing_configs", {"excluded_user_ids_json": "TEXT NOT NULL DEFAULT '[]'"})
+    _add_columns(conn, "group_briefing_runs", {"document_json": "TEXT"})
     _add_columns(conn, "group_briefing_recipients", {'dispatch_token': 'TEXT', 'lease_expires_at': 'TEXT', 'destination_json': 'TEXT', 'destination_locked': 'INTEGER NOT NULL DEFAULT 0'})
     conn.execute("""CREATE TABLE IF NOT EXISTS group_briefing_parts (
     recipient_id INTEGER NOT NULL REFERENCES group_briefing_recipients(id),

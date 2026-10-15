@@ -604,3 +604,29 @@ def test_cli_init_can_upgrade_legacy_defaults_before_loading_overlays(tmp_path, 
         assert journal is not None
         assert len(user_briefings.list_briefings(document["db_path"])) == 3
         assert load_config(path).users["alice"].briefings[0].name == "daily"
+
+
+@pytest.mark.parametrize("name", ["Daily", "Daily news", "daily"])
+def test_import_legacy_name_without_overwriting_existing_group_briefing(tmp_path, monkeypatch, name):
+    from istota.briefings import group_migrate as migration
+    from istota.groups.system import ensure_all_users_group
+    path, document = legacy(tmp_path, monkeypatch)
+    document["default_briefings"][0]["name"] = name
+    path.write_text(toml_write.dumps(document))
+    config = load_config(path)
+    with db.get_db(config.db_path) as conn:
+        group = ensure_all_users_group(conn, config)
+        from tests.test_group_briefing_store import payload as new_payload
+        existing = store.save_definition(conn, config, group["group_id"], new_payload(enabled=False),
+                                         actor_id="alice", is_admin=True, expected_revision=0)
+        result = migration.import_default(conn, config, name, actor_id="alice", timezone="UTC")
+        definition = store.get_definition(conn, result["definition_id"])
+        assert definition["id"] != existing["id"]
+        assert definition["title"] == "Daily"
+        assert migration.import_default(conn, config, name, actor_id="alice", timezone="UTC")["definition_id"] == definition["id"]
+        migration.review_default(conn, config, name, actor_id="alice", expected_revision=1, timezone="UTC", dispositions={})
+        migration.cutover_default(conn, config, name, actor_id="alice", expected_revision=1)
+        assert not user_briefings.get_briefing(config.db_path, "alice", name, conn=conn).enabled
+        migration.rollback_default(conn, config, name, actor_id="alice", expected_revision=2)
+        assert user_briefings.get_briefing(config.db_path, "alice", name, conn=conn).enabled
+        assert store.get_definition(conn, existing["id"]) == existing

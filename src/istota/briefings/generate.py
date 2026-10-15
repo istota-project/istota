@@ -436,16 +436,20 @@ def assemble_group_input(definition, gathered):
     offset = 0
     synthesis_ids = []
     for block in definition_blocks(definition):
-        sources = gathered[offset:offset + len(block.sources)]
+        block_sources = gathered[offset:offset + len(block.sources)]
         offset += len(block.sources)
-        sources = [source for source in sources if source.ok and not source.is_empty]
+        sources = [source for source in block_sources if source.ok and not source.is_empty]
         if not sources:
             continue
         index = str(len(sections))
+        # Document block fields, as in the personal manifest; body_md None awaits synthesis.
+        section = {"block_id": block.id, "title": block.title, "kind": "markdown", "body_md": None,
+                   "presentation": presentation_for_options(block.options),
+                   "source_status": "partial" if any(not s.ok for s in block_sources) else "complete"}
+        sections.append(section)
         if block.render_mode == "structured":
-            sections.append((block.title, _assemble_verbatim(sources)))
+            section["body_md"] = _assemble_verbatim(sources)
             continue
-        sections.append((block.title, None))
         synthesis_ids.append(index)
         instructions = f"Title: {block.title}\n{block.directive or _default_directive(block)}"
         if block.options.get("story_count"):

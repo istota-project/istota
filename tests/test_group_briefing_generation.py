@@ -121,7 +121,7 @@ def test_blocks_gather_once_keep_structured_verbatim_and_combine_synthesis(env, 
     root = env.workspace_path / "Groups/team"
     root.mkdir(parents=True)
     (root / "GROUP.md").write_text("Exact 17.25%")
-    blocks = [{"title": "Numbers", "render_mode": "structured", "sources": [
+    blocks = [{"title": "Numbers", "render_mode": "structured", "options": {"presentation": {"width": "wide"}}, "sources": [
         {"id": "numbers", "kind": "group_memory", "config": {}}]}]
     if mixed:
         blocks.extend({"title": title, "sources": [{"id": title.lower(), "kind": "group_memory", "config": {}}]}
@@ -135,8 +135,10 @@ def test_blocks_gather_once_keep_structured_verbatim_and_combine_synthesis(env, 
     with db.get_db(env.db_path) as conn:
         saved = store.get_run(conn, run["id"])
         assert saved["state"] == "published"
-        assert saved["body_md"] == ("Numbers\nExact 17.25%\n\nAnalysis\nAnalysis text\n\nOutlook\nOutlook text"
-                                    if mixed else "Numbers\nExact 17.25%")
+        assert saved["document"]["blocks"][0]["presentation"] == {"width": "wide"}
+        assert saved["document"]["blocks"][0]["block_id"] == 0
+        assert saved["body_md"] == ("Numbers\n\nExact 17.25%\n\nAnalysis\n\nAnalysis text\n\nOutlook\n\nOutlook text"
+                                    if mixed else "Numbers\n\nExact 17.25%")
     assert brain.call_count == int(mixed)
 
 
@@ -267,6 +269,7 @@ def test_research_outage_is_visible_but_all_empty_fails(env, clock, brain, other
         saved = store.get_run(conn, run["id"])
         assert saved["state"] == ("published" if other_source else "failed")
         if other_source:
+            assert saved["body_md"].startswith("Incomplete sources:")
             assert saved["provenance"]["incomplete_sources"]
             assert saved["provenance"]["sources"][-1]["error_code"] == "research_unavailable"
         else:

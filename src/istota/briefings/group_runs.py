@@ -5,10 +5,14 @@ from zoneinfo import ZoneInfo
 
 from istota import db, modules
 from istota.briefings import group_store
+from istota.briefings.document import document_to_markdown
 from istota.briefings.source_grants import validate_run_grants
 from istota.browser.owner import BRIEFINGS_IDENTITY
 from istota.groups.policy import GroupError
 from istota.groups.service import _transaction
+
+# Fixed wording: provider errors and private source names never reach the edition.
+INCOMPLETE_NOTICE = "Incomplete sources: some selected sources were unavailable or empty."
 
 
 def _current_run(conn, config, run_id, token, now):
@@ -202,27 +206,35 @@ def generate_task(task, config, *, now=None):
                         value = json.loads(candidate.text)
                     except (ValueError, TypeError):
                         continue
-                    expected = {str(index) for index, (_, content) in enumerate(sections) if content is None}
+                    expected = {str(index) for index, section in enumerate(sections) if section["body_md"] is None}
                     if (isinstance(value, dict) and set(value) == expected
                             and all(isinstance(v, str) and v.strip() for v in value.values())):
                         synthesized = value
                         break
                 if synthesized is None:
                     return False, "synthesis_invalid"
-                sections = [(title, content if content is not None else synthesized[str(index)].strip())
-                            for index, (title, content) in enumerate(sections)]
-        if definition["generation_mode"] == "blocks":
-            body = "\n\n".join(f"{title}\n{content}" for title, content in sections)
+                for index, section in enumerate(sections):
+                    if section["body_md"] is None:
+                        section["body_md"] = synthesized[str(index)].strip()
         if cancelled():
             raise GroupError(409, "generation_cancelled", "Generation task is no longer current")
         subject = format_briefing_title(definition["title"] or default_briefing_title(definition["name"]),
                                         due.astimezone(ZoneInfo(definition["timezone"])))
-        provenance = {"incomplete_sources": any(not s.ok or s.is_empty for s in gathered),
+        incomplete = any(not s.ok or s.is_empty for s in gathered)
+        document = None
+        if definition["generation_mode"] == "blocks":
+            if incomplete:
+                sections[0]["body_md"] = INCOMPLETE_NOTICE + "\n\n" + sections[0]["body_md"]
+            document = {"version": 1, "title": subject, "blocks": sections}
+            body = document_to_markdown(document)
+        elif incomplete:
+            body = INCOMPLETE_NOTICE + "\n\n" + body
+        provenance = {"incomplete_sources": incomplete,
                       "sources": [{"kind": s.kind, "ok": s.ok, "provenance": s.provenance,
                                    "error_code": s.error_code} for s in gathered]}
         with db.get_db(config.db_path) as conn:
             result = group_store.publish_run(conn, config, run_id, token, subject=subject,
-                body_md=body, provenance=provenance, usage=usage, now=now)
+                body_md=body, provenance=provenance, usage=usage, document=document, now=now)
         return True, result["state"]
     except GroupError as exc:
         with db.get_db(config.db_path) as conn:
