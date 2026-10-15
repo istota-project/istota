@@ -631,7 +631,10 @@ def import_work_log(ctx: UserContext) -> None:
     try:
         ensure_store(Path(ctx.data_dir))
     except WorkStoreBlocked as exc:
-        logger.warning("money_work_log_import_blocked %s", exc)
+        # This runs on every money request; a refusal already reported is
+        # answered from the store's cache and needs no second warning.
+        level = logging.DEBUG if exc.repeated else logging.WARNING
+        logger.log(level, "money_work_log_import_blocked %s", exc)
 
 
 def backfill_work_entry_ids(ctx: UserContext) -> int:

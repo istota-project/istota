@@ -70,8 +70,14 @@ class WorkStoreBlocked(RuntimeError):
     """The TOML work log could not be imported, so the store is unavailable.
 
     The message is ``work log migration blocked: <reason>``, which the CLI and
-    routes pass through as the error.
+    routes pass through as the error. ``repeated`` is true when the refusal
+    was answered from this process's cache rather than a fresh import attempt,
+    so a caller that logs it can log it once.
     """
+
+    def __init__(self, message: str, *, repeated: bool = False):
+        super().__init__(message)
+        self.repeated = repeated
 
 
 @dataclass
@@ -128,18 +134,56 @@ def _init(path: Path) -> None:
     _INITIALISED.add(key)
 
 
-def _is_migrated(conn: sqlite3.Connection) -> bool:
+def _store_record(conn: sqlite3.Connection) -> str | None:
     from istota.money import db  # noqa: PLC0415
     from istota.money.work_migrate import WORK_STORE_KEY  # noqa: PLC0415
 
-    return db.kv_get(conn, WORK_STORE_KEY) is not None
+    return db.kv_get(conn, WORK_STORE_KEY)
+
+
+def _is_migrated(conn: sqlite3.Connection) -> bool:
+    return _store_record(conn) is not None
+
+
+# A refusal depends on the year files alone, so it is kept per process until
+# one of them changes; without this every money request re-parsed them all
+# and logged the refusal again. A failed import is retried, since a write
+# failure can be transient.
+_REFUSED: dict[tuple[str, str], tuple[tuple, str]] = {}
+
+
+def _year_files_fingerprint(data_dir: Path) -> tuple:
+    from istota.money.work_migrate import year_files  # noqa: PLC0415
+
+    seen = []
+    for path in year_files(data_dir):
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            continue
+        seen.append((path.name, st.st_size, st.st_mtime_ns))
+    return tuple(seen)
+
+
+def _set_aside_leftovers(data_dir: Path, record: str) -> None:
+    from istota.money.work_migrate import set_aside_year_files, year_files  # noqa: PLC0415
+
+    if not year_files(data_dir):
+        return
+    try:
+        hashes = json.loads(record).get("source_hashes") or {}
+    except (ValueError, AttributeError):
+        hashes = {}
+    set_aside_year_files(data_dir, hashes)
 
 
 def ensure_store(data_dir: Path) -> Path:
     """Make sure the store is usable: schema present and the work log imported.
 
     Returns the database path. Raises :class:`WorkStoreBlocked` when the
-    import refuses or fails.
+    import refuses or fails. Once imported, a ``{year}.toml`` still in the
+    work dir (a rename that failed, or a file that came back) is renamed aside
+    unread.
     """
     from istota.money import db  # noqa: PLC0415
     from istota.money.work_migrate import migrate_work_log  # noqa: PLC0415
@@ -147,11 +191,23 @@ def ensure_store(data_dir: Path) -> Path:
     path = db_path_for(data_dir)
     _init(path)
     with db.get_db(path) as conn:
-        if _is_migrated(conn):
-            return path
+        record = _store_record(conn)
+    if record is not None:
+        _set_aside_leftovers(data_dir, record)
+        return path
+
+    cache_key = (_key(data_dir), os.path.abspath(path))
+    fingerprint = _year_files_fingerprint(data_dir)
+    cached = _REFUSED.get(cache_key)
+    if cached is not None and cached[0] == fingerprint:
+        raise WorkStoreBlocked(cached[1], repeated=True)
     report = migrate_work_log(data_dir, db_path=path)
     if not report.ok:
-        raise WorkStoreBlocked(f"work log migration blocked: {report.reason}")
+        message = f"work log migration blocked: {report.reason}"
+        if report.status == "refused":
+            _REFUSED[cache_key] = (fingerprint, message)
+        raise WorkStoreBlocked(message)
+    _REFUSED.pop(cache_key, None)
     return path
 
 

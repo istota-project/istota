@@ -9,7 +9,10 @@ only then records the ``work_store`` key that makes ``work.py`` treat the
 database as the store. Any refusal or difference rolls the whole transaction
 back, so a blocked import leaves the database exactly as it found it.
 
-The year files are never written by the import. The one writer left here is
+The year files are never written by the import. After it commits, each one is
+renamed ``{year}.toml.migrated`` in place (:func:`set_aside_year_files`), and
+every later store open renames any ``{year}.toml`` that is still there or has
+come back, without reading it. The one writer left here is
 :func:`backfill_legacy_uids`, which stamps a uid on hand-added entries before
 the import has run (the import refuses an entry without one).
 """
@@ -173,6 +176,60 @@ def load_legacy(data_dir: Path) -> LegacyLog:
     # the display index users knew, and the import preserves it.
     entries.sort(key=lambda e: e.date)
     return LegacyLog(entries, quarantined, hashes)
+
+
+MIGRATED_SUFFIX = ".migrated"
+
+
+def _set_aside_target(path: Path) -> Path:
+    """``{year}.toml.migrated``, or a UTC-stamped name beside it if that exists."""
+    target = path.with_name(path.name + MIGRATED_SUFFIX)
+    if not target.exists():
+        return target
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = path.with_name(f"{path.name}{MIGRATED_SUFFIX}-{stamp}")
+    counter = 2
+    while target.exists():
+        target = path.with_name(f"{path.name}{MIGRATED_SUFFIX}-{stamp}-{counter}")
+        counter += 1
+    return target
+
+
+def set_aside_year_files(data_dir: Path, source_hashes: dict[str, str]) -> list[Path]:
+    """Rename every ``{year}.toml`` to its ``.migrated`` name. Returns the new paths.
+
+    Called once the import has committed, and on every later store open. A
+    file whose bytes match the hash the import recorded for its year is the
+    imported file (a rename that failed before is being retried); any other
+    file has come back since, and is moved aside with a warning, never read
+    into the store. A failed rename is logged and left for the next open.
+    """
+    moved = []
+    try:
+        present = year_files(data_dir)
+    except OSError as exc:
+        logger.error("work_year_file_rename_failed dir=%s error=%s", legacy_work_dir(data_dir), exc)
+        return moved
+    for path in present:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            target = _set_aside_target(path)
+            path.rename(target)
+        except FileNotFoundError:
+            continue  # another process moved it first
+        except OSError as exc:
+            logger.error("work_year_file_rename_failed path=%s error=%s", path, exc)
+            continue
+        if source_hashes.get(path.stem) == digest:
+            logger.info("work_year_file_set_aside path=%s target=%s", path, target.name)
+        else:
+            logger.warning(
+                "work_year_file_reappeared path=%s target=%s: not imported; "
+                "the work log is in money.db",
+                path, target.name,
+            )
+        moved.append(target)
+    return moved
 
 
 @contextmanager
@@ -454,6 +511,8 @@ def migrate_work_log(
                 "source_hashes": log.source_hashes,
             }))
             conn.commit()
+            # Outside the transaction: a failed rename never undoes the import.
+            set_aside_year_files(data_dir, log.source_hashes)
     logger.info(
         "work_log_migrated entries=%d invoices=%d years=%s",
         report.entries, report.invoices, ",".join(years),

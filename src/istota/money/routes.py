@@ -22,11 +22,13 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi import File as FastAPIFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.routing import APIRoute
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.cli import UserContext
 from istota.money.config_store import FILING_STATUSES
 from istota.money.core.tax_data import load_tax_rates
+from istota.money.work import WorkStoreBlocked
 from istota.webui.router_stubs import require_auth, verify_origin
 
 logger = logging.getLogger(__name__)
@@ -122,7 +124,26 @@ def _resolve_user_ledger(user_ctx: UserContext, ledger_name: str | None):
 # ---------------------------------------------------------------------------
 
 
-router = APIRouter()
+class _MoneyRoute(APIRoute):
+    """Answers a blocked work log import with 503 and the CLI's error text.
+
+    Any route can reach the work store, directly or through invoicing and
+    review helpers, so this sits on the router rather than in each handler.
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def guarded(request: Request):
+            try:
+                return await handler(request)
+            except WorkStoreBlocked as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=503)
+
+        return guarded
+
+
+router = APIRouter(route_class=_MoneyRoute)
 
 
 @router.get("/me")

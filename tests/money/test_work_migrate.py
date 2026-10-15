@@ -8,9 +8,12 @@ byte-identical with the same mtime.
 """
 
 import json
+import logging
+import re
 import tomllib
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -175,10 +178,20 @@ def _key(db_path):
         return db.kv_get(conn, WORK_STORE_KEY)
 
 
+def _set_aside(data_dir):
+    """Every renamed-aside year file's bytes and mtime, by name."""
+    wd = data_dir / "invoices" / "work"
+    return {
+        p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in sorted(wd.glob("*.toml.migrated*"))
+    } if wd.is_dir() else {}
+
+
 def _assert_untouched(data_dir, db_path, before):
     assert _row_counts(db_path) == {"work_entries": 0, "invoices": 0, "invoice_lines": 0}
     assert _key(db_path) is None
     assert _files(data_dir) == before
+    assert _set_aside(data_dir) == {}
 
 
 def _dump(db_path):
@@ -269,10 +282,13 @@ class TestCleanImport:
         after = {e.uid: work.entry_etag(e) for e in work.load_work_entries(data_dir) if not e.invoice}
         assert after == before
 
-    def test_the_year_files_are_left_as_they_were(self, data_dir, db_path, fixture_log):
+    def test_the_year_files_are_renamed_aside_unchanged(self, data_dir, db_path, fixture_log):
         before = _files(data_dir)
         migrate_work_log(data_dir)
-        assert _files(data_dir) == before
+        assert _files(data_dir) == {}
+        assert _set_aside(data_dir) == {
+            f"{name}.migrated": content for name, content in before.items()
+        }
 
     def test_records_the_key_with_the_source_hashes(self, data_dir, db_path, fixture_log):
         import hashlib
@@ -444,6 +460,7 @@ class TestDryRun:
         assert report.status == "dry_run"
         assert (report.entries, report.invoices) == (6, 3)
         _assert_untouched(data_dir, db_path, before)
+        assert sorted(before) == ["2025.toml", "2026.toml"]
 
     def test_reports_a_refusal(self, data_dir, db_path, fixture_log):
         (data_dir / "invoices" / "work" / "2026.toml").write_text(
@@ -573,3 +590,209 @@ class TestCli:
         assert (code, out["stamped"]) == (0, 1)
         code, out = self._invoke(data_dir, db_path, "work", "list")
         assert out["count"] == 7
+
+
+def _block(data_dir):
+    """Append an entry with no uid: the import refuses the log."""
+    with (data_dir / "invoices" / "work" / "2026.toml").open("a") as f:
+        f.write('\n[[entries]]\ndate = 2026-02-01\nclient = "acme"\nservice = "dev"\n')
+
+
+class TestRenameAside:
+    """After a committed import the year files are renamed, never read again."""
+
+    def test_an_existing_migrated_name_gets_a_stamp(self, data_dir, db_path, fixture_log):
+        wd = data_dir / "invoices" / "work"
+        (wd / "2025.toml.migrated").write_text("an older copy\n")
+        before = _files(data_dir)
+
+        assert migrate_work_log(data_dir).status == "migrated"
+
+        aside = _set_aside(data_dir)
+        assert aside["2025.toml.migrated"][0] == b"an older copy\n"
+        assert aside["2026.toml.migrated"] == before["2026.toml"]
+        (stamped,) = [n for n in aside if n.startswith("2025.toml.migrated-")]
+        assert re.fullmatch(r"2025\.toml\.migrated-\d{8}T\d{6}Z", stamped)
+        assert aside[stamped] == before["2025.toml"]
+
+    def test_a_failed_rename_keeps_the_import_and_the_next_open_retries(
+        self, data_dir, db_path, fixture_log, monkeypatch, caplog,
+    ):
+        before = _files(data_dir)
+
+        def refuse(self, target):
+            raise PermissionError("read-only mount")
+
+        monkeypatch.setattr(Path, "rename", refuse)
+        with caplog.at_level(logging.ERROR, logger="istota.money.work_migrate"):
+            report = migrate_work_log(data_dir)
+
+        assert report.status == "migrated"
+        assert _key(db_path) is not None
+        assert _row_counts(db_path)["work_entries"] == 6
+        assert _files(data_dir) == before
+        failed = [r for r in caplog.records if "work_year_file_rename_failed" in r.getMessage()]
+        assert len(failed) == 2
+        assert all(r.levelno == logging.ERROR for r in failed)
+
+        monkeypatch.undo()
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="istota.money.work_migrate"):
+            assert len(work.load_work_entries(data_dir)) == 6
+
+        assert _files(data_dir) == {}
+        assert _set_aside(data_dir) == {
+            f"{name}.migrated": content for name, content in before.items()
+        }
+        # The import's own files: a retry, not a reappearance.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_a_reappearing_year_file_is_moved_aside_unread(
+        self, data_dir, db_path, fixture_log, caplog,
+    ):
+        migrate_work_log(data_dir)
+        rows = _dump(db_path)
+        returned = data_dir / "invoices" / "work" / "2026.toml"
+        returned.write_text(
+            '[[entries]]\nuid = "ghost"\ndate = 2026-03-01\nclient = "acme"\n'
+            'service = "dev"\nqty = 9\n'
+        )
+
+        with caplog.at_level(logging.WARNING, logger="istota.money.work_migrate"):
+            entries = work.load_work_entries(data_dir)
+
+        assert "ghost" not in {e.uid for e in entries}
+        assert _dump(db_path) == rows
+        assert not returned.exists()
+        stamped = [n for n in _set_aside(data_dir) if n.startswith("2026.toml.migrated-")]
+        assert len(stamped) == 1
+        (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert "work_year_file_reappeared" in warning.getMessage()
+        assert str(returned) in warning.getMessage()
+
+    def test_a_refused_import_renames_nothing(self, data_dir, db_path, fixture_log):
+        _block(data_dir)
+        before = _files(data_dir)
+        with pytest.raises(work.WorkStoreBlocked):
+            work.load_work_entries(data_dir)
+        _assert_untouched(data_dir, db_path, before)
+
+
+class TestBlockedIsReportedOnce:
+    """A refusal is kept per process until a year file changes."""
+
+    def test_a_second_open_does_not_parse_again(
+        self, data_dir, db_path, fixture_log, monkeypatch, caplog,
+    ):
+        from istota.money import work_migrate
+
+        _block(data_dir)
+        parses = []
+        original = work_migrate.load_legacy
+
+        def counting(d):
+            parses.append(d)
+            return original(d)
+
+        monkeypatch.setattr(work_migrate, "load_legacy", counting)
+
+        with caplog.at_level(logging.WARNING, logger="istota.money"):
+            for _ in range(3):
+                with pytest.raises(work.WorkStoreBlocked, match="no uid") as raised:
+                    work.load_work_entries(data_dir)
+
+        assert len(parses) == 1
+        assert raised.value.repeated is True
+        refused = [r for r in caplog.records if "work_log_migration_refused" in r.getMessage()]
+        assert len(refused) == 1
+
+    def test_fixing_the_file_runs_the_import_again(self, data_dir, db_path, fixture_log):
+        _block(data_dir)
+        with pytest.raises(work.WorkStoreBlocked):
+            work.load_work_entries(data_dir)
+        assert work.backfill_work_ids(data_dir) == 1
+        assert len(work.load_work_entries(data_dir)) == 7
+
+    def test_the_per_request_hook_warns_once(self, data_dir, db_path, fixture_log, caplog):
+        from istota.money._migrate import import_work_log
+        from istota.money.cli import UserContext
+
+        _block(data_dir)
+        ctx = UserContext(data_dir=data_dir, db_path=db_path)
+        with caplog.at_level(logging.DEBUG, logger="istota.money._migrate"):
+            import_work_log(ctx)
+            import_work_log(ctx)
+        blocked = [r for r in caplog.records if "money_work_log_import_blocked" in r.getMessage()]
+        assert [r.levelno for r in blocked] == [logging.WARNING, logging.DEBUG]
+
+
+class TestBlockedRoutes:
+    """While blocked, the web work and invoice routes answer 503 with the CLI's text."""
+
+    @pytest.fixture
+    def blocked_client(self, data_dir, db_path, fixture_log):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota.money.cli import UserContext
+        from istota.money.routes import get_user_config, require_auth, router, verify_origin
+
+        _block(data_dir)
+        db.init_db(db_path)  # what ensure_initialised does before any route runs
+        ctx = UserContext(data_dir=data_dir, ledgers=[], db_path=db_path)
+        app = FastAPI()
+        app.include_router(router, prefix="/api/money")
+        app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+        app.dependency_overrides[get_user_config] = lambda: ctx
+        app.dependency_overrides[verify_origin] = lambda: None
+        return TestClient(app, raise_server_exceptions=False)
+
+    @pytest.mark.parametrize("method,path,body", [
+        ("get", "/api/money/work", None),
+        ("post", "/api/money/work",
+         {"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1}),
+        ("patch", "/api/money/work/u6", {"qty": 2}),
+        ("delete", "/api/money/work/u6", None),
+        ("get", "/api/money/invoices", None),
+        ("get", "/api/money/invoice-details?invoice_number=INV-000002", None),
+        ("post", "/api/money/invoices/INV-000002/mark-paid", {"paid_date": "2026-03-02"}),
+        ("post", "/api/money/invoices/INV-000001/mark-pending", None),
+    ])
+    def test_answers_503_and_writes_nothing(
+        self, data_dir, db_path, blocked_client, method, path, body,
+    ):
+        before = _files(data_dir)
+        kwargs = {"json": body} if body is not None else {}
+        resp = getattr(blocked_client, method)(path, **kwargs)
+
+        assert resp.status_code == 503
+        payload = resp.json()
+        assert payload["status"] == "error"
+        assert payload["error"].startswith("work log migration blocked: ")
+        assert "no uid" in payload["error"]
+        _assert_untouched(data_dir, db_path, before)
+
+
+class TestFixtureThroughTheCli:
+    """The multi-year fixture end to end through the CLI: import, then read back.
+
+    ``tests/money/fixtures/`` holds no work log, so this fixture stands in.
+    """
+
+    def test_work_and_invoice_lists_match_the_fixture(self, data_dir, db_path, fixture_log):
+        cli = TestCli()
+        code, out = cli._invoke(data_dir, db_path, "work", "migrate")
+        assert (code, out["migration"]["status"]) == (0, "migrated")
+        assert set(_set_aside(data_dir)) == {"2025.toml.migrated", "2026.toml.migrated"}
+
+        code, out = cli._invoke(data_dir, db_path, "work", "list")
+        assert (code, out["count"]) == (0, 6)
+
+        code, out = cli._invoke(data_dir, db_path, "invoice", "list", "--all")
+        assert (code, out["status"]) == (0, "ok")
+        listed = json.dumps(out)
+        for number in ("INV-000001", "INV-000002", "INV-000003"):
+            assert number in listed
+
+        code, out = cli._invoke(data_dir, db_path, "work", "migrate")
+        assert (code, out["migration"]["status"]) == (0, "already")
