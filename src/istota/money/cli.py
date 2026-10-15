@@ -952,7 +952,8 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
                     stamped = mark_paid(
                         ctx.data_dir, number, match.payment.date,
                         validate=lambda entries: open_invoice(
-                            config, number, entries, automatic=True, ledgers=ctx.ledgers,
+                            config, number, entries, total=original[number].total,
+                            automatic=True, ledgers=ctx.ledgers,
                             detection_cache=detection_cache,
                         ) == original[number],
                         conn=conn,

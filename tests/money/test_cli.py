@@ -1552,7 +1552,7 @@ class TestSyncMonarchInvoiceMatching:
         _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
             tmp_path=tmp_path, obj=obj)
 
-        with patch("istota.money.work.get_invoice_numbers",
+        with patch("istota.money.work.list_invoices",
                    side_effect=WorkStoreBlocked("work log migration blocked: bad row")):
             out = self._sync(runner, tmp_path, obj, [self._credit(1200.00)])
 

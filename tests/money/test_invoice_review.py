@@ -342,10 +342,31 @@ def test_valid_entity_is_validated_once_across_invoices_and_settlement(scenario)
     from istota.money.invoice_review import validate_payment_detection
 
     ctx, call, _ = scenario
-    _set_entry(ctx.data_dir, 1, qty=4)
+    with db.get_db(ctx.db_path) as conn:
+        conn.execute("UPDATE invoices SET total = 600 WHERE number = 'INV-000002'")
     helper = SyncFixtures()
     with patch("istota.money.invoice_review.validate_payment_detection",
                wraps=validate_payment_detection) as validate:
         helper._sync(CliRunner(), ctx.data_dir, ctx, [helper._credit(1200), helper._credit(600)])
     assert validate.call_count == 1
     assert len(call("invoice", "matches")["matches"]) == 2
+
+
+def test_matching_uses_the_stored_total_after_a_rate_change(scenario):
+    """An issued invoice's amount is its stored snapshot, not today's rates."""
+    from istota.money import config_store
+    from istota.money.invoice_review import open_invoices
+
+    ctx, call, sync = scenario
+    config = config_store.load_invoicing(ctx.db_path)
+    config.services["dev"].rate = 200.0
+    config_store.save_invoicing(ctx.db_path, config)
+
+    totals = {i.number: i.total for i in open_invoices(config, ctx.data_dir)}
+    assert totals == {"INV-000001": 1200.0, "INV-000002": 1200.0}
+
+    sync()
+    row = call("invoice", "review", "list")["matches"][0]
+    assert [c["total"] for c in row["candidate_details"]] == [1200.0, 1200.0]
+    call("invoice", "review", "settle", row["ledger_txn_id"], "--invoice", "INV-000001")
+    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000001")[0].paid_date is not None

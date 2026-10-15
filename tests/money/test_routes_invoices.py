@@ -197,6 +197,9 @@ class TestInvoicePaymentMatches:
             mark_paid(tmp_path, f"INV-{index:06d}", "2026-04-15")
         client = make_client(config)
         with money_db.get_db(tmp_path / "data" / "money.db") as conn:
+            # The config is a TOML file the store does not read, so a hand
+            # assignment stored no total; matching reads the stored one.
+            conn.execute("UPDATE invoices SET total = 1200")
             for index, status, decided_by in [(2, "settled", "auto"), (3, "settled", "user"), (4, "reverted", "auto")]:
                 money_db.record_payment_match(
                     conn, ledger_txn_id=str(index) * 32, txn_date="2026-04-15",

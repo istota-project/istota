@@ -60,8 +60,12 @@ def validate_payment_detection(company, ledgers, *, previous=None):
     return _ledger_scope_name(ledger, ledgers)
 
 
-def open_invoice(config, number, entries, *, automatic=False, ledgers=(), detection_cache=None):
-    """Build a matchable invoice from a live work snapshot."""
+def open_invoice(config, number, entries, *, total, automatic=False, ledgers=(), detection_cache=None):
+    """Build a matchable invoice from a live work snapshot.
+
+    ``total`` is the invoice's stored total, what it billed when issued; the
+    entries only decide whether it is still open and eligible.
+    """
     if not entries or any(e.paid_date is not None for e in entries):
         return None
     items = build_line_items(entries, config.services)
@@ -91,7 +95,7 @@ def open_invoice(config, number, entries, *, automatic=False, ledgers=(), detect
     return OpenInvoice(
         number=number, client=entries[0].client,
         date=work.invoice_issue_date(entries),
-        total=sum(item.amount for item in items),
+        total=total,
         bank_account=resolve_bank_account(entity, config),
         ledger=ledger, income_account=entity.payment_detection_income_account,
     )
@@ -101,10 +105,11 @@ def open_invoices(config, data_dir, *, automatic=False, ledgers=(), detection_ca
     invoices = []
     if detection_cache is None:
         detection_cache = {}
-    for number in work.get_invoice_numbers(data_dir):
+    for record in work.list_invoices(data_dir, include_voided=False):
         invoice = open_invoice(
-            config, number, work.get_entries_for_invoice(data_dir, number),
-            automatic=automatic, ledgers=ledgers, detection_cache=detection_cache,
+            config, record.number, work.get_entries_for_invoice(data_dir, record.number),
+            total=record.total, automatic=automatic, ledgers=ledgers,
+            detection_cache=detection_cache,
         )
         if invoice is not None:
             invoices.append(invoice)
@@ -136,9 +141,15 @@ def settle_payment_review(db_path, data_dir, config, ledger_txn_id, invoice_numb
         if row["invoice_number"] and row["invoice_number"] != invoice_number:
             raise ValueError("Payment review already chose another invoice; retry that invoice")
 
+        record = work.get_invoice(data_dir, invoice_number, conn=conn)
+        if record is None:
+            raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
+        stored_total = record.total
+
         if not row["invoice_number"]:
             live = open_invoice(config, invoice_number,
-                                work.get_entries_for_invoice(data_dir, invoice_number, conn=conn))
+                                work.get_entries_for_invoice(data_dir, invoice_number, conn=conn),
+                                total=stored_total)
             if live is None or not row["account"] or live.bank_account != row["account"]:
                 raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
             if not db.claim_review(conn, ledger_txn_id, invoice_number):
@@ -158,11 +169,12 @@ def settle_payment_review(db_path, data_dir, config, ledger_txn_id, invoice_numb
             # Only this durably chosen invoice can reconcile a completed work write.
             if entries and all(e.paid_date == paid_date for e in entries):
                 live = open_invoice(config, invoice_number,
-                                    [replace(e, paid_date=None) for e in entries])
+                                    [replace(e, paid_date=None) for e in entries],
+                                    total=stored_total)
                 if live is not None and row["account"] and live.bank_account == row["account"]:
                     already_paid = len(entries)
                 return False
-            live = open_invoice(config, invoice_number, entries)
+            live = open_invoice(config, invoice_number, entries, total=stored_total)
             return live is not None and bool(row["account"]) and live.bank_account == row["account"]
 
         count = work.mark_paid(
