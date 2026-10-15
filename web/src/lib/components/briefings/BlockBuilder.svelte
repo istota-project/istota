@@ -275,21 +275,23 @@
       {/each}
     </ol>
   {/if}
-  <Button
-    variant="secondary"
-    onclick={() => {
-      previewing = true;
-    }}
-    disabled={busy}>Preview</Button
-  >
-  <Button
-    variant="secondary"
-    onclick={() => {
-      search = '';
-      picking = true;
-    }}
-    disabled={busy}>Add block</Button
-  >
+  <div class="builder-actions">
+    <Button
+      variant="secondary"
+      onclick={() => {
+        previewing = true;
+      }}
+      disabled={busy}>Preview</Button
+    >
+    <Button
+      variant="secondary"
+      onclick={() => {
+        search = '';
+        picking = true;
+      }}
+      disabled={busy}>Add block</Button
+    >
+  </div>
 </div>
 
 {#if picking}
@@ -384,6 +386,12 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+  .builder-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: var(--space-2);
   }
   .block-list,
   .preset-list {

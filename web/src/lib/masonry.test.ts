@@ -50,6 +50,28 @@ describe('masonry placement', () => {
     expect(layoutMasonry([card(226), card(253)], 2, 16).map((p) => p.height)).toEqual([300, 300]);
     expect(layoutMasonry([card(151), card(249)], 2, 16).map((p) => p.height)).toEqual([200, 250]);
   });
+  it('fills a small gap before a spanning block when neighboring cards start at different heights', () => {
+    const placed = layoutMasonry(
+      [card(400, 'wide'), card(200), card(350), card(200, 'wide'), card(100, 'full')],
+      3,
+      16,
+    );
+    const tasks = placed[2];
+    const newsletters = placed[3];
+    expect(tasks.top).not.toBe(newsletters.top);
+    expect(tasks.top + tasks.height).toBe(newsletters.top + newsletters.height);
+    expect(tasks.height).toBe(400);
+    expect(placed[4].top).toBe(newsletters.top + newsletters.height + 16);
+  });
+  it('does not stretch across an intervening card or a gap larger than one step', () => {
+    const placed = layoutMasonry(
+      [card(400, 'wide'), card(100), card(100), card(100, 'full')],
+      3,
+      16,
+    );
+    expect(placed[1].height).toBe(100);
+    expect(placed[2].height).toBe(100);
+  });
   it('handles an empty edition', () => {
     expect(layoutMasonry([], 2, 16)).toEqual([]);
   });

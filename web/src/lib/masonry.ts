@@ -62,6 +62,18 @@ export function layoutMasonry(
       bottoms[c] = next.top + placement.height + gap;
   }
   settle();
+  // Fill small holes below a card without moving any cards or crossing one.
+  // Different starting heights mean the common bottom need not be a step multiple.
+  for (let i = 0; i < placed.length; i++) {
+    const item = placed[i];
+    let nextTop = Infinity;
+    for (const next of placed.slice(i + 1)) {
+      if (next.column < item.column + item.span && next.column + next.span > item.column)
+        nextTop = Math.min(nextTop, next.top);
+    }
+    const extra = nextTop - gap - (item.top + item.height);
+    if (extra > 0 && extra <= heightStep) item.height += extra;
+  }
   return placed;
 }
 

@@ -88,7 +88,7 @@
   <title>Briefings</title>
 </svelte:head>
 
-<div class="reader">
+<div class="content-frame reader">
   {#if loading}
     <PageLoading />
   {:else if error}

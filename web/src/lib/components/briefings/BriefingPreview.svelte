@@ -180,6 +180,9 @@
     gap: var(--space-4);
     min-width: 0;
   }
+  .preview :global(.briefing-block) {
+    background: var(--surface-base);
+  }
   p {
     margin: 0;
   }
