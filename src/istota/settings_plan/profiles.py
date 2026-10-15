@@ -54,15 +54,25 @@ def _profile_state(conn, user):
     })
 
 
-def validate_destination(conn, config, user, descriptor, *, channels=()):
-    """Check destination grammar and room reach without network or store writes."""
+def validate_destination(conn, config, user, descriptor, *, channels=(), stored=False):
+    """Check destination grammar and room reach without network or store writes.
+
+    `stored` is a value the plan does not change. Only the shared-room refusal
+    applies to it: a destination that stopped being reachable must not block an
+    install's own snapshot, and delivery reports it, but personal content is
+    never routed into a shared room, whoever wrote the route.
+    """
     destinations = parse_output_target(descriptor)
     if not destinations:
+        if stored:
+            return
         raise ValueError("invalid destination")
     known = {"talk", "email", "ntfy", "istota_file", "stream", "room"} | set(make_registry(config).names())
     talk_refs = db.talk_refs_for_member(conn, user)
     for destination in destinations:
         if destination.surface not in known:
+            if stored:
+                continue
             raise ValueError("unknown surface")
         token = destination.channel
         if not token or destination.surface not in {"talk", "web", "room"}:
@@ -70,19 +80,23 @@ def validate_destination(conn, config, user, descriptor, *, channels=()):
         room_token = token
         if destination.surface == "talk":
             room_token = db.resolve_room_token(conn, "talk", token)
-            if token not in talk_refs.values() and token not in channels:
+            if token not in talk_refs.values() and token not in channels and not stored:
                 raise ValueError("unavailable conversation")
             if room_token is None:
                 room_token = token if db.get_room(conn, token) else None
         if room_token:
             room = db.get_room(conn, room_token)
             if room is None or room.archived or not db.is_room_member(conn, room_token, user):
+                if stored:
+                    continue
                 raise ValueError("unavailable room")
             if db.room_is_shared(conn, room_token):
                 raise ValueError("shared destination")
 
 
 def _validate_profile(conn, config, user, fields, existing):
+    """A destination the plan leaves as stored is checked as `stored`
+    (see validate_destination)."""
     from istota.skills._loader import load_skill_index
 
     for name, value in fields.items():
@@ -100,13 +114,18 @@ def _validate_profile(conn, config, user, fields, existing):
                 if existing is None or value != getattr(existing, name):
                     validate_destination(conn, config, user, "talk:" + value)
             elif name == "default_room" and value:
-                validate_destination(conn, config, user, "web:" + value.strip())
+                stored = existing is not None and value == existing.default_room
+                validate_destination(conn, config, user, "web:" + value.strip(), stored=stored)
             elif name in {"default_destination", "routing"}:
                 channels = (existing.log_channel, existing.alerts_channel) if existing else ()
-                descriptors = value.values() if name == "routing" else [value or "talk"]
-                for descriptor in descriptors:
+                if name == "routing":
+                    before = existing.routing if existing else {}
+                    descriptors = [(d, existing is not None and before.get(purpose) == d) for purpose, d in value.items()]
+                else:
+                    descriptors = [(value or "talk", existing is not None and value == existing.default_destination)]
+                for descriptor, stored in descriptors:
                     if descriptor:
-                        validate_destination(conn, config, user, descriptor, channels=channels)
+                        validate_destination(conn, config, user, descriptor, channels=channels, stored=stored)
         except (ValueError, ZoneInfoNotFoundError):
             raise ExecutionError("validation_error", ["users", user, "profile", name]) from None
 

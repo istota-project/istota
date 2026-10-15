@@ -84,7 +84,10 @@ def _is_admin(conn, config, user):
     return is_admin_with_stored_users(config, user, stored_user_ids(conn))
 
 
-def _validate_cron(conn, config, user, job, path):
+def _validate_cron(conn, config, user, job, path, previous=None):
+    """`previous` is the stored job's definition; a destination it already
+    holds is checked as `stored` (see profiles.validate_destination)."""
+    previous = previous or {}
     if not croniter.is_valid(job.cron):
         raise ExecutionError("validation_error", [*path, "cron"])
     is_admin = _is_admin(conn, config, user)
@@ -104,14 +107,14 @@ def _validate_cron(conn, config, user, job, path):
         # a valid email destination. Explicit none is a valid no-delivery job.
         for leaf in job.target.split(","):
             if leaf.strip() and leaf.strip().lower() != "none":
-                validate_destination(conn, config, user, leaf)
+                validate_destination(conn, config, user, leaf, stored=job.target == previous.get("target"))
     except ValueError:
         raise ExecutionError("validation_error", [*path, "target"]) from None
     if job.room:
         # A cron room may be a legacy Talk binding or a canonical room token.
         token = db.resolve_room_token(conn, "talk", job.room) or job.room
         try:
-            validate_destination(conn, config, user, "room:" + token)
+            validate_destination(conn, config, user, "room:" + token, stored=job.room == previous.get("room"))
         except ValueError:
             raise ExecutionError("validation_error", [*path, "room"]) from None
     for destination in parse_output_target(job.target):
@@ -179,7 +182,7 @@ def plan_cron(plan, user, context, options):
                                        for job in db.get_user_scheduled_jobs(conn, user)):
                 raise ExecutionError("cron_file_migration_required", field_path)
             for index, job in enumerate(parsed.jobs):
-                _validate_cron(conn, config, user, job, [*field_path, index])
+                _validate_cron(conn, config, user, job, [*field_path, index], existing.get(job.name))
     except (sqlite3.Error, OSError):
         raise ExecutionError("cron_store_unavailable", field_path) from None
     operations = []
@@ -211,7 +214,7 @@ def plan_cron(plan, user, context, options):
                 conn.row_factory = sqlite3.Row
                 conn.execute("BEGIN")
                 for index, job in enumerate(current.jobs):
-                    _validate_cron(conn, current_config, user, job, [*field_path, index])
+                    _validate_cron(conn, current_config, user, job, [*field_path, index], existing.get(job.name))
         except (ExecutionError, OSError):
             raise ExecutionError("state_changed", field_path) from None
 
@@ -296,17 +299,21 @@ def snapshot_heartbeat(config, user):
     return definition, text_files.revision(content)
 
 
-def _validate_heartbeat_reach(config, user, definition):
+def _validate_heartbeat_reach(config, user, definition, before=None):
+    """`before` is the stored file's definition; a destination it already
+    holds is checked as `stored` (see profiles.validate_destination)."""
     from istota.sandbox.host_paths import owner_path_parts
 
     field_path = ["users", user, "heartbeat"]
+    stored_token = before["settings"]["conversation_token"] if before else None
+    stored_channels = {item["name"]: item["channel"] for item in before["checks"]} if before else {}
     try:
         with closing(connect_read_only(config.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
             token = definition["settings"]["conversation_token"]
             if token:
-                validate_destination(conn, config, user, "talk:" + token)
+                validate_destination(conn, config, user, "talk:" + token, stored=token == stored_token)
             for index, check in enumerate(definition["checks"]):
                 path = [*field_path, "checks", index]
                 if check["type"] in {"shell-command", "url-health"} and not _is_admin(conn, config, user):
@@ -314,7 +321,8 @@ def _validate_heartbeat_reach(config, user, definition):
                 if check["type"] == "file-watch" and owner_path_parts(check["path"], user) is None:
                     raise ExecutionError("validation_error", [*path, "path"])
                 if check["channel"]:
-                    validate_destination(conn, config, user, check["channel"])
+                    validate_destination(conn, config, user, check["channel"],
+                                         stored=check["channel"] == stored_channels.get(check["name"]))
     except ValueError:
         raise ExecutionError("validation_error", field_path) from None
     except (sqlite3.Error, OSError):
@@ -343,7 +351,7 @@ def plan_heartbeat(plan, user, context, options):
         desired[identity] = merged
     candidate = "```toml\n" + toml_write.dumps({"settings": settings, "checks": list(desired.values())}) + "```\n"
     _, _, after = _heartbeat_document(candidate, user)
-    _validate_heartbeat_reach(config, user, after)
+    _validate_heartbeat_reach(config, user, after, before)
     operations = []
     if before["settings"] != after["settings"]:
         changes = [{"path": [name], "before": before["settings"][name], "after": value}
@@ -373,7 +381,7 @@ def plan_heartbeat(plan, user, context, options):
     def validate():
         try:
             current_config = replace(config, admin_users=load_admin_users())
-            _validate_heartbeat_reach(current_config, user, after)
+            _validate_heartbeat_reach(current_config, user, after, before)
         except (ExecutionError, OSError):
             raise ExecutionError("state_changed", field_path) from None
 

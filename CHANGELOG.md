@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Applying an install's own snapshot no longer fails with `validation_error` on a route, briefing output, scheduled job target or heartbeat channel that was saved earlier and no longer passes the destination check, such as a Talk conversation the user has left. A destination the plan leaves unchanged is still refused when it points into a shared room.
 - `istota snapshot` names where a `HEARTBEAT.md` it cannot export is wrong, such as `users.alice.heartbeat.checks.0.config`, instead of only the file. It still prints no values.
 - The heartbeat examples no longer show a `[checks.config]` table or a `source` field on task-deadline checks. Neither was ever read, so a self-check's `execution_test` written that way had no effect, and a file copied from them could not be exported by `istota snapshot`. Put a check's settings directly under its `[[checks]]` entry.
 - A timed location share or a card purchase asked for in a WhatsApp group no longer fails with `invalid_preview` when you have a private WhatsApp chat with the bot. The approval now reaches that chat as expected.

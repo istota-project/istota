@@ -423,3 +423,71 @@ def test_the_ansible_format_is_a_group_vars_file_the_role_applies_as_no_change(i
     assert code in (0, 2), result + stderr
     operations = json.loads(result)["operations"]
     assert all(item["section"] == "config" for item in operations), operations
+
+
+def _stale_destinations(install):
+    """One destination per adapter that today's check refuses: a Talk
+    conversation alice is not in, stored before the check could see it."""
+    path, config = install
+    stale = "talk:gone-conversation"
+    user_profiles.update_profile(config.db_path, "alice", routing={"briefing": stale})
+    user_briefings.ensure_briefing(config.db_path, user_id="alice", name="evening",
+                                  cron="0 19 * * *", output=stale)
+    folder = resolve_user_config_dir(config, "alice")
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "CRON.md").write_text(
+        f'```toml\n[[jobs]]\nname="daily"\ncron="0 9 * * *"\nprompt="Review"\ntarget="{stale}"\n```\n')
+    (folder / "HEARTBEAT.md").write_text(
+        f'```toml\n[[checks]]\nname="inbox"\ntype="self-check"\nchannel="{stale}"\n```\n')
+    return path
+
+
+def test_a_snapshot_applies_back_over_destinations_todays_check_refuses(install, tmp_path, monkeypatch, capsys):
+    """Applying an install's own snapshot changes nothing, so it must not be
+    refused for a stored destination it does not touch."""
+    path = _stale_destinations(install)
+    code, stdout, stderr = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
+    assert code == 0, stderr
+    plan = tmp_path / "settings.json"
+    plan.write_text(stdout)
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
+    assert code == 0, result + stderr
+    assert json.loads(result)["operations"] == []
+
+
+@pytest.mark.parametrize("where", ["routing", "briefing", "cron", "heartbeat"])
+def test_a_changed_destination_is_still_checked(install, tmp_path, monkeypatch, capsys, where):
+    path = _stale_destinations(install)
+    code, stdout, _ = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
+    document = json.loads(stdout)
+    alice = document["users"]["alice"]
+    other = "talk:another-gone-conversation"
+    if where == "routing":
+        alice["profile"]["routing"]["briefing"] = other
+    elif where == "briefing":
+        next(item for item in alice["briefings"] if item["name"] == "evening")["output"] = other
+    elif where == "cron":
+        alice["scheduled_jobs"][0]["target"] = other
+    else:
+        alice["heartbeat"]["checks"][0]["channel"] = other
+    plan = tmp_path / "settings.json"
+    plan.write_text(json.dumps(document))
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
+    assert code == 1, result + stderr
+    assert json.loads(result)["errors"][0]["code"] == "validation_error"
+
+
+def test_a_stored_destination_in_a_shared_room_still_refuses_a_round_trip(install, tmp_path, monkeypatch, capsys):
+    """Only reach is waived for an unchanged destination: a shared room is never
+    a destination for personal content, whoever wrote the route."""
+    path, config = install
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, "private-alice", "alice", origin="web")
+        db.add_room_member(conn, "private-alice", "bob")
+    user_profiles.update_profile(config.db_path, "alice", routing={"briefing": "room:private-alice"})
+    code, stdout, _ = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
+    plan = tmp_path / "settings.json"
+    plan.write_text(stdout)
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
+    assert code == 1, result + stderr
+    assert json.loads(result)["errors"][0]["path"] == ["users", "alice", "profile", "routing"]

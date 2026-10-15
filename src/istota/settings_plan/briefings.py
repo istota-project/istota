@@ -39,11 +39,15 @@ def _schedule_digest(conn, user):
                           "components": row.components} for row in rows])
 
 
-def _validate_schedule(conn, config, user, definition, path):
+def _validate_schedule(conn, config, user, definition, path, previous=None):
+    """`previous` is the stored definition; a destination it already holds is
+    checked as `stored` (see profiles.validate_destination)."""
     if not croniter.is_valid(definition["cron"]):
         raise ExecutionError("validation_error", [*path, "cron"])
+    previous = previous or {}
     try:
-        validate_destination(conn, config, user, definition["output"])
+        validate_destination(conn, config, user, definition["output"],
+                             stored=definition["output"] == previous.get("output"))
     except ValueError:
         raise ExecutionError("validation_error", [*path, "output"]) from None
     token = definition["conversation_token"]
@@ -53,7 +57,8 @@ def _validate_schedule(conn, config, user, definition, path):
         raise ExecutionError("validation_error", [*path, "conversation_token"])
     if token:
         try:
-            validate_destination(conn, config, user, "talk:" + token)
+            validate_destination(conn, config, user, "talk:" + token,
+                                 stored=token == previous.get("conversation_token"))
         except ValueError:
             raise ExecutionError("validation_error", [*path, "conversation_token"]) from None
 
@@ -91,7 +96,7 @@ def plan_schedules(plan, user, context, options):
                 if previous is None:
                     merged["enabled"] = True
                 merged.update({name: deepcopy(value) for name, value in declaration.items() if name != "blocks"})
-                _validate_schedule(conn, config, user, merged, [*path, index])
+                _validate_schedule(conn, config, user, merged, [*path, index], previous)
                 desired[identity] = merged
                 if previous == merged:
                     continue
@@ -124,7 +129,7 @@ def plan_schedules(plan, user, context, options):
             else:
                 definition = desired[identity]
                 try:
-                    _validate_schedule(conn, config, user, definition, path)
+                    _validate_schedule(conn, config, user, definition, path, existing.get(identity))
                 except ExecutionError:
                     raise ExecutionError("state_changed", path) from None
                 previous = user_briefings.get_briefing(config.db_path, user, identity, conn=conn)
