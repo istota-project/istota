@@ -3,6 +3,8 @@ import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-li
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
 import type { User } from '$lib/api';
+import { get } from 'svelte/store';
+import { currentNotice, clearNotices } from '$lib/stores/notices';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
@@ -452,4 +454,40 @@ it('mutes group briefings from Delivery, with a group-wide row that covers each 
   );
   // The briefing's own choice is untouched; the group row covers it.
   expect(api.saveGroupBriefingPreferences).not.toHaveBeenCalled();
+});
+
+it('shows an administrator hold, locks Enabled alone, and marks it in the sidebar', async () => {
+  saved.held = { at: '2026-10-15T09:00:00Z', by_label: 'Rosa Admin' };
+  // `base` is '' under vitest; the sidebar shows settings only on that path.
+  visit('/briefings/settings/?group=research&briefing=news');
+  render(Harness, { layout: Layout, component: Page, user: alice });
+  await screen.findByRole('heading', { name: 'News' });
+  expect(
+    screen.getByText('Paused by an administrator', { selector: '*:not([title])' }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText('This briefing will not run until an administrator resumes it.'),
+  ).toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: /^Enabled/ })).toBeDisabled();
+  expect(screen.getByRole('textbox', { name: /^Title/ })).toBeEnabled();
+  expect(await screen.findByTitle('Paused by an administrator')).toBeInTheDocument();
+  expect(screen.queryByTitle('Draft')).toBeNull();
+});
+
+it('reports a refused enable while held as a failed action, not lost access', async () => {
+  clearNotices();
+  await openEditor();
+  api.saveGroupBriefing.mockRejectedValue(
+    Object.assign(new Error('An administrator has paused this briefing'), { status: 409 }),
+  );
+  await fireEvent.click(screen.getByRole('checkbox', { name: /^Enabled/ }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(get(currentNotice)).toMatchObject({
+      message: 'An administrator has paused this briefing',
+      severity: 'error',
+    }),
+  );
+  expect(screen.queryByText('You can no longer edit this briefing')).toBeNull();
+  clearNotices();
 });

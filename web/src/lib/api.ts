@@ -6440,6 +6440,9 @@ export interface GroupBriefingDefinition {
   generation?: GroupBriefingGeneration;
   capabilities: BriefingTarget['capabilities'];
   source_approvals?: BriefingSourceApproval[];
+  // Set while an administrator holds the briefing; only an administrator
+  // lifts it, and the owners cannot enable it meanwhile.
+  held?: BriefingHold | null;
 }
 export type GroupBriefingPayload = Pick<
   GroupBriefingDefinition,

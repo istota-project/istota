@@ -364,3 +364,27 @@ async def test_group_editions_feed_lists_only_readable_published_editions(client
     session(client, configured, "admin")
     assert (await client.get(BASE + "/briefings/group-editions")).json() == {"items": [], "total": 0}
 
+
+
+async def test_definition_reports_an_admin_hold_by_name_and_refuses_enabling(client, configured):
+    definition = await create(client)
+    assert (await client.get(ROOT + "/daily")).json()["held"] is None
+    config = configured._config
+    with db.get_db(config.db_path) as conn:
+        store.set_hold(conn, config, definition["id"], admin_id="admin")
+    owner = (await client.get(ROOT + "/daily")).json()
+    assert owner["held"]["at"] and owner["held"]["by_label"] == "Admin"
+    assert not {"admin_hold_at", "admin_hold_by"} & owner.keys()
+    assert (await client.get(ROOT)).json()["items"][0]["held"]["by_label"] == "Admin"
+    enable = await client.put(ROOT + "/daily", json={**payload(channel="in_app"), "revision": owner["revision"]})
+    assert enable.status_code == 409 and enable.json()["error"] == "definition_held"
+    saved = await client.put(ROOT + "/daily", json={**payload(enabled=False, channel="in_app", title="Renamed"),
+                                                    "revision": owner["revision"]})
+    assert saved.status_code == 200 and saved.json()["held"]["by_label"] == "Admin"
+    session(client, configured, "bob")
+    member = (await client.get(ROOT + "/daily")).json()
+    assert member["held"]["by_label"] == "Admin" and "admin_hold_by" not in member
+    with db.get_db(config.db_path) as conn:
+        store.clear_hold(conn, config, definition["id"])
+        store.set_hold(conn, config, definition["id"], admin_id="root@example.com")
+    assert (await client.get(ROOT + "/daily")).json()["held"]["by_label"] == "an administrator"

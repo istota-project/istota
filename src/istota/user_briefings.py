@@ -241,6 +241,18 @@ def ensure_briefing(
     return fresh, state
 
 
+def hold_view(config, held_at: str | None, held_by: str | None) -> dict | None:
+    """An administrator's hold as an owner sees it, personal or group.
+
+    The administrator's display name, never their id, which may be an address.
+    """
+    if not held_at:
+        return None
+    profile = config.users.get(held_by) if config and held_by else None
+    label = (profile.display_name if profile else "") or "an administrator"
+    return {"at": held_at, "by_label": label}
+
+
 def require_not_held(conn: sqlite3.Connection, user_id: str, name: str) -> None:
     """Refuse to queue a run of a briefing an administrator holds.
 

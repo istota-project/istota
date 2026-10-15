@@ -611,7 +611,11 @@
                       onclick={() => (settingsSidebarOpen = false)}
                     >
                       <span class="view-name">{item.title || item.name}</span>
-                      {#if !item.enabled}<span class="view-state" title="Draft"
+                      {#if item.held}<span class="view-state" title="Paused by an administrator"
+                          ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
+                            >, paused by an administrator</span
+                          ></span
+                        >{:else if !item.enabled}<span class="view-state" title="Draft"
                           ><PencilLine size={13} aria-hidden="true" /><span class="visually-hidden"
                             >, draft</span
                           ></span

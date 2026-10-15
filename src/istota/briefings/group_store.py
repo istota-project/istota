@@ -107,6 +107,22 @@ def supersede_definition_runs(conn, definition_id):
                  (definition_id,))
 
 
+def stop_definition_work(conn, definition_id, reason):
+    """Stop a definition's unsent work; shared by disabling and an administrator's hold.
+
+    Active runs are superseded and pending or failed legs skipped with ``reason``.
+    A leg already sending keeps its state and carries the reason, which
+    ``delivery_refusal`` reads before any later part goes out.
+    """
+    supersede_definition_runs(conn, definition_id)
+    conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code=? "
+                 "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
+                 "AND state IN ('pending', 'failed')", (reason, definition_id))
+    conn.execute("UPDATE group_briefing_recipients SET error_code=? "
+                 "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
+                 "AND state='sending'", (reason, definition_id))
+
+
 def list_definitions(conn, group_id):
     return [get_definition(conn, row["id"]) for row in conn.execute(
         "SELECT id FROM group_briefing_configs WHERE group_id = ? ORDER BY name", (group_id,)
@@ -134,6 +150,8 @@ def validate_definition_save(conn, config, group_id, payload, *, actor_id, expec
         raise GroupError(409, "immutable_name", "Briefing name is fixed")
     if expected_revision != (old["revision"] if old else 0):
         raise GroupError(409, "revision_conflict", "Briefing changed; reload before saving")
+    if old and old["admin_hold_at"] and value["enabled"] and not old["enabled"]:
+        raise GroupError(409, "definition_held", "An administrator has paused this briefing")
     retained = set(old["excluded_user_ids"]) if old else set()
     if old and "excluded_user_ids" not in payload:
         value["excluded_user_ids"] = old["excluded_user_ids"]
@@ -171,7 +189,6 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                             generation_mode = ?, generation_json = ?, channel = ?, excluded_user_ids_json = ?, updated_by = ?,
                             revision = revision + 1, updated_at = datetime('now') WHERE id = ?""",
                          (*fields, definition_id))
-            supersede_definition_runs(conn, definition_id)
             for user_id in value["excluded_user_ids"]:
                 conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code='excluded' "
                              "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
@@ -179,13 +196,10 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                 conn.execute("UPDATE group_briefing_recipients SET error_code='excluded' "
                              "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
                              "AND user_id=? AND state='sending'", (definition_id, user_id))
-            if not value["enabled"]:
-                conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code='definition_disabled' "
-                             "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
-                             "AND state IN ('pending', 'failed')", (definition_id,))
-                conn.execute("UPDATE group_briefing_recipients SET error_code='definition_disabled' "
-                             "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
-                             "AND state='sending'", (definition_id,))
+            if value["enabled"]:
+                supersede_definition_runs(conn, definition_id)
+            else:
+                stop_definition_work(conn, definition_id, "definition_disabled")
         else:
             cursor = conn.execute("""INSERT INTO group_briefing_configs
                 (title, cron, timezone, enabled, generation_mode, generation_json, channel, excluded_user_ids_json, updated_by,
@@ -194,6 +208,42 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
             definition_id = cursor.lastrowid
         definition = get_definition(conn, definition_id)
         from istota.notifications.resolvers.group_briefing import sync_approvals
+        sync_approvals(conn, config, definition)
+        return definition
+
+
+def set_hold(conn, config, definition_id, *, admin_id):
+    """Hold a definition for an administrator; None for an unknown id.
+
+    Idempotent: a held definition keeps its first time and administrator and
+    its revision. Placing the hold stops unsent work as disabling does and
+    bumps the revision, so an open editor reloads rather than overwrites it.
+    The owners' ``enabled`` is not touched.
+    """
+    from istota.notifications.resolvers.group_briefing import sync_approvals
+    with _transaction(conn):
+        current = get_definition(conn, definition_id)
+        if current is None or current["admin_hold_at"] is not None:
+            return current
+        conn.execute("UPDATE group_briefing_configs SET admin_hold_at = ?, admin_hold_by = ?, "
+                     "revision = revision + 1, updated_at = datetime('now') WHERE id = ?",
+                     (_timestamp(), admin_id, definition_id))
+        stop_definition_work(conn, definition_id, "definition_held")
+        definition = get_definition(conn, definition_id)
+        sync_approvals(conn, config, definition)
+        return definition
+
+
+def clear_hold(conn, config, definition_id):
+    """Lift an administrator's hold; None for an unknown id. Idempotent."""
+    from istota.notifications.resolvers.group_briefing import sync_approvals
+    with _transaction(conn):
+        current = get_definition(conn, definition_id)
+        if current is None or current["admin_hold_at"] is None:
+            return current
+        conn.execute("UPDATE group_briefing_configs SET admin_hold_at = NULL, admin_hold_by = NULL, "
+                     "revision = revision + 1, updated_at = datetime('now') WHERE id = ?", (definition_id,))
+        definition = get_definition(conn, definition_id)
         sync_approvals(conn, config, definition)
         return definition
 
@@ -242,6 +292,8 @@ def enqueue_run(conn, config, definition_id, *, actor_id=None, is_admin=False,
             if request_id is not None and existing["request_json"] != _json(request):
                 raise GroupError(409, "request_conflict", "Request UUID was already used for another payload")
             return get_run(conn, existing["id"])
+        if mode == "publish" and definition["admin_hold_at"]:
+            raise GroupError(409, "definition_held", "An administrator has paused this briefing")
         if mode == "publish" and not definition["enabled"]:
             raise GroupError(409, "definition_disabled", "Enable the briefing before publishing")
         if definition["channel"] not in available_channels(config):
@@ -432,7 +484,7 @@ def get_recipient(conn, recipient_id):
 def delivery_refusal(conn, config, recipient):
     """Live checks for an already snapshotted member; never admit a new interval."""
     from istota.briefings.source_grants import validate_run_grants
-    if recipient["error_code"] in ("definition_disabled", "excluded"):
+    if recipient["error_code"] in ("definition_disabled", "definition_held", "excluded"):
         return recipient["error_code"]
     run = get_run(conn, recipient["run_id"])
     definition = get_definition(conn, run["definition_id"])
@@ -440,6 +492,8 @@ def delivery_refusal(conn, config, recipient):
         return "definition_unavailable"
     if not definition["enabled"]:
         return "definition_disabled"
+    if definition["admin_hold_at"]:
+        return "definition_held"
     member = conn.execute("SELECT * FROM group_members WHERE id = ? AND ended_at IS NULL",
                           (recipient["membership_id"],)).fetchone()
     user = recipient["user_id"]

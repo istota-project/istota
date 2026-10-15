@@ -387,3 +387,14 @@ def test_repeated_fall_back_hour_has_one_scheduled_occurrence(env, clock, monkey
     scheduler.check_group_briefings(env)
     with db.get_db(env.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM group_briefing_runs").fetchone()[0] == 1
+
+
+def test_scheduler_admits_no_run_for_a_held_definition(env, clock):
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env, timezone="UTC", channel="in_app")
+        store.set_hold(conn, env, definition["id"], admin_id="admin")
+    assert scheduler.check_group_briefings(env) == []
+    with db.get_db(env.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM group_briefing_runs").fetchone()[0] == 0
+        store.clear_hold(conn, env, definition["id"])
+    assert len(scheduler.check_group_briefings(env)) == 1

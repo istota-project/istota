@@ -9075,6 +9075,7 @@ def _migrate_group_briefings(conn: sqlite3.Connection) -> None:
     for statement in _GROUP_BRIEFINGS_DDL:
         conn.execute(statement)
     _add_columns(conn, "group_briefing_configs", {"excluded_user_ids_json": "TEXT NOT NULL DEFAULT '[]'"})
+    _add_columns(conn, "group_briefing_configs", {"admin_hold_at": "TEXT", "admin_hold_by": "TEXT"})
     _add_columns(conn, "group_briefing_runs", {"document_json": "TEXT"})
     _add_columns(conn, "group_briefing_recipients", {'dispatch_token': 'TEXT', 'lease_expires_at': 'TEXT', 'destination_json': 'TEXT', 'destination_locked': 'INTEGER NOT NULL DEFAULT 0'})
     conn.execute("""CREATE TABLE IF NOT EXISTS group_briefing_parts (

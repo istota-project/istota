@@ -14,6 +14,7 @@ from istota.briefings.models import GROUP_SOURCE_KINDS
 from istota.groups.policy import GroupError
 from istota.groups.routes import _payload, _run, _summary, _user
 from istota.groups.system import eligible_user_ids
+from istota.user_briefings import hold_view
 from istota.webui.router_stubs import require_auth, verify_origin
 
 router = APIRouter()
@@ -44,13 +45,17 @@ def _access(conn, config, actor, group_id, name=None, *, author=False):
     return caps, definition
 
 
-def _definition_view(definition, caps):
+def _definition_view(config, definition, caps):
     # A member reads published editions, not private instructions in a draft.
     fields = ("id", "group_id", "name", "title", "cron", "timezone", "enabled", "channel", "revision")
     result = {key: definition[key] for key in fields}
     if caps["author_briefings"]:
         result = dict(definition)
-    return {**result, "scope": "group", "capabilities": caps}
+    # The hold travels as a display name; the administrator's id stays here.
+    result.pop("admin_hold_at", None)
+    result.pop("admin_hold_by", None)
+    held = hold_view(config, definition["admin_hold_at"], definition["admin_hold_by"])
+    return {**result, "held": held, "scope": "group", "capabilities": caps}
 
 
 def _edition_view(run, *, body=False):
@@ -132,7 +137,7 @@ def _definitions(conn, config, actor, group_id, name=None):
     definitions = [definition] if definition else store.list_definitions(conn, group_id)
     items = []
     for item in definitions:
-        view = _definition_view(item, caps)
+        view = _definition_view(config, item, caps)
         view["next_run"] = (croniter(item["cron"], datetime.now(ZoneInfo(item["timezone"]))).get_next(datetime).isoformat()
                             if item["enabled"] and modules.module_available("briefings") else None)
         # Preview status is private; members see only retained published history.
@@ -156,7 +161,7 @@ def _save(conn, config, actor, group_id, payload, name=None):
     revision = value.pop("revision")
     definition = store.save_definition(conn, config, group_id, value, actor_id=actor,
         expected_revision=revision, definition_id=old["id"] if old else None, is_admin=caps["author_briefings"])
-    return _definition_view(definition, caps)
+    return _definition_view(config, definition, caps)
 
 
 def _runs(conn, config, actor, group_id, name, *, limit=20, offset=0, payload=None):

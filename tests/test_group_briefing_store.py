@@ -483,3 +483,108 @@ def test_exclusions_upgrade_existing_definition_to_empty_default(env):
         db._run_migrations(conn)
         assert store.get_definition(conn, first["id"])["excluded_user_ids"] == []
         assert store.get_definition(conn, first["id"])["revision"] == 1
+
+
+def _published_with_queued(conn, config, **changes):
+    """A published edition with pending legs (one mid-send) and a queued later run."""
+    from istota.briefings import group_store as store
+    definition = define(conn, config, **changes)
+    run = enqueue(conn, config, definition)
+    claim = store.claim_run(conn, run_id=run["id"], now=NOW)
+    store.publish_run(conn, config, run["id"], claim["attempt_token"], subject="News", body_md="Common", now=NOW)
+    conn.execute("UPDATE group_briefing_recipients SET state='sending' WHERE run_id=? AND user_id='bob' "
+                 "AND channel='email'", (run["id"],))
+    conn.commit()
+    queued = enqueue(conn, config, store.get_definition(conn, definition["id"]))
+    return store.get_definition(conn, definition["id"]), run, queued
+
+
+def _ledger(conn, run_id):
+    from istota.briefings import group_store as store
+    return {(r["user_id"], r["channel"]): (r["state"], r["error_code"]) for r in store.list_recipients(conn, run_id)}
+
+
+def test_hold_stops_the_same_work_as_disabling(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        disabled, disabled_run, disabled_queued = _published_with_queued(conn, env)
+        store.save_definition(conn, env, "team", payload(enabled=False), definition_id=disabled["id"],
+                              actor_id="alice", expected_revision=disabled["revision"])
+        held, held_run, held_queued = _published_with_queued(conn, env, name="weekly")
+        after = store.set_hold(conn, env, held["id"], admin_id="admin")
+        assert after["admin_hold_at"] and after["admin_hold_by"] == "admin"
+        assert after["enabled"] is True and after["revision"] == held["revision"] + 1
+        swap = {"definition_disabled": "definition_held"}
+        expected = {key: (state, swap.get(code, code)) for key, (state, code) in _ledger(conn, disabled_run["id"]).items()}
+        assert _ledger(conn, held_run["id"]) == expected
+        assert expected[("alice", "in_app")] == ("skipped", "definition_held")
+        assert expected[("bob", "email")] == ("sending", "definition_held")
+        for queued in (disabled_queued, held_queued):
+            assert store.get_run(conn, queued["id"])["state"] == "superseded"
+        sending = next(r for r in store.list_recipients(conn, held_run["id"]) if r["state"] == "sending")
+        assert store.delivery_refusal(conn, env, sending) == "definition_held"
+
+
+def test_hold_and_resume_are_idempotent_and_keep_the_owner_choice(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env)
+        assert store.set_hold(conn, env, 9999, admin_id="admin") is None
+        assert store.clear_hold(conn, env, 9999) is None
+        first = store.set_hold(conn, env, definition["id"], admin_id="admin")
+        again = store.set_hold(conn, env, definition["id"], admin_id="other-admin")
+        assert (again["admin_hold_at"], again["admin_hold_by"], again["revision"]) == (
+            first["admin_hold_at"], "admin", first["revision"])
+        resumed = store.clear_hold(conn, env, definition["id"])
+        assert resumed["admin_hold_at"] is None and resumed["admin_hold_by"] is None
+        assert resumed["enabled"] is True and resumed["revision"] == first["revision"] + 1
+        assert store.clear_hold(conn, env, definition["id"])["revision"] == resumed["revision"]
+        assert store.enqueue_run(conn, env, definition["id"], due_at=NOW, now=NOW)["state"] == "queued"
+
+
+def test_held_definition_admits_no_publish_run_but_previews(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env)
+        store.set_hold(conn, env, definition["id"], admin_id="admin")
+        for kwargs in ({"due_at": NOW}, {"actor_id": "alice", "request_id": str(uuid4())}):
+            with pytest.raises(GroupError) as exc:
+                store.enqueue_run(conn, env, definition["id"], now=NOW, **kwargs)
+            assert (exc.value.status_code, exc.value.code) == (409, "definition_held")
+        assert enqueue(conn, env, definition, mode="preview")["mode"] == "preview"
+
+
+def test_owner_may_edit_or_disable_a_held_definition_but_not_enable_it(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env, enabled=False)
+        held = store.set_hold(conn, env, definition["id"], admin_id="admin")
+        with pytest.raises(GroupError) as exc:
+            store.save_definition(conn, env, "team", payload(enabled=True), definition_id=definition["id"],
+                                  actor_id="alice", expected_revision=held["revision"])
+        assert (exc.value.status_code, exc.value.code) == (409, "definition_held")
+        edited = store.save_definition(conn, env, "team", payload(enabled=False, title="Renamed"),
+                                       definition_id=definition["id"], actor_id="alice",
+                                       expected_revision=held["revision"])
+        assert edited["title"] == "Renamed" and edited["admin_hold_at"] == held["admin_hold_at"]
+        enabled = define(conn, env, name="weekly")
+        held = store.set_hold(conn, env, enabled["id"], admin_id="admin")
+        kept = store.save_definition(conn, env, "team", payload(name="weekly", title="Still on"),
+                                     definition_id=enabled["id"], actor_id="alice",
+                                     expected_revision=held["revision"])
+        assert kept["enabled"] is True and kept["admin_hold_at"]
+        off = store.save_definition(conn, env, "team", payload(name="weekly", enabled=False),
+                                    definition_id=enabled["id"], actor_id="alice",
+                                    expected_revision=kept["revision"])
+        assert off["enabled"] is False and off["admin_hold_by"] == "admin"
+
+
+def test_a_stale_editor_cannot_overwrite_a_hold(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env)
+        store.set_hold(conn, env, definition["id"], admin_id="admin")
+        with pytest.raises(GroupError) as exc:
+            store.save_definition(conn, env, "team", payload(title="Stale"), definition_id=definition["id"],
+                                  actor_id="alice", expected_revision=definition["revision"])
+        assert exc.value.code == "revision_conflict"

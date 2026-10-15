@@ -2493,6 +2493,8 @@ CREATE TABLE IF NOT EXISTS group_briefing_configs (
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         excluded_user_ids_json TEXT NOT NULL DEFAULT '[]',
+        admin_hold_at TEXT,             -- set = held by an administrator, does not run
+        admin_hold_by TEXT,             -- the administrator's user id
         UNIQUE(group_id, name)
     );
 

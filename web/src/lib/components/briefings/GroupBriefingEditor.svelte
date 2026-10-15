@@ -124,6 +124,7 @@
   // A former owner keeps their draft on screen, locked, rather than losing it.
   const showsDefinition = $derived(!!saved?.capabilities.author_briefings);
   const canGenerate = $derived(author && saved?.capabilities.generate_briefings !== false);
+  const held = $derived(!!saved?.held);
   const allUsers = $derived(target?.system_key === 'all_users');
   const groupLabel = $derived(target?.label ?? group);
   const SOURCE_KINDS = [
@@ -543,6 +544,11 @@
 
   {#if showsDefinition}
     <SettingsCard title="Schedule and delivery">
+      {#if held}
+        <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
+          This briefing will not run until an administrator resumes it.
+        </NoticeBanner>
+      {/if}
       <fieldset class="fields" disabled={busy || accessLost}>
         <SettingsField label="Title" hint="Shown on every edition, followed by its date.">
           <Input bind:value={title} placeholder={derivedTitle(name)} />
@@ -596,7 +602,7 @@
           hint="When on, each scheduled run publishes an edition and sends it to members."
           warning={enabled && blocker ? blocker : undefined}
         >
-          <input type="checkbox" bind:checked={enabled} />
+          <input type="checkbox" bind:checked={enabled} disabled={held} />
         </SettingsField>
       </fieldset>
     </SettingsCard>
