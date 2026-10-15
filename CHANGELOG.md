@@ -10,9 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `istota snapshot --format ansible` writes the settings as a `group_vars` file for the Ansible management role, so a snapshot goes into an inventory as it is: `istota snapshot --format ansible | ansible-vault encrypt --output FILE -`.
+- **Invoicing from the web.** The Invoices page can generate invoices after a preview, create a manual invoice, void an invoice and preview its PDF in the file viewer, and a work entry's menu has Generate invoice. No email is sent to clients.
+- **Bill one piece of work on its own.** A work entry marked Invoice separately always gets an invoice of its own, and `invoice generate --entry UID` bills exactly the entries you name.
+- **Voided invoices stay on record.** A void keeps the invoice's total, the work it covered, a reason and the invoices that replace it, and the voided invoice still shows in the invoice list. Its PDF is kept with a `-VOID` suffix unless you ask for it to be deleted, and its number is never reused.
 
 ### Changed
 
+- **The work log and invoices moved into the money database.** Each invoice now has a record with the total it was issued at, so a later rate change no longer alters past invoices, and generating, voiding and paying each happen in one step that cannot be left half done. An invoice is paid as a whole; payment is no longer recorded per work entry. See `docs/features/money.md`.
+  **Upgrade note:** the yearly `invoices/work/{year}.toml` files are imported the first time the work log is used and then renamed `{year}.toml.migrated`; edits to them no longer do anything. If the import refuses (an unreadable file, an entry with no uid, a duplicated uid, or one invoice's entries disagreeing on the paid date), work and invoice commands fail with `work log migration blocked` until an operator fixes it and runs `istota money work migrate -u USER`. A number voided before the upgrade stays a gap.
+- `invoice generate --period` help now says what it does: it bills unbilled work dated on or before the end of that month, earlier months included.
 - The Ansible management role takes the application settings only as `istota_plan`, with credentials in `istota_plan_secrets`. `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets` are gone, and so is the generated config reference in `defaults/main.yml`; set the plan from `istota snapshot --format json`. `istota migrate role-vars` now writes the old per-user credentials as `istota_plan_secrets` and leaves the plan to the VM's snapshot.
 - `[security] vault_fetch_limit_per_task` now counts distinct credentials rather than reads. A credential already served in a task attempt can be read again at no cost, so a WordPress session no longer runs out after ten calls against one site. A name not yet served, whether absent or refused, is still charged every time, and setting the limit to `1` limits a task to one credential.
 
