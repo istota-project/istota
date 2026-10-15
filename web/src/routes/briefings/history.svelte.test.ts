@@ -315,6 +315,67 @@ describe('briefing selection history', () => {
 });
 
 describe('edition reader transitions', () => {
+  it('keeps the initial archive pending in both panes', async () => {
+    let finish!: (value: ReturnType<typeof archive>) => void;
+    vi.mocked(getBriefingArchive).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+    await waitFor(() => expect(getBriefingArchive).toHaveBeenCalled());
+    expect(screen.queryByText(/No briefings yet/)).toBeNull();
+    finish(archive());
+    await screen.findByRole('heading', { name: 'Evening news' });
+  });
+
+  it.each(['populated', 'empty', 'failed'] as const)(
+    'shows loading until the selected type archive settles (%s)',
+    async (outcome) => {
+      render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+      await screen.findByRole('heading', { name: 'Evening news' });
+      let finish!: (value: ReturnType<typeof archive>) => void;
+      let fail!: (error: Error) => void;
+      vi.mocked(getBriefingArchive).mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            finish = resolve;
+            fail = reject;
+          }),
+      );
+      await chooseName('Morning');
+      expect(screen.queryByText(/No briefings yet/)).toBeNull();
+      expect(screen.getByText('Loading…')).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Evening news' })).toBeNull();
+
+      if (outcome === 'failed') {
+        fail(new TypeError('Failed to fetch'));
+        await screen.findByText('Failed to load briefings');
+        expect(screen.queryByText(/No briefings yet/)).toBeNull();
+      } else if (outcome === 'empty') {
+        finish({ ...archive('Morning'), items: [], total: 0 });
+        await screen.findByRole('heading', { name: 'No briefings yet' });
+        expect(screen.getByText('No briefings yet.')).toBeInTheDocument();
+      } else {
+        let finishDetail!: (value: BriefingArchiveItem) => void;
+        vi.mocked(getBriefingArchiveItem).mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finishDetail = resolve;
+            }),
+        );
+        finish(archive('Morning'));
+        await waitFor(() => expect(getBriefingArchiveItem).toHaveBeenLastCalledWith(2));
+        expect(screen.queryByText(/No briefings yet/)).toBeNull();
+        expect(screen.getByText('Loading…')).toBeInTheDocument();
+        finishDetail(items[1]);
+        await screen.findByRole('heading', { name: 'Morning news' });
+      }
+      expect(screen.queryByText('Loading…')).toBeNull();
+    },
+  );
+
   it('selects structured and legacy editions and restores the cards through history', async () => {
     vi.mocked(getBriefingArchiveItem).mockImplementation(async (id) =>
       id === 3 ? edition : { ...items[2], body_md: 'A legacy edition in full.' },

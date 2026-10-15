@@ -26,6 +26,7 @@
     KebabMenu,
     ConfirmDialog,
     EmptyState,
+    PageLoading,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog } from '@lucide/svelte';
@@ -121,6 +122,10 @@
   async function load(reset = true) {
     const generation = ++loadGeneration;
     loadingMore = !reset;
+    if (reset) {
+      briefingArchiveCount.set(null);
+      briefingArchiveError.set(null);
+    }
     try {
       const params: Record<string, string> = {
         limit: String(PAGE),
@@ -298,7 +303,9 @@
         {#if deleteError}
           <p class="sidebar-error">{deleteError}</p>
         {/if}
-        {#if items.length === 0 && $briefingArchiveError}
+        {#if items.length === 0 && $briefingArchiveCount === null}
+          <PageLoading />
+        {:else if items.length === 0 && $briefingArchiveError}
           <p class="sidebar-error">{$briefingArchiveError}</p>
         {:else if items.length === 0}
           <EmptyState size="sm">No briefings yet.</EmptyState>
