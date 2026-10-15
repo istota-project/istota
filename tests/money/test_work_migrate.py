@@ -757,6 +757,10 @@ class TestBlockedRoutes:
         ("get", "/api/money/invoice-details?invoice_number=INV-000002", None),
         ("post", "/api/money/invoices/INV-000002/mark-paid", {"paid_date": "2026-03-02"}),
         ("post", "/api/money/invoices/INV-000001/mark-pending", None),
+        ("post", "/api/money/invoices/generate", {"dry_run": False}),
+        ("post", "/api/money/invoices/INV-000001/void", {"force": True}),
+        ("post", "/api/money/invoices",
+         {"client": "acme", "items": [{"description": "x", "amount": 1}]}),
     ])
     def test_answers_503_and_writes_nothing(
         self, data_dir, db_path, blocked_client, method, path, body,

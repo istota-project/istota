@@ -346,3 +346,364 @@ class TestInvoiceRowFields:
         resp = client.get("/api/money/invoices/INV-000001/pdf")
         assert resp.status_code == 200
         assert "VOID" in resp.headers["content-disposition"]
+
+
+# =============================================================================
+# #756: generate, void and create from the web
+# =============================================================================
+
+
+@pytest.fixture
+def fake_pdf(monkeypatch):
+    """Render PDFs as a few bytes on disk, recording each path written."""
+    from istota.money.core import invoicing as invoicing_mod
+
+    written: list[Path] = []
+
+    def _fake(html, output_path, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"%PDF-1.4")
+        written.append(output_path)
+
+    monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", _fake)
+    return written
+
+
+def _invoices_in_db(data_dir: Path) -> list[str]:
+    from istota.money.work import list_invoices
+
+    return [r.number for r in list_invoices(data_dir)]
+
+
+def _entry(data_dir: Path, description: str):
+    from istota.money.work import load_work_entries
+
+    return next(e for e in load_work_entries(data_dir) if e.description == description)
+
+
+def _add(data_dir: Path, description: str, *, day: str = "2026-03-01", qty: float = 8):
+    add_work_entry(data_dir, day, "acme", "dev", qty=qty, description=description)
+    return _entry(data_dir, description)
+
+
+class TestGenerateRoute:
+    URL = "/api/money/invoices/generate"
+
+    def _client(self, make_client, tmp_path):
+        return make_client(_write_invoicing_config(tmp_path, "invoices"))
+
+    def test_dry_run_previews_and_writes_nothing(self, make_client, tmp_path, fake_pdf):
+        first = _add(tmp_path, "first")
+        second = _add(tmp_path, "second", qty=4)
+        client = self._client(make_client, tmp_path)
+
+        resp = client.post(self.URL, json={"dry_run": True})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["dry_run"] is True
+        assert data["notifications"] == "none"
+        [invoice] = data["invoices"]
+        assert invoice["invoice_number"] == "INV-000001"
+        assert invoice["total"] == 1800.0
+        assert invoice["entry_uids"] == [first.uid, second.uid]
+        assert invoice["entry_descriptions"] == ["first", "second"]
+        assert "file" not in invoice
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+        assert not _entry(tmp_path, "first").invoice
+
+    def test_commit_issues_the_previewed_invoice(self, make_client, tmp_path, fake_pdf):
+        _add(tmp_path, "first")
+        _add(tmp_path, "second", qty=4)
+        client = self._client(make_client, tmp_path)
+        preview = client.post(self.URL, json={"dry_run": True}).json()
+
+        resp = client.post(self.URL, json={"dry_run": False})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is False
+        assert [i["total"] for i in data["invoices"]] == [i["total"] for i in preview["invoices"]]
+        assert _invoices_in_db(tmp_path) == ["INV-000001"]
+        assert _entry(tmp_path, "first").invoice == "INV-000001"
+        assert len(fake_pdf) == 1 and fake_pdf[0].is_file()
+        listed = client.get("/api/money/invoices").json()["invoices"]
+        assert listed[0]["has_pdf"] is True
+
+    def test_named_entry_with_current_etag_bills_only_that_entry(
+        self, make_client, tmp_path, fake_pdf,
+    ):
+        from istota.money.work import entry_etag
+
+        chosen = _add(tmp_path, "chosen")
+        _add(tmp_path, "other", day="2026-02-01")
+        client = self._client(make_client, tmp_path)
+
+        resp = client.post(self.URL, json={
+            "entry_uids": [chosen.uid], "etags": {chosen.uid: entry_etag(chosen)},
+            "dry_run": False,
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["invoices"][0]["entry_uids"] == [chosen.uid]
+        assert _entry(tmp_path, "chosen").invoice == "INV-000001"
+        assert not _entry(tmp_path, "other").invoice
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_stale_etag_is_409_and_generates_nothing(
+        self, make_client, tmp_path, fake_pdf, dry_run,
+    ):
+        from istota.money.work import entry_etag, update_work_entry_by_uid
+
+        entry = _add(tmp_path, "edited")
+        stale = entry_etag(entry)
+        update_work_entry_by_uid(tmp_path, entry.uid, qty=9)
+        client = self._client(make_client, tmp_path)
+
+        resp = client.post(self.URL, json={
+            "entry_uids": [entry.uid], "etags": {entry.uid: stale, "gone": "abc"},
+            "dry_run": dry_run,
+        })
+
+        assert resp.status_code == 409
+        assert sorted(resp.json()["stale"]) == sorted([entry.uid, "gone"])
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
+    def test_unknown_entry_is_404(self, make_client, tmp_path, fake_pdf):
+        _add(tmp_path, "real")
+        client = self._client(make_client, tmp_path)
+        resp = client.post(self.URL, json={"entry_uids": ["nope"], "dry_run": False})
+        assert resp.status_code == 404
+        assert "nope" in resp.json()["error"]
+        assert _invoices_in_db(tmp_path) == []
+
+    def test_already_invoiced_entry_is_409(self, make_client, tmp_path, fake_pdf):
+        entry = _add(tmp_path, "billed")
+        client = self._client(make_client, tmp_path)
+        assert client.post(self.URL, json={"dry_run": False}).status_code == 200
+
+        resp = client.post(self.URL, json={"entry_uids": [entry.uid], "dry_run": False})
+
+        assert resp.status_code == 409
+        assert "already invoiced" in resp.json()["error"]
+        assert _invoices_in_db(tmp_path) == ["INV-000001"]
+
+    def test_nothing_to_bill_is_an_empty_list(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        resp = client.post(self.URL, json={"dry_run": True})
+        assert resp.status_code == 200
+        assert resp.json()["invoices"] == []
+
+    @pytest.mark.parametrize("body", [
+        {},
+        {"dry_run": "yes"},
+        {"dry_run": False, "entry_uids": []},
+        {"dry_run": False, "entry_uids": "u1"},
+        {"dry_run": False, "entry_uids": [1]},
+        {"dry_run": False, "period": "2026-13"},
+        {"dry_run": False, "period": 202603},
+        {"dry_run": False, "client": 3},
+        {"dry_run": False, "etags": ["u1"]},
+        {"dry_run": False, "etags": {"u1": 5}},
+        ["dry_run"],
+    ])
+    def test_invalid_body_is_400(self, make_client, tmp_path, fake_pdf, body):
+        _add(tmp_path, "work")
+        client = self._client(make_client, tmp_path)
+        resp = client.post(self.URL, json=body)
+        assert resp.status_code == 400
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
+    def test_no_invoicing_config_is_400(self, make_client, tmp_path, fake_pdf):
+        _add(tmp_path, "work")
+        resp = make_client().post(self.URL, json={"dry_run": False})
+        assert resp.status_code == 400
+        assert _invoices_in_db(tmp_path) == []
+
+
+def _issue(client, *, qty: float = 8) -> str:
+    resp = client.post("/api/money/invoices", json={
+        "client": "acme", "items": [{"service": "dev", "qty": qty, "description": "work"}],
+    })
+    assert resp.status_code == 200, resp.text
+    return resp.json()["invoice"]["invoice_number"]
+
+
+class TestVoidRoute:
+    def _client(self, make_client, tmp_path):
+        return make_client(_write_invoicing_config(tmp_path, "invoices"))
+
+    def test_void_open_invoice(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        replacement = _issue(client, qty=4)
+
+        resp = client.post(f"/api/money/invoices/{number}/void", json={
+            "reason": "wrong hours", "replaced_by": [replacement],
+        })
+
+        assert resp.status_code == 200
+        invoice = resp.json()["invoice"]
+        assert invoice["invoice_number"] == number
+        assert invoice["status"] == "voided"
+        assert invoice["voided_at"]
+        assert invoice["void_reason"] == "wrong hours"
+        assert invoice["replaced_by"] == [replacement]
+        assert invoice["total"] == 1200.0
+        assert invoice["has_pdf"] is True
+        assert not fake_pdf[0].exists()
+        assert fake_pdf[0].with_name(f"{fake_pdf[0].stem}-VOID.pdf").is_file()
+        assert resp.json()["entries_released"] == 1
+
+    def test_void_with_no_body(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        resp = client.post(f"/api/money/invoices/{number}/void")
+        assert resp.status_code == 200
+        assert resp.json()["invoice"]["status"] == "voided"
+
+    def test_delete_pdf(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        resp = client.post(f"/api/money/invoices/{number}/void", json={"delete_pdf": True})
+        assert resp.status_code == 200
+        assert resp.json()["invoice"]["has_pdf"] is False
+        assert list((tmp_path / "invoices").rglob("*.pdf")) == []
+
+    def test_paid_without_force_is_409(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        mark_paid(tmp_path, number, "2026-04-15")
+
+        resp = client.post(f"/api/money/invoices/{number}/void", json={})
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "paid"
+        rows = client.get("/api/money/invoices?show_all=true").json()["invoices"]
+        assert rows[0]["status"] == "paid"
+        assert fake_pdf[0].is_file()
+
+    def test_paid_with_force(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        mark_paid(tmp_path, number, "2026-04-15")
+
+        resp = client.post(f"/api/money/invoices/{number}/void", json={"force": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["invoice"]["status"] == "voided"
+        assert resp.json()["invoice"]["was_paid"] is True
+
+    def test_already_voided_is_409(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        assert client.post(f"/api/money/invoices/{number}/void", json={}).status_code == 200
+
+        resp = client.post(f"/api/money/invoices/{number}/void", json={})
+
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "already_voided"
+        assert "already voided on" in resp.json()["error"]
+
+    def test_unknown_invoice_is_404(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        resp = client.post("/api/money/invoices/INV-999999/void", json={})
+        assert resp.status_code == 404
+        assert resp.json()["code"] == "not_found"
+
+    def test_unknown_replacement_is_400(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        resp = client.post(
+            f"/api/money/invoices/{number}/void", json={"replaced_by": ["INV-999999"]},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "unknown_replacement"
+        assert client.get("/api/money/invoices").json()["invoices"][0]["status"] == "outstanding"
+
+    @pytest.mark.parametrize("body", [
+        {"reason": 5},
+        {"replaced_by": "INV-000002"},
+        {"replaced_by": [2]},
+        {"force": "yes"},
+        {"delete_pdf": 1},
+        ["force"],
+    ])
+    def test_invalid_body_is_400(self, make_client, tmp_path, fake_pdf, body):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        resp = client.post(f"/api/money/invoices/{number}/void", json=body)
+        assert resp.status_code == 400
+        assert client.get("/api/money/invoices").json()["invoices"][0]["status"] == "outstanding"
+
+    def test_malformed_json_is_400(self, make_client, tmp_path, fake_pdf):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client)
+        resp = client.post(
+            f"/api/money/invoices/{number}/void", content=b"{not json",
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400
+
+
+class TestCreateRoute:
+    URL = "/api/money/invoices"
+
+    def test_manual_create(self, make_client, tmp_path, fake_pdf):
+        client = make_client(_write_invoicing_config(tmp_path, "invoices"))
+
+        resp = client.post(self.URL, json={
+            "client": "acme",
+            "items": [
+                {"service": "dev", "qty": 2, "description": "setup"},
+                {"description": "Hardware", "amount": 99.5},
+            ],
+        })
+
+        assert resp.status_code == 200
+        invoice = resp.json()["invoice"]
+        assert invoice["invoice_number"] == "INV-000001"
+        assert invoice["status"] == "outstanding"
+        assert invoice["total"] == 399.5
+        assert invoice["has_pdf"] is True
+        listed = client.get("/api/money/invoices").json()
+        assert [i["invoice_number"] for i in listed["invoices"]] == ["INV-000001"]
+        assert listed["outstanding_count"] == 1
+
+    def test_unknown_client_is_400(self, make_client, tmp_path, fake_pdf):
+        client = make_client(_write_invoicing_config(tmp_path, "invoices"))
+        resp = client.post(self.URL, json={
+            "client": "nobody", "items": [{"description": "x", "amount": 1}],
+        })
+        assert resp.status_code == 400
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
+    @pytest.mark.parametrize("body", [
+        {"items": [{"description": "x", "amount": 1}]},
+        {"client": "", "items": [{"description": "x", "amount": 1}]},
+        {"client": "acme"},
+        {"client": "acme", "items": []},
+        {"client": "acme", "items": {"description": "x"}},
+        {"client": "acme", "items": ["x"]},
+        {"client": "acme", "items": [{"description": "x", "amount": "lots"}]},
+        {"client": "acme", "items": [{"service": "nope", "qty": 1}]},
+        {"client": "acme", "entity": 3, "items": [{"description": "x", "amount": 1}]},
+        ["acme"],
+    ])
+    def test_invalid_body_is_400(self, make_client, tmp_path, fake_pdf, body):
+        client = make_client(_write_invoicing_config(tmp_path, "invoices"))
+        resp = client.post(self.URL, json=body)
+        assert resp.status_code == 400
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
+    def test_no_invoicing_config_is_400(self, make_client, tmp_path, fake_pdf):
+        resp = make_client().post(self.URL, json={
+            "client": "acme", "items": [{"description": "x", "amount": 1}],
+        })
+        assert resp.status_code == 400

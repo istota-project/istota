@@ -413,7 +413,8 @@ def generate_invoices_for_period(
     ``period`` is an upper bound: every unbilled entry dated on or before the
     end of that month is billed, earlier months included. ``entry_uids`` bills
     exactly the entries named instead, and ``period`` is ignored; an unknown or
-    already-invoiced uid is a ``ValueError`` raised before anything is written.
+    already-invoiced uid is an :class:`EntrySelectionError` raised before
+    anything is written.
     The named entries still group by the normal rules.
     If that transaction fails the PDF is deleted and an
     :class:`InvoiceRecordError` is raised, after the counter is advanced past
@@ -515,6 +516,8 @@ def generate_invoices_for_period(
                 "items": len(invoice.items),
                 "total": round(invoice.total, 2),
                 "terms": invoice.due_date.isoformat() if invoice.due_date else str(invoice.client.terms),
+                "entry_uids": [e.uid for e in billable_entries],
+                "entry_descriptions": [e.description for e in billable_entries],
             }
             if entity_key != config.default_entity or len(config.companies) > 1:
                 summary["entity"] = entity_key
@@ -567,16 +570,28 @@ def generate_invoices_for_period(
     return results
 
 
+class EntrySelectionError(ValueError):
+    """A named entry that cannot be billed: ``code`` is ``not_found`` or ``invoiced``."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.code = code
+
+
 def _named_entries(entries: list[WorkEntry], uids: list[str]) -> list[WorkEntry]:
     """The entries ``uids`` name, in display order; every one must exist and be unbilled."""
     by_uid = {e.uid: e for e in entries if e.uid}
     wanted = list(dict.fromkeys(uids))
     missing = [uid for uid in wanted if uid not in by_uid]
     if missing:
-        raise ValueError(f"no work entry with uid {', '.join(missing)}")
+        raise EntrySelectionError(
+            f"no work entry with uid {', '.join(missing)}", code="not_found",
+        )
     invoiced = [f"{uid} ({by_uid[uid].invoice})" for uid in wanted if by_uid[uid].invoice]
     if invoiced:
-        raise ValueError(f"work entry already invoiced: {', '.join(invoiced)}")
+        raise EntrySelectionError(
+            f"work entry already invoiced: {', '.join(invoiced)}", code="invoiced",
+        )
     chosen = set(wanted)
     return [e for e in entries if e.uid in chosen]
 

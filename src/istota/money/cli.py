@@ -1156,7 +1156,8 @@ def invoice_generate(ctx, period, client, entity, entry_uids, dry_run):
     if period:
         result["period"] = period
     for invoice_result in results:
-        invoice_result.pop("client_key", None)
+        for web_only in ("client_key", "entry_uids", "entry_descriptions"):
+            invoice_result.pop(web_only, None)
     _output(result)
 
 
@@ -1591,6 +1592,9 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
                 db_path=ctx.db_path, record_schedule=True,
             )
             all_results.extend(results)
+        for invoice_result in all_results:
+            for web_only in ("entry_uids", "entry_descriptions"):
+                invoice_result.pop(web_only, None)
 
         total = sum(r["total"] for r in all_results)
         out = {
