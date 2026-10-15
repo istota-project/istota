@@ -563,3 +563,30 @@ def test_v2_upgrade_preserves_document_and_backfills_reads(tmp_path):
     with bdb.connect(path) as conn:
         assert bdb.get_archived(conn, new_id).read_at is None
         assert bdb.count_unread_archive(conn) == 1
+
+
+@pytest.mark.parametrize("retire", ["delete", "prune"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_archive_identity_survives_retirement(conn, retire, legacy):
+    if legacy:
+        conn.execute(
+            "INSERT INTO briefing_archive (id, briefing_name, body_md, generated_at) "
+            "VALUES (41, 'Morning', 'Old body', '2000-01-01T00:00:00Z')"
+        )
+        old_id = 41
+    else:
+        old_id = bdb.insert_archive(
+            conn, briefing_name="Morning", subject="Old", body_md="Old body",
+            generated_at="2000-01-01T00:00:00Z",
+        )
+    conn.commit()
+    if retire == "delete":
+        assert bdb.delete_archived(conn, old_id)
+    else:
+        assert bdb.prune_archive(conn, briefing_name="Morning", retention_days=1) == 1
+    conn.commit()
+    new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+    conn.commit()
+    assert new_id > old_id
+    assert bdb.mark_archived_read(conn, old_id) is None
+    assert bdb.get_archived(conn, new_id).read_at is None

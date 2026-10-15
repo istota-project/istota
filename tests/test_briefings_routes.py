@@ -726,3 +726,16 @@ class TestArchiveReadHostGates:
         assert (await client.post(url, json=body, headers=headers)).status_code == 200
         with bdb.connect(paths["bob"]) as conn:
             assert bdb.count_unread_archive(conn) == 0
+
+
+def test_deleted_archive_acknowledgment_cannot_read_replacement(ctx, client):
+    with bdb.connect(ctx.db_path) as conn:
+        old_id = bdb.insert_archive(conn, briefing_name="Morning", subject="Old", body_md="Old body")
+        conn.commit()
+    assert client.get(f"/istota/api/briefings/archive/{old_id}").status_code == 200
+    assert client.delete(f"/istota/api/briefings/archive/{old_id}").status_code == 200
+    with bdb.connect(ctx.db_path) as conn:
+        new_id = bdb.insert_archive(conn, briefing_name="Morning", subject="New", body_md="New body")
+        conn.commit()
+    assert client.post(f"/istota/api/briefings/archive/{old_id}/read").status_code == 404
+    assert client.get(f"/istota/api/briefings/archive/{new_id}").json()["read_at"] is None
