@@ -165,7 +165,7 @@ istota briefings archive show -u USER --id ARCHIVE_ID
 
 `--source-json` is repeatable. `ensure` / `list` / `delete` are positional actions. There are no `-n`/`-c` short flags — use `--name` and `--cron` (`-c` is the global `--config`).
 
-`istota briefing` (singular) still works as a deprecated shim for `istota briefings schedule` and prints a deprecation notice. Its `--component` / `--components-json` flags are gone — the boolean-component content model is retired, and content is authored as blocks (CLI above, config-authored `[[users.X.briefings.blocks]]`, or the web block editor).
+`istota briefing` (singular) still works as a deprecated shim for `istota briefings schedule` and prints a deprecation notice. Its `--component` / `--components-json` flags are gone — the boolean-component content model is retired, and content is authored as blocks (CLI above, a settings plan's `[[users.X.briefings.blocks]]`, or the web block editor).
 
 ### Secrets (encrypted store)
 

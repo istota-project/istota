@@ -24,16 +24,13 @@ Source kinds (`kind = …`):
 
 ## Personal configuration sources
 
-Schedule + delivery are loaded from (higher precedence wins):
+Schedule and delivery come from one place, the `briefing_configs` table. Rows are written by the web UI (Briefings → Settings), by `istota briefings schedule ensure`, and by a settings plan (`istota apply`). `enabled=0` mutes a row without scheduling it. Each row belongs to its user, who can edit, disable and delete it.
 
-1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
-2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/title/output; DB rows win by name).
+`[[users.alice.briefings]]` in `config/config.toml` is retired. On the first start after the upgrade, each entry is imported into `briefing_configs` once per user: an entry whose name already has a row is skipped, and an entry with no `cron` is imported disabled. After that the file is not read for briefings again, so a briefing deleted in the settings page stays deleted. Until the block is removed from the file, loading the config reports it as a retired key. A user's workspace `{bot_dir}/config/BRIEFINGS.md` was retired the same way: what it held is imported once and an existing file is left on disk, inert.
 
-Those two are the whole surface. A user's workspace `{bot_dir}/config/BRIEFINGS.md` was a third source, applied over both at read time; it is retired, and on first start after the upgrade whatever it held is imported into `briefing_configs`, once per user. An existing file is left on disk and is inert.
+Content **blocks** live in the per-user briefings module DB and are edited in the web block editor. Blocks authored under a retired `[[users.X.briefings.blocks]]` entry are seeded once into the row of the same name.
 
-Content **blocks** are seeded once into the per-user briefings module DB from config-authored `[[users.X.briefings.blocks]]` and are then edited in the web block editor.
-
-Because a name can come from either source, or from blocks with no schedule at all, `istota briefings list` (and `istota-skill briefings list`) is what answers "which briefings does this user actually have" — every effective name after defaults and disabled rows are applied, with each one's block count and its latest archived generation. Asking for a name that is not on that list now returns the valid options rather than an empty briefing: a zero-row block query used to read as "configured, no content", so a typo or a case mismatch produced a confident and wrong success (ISSUE-328).
+Because a name can come from a schedule, or from blocks with no schedule at all, `istota briefings list` (and `istota-skill briefings list`) is what answers "which briefings does this user actually have" — every effective name after defaults and disabled rows are applied, with each one's block count and its latest archived generation. Asking for a name that is not on that list now returns the valid options rather than an empty briefing: a zero-row block query used to read as "configured, no content", so a typo or a case mismatch produced a confident and wrong success (ISSUE-328).
 
 ## Building a briefing
 
@@ -81,9 +78,14 @@ Legacy `[[default_briefings]]` and the old per-user default toggle are migration
 
 Briefing prompts intentionally exclude USER.md and dated memories. This prevents private context from leaking into what may be shared or newsletter-style output.
 
-## Example config (TOML)
+## Example settings plan
+
+A plan applied with `istota apply -f plan.toml` writes the same rows the settings page does.
 
 ```toml
+[meta]
+version = 1
+
 [[users.alice.briefings]]
 name = "morning"
 cron = "0 6 * * *"               # 6am in user's timezone
@@ -114,7 +116,7 @@ output = "talk,email"             # one destination or a comma-separated list
     config = { preset = "ap" }
 ```
 
-Width lives in `options.presentation.width` and accepts `auto`, `wide` or `full`, with `auto` as the default. The editor preserves other option fields. Config-authored blocks seed once; later config edits do not overwrite a user's saved block changes.
+Width lives in `options.presentation.width` and accepts `auto`, `wide` or `full`, with `auto` as the default. The editor preserves other option fields.
 
 ## Shared curated content
 
