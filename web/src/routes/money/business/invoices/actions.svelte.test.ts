@@ -2,8 +2,14 @@ import '@testing-library/jest-dom/vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import Page from './+page.svelte';
+import FileViewerHost from '$lib/fileViewer/FileViewerHost.svelte';
+import { viewer } from '$lib/fileViewer/store.svelte';
 
-vi.mock('$app/paths', () => ({ base: '/istota' }));
+vi.mock('$app/paths', () => ({ base: '/istota', assets: '' }));
+vi.mock('pdfjs-dist', () => ({
+  GlobalWorkerOptions: {},
+  getDocument: vi.fn(() => ({ promise: new Promise(() => {}), destroy: async () => {} })),
+}));
 
 function invoiceRow(over: Record<string, unknown> = {}) {
   return {
@@ -60,6 +66,7 @@ type Handler = (body: any) => Response | Promise<Response>;
 let posts: { url: string; body: any }[];
 let handlers: Record<string, Handler>;
 let fetchMock: ReturnType<typeof vi.fn>;
+let listed: unknown[];
 
 function preview(over: Record<string, unknown> = {}) {
   return {
@@ -90,6 +97,7 @@ function generated(dryRun: boolean, invoices: unknown[]) {
 beforeEach(() => {
   posts = [];
   handlers = {};
+  listed = [OPEN, PAID, VOIDED];
   fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const path = url.replace('/istota/api/money', '');
     if (init?.method === 'POST') {
@@ -102,8 +110,8 @@ beforeEach(() => {
     if (path.startsWith('/invoices?'))
       return Response.json({
         status: 'ok',
-        invoices: [OPEN, PAID, VOIDED],
-        invoice_count: 3,
+        invoices: listed,
+        invoice_count: listed.length,
         outstanding_count: 1,
         payment_reviews: [],
       });
@@ -137,6 +145,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  viewer.close();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -178,12 +188,63 @@ describe('voided rows', () => {
 
   it('offer no pay, pending or void action, and keep Download PDF', async () => {
     render(Page);
-    expect(await menuLabels('INV-000009')).toEqual(['Download PDF']);
+    expect(await menuLabels('INV-000009')).toEqual(['Preview', 'Download PDF']);
   });
 
   it('leave an open invoice its pay and void actions', async () => {
     render(Page);
-    expect(await menuLabels('INV-000010')).toEqual(['Mark paid', 'Download PDF', 'Void invoice…']);
+    expect(await menuLabels('INV-000010')).toEqual([
+      'Mark paid',
+      'Preview',
+      'Download PDF',
+      'Void invoice…',
+    ]);
+  });
+});
+
+describe('PDF preview', () => {
+  const url = '/istota/api/money/invoices/INV-000010/pdf';
+
+  it('opens the invoice PDF in the file viewer', async () => {
+    const open = vi.spyOn(viewer, 'openFile');
+    render(Page);
+    await choose('INV-000010', 'Preview');
+    expect(open).toHaveBeenCalledExactlyOnceWith(url, {
+      kind: 'url',
+      url,
+      name: 'INV-000010',
+      mime: 'application/pdf',
+    });
+  });
+
+  it('is disabled when the invoice has no PDF', async () => {
+    listed = [invoiceRow({ has_pdf: false })];
+    const open = vi.spyOn(viewer, 'openFile');
+    render(Page);
+    await openMenu('INV-000010');
+    const item = await screen.findByRole('menuitem', { name: 'Preview' });
+    expect(item).toHaveAttribute('data-disabled');
+    await fireEvent.click(item);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('returns focus to the row kebab when the viewer closes', async () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    render(Page);
+    render(FileViewerHost);
+    await choose('INV-000010', 'Preview');
+    const dialog = await screen.findByRole('dialog', { name: 'INV-000010' });
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText('Actions for INV-000010')),
+    );
   });
 });
 

@@ -30,6 +30,8 @@
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import ManualInvoiceDialog from '$lib/components/money/ManualInvoiceDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
+  import { viewer } from '$lib/fileViewer/store.svelte';
+  import { isPlainClick } from '$lib/fileViewer/links';
   import { formatDecimal as formatAmount } from '$lib/format';
 
   let invoices: InvoiceRow[] = $state([]);
@@ -88,12 +90,34 @@
     window.open(invoicePdfUrl(inv.invoice_number), '_blank');
   }
 
+  // A link item: KebabMenu focuses its trigger before onClick, so the viewer
+  // returns focus there rather than to the menu item it removed.
+  function previewItem(inv: InvoiceRow): KebabItem {
+    if (!inv.has_pdf) return { label: 'Preview', onSelect: () => {}, disabled: true };
+    const url = invoicePdfUrl(inv.invoice_number);
+    return {
+      label: 'Preview',
+      href: url,
+      onClick: (event) => {
+        if (!isPlainClick(event)) return;
+        event.preventDefault();
+        viewer.openFile(url, {
+          kind: 'url',
+          url,
+          name: inv.invoice_number,
+          mime: 'application/pdf',
+        });
+      },
+    };
+  }
+
   function menuItems(inv: InvoiceRow): KebabItem[] {
     const busy = busyInvoice === inv.invoice_number;
     const items: KebabItem[] = [];
     // A voided invoice is a record, not a bill: nothing to pay, nothing to void.
     if (inv.status === 'voided') {
       if (inv.has_pdf) {
+        items.push(previewItem(inv));
         items.push({ label: 'Download PDF', onSelect: () => handleDownloadPdf(inv) });
       }
       return items;
@@ -103,6 +127,7 @@
     } else {
       items.push({ label: 'Mark paid', onSelect: () => handleMarkPaid(inv), disabled: busy });
     }
+    items.push(previewItem(inv));
     items.push({ label: 'Download PDF', onSelect: () => handleDownloadPdf(inv) });
     items.push({
       label: 'Void invoice…',
