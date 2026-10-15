@@ -717,22 +717,6 @@ async def api_invoice_pdf(
     )
 
 
-# Generation and manual creation pick the next number, render a PDF named for
-# it, then record the row. Two at once in this process would pick the same
-# number and the loser's cleanup would delete the winner's PDF.
-_ISSUE_LOCKS: dict[str, threading.Lock] = {}
-_ISSUE_LOCKS_GUARD = threading.Lock()
-
-
-def _issue_lock(data_dir: Path) -> threading.Lock:
-    key = str(data_dir)
-    with _ISSUE_LOCKS_GUARD:
-        lock = _ISSUE_LOCKS.get(key)
-        if lock is None:
-            lock = _ISSUE_LOCKS[key] = threading.Lock()
-        return lock
-
-
 async def _json_object_body(request: Request, *, empty_ok: bool) -> dict | None:
     """The request body as a dict, or None when it is not a JSON object."""
     raw = await request.body()
@@ -806,8 +790,10 @@ async def api_invoices_generate(
     """
     from istota.money.core.invoicing import (
         EntrySelectionError,
+        InvoiceIssueBusy,
         InvoiceRecordError,
         generate_invoices_for_period,
+        invoice_issue_lock,
     )
     from istota.money.work import ensure_store, entry_etag, load_work_entries
 
@@ -832,8 +818,9 @@ async def api_invoices_generate(
     output_dir = _invoice_output_dir(data_dir, config)
     accounting_path = data_dir / config.accounting_path
 
+    # The etag check and the issue are one step under the store's issuing lock.
     def run() -> list[dict] | JSONResponse:
-        with _issue_lock(data_dir):
+        with invoice_issue_lock(data_dir):
             if fields["etags"]:
                 current = {e.uid: entry_etag(e) for e in load_work_entries(data_dir) if e.uid}
                 stale = [
@@ -854,6 +841,8 @@ async def api_invoices_generate(
         results = await asyncio.to_thread(run)
     except EntrySelectionError as exc:
         return _error(str(exc), 404 if exc.code == "not_found" else 409)
+    except InvoiceIssueBusy as exc:
+        return _error(str(exc), 503)
     except InvoiceRecordError as exc:
         return _error(str(exc), 500)
     if isinstance(results, JSONResponse):
@@ -936,7 +925,11 @@ async def api_invoice_create(
     _csrf: None = Depends(verify_origin),
 ):
     """Create a manual invoice from line items, the same as ``invoice create``."""
-    from istota.money.core.invoicing import InvoiceRecordError, create_manual_invoice
+    from istota.money.core.invoicing import (
+        InvoiceIssueBusy,
+        InvoiceRecordError,
+        create_manual_invoice,
+    )
     from istota.money.work import ensure_store
 
     data_dir = user_ctx.data_dir
@@ -965,17 +958,18 @@ async def api_invoice_create(
         return _error("no invoicing config", 400)
 
     def run() -> dict:
-        with _issue_lock(data_dir):
-            return create_manual_invoice(
-                config=config, data_dir=data_dir,
-                accounting_path=data_dir / config.accounting_path,
-                invoice_output_dir=_invoice_output_dir(data_dir, config),
-                client_key=client_key.strip(), lines=items, entity=entity or None,
-                db_path=user_ctx.db_path, config_path=user_ctx.invoicing_config_path,
-            )
+        return create_manual_invoice(
+            config=config, data_dir=data_dir,
+            accounting_path=data_dir / config.accounting_path,
+            invoice_output_dir=_invoice_output_dir(data_dir, config),
+            client_key=client_key.strip(), lines=items, entity=entity or None,
+            db_path=user_ctx.db_path, config_path=user_ctx.invoicing_config_path,
+        )
 
     try:
         result = await asyncio.to_thread(run)
+    except InvoiceIssueBusy as exc:
+        return _error(str(exc), 503)
     except InvoiceRecordError as exc:
         return _error(str(exc), 500)
     except ValueError as exc:

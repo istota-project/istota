@@ -14,9 +14,13 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
+import threading
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
+from istota.lib.file_lock import exclusive_lock
 
 from .ids import new_txn_id
 from .models import (
@@ -420,6 +424,10 @@ def generate_invoices_for_period(
     :class:`InvoiceRecordError` is raised, after the counter is advanced past
     the invoices this run did record; no PDF is left without its invoice.
 
+    A real run holds :func:`invoice_issue_lock` from picking the first number
+    to recording the last invoice, and each PDF is linked into place without
+    replacing a file already at its name.
+
     ``record_schedule`` writes a monthly client's schedule state in the same
     transaction as each of its invoices.
 
@@ -427,6 +435,40 @@ def generate_invoices_for_period(
     generated PDFs (a year subdirectory is appended).  Otherwise falls back to
     ``accounting_path / config.invoice_output`` for backward compatibility.
     """
+    kwargs = dict(
+        config=config,
+        config_path=config_path,
+        accounting_path=accounting_path,
+        data_dir=data_dir,
+        period=period,
+        client_filter=client_filter,
+        entity_filter=entity_filter,
+        dry_run=dry_run,
+        invoice_output_dir=invoice_output_dir,
+        db_path=db_path,
+        record_schedule=record_schedule,
+        entry_uids=entry_uids,
+    )
+    if dry_run:
+        return _generate_invoices(**kwargs)
+    with invoice_issue_lock(data_dir):
+        return _generate_invoices(**kwargs)
+
+
+def _generate_invoices(
+    config: InvoicingConfig,
+    config_path: Path,
+    accounting_path: Path,
+    data_dir: Path,
+    period: str | None = None,
+    client_filter: str | None = None,
+    entity_filter: str | None = None,
+    dry_run: bool = False,
+    invoice_output_dir: Path | None = None,
+    db_path: Path | None = None,
+    record_schedule: bool = False,
+    entry_uids: list[str] | None = None,
+) -> list[dict]:
     from istota.money.db import set_invoice_schedule_generation
     from istota.money.work import (
         create_invoice,
@@ -526,13 +568,15 @@ def generate_invoices_for_period(
                 html = generate_invoice_html(invoice, logo_path=logo_path)
                 pdf_filename = f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
                 pdf_path = output_dir / pdf_filename
-                generate_invoice_pdf(html, pdf_path, root=accounting_path)
                 summary["file"] = str(pdf_path)
 
                 # By uid: the entries were resolved before the PDF render, and
                 # an entry another writer invoiced since then fails the active
                 # line index rather than being billed twice.
+                published = False
                 try:
+                    generate_invoice_pdf(html, pdf_path, root=accounting_path)
+                    published = True
                     with write_transaction(data_dir) as conn:
                         create_invoice(
                             conn, number=number_str, client=client_key,
@@ -544,10 +588,13 @@ def generate_invoices_for_period(
                         if record_schedule and client_config.schedule == "monthly":
                             set_invoice_schedule_generation(conn, client_key)
                 except Exception as exc:
-                    pdf_path.unlink(missing_ok=True)
+                    # Only a PDF this run published; a name already taken is
+                    # somebody else's file.
+                    if published:
+                        pdf_path.unlink(missing_ok=True)
                     logger.error(
-                        "invoice_record_failed invoice=%s client=%s error=%s — PDF removed",
-                        number_str, client_key, exc,
+                        "invoice_record_failed invoice=%s client=%s error=%s published=%s",
+                        number_str, client_key, exc, published,
                     )
                     if results:
                         persist_next_invoice_number(
@@ -598,6 +645,55 @@ def _named_entries(entries: list[WorkEntry], uids: list[str]) -> list[WorkEntry]
 
 class InvoiceRecordError(RuntimeError):
     """An invoice's PDF was rendered but its row and lines could not be recorded."""
+
+
+class InvoiceIssueBusy(RuntimeError):
+    """Another issuer held the invoice-issuing lock past the deadline."""
+
+
+# A generate run renders one PDF per invoice, about a second each with WeasyPrint.
+ISSUE_LOCK_TIMEOUT_SECONDS = 120.0
+
+_ISSUING = threading.local()
+
+
+def _issue_lock_path(data_dir: Path) -> Path:
+    from istota.money.work import db_path_for
+
+    return db_path_for(data_dir).parent / ".invoice-issue.lock"
+
+
+@contextmanager
+def invoice_issue_lock(data_dir: Path, *, timeout_seconds: float = ISSUE_LOCK_TIMEOUT_SECONDS):
+    """Hold the store's invoice-issuing lock: one issuer at a time, across processes.
+
+    Generation and manual creation pick the next number, render a PDF named
+    for it and record the row; two at once would pick the same number. The
+    anchor sits beside ``money.db``, so the web, the CLI, the skill and the
+    scheduler share it. Re-entering on the same thread is a no-op, which lets
+    a caller check something under the lock and then call the issuer.
+    """
+    anchor = _issue_lock_path(data_dir)
+    key = os.path.abspath(anchor)
+    held = _ISSUING.__dict__.setdefault("paths", set())
+    if key in held:
+        yield
+        return
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    with exclusive_lock(
+        anchor,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=0.1,
+        on_timeout=lambda _path: InvoiceIssueBusy(
+            "another invoice is being issued; try again in a moment",
+        ),
+        nofollow=True,
+    ):
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
 
 
 def check_scheduled_invoices(
@@ -823,30 +919,47 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 
 
 def generate_invoice_pdf(html: str, output_path: Path, *, root: Path | None = None) -> None:
-    """Convert invoice HTML to PDF using WeasyPrint.
+    """Convert invoice HTML to PDF using WeasyPrint, at a name nothing holds yet.
 
     With ``root`` (the accounting folder) and an ``output_path`` under it, the
     folders are walked from ``root`` with no link followed and the PDF is
     published through that descriptor (ISSUE-723). An output directory
     configured elsewhere keeps the leaf guard alone.
+
+    The bytes go to a dot-prefixed staging file, which is then linked to its
+    name without replacing anything: a name already taken raises
+    ``FileExistsError`` and the file there is left alone. Two issuers that
+    picked one number cannot overwrite each other's PDF. Only the staging
+    file is removed here.
     """
     from weasyprint import HTML
 
-    from istota.storage import write_regular_file  # noqa: PLC0415
-    from istota.workspace.writes import open_or_create_dir_below  # noqa: PLC0415
+    from istota.workspace.writes import open_or_create_dir_below, publish_new  # noqa: PLC0415
 
     pdf = HTML(string=html).write_pdf()
     if root is not None and output_path.parent.is_relative_to(root):
-        fd = open_or_create_dir_below(root, output_path.parent)
-        try:
-            written = write_regular_file(Path(output_path.name), pdf, dir_fd=fd)
-        finally:
-            os.close(fd)
+        dir_fd = open_or_create_dir_below(root, output_path.parent)
     else:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        written = write_regular_file(output_path, pdf)
-    if not written:
-        raise OSError(f"could not write {output_path.name}")
+        dir_fd = os.open(output_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    staging = f".{output_path.stem}.{secrets.token_hex(6)}.staging"
+    try:
+        fd = os.open(
+            staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o644, dir_fd=dir_fd,
+        )
+        with os.fdopen(fd, "wb") as file:
+            written = os.fstat(file.fileno())
+            file.write(pdf)
+            file.flush()
+            os.fsync(file.fileno())
+        publish_new(dir_fd, staging, output_path.name, written)
+    finally:
+        try:
+            os.unlink(staging, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        os.close(dir_fd)
 
 
 # =============================================================================
@@ -1055,10 +1168,9 @@ def create_manual_invoice(
     the PDF is rendered, and a bad line, client or entity is a ``ValueError``.
     The entries and the invoice are written in one transaction after the PDF
     exists; if that fails the PDF is deleted and :class:`InvoiceRecordError`
-    is raised.
+    is raised. The number is picked and recorded under
+    :func:`invoice_issue_lock`, the same lock generation holds.
     """
-    from istota.money.work import create_invoice, insert_entry, write_transaction
-
     client_config = config.clients.get(client_key)
     if not client_config:
         available = ", ".join(config.clients)
@@ -1074,6 +1186,31 @@ def create_manual_invoice(
     if not lines:
         raise ValueError("No line items specified. Use --service/--qty or --item")
     parsed = [_manual_line(line, config.services) for line in lines]
+
+    with invoice_issue_lock(data_dir):
+        return _issue_manual_invoice(
+            config=config, data_dir=data_dir, accounting_path=accounting_path,
+            invoice_output_dir=invoice_output_dir, client_key=client_key,
+            client_config=client_config, resolved_entity=resolved_entity,
+            entity=entity, parsed=parsed, db_path=db_path, config_path=config_path,
+        )
+
+
+def _issue_manual_invoice(
+    *,
+    config: InvoicingConfig,
+    data_dir: Path,
+    accounting_path: Path,
+    invoice_output_dir: Path,
+    client_key: str,
+    client_config: ClientConfig,
+    resolved_entity: CompanyConfig,
+    entity: str | None,
+    parsed: list,
+    db_path: Path | None,
+    config_path: Path | None,
+) -> dict:
+    from istota.money.work import create_invoice, insert_entry, write_transaction
 
     invoice_number = max(
         config.next_invoice_number,
@@ -1117,9 +1254,10 @@ def create_manual_invoice(
         invoice_output_dir / str(invoice_date.year)
         / f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
     )
-    generate_invoice_pdf(html_text, pdf_path, root=accounting_path)
-
+    published = False
     try:
+        generate_invoice_pdf(html_text, pdf_path, root=accounting_path)
+        published = True
         with write_transaction(data_dir) as conn:
             for new_entry in inv_entries:
                 insert_entry(conn, new_entry)
@@ -1131,8 +1269,10 @@ def create_manual_invoice(
                 manual=True,
             )
     except Exception as exc:
-        # Never leave a PDF behind for an invoice that was not recorded.
-        pdf_path.unlink(missing_ok=True)
+        # Never leave a PDF behind for an invoice that was not recorded, and
+        # never remove one this call did not publish.
+        if published:
+            pdf_path.unlink(missing_ok=True)
         raise InvoiceRecordError(f"could not record {number_str}: {exc}") from exc
 
     persist_next_invoice_number(invoice_number + 1, db_path=db_path, config_path=config_path)

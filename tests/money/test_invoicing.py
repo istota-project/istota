@@ -1,6 +1,8 @@
 """Tests for money.core.invoicing module."""
 
 import sqlite3
+import sys
+import types
 from datetime import date
 from pathlib import Path
 
@@ -1676,6 +1678,153 @@ class TestCreateManualInvoice:
                 invoice_output_dir=tmp_path / "invoices", client_key="globex",
                 lines=[{"description": "x", "amount": 1}],
             )
+
+
+class TestConcurrentIssuers:
+    """Two issuers in different processes must never overwrite or delete each
+    other's PDF: one holds the store's issuing lock from number to commit, and
+    a PDF is published under its name only if nothing is there yet."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            f'accounting_path = "{tmp_path}"\n'
+            'invoice_output = "invoices"\nnext_invoice_number = 1\n\n'
+            '[company]\nname = "My Co"\n\n'
+            '[clients.acme]\nname = "Acme"\nterms = 30\n\n'
+            '[clients.beta]\nname = "Beta"\nterms = 30\n\n'
+            '[services.dev]\ndisplay_name = "Dev"\nrate = 150\ntype = "hours"\n'
+        )
+
+        # The real publish step runs; only WeasyPrint is stood in for.
+        fake = types.ModuleType("weasyprint")
+        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: string.encode())
+        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        monkeypatch.setattr(
+            invoicing_mod, "generate_invoice_html",
+            lambda invoice, **k: f"PDF for {invoice.client.name}",
+        )
+        return config_file, parse_invoicing_config(config_file)
+
+    def _generate(self, tmp_path, config_file, config, client):
+        from istota.money.core.invoicing import generate_invoices_for_period
+
+        return generate_invoices_for_period(
+            config=config, config_path=config_file, accounting_path=tmp_path,
+            data_dir=tmp_path, client_filter=client,
+        )
+
+    def test_a_stale_number_does_not_touch_the_winners_pdf(self, tmp_path, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.work import add_work_entry, get_invoice, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=1)
+        add_work_entry(tmp_path, "2026-03-10", "beta", "dev", qty=2)
+        (first,) = self._generate(tmp_path, config_file, config, "acme")
+        pdf = Path(first["file"])
+
+        # The second issuer read the highest number before the first committed.
+        monkeypatch.setattr(invoicing_mod, "highest_existing_invoice_number", lambda d: 0)
+        with pytest.raises(invoicing_mod.InvoiceRecordError, match="INV-000001"):
+            self._generate(tmp_path, config_file, config, "beta")
+
+        assert pdf.read_text() == "PDF for Acme"
+        assert Path(get_invoice(tmp_path, "INV-000001").pdf_path).is_file()
+        assert [r.client for r in list_invoices(tmp_path)] == ["acme"]
+        assert [p.name for p in pdf.parent.iterdir()] == [pdf.name]
+
+    def test_a_stale_manual_number_does_not_touch_the_winners_pdf(self, tmp_path, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.core.invoicing import create_manual_invoice
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+
+        def create(client):
+            return create_manual_invoice(
+                config=config, data_dir=tmp_path, accounting_path=tmp_path,
+                invoice_output_dir=tmp_path / "invoices", client_key=client,
+                lines=[{"description": "x", "amount": 10}], config_path=config_file,
+            )
+
+        pdf = Path(create("acme")["file"])
+        monkeypatch.setattr(invoicing_mod, "highest_existing_invoice_number", lambda d: 0)
+        config.next_invoice_number = 1
+        with pytest.raises(invoicing_mod.InvoiceRecordError, match="INV-000001"):
+            create("beta")
+        assert pdf.read_text() == "PDF for Acme"
+
+    def test_generation_holds_the_issuing_lock_while_it_renders(self, tmp_path, monkeypatch):
+        import threading
+
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.work import add_work_entry
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=1)
+        seen = []
+        real_pdf = invoicing_mod.generate_invoice_pdf
+
+        def probing_pdf(html_text, output_path, **kwargs):
+            # Another issuer (its own descriptor, as another process would be)
+            # must not get the lock while this one renders.
+            def other():
+                try:
+                    with invoicing_mod.invoice_issue_lock(tmp_path, timeout_seconds=0.2):
+                        seen.append("acquired")
+                except invoicing_mod.InvoiceIssueBusy:
+                    seen.append("busy")
+
+            thread = threading.Thread(target=other)
+            thread.start()
+            thread.join()
+            real_pdf(html_text, output_path, **kwargs)
+
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", probing_pdf)
+        self._generate(tmp_path, config_file, config, "acme")
+        assert seen == ["busy"]
+        with invoicing_mod.invoice_issue_lock(tmp_path, timeout_seconds=0.2):
+            pass
+
+    def test_manual_creation_holds_the_issuing_lock(self, tmp_path, monkeypatch):
+        import threading
+
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.core.invoicing import create_manual_invoice
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        held = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with invoicing_mod.invoice_issue_lock(tmp_path):
+                held.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        held.wait(5)
+        try:
+            with pytest.raises(invoicing_mod.InvoiceIssueBusy):
+                with invoicing_mod.invoice_issue_lock(tmp_path, timeout_seconds=0.2):
+                    pass
+            real_lock = invoicing_mod.invoice_issue_lock
+            monkeypatch.setattr(
+                invoicing_mod, "invoice_issue_lock",
+                lambda d, **k: real_lock(d, timeout_seconds=0.2),
+            )
+            with pytest.raises(invoicing_mod.InvoiceIssueBusy):
+                create_manual_invoice(
+                    config=config, data_dir=tmp_path, accounting_path=tmp_path,
+                    invoice_output_dir=tmp_path / "invoices", client_key="acme",
+                    lines=[{"description": "x", "amount": 10}], config_path=config_file,
+                )
+        finally:
+            release.set()
+            thread.join()
+        assert not (tmp_path / "invoices").exists()
 
 
 class TestInvoiceHtmlEscaping:
