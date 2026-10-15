@@ -9406,6 +9406,9 @@ def _create_scheduled_job_task(
     occurrence it replaces. Raises ``ValueError`` from ``db.create_task`` for a
     ``user_id`` that cannot name a directory.
     """
+    from istota.briefings.group_migrate import publisher_retired
+    if publisher_retired(conn, job.user_id, job.name):
+        raise ValueError("publisher_retired")
     # `TEXT` in a dynamically typed store, so coerce once and use
     # the same value for the resolution and the column:
     # `resolve_brain_kind` opens with `(override or "").strip()`,

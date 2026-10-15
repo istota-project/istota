@@ -329,3 +329,255 @@ def test_cutover_reenable_of_personal_schedule_is_refused(tmp_path, monkeypatch)
         migration.cutover_default(conn, config, 'daily', actor_id='alice', expected_revision=1)
     with pytest.raises(ValueError, match='briefing_retired'):
         user_briefings.ensure_briefing(config.db_path, user_id='alice', name='daily', cron='0 7 * * *', output='email')
+
+
+@pytest.fixture
+def publisher(tmp_path, monkeypatch):
+    from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+    from istota.groups.system import reconcile_all_users_in_transaction
+    path, _ = legacy(tmp_path, monkeypatch)
+    config = load_config(path)
+    job = CronJob(name="publish-news", cron="0 6 * * *", prompt="Research public news", publish_shared_kv="news")
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, "alice", [job])
+        group = reconcile_all_users_in_transaction(conn, config)
+        db.shared_kv_set(conn, "briefing_shared_blocks", "news", '{"text":"Saved news"}', written_by="alice")
+    document = {"group_id": group["group_id"], "name": "common-news", "title": "News", "cron": "0 7 * * *",
+                "timezone": "UTC", "channel": "in_app", "generation_mode": "prompt",
+                "generation": {"version": 1, "prompt": "Summarize public news.", "research": {"enabled": False}, "inputs": []},
+                "dependent_jobs": []}
+    return config, job, document
+
+
+def publisher_preview(conn, config, definition_id):
+    run = store.enqueue_run(conn, config, definition_id, actor_id="alice", is_admin=True,
+                            request_id=str(uuid4()), mode="preview")
+    claim = store.claim_run(conn, run_id=run["id"])
+    return store.publish_run(conn, config, run["id"], claim["attempt_token"], subject="Preview", body_md="Common news")
+
+
+def test_publisher_import_inventory_and_confirmed_restart_cutover(publisher):
+    from istota.briefings import group_migrate as migration
+    from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+    config, job, document = publisher
+    replacement = CronJob(name="replacement", cron="0 6 * * *", prompt="Public news", publish_shared_kv="news")
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        assert not store.get_definition(conn, result["definition_id"])["enabled"]
+        assert {item["id"] for item in result["consumers"]} == {f"personal:{user}:daily" for user in ("alice", "bob", "carol")}
+        old_job = db.get_scheduled_job_by_name(conn, "alice", job.name)
+        task_id = db.create_task(conn, "news", "alice", source_type="scheduled", scheduled_job_id=old_job.id)
+    with db.get_db(config.db_path) as conn:
+        with pytest.raises(GroupError, match="confirmation_required"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
+                                        replacements={}, confirmed=False)
+        with pytest.raises(GroupError, match="preview_required"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
+                                        replacements={}, confirmed=True)
+        publisher_preview(conn, config, result["definition_id"])
+        with pytest.raises(GroupError, match="consumer_unresolved"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
+                                        replacements={}, confirmed=True)
+        sync_cron_jobs_to_db(conn, "alice", [job, replacement])
+        other = db.get_scheduled_job_by_name(conn, "alice", "replacement")
+        replacements = {item["id"]: other.id for item in result["consumers"]}
+        kv_before = db.shared_kv_get(conn, "briefing_shared_blocks", "news")
+    with db.get_db(config.db_path) as conn:
+        result = migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
+                                             replacements=replacements, confirmed=True)
+        assert result["state"] == "cutover"
+        assert db.get_task(conn, task_id).status == "cancelled"
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, "alice", [job, replacement])
+        assert not db.get_scheduled_job_by_name(conn, "alice", job.name).enabled
+        assert db.get_scheduled_job_by_name(conn, "alice", "replacement").enabled
+        with pytest.raises(ValueError, match="publisher_retired"):
+            db.create_task(conn, "cached job", "alice", source_type="scheduled", scheduled_job_id=old_job.id)
+        with pytest.raises(ValueError, match="publisher_retired"):
+            db.enable_scheduled_job(conn, old_job.id)
+        db.delete_scheduled_job(conn, old_job.id)
+        sync_cron_jobs_to_db(conn, "alice", [job, replacement])
+        assert not db.get_scheduled_job_by_name(conn, "alice", job.name).enabled
+        from istota.scheduler import _create_scheduled_job_task
+        with pytest.raises(ValueError, match="publisher_retired"):
+            _create_scheduled_job_task(conn, config, old_job)
+        assert db.shared_kv_get(conn, "briefing_shared_blocks", "news") == kv_before
+        conn.commit()
+        migration.rollback_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2)
+        sync_cron_jobs_to_db(conn, "alice", [job, replacement])
+        assert db.get_scheduled_job_by_name(conn, "alice", job.name).enabled
+        assert not store.get_definition(conn, result["definition_id"])["enabled"]
+
+
+def test_publisher_command_intent_is_unresolved_until_supplied(publisher):
+    from istota.briefings import group_migrate as migration
+    config, job, document = publisher
+    document.pop("generation")
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE scheduled_jobs SET command='exit 99', prompt='' WHERE name=?", (job.name,))
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        assert result["source_issues"] == [{"kind": "replacement_prompt_required"}]
+        with pytest.raises(GroupError, match="migration_sources_unresolved"):
+            publisher_preview(conn, config, result["definition_id"])
+        definition = store.get_definition(conn, result["definition_id"])
+        generation = {"version": 1, "prompt": "Write the supplied public news summary.", "research": {"enabled": False}, "inputs": []}
+        store.save_definition(conn, config, definition["group_id"], payload(definition, generation=generation), actor_id="alice",
+                              is_admin=True, expected_revision=1, definition_id=definition["id"])
+        publisher_preview(conn, config, definition["id"])
+
+
+def test_publisher_stale_preview_and_changed_producer_refuse(publisher):
+    from istota.briefings import group_migrate as migration
+    config, job, document = publisher
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        publisher_preview(conn, config, result["definition_id"])
+        definition = store.get_definition(conn, result["definition_id"])
+        store.save_definition(conn, config, definition["group_id"], payload(definition, title="Edited", excluded_user_ids=["bob"]),
+                              actor_id="alice", is_admin=True, expected_revision=1, definition_id=definition["id"])
+        with pytest.raises(GroupError, match="preview_required"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2,
+                                        replacements={}, confirmed=True)
+        publisher_preview(conn, config, definition["id"])
+        conn.execute("UPDATE scheduled_jobs SET prompt='Changed after import' WHERE name=?", (job.name,))
+    with db.get_db(config.db_path) as conn:
+        with pytest.raises(GroupError, match="publisher_changed"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2,
+                                        replacements={}, confirmed=True)
+
+
+def test_publisher_import_obeys_owner_and_contribution_gates(publisher):
+    from istota.briefings import group_migrate as migration
+    config, job, document = publisher
+    with db.get_db(config.db_path) as conn:
+        db.create_group(conn, "private-team", kind="group", display_name="Team", created_by="bob")
+        db.add_group_member(conn, "private-team", "bob", role="owner", added_by="bob")
+        document["group_id"] = "private-team"
+        conn.commit()
+        with pytest.raises(GroupError):
+            migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        with pytest.raises(GroupError, match="installation admin"):
+            migration.import_publisher(conn, config, "alice", job.name, document, actor_id="bob")
+        db.add_group_member(conn, "private-team", "alice", role="owner", added_by="bob")
+        document["generation"]["inputs"] = [{"id": "notes", "kind": "personal_file", "config": {"owner_id": "bob", "path": "notes.md"}}]
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        with pytest.raises(GroupError, match="approval"):
+            publisher_preview(conn, config, result["definition_id"])
+        definition = store.get_definition(conn, result["definition_id"])
+        with pytest.raises(GroupError, match="migration_cutover_required"):
+            store.save_definition(conn, config, definition["group_id"], payload(definition, enabled=True), actor_id="alice", is_admin=True,
+                                  expected_revision=1, definition_id=definition["id"])
+
+
+
+def test_publisher_cli_import_report_and_opaque_dependencies(publisher, tmp_path, capsys):
+    import json
+    from istota import cli_briefings
+    from istota.briefings import group_migrate as migration
+    from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+    config, job, document = publisher
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, "alice", [job, CronJob(name="opaque-consumer", cron="0 8 * * *", command="exit 99")])
+        opaque = db.get_scheduled_job_by_name(conn, "alice", "opaque-consumer")
+    document["dependent_jobs"] = [opaque.id]
+    document["generation"]["research"] = {"enabled": True, "prompt": "Read public headlines."}
+    document["generation"]["inputs"] = [{"id": "shared", "kind": "shared_block", "config": {"name": "other-news"}}]
+    path = tmp_path / "import.json"
+    path.write_text(json.dumps(document))
+    args = ["migrate", "import", "--producer-user", "alice", "--name", job.name, "--actor", "alice", "--file", str(path)]
+    assert cli_briefings.dispatch(args, config) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert any(item.get("unsupported") for item in result["consumers"])
+    assert cli_briefings.dispatch(["migrate", "report", "--producer-user", "alice", "--name", job.name, "--actor", "alice"], config) == 0
+    assert json.loads(capsys.readouterr().out)["consumers"] == result["consumers"]
+    with db.get_db(config.db_path) as conn:
+        definition = store.get_definition(conn, result["definition_id"])
+        assert definition["generation"]["research"]["prompt"] == "Read public headlines."
+        assert definition["generation"]["inputs"][0]["config"]["name"] == "other-news"
+        store.save_definition(conn, config, definition["group_id"], payload(definition, title="Keep UI edit", excluded_user_ids=["bob"]),
+                              actor_id="alice", is_admin=True, expected_revision=1, definition_id=definition["id"])
+        migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        assert store.get_definition(conn, definition["id"])["title"] == "Keep UI edit"
+        assert store.get_definition(conn, definition["id"])["excluded_user_ids"] == ["bob"]
+
+
+def test_publisher_cutover_inflight_replacement_and_exclusion_checks(publisher):
+    from istota.briefings import group_migrate as migration
+    from istota.cron_loader import CronJob, sync_cron_jobs_to_db
+    config, job, document = publisher
+    replacement = CronJob(name="replacement", cron="0 6 * * *", prompt="Public news", publish_shared_kv="news")
+    with db.get_db(config.db_path) as conn:
+        sync_cron_jobs_to_db(conn, "alice", [job, replacement])
+        old_job = db.get_scheduled_job_by_name(conn, "alice", job.name)
+        other = db.get_scheduled_job_by_name(conn, "alice", "replacement")
+        task_id = db.create_task(conn, "news", "alice", source_type="scheduled", scheduled_job_id=old_job.id)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        definition = store.get_definition(conn, result["definition_id"])
+        store.save_definition(conn, config, definition["group_id"], payload(definition, excluded_user_ids=["bob"]), actor_id="alice",
+                              is_admin=True, expected_revision=1, definition_id=definition["id"])
+        publisher_preview(conn, config, definition["id"])
+        replacements = {item["id"]: old_job.id for item in result["consumers"]}
+        with pytest.raises(GroupError, match="consumer_unresolved"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2,
+                                        replacements=replacements, confirmed=True)
+        replacements = {item["id"]: other.id for item in result["consumers"]}
+        with pytest.raises(GroupError, match="legacy_tasks_inflight"):
+            migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2,
+                                        replacements=replacements, confirmed=True)
+        assert db.get_scheduled_job(conn, old_job.id).enabled
+        assert not store.get_definition(conn, definition["id"])["enabled"]
+        conn.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
+    with db.get_db(config.db_path) as conn:
+        migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2,
+                                    replacements=replacements, confirmed=True)
+        assert store.get_definition(conn, definition["id"])["excluded_user_ids"] == ["bob"]
+        migration.rollback_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=3)
+        assert store.get_definition(conn, definition["id"])["excluded_user_ids"] == ["bob"]
+        assert db.get_task(conn, task_id).status == "completed"
+
+
+
+def test_publisher_changed_consumers_need_no_replacement_and_archives_stay_personal(publisher):
+    from istota.briefings import group_migrate as migration
+    config, job, document = publisher
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        publisher_preview(conn, config, result["definition_id"])
+    archives = {}
+    for user in config.users:
+        with bdb.connect(config.module_db_path(user, "briefings")) as content:
+            bdb.insert_archive(content, briefing_name="daily", subject="Personal", body_md="Personal history")
+            content.execute("DELETE FROM briefing_block_sources")
+            content.commit()
+            archives[user] = [tuple(row) for row in content.execute("SELECT * FROM briefing_archive")]
+    with db.get_db(config.db_path) as conn:
+        assert migration.publisher_report(conn, config, "alice", job.name, actor_id="alice")["consumers"] == []
+        migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
+                                    replacements={}, confirmed=True)
+        migration.rollback_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=2)
+    for user in config.users:
+        with bdb.connect(config.module_db_path(user, "briefings")) as content:
+            assert [tuple(row) for row in content.execute("SELECT * FROM briefing_archive")] == archives[user]
+
+
+
+def test_publisher_inventory_excludes_proven_retired_default_copies(publisher):
+    from istota.briefings import group_migrate as migration
+    config, job, document = publisher
+    with db.get_db(config.db_path) as conn:
+        result = migration.import_publisher(conn, config, "alice", job.name, document, actor_id="alice")
+        legacy = migration.import_default(conn, config, "daily", actor_id="alice", timezone="UTC")
+        definition = store.get_definition(conn, legacy["definition_id"])
+        store.save_definition(conn, config, definition["group_id"], payload(definition, generation_mode="prompt", generation=document["generation"]),
+                              actor_id="alice", is_admin=True, expected_revision=1, definition_id=definition["id"])
+        migration.review_default(conn, config, "daily", actor_id="alice", expected_revision=2, timezone="UTC", dispositions={})
+        migration.cutover_default(conn, config, "daily", actor_id="alice", expected_revision=2)
+        assert migration.publisher_report(conn, config, "alice", job.name, actor_id="alice")["consumers"] == []
+        publisher_preview(conn, config, result["definition_id"])
+        migration.cutover_publisher(conn, config, "alice", job.name, actor_id="alice", expected_revision=1,
+                                    replacements={}, confirmed=True)

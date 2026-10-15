@@ -1616,6 +1616,11 @@ def create_task(
     if source_type == "briefing" and briefing_name:
         from istota.briefings.group_migrate import require_personal_schedule
         require_personal_schedule(conn, user_id, briefing_name)
+    if scheduled_job_id is not None:
+        from istota.briefings.group_migrate import publisher_retired
+        job = get_scheduled_job(conn, scheduled_job_id)
+        if job and publisher_retired(conn, job.user_id, job.name):
+            raise ValueError("publisher_retired")
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
     if talk_message_id is not None:
         existing = find_task_by_talk_message_id(
@@ -11959,6 +11964,10 @@ def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     used, and a running job carrying that stamp would be a lie to whoever reads
     the column next.
     """
+    from istota.briefings.group_migrate import publisher_retired
+    job = get_scheduled_job(conn, job_id)
+    if job and publisher_retired(conn, job.user_id, job.name):
+        raise ValueError("publisher_retired")
     conn.execute(
         """
         UPDATE scheduled_jobs

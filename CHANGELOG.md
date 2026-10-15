@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Operators can import publishing prompts into disabled group briefings, review dependent consumers, and retire the old job after a successful preview and confirmed cutover. Retirement survives schedule reloads and restarts; existing shared content and personal archives remain available for rollback.
+
 - Group briefing owners can exclude selected members from deliveries and in-app notifications. Excluded members keep access to group history, and removing an exclusion does not resend skipped editions.
 
 - Operators can review and import former default briefings as disabled All users drafts, then cut over or roll back each schedule. Existing personal edits, archives and delivery opt-outs are preserved; new accounts receive no copied defaults. Members can change their All users delivery mute in Briefings.

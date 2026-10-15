@@ -93,13 +93,17 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("-f", "--file", help="JSON/TOML definition; use - for stdin")
     group.add_argument("--revision", type=int, help="Expected revision; 0 creates a disabled draft")
 
-    migration = sub.add_parser("migrate", help="Review and retire legacy default briefings")
+    migration = sub.add_parser("migrate", help="Review and retire legacy defaults or publishing jobs")
     migration.add_argument("action", choices=["report", "import", "review", "cutover", "rollback"])
     migration.add_argument("--name")
+    migration.add_argument("--producer-user", help="Migrate this user's publishing job named by --name")
+    migration.add_argument("-f", "--file", help="Publishing import: group definition, outputs and dependent_jobs")
+    migration.add_argument("--confirm-cutover", action="store_true",
+                           help="Confirm cutover after reviewing all dependencies, including scripts and prompts")
     migration.add_argument("--actor", required=True)
     migration.add_argument("--timezone", help="Explicit common timezone, required for import/review")
     migration.add_argument("--revision", type=int, help="Expected imported definition revision")
-    migration.add_argument("--dispositions", help="JSON/TOML map: user id to retire, keep (personal only), or mute")
+    migration.add_argument("--dispositions", help="JSON/TOML map: default user dispositions, or publishing consumer ids to replacement job ids")
     migration.add_argument("--accept-source-changes", action="store_true", help="Acknowledge removed/converted sources and delivery changes")
 
     # archive -------------------------------------------------------------
@@ -283,7 +287,30 @@ def _run_migration(args, config):
         with db.get_db(config.db_path) as conn:
             if not operator_is_admin(conn, config, args.actor):
                 raise ValueError("migration requires an installation admin")
-            if args.action == "report":
+            if args.producer_user:
+                if not args.name:
+                    raise ValueError("--name is required")
+                common = {"actor_id": args.actor}
+                if args.action == "report":
+                    result = migration.publisher_report(conn, config, args.producer_user, args.name, **common)
+                elif args.action == "import":
+                    if not args.file:
+                        raise ValueError("--file is required; supply the replacement prompt and dependency inventory")
+                    result = migration.import_publisher(conn, config, args.producer_user, args.name,
+                                                        apply.load_plan(args.file), **common)
+                elif args.action == "review":
+                    raise ValueError("Use report, generate a preview of the current draft, then cutover --confirm-cutover")
+                else:
+                    if args.revision is None:
+                        raise ValueError("--revision is required")
+                    common["expected_revision"] = args.revision
+                    if args.action == "cutover":
+                        result = migration.cutover_publisher(conn, config, args.producer_user, args.name,
+                            replacements=apply.load_plan(args.dispositions) if args.dispositions else {},
+                            confirmed=args.confirm_cutover, **common)
+                    else:
+                        result = migration.rollback_publisher(conn, config, args.producer_user, args.name, **common)
+            elif args.action == "report":
                 result = migration.migration_report(conn, config, args.name)
             else:
                 if not args.name:

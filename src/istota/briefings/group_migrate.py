@@ -180,8 +180,8 @@ def migration_report(conn, config, name=None):
     return records
 
 
-def _owned(conn, config, name, actor_id, expected_revision=None):
-    record = _record(conn, "default:" + name)
+def _owned(conn, config, name, actor_id, expected_revision=None, *, key=None):
+    record = _record(conn, key or "default:" + name)
     if not record or not record["definition_id"]:
         _error("migration_import_required")
     definition = store.get_definition(conn, record["definition_id"])
@@ -280,7 +280,11 @@ def validate_migration(conn, definition, *, activation=False, due_at=None):
     record = _record(conn, row[0])
     if activation and record["state"] != "cutover":
         _error("migration_cutover_required")
-    if record.get("source_issues") and record["state"] != "cutover":
+    if record["legacy_key"].startswith("publisher:"):
+        if (record.get("source_issues") and definition["generation_mode"] == "prompt"
+                and definition["generation"]["prompt"] == record["imported_generation"]["prompt"]):
+            _error("migration_sources_unresolved")
+    elif record.get("source_issues") and record["state"] != "cutover":
         if record.get("review", {}).get("revision") != definition.get("revision"):
             _error("migration_sources_unresolved")
     if due_at is not None and record.get("not_before") and due_at <= record["not_before"]:
@@ -371,3 +375,190 @@ def require_personal_schedule(conn, user_id, name):
         item = record["review"]["users"].get(user_id)
         if item and item["choice"] != "keep":
             raise ValueError("briefing_retired")
+
+
+def _publisher_key(user_id, name):
+    return "publisher:" + store._json([user_id, name])
+
+
+def publisher_retired(conn, user_id, name):
+    # Take the same write lock as cutover before a cached job can be admitted.
+    key = _publisher_key(user_id, name)
+    conn.execute("UPDATE group_briefing_migrations SET state=state WHERE legacy_key=?", (key,))
+    record = _record(conn, key)
+    return bool(record and record["state"] == "cutover")
+
+
+def _publisher_job(conn, config, user_id, name, actor_id):
+    from istota.cron_loader import FILE_OWNED_COLUMNS
+    if not operator_is_admin(conn, config, actor_id):
+        raise GroupError(403, "publisher_admin_required", "Publishing migration requires an installation admin")
+    job = db.get_scheduled_job_by_name(conn, user_id, name)
+    if job is None or name.startswith("_module."):
+        _error("publisher_not_found")
+    return job, {field: getattr(job, field) for field in sorted(FILE_OWNED_COLUMNS)}
+
+
+def _publisher_consumers(conn, config, outputs, dependent_jobs):
+    """Inventory structured references and operator-declared opaque jobs, without reading scripts."""
+    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+    consumers = {}
+
+    def collect(identity, sources):
+        used = {source.get("config", {}).get("name") or source.get("config", {}).get("key")
+                for source in sources if source["kind"] == "shared_block" and source.get("enabled", True)}
+        targets = [SHARED_BLOCK_NAMESPACE + "/" + name for name in used if name]
+        matched = sorted(set(targets) & set(outputs))
+        if matched:
+            consumers[identity] = {"id": identity, "outputs": matched}
+
+    users = set(config.users) | {row[0] for row in conn.execute("SELECT DISTINCT user_id FROM briefing_configs")}
+    for user in sorted(users):
+        configured = config.users.get(user)
+        definitions = {item.name: _migrate.block_specs(item) for item in configured.briefings} if configured else {}
+        path = config.module_db_path(user, "briefings")
+        if path.exists():
+            with bdb.connect(path) as content:
+                names = set(bdb.list_briefing_names(content))
+                for name in names | set(definitions):
+                    if name in names or bdb.meta_get(content, _migrate._briefing_sentinel(name)) == "1":
+                        definitions[name] = snapshot_blocks(content, name, user)
+        for name, blocks in definitions.items():
+            migrated = _record(conn, "default:" + name)
+            if migrated and migrated["state"] == "cutover" and migrated["review"]["users"].get(user, {}).get("choice") in ("retire", "mute"):
+                continue
+            collect(f"personal:{user}:{name}", [source for block in blocks for source in block["sources"]])
+    for row in conn.execute("SELECT id FROM group_briefing_configs ORDER BY id"):
+        definition = store.get_definition(conn, row[0])
+        collect(f"group:{definition['id']}", store.definition_sources(definition))
+    for block in config.briefing_shared_blocks:
+        collect("shared:" + block.name, [asdict(source) for source in block.sources])
+    for job_id in dependent_jobs:
+        job = db.get_scheduled_job(conn, job_id)
+        if job is None:
+            _error("dependent_job_not_found")
+        identity = "job:" + str(job_id)
+        consumers[identity] = {"id": identity, "outputs": outputs, "unsupported": "operator_declared_dependency"}
+    return sorted(consumers.values(), key=lambda item: item["id"])
+
+
+def publisher_report(conn, config, user_id, name, *, actor_id):
+    _publisher_job(conn, config, user_id, name, actor_id)
+    record, definition = _owned(conn, config, name, actor_id, key=_publisher_key(user_id, name))
+    return {"producer_user": user_id, "producer_name": name, "definition_id": definition["id"],
+            "revision": definition["revision"], "state": record["state"], "outputs": record["outputs"],
+            "source_issues": record.get("source_issues", []) if (definition["generation_mode"] == "prompt"
+                and definition["generation"]["prompt"] == record["imported_generation"].get("prompt")) else [],
+            "consumers": _publisher_consumers(conn, config, record["outputs"], record["dependent_jobs"]),
+            "inventory_limit": "Script and prompt dependencies require operator review; no scripts are read or executed.",
+            "outcomes": record.get("outcomes", [])}
+
+
+def import_publisher(conn, config, user_id, name, document, *, actor_id):
+    from istota.scheduler import _parse_shared_kv_target
+    from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+    if not isinstance(document, dict) or not isinstance(document.get("group_id"), str):
+        raise ValueError("Publishing import requires a group_id and a definition")
+    with _transaction(conn):
+        job, before = _publisher_job(conn, config, user_id, name, actor_id)
+        key = _publisher_key(user_id, name)
+        if _record(conn, key):
+            return publisher_report(conn, config, user_id, name, actor_id=actor_id)
+        targets = document.get("outputs", [job.publish_shared_kv] if job.publish_shared_kv else [])
+        if not isinstance(targets, list) or not targets or any(not isinstance(value, str) for value in targets):
+            _error("publisher_outputs_required")
+        outputs = sorted({"/".join(_parse_shared_kv_target(value)) for value in targets})
+        if any(not value.startswith(SHARED_BLOCK_NAMESPACE + "/") or not value.split("/", 1)[1] for value in outputs):
+            _error("publisher_output_unsupported")
+        if job.publish_shared_kv and "/".join(_parse_shared_kv_target(job.publish_shared_kv)) not in outputs:
+            _error("publisher_output_missing")
+        dependents = document.get("dependent_jobs")
+        if not isinstance(dependents, list) or any(type(value) is not int or value == job.id for value in dependents):
+            _error("publisher_dependency_inventory_required")
+        value = {field: document[field] for field in PAYLOAD_FIELDS if field in document}
+        issues = []
+        if "generation" not in value:
+            issues = [{"kind": "replacement_prompt_required"}]
+            value.update(generation_mode="prompt", generation={"version": 1,
+                "prompt": "Supply the intended replacement prompt before preview.", "research": {"enabled": False}, "inputs": []})
+        value["enabled"] = False
+        definition = store.save_definition(conn, config, document["group_id"], value, actor_id=actor_id,
+            is_admin=True, expected_revision=0, caller_transaction=True)
+        record = {"producer_user": user_id, "producer_name": name, "before": before, "outputs": outputs,
+                  "dependent_jobs": dependents, "source_issues": issues, "imported_generation": definition["generation"],
+                  "disabled_at": job.disabled_at}
+        _write(conn, key, "imported", record, definition["id"])
+        return publisher_report(conn, config, user_id, name, actor_id=actor_id)
+
+
+def cutover_publisher(conn, config, user_id, name, *, actor_id, expected_revision, replacements, confirmed=False, now=None):
+    from istota.scheduler import _parse_shared_kv_target
+    if not isinstance(replacements, dict):
+        raise ValueError("Replacement producers must be a map of consumer ids to job ids")
+    with ExitStack() as locks, _transaction(conn):
+        job, current = _publisher_job(conn, config, user_id, name, actor_id)
+        key = _publisher_key(user_id, name)
+        record, definition = _owned(conn, config, name, actor_id, expected_revision, key=key)
+        if record["state"] == "cutover":
+            return publisher_report(conn, config, user_id, name, actor_id=actor_id)
+        if not confirmed:
+            _error("publisher_confirmation_required")
+        if current != record["before"]:
+            _error("publisher_changed")
+        preview = conn.execute("SELECT 1 FROM group_briefing_runs WHERE definition_id=? AND state='preview_ready' "
+                               "AND json_extract(snapshot_json, '$.definition.revision')=?",
+                               (definition["id"], definition["revision"])).fetchone()
+        if not preview:
+            _error("publisher_preview_required")
+        store._validate_run_sources(conn, config, definition)
+        # Freeze the same module stores whose source references the inventory reads.
+        users = set(config.users) | {row[0] for row in conn.execute("SELECT DISTINCT user_id FROM briefing_configs")}
+        for user in sorted(users):
+            path = config.module_db_path(user, "briefings")
+            if path.exists():
+                locks.enter_context(bdb.connect(path)).execute("BEGIN IMMEDIATE")
+        consumers = _publisher_consumers(conn, config, record["outputs"], record["dependent_jobs"])
+        for consumer in consumers:
+            replacement_id = replacements.get(consumer["id"])
+            replacement = db.get_scheduled_job(conn, replacement_id) if type(replacement_id) is int else None
+            if (not replacement or replacement.id == job.id or not replacement.enabled or replacement.auto_disabled_at
+                    or not operator_is_admin(conn, config, replacement.user_id)
+                    or publisher_retired(conn, replacement.user_id, replacement.name)
+                    or consumer["outputs"] != ["/".join(_parse_shared_kv_target(replacement.publish_shared_kv))]):
+                _error("publisher_consumer_unresolved")
+        tasks = conn.execute("SELECT id,status FROM tasks WHERE scheduled_job_id=?", (job.id,)).fetchall()
+        if any(task["status"] not in ("pending", "failed", "completed", "cancelled") for task in tasks):
+            _error("legacy_tasks_inflight")
+        outcomes = []
+        for task in tasks:
+            if task["status"] in ("pending", "failed"):
+                db.cancel_task(conn, task["id"])
+            outcomes.append({"task_id": task["id"], "before": task["status"],
+                             "outcome": "cancelled" if task["status"] in ("pending", "failed") else task["status"]})
+        db.disable_scheduled_job(conn, job.id)
+        record.update(outcomes=outcomes, replacements=replacements, not_before=store._timestamp(now))
+        _write(conn, key, "cutover", record, definition["id"])
+        store.save_definition(conn, config, definition["group_id"], {field: definition[field] for field in PAYLOAD_FIELDS} | {"enabled": True},
+            actor_id=actor_id, is_admin=True, expected_revision=expected_revision, definition_id=definition["id"], caller_transaction=True)
+        return publisher_report(conn, config, user_id, name, actor_id=actor_id)
+
+
+def rollback_publisher(conn, config, user_id, name, *, actor_id, expected_revision):
+    with _transaction(conn):
+        job, current = _publisher_job(conn, config, user_id, name, actor_id)
+        key = _publisher_key(user_id, name)
+        record, definition = _owned(conn, config, name, actor_id, expected_revision, key=key)
+        if record["state"] != "cutover":
+            _error("migration_not_active")
+        if current != record["before"] | {"enabled": False}:
+            _error("publisher_changed")
+        if conn.execute("SELECT 1 FROM group_briefing_recipients WHERE run_id IN "
+                        "(SELECT id FROM group_briefing_runs WHERE definition_id=?) AND state IN ('sending','uncertain')",
+                        (definition["id"],)).fetchone():
+            _error("group_deliveries_inflight")
+        store.save_definition(conn, config, definition["group_id"], {field: definition[field] for field in PAYLOAD_FIELDS} | {"enabled": False},
+            actor_id=actor_id, is_admin=True, expected_revision=expected_revision, definition_id=definition["id"], caller_transaction=True)
+        _write(conn, key, "rolled_back", record, definition["id"])
+        conn.execute("UPDATE scheduled_jobs SET enabled=?,disabled_at=?,last_run_at=datetime('now') WHERE id=?",
+                     (record["before"]["enabled"], record["disabled_at"], job.id))
+        return publisher_report(conn, config, user_id, name, actor_id=actor_id)
