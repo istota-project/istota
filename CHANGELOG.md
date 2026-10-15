@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Admin → Briefings lists every personal, group and All users briefing with its owner, schedule, delivery and state. Administrators can pause a briefing so it does not run until an administrator resumes it, and delete one after typing its name and confirming with a code or password. Owners are notified; deleted group briefings keep their published editions in the reader.
+
 - Operators can import publishing prompts into disabled group briefings, review dependent consumers, and retire the old job after a successful preview and confirmed cutover. Retirement survives schedule reloads and restarts; existing shared content and personal archives remain available for rollback.
 
 - Group briefing owners can exclude selected members from deliveries and in-app notifications. Excluded members keep access to group history, and removing an exclusion does not resend skipped editions.
@@ -41,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Voided invoices stay on record.** A void keeps the invoice's total, the work it covered, a reason and the invoices that replace it, and the voided invoice still shows in the invoice list. Its PDF is kept with a `-VOID` suffix unless you ask for it to be deleted, and its number is never reused.
 
 ### Changed
+
+- `[users.X.briefings]` in `config.toml` is retired. Each entry is imported once into the briefings database, and the config reports the block until it is removed; a briefing deleted in the settings page no longer comes back on restart. Every personal briefing is now editable by its owner, with no "Set by your administrator" lock.
 
 - **The work log and invoices moved into the money database.** Each invoice now has a record with the total it was issued at, split by income account, so a later rate change no longer alters past invoices, `invoice paid` books exactly that total (manual items included, where a manual-only invoice used to be refused as having no billable items), and generating, voiding and paying each happen in one step that cannot be left half done. An invoice is paid as a whole; payment is no longer recorded per work entry. See `docs/features/money.md`.
   **Upgrade note:** the yearly `invoices/work/{year}.toml` files are imported the first time the work log is used and then renamed `{year}.toml.migrated`; edits to them no longer do anything. If the import refuses (an unreadable file, an entry with no uid, a duplicated uid, or one invoice's entries disagreeing on the paid date), work and invoice commands fail with `work log migration blocked` until an operator fixes it and runs `istota money work migrate -u USER`. A number voided before the upgrade stays a gap.

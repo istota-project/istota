@@ -34,7 +34,7 @@ Because a name can come from a schedule, or from blocks with no schedule at all,
 
 ## Building a briefing
 
-Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs; operator-managed schedules remain read-only.
+Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs.
 
 Add block opens a searchable preset list for feeds, websites, newsletters, calendar, markets, tasks, notes, reminders, shared content or a custom block. Presets use the existing sources. Feed presets need Feeds enabled with a subscription or category; shared content needs an available shared block. Choose the source's feed, website, file or shared-block name before saving.
 
@@ -73,6 +73,16 @@ A refused selected source blocks publication, including structured-only editions
 All users is the built-in group of enabled installation accounts. Membership is automatic, including for users whose personal Briefings module is off. It cannot be manually changed or archived. Installation admins author its briefings; joining the installation grants access to retained All users history. Its creation alone enables no mailing and injects no group memory into ordinary tasks.
 
 Legacy `[[default_briefings]]` and the old per-user default toggle are migration inputs only. Upgrade preserves existing effective personal schedules and content once. New accounts receive no copied schedules. Operators import disabled All users drafts, review personal variants and opt-outs, and explicitly cut over each definition. Existing personal archives stay personal. See [Migrating group briefings](../deployment/migrating-group-briefings.md) for the report, import, cutover and rollback commands.
+
+## Administrator pause and delete
+
+Admin → Briefings lists every personal, group and All users briefing on the installation, with its owner or group, schedule, delivery channel, state and last run. A text filter narrows both lists by owner, group or title. The page shows definitions and state only, never blocks, sources, prompts or editions.
+
+Pause places an administrator hold. A held briefing does not run, and pending runs are cancelled; a run already in progress finishes. The hold is separate from the owner's own on/off setting. The owner sees "Paused by an administrator" in Briefings settings and cannot turn the briefing on until an administrator chooses Resume, which restores whatever setting the owner had. A group's owners can still edit a held definition and turn it off.
+
+Delete asks for the briefing's name typed back and then a confirmation code or password, the same two checks the configuration editor uses. A personal briefing is removed the way its owner would remove it, and past editions stay in the owner's archive. A group briefing leaves the group's settings and stops running, its source approvals are revoked, and its name is free to reuse. Members keep its published editions in the reader. A definition created by a former default or publishing-job migration cannot be deleted until that migration is cut over (see [Migrating group briefings](../deployment/migrating-group-briefings.md)).
+
+The owner of a personal briefing, or the current owners of a group, get a notification when an administrator pauses, resumes or deletes it. The acting administrator is not notified, and nobody is notified about an All users briefing.
 
 ## Memory isolation
 
