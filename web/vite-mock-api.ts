@@ -7345,6 +7345,7 @@ const handlers: MockHandler[] = [
         };
         archive.push({
           id: archive.length + 1,
+          read_at: null,
           briefing_name: name,
           subject: title,
           generated_at: generated.toISOString(),
@@ -7359,6 +7360,7 @@ const handlers: MockHandler[] = [
       id: 18,
       briefing_name: 'morning',
       subject: 'An earlier morning briefing',
+      read_at: null,
       generated_at: new Date(Date.now() - 480 * 3600_000).toISOString(),
       task_id: 4100,
       delivered_to: ['talk'],

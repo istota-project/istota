@@ -104,6 +104,7 @@ describe('delegated links through the real viewer host', () => {
     async (format) => {
       vi.mocked(getBriefingArchiveItem).mockResolvedValue({
         id: 1,
+        read_at: null,
         task_id: null,
         briefing_name: 'Morning',
         generated_at: '2026-01-01T00:00:00Z',

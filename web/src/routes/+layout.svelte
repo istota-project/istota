@@ -54,9 +54,15 @@
   // live one does, because it is the same record.
   let live = $state(false);
 
-  const chatCount = $derived(user?.show_nav_unread_badges ? $navUnreadCounts.chat : null);
-  const briefingsCount = $derived(user?.show_nav_unread_badges ? $navUnreadCounts.briefings : null);
-  const feedsCount = $derived(user?.show_nav_unread_badges ? $navUnreadCounts.feeds : null);
+  const chatCount = $derived.by(() =>
+    user?.show_nav_unread_badges ? $navUnreadCounts.chat : null,
+  );
+  const briefingsCount = $derived.by(() =>
+    user?.show_nav_unread_badges ? $navUnreadCounts.briefings : null,
+  );
+  const feedsCount = $derived.by(() =>
+    user?.show_nav_unread_badges ? $navUnreadCounts.feeds : null,
+  );
   const chatLabel = $derived(unreadLabel('Chat', chatCount, 'message', 'messages'));
   const briefingsLabel = $derived(
     unreadLabel('Briefings', briefingsCount, 'briefing', 'briefings'),
