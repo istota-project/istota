@@ -5446,7 +5446,8 @@ export type StepUpAction =
   | 'backup_recipient'
   | 'history_restore'
   | 'history_purge'
-  | 'admin_config_change';
+  | 'admin_config_change'
+  | 'admin_briefing_delete';
 /** How the server confirms a sensitive action: a mailed code, or the
  *  account password where the install cannot mail one. The server decides. */
 export type StepUpMethod = 'email' | 'password';
@@ -6378,6 +6379,66 @@ export function archiveAdminGroup(
   payload: { revision: number; confirm: true },
 ): Promise<{ group_id: string; revision: number; archived_at: string }> {
   return groupRequest(`/admin${groupPath(id)}/archive`, 'POST', payload);
+}
+
+/** Admin › Briefings: definitions and state only, never content. */
+export interface AdminPersonalBriefing {
+  id: number;
+  user_id: string;
+  owner_label: string;
+  name: string;
+  title: string;
+  cron: string;
+  /** The owner's; null for a row whose user has no profile. */
+  timezone: string | null;
+  output: string;
+  enabled: boolean;
+  held: BriefingHold | null;
+  last_run_at: string | null;
+}
+export interface AdminGroupBriefing {
+  id: number;
+  group_id: string;
+  group_label: string;
+  system_key: string | null;
+  name: string;
+  title: string;
+  cron: string;
+  timezone: string;
+  channel: string;
+  enabled: boolean;
+  held: BriefingHold | null;
+  owners: string[];
+  last_published_at: string | null;
+}
+export type AdminBriefingKind = 'personal' | 'group';
+export function getAdminBriefings(): Promise<{
+  personal: AdminPersonalBriefing[];
+  group: AdminGroupBriefing[];
+}> {
+  return groupRequest('/admin/briefings');
+}
+export function holdAdminBriefing(
+  kind: AdminBriefingKind,
+  id: number,
+): Promise<AdminPersonalBriefing | AdminGroupBriefing> {
+  return groupRequest(`/admin/briefings/${kind}/${id}/hold`, 'POST', {});
+}
+export function resumeAdminBriefing(
+  kind: AdminBriefingKind,
+  id: number,
+): Promise<AdminPersonalBriefing | AdminGroupBriefing> {
+  return groupRequest(`/admin/briefings/${kind}/${id}/resume`, 'POST', {});
+}
+/** `confirm` is the briefing's name typed back. A refused proof is a 403
+ *  `GroupApiError` with `reason` set, which `StepUpDialog` reads. */
+export function deleteAdminBriefing(
+  kind: AdminBriefingKind,
+  id: number,
+  confirm: string,
+  step_up: StepUpProof,
+): Promise<{ ok: true; deleted: true; id: number }> {
+  return groupRequest(`/admin/briefings/${kind}/${id}`, 'DELETE', { confirm, step_up });
 }
 // Group briefing authoring uses the same authenticated API boundary as Groups.
 export interface BriefingTarget {

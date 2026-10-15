@@ -5853,6 +5853,121 @@ function mockAdminGroupDetail(id: string) {
     ],
   };
 }
+// Admin › Briefings: definitions and state, never content. Mirrors the
+// server's refusals so the page's confirm and step-up paths run in dev.
+const mockAdminHeld = (at: string) => ({ at, by_label: 'Alice' });
+const mockAdminBriefings = {
+  personal: [
+    {
+      id: 201,
+      user_id: 'carol',
+      owner_label: 'Carol',
+      name: 'weekly',
+      title: 'Weekly Review',
+      cron: '0 9 * * 1',
+      timezone: 'Europe/Berlin',
+      output: 'email',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      last_run_at: '2026-10-12T07:00:00+00:00',
+    },
+    {
+      id: 202,
+      user_id: 'dave',
+      owner_label: 'Dave',
+      name: 'weekend',
+      title: 'Weekend Reading',
+      cron: '0 10 * * 6',
+      timezone: 'UTC',
+      output: 'talk',
+      enabled: false,
+      held: mockAdminHeld('2026-10-10T09:30:00+00:00') as null | { at: string; by_label: string },
+      last_run_at: null,
+    },
+    {
+      id: 203,
+      user_id: 'former-user',
+      owner_label: 'former-user',
+      name: 'morning',
+      title: '',
+      cron: '0 7 * * *',
+      timezone: null,
+      output: 'ntfy',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      last_run_at: '2026-09-01T07:00:00+00:00',
+    },
+  ],
+  group: [
+    {
+      id: 301,
+      group_id: 'team',
+      group_label: 'Team',
+      system_key: null,
+      name: 'daily',
+      title: 'Team daily',
+      cron: '0 8 * * 1-5',
+      timezone: 'Europe/Berlin',
+      channel: 'email',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      owners: ['Carol'],
+      last_published_at: '2026-10-14T06:00:00Z',
+    },
+    {
+      id: 302,
+      group_id: 'all-users',
+      group_label: 'All users',
+      system_key: 'all_users' as string | null,
+      name: 'common',
+      title: 'Daily news',
+      cron: '0 7 * * *',
+      timezone: 'Europe/Berlin',
+      channel: 'in_app',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      owners: [] as string[],
+      last_published_at: '2026-10-15T05:00:00Z',
+    },
+  ],
+};
+function mockAdminBriefingRoutes(path: string, method: string, body: any) {
+  if (path === '/istota/api/admin/briefings' && method === 'GET') return mockAdminBriefings;
+  const action = path.match(
+    /^\/istota\/api\/admin\/briefings\/(personal|group)\/(\d+)(?:\/(hold|resume))?$/,
+  );
+  if (!action) return undefined;
+  const kind = action[1] as 'personal' | 'group';
+  const rows: { id: number; name: string; held: null | { at: string; by_label: string } }[] =
+    mockAdminBriefings[kind];
+  const index = rows.findIndex((row) => row.id === Number(action[2]));
+  if (index < 0)
+    return { __status: 404, error: 'briefing_not_found', message: 'Briefing not found' };
+  const row = rows[index];
+  if (method === 'POST' && action[3]) {
+    if (action[3] === 'hold' && !row.held) row.held = mockAdminHeld(mockIso(Date.now()));
+    if (action[3] === 'resume') row.held = null;
+    return row;
+  }
+  if (method === 'DELETE' && !action[3]) {
+    if (body?.confirm !== row.name)
+      return {
+        __status: 409,
+        error: 'confirm_required',
+        message: "Type the briefing's name to delete it",
+      };
+    if (!/^[0-9]{6}$/.test(String(body.step_up?.code ?? '')))
+      return {
+        __status: 403,
+        detail: 'That code was not accepted. Try again.',
+        field: 'code',
+        reason: 'bad',
+      };
+    rows.splice(index, 1);
+    return { ok: true, deleted: true, id: row.id };
+  }
+  return undefined;
+}
 function mockGroups(path: string, method: string) {
   if (method !== 'GET') return undefined;
   if (path === '/istota/api/admin/groups')
@@ -6803,6 +6918,9 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
 
   const groupBriefingReply = mockGroupBriefings(driveUrl.pathname, method, body);
   if (groupBriefingReply !== undefined) return groupBriefingReply;
+
+  const adminBriefingReply = mockAdminBriefingRoutes(driveUrl.pathname, method, body);
+  if (adminBriefingReply !== undefined) return adminBriefingReply;
 
   const groupReply = mockGroups(driveUrl.pathname, method);
   if (groupReply !== undefined) return groupReply;
