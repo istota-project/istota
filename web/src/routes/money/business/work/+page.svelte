@@ -29,6 +29,8 @@
     PageLoading,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
+  import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
+  import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
 
@@ -62,6 +64,10 @@
 
   let confirmOpen = $state(false);
   let pendingDelete: WorkEntryRow | null = $state(null);
+
+  // The entry being invoiced on its own, and the invoiced entry whose invoice is being voided.
+  let generating: WorkEntryRow | null = $state(null);
+  let voiding: WorkEntryRow | null = $state(null);
 
   const statusOptions: SelectOption[] = [
     { value: 'uninvoiced', label: 'Uninvoiced' },
@@ -225,6 +231,16 @@
     goto(`${base}/money/business/invoices`);
   }
 
+  function afterGenerate(_result: unknown, matchedPreview: boolean) {
+    if (matchedPreview) generating = null;
+    load();
+  }
+
+  function afterVoid() {
+    voiding = null;
+    load();
+  }
+
   async function reloadFromConflict() {
     conflict = '';
     await load();
@@ -236,7 +252,7 @@
     if (!entry.editable) {
       if (entry.invoice) {
         return [
-          { label: 'Invoiced — void the invoice to edit', onSelect: () => {}, disabled: true },
+          { label: `Void ${entry.invoice}…`, onSelect: () => (voiding = entry), danger: true },
           { label: `View invoice ${entry.invoice}`, onSelect: viewInvoice },
         ];
       }
@@ -250,6 +266,7 @@
     }
     return [
       { label: 'Edit', onSelect: () => openEdit(entry), disabled: busy },
+      { label: 'Generate invoice', onSelect: () => (generating = entry), disabled: busy },
       { label: 'Delete', onSelect: () => askDelete(entry), danger: true, disabled: busy },
     ];
   }
@@ -434,6 +451,23 @@
     onCancel={closeForm}
     error={formError}
     {saving}
+  />
+{/if}
+
+{#if generating}
+  <GenerateInvoicesDialog
+    selection={{ entry_uids: [generating.uid], etags: { [generating.uid]: generating.etag } }}
+    onIssued={afterGenerate}
+    onClose={() => (generating = null)}
+  />
+{/if}
+
+{#if voiding}
+  <VoidInvoiceDialog
+    invoiceNumber={voiding.invoice}
+    paid={!!voiding.paid_date}
+    onVoided={afterVoid}
+    onCancel={() => (voiding = null)}
   />
 {/if}
 

@@ -8,11 +8,17 @@
     markInvoicePaid,
     markInvoicePending,
     invoicePdfUrl,
+    getClients,
+    getBusinessSettings,
     type InvoiceRow,
     type InvoiceDetailItem,
+    type ClientRow,
+    type EntityRow,
+    type ServiceRow,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import {
+    Badge,
     Button,
     EmptyState,
     NoticeBanner,
@@ -20,6 +26,9 @@
     type KebabItem,
     PageLoading,
   } from '$lib/components/ui';
+  import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
+  import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
+  import ManualInvoiceDialog from '$lib/components/money/ManualInvoiceDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
 
@@ -82,13 +91,70 @@
   function menuItems(inv: InvoiceRow): KebabItem[] {
     const busy = busyInvoice === inv.invoice_number;
     const items: KebabItem[] = [];
+    // A voided invoice is a record, not a bill: nothing to pay, nothing to void.
+    if (inv.status === 'voided') {
+      if (inv.has_pdf) {
+        items.push({ label: 'Download PDF', onSelect: () => handleDownloadPdf(inv) });
+      }
+      return items;
+    }
     if (inv.status === 'paid') {
       items.push({ label: 'Mark pending', onSelect: () => handleMarkPending(inv), disabled: busy });
     } else {
       items.push({ label: 'Mark paid', onSelect: () => handleMarkPaid(inv), disabled: busy });
     }
     items.push({ label: 'Download PDF', onSelect: () => handleDownloadPdf(inv) });
+    items.push({
+      label: 'Void invoice…',
+      onSelect: () => (voiding = inv),
+      danger: true,
+      disabled: busy,
+    });
     return items;
+  }
+
+  function voidSummary(inv: InvoiceRow): string {
+    const parts = [`Voided ${formatDate(inv.voided_at?.slice(0, 10))}`];
+    if (inv.void_reason) parts.push(inv.void_reason);
+    if (inv.replaced_by.length > 0) parts.push(`Replaced by ${inv.replaced_by.join(', ')}`);
+    return parts.join(' — ');
+  }
+
+  let voiding: InvoiceRow | null = $state(null);
+  let generateOpen = $state(false);
+  let manualOpen = $state(false);
+
+  let clients: ClientRow[] = $state([]);
+  let entities: EntityRow[] = $state([]);
+  let services: ServiceRow[] = $state([]);
+
+  async function loadConfig() {
+    // Best-effort: the list works without it, only the dialogs' pickers are empty.
+    try {
+      const [clientResp, settingsResp] = await Promise.all([getClients(), getBusinessSettings()]);
+      clients = clientResp.clients;
+      entities = settingsResp.entities;
+      services = settingsResp.services;
+    } catch {
+      clients = [];
+      entities = [];
+      services = [];
+    }
+  }
+
+  function afterVoid() {
+    voiding = null;
+    load();
+  }
+
+  function afterGenerate(_result: unknown, matchedPreview: boolean) {
+    if (matchedPreview) generateOpen = false;
+    load();
+  }
+
+  function afterCreate() {
+    manualOpen = false;
+    load();
   }
 
   let expandedKeys = $state(new Set<string>());
@@ -151,6 +217,11 @@
     load();
   });
 
+  $effect(() => {
+    $selectedLedger;
+    loadConfig();
+  });
+
   let sorted = $derived.by(() => {
     const copy = [...invoices];
     copy.sort((a, b) => {
@@ -187,6 +258,10 @@
       <span class="money-result-count"
         >{invoiceCount} invoices ({outstandingCount} outstanding)</span
       >
+      <div class="toolbar-actions">
+        <Button variant="secondary" onclick={() => (manualOpen = true)}>New manual invoice</Button>
+        <Button variant="primary" onclick={() => (generateOpen = true)}>Generate invoices</Button>
+      </div>
     </div>
   {/if}
 
@@ -256,9 +331,11 @@
       {#each sorted as inv (inv.invoice_number)}
         {@const key = inv.invoice_number}
         {@const isExpanded = expandedKeys.has(key)}
+        {@const voided = inv.status === 'voided'}
         <div
           class="money-table-row"
           class:expanded={isExpanded}
+          class:voided
           role="button"
           tabindex="0"
           aria-expanded={isExpanded}
@@ -274,7 +351,8 @@
             class="inv-number"
             class:status-paid={inv.status === 'paid'}
             class:status-posted={inv.status === 'outstanding'}
-            class:status-draft={inv.status === 'draft'}>{inv.invoice_number}</span
+            class:status-draft={inv.status === 'draft'}
+            class:status-voided={voided}>{inv.invoice_number}</span
           >
           <span class="inv-client">
             {inv.client}
@@ -288,14 +366,20 @@
             {/if}
           </span>
           <span class="inv-date">{formatDate(inv.date)}</span>
-          <span
-            class="inv-status money-status"
-            class:status-paid={inv.status === 'paid'}
-            class:status-posted={inv.status === 'outstanding'}
-            class:status-draft={inv.status === 'draft'}>{displayStatus(inv.status)}</span
-          >
+          {#if voided}
+            <span class="inv-status inv-voided" title={voidSummary(inv)}>
+              <Badge size="sm">Voided</Badge>
+            </span>
+          {:else}
+            <span
+              class="inv-status money-status"
+              class:status-paid={inv.status === 'paid'}
+              class:status-posted={inv.status === 'outstanding'}
+              class:status-draft={inv.status === 'draft'}>{displayStatus(inv.status)}</span
+            >
+          {/if}
           <span class="inv-amount money-amount">${formatAmount(inv.total)}</span>
-          <KebabMenu items={menuItems(inv)} />
+          <KebabMenu items={menuItems(inv)} ariaLabel="Actions for {inv.invoice_number}" />
         </div>
         {#if isExpanded}
           <div class="inv-details">
@@ -327,7 +411,57 @@
   {/if}
 </div>
 
+{#if voiding}
+  <VoidInvoiceDialog
+    invoiceNumber={voiding.invoice_number}
+    paid={voiding.status === 'paid'}
+    onVoided={afterVoid}
+    onCancel={() => (voiding = null)}
+  />
+{/if}
+
+{#if generateOpen}
+  <GenerateInvoicesDialog
+    {clients}
+    {entities}
+    onIssued={afterGenerate}
+    onClose={() => (generateOpen = false)}
+  />
+{/if}
+
+{#if manualOpen}
+  <ManualInvoiceDialog
+    {clients}
+    {entities}
+    {services}
+    onCreated={afterCreate}
+    onCancel={() => (manualOpen = false)}
+  />
+{/if}
+
 <style>
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Muted rather than hidden: a voided number stays on record. */
+  .money-table-row.voided .inv-client,
+  .money-table-row.voided .inv-amount {
+    color: var(--text-dim);
+  }
+
+  .money-table-row.voided .inv-amount {
+    text-decoration: line-through;
+  }
+
+  .inv-voided {
+    display: inline-flex;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
   .payment-review + .payment-review {
     margin-top: var(--space-4);
   }
@@ -461,9 +595,13 @@
       color: var(--status-success-fg);
       background: var(--status-success-bg);
     }
-    .inv-number.status-draft {
+    .inv-number.status-draft,
+    .inv-number.status-voided {
       color: var(--text-muted);
       background: var(--surface-badge);
+    }
+    .inv-voided {
+      display: none;
     }
     .inv-amount {
       min-width: 4rem;
