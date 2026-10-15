@@ -1204,6 +1204,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_email_thread_members(conn)
     _migrate_groups(conn)
     _migrate_group_management(conn)
+    _migrate_system_groups(conn)
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
@@ -8843,7 +8844,8 @@ _GROUPS_DDL = (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     created_by   TEXT NOT NULL,
     archived_at  TEXT,
-    revision     INTEGER NOT NULL DEFAULT 0
+    revision     INTEGER NOT NULL DEFAULT 0,
+    system_key   TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS group_members (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8935,6 +8937,12 @@ def _migrate_email_thread_members(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('email_thread_members_v1')"
     )
+
+
+def _migrate_system_groups(conn: sqlite3.Connection) -> None:
+    _add_columns(conn, "groups", {"system_key": "TEXT"})
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_system_key ON groups(system_key) WHERE system_key IS NOT NULL")
+    conn.execute("INSERT OR IGNORE INTO _migration_state (name) VALUES ('system_groups_v1')")
 
 
 def _migrate_group_management(conn: sqlite3.Connection) -> None:
@@ -10977,6 +10985,7 @@ def _group_dict(row: sqlite3.Row) -> dict:
         "created_by": row["created_by"],
         "archived_at": row["archived_at"],
         "revision": row["revision"],
+        "system_key": row["system_key"],
     }
 
 
@@ -11005,7 +11014,7 @@ def archive_group(
     """Retire a group. True if a live group was archived."""
     cursor = conn.execute(
         "UPDATE groups SET archived_at = COALESCE(?, datetime('now')) "
-        "WHERE group_id = ? AND archived_at IS NULL",
+        "WHERE group_id = ? AND archived_at IS NULL AND system_key IS NULL",
         (at, group_id),
     )
     return cursor.rowcount > 0
@@ -11083,7 +11092,8 @@ def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bo
     row = conn.execute(
         "SELECT 1 FROM group_members m JOIN groups g ON g.group_id = m.group_id "
         "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
-        "AND g.archived_at IS NULL LIMIT 1",
+        "AND g.archived_at IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) LIMIT 1",
         (group_id, user_id),
     ).fetchone()
     return row is not None
@@ -11106,6 +11116,7 @@ def list_user_groups(conn: sqlite3.Connection, user_id: str) -> list[str]:
         "SELECT DISTINCT m.group_id FROM group_members m "
         "JOIN groups g ON g.group_id = m.group_id "
         "WHERE m.user_id = ? AND m.ended_at IS NULL AND g.archived_at IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) "
         "ORDER BY m.group_id",
         (user_id,),
     ).fetchall()

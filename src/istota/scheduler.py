@@ -10975,6 +10975,8 @@ def run_daemon(
         from .config import _apply_user_profiles  # noqa: PLC0415
 
         _apply_user_profiles(config)
+        from .groups.system import refresh_all_users
+        refresh_all_users(config, provision=True)
     except Exception as e:  # noqa: BLE001
         logger.warning("user_profiles migration skipped: %s", e)
 

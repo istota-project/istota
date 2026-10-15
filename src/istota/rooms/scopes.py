@@ -334,7 +334,9 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     if task.guest_participant_id is not None or task.audience == "mixed":
         return []
     groups = db.list_user_groups(conn, task.user_id)
-    if not groups or not task.conversation_token:
+    automatic = {g for g in groups if db.get_group(conn, g)["system_key"] == "all_users"}
+    groups = [g for g in groups if g not in automatic]
+    if not task.conversation_token:
         return groups
 
     from istota.rooms import policy as room_policy
@@ -363,7 +365,7 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     # never makes a reader a member.
     registered = db.get_room(conn, room_token)
     if registered is not None and registered.group_id:
-        groups = [g for g in groups if g == registered.group_id]
+        groups = [g for g in [*groups, *automatic] if g == registered.group_id]
     return [
         g for g in groups if readers <= set(db.list_group_members(conn, g))
     ]

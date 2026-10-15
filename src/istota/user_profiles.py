@@ -946,6 +946,8 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
         cur = conn.execute(
             "DELETE FROM user_profiles WHERE user_id = ?", (user_id,),
         )
+        from .groups.system import sync_account_membership
+        sync_account_membership(conn, user_id, enabled=False)
         return cur.rowcount > 0
 
 
@@ -1029,6 +1031,8 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         conn.execute(sql, values)
     except sqlite3.IntegrityError as exc:
         _raise_phone_conflict(exc)
+    from .groups.system import sync_account_membership
+    sync_account_membership(conn, profile.user_id)
 
 
 # --- Migration: TOML → DB --------------------------------------------------

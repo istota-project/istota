@@ -174,6 +174,12 @@
   {:else if detail && selected}
     <div class="settings groups-page">
       {#key detail.group_id}
+        {#if detail.system_key === 'all_users'}
+          <p class="caption">
+            The notebook, files and retained briefing history are shared with all current and future
+            installation users, including editions published before they joined.
+          </p>
+        {/if}
         <div class="overview card-grid">
           <div class="wide"><GroupNotebook groupId={detail.group_id} /></div>
           <SettingsCard title="Members">

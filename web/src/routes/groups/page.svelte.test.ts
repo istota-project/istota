@@ -438,3 +438,19 @@ it('keeps an owner metadata draft when reloading a revision conflict', async () 
     }),
   );
 });
+
+it('explains automatic membership and future history beside shared content', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    system_key: 'all_users',
+    display_name: 'All users',
+    capabilities: { ...group.capabilities, manage: false, leave: false },
+  });
+  render(Groups);
+  await screen.findByText('Everyone in this installation; membership is automatic.');
+  expect(screen.getByText(/current and future installation users/)).toBeTruthy();
+  for (const name of ['Add member', 'Leave group', 'Edit group details', 'Actions for Bob'])
+    expect(screen.queryByRole('button', { name })).toBeNull();
+  expect(screen.getByRole('heading', { name: 'Notebook' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Shared files' })).toBeTruthy();
+});

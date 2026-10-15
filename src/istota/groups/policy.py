@@ -18,12 +18,16 @@ def group_capabilities(conn, group_id: str, actor_id: str, *, is_admin: bool) ->
         (group_id, actor_id),
     ).fetchone() if member else None
     owner = bool(row and row["role"] == "owner")
+    system = bool(group and group["system_key"] == "all_users")
     return {
         "member": member, "owner": owner,
-        "manage": bool(group) and (owner or is_admin),
-        "archive": bool(group) and is_admin,
+        "manage": bool(group) and not system and (owner or is_admin),
+        "archive": bool(group) and not system and is_admin,
         "read_memory": member, "edit_memory": member,
-        "leave": member,
+        "leave": member and not system,
+        "read_briefings": member,
+        "author_briefings": member and (owner or (system and is_admin)),
+        "receive_briefings": member,
     }
 
 

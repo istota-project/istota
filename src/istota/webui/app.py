@@ -207,6 +207,8 @@ async def lifespan(app: FastAPI):
     _started_at = _utc_stamp()
     _reload_config(app)
     _publish_config(app)
+    from istota.groups.system import refresh_all_users
+    await asyncio.to_thread(refresh_all_users, _config, provision=True)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
     # Wrap the stop signals so the SSE streams below can end themselves instead
     # of being cancelled at the graceful-shutdown timeout — which is what put a
@@ -1012,6 +1014,8 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
     Unauthenticated, so it names no version: an exact version tells a visitor
     which advisories apply (ISSUE-569). `/admin` carries it instead.
     """
+    from istota.groups.system import ACCOUNT_HISTORY_DISCLOSURE
+    body += f'<p class="muted">{escape(ACCOUNT_HISTORY_DISCLOSURE)}</p>'
     name = escape(bot_name)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'

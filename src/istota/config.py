@@ -2277,6 +2277,9 @@ class Config:
     _profile_generation: int = field(default=-1, repr=False, compare=False)
     _profile_checked_at: float = field(default=0.0, repr=False, compare=False)
     _profile_refresh_failing: bool = field(default=False, repr=False, compare=False)
+    _profile_user_ids: set[str] = field(default_factory=set, repr=False, compare=False)
+    _configured_user_ids: set[str] | None = field(default=None, repr=False, compare=False)
+    _user_registry_complete: bool = field(default=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.workspace_path is None:
@@ -3729,6 +3732,9 @@ _NOT_CONFIGURATION = frozenset({
     "_profile_generation",
     "_profile_checked_at",
     "_profile_refresh_failing",
+    "_profile_user_ids",
+    "_configured_user_ids",
+    "_user_registry_complete",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -6151,11 +6157,14 @@ def _apply_user_profiles(config: "Config") -> None:
     (callers like ``istota init`` run before the DB exists). The DB wins for
     profile-shaped fields; TOML keeps resources and briefings.
     """
+    config._user_registry_complete = False
     try:
         from . import user_profiles as _up  # avoid import cycles at module load
     except Exception:  # pragma: no cover - defensive
         return
 
+    if config._configured_user_ids is None:
+        config._configured_user_ids = set(config.users)
     db_path = config.db_path
     if db_path is None or not Path(db_path).exists():
         return
@@ -6175,6 +6184,12 @@ def _apply_user_profiles(config: "Config") -> None:
         return
 
     _merge_profile_rows(config, rows)
+    config._user_registry_complete = True
+    from .groups.system import refresh_all_users
+    try:
+        refresh_all_users(config)
+    except Exception:
+        logger.warning("All users reconciliation failed; keeping membership intervals")
 
 
 def _merge_profile_rows(config: "Config", rows: dict) -> None:
@@ -6188,10 +6203,13 @@ def _merge_profile_rows(config: "Config", rows: dict) -> None:
     """
     from . import user_profiles as _up  # avoid import cycles at module load
 
+    if config._configured_user_ids is None:
+        config._configured_user_ids = set(config.users)
     current = config.users
     from .lib.user_ids import user_id_index
     # Validate the whole snapshot before changing any existing profile.
     user_id_index([*current, *rows])
+    config._profile_user_ids.update(rows)
     added: dict[str, UserConfig] = {}
     for user_id, profile in rows.items():
         existing = current.get(user_id)
@@ -6249,6 +6267,9 @@ def refresh_user_profiles_if_changed(
                 return False
             rows = _up.list_profiles(Path(db_path), busy_timeout_ms=busy_timeout_ms)
             _merge_profile_rows(config, rows)
+            config._user_registry_complete = True
+            from .groups.system import refresh_all_users
+            refresh_all_users(config, busy_timeout_ms=busy_timeout_ms)
         except Exception as e:  # noqa: BLE001
             level = logging.DEBUG if config._profile_refresh_failing else logging.WARNING
             logger.log(
@@ -6257,6 +6278,7 @@ def refresh_user_profiles_if_changed(
                 "per-user settings", e,
             )
             config._profile_refresh_failing = True
+            config._user_registry_complete = False
             return False
         config._profile_generation = generation
         config._profile_refresh_failing = False

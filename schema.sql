@@ -604,8 +604,10 @@ CREATE TABLE IF NOT EXISTS groups (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     created_by   TEXT NOT NULL,
     archived_at  TEXT,
-    revision     INTEGER NOT NULL DEFAULT 0
+    revision     INTEGER NOT NULL DEFAULT 0,
+    system_key   TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_system_key ON groups(system_key) WHERE system_key IS NOT NULL;
 
 -- Membership is a history, never a set: removal sets `ended_at`, no row is
 -- deleted, and a re-join inserts a new row, so `(group_id, user_id)` is not

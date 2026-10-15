@@ -6043,9 +6043,13 @@ export interface GroupCapabilities {
   read_memory: boolean;
   edit_memory: boolean;
   leave: boolean;
+  read_briefings: boolean;
+  author_briefings: boolean;
+  receive_briefings: boolean;
 }
 export interface GroupSummary {
   group_id: string;
+  system_key?: 'all_users' | null;
   display_name: string;
   kind: string;
   revision: number;
