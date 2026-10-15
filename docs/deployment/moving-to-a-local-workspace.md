@@ -66,7 +66,7 @@ This applies only when the optional Ansible management role manages the VM. Then
 
    `--copy-only` writes no `MOVED.md`, since the config has not moved yet and the play turns the mount off afterwards. Tell your users that their bot folder in Nextcloud is now a frozen copy.
 
-2. In the role's variables, set `istota_storage: local`, leave `workspace_mount_path` out of `istota_config`, and set `workspace_path = "/data/workspace"` and `[nextcloud] auto_share_bot_dir = false` there. Run the play. If the stack is still down afterwards, run `istota-stack up`.
+2. In the role's variables, set `istota_storage: local`, leave `workspace_mount_path` out of the `config` of `istota_plan`, and set `workspace_path = "/data/workspace"` and `[nextcloud] auto_share_bot_dir = false` there. Run the play. If the stack is still down afterwards, run `istota-stack up`.
 3. Once the stack is up, rebuild the memory search index:
 
    ```bash

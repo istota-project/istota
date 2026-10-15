@@ -3,7 +3,7 @@
 A plan is a TOML or JSON document of sections. This version reconciles one,
 `[config]`, which holds the whole of `config.toml` as a nested table, so a
 config manager (Ansible, say) can keep its variables as the source of truth
-without a template per key: `{"config": istota_config} | to_json`.
+without a template per key: `{"config": {...}} | to_json`.
 
 The contract is the exit code, after `terraform plan -detailed-exitcode`:
 

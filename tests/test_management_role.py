@@ -394,15 +394,13 @@ class TestTheRoleClaimsWhatItWrites:
 
     def test_the_plan_claims_the_config(self):
         """The envelope goes through `convert_role_input`, which marks the
-        config the role submits as the role's, in either input mode."""
+        config the role submits as the role's."""
         from istota.settings_plan.role_input import convert_role_input
 
-        for variables in ({"istota_config": {"bot_name": "Zed"}},
-                          {"istota_plan": {"meta": {"source": "snapshot"}, "config": {"bot_name": "Zed"}}}):
-            config, _ = _settings_parts(variables)
-            plan, _ = convert_role_input(config)
-            assert plan["meta"]["managed"] is True and plan["meta"]["source"] == "ansible"
-            assert plan["config"] == {"bot_name": "Zed"}
+        config, _ = _settings_parts({"istota_plan": {"meta": {"source": "snapshot"}, "config": {"bot_name": "Zed"}}})
+        plan, _ = convert_role_input(config)
+        assert plan["meta"]["managed"] is True and plan["meta"]["source"] == "ansible"
+        assert plan["config"] == {"bot_name": "Zed"}
 
     def test_put_files_claims_what_the_role_sets(self):
         request = self._put_files({"anthropic_api_key": "sk"}, ["alice"])
@@ -416,8 +414,7 @@ class TestTheRoleClaimsWhatItWrites:
 # --- secrets stay out of output -----------------------------------------------
 
 #: Variables whose value is a credential, or may hold one (a config can).
-_SECRET_VARS = {"istota_secrets", "istota_rclone_conf", "istota_user_secrets", "istota_config",
-                "istota_plan", "istota_plan_secrets"}
+_SECRET_VARS = {"istota_secrets", "istota_rclone_conf", "istota_plan", "istota_plan_secrets"}
 #: Task keys that are conditions or bookkeeping: a variable named there is
 #: evaluated, never printed.
 _CONDITION_KEYS = {"name", "when", "failed_when", "changed_when", "until", "register",
@@ -528,16 +525,6 @@ class TestTheSettingsInput:
     VALUE = "kk-secret-value"
     HEADER = ["brain", "native", "extra_headers", "x.tenant"]
 
-    def _legacy(self) -> dict:
-        return {
-            "istota_config": {"bot_name": "Zed"},
-            "istota_users": {"alice": {"display-name": "Alice", "email": ["a@example.com"]}},
-            "istota_user_secrets": {"alice": [
-                {"service": "karakeep", "key": "api_key", "value": self.VALUE},
-                {"service": "karakeep", "key": "base_url", "value": ""},
-            ]},
-        }
-
     def _canonical(self) -> dict:
         return {
             "istota_plan": {
@@ -552,21 +539,6 @@ class TestTheSettingsInput:
                 "users": {"alice": {"karakeep": {"api_key": self.VALUE}}},
             },
         }
-
-    def test_legacy_variables_split_into_the_config_and_the_user_settings(self):
-        from istota.settings_plan.role_input import convert_role_input
-
-        config, users = _settings_parts(self._legacy())
-        assert config == {"istota_config": {"bot_name": "Zed"}}
-        plan, sidecar = convert_role_input(config)
-        assert set(plan) == {"meta", "config"} and sidecar == {}
-        plan, sidecar = convert_role_input(users)
-        assert "config" not in plan
-        assert plan["users"]["alice"]["profile"]["display_name"] == "Alice"
-        assert plan["users"]["alice"]["profile"]["email_addresses"] == ["a@example.com"]
-        # The empty value is skipped, as the ensure loop skipped it.
-        assert plan["users"]["alice"]["secrets"] == [{"service": "karakeep", "keys": ["api_key"]}]
-        assert sidecar == {"users": {"alice": {"karakeep": {"api_key": self.VALUE}}}}
 
     def test_a_canonical_plan_splits_and_each_secret_follows_its_section(self):
         from istota.settings_plan.role_input import convert_role_input
@@ -591,8 +563,6 @@ class TestTheSettingsInput:
         assert _settings_parts(only_config)[1] == {}
         only_users = {"istota_plan": {"users": {"alice": {"profile": {"timezone": "UTC"}}}}}
         assert _settings_parts(only_users)[0] == {}
-        assert _settings_parts({"istota_config": {"bot_name": "Zed"}})[1] == {}
-        assert _settings_parts({"istota_users": {"alice": {"display-name": "Alice"}}})[0] == {}
 
     def test_a_secret_with_no_section_to_land_in_is_refused_not_dropped(self):
         """A user value with no user settings, or a config value with no
@@ -729,14 +699,14 @@ class TestAFailedApplyIsReportedFromItsResult:
             assert f"{register}.rc == 1" in _when(_tasks()[_index(name)]), name
 
     def test_a_refusal_carries_its_message_when_the_document_has_one(self):
-        """The role's refusals name the flag and the fix; without the message
-        a JSON error says only where."""
-        errors = [{"code": "validation_error", "path": ["istota_users", "alice", "displayname"],
-                   "message": "unsupported ensure flag; use `istota user ensure --help`"}]
+        """The role's refusals name the variable and the fix; without the
+        message a JSON error says only where."""
+        errors = [{"code": "validation_error", "path": ["istota_users"],
+                   "message": "not a settings variable; the role takes istota_plan and istota_plan_secrets"}]
         for name, register in self.NAMES:
             message = _failure_message(name, {register: {"rc": 1, "stdout": self._doc(errors=errors), "stderr": ""}})
-            assert ("validation_error at istota_users.alice.displayname: unsupported ensure flag; "
-                    "use `istota user ensure --help`") in message, message
+            assert ("validation_error at istota_users: not a settings variable; "
+                    "the role takes istota_plan and istota_plan_secrets") in message, message
 
     def test_a_partial_apply_names_what_was_applied(self):
         operations = [
@@ -769,8 +739,8 @@ def _assert_fails(task_name: str, variables: dict) -> list[str]:
 
 
 class TestTheSettingsVariablesAreCheckedFirst:
-    """Mixed or contradictory application inputs are refused before the play
-    changes anything on the VM; deployment variables may sit beside either."""
+    """Contradictory application inputs are refused before the play changes
+    anything on the VM; deployment variables may sit beside the plan."""
 
     CHECK = "Check the application-settings variables"
     PLAN = {"istota_plan": {"users": {"alice": {"profile": {"timezone": "UTC"}}}}}
@@ -782,9 +752,8 @@ class TestTheSettingsVariablesAreCheckedFirst:
         assert _index(self.CHECK) < _index("Stack directories")
         assert _index("Split the application settings") < _index("Stack directories")
 
-    def test_either_input_alone_passes(self):
+    def test_no_input_or_the_plan_passes(self):
         assert self._fails() == []
-        assert self._fails(istota_users={"alice": {"display-name": "Alice"}}, istota_config={"bot_name": "Z"}) == []
         assert self._fails(**self.PLAN, istota_plan_secrets={"users": {}}, istota_plan_prune=True,
                            istota_plan_prune_secrets=True) == []
 
@@ -792,21 +761,12 @@ class TestTheSettingsVariablesAreCheckedFirst:
         assert self._fails(**self.PLAN, istota_secrets={"anthropic_api_key": "k"}, istota_admins=["alice"],
                            istota_rclone_conf="[x]") == []
 
-    def test_empty_legacy_variables_do_not_count_as_input(self):
-        assert self._fails(**self.PLAN, istota_config={}, istota_users={}, istota_user_secrets={}) == []
-
-    def test_a_plan_with_any_nonempty_legacy_variable_is_refused(self):
-        for name, value in (("istota_config", {"bot_name": "Z"}), ("istota_users", {"a": {}}),
-                            ("istota_user_resources", {"a": []}), ("istota_user_briefings", {"a": []}),
-                            ("istota_user_secrets", {"a": []})):
-            assert self._fails(**self.PLAN, **{name: value}) != [], name
-
     def test_plan_secrets_need_the_plan(self):
         assert self._fails(istota_plan_secrets={"users": {}}) != []
 
     def test_prune_secrets_needs_prune_and_prune_needs_the_plan(self):
         assert self._fails(**self.PLAN, istota_plan_prune_secrets=True) != []
-        assert self._fails(istota_users={"a": {}}, istota_plan_prune=True) != []
+        assert self._fails(istota_plan_prune=True) != []
 
     def test_the_inputs_must_be_mappings(self):
         assert self._fails(istota_plan="settings.json") != []
@@ -815,7 +775,7 @@ class TestTheSettingsVariablesAreCheckedFirst:
 
 class TestTheUserSettingsAreCheckedBeforeTheConfig:
     """The user settings are applied after the health wait, but a schema
-    error or an unknown legacy flag in them must fail the play before the
+    error or an unknown field in them must fail the play before the
     config is written. `apply --check` reads no config and no database."""
 
     CHECK = "istota-stack apply --check (user settings)"
@@ -840,12 +800,11 @@ class TestTheUserSettingsAreCheckedBeforeTheConfig:
         assert self.CHECK in [t.get("name") for t in block["block"]]
 
     def test_a_refusal_fails_the_play_with_its_messages(self):
-        stdout = json.dumps({"problems": [{"kind": "discarded", "path": ["istota_users", "alice", "displayname"],
-                                           "message": "unsupported ensure flag; use `istota user ensure --help`"}],
+        stdout = json.dumps({"problems": [{"kind": "discarded", "path": ["istota_users"],
+                                           "message": "not a settings variable; the role takes istota_plan"}],
                              "error": None})
         message = _failure_message(self.REPORT, {"_istota_users_checked": {"rc": 1, "stdout": stdout, "stderr": ""}})
-        assert ("istota_users.alice.displayname: unsupported ensure flag; use `istota user ensure --help`"
-                in message), message
+        assert "istota_users: not a settings variable; the role takes istota_plan" in message, message
         assert "nothing was written" in message, message
         assert "_istota_users_checked.rc == 1" in _when(_tasks()[_index(self.REPORT)])
         stdout = json.dumps({"problems": [], "error": "the plan in role-vars input does not parse: invalid JSON"})

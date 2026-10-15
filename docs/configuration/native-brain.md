@@ -115,12 +115,16 @@ The same availability breaker is what the nightly sleep cycle consults before de
 Key handling:
 
 - `istota_brain_native_api_key` is **never** written to `config.toml`. With `istota_use_environment_file: true` (the default) it's rendered into the systemd `EnvironmentFile` as `ISTOTA_BRAIN_NATIVE_API_KEY`; vault it.
-- **Per-user keys** go through the existing `istota_user_secrets` mechanism (the `native_brain` service is in the connected-service schema, flagged `cli_only` so it's operator-provisioned only — not exposed in the web UI), and overlay the instance key for that user's tasks:
+- **Per-user keys** are declared in the user's `secrets` in `istota_plan`, with the value in `istota_plan_secrets` (the `native_brain` service is in the connected-service schema, flagged `cli_only` so it's operator-provisioned only, not exposed in the web UI), and overlay the instance key for that user's tasks:
 
   ```yaml
-  istota_user_secrets:
-    alice:
-      - { service: native_brain, key: api_key, value: "{{ vault_alice_native_key }}" }
+  istota_plan:
+    users:
+      alice:
+        secrets: [{service: native_brain, keys: [api_key]}]
+  istota_plan_secrets:
+    users:
+      alice: {native_brain: {api_key: "{{ vault_alice_native_key }}"}}
   ```
 
 - `istota_brain_native_extra_headers` is rendered as a `[brain.native.extra_headers]` sub-table (a TOML inline table would be mis-emitted by the JSON filter), so header names with dots or dashes (`anthropic-beta`) are safe.
