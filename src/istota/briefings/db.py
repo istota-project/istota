@@ -38,7 +38,7 @@ from istota.lib.timestamps import iso_now as _now_iso
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA_SQL = """
@@ -74,10 +74,13 @@ CREATE TABLE IF NOT EXISTS briefing_archive (
     generated_at TEXT NOT NULL,
     task_id INTEGER,
     block_meta TEXT NOT NULL DEFAULT '{}',
-    delivered_to TEXT NOT NULL DEFAULT '[]'
+    delivered_to TEXT NOT NULL DEFAULT '[]',
+    read_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_archive_name_time
     ON briefing_archive(briefing_name, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_archive_unread
+    ON briefing_archive(id) WHERE read_at IS NULL;
 
 -- Phase 2 substrate (created now, UNUSED until continuous ingestion).
 CREATE TABLE IF NOT EXISTS briefing_items (
@@ -106,9 +109,14 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 """
 
 
-# No migrations yet — v1 is the initial schema. Future column additions append
-# a (target_version, migrate_fn) tuple here (see feeds/db.py for the pattern).
-_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = []
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE briefing_archive ADD COLUMN read_at TEXT")
+    conn.execute("UPDATE briefing_archive SET read_at = ?", (_now_iso(),))
+
+
+_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
+    (2, _migrate_v1_to_v2),
+]
 
 
 def init_db(db_path: Path) -> None:
@@ -120,6 +128,8 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
+        # Keep the column, historical backfill and version stamp atomic.
+        conn.execute("BEGIN IMMEDIATE")
         current = _read_schema_version(conn)
         for target_version, migrate in _MIGRATIONS:
             if current < target_version:
@@ -128,6 +138,10 @@ def init_db(db_path: Path) -> None:
                     "briefings_db_migrated from=v%s to=v%s", current, target_version,
                 )
                 current = target_version
+                conn.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'version'",
+                    (str(current),),
+                )
         conn.executescript(SCHEMA_SQL)
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
@@ -533,6 +547,37 @@ def count_archive(
     return int(row["c"])
 
 
+def count_unread_archive(conn: sqlite3.Connection) -> int:
+    """Count unread rendered entries across the complete archive."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM briefing_archive WHERE read_at IS NULL",
+    ).fetchone()
+    return int(row["c"])
+
+
+def mark_archived_read(
+    conn: sqlite3.Connection, archive_id: int,
+) -> ArchivedBriefing | None:
+    """Record the first read time in the caller's transaction."""
+    conn.execute(
+        "UPDATE briefing_archive SET read_at = COALESCE(read_at, ?) WHERE id = ?",
+        (_now_iso(), archive_id),
+    )
+    return get_archived(conn, archive_id)
+
+
+def mark_archive_as_read(
+    conn: sqlite3.Connection, *, briefing_name: str | None = None,
+) -> int:
+    """Mark currently unread rows in an exact name scope, or the whole archive."""
+    sql = "UPDATE briefing_archive SET read_at = ? WHERE read_at IS NULL"
+    params: list = [_now_iso()]
+    if briefing_name is not None:
+        sql += " AND briefing_name = ?"
+        params.append(briefing_name)
+    return conn.execute(sql, params).rowcount
+
+
 def prune_archive(
     conn: sqlite3.Connection,
     *,
@@ -613,4 +658,5 @@ def _row_to_archived(row: sqlite3.Row) -> ArchivedBriefing:
         task_id=row["task_id"],
         block_meta=parse_json_dict(row["block_meta"]),
         delivered_to=parse_json_list(row["delivered_to"]),
+        read_at=row["read_at"],
     )
