@@ -894,3 +894,98 @@ class TestFixtureThroughTheCli:
 
         code, out = cli._invoke(data_dir, db_path, "work", "migrate")
         assert (code, out["migration"]["status"]) == (0, "already")
+
+
+# The money.db of an install that predates the TOML work log carries an older
+# `work_entries` table: integer id, invoice_number, no uid. `CREATE TABLE IF
+# NOT EXISTS` skips it, so the import used to fail on "no column named uid".
+LEGACY_WORK_ENTRIES = """
+CREATE TABLE work_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    client TEXT NOT NULL,
+    service TEXT NOT NULL,
+    qty REAL,
+    amount REAL,
+    discount REAL DEFAULT 0,
+    description TEXT DEFAULT '',
+    entity TEXT DEFAULT '',
+    invoice_number TEXT,
+    paid_date TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_work_uninvoiced ON work_entries(client, date)
+    WHERE invoice_number IS NULL;
+CREATE INDEX idx_work_by_invoice ON work_entries(invoice_number)
+    WHERE invoice_number IS NOT NULL;
+"""
+
+
+def _legacy_db(data_dir, *, rows=0, schema_already_ran=True):
+    """A money.db with the old table, in the state a deployment has it.
+
+    ``schema_already_ran`` is the state after the first failed upgrade: the
+    current SCHEMA ran once over the old table, so `invoices`, `invoice_lines`
+    (its foreign key naming a `uid` the old table lacks) and
+    `idx_work_entries_date` on the old table all exist.
+    """
+    import sqlite3
+
+    path = data_dir / "data" / "money.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(LEGACY_WORK_ENTRIES)
+    for i in range(rows):
+        conn.execute(
+            "INSERT INTO work_entries (date, client, service, qty) VALUES (?, 'acme', 'dev', 1)",
+            (f"2024-01-0{i + 1}",),
+        )
+    if schema_already_ran:
+        conn.executescript(db.SCHEMA)
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _work_entry_columns(path):
+    with db.get_db(path) as conn:
+        return {r[1] for r in conn.execute("PRAGMA table_info(work_entries)")}
+
+
+class TestLegacyWorkEntriesTable:
+    @pytest.mark.parametrize("schema_already_ran", [False, True])
+    def test_an_empty_legacy_table_is_replaced_and_the_import_runs(self, data_dir, schema_already_ran):
+        path = _legacy_db(data_dir, schema_already_ran=schema_already_ran)
+        config_store.init_db(path)
+        cfg = config_store.invoicing_config_from_toml_dict(tomllib.loads(CONFIG_TOML))
+        config_store.save_invoicing(path, cfg, replace_collections=True)
+        _write_years(data_dir, {2025: YEAR_2025, 2026: YEAR_2026})
+
+        report = migrate_work_log(data_dir, db_path=path)
+
+        assert report.status == "migrated", report.reason
+        columns = _work_entry_columns(path)
+        assert "uid" in columns and "invoice_number" not in columns
+        with db.get_db(path) as conn:
+            indexes = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='work_entries'"
+            )}
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert not indexes & {"idx_work_uninvoiced", "idx_work_by_invoice"}
+        assert _row_counts(path)["work_entries"] > 0
+
+    def test_a_legacy_table_with_rows_is_kept_and_the_import_refuses(self, data_dir):
+        path = _legacy_db(data_dir, rows=2)
+        config_store.init_db(path)
+        _write_years(data_dir, {2025: YEAR_2025})
+        before = _files(data_dir)
+
+        report = migrate_work_log(data_dir, db_path=path)
+
+        assert report.status == "refused"
+        assert "older schema" in report.reason and "2 rows" in report.reason
+        with db.get_db(path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM work_entries").fetchone()[0] == 2
+        assert "invoice_number" in _work_entry_columns(path)
+        assert _files(data_dir) == before
+        assert _key(path) is None
