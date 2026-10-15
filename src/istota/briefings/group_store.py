@@ -252,6 +252,18 @@ def clear_hold(conn, config, definition_id):
         return definition
 
 
+def require_no_pending_migration(conn, definition_id):
+    """Refuse a delete while a migration still acts on the definition.
+
+    ``rollback_default`` and a re-review read it, so only ``cutover`` is
+    finished. The admin route asks this before it spends a step-up code.
+    """
+    migration = conn.execute("SELECT state FROM group_briefing_migrations WHERE definition_id = ?",
+                             (definition_id,)).fetchone()
+    if migration is not None and migration["state"] != "cutover":
+        raise GroupError(409, "migration_pending", "Finish or roll back the briefing's migration first")
+
+
 def delete_definition(conn, definition_id, *, admin_id):
     """Soft-delete a definition for an administrator.
 
@@ -265,11 +277,7 @@ def delete_definition(conn, definition_id, *, admin_id):
         current = get_definition(conn, definition_id)
         if current is None or current["deleted_at"]:
             raise GroupError(404, "definition_not_found", "Briefing not found")
-        # rollback_default and a re-review still act on the definition.
-        migration = conn.execute("SELECT state FROM group_briefing_migrations WHERE definition_id = ?",
-                                 (definition_id,)).fetchone()
-        if migration is not None and migration["state"] != "cutover":
-            raise GroupError(409, "migration_pending", "Finish or roll back the briefing's migration first")
+        require_no_pending_migration(conn, definition_id)
         stop_definition_work(conn, definition_id, "definition_deleted")
         revoke_definition_grants(conn, definition_id)
         close_approvals(conn, definition_id)

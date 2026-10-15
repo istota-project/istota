@@ -298,6 +298,7 @@ def _register_all() -> None:
             "relay_question",
             "admin_profile_change",
             "admin_config_change",
+            "admin_briefing_change",
             "job_failure",
             "group_briefing",
         ):

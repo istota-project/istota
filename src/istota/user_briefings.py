@@ -288,7 +288,7 @@ def cancel_queued_tasks(conn: sqlite3.Connection, user_id: str, name: str) -> se
     return cancelled
 
 
-def _get_by_id(conn: sqlite3.Connection, briefing_id: int) -> UserBriefing | None:
+def get_briefing_by_id(conn: sqlite3.Connection, briefing_id: int) -> UserBriefing | None:
     row = conn.execute(
         "SELECT * FROM briefing_configs WHERE id = ?", (briefing_id,),
     ).fetchone()
@@ -307,7 +307,7 @@ def set_hold(db_path: Path, briefing_id: int, *, admin_id: str) -> UserBriefing 
         commit=True, rollback_on_error=True,
     ) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        current = _get_by_id(conn, briefing_id)
+        current = get_briefing_by_id(conn, briefing_id)
         if current is None:
             return None
         if current.admin_hold_at is not None:
@@ -318,7 +318,7 @@ def set_hold(db_path: Path, briefing_id: int, *, admin_id: str) -> UserBriefing 
             (held_at, admin_id, briefing_id),
         )
         cancel_queued_tasks(conn, current.user_id, current.name)
-        return _get_by_id(conn, briefing_id)
+        return get_briefing_by_id(conn, briefing_id)
 
 
 def clear_hold(db_path: Path, briefing_id: int) -> UserBriefing | None:
@@ -332,7 +332,7 @@ def clear_hold(db_path: Path, briefing_id: int) -> UserBriefing | None:
             "UPDATE briefing_configs SET admin_hold_at = NULL, admin_hold_by = NULL WHERE id = ?",
             (briefing_id,),
         )
-        return _get_by_id(conn, briefing_id)
+        return get_briefing_by_id(conn, briefing_id)
 
 
 def delete_briefing(

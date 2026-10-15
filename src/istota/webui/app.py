@@ -14164,7 +14164,11 @@ _STEP_UP_LABELS = {
     "history_restore": "restore credential history",
     "history_purge": "permanently delete credential history",
     "admin_config_change": "change this instance's configuration",
+    "admin_briefing_delete": "delete a briefing",
 }
+
+# Codes that guard no vault: an admin may ask for one without the vault gate.
+_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete"})
 
 
 def _step_up_session(request: Request) -> str:
@@ -14254,9 +14258,9 @@ async def settings_step_up(request: Request, user: dict = Depends(_require_api_a
                            _csrf: None = Depends(_verify_origin)):
     body = await _credential_json(request)
     action, name = body.get("action"), body.get("name")
-    if action == "admin_config_change":
-        # The config editor's code guards no vault, so the vault's isolation
-        # gate does not apply; being an admin does.
+    if action in _ADMIN_STEP_UP_ACTIONS:
+        # These codes guard no vault, so the vault's isolation gate does not
+        # apply; being an admin does.
         if not _user_is_web_admin(user["username"]):
             raise _ForbiddenException("admin only")
     else:
@@ -16704,6 +16708,13 @@ app.include_router(_groups_router, prefix="/istota/api", tags=["groups"])
 app.dependency_overrides[_groups_require_admin] = _require_admin
 app.dependency_overrides[_groups_require_auth] = _require_api_auth
 app.dependency_overrides[_groups_verify_origin] = _verify_origin
+
+# Admin › Briefings spans the personal and group stores, so it is its own router.
+from istota.briefings.admin_routes import router as _admin_briefings_router
+from istota.briefings.admin_routes import step_up_gate as _admin_briefings_step_up
+
+app.include_router(_admin_briefings_router, prefix="/istota/api", tags=["briefings"])
+app.dependency_overrides[_admin_briefings_step_up] = lambda: _require_step_up
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():
