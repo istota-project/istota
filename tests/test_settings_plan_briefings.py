@@ -111,7 +111,19 @@ def test_prune_definitions_preserves_archives_items_and_runtime(install):
         assert db.get_briefing_last_run(conn, "alice", "morning") == runtime
 
 
-@pytest.mark.parametrize("seed", ["users", "default_briefings"])
+def test_prune_ignores_a_retired_config_seed(install):
+    # `[users.X.briefings]` is imported once and never re-imported, so a prune
+    # that removes the row it became is not refused.
+    schedule(install)
+    definition = {"name": "morning", "cron": "0 7 * * *", "output": "email"}
+    install[0].write_text(toml_write.dumps(
+        {"db_path": str(install[1]), "users": {"alice": {"briefings": [definition]}}}))
+    context, operations = preview(install, [], prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert user_briefings.get_briefing(install[1], "alice", "morning") is None
+
+
+@pytest.mark.parametrize("seed", ["default_briefings"])
 def test_prune_refuses_config_seed_and_names_controlling_declaration(install, seed):
     schedule(install)
     definition = {"name": "morning", "cron": "0 7 * * *", "output": "email"}

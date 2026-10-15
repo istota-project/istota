@@ -183,7 +183,7 @@ def _check_references(plan, context, options, conn, available, removed, *, apply
             continue
         configured = context.config.users.get(user)
         if configured:
-            for index, seed in enumerate(configured.briefings):
+            for index, seed in enumerate(configured.legacy_briefing_seeds):
                 _check_blocks(seed.blocks, available, removed,
                               ["config", "users", user, "briefings", index, "blocks"], retained_only=True)
 

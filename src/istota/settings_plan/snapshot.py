@@ -29,7 +29,7 @@ def _refuse_credentials(value, path):
     config_secrets._walk(value, (), refuse)
 
 
-def _blocks(config, user, schedules):
+def _blocks(config, user, schedules, import_pending=False):
     database = config.module_db_path(user, "briefings")
     definitions, migrated = {}, set()
     try:
@@ -57,7 +57,12 @@ def _blocks(config, user, schedules):
             for source_index, source in enumerate(block["sources"]):
                 _refuse_credentials(source["config"], [*path, "sources", source_index, "config"])
         schedule["blocks"] = blocks
-    for seed in config.users[user].briefings:
+    seeds = list(config.users[user].briefings)
+    if import_pending:
+        # Retired `[users.X.briefings]` entries the next boot imports, blocks and all.
+        stored = {item["name"] for item in schedules}
+        seeds += [seed for seed in config.users[user].legacy_briefing_seeds if seed.name not in stored]
+    for seed in seeds:
         if not definitions.get(seed.name) and seed.name not in migrated and _migrate.block_specs(seed):
             raise ExecutionError("briefing_initialization_required", ["users", user, "briefings"])
 
@@ -117,8 +122,7 @@ def _gather(config_path, selected):
                 definition = profiles.snapshot_profile(stored[user])
                 definition["resources"] = resources.snapshot_resources(conn, user)
                 schedules = briefings.snapshot_schedules(conn, user)
-                briefings._check_schedule_seeds(config, user, {item["name"] for item in schedules})
-                _blocks(config, user, schedules)
+                _blocks(config, user, schedules, user_briefings.config_import_pending(conn, user))
                 definition["briefings"] = schedules
                 jobs, cron_revision = files.snapshot_cron(conn, config, user)
                 heartbeat, heartbeat_revision = files.snapshot_heartbeat(config, user)

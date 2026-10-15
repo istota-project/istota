@@ -65,13 +65,6 @@ def _validate_schedule(conn, config, user, definition, path, previous=None):
             raise ExecutionError("validation_error", [*path, "conversation_token"]) from None
 
 
-def _check_schedule_seeds(config, user, retained):
-    explicit = config.users[user].briefings
-    for index, definition in enumerate(explicit):
-        if definition.name not in retained and definition.cron:
-            raise ExecutionError("briefing_seed_conflict", ["config", "users", user, "briefings", index])
-
-
 def plan_schedules(plan, user, context, options):
     config = context.config
     path = ["users", user, "briefings"]
@@ -104,7 +97,6 @@ def plan_schedules(plan, user, context, options):
     except (sqlite3.Error, OSError):
         raise ExecutionError("briefing_store_unavailable", path) from None
     if options.prune:
-        _check_schedule_seeds(config, user, set(desired))
         for identity in sorted(existing.keys() - desired.keys()):
             operations.append(Operation("briefings", identity, "delete", user=user,
                                         expected_state=expected, restart_required=True))
@@ -223,7 +215,11 @@ def _check_content_seeds(config, user, names, declarations):
     enabled = {item["name"]: item["enabled"] for item in declarations if "enabled" in item}
     rows = [replace(row, enabled=enabled.get(row.name, row.enabled)) for row in rows]
     _apply_user_briefings(prospective, rows=rows)
-    for definition in prospective.users[user].briefings:
+    stored = {row.name for row in rows}
+    # A retired config seed's blocks ride on the row this plan creates.
+    unstored = [seed for seed in prospective.users[user].legacy_briefing_seeds
+                if seed.name not in stored and seed.blocks]
+    for definition in [*prospective.users[user].briefings, *unstored]:
         if definition.name in names and _migrate.block_specs(definition):
             raise ExecutionError("briefing_seed_conflict", ["users", user, "briefings", definition.name, "blocks"])
 

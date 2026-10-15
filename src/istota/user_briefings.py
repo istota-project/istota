@@ -1,23 +1,17 @@
 """User briefing store (Phase 7b of the Docker onboarding spec).
 
 Per-user briefings (cron-scheduled summaries delivered to a Talk room or
-email) live in the ``briefing_configs`` table. This replaces the
-``[[briefings]]`` blocks that used to live in per-user TOML files.
+email) live in the ``briefing_configs`` table, which is the only source.
+``_apply_user_briefings`` builds ``UserConfig.briefings`` from its rows at the
+tail of ``load_config``. The runtime read path (``get_briefings_for_user`` in
+``skills/briefing``) returns that result as it stands.
 
-Resolution order at config-load time:
-    1. ``briefing_configs`` table        (web UI / ``istota briefing ensure``)
-    2. ``[[briefings]]`` in TOML         (operator-managed; fallback)
+``[users.X.briefings]`` in config.toml is a retired input.
+``import_from_user_configs`` copies it into the table once per user, so a
+briefing the owner deletes stays deleted.
 
-Briefings stored in the DB are merged into ``UserConfig.briefings`` by
-``_apply_user_briefings`` at the tail of ``load_config``. The runtime read
-path (``get_briefings_for_user`` in ``skills/briefing``) returns that result
-as it stands — there is no third layer on top of it.
-
-The DB row, when present, replaces a TOML row of the same name. New
-briefings only present in the DB simply add to the user's list.
-
-There used to be a third source: a workspace ``BRIEFINGS.md``, applied over
-both of the above at read time. It is retired, because it beat the row the
+A workspace ``BRIEFINGS.md`` was also a source, applied over the rest at
+read time. It is retired, because it beat the row the
 settings page had just written while that page went on showing the value the
 user had chosen. ``import_from_workspace_files`` at the bottom of this module
 carries what those files held into the table, once.
@@ -51,6 +45,9 @@ logger = logging.getLogger(__name__)
 # ran the migration would otherwise never be looked at again, and their
 # schedule lives only in that file.
 _IMPORT_SENTINEL = "briefings_md_import_v1"
+
+# One sentinel per user for the retired `[users.X.briefings]` import.
+_USER_CONFIG_IMPORT_SENTINEL = "user_config_briefings_import_v1"
 
 
 @dataclass
@@ -266,94 +263,103 @@ def delete_briefing_by_id(db_path: Path, user_id: str, briefing_id: int) -> bool
 
 # --- Migration: TOML → DB --------------------------------------------------
 
+def config_import_pending(conn: sqlite3.Connection, user_id: str) -> bool:
+    """Whether ``import_from_user_configs`` has not yet run for ``user_id``."""
+    return not _sentinel_seen(conn, user_id, _USER_CONFIG_IMPORT_SENTINEL)
+
+
 def import_from_user_configs(
     db_path: Path,
     user_configs: "dict[str, object]",
 ) -> int:
-    """Seed ``briefing_configs`` rows from loaded TOML user configs.
+    """Copy each user's retired ``[users.X.briefings]`` into ``briefing_configs``, once.
 
-    Walks ``user_config.briefings`` for each user; inserts any
-    ``(user_id, name)`` pair that doesn't already have a DB row.
-    Idempotent across restarts.
+    Reads ``legacy_briefing_seeds``. An entry is written only when no row of
+    that ``(user_id, name)`` exists; one without a cron is written disabled.
+    The per-user sentinel is set in the same savepoint as that user's rows,
+    including for a user with no entries, so an entry added to TOML later, or
+    a row deleted later, is never imported again. Returns the rows written.
     """
     if not Path(db_path).exists():
         return 0
 
     written = 0
     with _connect(db_path) as conn:
-        existing_keys = {
-            (r["user_id"], r["name"])
-            for r in conn.execute(
-                "SELECT user_id, name FROM briefing_configs"
-            ).fetchall()
-        }
-
         for user_id, user_config in user_configs.items():
-            briefings = getattr(user_config, "briefings", None) or []
-            for b in briefings:
-                key = (user_id, getattr(b, "name", ""))
-                if not key[1] or key in existing_keys:
-                    continue
-
-                cron = getattr(b, "cron", "") or ""
-                if not cron:
-                    continue
-
-                output = getattr(b, "output", "talk") or "talk"
-                title = getattr(b, "title", "") or ""
-                token = getattr(b, "conversation_token", "") or ""
-                comps = dict(getattr(b, "components", {}) or {})
-
-                try:
-                    conn.execute(
-                        """
-                        INSERT INTO briefing_configs
-                            (user_id, name, cron_expression, title,
-                             conversation_token, components, output, enabled)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-                        """,
-                        (
-                            user_id,
-                            key[1],
-                            cron,
-                            title,
-                            token,
-                            json.dumps(comps, sort_keys=True),
-                            output,
-                        ),
-                    )
-                    written += 1
-                    logger.info(
-                        "briefing imported from TOML user=%s name=%s",
-                        user_id, key[1],
-                    )
-                except Exception as e:  # pragma: no cover - defensive
-                    logger.warning(
-                        "briefing import failed user=%s name=%s: %s",
-                        user_id, key[1], e,
-                    )
+            if _sentinel_seen(conn, user_id, _USER_CONFIG_IMPORT_SENTINEL):
+                continue
+            seeds = getattr(user_config, "legacy_briefing_seeds", None) or []
+            try:
+                conn.execute("SAVEPOINT user_config_briefings_import")
+                written += _import_user_seeds(conn, user_id, seeds)
+                _sentinel_set(conn, user_id, _USER_CONFIG_IMPORT_SENTINEL)
+                conn.execute("RELEASE user_config_briefings_import")
+            except Exception as e:  # noqa: BLE001
+                conn.execute("ROLLBACK TO user_config_briefings_import")
+                conn.execute("RELEASE user_config_briefings_import")
+                logger.warning("briefing import from config failed user=%s: %s", user_id, e)
 
     if written:
-        logger.info("user_briefings migration: wrote %d new row(s) from TOML", written)
+        logger.info("user_briefings migration: wrote %d new row(s) from config.toml", written)
     return written
 
 
-def _sentinel_name(user_id: str) -> str:
-    return f"{_IMPORT_SENTINEL}:{user_id}"
+def _import_user_seeds(conn: sqlite3.Connection, user_id: str, seeds: list) -> int:
+    written = 0
+    for b in seeds:
+        name = getattr(b, "name", "") or ""
+        if not name:
+            continue
+        exists = conn.execute(
+            "SELECT 1 FROM briefing_configs WHERE user_id = ? AND name = ?",
+            (user_id, name),
+        ).fetchone()
+        if exists:
+            continue
+        cron = getattr(b, "cron", "") or ""
+        conn.execute(
+            """
+            INSERT INTO briefing_configs
+                (user_id, name, cron_expression, title,
+                 conversation_token, components, output, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                name,
+                cron,
+                getattr(b, "title", "") or "",
+                getattr(b, "conversation_token", "") or "",
+                json.dumps(dict(getattr(b, "components", {}) or {}), sort_keys=True),
+                getattr(b, "output", "talk") or "talk",
+                1 if cron else 0,
+            ),
+        )
+        written += 1
+        logger.info("briefing imported from config.toml user=%s name=%s", user_id, name)
+    return written
 
 
-def _sentinel_seen(conn: sqlite3.Connection, user_id: str) -> bool:
+def _sentinel_name(user_id: str, sentinel: str = _IMPORT_SENTINEL) -> str:
+    return f"{sentinel}:{user_id}"
+
+
+def _sentinel_seen(
+    conn: sqlite3.Connection, user_id: str, sentinel: str = _IMPORT_SENTINEL,
+) -> bool:
     row = conn.execute(
         "SELECT 1 FROM _migration_state WHERE name = ?",
-        (_sentinel_name(user_id),),
+        (_sentinel_name(user_id, sentinel),),
     ).fetchone()
     return row is not None
 
 
-def _sentinel_set(conn: sqlite3.Connection, user_id: str) -> None:
+def _sentinel_set(
+    conn: sqlite3.Connection, user_id: str, sentinel: str = _IMPORT_SENTINEL,
+) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO _migration_state (name) VALUES (?)",
-        (_sentinel_name(user_id),),
+        (_sentinel_name(user_id, sentinel),),
     )
 
 

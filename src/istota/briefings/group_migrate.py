@@ -90,7 +90,9 @@ def preserve_legacy_defaults(config):
                     configured = config.users.get(user)
                     if configured is None:
                         _error("legacy_registry_incomplete")
-                    explicit = next((b for b in configured.briefings if b.name == raw["name"]), None)
+                    # `briefings` is empty on the overlay-free load `istota init` runs this from.
+                    explicit = next((b for b in [*configured.briefings, *configured.legacy_briefing_seeds]
+                                     if b.name == raw["name"]), None)
                     users[user] = {"explicit": explicit is not None, "optout": not configured.default_briefings,
                                    "seed": asdict(explicit) if explicit else raw, "preserved": False}
                 _write(conn, key, "preserving", {"legacy": raw, "users": users})
@@ -134,7 +136,8 @@ def _current(conn, config, user, name):
     row = user_briefings.get_briefing(config.db_path, user, name, conn=conn)
     if row is None:
         configured = config.users.get(user)
-        if configured and any(item.name == name and not item.from_db for item in configured.briefings):
+        if (configured and any(item.name == name for item in configured.legacy_briefing_seeds)
+                and user_briefings.config_import_pending(conn, user)):
             _error("legacy_personal_initialization_required")
         return None
     path = config.module_db_path(user, "briefings")

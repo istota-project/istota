@@ -264,15 +264,19 @@ class TestTheCli:
 
     @pytest.fixture
     def cfg(self, tmp_path):
+        from istota import user_briefings
+
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
+        user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning", cron="0 8 * * *",
+            conversation_token="room1", output="talk",
+        )
         path = tmp_path / "config.toml"
         path.write_text(
             f'db_path = "{db_path}"\n'
             f'temp_dir = "{tmp_path / "tmp"}"\n'
             '[users.alice]\ndisplay_name = "Alice"\n'
-            '[[users.alice.briefings]]\nname = "morning"\ncron = "0 8 * * *"\n'
-            'conversation_token = "room1"\noutput = "talk"\n'
         )
         return str(path), db_path
 

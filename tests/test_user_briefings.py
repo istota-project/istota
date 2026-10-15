@@ -125,7 +125,7 @@ class TestListAndDelete:
 class TestImportFromUserConfigs:
     def test_seeds_rows_from_toml(self, db_path):
         cfg = UserConfig(display_name="Alice")
-        cfg.briefings = [
+        cfg.legacy_briefing_seeds = [
             BriefingConfig(name="morning", cron="0 7 * * 1-5",
                            conversation_token="t", output="talk",
                            components={"calendar": True}),
@@ -142,7 +142,7 @@ class TestImportFromUserConfigs:
 
     def test_import_is_idempotent(self, db_path):
         cfg = UserConfig(display_name="Alice")
-        cfg.briefings = [
+        cfg.legacy_briefing_seeds = [
             BriefingConfig(name="m", cron="0 7 * * *", conversation_token="t",
                            output="talk", components={}),
         ]
@@ -158,7 +158,7 @@ class TestImportFromUserConfigs:
             conversation_token="t", output="talk", components={},
         )
         cfg = UserConfig(display_name="Alice")
-        cfg.briefings = [
+        cfg.legacy_briefing_seeds = [
             BriefingConfig(name="m", cron="0 7 * * *",
                            conversation_token="t", output="talk", components={}),
         ]
@@ -272,13 +272,11 @@ class TestDefaultBriefings:
     def test_user_own_briefing_wins_by_name(self, db_path):
         from istota import config as cfgmod
 
+        user_briefings.ensure_briefing(
+            db_path, user_id="carol", name="Daily", cron="0 9 * * *", output="email",
+        )
         cfg = Config(db_path=db_path, default_briefings=[self._default()])
-        cfg.users = {
-            "carol": UserConfig(
-                display_name="Carol",
-                briefings=[BriefingConfig(name="Daily", cron="0 9 * * *", output="email")],
-            ),
-        }
+        cfg.users = {"carol": UserConfig(display_name="Carol")}
         cfgmod._apply_user_briefings(cfg)
         daily = [b for b in cfg.users["carol"].briefings if b.name == "Daily"]
         assert len(daily) == 1  # no duplicate

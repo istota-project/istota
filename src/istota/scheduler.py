@@ -11091,10 +11091,10 @@ def run_daemon(
     except Exception as e:  # noqa: BLE001
         logger.warning("user_profiles migration skipped: %s", e)
 
-    # Phase 7b: migrate per-user TOML briefings into the briefing_configs
-    # table on first run. Idempotent — only writes rows whose
-    # (user_id, name) pair doesn't already exist. Re-applies the overlay
-    # so the in-memory config reflects DB-managed briefings.
+    # Phase 7b: copy the retired [users.X.briefings] into briefing_configs,
+    # once per user (a sentinel per user, so a deleted row is never
+    # re-imported). Re-applies the overlay so the in-memory config reflects
+    # the rows.
     #
     # The workspace pass follows it and carries each user's retired
     # BRIEFINGS.md into the same table, once. Order matters: the file was the
