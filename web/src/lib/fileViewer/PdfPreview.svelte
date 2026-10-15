@@ -4,7 +4,14 @@
   import type { PDFDocumentProxy, PDFDocumentLoadingTask, RenderTask } from 'pdfjs-dist';
   import { Button } from '$lib/components/ui';
 
-  let { url }: { url: string } = $props();
+  let {
+    url,
+    onLoadError,
+  }: {
+    url: string;
+    /** Called when the document cannot load; `status` is the HTTP status when the fetch failed. */
+    onLoadError?: (status: number | null) => void;
+  } = $props();
   let document = $state.raw<PDFDocumentProxy | null>(null);
   let pageNumber = $state(1);
   let error = $state('');
@@ -50,6 +57,12 @@
       } catch (e) {
         if (!active) return;
         const name = e instanceof Error ? e.name : '';
+        // pdf.js raises a ResponseException carrying the status for a failed fetch.
+        const status =
+          name === 'ResponseException' && typeof (e as { status?: unknown }).status === 'number'
+            ? (e as { status: number }).status
+            : null;
+        onLoadError?.(status);
         error =
           name === 'PasswordException'
             ? 'This PDF needs a password. Download it to open in another app.'

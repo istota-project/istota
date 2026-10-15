@@ -8165,9 +8165,15 @@ const handlers: MockHandler[] = [
       client_key: string;
       date: string;
       total: number;
-      status: string;
+      status: 'outstanding' | 'paid' | 'voided';
       paid_date?: string;
+      voided_at: string | null;
+      void_reason: string;
+      replaced_by: string[];
+      was_paid?: boolean;
+      has_pdf: boolean;
     }
+    const unvoided = { voided_at: null, void_reason: '', replaced_by: [], has_pdf: true };
     const invoices: Invoice[] = [
       {
         invoice_number: 'INV-000042',
@@ -8176,6 +8182,7 @@ const handlers: MockHandler[] = [
         date: '2026-05-15',
         total: 4500,
         status: 'outstanding',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000041',
@@ -8185,6 +8192,7 @@ const handlers: MockHandler[] = [
         total: 1800,
         status: 'paid',
         paid_date: '2026-05-10',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000040',
@@ -8193,6 +8201,7 @@ const handlers: MockHandler[] = [
         date: '2026-04-15',
         total: 3200,
         status: 'outstanding',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000039',
@@ -8200,7 +8209,12 @@ const handlers: MockHandler[] = [
         client_key: 'hooli',
         date: '2026-03-31',
         total: 950,
-        status: 'draft',
+        status: 'voided',
+        voided_at: '2026-04-02T09:30:00Z',
+        void_reason: 'Billed two jobs on one invoice',
+        replaced_by: ['INV-000040'],
+        was_paid: false,
+        has_pdf: true,
       },
     ];
 
@@ -8286,6 +8300,7 @@ const handlers: MockHandler[] = [
       discount: number;
       description: string;
       entity: string;
+      separate?: boolean;
       invoice: string;
       paid_date: string | null;
     }
@@ -8393,7 +8408,7 @@ const handlers: MockHandler[] = [
 
     function workEtag(w: Work): string {
       // Cheap content hash — enough for the mock's conflict path.
-      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}`;
+      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}|${!!w.separate}`;
       let hash = 0;
       for (let i = 0; i < body.length; i++) hash = (hash * 31 + body.charCodeAt(i)) | 0;
       return (hash >>> 0).toString(16);
@@ -8407,6 +8422,7 @@ const handlers: MockHandler[] = [
       if (!client) warnings.push('unknown_client');
       return {
         ...w,
+        separate: !!w.separate,
         index,
         etag: workEtag(w),
         client_name: client?.name ?? w.client,
@@ -8414,6 +8430,7 @@ const handlers: MockHandler[] = [
         service_type: svc?.type ?? '',
         computed_amount: workAmount(w),
         editable: !!w.uid && !w.invoice,
+        deletable: !!w.uid && !w.invoice,
         warnings,
       };
     }
@@ -8626,7 +8643,6 @@ const handlers: MockHandler[] = [
           work_entries: pinned,
           default_entity: isDefault,
           default_for_clients: fallbackClients,
-          quarantined: [],
         };
         if (!clients.length && !pinned && !isDefault && !fallbackClients) return null;
         let error: string;
@@ -8663,7 +8679,7 @@ const handlers: MockHandler[] = [
           error:
             `service '${row.key}' is used by ${entries.length} work ` +
             `entr${entries.length === 1 ? 'y' : 'ies'}`,
-          references: { work_entries: entries.length, invoices: invoices.size, quarantined: [] },
+          references: { work_entries: entries.length, invoices: invoices.size },
         };
       },
     });
@@ -8757,6 +8773,7 @@ const handlers: MockHandler[] = [
             'discount',
             'description',
             'entity',
+            'separate',
           ] as const) {
             if (body && key in body) (entry as any)[key] = body[key];
           }
@@ -8777,6 +8794,7 @@ const handlers: MockHandler[] = [
           discount: body?.discount ?? 0,
           description: body?.description ?? '',
           entity: body?.entity ?? '',
+          separate: body?.separate === true,
           invoice: '',
           paid_date: null,
         };
@@ -8815,6 +8833,172 @@ const handlers: MockHandler[] = [
         else if (status === 'paid') rows = rows.filter((r) => r.paid_date);
 
         return { status: 'ok', entries: rows, totals };
+      }
+
+      // --- Generate, void and create (#756) ---
+      const nextInvoiceNumber = () => {
+        const highest = Math.max(
+          0,
+          ...invoices.map((i) => Number(i.invoice_number.replace('INV-', ''))),
+        );
+        return `INV-${String(highest + 1).padStart(6, '0')}`;
+      };
+
+      if (path === '/invoices/generate' && method === 'POST') {
+        if (typeof body?.dry_run !== 'boolean') {
+          return { __status: 400, status: 'error', error: 'dry_run is required' };
+        }
+        const etags: Record<string, string> = body.etags ?? {};
+        const stale = Object.entries(etags)
+          .filter(([uid, etag]) => {
+            const entry = work.find((w) => w.uid === uid);
+            return !entry || workEtag(entry) !== etag;
+          })
+          .map(([uid]) => uid);
+        if (stale.length) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: 'work entries changed since they were read',
+            stale,
+          };
+        }
+        const uids: string[] | undefined = body.entry_uids;
+        if (uids) {
+          const missing = uids.filter((u) => !work.some((w) => w.uid === u));
+          if (missing.length) {
+            return { __status: 404, status: 'error', error: `no work entry with uid ${missing}` };
+          }
+          const billed = uids.filter((u) => work.find((w) => w.uid === u)?.invoice);
+          if (billed.length) {
+            return {
+              __status: 409,
+              status: 'error',
+              error: `work entry already invoiced: ${billed}`,
+            };
+          }
+        }
+        const candidates = work.filter(
+          (w) =>
+            !w.invoice &&
+            findService(w.service) &&
+            findClient(w.client) &&
+            (uids ? uids.includes(w.uid) : !body.client || w.client === body.client),
+        );
+        const groups = new Map<string, Work[]>();
+        for (const w of candidates) {
+          const key = w.separate ? `${w.client}:${w.uid}` : `${w.client}:${w.service}`;
+          groups.set(key, [...(groups.get(key) ?? []), w]);
+        }
+        let number = Number(nextInvoiceNumber().replace('INV-', ''));
+        const generated = [...groups.values()].map((entries) => {
+          const client = findClient(entries[0].client);
+          const total = entries.reduce((s, w) => s + (workAmount(w) ?? 0), 0);
+          const invoice_number = `INV-${String(number++).padStart(6, '0')}`;
+          return {
+            invoice_number,
+            client_key: entries[0].client,
+            client: client?.name ?? entries[0].client,
+            group: entries[0].service,
+            items: entries.length,
+            total: Math.round(total * 100) / 100,
+            terms: '30',
+            entry_uids: entries.map((w) => w.uid),
+            entry_descriptions: entries.map((w) => w.description),
+          };
+        });
+        if (!body.dry_run) {
+          for (const g of generated) {
+            for (const w of work) if (g.entry_uids.includes(w.uid)) w.invoice = g.invoice_number;
+            invoices.unshift({
+              invoice_number: g.invoice_number,
+              client: g.client,
+              client_key: g.client_key,
+              date: today(),
+              total: g.total,
+              status: 'outstanding',
+              ...unvoided,
+            });
+          }
+        }
+        return {
+          status: 'ok',
+          dry_run: body.dry_run,
+          invoice_count: generated.length,
+          total: generated.reduce((s, g) => s + g.total, 0),
+          invoices: generated,
+          notifications: 'none',
+        };
+      }
+
+      const voidMatch = path.match(/^\/invoices\/([^/]+)\/void$/);
+      if (voidMatch && method === 'POST') {
+        const number = decodeURIComponent(voidMatch[1]);
+        const inv = invoices.find((i) => i.invoice_number === number);
+        if (!inv) {
+          return { __status: 404, status: 'error', error: 'not found', code: 'not_found' };
+        }
+        if (inv.status === 'voided') {
+          return {
+            __status: 409,
+            status: 'error',
+            error: `Invoice ${number} already voided on ${inv.voided_at?.slice(0, 10)}`,
+            code: 'already_voided',
+          };
+        }
+        if (inv.status === 'paid' && !body?.force) {
+          return {
+            __status: 409,
+            status: 'error',
+            error: `Invoice ${number} has been marked as paid`,
+            code: 'paid',
+          };
+        }
+        const replacedBy: string[] = body?.replaced_by ?? [];
+        const unknown = replacedBy.find((n) => !invoices.some((i) => i.invoice_number === n));
+        if (unknown) {
+          return {
+            __status: 400,
+            status: 'error',
+            error: `Replacement invoice ${unknown} not found`,
+            code: 'unknown_replacement',
+          };
+        }
+        const released = work.filter((w) => w.invoice === number);
+        for (const w of released) {
+          w.invoice = '';
+          w.paid_date = null;
+        }
+        inv.was_paid = inv.status === 'paid';
+        inv.status = 'voided';
+        delete inv.paid_date;
+        inv.voided_at = new Date().toISOString();
+        inv.void_reason = body?.reason ?? '';
+        inv.replaced_by = replacedBy;
+        if (body?.delete_pdf) inv.has_pdf = false;
+        return { status: 'ok', invoice: inv, entries_released: released.length };
+      }
+
+      if (path === '/invoices' && method === 'POST') {
+        const client = findClient(body?.client);
+        if (!client) return { __status: 400, status: 'error', error: 'unknown client' };
+        const items: { service?: string; qty?: number; amount?: number }[] = body?.items ?? [];
+        if (!items.length) return { __status: 400, status: 'error', error: 'no line items' };
+        const total = items.reduce((s, item) => {
+          const svc = item.service ? findService(item.service) : undefined;
+          return s + (svc ? (item.qty ?? 0) * svc.rate : (item.amount ?? 0));
+        }, 0);
+        const inv: Invoice = {
+          invoice_number: nextInvoiceNumber(),
+          client: client.name,
+          client_key: client.key,
+          date: today(),
+          total: Math.round(total * 100) / 100,
+          status: 'outstanding',
+          ...unvoided,
+        };
+        invoices.unshift(inv);
+        return { status: 'ok', invoice: inv };
       }
 
       // --- Invoice action routes (must precede the broad /invoices match) ---
@@ -8885,11 +9069,14 @@ const handlers: MockHandler[] = [
 
       if (path === '/invoices' && method === 'GET') {
         const showAll = q.get('show_all') === 'true';
-        const list = showAll ? invoices : invoices.filter((i) => i.status !== 'paid');
-        const outstanding = invoices.filter((i) => i.status === 'outstanding');
+        const includeVoided = q.get('include_voided') !== 'false';
+        const list = invoices.filter(
+          (i) => (showAll || i.status !== 'paid') && (includeVoided || i.status !== 'voided'),
+        );
+        const outstanding = list.filter((i) => i.status === 'outstanding');
         return {
           status: 'ok',
-          invoice_count: invoices.length,
+          invoice_count: list.length,
           outstanding_count: outstanding.length,
           invoices: list,
         };

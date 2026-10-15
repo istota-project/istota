@@ -74,7 +74,7 @@ def _write_chunks(fd: int, chunks: Iterable[bytes], max_bytes: int, *, sync: boo
             os.fsync(file.fileno())
 
 
-def _publish_new(dir_fd: int, staging: str, name: str, written: os.stat_result) -> None:
+def publish_new(dir_fd: int, staging: str, name: str, written: os.stat_result) -> None:
     """Give the complete staging file its final name, never replacing an entry.
 
     Every task in the room can write this directory, so the staging name may
@@ -136,7 +136,7 @@ def write_new_file(
                     os.close(fd)
                     raise
                 _write_chunks(fd, chunks, max_bytes, sync=True)
-                _publish_new(dir_fd, staging, name, written)
+                publish_new(dir_fd, staging, name, written)
             finally:
                 try:
                     os.unlink(staging, dir_fd=dir_fd)

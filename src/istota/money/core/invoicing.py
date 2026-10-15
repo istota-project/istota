@@ -1,21 +1,27 @@
 """Invoicing: config-driven invoice generation, PDF export, payment recording (cash-basis).
 
-Work entries are stored in plaintext TOML files (see work.py). Config (clients,
-services, entities, rates) is parsed from a plain TOML file. No ledger entries
-at invoice time — income is recognized when payment is recorded (cash-basis).
+Work entries and invoices are stored in money.db (see work.py). Config
+(clients, services, entities, rates) comes from the config store. No ledger
+entries at invoice time — income is recognized when payment is recorded
+(cash-basis).
 """
 
 from __future__ import annotations
 
 import base64
+import errno
 import html
 import logging
 import mimetypes
 import os
 import re
+import secrets
+import threading
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
+from istota.lib.file_lock import exclusive_lock
 
 from .ids import new_txn_id
 from .models import (
@@ -169,6 +175,16 @@ def resolve_entity(
     return config.companies.get(entity_key, config.company)
 
 
+def entry_entity_key(config: InvoicingConfig, entry: WorkEntry) -> str:
+    """The entity key an entry bills under: entry, then client, then default."""
+    if entry.entity:
+        return entry.entity
+    cc = config.clients.get(entry.client) or config.clients.get(entry.client.lower())
+    if cc and cc.entity:
+        return cc.entity
+    return config.default_entity
+
+
 def resolve_bank_account(entity: CompanyConfig, config: InvoicingConfig) -> str:
     if entity.bank_account:
         return entity.bank_account
@@ -243,11 +259,33 @@ def build_line_items(
     return items
 
 
+def invoice_total(
+    entries: list[WorkEntry],
+    services: dict[str, ServiceConfig],
+) -> float:
+    """What an invoice over ``entries`` bills, at the current rates.
+
+    ``_manual`` entries (``invoice create --item``) bill their own amount; the
+    rest go through :func:`build_line_items`.
+    """
+    total = sum(
+        item.amount
+        for item in build_line_items([e for e in entries if e.service != "_manual"], services)
+    )
+    total += sum(e.amount or 0 for e in entries if e.service == "_manual")
+    return total
+
+
 def group_entries_by_bundle(
     entries: list[WorkEntry],
     client_config: ClientConfig,
 ) -> list[tuple[str, list[WorkEntry]]]:
-    """Group work entries according to client bundling rules."""
+    """Group work entries according to client bundling rules.
+
+    Returns ``(group_name, entries)`` pairs. An entry flagged ``separate`` is a
+    group of its own, named as the client's ``separate`` list names a service,
+    so two flagged entries of one service are two pairs with the same name.
+    """
     if not entries:
         return []
 
@@ -260,17 +298,22 @@ def group_entries_by_bundle(
     separate_set = set(client_config.separate)
 
     groups: dict[str, list[WorkEntry]] = {}
+    names: dict[str, str] = {}
     for entry in entries:
-        if entry.service in separate_set:
-            group_key = entry.service
+        if entry.separate:
+            group_key = f"{entry.service}:{entry.uid}"
+            group_name = entry.service
+        elif entry.service in separate_set:
+            group_key = group_name = entry.service
         elif entry.service in service_to_bundle:
-            group_key = service_to_bundle[entry.service]
+            group_key = group_name = service_to_bundle[entry.service]
         else:
-            group_key = "Services"
+            group_key = group_name = "Services"
 
         groups.setdefault(group_key, []).append(entry)
+        names[group_key] = group_name
 
-    return list(groups.items())
+    return [(names[key], members) for key, members in groups.items()]
 
 
 # =============================================================================
@@ -290,16 +333,16 @@ def parse_invoice_number(number_str: str) -> int | None:
 
 
 def highest_existing_invoice_number(data_dir: Path) -> int:
-    """Return the highest invoice number already stamped on work entries (0 if none).
+    """Return the highest invoice number ever issued (0 if none).
 
-    The work log is the ground truth for what's been issued. Deriving the next
-    number from this (rather than trusting a separate counter) self-heals counter
-    drift and prevents duplicate numbers.
+    Read from the ``invoices`` table, voided invoices included, so a voided
+    number is never issued again. Deriving the next number from this (rather
+    than trusting a separate counter) self-heals counter drift.
     """
-    from istota.money.work import get_invoice_numbers
+    from istota.money.work import list_invoices
 
     highest = 0
-    for inv in get_invoice_numbers(data_dir):
+    for inv in (record.number for record in list_invoices(data_dir)):
         n = parse_invoice_number(inv)
         if n is not None and n > highest:
             highest = n
@@ -364,40 +407,88 @@ def generate_invoices_for_period(
     dry_run: bool = False,
     invoice_output_dir: Path | None = None,
     db_path: Path | None = None,
+    record_schedule: bool = False,
+    entry_uids: list[str] | None = None,
 ) -> list[dict]:
     """Generate invoices for uninvoiced work entries.
 
-    Reads uninvoiced entries from TOML files, groups by client+entity and
-    bundle rules, generates PDFs, assigns invoice numbers.
+    Groups uninvoiced entries by client+entity and bundle rules, renders each
+    invoice's PDF, then records the invoice and its lines in one transaction.
+
+    ``period`` is an upper bound: every unbilled entry dated on or before the
+    end of that month is billed, earlier months included. ``entry_uids`` bills
+    exactly the entries named instead, and ``period`` is ignored; an unknown or
+    already-invoiced uid is an :class:`EntrySelectionError` raised before
+    anything is written.
+    The named entries still group by the normal rules.
+    If that transaction fails the PDF is deleted and an
+    :class:`InvoiceRecordError` is raised, after the counter is advanced past
+    the invoices this run did record; no PDF is left without its invoice.
+
+    A real run holds :func:`invoice_issue_lock` from picking the first number
+    to recording the last invoice, and each PDF is linked into place without
+    replacing a file already at its name.
+
+    ``record_schedule`` writes a monthly client's schedule state in the same
+    transaction as each of its invoices.
 
     If ``invoice_output_dir`` is given it is used as the base directory for
     generated PDFs (a year subdirectory is appended).  Otherwise falls back to
     ``accounting_path / config.invoice_output`` for backward compatibility.
     """
+    kwargs = dict(
+        config=config,
+        config_path=config_path,
+        accounting_path=accounting_path,
+        data_dir=data_dir,
+        period=period,
+        client_filter=client_filter,
+        entity_filter=entity_filter,
+        dry_run=dry_run,
+        invoice_output_dir=invoice_output_dir,
+        db_path=db_path,
+        record_schedule=record_schedule,
+        entry_uids=entry_uids,
+    )
+    if dry_run:
+        return _generate_invoices(**kwargs)
+    with invoice_issue_lock(data_dir):
+        return _generate_invoices(**kwargs)
+
+
+def _generate_invoices(
+    config: InvoicingConfig,
+    config_path: Path,
+    accounting_path: Path,
+    data_dir: Path,
+    period: str | None = None,
+    client_filter: str | None = None,
+    entity_filter: str | None = None,
+    dry_run: bool = False,
+    invoice_output_dir: Path | None = None,
+    db_path: Path | None = None,
+    record_schedule: bool = False,
+    entry_uids: list[str] | None = None,
+) -> list[dict]:
+    from istota.money.db import set_invoice_schedule_generation
     from istota.money.work import (
-        assign_invoice_number_by_uids,
-        backfill_work_ids,
+        create_invoice,
         get_uninvoiced_entries,
+        load_work_entries,
+        write_transaction,
     )
 
-    if not dry_run:
-        # Stamping is uid-addressed (see below), so every entry we might bill
-        # needs one. Reading never stamps, and a hand-added entry can arrive
-        # without a uid at any time, so make sure before we resolve anything.
-        backfill_work_ids(data_dir)
-
-    entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
+    if entry_uids:
+        entries = _named_entries(load_work_entries(data_dir), entry_uids)
+        if client_filter:
+            entries = [e for e in entries if e.client.lower() == client_filter.lower()]
+    else:
+        entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
     if not entries:
         return []
 
-    # Resolve entity key for each entry
     def _entity_key(entry: WorkEntry) -> str:
-        if entry.entity:
-            return entry.entity
-        cc = config.clients.get(entry.client) or config.clients.get(entry.client.lower())
-        if cc and cc.entity:
-            return cc.entity
-        return config.default_entity
+        return entry_entity_key(config, entry)
 
     # Group entries by (client, entity_key)
     grouped: dict[tuple[str, str], list[WorkEntry]] = {}
@@ -413,14 +504,13 @@ def generate_invoices_for_period(
     if not grouped:
         return []
 
-    year = str(date.today().year) if not period else period.split("-")[0]
+    year = str(date.today().year) if not period or entry_uids else period.split("-")[0]
     base_dir = invoice_output_dir if invoice_output_dir is not None else accounting_path / config.invoice_output
     output_dir = base_dir / year
 
     # Start at the higher of the stored counter and one past the highest invoice
-    # already issued. The work log is ground truth, so this self-heals counter
-    # drift (e.g. a counter left behind by the DB migration) and prevents
-    # collisions across both runs and multiple clients within one run.
+    # ever issued. The invoices table is ground truth, so this self-heals
+    # counter drift and prevents collisions across runs and clients.
     invoice_number = max(
         config.next_invoice_number,
         highest_existing_invoice_number(data_dir) + 1,
@@ -469,6 +559,8 @@ def generate_invoices_for_period(
                 "items": len(invoice.items),
                 "total": round(invoice.total, 2),
                 "terms": invoice.due_date.isoformat() if invoice.due_date else str(invoice.client.terms),
+                "entry_uids": [e.uid for e in billable_entries],
+                "entry_descriptions": [e.description for e in billable_entries],
             }
             if entity_key != config.default_entity or len(config.companies) > 1:
                 summary["entity"] = entity_key
@@ -477,29 +569,47 @@ def generate_invoices_for_period(
                 html = generate_invoice_html(invoice, logo_path=logo_path)
                 pdf_filename = f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
                 pdf_path = output_dir / pdf_filename
-                generate_invoice_pdf(html, pdf_path, root=accounting_path)
                 summary["file"] = str(pdf_path)
 
-                # By uid, never by display index: the entries were resolved
-                # before the PDF render above, and any concurrent insert has
-                # since shifted every index past it.
-                entry_uids = [e.uid for e in billable_entries if e.uid]
-                stamped = (
-                    assign_invoice_number_by_uids(
-                        data_dir, entry_uids, number_str, invoice_date,
-                    )
-                    if entry_uids
-                    else 0
-                )
-                if stamped != len(billable_entries):
-                    # An entry on a rendered PDF that didn't get stamped will
-                    # be picked up as uninvoiced again next run and billed
-                    # twice. Loud, because nothing downstream can detect it.
+                # By uid: the entries were resolved before the PDF render, and
+                # an entry another writer invoiced since then fails the active
+                # line index rather than being billed twice.
+                published = False
+                try:
+                    _refuse_taken_pdf_name(pdf_path)
+                    generate_invoice_pdf(html, pdf_path, root=accounting_path)
+                    published = True
+                    with write_transaction(data_dir) as conn:
+                        create_invoice(
+                            conn, number=number_str, client=client_key,
+                            entity=entity_key, group_name=group_name,
+                            issue_date=invoice_date, total=round(invoice.total, 2),
+                            entry_uids=[e.uid for e in billable_entries],
+                            pdf_path=str(pdf_path),
+                            income_lines=invoice_income_lines(
+                                billable_entries, config.services, invoice.total,
+                            ),
+                        )
+                        if record_schedule and client_config.schedule == "monthly":
+                            set_invoice_schedule_generation(conn, client_key)
+                except Exception as exc:
+                    # Only a PDF this run published; a name already taken is
+                    # somebody else's file.
+                    if published:
+                        pdf_path.unlink(missing_ok=True)
                     logger.error(
-                        "invoice_stamp_incomplete invoice=%s client=%s expected=%d stamped=%d — "
-                        "entries on this invoice may be re-billed; reconcile by hand",
-                        number_str, client_key, len(billable_entries), stamped,
+                        "invoice_record_failed invoice=%s client=%s error=%s published=%s",
+                        number_str, client_key, exc, published,
                     )
+                    if results:
+                        persist_next_invoice_number(
+                            invoice_number, db_path=db_path, config_path=config_path,
+                        )
+                    issued = ", ".join(r["invoice_number"] for r in results) or "none"
+                    raise InvoiceRecordError(
+                        f"could not record {number_str}: {exc} "
+                        f"(issued earlier in this run: {issued})"
+                    ) from exc
 
             results.append(summary)
             invoice_number += 1
@@ -510,6 +620,95 @@ def generate_invoices_for_period(
         )
 
     return results
+
+
+class EntrySelectionError(ValueError):
+    """A named entry that cannot be billed: ``code`` is ``not_found`` or ``invoiced``."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _named_entries(entries: list[WorkEntry], uids: list[str]) -> list[WorkEntry]:
+    """The entries ``uids`` name, in display order; every one must exist and be unbilled."""
+    by_uid = {e.uid: e for e in entries if e.uid}
+    wanted = list(dict.fromkeys(uids))
+    missing = [uid for uid in wanted if uid not in by_uid]
+    if missing:
+        raise EntrySelectionError(
+            f"no work entry with uid {', '.join(missing)}", code="not_found",
+        )
+    invoiced = [f"{uid} ({by_uid[uid].invoice})" for uid in wanted if by_uid[uid].invoice]
+    if invoiced:
+        raise EntrySelectionError(
+            f"work entry already invoiced: {', '.join(invoiced)}", code="invoiced",
+        )
+    chosen = set(wanted)
+    return [e for e in entries if e.uid in chosen]
+
+
+class InvoiceRecordError(RuntimeError):
+    """An invoice's PDF was rendered but its row and lines could not be recorded."""
+
+
+class InvoiceIssueBusy(RuntimeError):
+    """Another issuer held the invoice-issuing lock past the deadline."""
+
+
+# A generate run renders one PDF per invoice, about a second each with WeasyPrint.
+ISSUE_LOCK_TIMEOUT_SECONDS = 120.0
+
+_ISSUING = threading.local()
+
+
+def _issue_lock_path(data_dir: Path) -> Path:
+    from istota.money.work import db_path_for
+
+    return db_path_for(data_dir).parent / ".invoice-issue.lock"
+
+
+def _refuse_taken_pdf_name(pdf_path: Path) -> None:
+    """Refuse before rendering when something already holds the PDF's name.
+
+    ``generate_invoice_pdf`` refuses the same at publish time; checking first
+    skips a render that could not be kept.
+    """
+    if os.path.lexists(pdf_path):
+        raise FileExistsError(errno.EEXIST, "an invoice PDF already has this name", pdf_path.name)
+
+
+@contextmanager
+def invoice_issue_lock(data_dir: Path, *, timeout_seconds: float = ISSUE_LOCK_TIMEOUT_SECONDS):
+    """Hold the store's invoice-issuing lock: one issuer at a time, across processes.
+
+    Generation and manual creation pick the next number, render a PDF named
+    for it and record the row; two at once would pick the same number. The
+    anchor sits beside ``money.db``, so the web, the CLI, the skill and the
+    scheduler share it. Re-entering on the same thread is a no-op, which lets
+    a caller check something under the lock and then call the issuer.
+    """
+    anchor = _issue_lock_path(data_dir)
+    key = os.path.abspath(anchor)
+    held = _ISSUING.__dict__.setdefault("paths", set())
+    if key in held:
+        yield
+        return
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    with exclusive_lock(
+        anchor,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=0.1,
+        on_timeout=lambda _path: InvoiceIssueBusy(
+            "another invoice is being issued; try again in a moment",
+        ),
+        nofollow=True,
+    ):
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
 
 
 def check_scheduled_invoices(
@@ -735,30 +934,47 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 
 
 def generate_invoice_pdf(html: str, output_path: Path, *, root: Path | None = None) -> None:
-    """Convert invoice HTML to PDF using WeasyPrint.
+    """Convert invoice HTML to PDF using WeasyPrint, at a name nothing holds yet.
 
     With ``root`` (the accounting folder) and an ``output_path`` under it, the
     folders are walked from ``root`` with no link followed and the PDF is
     published through that descriptor (ISSUE-723). An output directory
     configured elsewhere keeps the leaf guard alone.
+
+    The bytes go to a dot-prefixed staging file, which is then linked to its
+    name without replacing anything: a name already taken raises
+    ``FileExistsError`` and the file there is left alone. Two issuers that
+    picked one number cannot overwrite each other's PDF. Only the staging
+    file is removed here.
     """
     from weasyprint import HTML
 
-    from istota.storage import write_regular_file  # noqa: PLC0415
-    from istota.workspace.writes import open_or_create_dir_below  # noqa: PLC0415
+    from istota.workspace.writes import open_or_create_dir_below, publish_new  # noqa: PLC0415
 
     pdf = HTML(string=html).write_pdf()
     if root is not None and output_path.parent.is_relative_to(root):
-        fd = open_or_create_dir_below(root, output_path.parent)
-        try:
-            written = write_regular_file(Path(output_path.name), pdf, dir_fd=fd)
-        finally:
-            os.close(fd)
+        dir_fd = open_or_create_dir_below(root, output_path.parent)
     else:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        written = write_regular_file(output_path, pdf)
-    if not written:
-        raise OSError(f"could not write {output_path.name}")
+        dir_fd = os.open(output_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    staging = f".{output_path.stem}.{secrets.token_hex(6)}.staging"
+    try:
+        fd = os.open(
+            staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o644, dir_fd=dir_fd,
+        )
+        with os.fdopen(fd, "wb") as file:
+            written = os.fstat(file.fileno())
+            file.write(pdf)
+            file.flush()
+            os.fsync(file.fileno())
+        publish_new(dir_fd, staging, output_path.name, written)
+    finally:
+        try:
+            os.unlink(staging, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        os.close(dir_fd)
 
 
 # =============================================================================
@@ -788,29 +1004,53 @@ def create_income_posting(
     return "\n".join(lines)
 
 
-def compute_income_lines(
+DEFAULT_INCOME_ACCOUNT = "Income:Services"
+
+
+def invoice_income_lines(
     entries: list[WorkEntry],
     services: dict[str, ServiceConfig],
+    total: float,
 ) -> dict[str, float]:
-    """Compute income account -> amount mapping from work entries."""
-    items = build_line_items(entries, services)
-    income_lines: dict[str, float] = {}
-    for item in items:
-        income_account = "Income:Services"
-        for svc_key, svc in services.items():
-            if svc.display_name == item.display_name:
-                income_account = svc.income_account or f"Income:{svc_key.title()}"
-                break
-        income_lines[income_account] = income_lines.get(income_account, 0) + item.amount
-    return income_lines
+    """The income account -> amount split an invoice is issued with.
+
+    Each entry goes to its service's ``income_account`` (or
+    ``Income:<Service>``); a ``_manual`` item and an entry whose service is
+    not configured go to ``Income:Services``. Amounts are rounded to cents and
+    the rounding remainder is put on the largest line, so the lines sum to
+    ``round(total, 2)`` exactly: the snapshot is the invoice's total, split.
+    Stored on the invoice row at issue and read back when payment is posted,
+    so a later rate change never alters what a payment books.
+    """
+    raw: dict[str, float] = {}
+    for entry in entries:
+        svc = services.get(entry.service) if entry.service != "_manual" else None
+        if svc is not None:
+            account = svc.income_account or f"Income:{entry.service.title()}"
+            amount = entry_line_item(entry, svc).amount
+        else:
+            account = DEFAULT_INCOME_ACCOUNT
+            amount = (entry.amount or 0) if entry.service == "_manual" else 0
+        raw[account] = raw.get(account, 0) + amount
+    lines = {account: round(amount, 2) for account, amount in raw.items() if round(amount, 2)}
+    target = round(total, 2)
+    remainder = round(target - sum(lines.values()), 2)
+    if remainder:
+        if lines:
+            largest = max(sorted(lines), key=lambda a: abs(lines[a]))
+            lines[largest] = round(lines[largest] + remainder, 2)
+        else:
+            lines[DEFAULT_INCOME_ACCOUNT] = target
+    return {account: amount for account, amount in lines.items() if amount}
 
 
 def find_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> Path | None:
-    """Locate the generated PDF for an invoice. Returns the path or None.
+    """Locate the generated PDF for an invoice by its name. Returns the path or None.
 
-    Mirrors :func:`delete_invoice_pdf`'s lookup: parses the numeric part of
-    the ``INV-<n>`` invoice number and globs ``Invoice-<n:06d>-*.pdf`` across
-    the year subdirectories of ``invoice_output_dir``.
+    Parses the numeric part of the ``INV-<n>`` invoice number and globs
+    ``Invoice-<n:06d>-*.pdf`` across the year subdirectories of
+    ``invoice_output_dir``. An invoice row's own ``pdf_path`` is the first
+    place to look; this is for a row that has none.
     """
     match = re.match(r"INV-(\d+)", invoice_number)
     if not match:
@@ -826,10 +1066,284 @@ def find_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> Path | No
     return None
 
 
-def delete_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> bool:
-    """Find and delete the PDF file for an invoice. Returns True if a file was deleted."""
-    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
-    if pdf is None:
+# =============================================================================
+# Void and manual creation (shared by the CLI and the web routes)
+# =============================================================================
+
+
+def _void_pdf_path(pdf: Path) -> Path:
+    """``Invoice-000251-10_15_2026.pdf`` → ``Invoice-000251-10_15_2026-VOID.pdf``."""
+    return pdf.with_name(f"{pdf.stem}-VOID{pdf.suffix}")
+
+
+def void_invoice_with_cleanup(
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    invoice_output_dir: Path | None,
+    reason: str = "",
+    replaced_by: tuple[str, ...] | list[str] = (),
+    force: bool = False,
+    delete_pdf: bool = False,
+) -> dict:
+    """Void an invoice, clear its DB state and set its PDF aside.
+
+    One transaction voids the row, releases its entries and runs
+    :func:`istota.money.db.clear_invoice_state`. A kept PDF is renamed to
+    ``…-VOID.pdf`` inside that transaction and renamed back if the commit
+    fails, so the stored ``pdf_path`` names the file on disk. With
+    ``delete_pdf`` the path is emptied and the file removed after the commit,
+    since a deletion cannot be undone. A refusal is a
+    :class:`istota.money.work.VoidError` raised before anything changes.
+    """
+    from istota.money.db import clear_invoice_state
+    from istota.money.work import get_invoice, void_invoice, write_transaction
+
+    pdf: Path | None = None
+    renamed_to: Path | None = None
+    try:
+        with write_transaction(data_dir) as conn:
+            record = get_invoice(data_dir, invoice_number, conn=conn)
+            if record is not None:
+                if record.pdf_path and Path(record.pdf_path).is_file():
+                    pdf = Path(record.pdf_path)
+                elif invoice_output_dir is not None:
+                    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
+            new_pdf_path: str | None = None
+            if pdf is not None:
+                new_pdf_path = "" if delete_pdf else str(_void_pdf_path(pdf))
+            result = void_invoice(
+                data_dir, invoice_number, reason=reason, replaced_by=replaced_by,
+                force=force, pdf_path=new_pdf_path, conn=conn,
+            )
+            db_cleanup = clear_invoice_state(conn, invoice_number)
+            if pdf is not None and not delete_pdf:
+                target = _void_pdf_path(pdf)
+                pdf.rename(target)
+                renamed_to = target
+    except Exception:
+        # The commit failed after the rename: put the file back where the
+        # still-open invoice's row says it is.
+        if renamed_to is not None and pdf is not None:
+            renamed_to.rename(pdf)
+        raise
+
+    out = {
+        "invoice_number": invoice_number,
+        "entries_voided": result.released,
+        "was_paid": result.was_paid,
+        "voided_at": result.voided_at,
+        "void_reason": result.reason,
+        "replaced_by": result.replaced_by,
+        "pdf_path": result.pdf_path,
+    }
+    if db_cleanup:
+        out["db_cleanup"] = db_cleanup
+    if delete_pdf:
+        deleted = False
+        if pdf is not None:
+            try:
+                pdf.unlink()
+                deleted = True
+            except OSError as exc:
+                logger.error("invoice_void_pdf_delete_failed invoice=%s error=%s", invoice_number, exc)
+        out["pdf_deleted"] = deleted
+    return out
+
+
+def _finite_number(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    pdf.unlink()
-    return True
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
+def _manual_line(line, services: dict[str, ServiceConfig]) -> tuple[str, float | None, float | None, str]:
+    """Validate one manual-invoice line: ``(service, qty, amount, description)``."""
+    if not isinstance(line, dict):
+        raise ValueError("Each line item must be an object")
+    service = line.get("service") or ""
+    description = line.get("description") or ""
+    if not isinstance(service, str) or not isinstance(description, str):
+        raise ValueError("A line item's service and description must be text")
+    if service:
+        if service not in services:
+            available = ", ".join(services)
+            raise ValueError(f"Service '{service}' not found. Available: {available}")
+        qty = line.get("qty")
+        if qty is not None and not _finite_number(qty):
+            raise ValueError(f"Invalid qty for service '{service}'")
+        return service, (float(qty) if qty is not None else None), None, description
+    amount = line.get("amount")
+    if not _finite_number(amount):
+        raise ValueError(f"A manual item needs a numeric amount: {description or 'no description'}")
+    return "_manual", None, float(amount), description
+
+
+def create_manual_invoice(
+    *,
+    config: InvoicingConfig,
+    data_dir: Path,
+    accounting_path: Path,
+    invoice_output_dir: Path,
+    client_key: str,
+    lines: list[dict],
+    entity: str | None = None,
+    db_path: Path | None = None,
+    config_path: Path | None = None,
+) -> dict:
+    """Create a one-off invoice from line items, render its PDF and record it.
+
+    Each line is ``{"service", "qty", "description"}`` for a configured service,
+    or ``{"description", "amount"}`` for a manual item. Every check runs before
+    the PDF is rendered, and a bad line, client or entity is a ``ValueError``.
+    The entries and the invoice are written in one transaction after the PDF
+    exists; if that fails the PDF is deleted and :class:`InvoiceRecordError`
+    is raised. The number is picked and recorded under
+    :func:`invoice_issue_lock`, the same lock generation holds.
+    """
+    client_config = config.clients.get(client_key)
+    if not client_config:
+        available = ", ".join(config.clients)
+        raise ValueError(f"Client '{client_key}' not found. Available: {available}")
+    if entity:
+        if entity not in config.companies:
+            available = ", ".join(config.companies)
+            raise ValueError(f"Entity '{entity}' not found. Available: {available}")
+        resolved_entity = config.companies[entity]
+    else:
+        resolved_entity = resolve_entity(config, client_config=client_config)
+
+    if not lines:
+        raise ValueError("No line items specified. Use --service/--qty or --item")
+    parsed = [_manual_line(line, config.services) for line in lines]
+
+    with invoice_issue_lock(data_dir):
+        return _issue_manual_invoice(
+            config=config, data_dir=data_dir, accounting_path=accounting_path,
+            invoice_output_dir=invoice_output_dir, client_key=client_key,
+            client_config=client_config, resolved_entity=resolved_entity,
+            entity=entity, parsed=parsed, db_path=db_path, config_path=config_path,
+        )
+
+
+def _issue_manual_invoice(
+    *,
+    config: InvoicingConfig,
+    data_dir: Path,
+    accounting_path: Path,
+    invoice_output_dir: Path,
+    client_key: str,
+    client_config: ClientConfig,
+    resolved_entity: CompanyConfig,
+    entity: str | None,
+    parsed: list,
+    db_path: Path | None,
+    config_path: Path | None,
+) -> dict:
+    from istota.money.work import create_invoice, insert_entry, write_transaction
+
+    invoice_number = max(
+        config.next_invoice_number,
+        highest_existing_invoice_number(data_dir) + 1,
+    )
+    invoice_date = date.today()
+    number_str = format_invoice_number(invoice_number)
+
+    inv_entries = [
+        WorkEntry(
+            date=invoice_date, client=client_key.lower(), service=service,
+            qty=qty, amount=amount, description=description,
+            entity=entity or "", uid=new_txn_id(),
+        )
+        for service, qty, amount, description in parsed
+    ]
+    items = build_line_items(
+        [e for e in inv_entries if e.service != "_manual"], config.services,
+    )
+    for e in inv_entries:
+        if e.service == "_manual":
+            items.append(InvoiceLineItem(
+                display_name=e.description or "Manual item", description="",
+                quantity=1, rate=e.amount or 0, discount=0, amount=e.amount or 0,
+            ))
+    total = sum(i.amount for i in items)
+    due_date = (
+        invoice_date + timedelta(days=client_config.terms)
+        if isinstance(client_config.terms, int) else None
+    )
+    inv = Invoice(
+        number=number_str, date=invoice_date, due_date=due_date,
+        client=client_config, company=resolved_entity,
+        items=items, total=total, group_name="",
+    )
+
+    html_text = generate_invoice_html(
+        inv, logo_path=_resolve_logo(accounting_path, resolved_entity.logo),
+    )
+    pdf_path = (
+        invoice_output_dir / str(invoice_date.year)
+        / f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
+    )
+    published = False
+    try:
+        _refuse_taken_pdf_name(pdf_path)
+        generate_invoice_pdf(html_text, pdf_path, root=accounting_path)
+        published = True
+        with write_transaction(data_dir) as conn:
+            for new_entry in inv_entries:
+                insert_entry(conn, new_entry)
+            create_invoice(
+                conn, number=number_str, client=client_key.lower(),
+                entity=resolved_entity.key or entity or config.default_entity,
+                group_name="", issue_date=invoice_date, total=round(total, 2),
+                entry_uids=[e.uid for e in inv_entries], pdf_path=str(pdf_path),
+                manual=True,
+                income_lines=invoice_income_lines(inv_entries, config.services, total),
+            )
+    except Exception as exc:
+        # Never leave a PDF behind for an invoice that was not recorded, and
+        # never remove one this call did not publish.
+        if published:
+            pdf_path.unlink(missing_ok=True)
+        raise InvoiceRecordError(f"could not record {number_str}: {exc}") from exc
+
+    persist_next_invoice_number(invoice_number + 1, db_path=db_path, config_path=config_path)
+
+    return {
+        "invoice_number": number_str,
+        "client_key": client_key.lower(),
+        "client": client_config.name,
+        "total": round(total, 2),
+        "due_date": due_date.isoformat() if due_date else str(client_config.terms),
+        "file": str(pdf_path),
+        "entry_uids": [e.uid for e in inv_entries],
+    }
+
+
+_LISTED_STATUS = {"open": "outstanding", "paid": "paid", "voided": "voided"}
+
+
+def invoice_summary(record, config: InvoicingConfig | None) -> dict:
+    """One invoice as ``invoice list`` and ``GET /invoices`` show it.
+
+    ``record`` is an :class:`InvoiceRecord`. The total is the stored snapshot,
+    never recomputed from the entries. An open invoice shows as
+    ``outstanding``.
+    """
+    client_config = config.clients.get(record.client) if config is not None else None
+    row = {
+        "invoice_number": record.number,
+        "client": client_config.name if client_config else record.client,
+        "client_key": record.client,
+        "date": record.issue_date.isoformat(),
+        "total": round(record.total, 2),
+        "status": _LISTED_STATUS.get(record.status, record.status),
+        "voided_at": record.voided_at,
+        "void_reason": record.void_reason,
+        "replaced_by": list(record.replaced_by),
+    }
+    if record.status == "paid" and record.paid_date:
+        row["paid_date"] = record.paid_date.isoformat()
+    if record.status == "voided":
+        row["was_paid"] = record.was_paid
+    return row

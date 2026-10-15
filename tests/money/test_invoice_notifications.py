@@ -111,7 +111,7 @@ def test_resolver_liveness_and_cross_user_isolation(scenario, decision):
             db.dismiss_review(conn, alice_row["object_id"])
     else:
         for number in ("INV-000001", "INV-000002"):
-            work.record_invoice_payment(contexts["alice"].data_dir, number, date.today())
+            work.mark_paid(contexts["alice"].data_dir, number, date.today())
     with framework_db.get_db(config.db_path) as conn:
         assert store.list_open(config, conn, "alice")[1] == 0
         assert store.list_open(config, conn, "bob")[1] == 1
@@ -122,7 +122,7 @@ def test_resolver_liveness_and_cross_user_isolation(scenario, decision):
 def test_settlement_is_bell_only_and_closes_when_seen(scenario, command):
     config, contexts = scenario
     ctx = contexts["alice"]
-    work.record_invoice_payment(ctx.data_dir, "INV-000002", date.today())
+    work.mark_paid(ctx.data_dir, "INV-000002", date.today())
     with patch("istota.notifications.delivery.send_notification", return_value=True) as send:
         sync(ctx, command)
     send.assert_not_called()
@@ -154,7 +154,7 @@ def test_interactive_review_does_not_push_and_dismiss_route_closes(scenario):
 def test_reverted_settlement_is_stale(scenario, surface):
     config, contexts = scenario
     ctx = contexts["alice"]
-    work.record_invoice_payment(ctx.data_dir, "INV-000002", date.today())
+    work.mark_paid(ctx.data_dir, "INV-000002", date.today())
     sync(ctx, "sync-monarch")
     if surface == "web":
         with client(config) as web:
@@ -309,7 +309,7 @@ def test_authenticated_settings_sync_and_bell(scenario, ambiguous):
     config_store.upsert_company(ctx.db_path, "default", payment_detection_enabled=False,
                                payment_detection_ledger="", payment_detection_income_account="")
     if not ambiguous:
-        work.record_invoice_payment(ctx.data_dir, "INV-000002", date.today())
+        work.mark_paid(ctx.data_dir, "INV-000002", date.today())
 
     app = FastAPI()
     app.state.istota_config = config
@@ -361,8 +361,12 @@ def test_failed_settlement_never_exposes_another_candidate(scenario):
         with patch.object(db, "settle_review", return_value=False):
             response = web.post(endpoint, json={"invoice_number": "INV-000001"})
         assert response.status_code == 400
+        # The payment rolled back with the failed decision, so the review stays
+        # open, offering only the invoice it already chose.
         with framework_db.get_db(config.db_path) as conn:
-            assert store.list_open(config, conn, "alice")[1] == 0
+            (item,), total = store.list_open(config, conn, "alice")
+        assert total == 1
+        assert [a.id for a in item.actions if a.id.startswith("settle-")] == ["settle-INV-000001"]
         response = web.post(endpoint, json={"invoice_number": "INV-000002"})
         assert response.status_code == 400
         response = web.post(endpoint, json={"invoice_number": "INV-000001"})

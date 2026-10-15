@@ -21,7 +21,7 @@ from istota.money.work import (
     assign_invoice_number,
     entry_etag,
     load_work_entries,
-    record_invoice_payment,
+    mark_paid,
 )
 
 
@@ -46,7 +46,7 @@ def make_client(tmp_path: Path):
         ctx = UserContext(
             data_dir=tmp_path,
             ledgers=[],
-            db_path=tmp_path / "money.db",
+            db_path=tmp_path / "data" / "money.db",
             invoicing_config_path=_write_invoicing_config(tmp_path) if with_config else None,
         )
         app = FastAPI()
@@ -115,7 +115,7 @@ class TestListWork:
     def test_paid_date_surfaced(self, make_client, tmp_path):
         add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
         assign_invoice_number(tmp_path, [1], "INV-000001")
-        record_invoice_payment(tmp_path, "INV-000001", "2026-04-15")
+        mark_paid(tmp_path, "INV-000001", "2026-04-15")
         row = make_client().get("/api/money/work").json()["entries"][0]
         assert row["paid_date"] == "2026-04-15"
 
@@ -131,17 +131,6 @@ class TestListWork:
         row = make_client().get("/api/money/work").json()["entries"][0]
         assert "unknown_client" in row["warnings"]
         assert row["client_name"] == "nobody"
-
-    def test_entry_without_uid_is_not_editable(self, make_client, tmp_path):
-        work_dir = tmp_path / "invoices" / "work"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        (work_dir / "2026.toml").write_text(
-            '[[entries]]\ndate = 2026-03-01\nclient = "acme"\nservice = "dev"\nqty = 1\n'
-        )
-        row = make_client().get("/api/money/work").json()["entries"][0]
-        assert row["uid"] == ""
-        assert row["editable"] is False
-        assert "no_uid" in row["warnings"]
 
     def test_filter_by_client(self, make_client, tmp_path):
         add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1)
@@ -167,7 +156,7 @@ class TestListWork:
         add_work_entry(tmp_path, "2026-03-03", "acme", "dev", qty=1, description="settled")
         assign_invoice_number(tmp_path, [2], "INV-000001")
         assign_invoice_number(tmp_path, [3], "INV-000002")
-        record_invoice_payment(tmp_path, "INV-000002", "2026-04-01")
+        mark_paid(tmp_path, "INV-000002", "2026-04-01")
         client = make_client()
 
         def descs(status):
@@ -399,8 +388,7 @@ class TestUpdateWork:
         resp = make_client().patch(f"/api/money/work/{uid}", json={"date": "2027-01-05"})
         assert resp.status_code == 200
         assert resp.json()["entry"]["date"] == "2027-01-05"
-        assert (tmp_path / "invoices" / "work" / "2027.toml").exists()
-        assert not (tmp_path / "invoices" / "work" / "2026.toml").exists()
+        assert [e.date.isoformat() for e in load_work_entries(tmp_path)] == ["2027-01-05"]
 
 
 class TestDeleteWork:
@@ -420,7 +408,42 @@ class TestDeleteWork:
         assign_invoice_number(tmp_path, [1], "INV-000001")
         resp = make_client().delete(f"/api/money/work/{uid}")
         assert resp.status_code == 409
+        assert resp.json()["code"] == "invoiced"
         assert len(load_work_entries(tmp_path)) == 1
+
+
+class TestEntryOnAVoidedInvoice:
+    """A voided invoice keeps its record of the entries it covered, so the row
+    says it cannot be deleted and the refusal names itself."""
+
+    def _voided(self, tmp_path) -> str:
+        from istota.money.work import void_invoice
+
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, description="voided")
+        add_work_entry(tmp_path, "2026-03-02", "acme", "dev", qty=1, description="plain")
+        assign_invoice_number(tmp_path, [1], "INV-000001")
+        void_invoice(tmp_path, "INV-000001")
+        return _uid_of(tmp_path, "voided")
+
+    def test_the_row_is_editable_but_not_deletable(self, make_client, tmp_path):
+        self._voided(tmp_path)
+        rows = {r["description"]: r for r in make_client().get("/api/money/work").json()["entries"]}
+        assert rows["voided"]["editable"] is True
+        assert rows["voided"]["deletable"] is False
+        assert rows["plain"]["deletable"] is True
+
+    def test_an_update_keeps_the_flag(self, make_client, tmp_path):
+        uid = self._voided(tmp_path)
+        resp = make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["deletable"] is False
+
+    def test_delete_is_refused_with_its_own_code(self, make_client, tmp_path):
+        uid = self._voided(tmp_path)
+        resp = make_client().delete(f"/api/money/work/{uid}")
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "on_voided_invoice"
+        assert len(load_work_entries(tmp_path)) == 2
 
 
 class TestEtagConcurrency:
@@ -446,6 +469,7 @@ class TestEtagConcurrency:
         assert resp.status_code == 409
         body = resp.json()
         assert body["error"] == "entry changed"
+        assert body["code"] == "conflict"
         # The conflict response carries the current server-side row.
         assert body["entry"]["qty"] == 99
         assert load_work_entries(tmp_path)[0].qty == 99
@@ -505,7 +529,7 @@ class TestMutationsRequireCsrf:
         ctx = UserContext(
             data_dir=tmp_path,
             ledgers=[],
-            db_path=tmp_path / "money.db",
+            db_path=tmp_path / "data" / "money.db",
             invoicing_config_path=_write_invoicing_config(tmp_path),
         )
         app = FastAPI()
@@ -685,3 +709,63 @@ class TestUpdateResponseShape:
         monkeypatch.setattr(routes_mod, "_work_entry_response", _boom)
         resp = make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
         assert resp.status_code == 200
+
+
+class TestSeparateField:
+    """#754: the per-entry ``separate`` flag through the work routes."""
+
+    def test_row_carries_the_flag(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, description="plain")
+        add_work_entry(tmp_path, "2026-03-02", "acme", "dev", qty=1, description="alone",
+                       separate=True)
+        rows = make_client().get("/api/money/work").json()["entries"]
+        assert {r["description"]: r["separate"] for r in rows} == {"plain": False, "alone": True}
+
+    def test_create_stores_the_flag(self, make_client, tmp_path):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1,
+                  "separate": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["separate"] is True
+        assert load_work_entries(tmp_path)[0].separate is True
+
+    def test_create_defaults_the_flag_off(self, make_client, tmp_path):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1},
+        )
+        assert resp.json()["entry"]["separate"] is False
+
+    def test_update_round_trips_the_flag(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1)
+        uid = load_work_entries(tmp_path)[0].uid
+        client = make_client()
+
+        on = client.patch(f"/api/money/work/{uid}", json={"separate": True})
+        assert on.status_code == 200
+        assert on.json()["entry"]["separate"] is True
+        etag = on.json()["entry"]["etag"]
+
+        off = client.patch(f"/api/money/work/{uid}", json={"separate": False, "etag": etag})
+        assert off.status_code == 200
+        assert off.json()["entry"]["separate"] is False
+        assert load_work_entries(tmp_path)[0].separate is False
+
+    def test_an_update_without_the_flag_leaves_it_alone(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, separate=True)
+        uid = load_work_entries(tmp_path)[0].uid
+        make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
+        assert load_work_entries(tmp_path)[0].separate is True
+
+    @pytest.mark.parametrize("value", ["yes", 1, 0, None, "true"])
+    def test_a_non_boolean_flag_is_refused(self, make_client, tmp_path, value):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1,
+                  "separate": value},
+        )
+        assert resp.status_code == 400
+        assert "separate" in resp.json()["error"]
+        assert load_work_entries(tmp_path) == []
