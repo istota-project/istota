@@ -3263,6 +3263,23 @@ def process_one_task(
         # Get user resources
         user_resources = db.get_user_resources(conn, task.user_id)
 
+    if task.source_type == "group_briefing_generation":
+        from .briefings.group_runs import generate_task
+        with _task_heartbeat(config, task_id):
+            success, result = (True, "dry_run") if dry_run else generate_task(task, config)
+        with db.get_db(config.db_path) as conn:
+            current = db.get_task(conn, task_id)
+            if (current is None or current.status == "cancelled"
+                    or current.attempt_count != task.attempt_count):
+                return task_id, False
+            decision = decide_retry(task, result, success=success, **retry_flags(task, result, success=success))
+            if decision.will_retry:
+                db.set_task_pending_retry(conn, task_id, result, decision.delay_minutes)
+            else:
+                db.update_task_status(conn, task_id, "completed" if success else "failed",
+                                      result=result if success else None, error=None if success else result)
+        return task_id, success
+
     # Log channel setup — resolve before execution starts. The verbose log is
     # opt-in and routes to any user-routable transport destination (talk default
     # / email / ntfy / comma list); effective_log_destinations returns [] when
@@ -5683,6 +5700,39 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             created_tasks.append(task_id)
 
     return created_tasks
+
+
+def check_group_briefings(config: Config) -> list[int]:
+    """Admit one recent wall-clock occurrence and advance ordinary phase tasks."""
+    from .briefings import group_runs, group_store
+    from .groups.policy import GroupError
+    from . import modules
+
+    if not modules.module_available("briefings"):
+        return []
+    now = _now(timezone.utc)
+    with db.get_db(config.db_path) as conn:
+        definitions = conn.execute("SELECT id FROM group_briefing_configs WHERE enabled = 1").fetchall()
+        for row in definitions:
+            definition = group_store.get_definition(conn, row["id"])
+            tz = ZoneInfo(definition["timezone"])
+            local = now.astimezone(tz)
+            wall = local.replace(tzinfo=None)
+            # Evaluate naive wall time like personal/shared cron scheduling.
+            # The latest due occurrence avoids a backlog after downtime.
+            due_wall = croniter(definition["cron"], wall + timedelta(microseconds=1)).get_prev(datetime)
+            if _is_stale_fire(f"group briefing {definition['id']}", due_wall, wall,
+                              config.scheduler.cron_max_staleness_minutes):
+                continue
+            due = due_wall.replace(tzinfo=tz)
+            # A nonexistent spring-forward wall time is never a real occurrence.
+            if due.astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None) != due_wall:
+                continue
+            try:
+                group_store.enqueue_run(conn, config, definition["id"], due_at=due, now=now)
+            except GroupError as exc:
+                logger.info("group_briefing_admission_refused definition=%s code=%s", definition["id"], exc.code)
+        return group_runs.advance_runs(conn, config, now=now)
 
 
 def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str]:
@@ -9756,6 +9806,7 @@ def build_interval_gates(
         # Manages its own DB connections so no lock is held during the slow
         # network pre-fetching.
         briefing_tasks = check_briefings(config.db_path, config)
+        briefing_tasks.extend(check_group_briefings(config))
         if briefing_tasks:
             logger.info("Queued %d briefing(s)", len(briefing_tasks))
 

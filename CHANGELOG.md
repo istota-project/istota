@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Group briefings generate one common edition per occurrence, with saved research reused after a synthesis retry. Previews remain drafts, and structured blocks retain their original content without a model pass.
+
 - All users is a built-in group whose membership follows enabled installation accounts. Its notebook, files and retained briefing history are shared with current and future users; membership cannot be changed by hand.
 
 - `istota snapshot --format ansible` writes the settings as a `group_vars` file for the Ansible management role, so a snapshot goes into an inventory as it is: `istota snapshot --format ansible | ansible-vault encrypt --output FILE -`.
