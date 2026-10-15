@@ -3623,6 +3623,21 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
+    briefing_document = None
+    briefing_title = None
+    if success and task.source_type == "briefing" and not dry_run:
+        try:
+            normalized = _normalize_briefing_result(config, task, result)
+            if normalized is not None:
+                briefing_document = normalized.get("briefing_document")
+                if briefing_document is not None:
+                    briefing_title = briefing_document["title"]
+                result = json.dumps(normalized, ensure_ascii=False)
+        except ValueError as error:
+            success = False
+            result = str(error)
+            logger.warning("Task %s: %s", task_id, result)
+
     from istota.rooms import private_replies as private_replies_mod
     from istota.relay.requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
@@ -4180,13 +4195,15 @@ def process_one_task(
                         # never by memory (multiplayer D2): nothing a guest
                         # wrote is recalled back into the host's own tasks.
                         if task.guest_participant_id is None:
-                            _index_conv(conn, task.user_id, task_id, task.prompt, result,
+                            _index_conv(conn, task.user_id, task_id, task.prompt,
+                                        normalized["body"] if briefing_document else result,
                                         speaker=_speaker)
                         # Also index under channel namespace if in a channel.
                         if (task.conversation_token
                                 and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
-                            _index_conv(conn, channel_uid, task_id, task.prompt, result,
+                            _index_conv(conn, channel_uid, task_id, task.prompt,
+                                        normalized["body"] if briefing_document else result,
                                         speaker=_speaker)
                     except Exception as e:
                         logger.debug("Memory search indexing failed for task %s: %s", task_id, e)
@@ -4716,7 +4733,7 @@ def process_one_task(
         # Archive the rendered briefing for the landing page (module path only).
         _maybe_archive_briefing(
             config, task, result, parsed_briefing,
-            title=briefing_title_for_task(config, task),
+            title=briefing_title or briefing_title_for_task(config, task),
         )
 
     # The ack message is left as-is — it shows the last tool call as a compact
@@ -4966,7 +4983,7 @@ def process_one_task(
         if task.source_type == "briefing":
             pb = parse_briefing_json(result)
             email_result = pb["body"] if pb else strip_briefing_preamble(result)
-            email_subject = briefing_title_for_task(config, task)
+            email_subject = briefing_title or briefing_title_for_task(config, task)
         else:
             email_result = result
         email_ok = asyncio.run(post_result_to_email(
@@ -5080,7 +5097,7 @@ def process_one_task(
         if task.source_type == "briefing":
             pb = parse_briefing_json(result)
             ntfy_result = pb["body"] if pb else strip_briefing_preamble(result)
-            ntfy_title = briefing_title_for_task(config, task)
+            ntfy_title = briefing_title or briefing_title_for_task(config, task)
         else:
             ntfy_result = result
         ntfy_transport = registry.get("ntfy")
@@ -5467,17 +5484,43 @@ def briefing_title_for_task(config: Config, task) -> str:
     )
 
 
+def _normalize_briefing_result(config: Config, task, result: str) -> dict | None:
+    """Bind new output to the protected snapshot; leave body-only tasks linear."""
+    from .briefings.document import document_to_markdown, normalize_briefing_document
+    from .executor import get_task_control_dir
+
+    parsed = parse_briefing_json(result)
+    structured = parsed is not None and ("version" in parsed or "blocks" in parsed)
+    meta = None
+    try:
+        control_dir = get_task_control_dir(config, task.user_id, task.id)
+        path = control_dir / "briefing_meta.json" if control_dir else None
+        if path is not None and path.exists():
+            meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        if structured:
+            raise ValueError("briefing_manifest_unreadable") from None
+    if isinstance(meta, dict) and "manifest" in meta:
+        if type(meta.get("version")) is not int or meta["version"] != 1:
+            raise ValueError("briefing_manifest_version")
+        document = normalize_briefing_document(result, meta["manifest"])
+        return {"body": document_to_markdown(document), "briefing_document": document}
+    if structured:
+        raise ValueError("briefing_manifest_missing")
+    if parsed is not None and isinstance(parsed.get("body"), str):
+        return {"body": parsed["body"]}
+    return None
+
+
 def _maybe_archive_briefing(
     config: Config, task, result: str, parsed, title: str | None = None,
 ) -> None:
     """Archive a rendered briefing to the module's ``briefing_archive``.
 
-    Only module-path briefings are archived: the module must be enabled for the
-    user AND the briefing must have content blocks (a legacy no-blocks briefing
-    is not archived — it wouldn't appear on the landing page anyway). Reads the
-    per-block provenance the executor stashed and prunes past retention. Fully
-    best-effort — the task has already delivered, so a failed archive is logged
-    and swallowed.
+    Snapshot editions survive definition deletion. Legacy body-only editions
+    still require live blocks. Read provenance before removing the control file;
+    the normalized document already lives in memory and tasks.result. Archive
+    failures are logged without retrying generation or blocking delivery.
     """
     if not getattr(task, "briefing_name", None):
         return
@@ -5496,17 +5539,19 @@ def _maybe_archive_briefing(
         logger.warning("briefings archive: resolve failed for %s: %s", task.id, e)
         return
 
-    # Only archive when the briefing actually has blocks (module path).
+    document = parsed.get("briefing_document") if parsed else None
+
+    # A completed snapshot remains valid after its definition is deleted.
     try:
         with bdb.connect(ctx.db_path) as conn:
-            if not bdb.list_blocks(conn, task.briefing_name, with_sources=False):
+            if document is None and not bdb.list_blocks(conn, task.briefing_name, with_sources=False):
                 return
     except Exception:  # noqa: BLE001
         return
 
     # The archive's `subject` is the deterministic title, not whatever the
     # model felt like calling it — the same string the email subject uses.
-    subject = title or briefing_title_for_task(config, task)
+    subject = document["title"] if document else title or briefing_title_for_task(config, task)
     body = parsed.get("body") if parsed else strip_briefing_preamble(result)
     if not body:
         return
@@ -5557,6 +5602,7 @@ def _maybe_archive_briefing(
             task_id=task.id,
             block_meta=block_meta,
             delivered_to=delivered_to,
+            document=document,
             retention_days=config.briefings.archive_retention_days,
         )
     except Exception as e:  # noqa: BLE001

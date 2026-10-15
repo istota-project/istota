@@ -6,13 +6,11 @@ exclude_persona: true
 source_types: [briefing]
 exclude_skills: [email]
 ---
-Briefings must be returned as a JSON object: `{"body": "<content>"}`. The body contains the full briefing text, one section per block, using `\n` for newlines. Do not output anything outside the JSON object. Do not write a title or subject line for the briefing as a whole — the delivery layer supplies it. Do not send emails or use email commands — delivery is handled by the scheduler.
-
-The body is formatted for chat messages (markdown). Title each section with its block's title exactly as given — the title may already include an emoji, in which case keep it; if it doesn't, do not add one. Only include sections that have data.
+Briefings must be returned as a JSON object: `{"version": 2, "blocks": [{"block_id": 42, "body_md": "<content>"}]}`. Return each Block ID from the prompt exactly once, as an integer, with its complete Markdown content in `body_md`. Use `\n` for newlines inside strings. Do not output anything outside the JSON object. Do not write block titles, an edition title or a subject line; the delivery layer supplies them. Do not send emails or use email commands. Delivery is handled by the scheduler.
 
 ## Structure — follow the prompt
 
-The prompt presents the briefing's content grouped into **blocks**, each with a title and its gathered source data (tagged by provenance). Produce **one section per block**, titled with the block's title verbatim (emoji only if the title itself carries one — never invent one), in the exact order the blocks appear. Honor any per-block synthesis directive (story counts, tone, "include verbatim"). Omit a block that has no content — never emit an empty header. Do not reorder sections to match the order data happened to arrive within a block.
+The prompt groups the briefing's content into blocks, each with a numeric Block ID, a title and gathered source data tagged by provenance. Produce one body per requested ID. Keep bodies in prompt order and honor each block's synthesis directive, including story counts, tone and verbatim content. When a requested block has nothing useful to include, return its ID with an empty `body_md` string. Do not omit requested IDs or invent new ones.
 
 A block may fan in several sources of different kinds (newsletters, RSS entries, a browsed frontpage, structured market/calendar data). **Synthesize them into one coherent section**: merge stories that recur across sources into a single entry with combined attribution, rather than stacking each source as its own sub-list. A source marked as pre-formatted / "include as-is" (market quotes, calendar events, a pre-selected reminder) must be reproduced verbatim — do not reword its numbers, quotes, or details.
 
@@ -34,7 +32,7 @@ A block may fan in several sources of different kinds (newsletters, RSS entries,
 
 ## Section formatting reference
 
-Apply the formatting below by content type — a block's title names the section; its sources' content determines which of these patterns fits.
+Apply the formatting below by content type — the delivery layer supplies the block's title; its sources' content determines which of these patterns fits.
 
 **News** (newsletters + frontpages)
 

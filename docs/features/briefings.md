@@ -165,7 +165,15 @@ Each generated briefing is archived on delivery and pruned by `[briefings] archi
 
 ## Output format
 
-The model returns structured JSON — `{"body": "..."}`, body only. The scheduler parses it and handles delivery deterministically. The **title is not the model's to choose**: it is composed from the briefing's configured `title` (blank derives it from the name, so `morning` becomes "Morning Briefing") plus the run date in the user's timezone, and the archive entry, the email subject and the ntfy push title all call the same function, so they cannot disagree about the same run. A stray `subject` from an in-flight run is tolerated and ignored. The email skill is excluded from briefing tasks via `exclude_skills` to prevent the model from sending emails directly.
+Generation makes one source gather and one model call for the edition. Before the call, the worker saves a protected manifest with the edition title, ordered numeric block IDs, block titles, render modes, presentation widths and source status. Duplicate titles remain distinct. Blocks with no gathered content are omitted from the request; failed sources keep their provenance outside the reader-facing document.
+
+The model returns `{"version": 2, "blocks": [{"block_id": 42, "body_md": "..."}]}`. Each requested ID must appear exactly once. An empty string explicitly omits a block whose gathered content produced nothing useful. The model supplies only block bodies; titles, order, presentation and source status come from the manifest. The edition title uses the configured title (blank derives it from the briefing name) and the task's creation date in the user's timezone.
+
+Before marking the task completed, indexing its answer or delivering it, the scheduler validates the response against that manifest. Missing, duplicate or unknown IDs, wrong types and unsupported versions fail through the normal quiet briefing retry path. An edition with no useful blocks fails with `briefing_no_content` rather than publishing an empty edition. Useful blocks with failed sources retain a partial-source status.
+
+The completed task stores a canonical envelope with `body` and `briefing_document`. The archive stores the same immutable document and its deterministic linear Markdown projection. Editing or deleting a definition during generation cannot change that edition's titles, content, order or layout. Chat, digest and existing text destinations use the projection; email and ntfy subjects use the saved edition title even after archive cleanup removes the manifest file. An archive write failure is logged and does not repeat generation or block delivery.
+
+Old body-only tasks retain their linear path without inferred block boundaries. The parser still tolerates JSON fences and wrappers. The email skill stays excluded from briefing tasks so delivery remains scheduler-owned.
 
 ## Reading a todo file
 
