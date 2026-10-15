@@ -34,7 +34,7 @@ def test_presence_defaults_and_scope():
     from istota.settings_plan.schema import parse_plan, select_users
 
     document = {"config": {}, "shared_briefing_blocks": [], "users": {
-        "alice": {"profile": {"display_name": "", "default_briefings": False}, "resources": []},
+        "alice": {"profile": {"display_name": "", "briefing_email_html": False}, "resources": []},
         "bob": {},
     }}
     plan = parse_plan(document)
@@ -43,7 +43,7 @@ def test_presence_defaults_and_scope():
     assert "profile_mode" not in alice.sections
     assert alice.sections["resources"] == []
     assert "resources" not in plan.users["bob"].sections
-    assert alice.sections["profile"] == {"display_name": "", "default_briefings": False}
+    assert alice.sections["profile"] == {"display_name": "", "briefing_email_html": False}
     selected = select_users(plan, ["alice"])
     assert set(selected.users) == {"alice"}
     assert selected.config is None and selected.shared_briefing_blocks is None

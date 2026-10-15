@@ -139,8 +139,9 @@ def test_seed_conflict_and_config_seed_reference(install):
     raw["briefing_shared_blocks"] = []
     raw["default_briefings"] = [{"name": "morning", "cron": "0 7 * * *", "blocks": [{"title": "News", "sources": [{"kind": "shared_block", "config": {"name": "news"}}]}]}]
     install[0].write_text(toml_write.dumps(raw))
-    with pytest.raises(engine.ExecutionError, match="shared_block_reference"):
-        preview(install, {"shared_briefing_blocks": []}, prune=True)
+    # Legacy defaults are migration declarations, not new personal consumers.
+    context, operations = preview(install, {"shared_briefing_blocks": []}, prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 2
 
 
 def test_stale_definition_and_new_reference_refuse_delete(install):

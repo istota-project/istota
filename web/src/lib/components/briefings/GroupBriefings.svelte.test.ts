@@ -40,6 +40,7 @@ beforeEach(() => {
   api.getGroupBriefing.mockImplementation(async () => definition);
   api.getGroupBriefingRuns.mockImplementation(async () => ({ items: [run], total: 1 }));
   api.getGroupBriefingRun.mockImplementation(async () => run);
+  api.getGroupDeliveryPreferences.mockResolvedValue({ outbound_muted: false, in_app_muted: false });
   api.getGroupBriefingPreferences.mockResolvedValue({ outbound_muted: false, in_app_muted: false });
   api.saveGroupBriefingPreferences.mockImplementation(async (_g, _n, prefs) => prefs);
   api.getGroupBriefingDelivery.mockResolvedValue({
@@ -217,4 +218,18 @@ it('clears a private preview when its author becomes a member', async () => {
   await screen.findByText('Edition not found');
   expect(screen.queryByText('Retained group content')).toBeNull();
   expect(screen.queryByRole('link', { name: 'Download Markdown' })).toBeNull();
+});
+
+it('lets a member change group-wide delivery defaults without leaving the group', async () => {
+  api.getGroupDeliveryPreferences.mockResolvedValue({ outbound_muted: true, in_app_muted: true });
+  api.saveGroupDeliveryPreferences.mockImplementation(async (_group, prefs) => prefs);
+  await open();
+  const outbound = screen.getByRole('checkbox', { name: 'Mute external delivery for all briefings in this group' });
+  expect(outbound).toBeChecked();
+  await fireEvent.click(outbound);
+  await fireEvent.click(screen.getByRole('button', { name: 'Save group delivery preferences' }));
+  await waitFor(() => expect(api.saveGroupDeliveryPreferences).toHaveBeenCalledWith('team', {
+    outbound_muted: false, in_app_muted: true,
+  }));
+  expect(screen.getByText('Retained group content')).toBeInTheDocument();
 });

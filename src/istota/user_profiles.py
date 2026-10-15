@@ -97,7 +97,7 @@ class UserProfile:
     # `relay_destinations.resolve_destination`, which treats an unknown value
     # as no preference.
     relay_delivery: str = ""
-    # Seed the shared [[default_briefings]] set into this user (default on).
+    # Legacy migration input; new delivery preferences belong to the group.
     default_briefings: bool = True
     # Deliver briefing email as multipart/alternative (HTML + plain) — default on.
     briefing_email_html: bool = True
@@ -160,7 +160,7 @@ SELF_EDITABLE_FIELDS = (
 ADMIN_EDITABLE_FIELDS = (
     "display_name", "timezone", "email_addresses",
     "trusted_email_senders", "quiet_email_senders", "outbound_approval",
-    "disabled_skills", "disabled_modules", "default_briefings",
+    "disabled_skills", "disabled_modules",
     "max_foreground_workers", "max_background_workers", "sms_phone_number",
 )
 
@@ -1267,6 +1267,8 @@ def validate_provisioning_fields(
     from .modules import MODULE_NAMES
     from .transport import parse_output_target
 
+    if "default_briefings" in updates:
+        raise ValueError("default_briefings is migration input only; use All users delivery preferences")
     unknown = set(updates) - set(SELF_EDITABLE_FIELDS) - set(ADMIN_EDITABLE_FIELDS)
     if unknown:
         raise ValueError(f"unknown profile field(s): {sorted(unknown)}")

@@ -903,7 +903,6 @@ export interface AdminUserProfile {
   outbound_approval: '' | 'off' | 'untrusted' | 'all';
   disabled_skills: string[];
   disabled_modules: string[];
-  default_briefings: boolean;
   /** `0` is the deployment default. */
   max_foreground_workers: number;
   max_background_workers: number;
@@ -6578,6 +6577,19 @@ export function saveGroupBriefingPreferences(
   preferences: BriefingDeliveryPreferences,
 ): Promise<BriefingDeliveryPreferences> {
   return apiFetch(groupBriefingPath(group, name) + '/delivery', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ outbound_muted: preferences.outbound_muted, in_app_muted: preferences.in_app_muted }),
+  });
+}
+export function getGroupDeliveryPreferences(group: string): Promise<BriefingDeliveryPreferences> {
+  return apiFetch(`/groups/${encodeURIComponent(group)}/briefing-delivery`);
+}
+export function saveGroupDeliveryPreferences(
+  group: string,
+  preferences: BriefingDeliveryPreferences,
+): Promise<BriefingDeliveryPreferences> {
+  return apiFetch(`/groups/${encodeURIComponent(group)}/briefing-delivery`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(preferences),

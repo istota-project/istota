@@ -846,7 +846,7 @@ class UserConfig:
     # answer with no question above it is the defect the inbound mirror exists
     # to fix (ISSUE-136).
     external_turn_display: str = "collapsed"
-    default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
+    default_briefings: bool = True  # Legacy migration input; delivery preferences live on the group.
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
     # The KDBX credential vault, operator-set. Empty means this user's vault is
@@ -2239,11 +2239,7 @@ class Config:
     models: ModelsConfig = field(default_factory=ModelsConfig)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
-    # Canonical shared briefing set, seeded into each opted-in user (retire-
-    # legacy-briefing-components spec). Parsed from the top-level
-    # ``[[default_briefings]]`` TOML section; merged by name into a user's
-    # briefings (user wins) in ``_apply_user_briefings`` when their
-    # ``default_briefings`` flag is true.
+    # Legacy migration declarations. Never copied into new personal schedules.
     default_briefings: list[BriefingConfig] = field(default_factory=list)
     # Module-owned shared briefing blocks (shared-kv-curated-content spec):
     # generated once globally and written into ``shared_kv``; per-user briefings
@@ -3016,6 +3012,9 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
 
 def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     """Parse a user data dict (from main config or per-user file) into UserConfig."""
+    if "default_briefings" in user_data:
+        report_problem("retired", ("users", user_id, "default_briefings"),
+                       "default_briefings is migration input only; use All users delivery preferences")
     # Parse briefings
     briefings = _parse_briefing_specs(
         user_data.get("briefings", []), ("users", user_id, "briefings"),
@@ -4802,6 +4801,9 @@ def load_config(
                     "[experimental] unknown feature %r — typo or stale flag", f,
                 )
 
+    if data.get("default_briefings"):
+        report_problem("retired", ("default_briefings",),
+                       "default_briefings is migration input only; use istota briefings migrate report/import and All users definitions")
     if "default_briefings" in data:
         # The canonical shared briefing set. Same name/cron/output/blocks shape
         # as ``[[users.X.briefings]]`` — parsed via the shared helper (fail-soft:
@@ -4985,6 +4987,8 @@ def load_config(
         # DB rows replace TOML rows of the same ``name``; distinct names coexist.
         # ``check_briefings`` and ``get_briefings_for_user`` keep reading
         # ``user_config.briefings`` unchanged.
+        from .briefings.group_migrate import preserve_legacy_defaults
+        preserve_legacy_defaults(config)
         _apply_user_briefings(config)
 
         # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
@@ -6409,31 +6413,6 @@ def _migrate_obsolete_resources(config: "Config") -> None:
         uc.resources = [rc for rc in uc.resources if rc.type not in obsolete]
 
 
-def _merge_default_briefings(config: "Config") -> None:
-    """Seed the shared ``[[default_briefings]]`` set into each opted-in user.
-
-    For each user whose ``default_briefings`` flag is true, append every
-    default briefing whose ``name`` the user does not already define (an
-    explicit user briefing wins). Seed-once + edit-preservation fall out of
-    the downstream machinery for free: ``import_from_user_configs`` never
-    overwrites an existing ``briefing_configs`` row and the block seeder is
-    one-time, so after the first seed the user's edits survive an Ansible
-    re-run. Runs before the DB overlay so a seeded default's config-authored
-    blocks are captured and ride onto its DB-sourced entry.
-    """
-    if not config.default_briefings:
-        return
-    for user_config in config.users.values():
-        if not getattr(user_config, "default_briefings", True):
-            continue
-        existing = {b.name for b in user_config.briefings}
-        for default in config.default_briefings:
-            if default.name and default.name not in existing:
-                # Copy so a per-user edit can't mutate the shared template.
-                user_config.briefings.append(_dc_replace(default))
-                existing.add(default.name)
-
-
 def _apply_user_briefings(config: "Config", *, rows=None) -> None:
     """Merge ``briefing_configs`` rows into ``config.users[*].briefings``.
 
@@ -6442,13 +6421,8 @@ def _apply_user_briefings(config: "Config", *, rows=None) -> None:
     a replacement, so an operator can switch a TOML-templated briefing off
     via the web UI without re-templating.
 
-    Also seeds the shared ``[[default_briefings]]`` set into opted-in users
-    (by name, user wins) before the DB overlay.
-
     Best-effort: a missing DB does not fail config loading.
     """
-    _merge_default_briefings(config)
-
     try:
         from . import user_briefings as _ub  # avoid import cycles at module load
     except Exception:  # pragma: no cover - defensive

@@ -186,14 +186,6 @@ def _check_references(plan, context, options, conn, available, removed, *, apply
             for index, seed in enumerate(configured.briefings):
                 _check_blocks(seed.blocks, available, removed,
                               ["config", "users", user, "briefings", index, "blocks"], retained_only=True)
-        profile = context.profiles.get(user) or profiles.get(user)
-        defaults = profile.default_briefings if profile else configured.default_briefings if configured else True
-        if defaults:
-            explicit = {seed.name for seed in configured.briefings} if configured else set()
-            for index, seed in enumerate(context.config.default_briefings):
-                if seed.name not in explicit:
-                    _check_blocks(seed.blocks, available, removed, ["config", "default_briefings", index, "blocks"],
-                                  retained_only=True)
 
 
 def validate_references(plan, context, options):

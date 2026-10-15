@@ -244,7 +244,7 @@ class TestOutputColumn:
 
 
 class TestDefaultBriefings:
-    """Shared [[default_briefings]] seeded into opted-in users (by name, user wins)."""
+    """Legacy defaults no longer copy into new personal schedules."""
 
     def _default(self, name="Daily"):
         return BriefingConfig(
@@ -252,15 +252,14 @@ class TestDefaultBriefings:
             blocks=[{"title": "News", "sources": [{"kind": "rss", "config": {}}]}],
         )
 
-    def test_opted_in_user_gets_defaults_with_blocks(self, db_path):
+    def test_new_user_does_not_get_copied_defaults(self, db_path):
         from istota import config as cfgmod
 
         cfg = Config(db_path=db_path, default_briefings=[self._default()])
         cfg.users = {"alice": UserConfig(display_name="Alice")}
         cfgmod._apply_user_briefings(cfg)
         briefings = cfg.users["alice"].briefings
-        assert [b.name for b in briefings] == ["Daily"]
-        assert briefings[0].blocks[0]["title"] == "News"
+        assert briefings == []
 
     def test_opted_out_user_gets_none(self, db_path):
         from istota import config as cfgmod
@@ -285,18 +284,16 @@ class TestDefaultBriefings:
         assert len(daily) == 1  # no duplicate
         assert daily[0].cron == "0 9 * * *"  # user's own, default not merged
 
-    def test_defaults_reach_db_via_import(self, db_path):
+    def test_personal_import_does_not_copy_defaults(self, db_path):
         from istota import config as cfgmod
 
         cfg = Config(db_path=db_path, default_briefings=[self._default()])
         cfg.users = {"alice": UserConfig(display_name="Alice")}
         cfgmod._apply_user_briefings(cfg)
-        # The seeded default is now an ordinary in-memory briefing → import writes it.
+        # The importer only sees explicit personal schedules.
         written = user_briefings.import_from_user_configs(db_path, cfg.users)
-        assert written == 1
-        rows = user_briefings.list_briefings(db_path, "alice")
-        assert [r.name for r in rows] == ["Daily"]
-        assert rows[0].output == "talk"
+        assert written == 0
+        assert user_briefings.list_briefings(db_path, "alice") == []
 
     def test_no_defaults_configured_is_noop(self, db_path):
         from istota import config as cfgmod

@@ -24,7 +24,7 @@ PROFILE_FIELDS = {
     "default_destination": str, "default_room": str, "outbound_approval": str,
     "external_turn_display": str, "relay_delivery": str, "sms_phone_number": str,
     "max_foreground_workers": int, "max_background_workers": int,
-    "default_briefings": bool, "briefing_email_html": bool, "timezone_follow_location": bool,
+    "briefing_email_html": bool, "timezone_follow_location": bool,
 }
 JOB_FIELDS = {
     "name": str, "cron": str, "prompt": str, "command": str, "prompt_file": str,
@@ -258,6 +258,8 @@ def validate_user_plan(user_id: str, document: dict) -> UserPlan:
     if "profile" in document:
         profile = document["profile"]
         profile_path = [*path, "profile"]
+        if isinstance(profile, dict) and "default_briefings" in profile:
+            _fail([*profile_path, "default_briefings"], "migration input retired; use All users delivery preferences")
         _fields(profile, PROFILE_FIELDS, profile_path)
         for name, value in profile.items():
             if PROFILE_FIELDS[name] is list:

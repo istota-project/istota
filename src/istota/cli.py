@@ -1736,7 +1736,7 @@ def user_ensure_updates(args):
     if getattr(args, "external_turn_display", None) is not None:
         updates["external_turn_display"] = args.external_turn_display
     if getattr(args, "default_briefings", None) is not None:
-        updates["default_briefings"] = args.default_briefings
+        raise ValueError("default_briefings is migration input only; use All users delivery preferences")
     if getattr(args, "briefing_email_html", None) is not None:
         updates["briefing_email_html"] = args.briefing_email_html
     if getattr(args, "timezone_follow_location", None) is not None:
@@ -4838,9 +4838,7 @@ def add_user_ensure_arguments(user_ensure_parser):
         dest="default_briefings", default=None,
         action=argparse.BooleanOptionalAction,
         help=(
-            "Seed the shared [[default_briefings]] set into this user (default on). "
-            "Pass --no-default-briefings to opt out; already-seeded briefings are "
-            "left intact."
+            "Retired migration input; use All users delivery preferences."
         ),
     )
     user_ensure_parser.add_argument(

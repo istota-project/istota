@@ -93,6 +93,15 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("-f", "--file", help="JSON/TOML definition; use - for stdin")
     group.add_argument("--revision", type=int, help="Expected revision; 0 creates a disabled draft")
 
+    migration = sub.add_parser("migrate", help="Review and retire legacy default briefings")
+    migration.add_argument("action", choices=["report", "import", "review", "cutover", "rollback"])
+    migration.add_argument("--name")
+    migration.add_argument("--actor", required=True)
+    migration.add_argument("--timezone", help="Explicit common timezone, required for import/review")
+    migration.add_argument("--revision", type=int, help="Expected imported definition revision")
+    migration.add_argument("--dispositions", help="JSON/TOML map: user id to retire, keep (personal only), or mute")
+    migration.add_argument("--accept-source-changes", action="store_true", help="Acknowledge removed/converted sources and delivery changes")
+
     # archive -------------------------------------------------------------
     arc = sub.add_parser("archive", help="Read the briefing archive")
     arc.add_argument("action", choices=["list", "show"])
@@ -262,6 +271,44 @@ def _run_group(args, config) -> int:
         return 1
 
 
+def _run_migration(args, config):
+    import json
+
+    from istota import apply, db
+    from istota.briefings import group_migrate as migration
+    from istota.groups.policy import GroupError
+    from istota.settings_plan.group_briefings import operator_is_admin
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            if not operator_is_admin(conn, config, args.actor):
+                raise ValueError("migration requires an installation admin")
+            if args.action == "report":
+                result = migration.migration_report(conn, config, args.name)
+            else:
+                if not args.name:
+                    raise ValueError("--name is required")
+                if args.action in ("import", "review") and not args.timezone:
+                    raise ValueError("--timezone is required; review each candidate's local timezone")
+                if args.action != "import" and args.revision is None:
+                    raise ValueError("--revision is required")
+                if args.action == "import":
+                    result = migration.import_default(conn, config, args.name, actor_id=args.actor, timezone=args.timezone)
+                elif args.action == "review":
+                    dispositions = apply.load_plan(args.dispositions) if args.dispositions else {}
+                    result = migration.review_default(conn, config, args.name, actor_id=args.actor,
+                        expected_revision=args.revision, timezone=args.timezone, dispositions=dispositions,
+                        accept_source_changes=args.accept_source_changes)
+                else:
+                    operation = migration.cutover_default if args.action == "cutover" else migration.rollback_default
+                    result = operation(conn, config, args.name, actor_id=args.actor, expected_revision=args.revision)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (GroupError, apply.PlanError, ValueError, OSError) as error:
+        print("Error: " + (error.code if isinstance(error, GroupError) else str(error)), file=sys.stderr)
+        return 1
+
+
 def _invoke_module(config, user_id: str, module_argv: list[str]) -> int:
     """Resolve the user's BriefingsContext and run the module Click CLI."""
     from click.testing import CliRunner
@@ -352,6 +399,8 @@ def dispatch(argv: list[str], config) -> int:
         return _run_shared(args, config)
     if args.group == "group":
         return _run_group(args, config)
+    if args.group == "migrate":
+        return _run_migration(args, config)
 
     builders = {
         "list": lambda args: ["list"],

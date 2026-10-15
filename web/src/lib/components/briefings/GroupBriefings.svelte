@@ -12,6 +12,8 @@
     runGroupBriefing,
     getGroupBriefingPreferences,
     saveGroupBriefingPreferences,
+    getGroupDeliveryPreferences,
+    saveGroupDeliveryPreferences,
     groupBriefingDownloadUrl,
     type GroupBriefingDefinition,
     type GroupBriefingRun,
@@ -36,6 +38,7 @@
   let current = $state<GroupBriefingRun | null>(null);
   let delivery = $state<BriefingDelivery | null>(null);
   let preferences = $state<BriefingDeliveryPreferences | null>(null);
+  let groupPreferences = $state<BriefingDeliveryPreferences | null>(null);
   let loading = $state(true);
   let busy = $state(false);
   let error = $state('');
@@ -74,6 +77,7 @@
       delivery = null;
       definition = null;
       preferences = null;
+      groupPreferences = null;
       runs = [];
       definitions = [];
       denied = true;
@@ -131,9 +135,10 @@
     loading = true;
     error = '';
     try {
-      const result = await getGroupBriefings(groupId);
+      const [result, defaults] = await Promise.all([getGroupBriefings(groupId), getGroupDeliveryPreferences(groupId)]);
       if (!active || token !== request) return;
       definitions = result.items;
+      groupPreferences = defaults;
       createAllowed =
         result.capabilities?.author_briefings ??
         result.items[0]?.capabilities.author_briefings ??
@@ -169,6 +174,30 @@
         const result = await runGroupBriefing(groupId, name, kind, crypto.randomUUID());
         if (!active || token !== request) return;
         selection.push({ name, run: result.id });
+      }
+    } catch (e) {
+      if (active && token === request) failure(e);
+    } finally {
+      if (active) busy = false;
+    }
+  }
+
+  async function saveGroupPreferences() {
+    if (!groupPreferences || busy) return;
+    const token = request;
+    busy = true;
+    error = '';
+    try {
+      const result = await saveGroupDeliveryPreferences(groupId, {
+        outbound_muted: groupPreferences.outbound_muted,
+        in_app_muted: groupPreferences.in_app_muted,
+      });
+      if (active && token === request) {
+        groupPreferences = result;
+        if (definition) {
+          const next = await getGroupBriefingPreferences(groupId, definition.name);
+          if (active && token === request) preferences = next;
+        }
       }
     } catch (e) {
       if (active && token === request) failure(e);
@@ -219,6 +248,14 @@
   {#if loading}<PageLoading />{:else if !definitions.length && !error}<EmptyState size="sm"
       >No group briefings yet.</EmptyState
     >{/if}
+    {#if groupPreferences && !denied}
+      <div class="preferences">
+        <p class="caption">These defaults apply to current and future briefings in this group. Membership and history access stay available.</p>
+        <label><input type="checkbox" bind:checked={groupPreferences.outbound_muted} /> Mute external delivery for all briefings in this group</label>
+        <label><input type="checkbox" bind:checked={groupPreferences.in_app_muted} /> Mute notifications for all briefings in this group</label>
+        <Button size="sm" onclick={saveGroupPreferences} disabled={busy}>Save group delivery preferences</Button>
+      </div>
+    {/if}
   {#if definitions.length}
     <div class="definition-list">
       {#each definitions as item (item.id)}

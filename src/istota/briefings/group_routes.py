@@ -194,13 +194,11 @@ def _audience(conn, config, actor, group_id, name):
     if not caps["author_briefings"]:
         return result
     counts = {"deliverable": 0, "muted": 0, "missing_destination": 0}
-    group = db.get_group(conn, group_id)
     for member in members:
         channel = definition["channel"]
         prefs = store.delivery_preferences(conn, group_id, member, definition_id=definition["id"])
         if (prefs["in_app_muted" if channel == "in_app" else "outbound_muted"]
-                or (channel != "in_app" and (not config.is_module_enabled(member, "briefings", conn=conn)
-                    or (group["system_key"] == "all_users" and not config.users[member].default_briefings)))):
+                or (channel != "in_app" and not config.is_module_enabled(member, "briefings", conn=conn))):
             counts["muted"] += 1
             continue
         try:

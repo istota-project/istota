@@ -815,10 +815,12 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_long_workers = 2                         # instance-wide cap, inside max_foreground_workers
 
 # ============================================================================
-# Default briefings (shared canonical set)
+# Legacy default briefings (migration input)
 # ============================================================================
-# Briefings seeded once into each user with `default_briefings` on (the
-# default), shaped like a per-user briefing. Later edits by the user win.
+# Legacy migration input only; never copied into new personal briefings.
+# Import disabled All users drafts with `istota briefings migrate import`.
+# Review candidates and the common timezone before explicit cutover.
+# Existing personal edits and archives remain personal.
 #
 # [[default_briefings]]
 # name = "Daily"

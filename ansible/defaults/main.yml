@@ -164,6 +164,8 @@ istota_admins: []
 # the step. The role marks its config as managed by ansible; each user's
 # profile_mode is left as written.
 istota_plan: {}
+# Explicit current owner/admin identity for changed group briefing definitions.
+istota_plan_actor: ""
 # The plan's credentials, from the vault: the sidecar's `users` (user ->
 # service -> key -> value) and `config` ([{path: [...], value: ...}]). Needs
 # istota_plan. Written to a private 0600 file and removed after the apply.

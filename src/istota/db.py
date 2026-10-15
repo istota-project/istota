@@ -1612,6 +1612,9 @@ def create_task(
             f"create_task: user_id {user_id!r} cannot name a per-user directory; "
             "it must be a non-empty path component other than '.' or '..'."
         )
+    if source_type == "briefing" and briefing_name:
+        from istota.briefings.group_migrate import require_personal_schedule
+        require_personal_schedule(conn, user_id, briefing_name)
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
     if talk_message_id is not None:
         existing = find_task_by_talk_message_id(
@@ -9029,7 +9032,21 @@ _GROUP_BRIEFINGS_DDL = (
 )
 
 
+_GROUP_BRIEFING_MIGRATIONS_DDL = """CREATE TABLE IF NOT EXISTS group_briefing_migrations (
+    legacy_key TEXT PRIMARY KEY,
+    definition_id INTEGER UNIQUE REFERENCES group_briefing_configs(id),
+    state TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
+
 def _migrate_group_briefings(conn: sqlite3.Connection) -> None:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='group_briefing_migrations'").fetchone():
+        upgrading = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='tasks'").fetchone())
+        conn.execute(_GROUP_BRIEFING_MIGRATIONS_DDL)
+        conn.execute("INSERT INTO group_briefing_migrations (legacy_key, state, data_json) VALUES (?, ?, ?)",
+                     ("registry:v1", "registry", json.dumps({"capture": upgrading, "users": []})))
     for statement in _GROUP_BRIEFINGS_DDL:
         conn.execute(statement)
     _add_columns(conn, "group_briefing_recipients", {'dispatch_token': 'TEXT', 'lease_expires_at': 'TEXT', 'destination_json': 'TEXT', 'destination_locked': 'INTEGER NOT NULL DEFAULT 0'})

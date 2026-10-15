@@ -2596,3 +2596,11 @@ CREATE TABLE IF NOT EXISTS group_briefing_group_preferences (
     in_app_muted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (group_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS group_briefing_migrations (
+    legacy_key TEXT PRIMARY KEY,
+    definition_id INTEGER UNIQUE REFERENCES group_briefing_configs(id),
+    state TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

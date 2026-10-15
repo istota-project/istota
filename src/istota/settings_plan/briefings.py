@@ -70,11 +70,6 @@ def _check_schedule_seeds(config, user, retained):
     for index, definition in enumerate(explicit):
         if definition.name not in retained and definition.cron:
             raise ExecutionError("briefing_seed_conflict", ["config", "users", user, "briefings", index])
-    if config.users[user].default_briefings:
-        explicit_names = {definition.name for definition in explicit}
-        for index, definition in enumerate(config.default_briefings):
-            if definition.name not in retained | explicit_names and definition.cron:
-                raise ExecutionError("briefing_seed_conflict", ["config", "default_briefings", index])
 
 
 def plan_schedules(plan, user, context, options):

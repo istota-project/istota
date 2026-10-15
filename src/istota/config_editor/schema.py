@@ -33,6 +33,7 @@ def _read_only() -> dict[tuple[str, ...], str]:
     found: dict[tuple[str, ...], str] = {}
     for name in config_module._NOT_CONFIGURATION:
         found[(name,)] = "Not a setting: istota sets this itself."
+    found[("default_briefings",)] = "default_briefings is migration input only; use istota briefings migrate report/import."
     found[("admin_users",)] = "Edited in the admins editor, which writes config/admins."
     found[("users",)] = (
         "Per-user settings are edited on the Users page. [users.*] in config.toml "

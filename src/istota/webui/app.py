@@ -2430,6 +2430,8 @@ async def admin_user_update(
         raise HTTPException(status_code=400, detail="Invalid settings request.")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
+    if "default_briefings" in payload:
+        raise HTTPException(status_code=400, detail="default_briefings is migration input only; use All users delivery preferences")
     unknown = sorted(set(payload) - set(_ADMIN_PATCH_FIELDS))
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown field: {unknown[0]}")
@@ -14913,7 +14915,6 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
     # Admin-only, below: the authority table says who may send them.
-    "default_briefings":      {"type": "bool"},
     "sms_phone_number":       {"type": "sms_phone"},
     "outbound_approval":      {"type": "outbound_approval"},
     "default_destination":    {"type": "descriptor"},

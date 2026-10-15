@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Operators can review and import former default briefings as disabled All users drafts, then cut over or roll back each schedule. Existing personal edits, archives and delivery opt-outs are preserved; new accounts receive no copied defaults. Members can change their All users delivery mute in Briefings.
+
 - Operators can save group briefing drafts and roundtrip their definitions through apply and snapshot. Writes require an explicit current owner, or an administrator for All users; imported definitions carry no source-sharing approvals.
 
 - Group editions can be read from Briefings or Groups, with audience labels, delivery status and personal mute controls. Current owners can generate, preview or retry delivery from the same reader; ownership changes and lost membership remove access from an open view.

@@ -81,6 +81,8 @@ def definition_blocks(definition):
 
 def _validate_run_sources(conn, config, definition):
     from istota.briefings.source_grants import validate_definition_grants
+    from istota.briefings.group_migrate import validate_migration
+    validate_migration(conn, definition)
     generation = definition["generation"]
     if generation["contains_personal_information"] and not generation["audience_acknowledged"]:
         raise GroupError(422, "audience_acknowledgement_required", "Acknowledge the group audience for personal prompt content")
@@ -137,6 +139,9 @@ def validate_definition_save(conn, config, group_id, payload, *, actor_id, expec
         raise GroupError(409, "definition_exists", "Briefing name already exists")
     candidate = {**value, "id": definition_id, "group_id": group_id}
     if value["enabled"]:
+        from istota.briefings.group_migrate import validate_migration
+        candidate["revision"] = old["revision"] if old else 0
+        validate_migration(conn, candidate, activation=True)
         _validate_run_sources(conn, config, candidate)
     return value, old
 
@@ -227,6 +232,8 @@ def enqueue_run(conn, config, definition_id, *, actor_id=None, is_admin=False,
             raise GroupError(409, "definition_disabled", "Enable the briefing before publishing")
         if definition["channel"] not in available_channels(config):
             raise GroupError(422, "channel_unavailable", "Delivery channel is unavailable")
+        from istota.briefings.group_migrate import validate_migration
+        validate_migration(conn, definition, activation=mode == "publish", due_at=due if request_id is None else None)
         grants = _validate_run_sources(conn, config, definition)
         snapshot = {"definition": definition, "grants": grants}
         cursor = conn.execute("""INSERT INTO group_briefing_runs
@@ -422,9 +429,6 @@ def delivery_refusal(conn, config, recipient):
     if recipient["channel"] != "in_app":
         if not config.is_module_enabled(user, "briefings", conn=conn):
             return "module_disabled"
-        group = db.get_group(conn, definition["group_id"])
-        if group["system_key"] == "all_users" and not config.users[user].default_briefings:
-            return "muted"
         if recipient["channel"] not in available_channels(config):
             return "channel_unavailable"
     return None

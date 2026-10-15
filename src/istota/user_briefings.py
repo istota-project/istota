@@ -211,6 +211,9 @@ def ensure_briefing(
         return existing, state  # type: ignore[return-value]
 
     with nullcontext(conn) if conn is not None else _connect(db_path) as writer:
+        if enabled:
+            from .briefings.group_migrate import require_personal_schedule
+            require_personal_schedule(writer, user_id, name)
         writer.execute(
             """
             INSERT INTO briefing_configs

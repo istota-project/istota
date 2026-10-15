@@ -356,7 +356,7 @@ class TestConfigLoading:
         assert d.output == "talk"
         assert d.blocks[0]["title"] == "News"
 
-    def test_default_briefings_seeded_into_user(self, tmp_path):
+    def test_default_briefings_are_migration_inputs_only(self, tmp_path):
         db_file = tmp_path / "istota.db"
         from istota import db as _db
         _db.init_db(db_file)
@@ -373,7 +373,7 @@ class TestConfigLoading:
         )
         cfg = load_config(p)
         names = [b.name for b in cfg.users["alice"].briefings]
-        assert "Daily" in names
+        assert names == []
 
     def test_toml_components_authoring_ignored(self, tmp_path):
         # Legacy `[[briefings]] [briefings.components]` authoring is dropped;

@@ -91,6 +91,11 @@ def _load(tmp_path: Path, text: str, monkeypatch, env: dict[str, str] | None = N
 
 
 class TestEveryAnswerReachesItsKey:
+    def test_new_setup_does_not_author_legacy_default_copies(self):
+        document = tomllib.loads(render_container_config(_full_answers(), inline_credentials=False))
+        assert "default_briefings" not in document
+        assert all("default_briefings" not in user for user in document.get("users", {}).values())
+
     def test_the_full_answer_set_loads_with_secrets_from_the_environment(
         self, tmp_path, monkeypatch,
     ):

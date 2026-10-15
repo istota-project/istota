@@ -37,10 +37,14 @@ class TestTheAuthorityTables:
         assert field not in SELF_EDITABLE_FIELDS
         assert field in ADMIN_EDITABLE_FIELDS
 
-    @pytest.mark.parametrize("field", ["sms_phone_number", "default_briefings"])
+    @pytest.mark.parametrize("field", ["sms_phone_number"])
     def test_operator_bound_fields_are_admin_only(self, field):
         assert field not in SELF_EDITABLE_FIELDS
         assert field in ADMIN_EDITABLE_FIELDS
+
+    def test_legacy_default_toggle_is_not_authorable(self):
+        assert "default_briefings" not in SELF_EDITABLE_FIELDS
+        assert "default_briefings" not in ADMIN_EDITABLE_FIELDS
 
     def test_the_self_put_accepts_exactly_the_self_set(self):
         pytest.importorskip("fastapi")
