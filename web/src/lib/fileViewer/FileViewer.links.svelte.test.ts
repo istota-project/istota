@@ -99,26 +99,49 @@ describe('delegated links through the real viewer host', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('opens a briefing file link into the host image handoff', async () => {
-    vi.mocked(getBriefingArchiveItem).mockResolvedValue({
-      id: 1,
-      task_id: null,
-      briefing_name: 'Morning',
-      generated_at: '2026-01-01T00:00:00Z',
-      subject: 'Morning briefing',
-      body_md: `[**View image**](${chatFileUrl(image)})`,
-      delivered_to: [],
-    });
-    selectedBriefingId.set(1);
-    render(FileViewerHost);
-    render(Briefing);
-    expect(await fireEvent.click(await screen.findByText('View image'))).toBe(false);
-    await waitFor(() =>
-      expect(document.querySelector('.lightbox img')?.getAttribute('src')).toBe(chatFileUrl(image)),
-    );
-    expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    expect(screen.getByRole('dialog', { name: 'Image viewer' })).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Close image' }));
-    expect(document.querySelector('.lightbox')).toBeNull();
-  });
+  it.each(['legacy', 'document'])(
+    'opens a %s briefing file link into the host image handoff',
+    async (format) => {
+      vi.mocked(getBriefingArchiveItem).mockResolvedValue({
+        id: 1,
+        task_id: null,
+        briefing_name: 'Morning',
+        generated_at: '2026-01-01T00:00:00Z',
+        subject: 'Morning briefing',
+        body_md:
+          format === 'legacy' ? `[**View image**](${chatFileUrl(image)})` : 'Linear fallback',
+        document:
+          format === 'document'
+            ? {
+                version: 1,
+                title: 'Morning briefing',
+                blocks: [
+                  {
+                    block_id: 42,
+                    title: 'Images',
+                    kind: 'markdown',
+                    body_md: `[**View image**](${chatFileUrl(image)})`,
+                    presentation: { width: 'auto' },
+                    source_status: 'complete',
+                  },
+                ],
+              }
+            : null,
+        delivered_to: [],
+      });
+      selectedBriefingId.set(1);
+      render(FileViewerHost);
+      render(Briefing);
+      expect(await fireEvent.click(await screen.findByText('View image'))).toBe(false);
+      await waitFor(() =>
+        expect(document.querySelector('.lightbox img')?.getAttribute('src')).toBe(
+          chatFileUrl(image),
+        ),
+      );
+      expect(screen.getAllByRole('dialog')).toHaveLength(1);
+      expect(screen.getByRole('dialog', { name: 'Image viewer' })).toBeTruthy();
+      await fireEvent.click(screen.getByRole('button', { name: 'Close image' }));
+      expect(document.querySelector('.lightbox')).toBeNull();
+    },
+  );
 });

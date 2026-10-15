@@ -195,7 +195,7 @@ def get_archive_item(
         row = bdb.get_archived(conn, archive_id)
     if not row:
         raise HTTPException(404, "briefing not found")
-    return _map_archive(row)
+    return {**_map_archive(row), "document": row.document}
 
 
 @router.delete("/archive/{archive_id}")

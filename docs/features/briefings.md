@@ -161,6 +161,12 @@ The briefings tab is a reader for generated briefings, with an archive sidebar f
 
 Selecting an archived briefing or changing the briefing-name filter adds a browser history entry. Back and Forward restore the selection, and reloading or sharing the URL opens the same briefing and filter. Returning from settings keeps the selection. If a briefing or filter is no longer available, the reader falls back to the first available briefing or All and updates the current URL without adding an entry.
 
+A generated result is an edition. New editions show one card per populated block, in the saved order, with the edition title and generation date above them. Cards use one, two or three columns according to the space available beside the archive. Automatic blocks take one column, Wide blocks take two where space allows, and Full width blocks take the whole row. At narrow widths every block takes one column. Layout and title changes affect future editions; an archived edition keeps its saved content and layout.
+
+Cards preview the first three complete Markdown blocks, with at most five top-level items in each list. Paragraphs, links and nested items remain whole. When content is omitted, **Read full block** opens the complete block in a viewer. Article links work directly from the card. **Some sources unavailable** means the block includes useful content despite a source failure; internal source errors are never shown in the card.
+
+Older editions without a structured document stay readable in a single full-width card. Unsupported or damaged documents also use their complete stored Markdown body. Opening an edition reads the archive without fetching sources or generating content. Changing the selection shows a loading state until that edition arrives, so the previous edition cannot appear under the new selection.
+
 Each generated briefing is archived on delivery and pruned by `[briefings] archive_retention_days` (default 90) on insert, alongside the manual per-result delete.
 
 ## Output format

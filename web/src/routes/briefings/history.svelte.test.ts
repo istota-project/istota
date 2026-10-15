@@ -32,6 +32,7 @@ import {
   briefingsRefreshNonce,
 } from '$lib/stores/briefings';
 import Layout from './+layout.svelte';
+import { edition } from '$lib/components/briefings/edition.fixture';
 
 const children = (() => {}) as unknown as import('svelte').Snippet;
 const items: BriefingArchiveItem[] = [
@@ -308,5 +309,67 @@ describe('briefing selection history', () => {
     await waitFor(() => expect(get(briefingArchiveCount)).toBe(2));
     expect(get(briefingFilterName)).toBe('Morning');
     expect(window.location.search).toBe('?id=1&name=Morning');
+  });
+});
+
+describe('edition reader transitions', () => {
+  it('selects structured and legacy editions and restores the cards through history', async () => {
+    vi.mocked(getBriefingArchiveItem).mockImplementation(async (id) =>
+      id === 3 ? edition : { ...items[2], body_md: 'A legacy edition in full.' },
+    );
+    render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+    await screen.findByRole('heading', { name: 'Headlines <em>today</em>' });
+    await fireEvent.click(screen.getByRole('button', { name: /Earlier news/ }));
+    await screen.findByText('A legacy edition in full.');
+    expect(screen.queryByRole('heading', { name: 'Headlines <em>today</em>' })).toBeNull();
+    __history.back();
+    await screen.findByRole('heading', { name: 'Headlines <em>today</em>' });
+    expect(screen.queryByText('A legacy edition in full.')).toBeNull();
+  });
+
+  it('removes the previous edition while the new selection loads or fails', async () => {
+    selectedBriefingId.set(3);
+    briefingArchiveCount.set(3);
+    vi.mocked(getBriefingArchiveItem).mockResolvedValueOnce({
+      ...items[0],
+      body_md: 'Previous edition body',
+    });
+    render(Page);
+    await screen.findByText('Previous edition body');
+    let rejectDetail!: (error: Error) => void;
+    vi.mocked(getBriefingArchiveItem).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectDetail = reject;
+        }),
+    );
+    selectedBriefingId.set(1);
+    await waitFor(() => expect(getBriefingArchiveItem).toHaveBeenLastCalledWith(1));
+    expect(screen.queryByText('Previous edition body')).toBeNull();
+    expect(screen.getByText('Loading…')).toBeInTheDocument();
+    rejectDetail(new Error('Failed to load edition'));
+    await screen.findByText('Failed to load edition');
+    expect(screen.queryByText('Previous edition body')).toBeNull();
+    expect(screen.queryByText('No briefings yet')).toBeNull();
+  });
+
+  it('ignores an old success after a newer edition has loaded', async () => {
+    selectedBriefingId.set(1);
+    briefingArchiveCount.set(3);
+    let finishOld!: (value: BriefingArchiveItem) => void;
+    vi.mocked(getBriefingArchiveItem).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishOld = resolve;
+        }),
+    );
+    render(Page);
+    await waitFor(() => expect(getBriefingArchiveItem).toHaveBeenCalledWith(1));
+    vi.mocked(getBriefingArchiveItem).mockResolvedValueOnce(edition);
+    selectedBriefingId.set(3);
+    await screen.findByRole('heading', { name: edition.subject });
+    finishOld({ ...items[2], body_md: 'Late old body' });
+    await tick();
+    expect(screen.queryByText('Late old body')).toBeNull();
   });
 });

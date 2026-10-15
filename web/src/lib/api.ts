@@ -4815,7 +4815,25 @@ async function uploadFromShell(item: Picked): Promise<ChatAttachment> {
 // Briefings module
 // ---------------------------------------------------------------------------
 
+export type BriefingWidth = 'auto' | 'wide' | 'full';
+
+export interface BriefingDocumentBlock {
+  block_id: number;
+  title: string;
+  kind: string;
+  body_md: string;
+  presentation: { width: BriefingWidth };
+  source_status: 'complete' | 'partial';
+}
+
+export interface BriefingDocument {
+  version: 1;
+  title: string;
+  blocks: BriefingDocumentBlock[];
+}
+
 export interface BriefingArchiveItem {
+  document?: BriefingDocument | null;
   id: number;
   briefing_name: string;
   subject: string;

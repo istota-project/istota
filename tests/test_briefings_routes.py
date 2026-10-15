@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from istota.briefings import db as bdb
 from istota.briefings.models import BriefingsContext
+from istota.briefings.document import document_to_markdown
 from istota.briefings.routes import get_user_context, require_auth, router, verify_origin
 from istota.briefings.workspace import synthesize_briefings_context
 
@@ -59,6 +60,42 @@ class TestArchive:
         item = client.get(f"/istota/api/briefings/archive/{aid}").json()
         assert item["id"] == aid
         assert item["delivered_to"] == ["talk"]
+
+    def test_detail_document_is_additive_and_list_stays_linear(self, ctx, client):
+        document = {
+            "version": 1, "title": "Morning edition",
+            "blocks": [{
+                "block_id": 42, "title": "Headlines", "kind": "markdown",
+                "body_md": "[A story](https://example.com/story)",
+                "presentation": {"width": "wide"}, "source_status": "partial",
+            }],
+        }
+        with bdb.connect(ctx.db_path) as conn:
+            aid = bdb.insert_archive(
+                conn, briefing_name="morning", subject=document["title"],
+                body_md=document_to_markdown(document), document=document,
+                block_meta={"42": {"error": "internal source detail"}},
+            )
+            conn.commit()
+        detail = client.get(f"/istota/api/briefings/archive/{aid}").json()
+        assert detail["document"] == document
+        assert detail["body_md"] == document_to_markdown(document)
+        assert "block_meta" not in detail
+        listed = client.get("/istota/api/briefings/archive").json()["items"][0]
+        assert "document" not in listed
+        assert listed["body_md"] == document_to_markdown(document)
+
+    @pytest.mark.parametrize("stored", [None, "{", '{"version": 99}', '{"version": 1}'])
+    def test_detail_keeps_legacy_body_when_document_is_unreadable(self, ctx, client, stored):
+        with bdb.connect(ctx.db_path) as conn:
+            aid = bdb.insert_archive(
+                conn, briefing_name="morning", subject="Old edition", body_md="Whole old body",
+            )
+            conn.execute("UPDATE briefing_archive SET document_json = ? WHERE id = ?", (stored, aid))
+            conn.commit()
+        detail = client.get(f"/istota/api/briefings/archive/{aid}").json()
+        assert detail["document"] is None
+        assert detail["body_md"] == "Whole old body"
 
     def test_get_missing_404(self, client):
         assert client.get("/istota/api/briefings/archive/999").status_code == 404
