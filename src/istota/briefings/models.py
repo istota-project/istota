@@ -60,6 +60,28 @@ ALLOWED_SHARED_SOURCE_KINDS = frozenset({"browse", "markets", "email"})
 STRUCTURED_KINDS = ("markets", "calendar")
 
 
+# Draft definitions only; runtime pickers supply feed, site, file and shared names.
+BLOCK_TEMPLATES = [
+    {"id": template_id, "label": label, "description": description, "block": {
+        "title": label, "directive": "", "render_mode": mode,
+        "options": {"presentation": {"width": "auto"}},
+        "sources": [{"kind": kind, "config": {}, "enabled": True}] if kind else [],
+    }}
+    for template_id, label, description, kind, mode in [
+        ("feeds", "News from feeds", "Choose a feed subscription or category.", "rss", "synthesis"),
+        ("websites", "News from websites", "Choose a site preset or enter a URL.", "browse", "synthesis"),
+        ("newsletters", "Newsletters", "Summarize newsletters from your email sources.", "email", "synthesis"),
+        ("calendar", "Calendar", "Show your upcoming calendar events.", "calendar", "structured"),
+        ("markets", "Markets", "Show the current market summary.", "markets", "structured"),
+        ("tasks", "Tasks", "Choose a file containing your tasks.", "todos", "synthesis"),
+        ("notes", "Notes", "Choose a file containing your notes.", "notes", "synthesis"),
+        ("reminder", "Reminder", "Choose a file containing your reminders.", "reminders", "synthesis"),
+        ("shared", "Shared content", "Choose an available shared block.", "shared_block", "structured"),
+        ("custom", "Custom", "Start with a title and add your own sources.", None, "synthesis"),
+    ]
+]
+
+
 @dataclass
 class BriefingsContext:
     """Per-user runtime handle for the briefings module.
@@ -297,3 +319,67 @@ def validate_briefing_document(document: object) -> dict:
             "source_status": block["source_status"],
         })
     return {"version": 1, "title": document["title"], "blocks": blocks}
+
+
+def normalize_block_payload(payload: object) -> dict:
+    """Validate a block patch and optional complete source list before writes."""
+    if not isinstance(payload, dict):
+        raise ValueError("block must be an object")
+    normalized = {}
+    if "id" in payload:
+        block_id = payload["id"]
+        if type(block_id) is not int or block_id <= 0:
+            raise ValueError("id must be a positive integer")
+        normalized["id"] = block_id
+    creating = "id" not in normalized
+    for name in ("briefing_name", "title"):
+        if name in payload or creating:
+            value = payload.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} required")
+            normalized[name] = value.strip()
+    if "directive" in payload or creating:
+        directive = payload.get("directive")
+        if directive is not None and not isinstance(directive, str):
+            raise ValueError("directive must be text or null")
+        normalized["directive"] = directive or ""
+    if "render_mode" in payload or creating:
+        mode = payload.get("render_mode", "synthesis")
+        if mode not in RENDER_MODES:
+            raise ValueError("render_mode must be synthesis or structured")
+        normalized["render_mode"] = mode
+    if "options" in payload or creating:
+        normalized["options"] = validate_block_options(payload.get("options", {}))
+    if "sources" in payload:
+        raw_sources = payload["sources"]
+        if not isinstance(raw_sources, list):
+            raise ValueError("sources must be a list")
+        if creating and not raw_sources:
+            raise ValueError("a new block requires at least one source")
+        sources = []
+        seen = set()
+        for raw in raw_sources:
+            if not isinstance(raw, dict) or raw.get("kind") not in SOURCE_KINDS:
+                raise ValueError("each source requires a valid kind")
+            source = {"kind": raw["kind"]}
+            if "id" in raw:
+                source_id = raw["id"]
+                if type(source_id) is not int or source_id <= 0 or source_id in seen:
+                    raise ValueError("source ids must be distinct positive integers")
+                seen.add(source_id)
+                source["id"] = source_id
+            config = raw.get("config", {})
+            if not isinstance(config, dict):
+                raise ValueError("source config must be an object")
+            enabled = raw.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError("source enabled must be a boolean")
+            source.update(config=deepcopy(config), enabled=enabled)
+            sources.append(source)
+        normalized["sources"] = sources
+    # Refuse non-JSON values before any SQL, including callers outside HTTP.
+    try:
+        json.dumps(normalized, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("block fields must contain valid JSON values") from None
+    return normalized

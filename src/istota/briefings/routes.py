@@ -29,6 +29,7 @@ from istota.briefings._loader import UserNotFoundError, resolve_for_user
 from istota.briefings._migrate import ensure_initialised
 from istota.briefings.models import (
     ALLOWED_SHARED_SOURCE_KINDS,
+    BLOCK_TEMPLATES,
     RENDER_MODES,
     SOURCE_KINDS,
     STRUCTURED_KINDS,
@@ -240,6 +241,7 @@ def get_config(
         "schedule_names": _schedule_names(cfg, user["username"]),
         "source_kinds": list(SOURCE_KINDS),
         "structured_kinds": list(STRUCTURED_KINDS),
+        "block_templates": BLOCK_TEMPLATES,
     }
 
 
@@ -255,48 +257,29 @@ def put_block(
     Modes (by payload shape):
     * ``{"reorder": {"briefing_name", "ordered_ids": [...]}}`` — reorder.
     * ``{"id": N, ...}`` — update an existing block.
+    * Optional ``sources`` replaces the complete source list atomically.
     * ``{"briefing_name", "title", ...}`` — create a new block.
     """
     with bdb.connect(ctx.db_path) as conn:
-        if "reorder" in payload:
-            r = payload["reorder"]
-            name = (r.get("briefing_name") or "").strip()
-            ordered = [int(x) for x in (r.get("ordered_ids") or [])]
-            if not name:
-                raise HTTPException(400, "briefing_name required")
-            bdb.reorder_blocks(conn, name, ordered)
+        try:
+            if "reorder" in payload:
+                reorder = payload["reorder"]
+                if not isinstance(reorder, dict):
+                    raise ValueError("reorder must be an object")
+                name = reorder.get("briefing_name")
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("briefing_name required")
+                ordered = reorder.get("ordered_ids")
+                bdb.reorder_blocks(conn, name.strip(), ordered)
+                conn.commit()
+                return {"status": "ok", "reordered": len(ordered)}
+            block = bdb.save_block_definition(conn, payload=payload)
             conn.commit()
-            return {"status": "ok", "reordered": len(ordered)}
-
-        if payload.get("id"):
-            block_id = int(payload["id"])
-            existing = bdb.get_block(conn, block_id, with_sources=False)
-            if not existing:
-                raise HTTPException(404, "block not found")
-            bdb.update_block(
-                conn, block_id,
-                title=payload.get("title"),
-                directive=payload.get("directive"),
-                render_mode=_valid_render_mode(payload.get("render_mode")),
-                options=payload.get("options"),
-            )
-            conn.commit()
-            block = bdb.get_block(conn, block_id)
-            return {"status": "ok", "block": _map_block(block)}
-
-        name = (payload.get("briefing_name") or "").strip()
-        title = (payload.get("title") or "").strip()
-        if not name or not title:
-            raise HTTPException(400, "briefing_name and title required")
-        block_id = bdb.add_block(
-            conn, briefing_name=name, title=title,
-            directive=payload.get("directive"),
-            render_mode=_valid_render_mode(payload.get("render_mode")) or "synthesis",
-            options=payload.get("options") or {},
-        )
-        conn.commit()
-        block = bdb.get_block(conn, block_id)
-        return {"status": "ok", "block": _map_block(block)}
+        except LookupError:
+            raise HTTPException(404, "block not found") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+    return {"status": "ok", "block": _map_block(block)}
 
 
 @router.delete("/blocks/{block_id}")
@@ -705,10 +688,3 @@ def suggest_paths(
     root = cfg.workspace_root(user["username"]) if cfg is not None else None
     paths = _walk_text_files(root, q) if root is not None and root.is_dir() else []
     return {"paths": paths}
-
-
-def _valid_render_mode(value):
-    from istota.briefings.models import RENDER_MODES
-    if value is None:
-        return None
-    return value if value in RENDER_MODES else "synthesis"

@@ -4868,11 +4868,42 @@ export interface BriefingBlock {
   sources: BriefingSource[];
 }
 
+export interface BriefingSourceDraft {
+  id?: number;
+  kind: string;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface BriefingBlockSave {
+  id?: number;
+  briefing_name?: string;
+  title?: string;
+  directive?: string | null;
+  render_mode?: string;
+  options?: Record<string, unknown>;
+  sources?: BriefingSourceDraft[];
+}
+
+export interface BriefingBlockTemplate {
+  id: string;
+  label: string;
+  description: string;
+  block: {
+    title: string;
+    directive: string;
+    render_mode: string;
+    options: Record<string, unknown>;
+    sources: BriefingSourceDraft[];
+  };
+}
+
 export interface BriefingConfigResponse {
   briefings: { name: string; blocks: BriefingBlock[] }[];
   schedule_names: string[];
   source_kinds: string[];
   structured_kinds: string[];
+  block_templates: BriefingBlockTemplate[];
 }
 
 export interface BrowsePreset {
@@ -4906,9 +4937,15 @@ export async function getBriefingConfig(): Promise<BriefingConfigResponse> {
   return apiFetch<BriefingConfigResponse>('/briefings/config');
 }
 
+export function putBriefingBlock(
+  payload: BriefingBlockSave,
+): Promise<{ status: string; block: BriefingBlock }>;
+export function putBriefingBlock(payload: {
+  reorder: { briefing_name: string; ordered_ids: number[] };
+}): Promise<{ status: string; reordered: number }>;
 export async function putBriefingBlock(
-  payload: Record<string, unknown>,
-): Promise<{ status: string; block?: BriefingBlock }> {
+  payload: BriefingBlockSave | { reorder: { briefing_name: string; ordered_ids: number[] } },
+): Promise<{ status: string; block?: BriefingBlock; reordered?: number }> {
   return apiFetch('/briefings/blocks', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

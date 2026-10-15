@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.testclient import TestClient
 
 from istota.briefings import db as bdb
@@ -361,3 +362,156 @@ class TestPathPicker:
             "/istota/api/briefings/path-suggest", params={"q": "sprint"},
         ).json()
         assert "istota/notes/2026/q3/sprint-plan.md" in body["paths"]
+
+
+class TestAtomicBlockWrites:
+    def test_create_duplicate_and_legacy_patch(self, client):
+        payload = {
+            "briefing_name": "M", "title": "News", "directive": "Concise",
+            "render_mode": "structured", "options": {"custom": 42, "presentation": {"width": "full"}},
+            "sources": [{"kind": "notes", "config": {"path": "shared/notes.md"}, "enabled": False},
+                        {"kind": "calendar", "config": {"days": 3}, "enabled": True}],
+        }
+        response = client.put("/istota/api/briefings/blocks", json=payload)
+        assert response.status_code == 200
+        block = response.json()["block"]
+        assert len(block["sources"]) == 2
+        assert block["sources"][0]["enabled"] is False
+        copy_payload = {**payload, "title": block["title"] + " (copy)"}
+        duplicate = client.put("/istota/api/briefings/blocks", json=copy_payload).json()["block"]
+        assert duplicate["id"] != block["id"]
+        assert duplicate["position"] == block["position"] + 1
+        assert duplicate["options"] == block["options"]
+        assert duplicate["directive"] == block["directive"]
+        assert duplicate["render_mode"] == block["render_mode"]
+        assert {s["id"] for s in duplicate["sources"]}.isdisjoint(s["id"] for s in block["sources"])
+        for source, copied in zip(block["sources"], duplicate["sources"]):
+            assert {k: v for k, v in source.items() if k != "id"} == {k: v for k, v in copied.items() if k != "id"}
+        patched = client.put("/istota/api/briefings/blocks", json={"id": block["id"], "title": "Renamed"}).json()["block"]
+        assert patched["sources"] == block["sources"]
+        assert patched["options"] == block["options"]
+        empty = client.put("/istota/api/briefings/blocks", json={"id": block["id"], "sources": []}).json()["block"]
+        assert empty["sources"] == []
+        assert empty["title"] == "Renamed"
+        # Existing zero-source definitions remain editable.
+        assert client.put("/istota/api/briefings/blocks", json={"id": block["id"], "title": "Empty"}).status_code == 200
+
+    @pytest.mark.parametrize("patch", [
+        {"sources": []}, {"sources": None}, {"sources": {}},
+        {"sources": [{"kind": "unknown"}]}, {"sources": [{"kind": "notes", "config": []}]},
+        {"sources": [{"kind": "notes", "enabled": "false"}]},
+        {"sources": [{"id": 999, "kind": "notes"}]},
+        {"options": {"presentation": {"width": "bad"}}},
+        {"title": []}, {"render_mode": "bad"},
+    ])
+    def test_invalid_creation_leaves_no_block(self, client, patch):
+        response = client.put("/istota/api/briefings/blocks", json={
+            "briefing_name": "M", "title": "Copy", "sources": [{"kind": "notes"}], **patch,
+        })
+        assert response.status_code == 400
+        assert client.get("/istota/api/briefings/config").json()["briefings"] == []
+
+    @pytest.mark.parametrize("case", ["foreign", "duplicate", "invalid_config", "invalid_options"])
+    def test_invalid_edit_preserves_whole_definition(self, ctx, client, case):
+        with bdb.connect(ctx.db_path) as conn:
+            bid = bdb.add_block(conn, briefing_name="M", title="Original", options={"custom": 42})
+            sid = bdb.add_source(conn, block_id=bid, kind="notes", config={"path": "shared/notes.md"})
+            foreign = bdb.add_block(conn, briefing_name="Other", title="Other")
+            foreign_sid = bdb.add_source(conn, block_id=foreign, kind="calendar")
+            conn.commit()
+        before = client.get("/istota/api/briefings/config").json()["briefings"]
+        sources = [{"id": sid, "kind": "notes", "config": {"path": "changed.md"}}]
+        patch = {"id": bid, "title": "Changed", "sources": sources}
+        if case == "foreign":
+            sources.append({"id": foreign_sid, "kind": "calendar"})
+        elif case == "duplicate":
+            sources.append(sources[0])
+        elif case == "invalid_config":
+            sources.append({"kind": "calendar", "config": []})
+        else:
+            patch["options"] = {"presentation": {"width": "bad"}}
+        response = client.put("/istota/api/briefings/blocks", json=patch)
+        assert response.status_code == 400
+        assert client.get("/istota/api/briefings/config").json()["briefings"] == before
+
+    @pytest.mark.parametrize("case", ["duplicate", "missing", "foreign", "bool", "string", "shape"])
+    def test_invalid_reorder_keeps_positions(self, ctx, client, case):
+        with bdb.connect(ctx.db_path) as conn:
+            a = bdb.add_block(conn, briefing_name="M", title="A")
+            b = bdb.add_block(conn, briefing_name="M", title="B")
+            foreign = bdb.add_block(conn, briefing_name="Other", title="Other")
+            conn.commit()
+        orders = {"duplicate": [a, a], "missing": [b], "foreign": [b, a, foreign],
+                  "bool": [True, b], "string": [str(b), str(a)], "shape": "bad"}
+        response = client.put("/istota/api/briefings/blocks", json={
+            "reorder": {"briefing_name": "M", "ordered_ids": orders[case]},
+        })
+        assert response.status_code == 400
+        with bdb.connect(ctx.db_path) as conn:
+            assert [(x.id, x.position) for x in bdb.list_blocks(conn, "M")] == [(a, 0), (b, 1)]
+
+    def test_source_and_block_ids_stay_in_authenticated_user_database(self, tmp_path):
+        from istota.config import Config, UserConfig
+
+        cfg = Config(db_path=tmp_path / "framework.db", workspace_path=tmp_path / "workspace",
+                     users={"alice": UserConfig(), "bob": UserConfig()})
+        app = FastAPI()
+        app.state.istota_config = cfg
+        app.include_router(router, prefix="/istota/api/briefings")
+        identity = {"username": "bob"}
+        app.dependency_overrides[require_auth] = lambda: identity
+        app.dependency_overrides[verify_origin] = lambda: None
+        with TestClient(app) as client:
+            bob = client.put("/istota/api/briefings/blocks", json={"briefing_name": "M", "title": "Private", "sources": [{"kind": "notes"}]}).json()["block"]
+            identity["username"] = "alice"
+            assert client.put("/istota/api/briefings/blocks", json={"id": bob["id"], "title": "Changed"}).status_code == 404
+            response = client.put("/istota/api/briefings/blocks", json={"briefing_name": "M", "title": "Copy", "sources": [{"id": bob["sources"][0]["id"], "kind": "notes"}]})
+            assert response.status_code == 400
+            assert client.get("/istota/api/briefings/config").json()["briefings"] == []
+            identity["username"] = "bob"
+            assert client.get("/istota/api/briefings/config").json()["briefings"][0]["blocks"][0] == bob
+
+    def test_catalog_contains_editable_defaults_without_user_selections(self, client):
+        config = client.get("/istota/api/briefings/config").json()
+        catalog = config["block_templates"]
+        assert [t["label"] for t in catalog] == ["News from feeds", "News from websites", "Newsletters", "Calendar", "Markets", "Tasks", "Notes", "Reminder", "Shared content", "Custom"]
+        assert len({t["id"] for t in catalog}) == 10
+        for template in catalog:
+            assert template["description"]
+            block = template["block"]
+            assert block["title"] and block["render_mode"] in {"synthesis", "structured"}
+            assert block["options"]["presentation"] == {"width": "auto"}
+            assert "id" not in block
+            for source in block["sources"]:
+                assert source["kind"] in config["source_kinds"]
+                assert source["config"] == {} and source["enabled"] is True
+                assert "id" not in source
+        assert catalog[-1]["block"]["sources"] == []
+
+
+    def test_host_auth_and_origin_checks_guard_atomic_writes(self, tmp_path, monkeypatch):
+        from istota.config import Config, UserConfig
+        from istota.webui import app as web_app
+
+        cfg = Config(db_path=tmp_path / "framework.db", workspace_path=tmp_path / "workspace",
+                     users={"alice": UserConfig()})
+        cfg.site.hostname = "bot.example.com"
+        monkeypatch.setattr(web_app, "_config", cfg)
+        app = FastAPI()
+        app.state.istota_config = cfg
+        app.add_middleware(SessionMiddleware, secret_key="test-session-secret")
+        app.add_exception_handler(web_app._UnauthorizedException, web_app._handle_unauthorized)
+        app.add_exception_handler(web_app._ForbiddenException, web_app._handle_forbidden)
+        app.include_router(router, prefix="/istota/api/briefings")
+        app.dependency_overrides[require_auth] = web_app._require_api_auth
+        app.dependency_overrides[verify_origin] = web_app._verify_origin
+        payload = {"briefing_name": "M", "title": "News", "sources": [{"kind": "notes"}]}
+        with TestClient(app) as client:
+            assert client.put("/istota/api/briefings/blocks", json=payload,
+                              headers={"Origin": "https://bot.example.com"}).status_code == 401
+            app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+            for headers in ({}, {"Origin": "https://other.example.com"}):
+                assert client.put("/istota/api/briefings/blocks", json=payload, headers=headers).status_code == 403
+            assert not cfg.module_db_path("alice", "briefings").exists()
+            assert client.put("/istota/api/briefings/blocks", json=payload,
+                              headers={"Origin": "https://bot.example.com"}).status_code == 200

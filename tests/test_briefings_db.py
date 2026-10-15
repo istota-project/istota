@@ -1,6 +1,7 @@
 """Tests for the briefings module SQLite layer."""
 
 from datetime import datetime, timedelta, timezone
+import sqlite3
 
 import pytest
 
@@ -120,12 +121,13 @@ class TestBlockCrud:
         bdb.reorder_blocks(conn, "M", [c, a, b])
         assert [x.title for x in bdb.list_blocks(conn, "M")] == ["C", "A", "B"]
 
-    def test_reorder_ignores_foreign_ids(self, conn):
+    def test_reorder_rejects_foreign_ids(self, conn):
         a = bdb.add_block(conn, briefing_name="M", title="A")
         b = bdb.add_block(conn, briefing_name="M", title="B")
         foreign = bdb.add_block(conn, briefing_name="OTHER", title="Z")
-        bdb.reorder_blocks(conn, "M", [b, a, foreign])
-        assert [x.title for x in bdb.list_blocks(conn, "M")] == ["B", "A"]
+        with pytest.raises(ValueError, match="permutation"):
+            bdb.reorder_blocks(conn, "M", [b, a, foreign])
+        assert [x.title for x in bdb.list_blocks(conn, "M")] == ["A", "B"]
 
     def test_list_briefing_names(self, conn):
         bdb.add_block(conn, briefing_name="M", title="A")
@@ -312,3 +314,62 @@ class TestDocumentStorage:
                      ('{"tone":"neutral","presentation":{"width":"bad"}}', bid))
         assert bdb.get_block(conn, bid).options == {"tone": "neutral", "presentation": {"width": "auto"}}
         assert "briefing_presentation_invalid" in caplog.text
+
+
+class TestDefinitionSave:
+    def test_complete_edit_retains_ids_and_replaces_order(self, conn):
+        original = bdb.save_block_definition(conn, payload={
+            "briefing_name": "M", "title": "News", "directive": "Brief",
+            "options": {"custom": 42, "presentation": {"width": "wide"}},
+            "sources": [{"kind": "notes", "config": {"path": "shared/notes.md"}},
+                        {"kind": "calendar"}, {"kind": "markets"}],
+        })
+        first, second, removed = original.sources
+        saved = bdb.save_block_definition(conn, payload={
+            "id": original.id, "title": "Changed", "directive": "",
+            "sources": [{"id": second.id, "kind": "calendar", "enabled": False},
+                        {"id": first.id, "kind": "todos", "config": {"path": "shared/tasks.md"}},
+                        {"kind": "reminders", "config": {"path": "shared/reminders.md"}}],
+        })
+        assert saved.title == "Changed" and saved.directive == ""
+        assert saved.options == original.options
+        assert [s.id for s in saved.sources[:2]] == [second.id, first.id]
+        assert [s.position for s in saved.sources] == [0, 1, 2]
+        assert [s.kind for s in saved.sources] == ["calendar", "todos", "reminders"]
+        assert saved.sources[0].enabled is False
+        assert saved.sources[1].config == {"path": "shared/tasks.md"}
+        assert removed.id not in [s.id for s in saved.sources]
+
+    def test_more_new_sources_before_retained_source_do_not_collide(self, conn):
+        original = bdb.save_block_definition(conn, payload={
+            "briefing_name": "M", "title": "News", "sources": [{"kind": "notes"}],
+        })
+        retained = original.sources[0]
+        saved = bdb.save_block_definition(conn, payload={
+            "id": original.id, "sources": [{"kind": "calendar"}, {"kind": "markets"},
+                                          {"id": retained.id, "kind": "notes"}],
+        })
+        assert [source.kind for source in saved.sources] == ["calendar", "markets", "notes"]
+        assert saved.sources[2].id == retained.id
+
+    @pytest.mark.parametrize("creating", [False, True])
+    def test_late_database_failure_rolls_back_only_definition(self, conn, creating):
+        bid = bdb.add_block(conn, briefing_name="M", title="Original")
+        sid = bdb.add_source(conn, block_id=bid, kind="notes")
+        conn.commit()
+        # A real storage failure after block writes must undo the whole save,
+        # while preserving a caller's unrelated uncommitted work.
+        conn.execute("""CREATE TRIGGER refuse_calendar BEFORE INSERT ON briefing_block_sources
+                        WHEN NEW.kind = 'calendar'
+                        BEGIN SELECT RAISE(ABORT, 'calendar refused'); END""")
+        unrelated = bdb.add_block(conn, briefing_name="Other", title="Keep")
+        payload = {"title": "Changed", "sources": [{"kind": "notes"}, {"kind": "calendar"}]}
+        payload.update({"briefing_name": "M"} if creating else {"id": bid})
+        with pytest.raises(sqlite3.IntegrityError, match="calendar refused"):
+            bdb.save_block_definition(conn, payload=payload)
+        conn.commit()
+        assert bdb.get_block(conn, unrelated).title == "Keep"
+        blocks = bdb.list_blocks(conn, "M")
+        assert len(blocks) == 1
+        assert blocks[0].title == "Original"
+        assert [s.id for s in blocks[0].sources] == [sid]

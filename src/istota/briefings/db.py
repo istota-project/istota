@@ -29,6 +29,7 @@ from istota.briefings.models import (
     ArchivedBriefing,
     BlockSource,
     BriefingBlock,
+    normalize_block_payload,
     parse_json_dict,
     parse_json_list,
     presentation_for_options,
@@ -347,8 +348,7 @@ def reorder_blocks(
 
     Two-phase to dodge the ``UNIQUE(briefing_name, position)`` constraint: park
     every block at a high, collision-free position, then set final positions.
-    ``ordered_ids`` must be exactly the briefing's block ids (any order); ids
-    not belonging to the briefing are ignored.
+    ``ordered_ids`` must be an exact permutation of this briefing's block ids.
     """
     valid = {
         r["id"]
@@ -357,10 +357,17 @@ def reorder_blocks(
             (briefing_name,),
         ).fetchall()
     }
-    target = [bid for bid in ordered_ids if bid in valid]
+    if (not isinstance(ordered_ids, list)
+            or any(type(bid) is not int for bid in ordered_ids)
+            or len(ordered_ids) != len(valid) or set(ordered_ids) != valid):
+        raise ValueError("ordered_ids must be an exact permutation of the briefing block ids")
+    target = ordered_ids
     now = _now_iso()
     # Phase 1: park out of the way (offset well past any real count).
-    offset = 1000000
+    offset = conn.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM briefing_blocks WHERE briefing_name = ?",
+        (briefing_name,),
+    ).fetchone()[0]
     for i, bid in enumerate(target):
         conn.execute(
             "UPDATE briefing_blocks SET position = ?, updated_at = ? WHERE id = ?",
@@ -419,6 +426,8 @@ def update_source(
     *,
     config: dict | None = None,
     enabled: bool | None = None,
+    kind: str | None = None,
+    position: int | None = None,
 ) -> None:
     sets: list[str] = []
     params: list = []
@@ -428,6 +437,12 @@ def update_source(
     if enabled is not None:
         sets.append("enabled = ?")
         params.append(1 if enabled else 0)
+    if kind is not None:
+        sets.append("kind = ?")
+        params.append(kind)
+    if position is not None:
+        sets.append("position = ?")
+        params.append(position)
     if not sets:
         return
     params.append(source_id)
@@ -448,6 +463,53 @@ def list_sources(conn: sqlite3.Connection, block_id: int) -> list[BlockSource]:
         (block_id,),
     ).fetchall()
     return [_row_to_source(r) for r in rows]
+
+
+def save_block_definition(conn: sqlite3.Connection, *, payload: dict) -> BriefingBlock:
+    """Save a block and its optional complete source list as one transaction."""
+    values = normalize_block_payload(payload)
+    block_id = values.pop("id", None)
+    sources = values.pop("sources", None)
+    # A savepoint also preserves unrelated work in an existing caller transaction.
+    conn.execute("SAVEPOINT briefing_definition")
+    try:
+        existing = get_block(conn, block_id) if block_id is not None else None
+        if block_id is not None and existing is None:
+            raise LookupError("block not found")
+        existing_sources = {s.id: s for s in existing.sources} if existing else {}
+        if sources is not None:
+            for source in sources:
+                if "id" in source and source["id"] not in existing_sources:
+                    raise ValueError("source id does not belong to this block")
+        if existing:
+            if values.pop("briefing_name", existing.briefing_name) != existing.briefing_name:
+                raise ValueError("briefing_name cannot be changed")
+            update_block(conn, block_id, **values)
+        else:
+            block_id = add_block(conn, **values)
+        if sources is not None:
+            kept_ids = {source["id"] for source in sources if "id" in source}
+            # Keep omitted rows until insertion, so SQLite cannot reuse their ids.
+            # Park above both ranges so added sources cannot collide with them.
+            offset = max(max((s.position for s in existing_sources.values()), default=-1), len(sources)) + 1
+            for i, source_id in enumerate(existing_sources):
+                update_source(conn, source_id, position=offset + i)
+            for position, source in enumerate(sources):
+                fields = {k: source[k] for k in ("kind", "config", "enabled")}
+                if "id" in source:
+                    update_source(conn, source["id"], position=position, **fields)
+                else:
+                    add_source(conn, block_id=block_id, position=position, **fields)
+            for source_id in existing_sources:
+                if source_id not in kept_ids:
+                    delete_source(conn, source_id)
+        block = get_block(conn, block_id)
+        conn.execute("RELEASE SAVEPOINT briefing_definition")
+        return block
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT briefing_definition")
+        conn.execute("RELEASE SAVEPOINT briefing_definition")
+        raise
 
 
 # -- archive ------------------------------------------------------------------
