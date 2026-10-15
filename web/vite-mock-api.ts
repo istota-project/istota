@@ -7469,9 +7469,15 @@ const handlers: MockHandler[] = [
       client_key: string;
       date: string;
       total: number;
-      status: string;
+      status: 'outstanding' | 'paid' | 'voided';
       paid_date?: string;
+      voided_at: string | null;
+      void_reason: string;
+      replaced_by: string[];
+      was_paid?: boolean;
+      has_pdf: boolean;
     }
+    const unvoided = { voided_at: null, void_reason: '', replaced_by: [], has_pdf: true };
     const invoices: Invoice[] = [
       {
         invoice_number: 'INV-000042',
@@ -7480,6 +7486,7 @@ const handlers: MockHandler[] = [
         date: '2026-05-15',
         total: 4500,
         status: 'outstanding',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000041',
@@ -7489,6 +7496,7 @@ const handlers: MockHandler[] = [
         total: 1800,
         status: 'paid',
         paid_date: '2026-05-10',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000040',
@@ -7497,6 +7505,7 @@ const handlers: MockHandler[] = [
         date: '2026-04-15',
         total: 3200,
         status: 'outstanding',
+        ...unvoided,
       },
       {
         invoice_number: 'INV-000039',
@@ -7504,7 +7513,12 @@ const handlers: MockHandler[] = [
         client_key: 'hooli',
         date: '2026-03-31',
         total: 950,
-        status: 'draft',
+        status: 'voided',
+        voided_at: '2026-04-02T09:30:00Z',
+        void_reason: 'Billed two jobs on one invoice',
+        replaced_by: ['INV-000040'],
+        was_paid: false,
+        has_pdf: true,
       },
     ];
 
@@ -8192,11 +8206,14 @@ const handlers: MockHandler[] = [
 
       if (path === '/invoices' && method === 'GET') {
         const showAll = q.get('show_all') === 'true';
-        const list = showAll ? invoices : invoices.filter((i) => i.status !== 'paid');
-        const outstanding = invoices.filter((i) => i.status === 'outstanding');
+        const includeVoided = q.get('include_voided') !== 'false';
+        const list = invoices.filter(
+          (i) => (showAll || i.status !== 'paid') && (includeVoided || i.status !== 'voided'),
+        );
+        const outstanding = list.filter((i) => i.status === 'outstanding');
         return {
           status: 'ok',
-          invoice_count: invoices.length,
+          invoice_count: list.length,
           outstanding_count: outstanding.length,
           invoices: list,
         };

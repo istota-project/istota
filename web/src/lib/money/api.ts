@@ -427,10 +427,19 @@ export interface InvoiceRow {
   client: string;
   client_key: string;
   date: string;
+  /** What the invoice billed when it was issued; never recomputed. */
   total: number;
+  /** `outstanding`, `paid` or `voided`. */
   status: string;
   paid_date?: string;
   paid_by_sync_date?: string;
+  voided_at: string | null;
+  void_reason: string;
+  replaced_by: string[];
+  /** Present on a voided invoice only. */
+  was_paid?: boolean;
+  /** A PDF is on disk for this number (a voided one keeps its `-VOID` copy). */
+  has_pdf: boolean;
 }
 
 export interface InvoicePaymentReview {
@@ -453,10 +462,12 @@ export interface InvoicesResponse {
 export async function getInvoices(opts?: {
   client?: string;
   show_all?: boolean;
+  include_voided?: boolean;
 }): Promise<InvoicesResponse> {
   const params = new URLSearchParams();
   if (opts?.client) params.set('client', opts.client);
   if (opts?.show_all) params.set('show_all', 'true');
+  if (opts?.include_voided === false) params.set('include_voided', 'false');
   const qs = params.toString();
   return apiFetch<InvoicesResponse>(`/invoices${qs ? '?' + qs : ''}`);
 }
