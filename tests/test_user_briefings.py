@@ -91,6 +91,122 @@ class TestEnsureBriefing:
             )
 
 
+class TestAdminHold:
+    def _row(self, db_path, name="morning", user_id="alice", enabled=True):
+        b, _ = user_briefings.ensure_briefing(
+            db_path, user_id=user_id, name=name, cron="0 7 * * *",
+            conversation_token="t", output="talk", enabled=enabled,
+        )
+        return b
+
+    def _task(self, db_path, user_id, name, status):
+        from istota import db
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="p", user_id=user_id, source_type="briefing",
+                briefing_name=name,
+            )
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+        return task_id
+
+    def _status(self, db_path, task_id):
+        from istota import db
+        with db.get_db(db_path) as conn:
+            return conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+
+    def test_set_hold_records_who_and_when(self, db_path):
+        b = self._row(db_path)
+        held = user_briefings.set_hold(db_path, b.id, admin_id="root")
+        assert held.admin_hold_by == "root"
+        assert held.admin_hold_at
+        assert held.enabled is True  # the owner's choice is untouched
+
+    def test_set_hold_is_idempotent_and_keeps_the_first_time(self, db_path):
+        b = self._row(db_path)
+        first = user_briefings.set_hold(db_path, b.id, admin_id="root")
+        again = user_briefings.set_hold(db_path, b.id, admin_id="other")
+        assert (again.admin_hold_at, again.admin_hold_by) == (first.admin_hold_at, "root")
+
+    def test_unknown_id_returns_none(self, db_path):
+        assert user_briefings.set_hold(db_path, 999, admin_id="root") is None
+        assert user_briefings.clear_hold(db_path, 999) is None
+
+    def test_clear_hold_restores_the_owners_enabled(self, db_path):
+        b = self._row(db_path, enabled=False)
+        user_briefings.set_hold(db_path, b.id, admin_id="root")
+        cleared = user_briefings.clear_hold(db_path, b.id)
+        assert (cleared.admin_hold_at, cleared.admin_hold_by) == (None, None)
+        assert cleared.enabled is False
+
+    def test_owner_save_leaves_the_hold(self, db_path):
+        b = self._row(db_path, enabled=False)
+        user_briefings.set_hold(db_path, b.id, admin_id="root")
+        saved, state = user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning", cron="0 8 * * *",
+            conversation_token="t", output="talk", enabled=True,
+        )
+        assert state == "updated"
+        assert saved.enabled is True
+        assert saved.admin_hold_by == "root"
+
+    def test_hold_cancels_pending_tasks_of_that_briefing_only(self, db_path):
+        b = self._row(db_path)
+        self._row(db_path, name="evening")
+        pending = self._task(db_path, "alice", "morning", "pending")
+        running = self._task(db_path, "alice", "morning", "running")
+        done = self._task(db_path, "alice", "morning", "completed")
+        other = self._task(db_path, "alice", "evening", "pending")
+        user_briefings.set_hold(db_path, b.id, admin_id="root")
+        assert self._status(db_path, pending) == "cancelled"
+        assert self._status(db_path, running) == "running"
+        assert self._status(db_path, done) == "completed"
+        assert self._status(db_path, other) == "pending"
+
+    def test_create_task_refuses_a_held_briefing(self, db_path):
+        from istota import db
+        b = self._row(db_path)
+        user_briefings.set_hold(db_path, b.id, admin_id="root")
+        with db.get_db(db_path) as conn, pytest.raises(ValueError, match="briefing_held"):
+            db.create_task(conn, prompt="p", user_id="alice", source_type="briefing",
+                           briefing_name="morning")
+        user_briefings.clear_hold(db_path, b.id)
+        assert self._task(db_path, "alice", "morning", "pending")
+
+    def test_overlay_leaves_a_held_row_out(self, db_path):
+        from istota import config as cfgmod
+        b = self._row(db_path)
+        self._row(db_path, name="evening")
+        user_briefings.set_hold(db_path, b.id, admin_id="root")
+        cfg = Config(db_path=db_path)
+        cfg.users = {"alice": UserConfig(display_name="Alice")}
+        cfgmod._apply_user_briefings(cfg)
+        assert [x.name for x in cfg.users["alice"].briefings] == ["evening"]
+
+    def test_migration_adds_the_hold_columns(self, tmp_path):
+        import sqlite3
+
+        from istota import db
+
+        path = tmp_path / "old.db"
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE briefing_configs (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, "
+            "name TEXT NOT NULL, cron_expression TEXT NOT NULL, conversation_token TEXT NOT NULL, "
+            "components TEXT NOT NULL, enabled INTEGER DEFAULT 1, last_run_at TEXT, "
+            "created_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id, name))"
+        )
+        conn.execute(
+            "INSERT INTO briefing_configs (user_id, name, cron_expression, conversation_token, "
+            "components) VALUES ('alice', 'morning', '0 7 * * *', 't', '{}')"
+        )
+        conn.commit()
+        conn.close()
+        db.init_db(path)
+        row = user_briefings.get_briefing(path, "alice", "morning")
+        assert (row.admin_hold_at, row.admin_hold_by) == (None, None)
+        assert user_briefings.set_hold(path, row.id, admin_id="root").admin_hold_by == "root"
+
+
 class TestListAndDelete:
     def test_list_scopes_to_user(self, db_path):
         user_briefings.ensure_briefing(

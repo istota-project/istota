@@ -7,7 +7,7 @@
     type BriefingRoomOption,
     type UserBriefingRow,
   } from '$lib/api';
-  import { Input, Select, type SelectOption } from '$lib/components/ui';
+  import { Input, NoticeBanner, Select, type SelectOption } from '$lib/components/ui';
   import { notifyError } from '$lib/stores/notices';
   import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -74,6 +74,7 @@
     });
   });
 
+  const held = $derived(!!schedule?.held);
   const dirty = $derived(!!saved && JSON.stringify(draft) !== saved);
   const outputOptions = $derived(
     [...new Set([...outputs, draft.output])].map((o) => ({ value: o, label: channelLabel(o) })),
@@ -112,6 +113,11 @@
 </script>
 
 <SettingsCard title="Schedule and delivery">
+  {#if held}
+    <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
+      This briefing will not run until an administrator resumes it.
+    </NoticeBanner>
+  {/if}
   <fieldset class="fields">
     <SettingsField
       label="Title"
@@ -159,7 +165,7 @@
       checkbox
       hint="When off, the briefing keeps its content but does not run."
     >
-      <input type="checkbox" bind:checked={draft.enabled} />
+      <input type="checkbox" bind:checked={draft.enabled} disabled={held} />
     </SettingsField>
   </fieldset>
 </SettingsCard>

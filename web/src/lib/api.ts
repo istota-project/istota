@@ -2196,7 +2196,17 @@ export interface UserBriefingRow {
   // A delivery surface (talk / email / ntfy) or a comma/surface:channel
   // descriptor; the dropdown is driven by the server's `outputs` list.
   output: string;
+  // The owner's own choice. A hold below keeps the briefing from running
+  // whatever this says.
   enabled: boolean;
+  // Set while an administrator holds the briefing; only an administrator
+  // lifts it. `by_label` is a display name.
+  held?: BriefingHold | null;
+}
+
+export interface BriefingHold {
+  at: string;
+  by_label: string;
 }
 
 // The same list the routing rows offer — `/settings/briefings` and

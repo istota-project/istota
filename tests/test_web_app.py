@@ -5220,6 +5220,53 @@ class TestBriefingEndpoints:
         assert "logtoken" in room_tokens
         assert "alertstoken" in room_tokens
 
+    async def test_list_reports_an_admin_hold_by_display_name(self, tmp_path, client, app):
+        from istota import user_briefings
+        cfg = self._make_test_config(tmp_path)
+        cfg.users["root"] = UserConfig(display_name="Rosa Admin")
+        _patch_app(cfg)
+        held, _ = user_briefings.ensure_briefing(
+            self._db_path, user_id="alice", name="evening",
+            cron="0 19 * * *", conversation_token="logtoken", output="talk",
+        )
+        user_briefings.ensure_briefing(
+            self._db_path, user_id="alice", name="weekly",
+            cron="0 9 * * 1", conversation_token="logtoken", output="talk",
+        )
+        user_briefings.set_hold(self._db_path, held.id, admin_id="root")
+        cookies = await self._login(client)
+        resp = await client.get("/istota/api/settings/briefings", cookies=cookies)
+        rows = {b["name"]: b for b in resp.json()["briefings"]}
+        assert rows["weekly"]["held"] is None
+        assert rows["evening"]["held"]["by_label"] == "Rosa Admin"
+        assert rows["evening"]["held"]["at"]
+        assert "by" not in rows["evening"]["held"]
+
+    async def test_owner_save_keeps_the_hold(self, tmp_path, client, app):
+        from istota import user_briefings
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        row, _ = user_briefings.ensure_briefing(
+            self._db_path, user_id="alice", name="evening",
+            cron="0 19 * * *", conversation_token="logtoken", output="talk",
+            enabled=False,
+        )
+        user_briefings.set_hold(self._db_path, row.id, admin_id="root")
+        cookies = await self._login(client)
+        resp = await client.post(
+            "/istota/api/settings/briefings",
+            json={"name": "evening", "cron": "0 20 * * *",
+                  "conversation_token": "logtoken", "output": "talk", "enabled": True},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        stored = user_briefings.get_briefing(self._db_path, "alice", "evening")
+        assert stored.enabled is True
+        assert stored.cron == "0 20 * * *"
+        assert stored.admin_hold_by == "root"
+        listed = await client.get("/istota/api/settings/briefings", cookies=cookies)
+        assert listed.json()["briefings"][0]["held"] is not None
+
     async def test_post_creates_briefing(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

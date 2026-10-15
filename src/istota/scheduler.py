@@ -5744,6 +5744,13 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             try:
                 task_id = _create_briefing_task(conn, user_id, briefing)
             except ValueError as e:
+                if str(e) == "briefing_held":
+                    # Held after this config was loaded. Stamp the slot so the
+                    # next tick does not retry it and a resume waits for the
+                    # next scheduled slot.
+                    logger.info("Briefing '%s' skipped: held by an administrator", briefing.name)
+                    db.set_briefing_last_run(conn, user_id, briefing.name)
+                    continue
                 logger.error(
                     "Briefing '%s' skipped: %s", briefing.name, e,
                 )

@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 import Page from './+page.svelte';
+import Layout from '../+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
 const user = {
@@ -425,6 +426,27 @@ describe('briefing block builder', () => {
     expect(screen.getByRole('checkbox', { name: /^Enabled/ })).toBeEnabled();
     await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
     expect(await screen.findByRole('menuitem', { name: 'Duplicate' })).toBeInTheDocument();
+  });
+
+  it('shows an administrator hold, locks Enabled alone, and marks it in the sidebar', async () => {
+    const listed = await api.getBriefings();
+    listed.briefings[0].held = { at: '2026-10-15T09:00:00+00:00', by_label: 'Rosa Admin' };
+    api.getBriefings.mockResolvedValue(listed);
+    // `base` is '' under vitest.
+    window.history.replaceState(null, '', '/briefings/settings/?name=morning');
+    page.url = new URL(window.location.href);
+    render(Harness, { layout: Layout, component: Page, user });
+    await screen.findByRole('button', { name: 'Add block' });
+    expect(
+      screen.getByText('Paused by an administrator', { selector: '*:not([title])' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('This briefing will not run until an administrator resumes it.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /^Enabled/ })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: /^Schedule/ })).toBeEnabled();
+    expect(await screen.findByTitle('Paused by an administrator')).toBeInTheDocument();
+    expect(screen.getAllByTitle('Off')).toHaveLength(1);
   });
 
   it('opens an empty disabled schedule by URL with its schedule beside its content', async () => {

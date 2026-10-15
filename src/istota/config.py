@@ -6427,8 +6427,8 @@ def _migrate_obsolete_resources(config: "Config") -> None:
 def _apply_user_briefings(config: "Config", *, rows=None) -> None:
     """Build ``config.users[*].briefings`` from ``briefing_configs`` rows.
 
-    The table is the only source. Disabled rows are left out, so
-    ``check_briefings`` never sees them. Config-authored ``blocks`` from the
+    The table is the only source. Disabled rows and rows an administrator holds
+    are left out, so ``check_briefings`` never sees them. Config-authored ``blocks`` from the
     retired ``[users.X.briefings]`` ride on the row of the same name: rows never
     carry blocks, and the module-DB seeder reads them from here once.
 
@@ -6465,7 +6465,7 @@ def _apply_user_briefings(config: "Config", *, rows=None) -> None:
         }
         briefings = []
         for r in by_user.get(user_id, []):
-            if not r.enabled:
+            if not r.enabled or getattr(r, "admin_hold_at", None):
                 continue
             bc = BriefingConfig(
                 name=r.name,

@@ -1849,6 +1849,65 @@ class TestCheckBriefings:
         assert len(result) == 1
 
 
+class TestCheckBriefingsAdminHold:
+    def _config_and_row(self, db_path):
+        from istota import user_briefings
+        row, _ = user_briefings.ensure_briefing(
+            db_path, user_id="alice", name="morning", cron="0 6 * * *",
+            conversation_token="room1", output="talk",
+        )
+        with db.get_db(db_path) as conn:
+            yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
+            conn.execute(
+                "INSERT INTO briefing_state (user_id, briefing_name, last_run_at) VALUES (?, ?, ?)",
+                ("alice", "morning", yesterday),
+            )
+        config = Config(
+            db_path=db_path, users={"alice": UserConfig(timezone="UTC")},
+            scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
+        )
+        return config, row
+
+    def _briefing_tasks(self, db_path):
+        with db.get_db(db_path) as conn:
+            return conn.execute("SELECT id FROM tasks WHERE source_type = 'briefing'").fetchall()
+
+    def test_a_held_briefing_is_not_in_the_overlay_so_never_due(self, db_path):
+        from istota import user_briefings
+        from istota.config import _apply_user_briefings
+        config, row = self._config_and_row(db_path)
+        user_briefings.set_hold(db_path, row.id, admin_id="root")
+        _apply_user_briefings(config)
+        assert check_briefings(db_path, config) == []
+        assert self._briefing_tasks(db_path) == []
+
+    def test_a_hold_after_config_load_is_refused_at_create_task(self, db_path):
+        from istota import user_briefings
+        from istota.config import _apply_user_briefings
+        config, row = self._config_and_row(db_path)
+        _apply_user_briefings(config)  # loaded before the hold, as a running daemon has it
+        user_briefings.set_hold(db_path, row.id, admin_id="root")
+        assert check_briefings(db_path, config) == []
+        assert self._briefing_tasks(db_path) == []
+        # The skipped slot is stamped, so the next tick does not try it again
+        # and a resume waits for the next scheduled slot.
+        assert check_briefings(db_path, config) == []
+        with db.get_db(db_path) as conn:
+            last = datetime.fromisoformat(db.get_briefing_last_run(conn, "alice", "morning"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=ZoneInfo("UTC"))
+        assert datetime.now(ZoneInfo("UTC")) - last < timedelta(minutes=5)
+
+    def test_resume_lets_it_run_again(self, db_path):
+        from istota import user_briefings
+        from istota.config import _apply_user_briefings
+        config, row = self._config_and_row(db_path)
+        user_briefings.set_hold(db_path, row.id, admin_id="root")
+        user_briefings.clear_hold(db_path, row.id)
+        _apply_user_briefings(config)
+        assert len(check_briefings(db_path, config)) == 1
+
+
 class TestBriefingDeferredPrompt:
     """ISSUE-143: the briefing prefetch must not run on the dispatch thread."""
 

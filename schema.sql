@@ -205,7 +205,9 @@ CREATE TABLE IF NOT EXISTS briefing_configs (
     conversation_token TEXT NOT NULL,
     components TEXT NOT NULL,       -- JSON: legacy component bag, retained only as a one-time components→blocks migration carrier
     output TEXT NOT NULL DEFAULT 'talk',  -- delivery descriptor (talk/email/both/all/ntfy/surface:chan/comma lists)
-    enabled INTEGER DEFAULT 1,
+    enabled INTEGER DEFAULT 1,      -- the owner's choice
+    admin_hold_at TEXT,             -- ISO-8601 UTC; set = held by an administrator, does not run
+    admin_hold_by TEXT,             -- the administrator's user id
     last_run_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(user_id, name)

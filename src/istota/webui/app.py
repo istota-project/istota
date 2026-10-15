@@ -15962,11 +15962,25 @@ def _write_self_profile(
 # Phase 7b — User-managed briefings (briefing_configs table)
 # ============================================================================
 
+def _briefing_hold(b) -> dict | None:
+    """An administrator's hold as the owner sees it: when, and by whom by name.
+
+    The administrator's display name, never their id or an address.
+    """
+    if not getattr(b, "admin_hold_at", None):
+        return None
+    admin = b.admin_hold_by or ""
+    profile = _config.users.get(admin) if _config and admin else None
+    label = (profile.display_name if profile else "") or "an administrator"
+    return {"at": b.admin_hold_at, "by_label": label}
+
+
 def _briefing_to_dict(b) -> dict:
     """Serialize a UserBriefing row for the API.
 
     ``managed`` is the constant ``"db"``, kept for one release so a cached
     client that still checks it keeps working; nothing current reads it.
+    ``held`` is ``{at, by_label}`` while an administrator holds the briefing.
     """
     return {
         "managed": "db",
@@ -15977,6 +15991,7 @@ def _briefing_to_dict(b) -> dict:
         "conversation_token": b.conversation_token or "",
         "output": b.output or "talk",
         "enabled": bool(b.enabled),
+        "held": _briefing_hold(b),
     }
 
 

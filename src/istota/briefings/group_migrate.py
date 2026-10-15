@@ -331,11 +331,10 @@ def cutover_default(conn, config, name, *, actor_id, expected_revision, now=None
                                  (user, name)).fetchall()
             if any(task["status"] not in ("pending", "completed", "failed", "cancelled") for task in tasks):
                 _error("legacy_tasks_inflight")
+            cancelled = user_briefings.cancel_queued_tasks(conn, user, name)
             for task in tasks:
-                if task["status"] in ("pending", "failed"):
-                    db.cancel_task(conn, task["id"])
                 outcomes.append({"task_id": task["id"], "before": task["status"],
-                                 "outcome": "cancelled" if task["status"] in ("pending", "failed") else task["status"]})
+                                 "outcome": "cancelled" if task["id"] in cancelled else task["status"]})
             row = user_briefings.get_briefing(config.db_path, user, name, conn=conn)
             if row:
                 user_briefings.ensure_briefing(config.db_path, user_id=user, conn=conn, **(_schedule(row) | {"enabled": False}))

@@ -774,6 +774,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # existing row — no backfill needed.
     _add_columns(conn, "briefing_configs", {"title": "TEXT NOT NULL DEFAULT ''"})
 
+    # Briefing configs: an administrator's hold, separate from the owner's
+    # `enabled`. Only an administrator sets or lifts it.
+    _add_columns(conn, "briefing_configs", {"admin_hold_at": "TEXT", "admin_hold_by": "TEXT"})
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id
@@ -1616,6 +1620,8 @@ def create_task(
     if source_type == "briefing" and briefing_name:
         from istota.briefings.group_migrate import require_personal_schedule
         require_personal_schedule(conn, user_id, briefing_name)
+        from istota.user_briefings import require_not_held
+        require_not_held(conn, user_id, briefing_name)
     if scheduled_job_id is not None:
         from istota.briefings.group_migrate import publisher_retired
         job = get_scheduled_job(conn, scheduled_job_id)
