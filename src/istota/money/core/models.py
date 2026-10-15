@@ -168,6 +168,8 @@ class WorkEntry:
     discount: float = 0
     description: str = ""
     entity: str = ""
+    # Always invoiced on its own, whatever the client's bundling rules say.
+    separate: bool = False
     # The next three are read-only on an entry: they come from the entry's
     # active invoice line and that invoice's row, and are filled by the read.
     invoice: str = ""

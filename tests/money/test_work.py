@@ -632,6 +632,24 @@ class TestFieldRoundTrip:
         update_work_entry(data_dir, 1, qty=3)
         assert load_work_entries(data_dir)[0].extra == {"billing_note": "holiday rate"}
 
+    def test_separate_defaults_off_and_round_trips(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1, description="plain")
+        add_work_entry(data_dir, "2026-03-02", "acme", "dev", qty=1, description="alone",
+                       separate=True)
+        flags = {e.description: e.separate for e in load_work_entries(data_dir)}
+        assert flags == {"plain": False, "alone": True}
+
+    def test_separate_is_updatable_and_changes_the_etag(self, data_dir):
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1)
+        before = load_work_entries(data_dir)[0]
+        assert update_work_entry_by_uid(data_dir, before.uid, separate=True).ok
+        after = load_work_entries(data_dir)[0]
+        assert after.separate is True
+        assert entry_etag(after) != entry_etag(before)
+        assert update_work_entry(data_dir, 1, separate=False)
+        assert load_work_entries(data_dir)[0].separate is False
+        assert entry_etag(load_work_entries(data_dir)[0]) == entry_etag(before)
+
     @pytest.mark.parametrize("raw", ["a\rb", "a\tb", "a\x00b", "a\x1fb", "a\x7fb", "line\r\nline"])
     def test_control_characters_round_trip(self, data_dir, raw):
         add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=1, description=raw)

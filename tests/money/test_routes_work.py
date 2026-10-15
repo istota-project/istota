@@ -673,3 +673,63 @@ class TestUpdateResponseShape:
         monkeypatch.setattr(routes_mod, "_work_entry_response", _boom)
         resp = make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
         assert resp.status_code == 200
+
+
+class TestSeparateField:
+    """#754: the per-entry ``separate`` flag through the work routes."""
+
+    def test_row_carries_the_flag(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, description="plain")
+        add_work_entry(tmp_path, "2026-03-02", "acme", "dev", qty=1, description="alone",
+                       separate=True)
+        rows = make_client().get("/api/money/work").json()["entries"]
+        assert {r["description"]: r["separate"] for r in rows} == {"plain": False, "alone": True}
+
+    def test_create_stores_the_flag(self, make_client, tmp_path):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1,
+                  "separate": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["entry"]["separate"] is True
+        assert load_work_entries(tmp_path)[0].separate is True
+
+    def test_create_defaults_the_flag_off(self, make_client, tmp_path):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1},
+        )
+        assert resp.json()["entry"]["separate"] is False
+
+    def test_update_round_trips_the_flag(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1)
+        uid = load_work_entries(tmp_path)[0].uid
+        client = make_client()
+
+        on = client.patch(f"/api/money/work/{uid}", json={"separate": True})
+        assert on.status_code == 200
+        assert on.json()["entry"]["separate"] is True
+        etag = on.json()["entry"]["etag"]
+
+        off = client.patch(f"/api/money/work/{uid}", json={"separate": False, "etag": etag})
+        assert off.status_code == 200
+        assert off.json()["entry"]["separate"] is False
+        assert load_work_entries(tmp_path)[0].separate is False
+
+    def test_an_update_without_the_flag_leaves_it_alone(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, separate=True)
+        uid = load_work_entries(tmp_path)[0].uid
+        make_client().patch(f"/api/money/work/{uid}", json={"qty": 2})
+        assert load_work_entries(tmp_path)[0].separate is True
+
+    @pytest.mark.parametrize("value", ["yes", 1, 0, None, "true"])
+    def test_a_non_boolean_flag_is_refused(self, make_client, tmp_path, value):
+        resp = make_client().post(
+            "/api/money/work",
+            json={"date": "2026-03-01", "client": "acme", "service": "dev", "qty": 1,
+                  "separate": value},
+        )
+        assert resp.status_code == 400
+        assert "separate" in resp.json()["error"]
+        assert load_work_entries(tmp_path) == []

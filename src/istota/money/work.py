@@ -366,6 +366,9 @@ def _serialize_entry(entry: WorkEntry) -> str:
         lines.append(f'description = "{_escape(entry.description)}"')
     if entry.entity:
         lines.append(f'entity = "{_escape(entry.entity)}"')
+    # Only when set, so the etag of every unflagged entry is what it was.
+    if entry.separate:
+        lines.append("separate = true")
     if entry.invoice:
         lines.append(f'invoice = "{_escape(entry.invoice)}"')
     if entry.invoice_date is not None:
@@ -444,7 +447,7 @@ def _now() -> str:
 
 _ENTRY_QUERY = """
 SELECT e.uid, e.date, e.client, e.service, e.qty, e.amount, e.discount,
-       e.description, e.entity, e.extra,
+       e.description, e.entity, e.separate, e.extra,
        l.invoice_number AS invoice, i.issue_date, i.paid_date
 FROM work_entries e
 LEFT JOIN invoice_lines l ON l.entry_uid = e.uid AND l.active = 1
@@ -466,6 +469,7 @@ def read_entries(conn: sqlite3.Connection) -> list[WorkEntry]:
             discount=row["discount"],
             description=row["description"],
             entity=row["entity"],
+            separate=bool(row["separate"]),
             invoice=row["invoice"] or "",
             invoice_date=_opt_date(row["issue_date"]),
             paid_date=_opt_date(row["paid_date"]),
@@ -530,20 +534,22 @@ def insert_entry(
     stamp = created_at or _now()
     conn.execute(
         "INSERT INTO work_entries (uid, date, client, service, qty, amount, discount, "
-        "description, entity, extra, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "description, entity, separate, extra, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (entry.uid, entry.date.isoformat(), entry.client, entry.service,
          entry.qty, entry.amount, entry.discount or 0, entry.description,
-         entry.entity, _encode_extra(entry.extra), stamp, stamp),
+         entry.entity, int(bool(entry.separate)), _encode_extra(entry.extra), stamp, stamp),
     )
 
 
 def _update_entry_row(conn: sqlite3.Connection, entry: WorkEntry) -> None:
     conn.execute(
         "UPDATE work_entries SET date = ?, client = ?, service = ?, qty = ?, amount = ?, "
-        "discount = ?, description = ?, entity = ?, updated_at = ? WHERE uid = ?",
+        "discount = ?, description = ?, entity = ?, separate = ?, updated_at = ? "
+        "WHERE uid = ?",
         (entry.date.isoformat(), entry.client, entry.service, entry.qty, entry.amount,
-         entry.discount or 0, entry.description, entry.entity, _now(), entry.uid),
+         entry.discount or 0, entry.description, entry.entity, int(bool(entry.separate)),
+         _now(), entry.uid),
     )
 
 
@@ -684,6 +690,7 @@ def add_work_entry(
     invoice_date: str | date | None = None,
     uid: str = "",
     *,
+    separate: bool = False,
     conn: sqlite3.Connection | None = None,
 ) -> int:
     """Insert an entry and return its display index.
@@ -691,12 +698,12 @@ def add_work_entry(
     Pass ``uid`` to choose the stable id up front; the returned index is stale
     the moment another writer inserts something earlier. ``invoice`` puts the
     entry on that invoice (creating it, dated ``invoice_date`` or today, when
-    the number is new).
+    the number is new). ``separate`` invoices the entry on its own.
     """
     new_entry = WorkEntry(
         date=_parse_date(entry_date), client=client.lower(), service=service,
         qty=qty, amount=amount, discount=discount,
-        description=description, entity=entity,
+        description=description, entity=entity, separate=bool(separate),
         uid=uid or new_txn_id(),
     )
     config = _invoicing_config(data_dir) if invoice and conn is None else None

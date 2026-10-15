@@ -275,7 +275,12 @@ def group_entries_by_bundle(
     entries: list[WorkEntry],
     client_config: ClientConfig,
 ) -> list[tuple[str, list[WorkEntry]]]:
-    """Group work entries according to client bundling rules."""
+    """Group work entries according to client bundling rules.
+
+    Returns ``(group_name, entries)`` pairs. An entry flagged ``separate`` is a
+    group of its own, named as the client's ``separate`` list names a service,
+    so two flagged entries of one service are two pairs with the same name.
+    """
     if not entries:
         return []
 
@@ -288,17 +293,22 @@ def group_entries_by_bundle(
     separate_set = set(client_config.separate)
 
     groups: dict[str, list[WorkEntry]] = {}
+    names: dict[str, str] = {}
     for entry in entries:
-        if entry.service in separate_set:
-            group_key = entry.service
+        if entry.separate:
+            group_key = f"{entry.service}:{entry.uid}"
+            group_name = entry.service
+        elif entry.service in separate_set:
+            group_key = group_name = entry.service
         elif entry.service in service_to_bundle:
-            group_key = service_to_bundle[entry.service]
+            group_key = group_name = service_to_bundle[entry.service]
         else:
-            group_key = "Services"
+            group_key = group_name = "Services"
 
         groups.setdefault(group_key, []).append(entry)
+        names[group_key] = group_name
 
-    return list(groups.items())
+    return [(names[key], members) for key, members in groups.items()]
 
 
 # =============================================================================
@@ -393,11 +403,18 @@ def generate_invoices_for_period(
     invoice_output_dir: Path | None = None,
     db_path: Path | None = None,
     record_schedule: bool = False,
+    entry_uids: list[str] | None = None,
 ) -> list[dict]:
     """Generate invoices for uninvoiced work entries.
 
     Groups uninvoiced entries by client+entity and bundle rules, renders each
     invoice's PDF, then records the invoice and its lines in one transaction.
+
+    ``period`` is an upper bound: every unbilled entry dated on or before the
+    end of that month is billed, earlier months included. ``entry_uids`` bills
+    exactly the entries named instead, and ``period`` is ignored; an unknown or
+    already-invoiced uid is a ``ValueError`` raised before anything is written.
+    The named entries still group by the normal rules.
     If that transaction fails the PDF is deleted and an
     :class:`InvoiceRecordError` is raised, after the counter is advanced past
     the invoices this run did record; no PDF is left without its invoice.
@@ -413,10 +430,16 @@ def generate_invoices_for_period(
     from istota.money.work import (
         create_invoice,
         get_uninvoiced_entries,
+        load_work_entries,
         write_transaction,
     )
 
-    entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
+    if entry_uids:
+        entries = _named_entries(load_work_entries(data_dir), entry_uids)
+        if client_filter:
+            entries = [e for e in entries if e.client.lower() == client_filter.lower()]
+    else:
+        entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
     if not entries:
         return []
 
@@ -437,7 +460,7 @@ def generate_invoices_for_period(
     if not grouped:
         return []
 
-    year = str(date.today().year) if not period else period.split("-")[0]
+    year = str(date.today().year) if not period or entry_uids else period.split("-")[0]
     base_dir = invoice_output_dir if invoice_output_dir is not None else accounting_path / config.invoice_output
     output_dir = base_dir / year
 
@@ -542,6 +565,20 @@ def generate_invoices_for_period(
         )
 
     return results
+
+
+def _named_entries(entries: list[WorkEntry], uids: list[str]) -> list[WorkEntry]:
+    """The entries ``uids`` name, in display order; every one must exist and be unbilled."""
+    by_uid = {e.uid: e for e in entries if e.uid}
+    wanted = list(dict.fromkeys(uids))
+    missing = [uid for uid in wanted if uid not in by_uid]
+    if missing:
+        raise ValueError(f"no work entry with uid {', '.join(missing)}")
+    invoiced = [f"{uid} ({by_uid[uid].invoice})" for uid in wanted if by_uid[uid].invoice]
+    if invoiced:
+        raise ValueError(f"work entry already invoiced: {', '.join(invoiced)}")
+    chosen = set(wanted)
+    return [e for e in entries if e.uid in chosen]
 
 
 class InvoiceRecordError(RuntimeError):

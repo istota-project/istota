@@ -346,8 +346,11 @@ def work_migrate(ctx, dry_run):
 @click.option("--discount", type=float, default=0, help="Discount amount")
 @click.option("--description", help="Description of work")
 @click.option("--entity", "-e", help="Entity override")
+@click.option("--separate/--no-separate", default=False,
+              help="Always invoice this entry on its own")
 @pass_ctx
-def work_add(ctx, entry_date, client, service, qty, amount, discount, description, entity):
+def work_add(ctx, entry_date, client, service, qty, amount, discount, description, entity,
+             separate):
     """Add a work entry."""
     from istota.money.work import add_work_entry
 
@@ -361,7 +364,7 @@ def work_add(ctx, entry_date, client, service, qty, amount, discount, descriptio
     entry_id = add_work_entry(
         data_dir, entry_date, client.lower(), service,
         qty=qty, amount=amount, discount=discount,
-        description=description or "", entity=entity or "",
+        description=description or "", entity=entity or "", separate=separate,
     )
     _output({"status": "ok", "id": entry_id, "message": f"Added work entry #{entry_id}"})
 
@@ -400,6 +403,7 @@ def work_list(ctx, client, period, uninvoiced, invoiced):
                 "discount": e.discount,
                 "description": e.description,
                 "entity": e.entity or None,
+                "separate": e.separate,
                 "invoice": e.invoice or None,
                 "paid_date": e.paid_date.isoformat() if e.paid_date else None,
             }
@@ -452,8 +456,11 @@ def work_remove(ctx, entry_id):
 @click.option("--description", help="Description")
 @click.option("--entity", "-e", help="Entity override")
 @click.option("--invoice", help="Manually assign invoice number")
+@click.option("--separate/--no-separate", default=None,
+              help="Invoice this entry on its own, or bundle it as usual")
 @pass_ctx
-def work_update(ctx, entry_id, entry_date, client, service, qty, amount, discount, description, entity, invoice):
+def work_update(ctx, entry_id, entry_date, client, service, qty, amount, discount, description,
+                entity, invoice, separate):
     """Update a work entry."""
     from istota.money.work import update_work_entry
 
@@ -476,6 +483,8 @@ def work_update(ctx, entry_id, entry_date, client, service, qty, amount, discoun
         fields["entity"] = entity
     if invoice is not None:
         fields["invoice"] = invoice
+    if separate is not None:
+        fields["separate"] = separate
 
     if not fields:
         _output({"status": "error", "error": "No fields to update"})
@@ -1090,12 +1099,20 @@ def invoice(click_ctx):
 
 
 @invoice.command("generate")
-@click.option("--period", "-p", help="Billing period upper bound (YYYY-MM)")
+@click.option(
+    "--period", "-p", metavar="YYYY-MM",
+    help="Bill unbilled work dated on or before the end of this month "
+         "(earlier months included)",
+)
 @click.option("--client", "-c", help="Filter by client key")
 @click.option("--entity", "-e", help="Filter by entity key")
+@click.option(
+    "--entry", "entry_uids", multiple=True, metavar="UID",
+    help="Bill exactly this entry (repeatable); --period is ignored",
+)
 @click.option("--dry-run", is_flag=True, help="Preview without generating files")
 @pass_ctx
-def invoice_generate(ctx, period, client, entity, dry_run):
+def invoice_generate(ctx, period, client, entity, entry_uids, dry_run):
     """Generate invoices for uninvoiced work entries."""
     from istota.money.core.invoicing import generate_invoices_for_period
 
@@ -1116,13 +1133,14 @@ def invoice_generate(ctx, period, client, entity, dry_run):
             entity_filter=entity, dry_run=dry_run,
             invoice_output_dir=invoice_output_dir,
             db_path=ctx.db_path, record_schedule=True,
+            entry_uids=list(entry_uids) or None,
         )
     except Exception as e:
         _output({"status": "error", "error": str(e)})
         return
 
     if not results:
-        period_desc = f" for period {period}" if period else ""
+        period_desc = f" for period {period}" if period and not entry_uids else ""
         _output({"status": "ok", "message": f"No uninvoiced entries found{period_desc}", "invoices": []})
         return
 

@@ -226,6 +226,85 @@ class TestWorkCommands:
         output = json.loads(result.output)
         assert output["count"] == 2
 
+    def test_work_separate_flag_on_add_update_and_list(self, runner, tmp_path, single_ledger):
+        _, ledgers = single_ledger
+        obj = _make_context(tmp_path, ledgers=ledgers)
+        _invoke(runner, ["work", "add",
+            "-d", "2026-03-01", "-c", "acme", "-s", "dev", "-q", "8", "--separate"],
+            tmp_path=tmp_path, obj=obj)
+        _invoke(runner, ["work", "add",
+            "-d", "2026-03-02", "-c", "acme", "-s", "dev", "-q", "4"],
+            tmp_path=tmp_path, obj=obj)
+
+        def flags():
+            result = _invoke(runner, ["work", "list"], tmp_path=tmp_path, obj=obj)
+            return [e["separate"] for e in json.loads(result.output)["entries"]]
+
+        assert flags() == [True, False]
+
+        result = _invoke(runner, ["work", "update", "1", "--no-separate"],
+            tmp_path=tmp_path, obj=obj)
+        assert json.loads(result.output)["status"] == "ok"
+        result = _invoke(runner, ["work", "update", "2", "--separate"],
+            tmp_path=tmp_path, obj=obj)
+        assert json.loads(result.output)["status"] == "ok"
+        assert flags() == [False, True]
+
+        # An update that doesn't name the flag leaves it as it was.
+        _invoke(runner, ["work", "update", "2", "-q", "5"], tmp_path=tmp_path, obj=obj)
+        assert flags() == [False, True]
+
+
+class TestInvoiceGenerateEntries:
+    """#754: ``invoice generate --entry UID`` bills exactly the entries named."""
+
+    def _add(self, runner, tmp_path, obj, entry_date, description):
+        _invoke(runner, ["work", "add", "-d", entry_date, "-c", "acme", "-s", "dev",
+                         "-q", "1", "--description", description],
+                tmp_path=tmp_path, obj=obj)
+
+    def _uids(self, runner, tmp_path, obj):
+        result = _invoke(runner, ["work", "list"], tmp_path=tmp_path, obj=obj)
+        return {e["description"]: e["uid"] for e in json.loads(result.output)["entries"]}
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_named_entries_are_billed_and_others_left(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        for when, name in (("2026-03-01", "a"), ("2026-03-02", "b"), ("2026-04-01", "c")):
+            self._add(runner, tmp_path, invoicing_ctx, when, name)
+        uids = self._uids(runner, tmp_path, invoicing_ctx)
+
+        result = _invoke(runner, [
+            "invoice", "generate", "--entry", uids["a"], "--entry", uids["c"],
+        ], tmp_path=tmp_path, obj=invoicing_ctx)
+
+        output = json.loads(result.output)
+        assert output["status"] == "ok", output
+        assert output["invoice_count"] == 1
+        assert output["total"] == 300.0
+        remaining = _invoke(runner, ["work", "list", "--uninvoiced"],
+                            tmp_path=tmp_path, obj=invoicing_ctx)
+        assert [e["description"] for e in json.loads(remaining.output)["entries"]] == ["b"]
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_an_unknown_entry_is_an_error(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        self._add(runner, tmp_path, invoicing_ctx, "2026-03-01", "a")
+
+        result = _invoke(runner, ["invoice", "generate", "--entry", "missing-uid"],
+                         tmp_path=tmp_path, obj=invoicing_ctx)
+
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert "missing-uid" in output["error"]
+        mock_pdf.assert_not_called()
+
+    def test_period_help_says_it_sweeps_earlier_months(self, runner, tmp_path, invoicing_ctx):
+        result = _invoke(runner, ["invoice", "generate", "--help"],
+                         tmp_path=tmp_path, obj=invoicing_ctx)
+        assert "earlier months included" in " ".join(result.output.split())
+        assert "--entry" in result.output
+
 
 class TestListCommand:
     def test_list_with_config(self, runner, tmp_path, single_ledger):

@@ -743,6 +743,7 @@ async def api_invoice_pdf(
 # able to stamp an invoice number, date it, or mark work paid.
 _WORK_WRITABLE_FIELDS = (
     "date", "client", "service", "qty", "amount", "discount", "description", "entity",
+    "separate",
 )
 
 _WORK_STATUSES = ("uninvoiced", "invoiced", "paid", "all")
@@ -804,6 +805,7 @@ def _work_row(entry, config) -> dict:
         "discount": entry.discount,
         "description": entry.description,
         "entity": entry.entity,
+        "separate": entry.separate,
         "invoice": entry.invoice,
         "paid_date": entry.paid_date.isoformat() if entry.paid_date else None,
         "computed_amount": computed,
@@ -939,6 +941,10 @@ def _coerce_work_fields(body: dict) -> tuple[dict, str | None]:
             return {}, f"invalid {key}"
         fields[key] = value
 
+    # A strict bool: 1, "true" or null here is a client bug, not a flag.
+    if "separate" in fields and not isinstance(fields["separate"], bool):
+        return {}, "invalid separate — expected true or false"
+
     return fields, None
 
 
@@ -1039,6 +1045,7 @@ async def api_work_create(
         description=fields.get("description") or "",
         entity=fields.get("entity") or "",
         uid=uid,
+        separate=fields.get("separate", False),
     )
 
     row = _work_entry_response(data_dir, uid, config)

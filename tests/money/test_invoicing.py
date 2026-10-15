@@ -176,6 +176,35 @@ class TestGroupEntriesByBundle:
         groups = group_entries_by_bundle(entries, client)
         assert len(groups) == 2
 
+    def test_a_flagged_entry_gets_a_group_of_its_own(self):
+        flagged = WorkEntry(date=date(2026, 1, 1), client="a", service="dev", uid="u1", separate=True)
+        other = WorkEntry(date=date(2026, 1, 2), client="a", service="dev", uid="u2")
+        groups = group_entries_by_bundle([flagged, other], ClientConfig(key="a", name="A"))
+        assert [(name, [e.uid for e in members]) for name, members in groups] == [
+            ("dev", ["u1"]), ("Services", ["u2"]),
+        ]
+
+    def test_two_flagged_same_service_entries_stay_apart(self):
+        entries = [
+            WorkEntry(date=date(2026, 1, 1), client="a", service="dev", uid="u1", separate=True),
+            WorkEntry(date=date(2026, 1, 2), client="a", service="dev", uid="u2", separate=True),
+        ]
+        groups = group_entries_by_bundle(entries, ClientConfig(key="a", name="A"))
+        assert [[e.uid for e in members] for _, members in groups] == [["u1"], ["u2"]]
+
+    def test_the_flag_wins_over_a_bundle(self):
+        entries = [
+            WorkEntry(date=date(2026, 1, 1), client="a", service="dev", uid="u1", separate=True),
+            WorkEntry(date=date(2026, 1, 2), client="a", service="dev", uid="u2"),
+        ]
+        client = ClientConfig(
+            key="a", name="A", bundles=[{"name": "Build", "services": ["dev"]}],
+        )
+        groups = group_entries_by_bundle(entries, client)
+        assert [(name, [e.uid for e in members]) for name, members in groups] == [
+            ("dev", ["u1"]), ("Build", ["u2"]),
+        ]
+
 
 class TestFindInvoicePdf:
     def _make_pdf(self, output_dir: Path, year: str, filename: str) -> Path:
@@ -1347,6 +1376,128 @@ class TestTransactionalGeneration:
                     issue_date=date(2026, 3, 31), total=1200, entry_uids=[uid], pdf_path="",
                 )
         assert load_work_entries(tmp_path)[0].invoice == "INV-000001"
+
+
+class TestSeparateAndNamedEntries:
+    """#754: a flagged entry is invoiced alone, and ``entry_uids`` bills exactly those."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        return TestTransactionalGeneration()._setup(tmp_path, monkeypatch)
+
+    def _generate(self, tmp_path, config_file, config, **kwargs):
+        from istota.money.core.invoicing import generate_invoices_for_period
+
+        return generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path, **kwargs,
+        )
+
+    def _uids(self, tmp_path):
+        from istota.money.work import load_work_entries
+
+        return {e.description: e.uid for e in load_work_entries(tmp_path)}
+
+    def test_a_flagged_entry_gets_its_own_invoice(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8, description="a", separate=True)
+        add_work_entry(tmp_path, "2026-03-11", "acme", "dev", qty=2, description="b")
+        uids = self._uids(tmp_path)
+
+        results = self._generate(tmp_path, config_file, config)
+
+        assert len(results) == 2
+        by_entries = {tuple(r.entry_uids): r for r in list_invoices(tmp_path)}
+        assert by_entries[(uids["a"],)].total == 1200.0
+        assert by_entries[(uids["a"],)].group_name == "dev"
+        assert by_entries[(uids["b"],)].total == 300.0
+
+    def test_two_unflagged_same_service_entries_stay_combined(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8, description="a")
+        add_work_entry(tmp_path, "2026-03-11", "acme", "dev", qty=2, description="b")
+
+        (result,) = self._generate(tmp_path, config_file, config)
+
+        (record,) = list_invoices(tmp_path)
+        assert record.total == 1500.0 == result["total"]
+        assert len(record.entry_uids) == 2
+
+    def test_one_named_entry_is_billed_alone(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices, load_work_entries
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8, description="a")
+        add_work_entry(tmp_path, "2026-03-11", "acme", "dev", qty=2, description="b")
+        uids = self._uids(tmp_path)
+
+        (result,) = self._generate(tmp_path, config_file, config, entry_uids=[uids["b"]])
+
+        (record,) = list_invoices(tmp_path)
+        assert record.entry_uids == [uids["b"]]
+        assert result["total"] == 300.0
+        invoiced = {e.description: e.invoice for e in load_work_entries(tmp_path)}
+        assert invoiced == {"a": "", "b": "INV-000001"}
+
+    def test_two_named_same_service_entries_share_one_invoice(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        for name in ("a", "b", "c"):
+            add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=1, description=name)
+        uids = self._uids(tmp_path)
+
+        results = self._generate(
+            tmp_path, config_file, config, entry_uids=[uids["a"], uids["c"]],
+        )
+
+        assert len(results) == 1
+        (record,) = list_invoices(tmp_path)
+        assert sorted(record.entry_uids) == sorted([uids["a"], uids["c"]])
+
+    def test_named_entries_ignore_the_period(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-05-10", "acme", "dev", qty=1, description="may")
+        uids = self._uids(tmp_path)
+
+        results = self._generate(
+            tmp_path, config_file, config, period="2026-03", entry_uids=[uids["may"]],
+        )
+        assert len(results) == 1
+
+    def test_an_unknown_uid_errors_and_writes_nothing(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8, description="a")
+        uids = self._uids(tmp_path)
+
+        with pytest.raises(ValueError, match="no-such-uid"):
+            self._generate(tmp_path, config_file, config, entry_uids=[uids["a"], "no-such-uid"])
+
+        assert list_invoices(tmp_path) == []
+        assert not (tmp_path / "invoices").exists()
+        assert parse_invoicing_config(config_file).next_invoice_number == 1
+
+    def test_an_invoiced_uid_errors_and_writes_nothing(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8, description="a")
+        add_work_entry(tmp_path, "2026-03-11", "acme", "dev", qty=2, description="b")
+        uids = self._uids(tmp_path)
+        self._generate(tmp_path, config_file, config, entry_uids=[uids["a"]])
+
+        with pytest.raises(ValueError, match="already invoiced"):
+            self._generate(tmp_path, config_file, config, entry_uids=[uids["b"], uids["a"]])
+
+        assert [r.number for r in list_invoices(tmp_path)] == ["INV-000001"]
+        assert len(list((tmp_path / "invoices").rglob("*.pdf"))) == 1
 
 
 class TestInvoiceHtmlEscaping:
