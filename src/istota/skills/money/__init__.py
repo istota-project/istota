@@ -550,6 +550,8 @@ def cmd_invoice_generate(args):
         cli_args += ["--client", args.client]
     if args.entity:
         cli_args += ["--entity", args.entity]
+    for uid in args.entry or []:
+        cli_args += ["--entry", uid]
     if args.dry_run:
         cli_args.append("--dry-run")
     _output(_run(cli_args))
@@ -981,9 +983,13 @@ def build_parser():
     inv_sub = p_inv.add_subparsers(dest="invoice_command")
 
     p_inv_gen = inv_sub.add_parser("generate", help="Generate invoices")
-    p_inv_gen.add_argument("--period", "-p", help="Billing period (YYYY-MM)")
+    p_inv_gen.add_argument("--period", "-p", metavar="YYYY-MM",
+                           help="Bill unbilled work dated on or before the end of this "
+                                "month (earlier months included)")
     p_inv_gen.add_argument("--client", "-c", help="Filter by client")
     p_inv_gen.add_argument("--entity", "-e", help="Filter by entity")
+    p_inv_gen.add_argument("--entry", action="append", metavar="UID",
+                           help="Bill exactly this entry (repeatable); --period is ignored")
     p_inv_gen.add_argument("--dry-run", action="store_true", help="Preview only")
 
     p_inv_list = inv_sub.add_parser("list", help="List invoices")

@@ -309,6 +309,14 @@ class TestCommandDispatch:
         assert args[args.index("--reason") + 1] == "split in two"
         assert args[args.index("--replaced-by") + 1] == "INV-000002,INV-000003"
 
+    def test_invoice_generate_passes_each_entry(self, captured):
+        from istota.skills.money import main
+
+        main(["invoice", "generate", "--entry", "u1", "--entry", "u2", "--dry-run"])
+        assert captured[-1] == [
+            "invoice", "generate", "--entry", "u1", "--entry", "u2", "--dry-run",
+        ]
+
     def test_invoice_list_active(self, captured):
         from istota.skills.money import main
 
