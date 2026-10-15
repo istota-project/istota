@@ -240,6 +240,24 @@ describe('PDF preview', () => {
     expect(open).not.toHaveBeenCalled();
   });
 
+  it('disables Download PDF on an open invoice with no PDF', async () => {
+    listed = [invoiceRow({ has_pdf: false })];
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(Page);
+    await openMenu('INV-000010');
+    const item = await screen.findByRole('menuitem', { name: 'Download PDF' });
+    expect(item).toHaveAttribute('data-disabled');
+    await fireEvent.click(item);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('enables Download PDF when the invoice has one', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(Page);
+    await choose('INV-000010', 'Download PDF');
+    expect(open).toHaveBeenCalledWith(url, '_blank');
+  });
+
   it('returns focus to the row kebab when the viewer closes', async () => {
     vi.stubGlobal(
       'ResizeObserver',

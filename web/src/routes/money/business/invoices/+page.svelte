@@ -128,7 +128,11 @@
       items.push({ label: 'Mark paid', onSelect: () => handleMarkPaid(inv), disabled: busy });
     }
     items.push(previewItem(inv));
-    items.push({ label: 'Download PDF', onSelect: () => handleDownloadPdf(inv) });
+    items.push({
+      label: 'Download PDF',
+      onSelect: () => handleDownloadPdf(inv),
+      disabled: !inv.has_pdf,
+    });
     items.push({
       label: 'Void invoice…',
       onSelect: () => (voiding = inv),
