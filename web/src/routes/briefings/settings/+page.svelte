@@ -556,11 +556,16 @@
           directive: block.directive ?? '',
           render_mode: block.render_mode,
           options: block.options ?? {},
-          sources: block.sources.map((source) => ({
-            kind: source.kind,
-            config: source.config ?? {},
-            enabled: source.enabled,
-          })),
+          // Legacy empty blocks remain copyable through the block-only API.
+          ...(block.sources.length
+            ? {
+                sources: block.sources.map((source) => ({
+                  kind: source.kind,
+                  config: source.config ?? {},
+                  enabled: source.enabled,
+                })),
+              }
+            : {}),
         });
       }
       await Promise.all([reloadSchedule(), reloadContent()]);

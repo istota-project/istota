@@ -345,6 +345,33 @@ describe('briefing block builder', () => {
     expect(within(dialog).getByRole('button', { name: 'Delete' })).not.toBeDisabled();
   });
 
+  it('keeps legacy zero-source blocks when duplicating a whole briefing', async () => {
+    const legacy = structuredClone(blocks[0]);
+    legacy.sources = [];
+    api.getBriefingConfig.mockResolvedValue({
+      briefings: [{ name: 'morning', blocks: [legacy] }],
+      schedule_names: ['morning'],
+      source_kinds: ['calendar'],
+      structured_kinds: [],
+      block_templates: templates,
+    });
+    await mount();
+    await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Duplicate' }));
+    await waitFor(() =>
+      expect(api.putBriefingBlock).toHaveBeenCalledWith({
+        briefing_name: 'morning-copy',
+        title: legacy.title,
+        directive: legacy.directive,
+        render_mode: legacy.render_mode,
+        options: legacy.options,
+      }),
+    );
+    expect(api.upsertBriefing).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'morning-copy', enabled: false }),
+    );
+  });
+
   it('includes empty disabled schedules from the live listing and pairs schedule with content', async () => {
     await mount();
     const trigger = screen.getByRole('button', { name: 'Briefing', exact: true });
