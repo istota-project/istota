@@ -35,6 +35,16 @@ Content **blocks** are seeded once into the per-user briefings module DB from co
 
 Because a name can come from either source, or from blocks with no schedule at all, `istota briefings list` (and `istota-skill briefings list`) is what answers "which briefings does this user actually have" — every effective name after defaults and disabled rows are applied, with each one's block count and its latest archived generation. Asking for a name that is not on that list now returns the valid options rather than an empty briefing: a zero-row block query used to read as "configured, no content", so a typo or a case mismatch produced a confident and wrong success (ISSUE-328).
 
+## Building a briefing
+
+Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs; operator-managed schedules remain read-only.
+
+Add block opens a searchable preset list for feeds, websites, newsletters, calendar, markets, tasks, notes, reminders, shared content or a custom block. Presets use the existing sources. Feed presets need Feeds enabled with a subscription or category; shared content needs an available shared block. Choose the source's feed, website, file or shared-block name before saving.
+
+The block editor keeps a local draft of the title, source list and width. Automatic uses one column, Wide uses two where space allows, and Full width spans the reader pane. All widths become one column on a narrow pane. Advanced contains the directive, generation mode, story count and tone. Save block writes the block and all its sources together. Cancel discards the draft after confirmation when it has changes; a failed save keeps it open. The app bar's Save continues to control the separate HTML email preference.
+
+Each block's actions include Edit, Move up, Move down, Duplicate and Delete. Moves work with the keyboard or touch and keep reading order. Duplication copies every source, including disabled ones. Deleting or changing a block affects future editions; existing editions remain available. Admins can still manage and run shared blocks in their own card.
+
 ## Default briefings
 
 A canonical shared set defined once in the top-level `[[default_briefings]]` section is seeded by name into each opted-in user (per-user `default_briefings` flag, default on; an explicit user briefing of the same name wins). Seeding is one-time — later web edits win and re-runs never clobber them. Opt a user out with `istota user ensure --no-default-briefings`.
@@ -51,11 +61,12 @@ name = "morning"
 cron = "0 6 * * *"               # 6am in user's timezone
 conversation_token = "room123"    # Talk room to post to
 title = "Morning Briefing"        # optional; blank derives it from the name
-output = "both"                   # "talk", "email", or "both"
+output = "talk,email"             # one destination or a comma-separated list
 
   [[users.alice.briefings.blocks]]
   title = "Today"
   render_mode = "structured"
+  options = { presentation = { width = "wide" } }
 
     [[users.alice.briefings.blocks.sources]]
     kind = "calendar"
@@ -63,16 +74,19 @@ output = "both"                   # "talk", "email", or "both"
 
     [[users.alice.briefings.blocks.sources]]
     kind = "todos"
-    config = {}
+    config = { path = "shared/tasks.md" }
 
   [[users.alice.briefings.blocks]]
   title = "World News"
   render_mode = "synthesis"
+  options = { story_count = 5, tone = "neutral", presentation = { width = "full" } }
 
     [[users.alice.briefings.blocks.sources]]
     kind = "browse"
     config = { preset = "ap" }
 ```
+
+Width lives in `options.presentation.width` and accepts `auto`, `wide` or `full`, with `auto` as the default. The editor preserves other option fields. Config-authored blocks seed once; later config edits do not overwrite a user's saved block changes.
 
 ## Shared curated content
 

@@ -152,8 +152,7 @@ def _schedule_names(cfg, username: str) -> list[str]:
     try:
         from istota.user_briefings import list_briefings
         for b in list_briefings(cfg.db_path, username):
-            if b.enabled:
-                _add(b.name)
+            _add(b.name)
     except Exception:  # noqa: BLE001
         pass
 

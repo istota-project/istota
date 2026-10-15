@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Briefing settings has a preset picker and a block editor that saves a complete draft. You can set card widths, move blocks by keyboard or touch, and keep editing disabled briefings; cancellation and failed saves preserve saved content.
 - New briefing editions show ordered cards that adapt to the reader pane, with wider blocks where configured. Long cards open in a full-block viewer, and older editions keep their complete linear view.
 - Briefing emails keep every section in order, with a heading in HTML and usable article links in plain text. Switching off HTML or a rendering failure still delivers the complete plain edition.
 - The Ansible management role takes the application settings only as `istota_plan`, with credentials in `istota_plan_secrets`. `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets` are gone, and so is the generated config reference in `defaults/main.yml`; set the plan from `istota snapshot --format json`. `istota migrate role-vars` now writes the old per-user credentials as `istota_plan_secrets` and leaves the plan to the VM's snapshot.

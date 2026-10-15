@@ -231,7 +231,7 @@ class TestScheduleNames:
 
         assert _schedule_names(cfg, "alice") == ["Evening"]
 
-    def test_disabled_db_briefing_excluded(self, tmp_path):
+    def test_disabled_db_briefing_remains_editable(self, tmp_path):
         from types import SimpleNamespace
 
         import istota.db as fdb
@@ -246,7 +246,7 @@ class TestScheduleNames:
         )
         cfg = SimpleNamespace(db_path=framework_db, users={})
 
-        assert _schedule_names(cfg, "alice") == []
+        assert _schedule_names(cfg, "alice") == ["Muted"]
 
 
 class TestPickers:

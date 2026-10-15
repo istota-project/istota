@@ -1,10 +1,11 @@
 <script lang="ts">
   // Per-kind config fields for a briefing source. Shared by the per-user block
   // editor and the admin shared-block editor so both render identically. Operates
-  // on a plain `config` object via an `onChange(patch)` callback — the caller owns
-  // where the config lives. Path kinds (todos/reminders/notes) keep their
-  // debounced file-picker in the page and are not handled here.
-  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  // on a plain `config` object via an `onChange(patch)` callback. File checks
+  // are advisory and never write the draft.
+  import { onDestroy } from 'svelte';
+  import { checkBriefingPath, getBriefingPathSuggestions } from '$lib/api';
+  import { AutocompleteInput, Button, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
   interface Props {
@@ -24,6 +25,50 @@
     rssOptions = [],
     sharedBlockOptions = [],
   }: Props = $props();
+
+  let pathSuggestions = $state<string[]>([]);
+  let pathStatus = $state<'' | 'checking' | 'ok' | 'missing'>('');
+  let pathResolved = $state('');
+  let pathSeq = 0;
+  let pathTimer: ReturnType<typeof setTimeout> | undefined;
+  const fileKinds = ['todos', 'reminders', 'notes'];
+  const filePlaceholder: Record<string, string> = {
+    todos: 'shared/team-todo.md',
+    reminders: 'istota/config/reminders.md',
+    notes: 'istota/notes/agenda.md',
+  };
+
+  $effect(() => {
+    const fileKind = fileKinds.includes(kind);
+    const path = String(config.path ?? '').trim();
+    const seq = ++pathSeq;
+    clearTimeout(pathTimer);
+    pathStatus = '';
+    pathResolved = '';
+    if (!fileKind) return;
+    pathTimer = setTimeout(() => {
+      getBriefingPathSuggestions(path)
+        .then((response) => {
+          if (seq === pathSeq) pathSuggestions = response.paths;
+        })
+        .catch(() => {});
+      if (!path) return;
+      pathStatus = 'checking';
+      checkBriefingPath(path)
+        .then((response) => {
+          if (seq !== pathSeq) return;
+          pathStatus = response.ok ? 'ok' : 'missing';
+          pathResolved = response.resolved ?? '';
+        })
+        .catch(() => {
+          if (seq === pathSeq) pathStatus = '';
+        });
+    }, 150);
+  });
+  onDestroy(() => {
+    clearTimeout(pathTimer);
+    pathSeq += 1;
+  });
 
   const EMAIL_MODE_OPTIONS: SelectOption[] = [
     { value: 'shared', label: 'Shared newsletter pool' },
@@ -60,7 +105,28 @@
   const browseValue = $derived(config.preset ? `preset:${config.preset}` : '__custom__');
 </script>
 
-{#if kind === 'email'}
+{#if fileKinds.includes(kind)}
+  <SettingsField
+    label="File path"
+    hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's folder. Required, with no default."
+  >
+    <AutocompleteInput
+      value={String(config.path ?? '')}
+      options={pathSuggestions}
+      placeholder={filePlaceholder[kind]}
+      invalid={pathStatus === 'missing'}
+      monospace
+      ariaLabel="File path"
+      filter={(options) => options}
+      onValueChange={(value) => onChange({ path: value || undefined })}
+    />
+    {#if pathStatus === 'checking'}<p class="caption">Checking…</p>
+    {:else if pathStatus === 'ok'}<p class="caption">Resolves to {pathResolved}</p>
+    {:else if pathStatus === 'missing'}<p class="caption">
+        No file there yet. This source is skipped until the file exists.
+      </p>{/if}
+  </SettingsField>
+{:else if kind === 'email'}
   <SettingsField label="Mode">
     <Select
       value={(config.mode as string) ?? 'shared'}

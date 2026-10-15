@@ -8,13 +8,8 @@
     deleteBriefing,
     getBriefingConfig,
     putBriefingBlock,
-    deleteBriefingBlock,
-    putBriefingSource,
-    deleteBriefingSource,
     getBrowsePresets,
     getFeedOptions,
-    checkBriefingPath,
-    getBriefingPathSuggestions,
     getSharedBlockOptions,
     getSharedBlocks,
     putSharedBlock,
@@ -22,7 +17,6 @@
     runSharedBlock,
     type UserBriefingRow,
     type BriefingBlock,
-    type BriefingSource,
     type BriefingConfigResponse,
     type BrowsePreset,
     type FeedOptions,
@@ -30,12 +24,10 @@
     type SharedBlock,
   } from '$lib/api';
   import {
-    AutocompleteInput,
     Button,
     ConfirmDialog,
     EmptyState,
     IconButton,
-    Input,
     KebabMenu,
     Select,
     type KebabItem,
@@ -43,6 +35,7 @@
   } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import BlockBuilder from '$lib/components/briefings/BlockBuilder.svelte';
   import SourceConfigFields from '$lib/components/briefings/SourceConfigFields.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { getCurrentUser } from '$lib/userContext';
@@ -121,50 +114,7 @@
   // Live pickable shared blocks (built-in + custom-published) for the Shared source.
   let sharedBlockOptions = $state<SharedBlockOption[]>([]);
   let selectedName = $state<string>('');
-  let newBlockTitle = $state('');
-  let expandedId = $state<number | null>(null);
-  let addingSaving = $state(false);
-
-  // Responsive columns for the blocks table are decided here rather than by a
-  // container query, because the expanded editor is a `colspan` row and the two
-  // must agree: a `colspan` larger than the number of rendered columns makes the
-  // browser invent the missing ones, which on mobile collapsed the Block column
-  // and stranded the kebab mid-table. Measured on the table's own scroll box, so
-  // the thresholds are the width the table actually has. 0 = not yet measured
-  // (SSR/first paint) — show everything and let the observer narrow it.
-  let blocksWidth = $state(0);
-  const showBlockSources = $derived(blocksWidth === 0 || blocksWidth > 620);
-  const showBlockRender = $derived(blocksWidth === 0 || blocksWidth > 470);
-  const blockColumnCount = $derived(3 + (showBlockRender ? 1 : 0) + (showBlockSources ? 1 : 0));
-  // Surfaces failures from the non-atomic block/source duplicate, which can
-  // leave a partially built block behind.
-  let blockError = $state('');
-
-  // The source currently open in the inline config editor (a draft copy — only
-  // committed to the backend on Save).
-  let sourceDraft = $state<{ id: number; kind: string; config: Record<string, unknown> } | null>(
-    null,
-  );
-
-  // File-path picker state for todos/reminders/notes sources. Suggestions are
-  // fetched server-side as the user types (so deep/late files surface), and
-  // existence is verified as an advisory hint — never a save blocker (the
-  // resolver is fail-soft: a missing file just contributes a provenance note).
-  let pathSuggestions = $state<string[]>([]);
-  // '' idle | 'checking' | 'ok' | 'missing' — advisory only.
-  let pathStatus = $state<'' | 'checking' | 'ok' | 'missing'>('');
-  let pathResolved = $state('');
-  // Debounce + last-write-wins guards for the two async calls on each keystroke.
-  let pathDebounce: ReturnType<typeof setTimeout> | undefined;
-  let suggestSeq = 0;
-  let verifySeq = 0;
-
-  // A unified delete confirmation across briefings / blocks / sources.
-  let confirmDelete = $state<{
-    kind: 'briefing' | 'block' | 'source';
-    id: number;
-    label: string;
-  } | null>(null);
+  let confirmDelete = $state<{ id: number; label: string } | null>(null);
 
   // --- Admin: shared blocks (generated once globally, read by any user) ---
   type SharedDraftSource = { kind: string; config: Record<string, unknown> };
@@ -408,11 +358,6 @@
     notes: 'Notes',
     shared_block: 'Shared block',
   };
-  const FILE_PLACEHOLDER: Record<string, string> = {
-    todos: 'shared/team-todo.md',
-    reminders: 'istota/config/reminders.md',
-    notes: 'istota/notes/agenda.md',
-  };
   const RENDER_OPTIONS: SelectOption[] = [
     { value: 'synthesis', label: 'Synthesis (summarize)' },
     { value: 'structured', label: 'Structured (verbatim)' },
@@ -423,10 +368,13 @@
   const allNames = $derived.by(() => {
     if (!config) return [] as string[];
     const set = new Set<string>();
+    briefings.forEach((briefing) => set.add(briefing.name));
     config.schedule_names.forEach((n) => set.add(n));
     config.briefings.forEach((b) => set.add(b.name));
     return [...set];
   });
+
+  const selectedSchedule = $derived(briefings.find((briefing) => briefing.name === selectedName));
 
   const currentBlocks = $derived.by(() => {
     if (!config) return [] as BriefingBlock[];
@@ -506,9 +454,6 @@
           ]);
           await reloadContent();
         })(),
-        getBriefingPathSuggestions()
-          .then((r) => (pathSuggestions = r.paths))
-          .catch(() => (pathSuggestions = [])),
         getSharedBlockOptions()
           .then((r) => (sharedBlockOptions = r.options))
           .catch(() => (sharedBlockOptions = [])),
@@ -605,22 +550,18 @@
       });
       const blocks = config?.briefings.find((x) => x.name === b.name)?.blocks ?? [];
       for (const block of blocks) {
-        const resp = await putBriefingBlock({
+        await putBriefingBlock({
           briefing_name: name,
           title: block.title,
           directive: block.directive ?? '',
           render_mode: block.render_mode,
           options: block.options ?? {},
+          sources: block.sources.map((source) => ({
+            kind: source.kind,
+            config: source.config ?? {},
+            enabled: source.enabled,
+          })),
         });
-        const newId = resp.block?.id;
-        if (!newId) continue;
-        for (const src of block.sources ?? []) {
-          await putBriefingSource({
-            block_id: newId,
-            kind: src.kind,
-            config: JSON.parse(JSON.stringify(src.config ?? {})),
-          });
-        }
       }
       await Promise.all([reloadSchedule(), reloadContent()]);
       briefingsRefreshNonce.update((n) => n + 1);
@@ -639,13 +580,14 @@
       {
         label: 'Delete',
         danger: true,
-        onSelect: () => (confirmDelete = { kind: 'briefing', id: b.id!, label: b.name }),
+        onSelect: () => (confirmDelete = { id: b.id!, label: b.name }),
       },
     ];
   }
 
   async function submitBriefing(e: SubmitEvent) {
     e.preventDefault();
+    if (briefingSaving) return;
     briefingError = '';
     const name = newBriefing.name.trim();
     const cron = newBriefing.cron.trim();
@@ -677,292 +619,28 @@
     }
   }
 
-  // ---- Block handlers ----
-  async function addBlock() {
-    const title = newBlockTitle.trim();
-    if (!title || !selectedName) return;
-    addingSaving = true;
-    try {
-      const resp = await putBriefingBlock({ briefing_name: selectedName, title });
-      newBlockTitle = '';
-      await reloadContent();
-      if (resp.block?.id) expandedId = resp.block.id;
-    } finally {
-      addingSaving = false;
-    }
-  }
-
-  function toggleExpand(block: BriefingBlock) {
-    expandedId = expandedId === block.id ? null : block.id;
-    sourceDraft = null;
-  }
-
-  async function updateBlock(block: BriefingBlock, patch: Record<string, unknown>) {
-    await putBriefingBlock({ id: block.id, ...patch });
-    await reloadContent();
-  }
-
-  function askRemoveBlock(block: BriefingBlock) {
-    confirmDelete = { kind: 'block', id: block.id, label: block.title };
-  }
-
-  async function move(block: BriefingBlock, dir: -1 | 1) {
-    const ids = currentBlocks.map((b) => b.id);
-    const idx = ids.indexOf(block.id);
-    const swap = idx + dir;
-    if (swap < 0 || swap >= ids.length) return;
-    [ids[idx], ids[swap]] = [ids[swap], ids[idx]];
-    await putBriefingBlock({ reorder: { briefing_name: selectedName, ordered_ids: ids } });
-    await reloadContent();
-  }
-
-  // Block create takes no `sources` array, so a clone is one create plus one
-  // PUT per source. Not atomic — a mid-way failure leaves a partial block
-  // rather than rolling back, which is why the error surfaces on the card.
-  async function cloneBlock(block: BriefingBlock) {
-    blockError = '';
-    try {
-      const resp = await putBriefingBlock({
-        briefing_name: selectedName,
-        title: `${block.title} (copy)`,
-        directive: block.directive ?? '',
-        render_mode: block.render_mode,
-        options: block.options ?? {},
-      });
-      const newId = resp.block?.id;
-      if (newId) {
-        for (const src of block.sources ?? []) {
-          await putBriefingSource({
-            block_id: newId,
-            kind: src.kind,
-            config: JSON.parse(JSON.stringify(src.config ?? {})),
-          });
-        }
-      }
-      await reloadContent();
-      if (newId) expandedId = newId;
-    } catch (e) {
-      blockError = (e as Error).message || 'Duplicate failed';
-    }
-  }
-
-  function blockMenu(block: BriefingBlock): KebabItem[] {
-    return [
-      {
-        label: expandedId === block.id ? 'Collapse' : 'Edit',
-        onSelect: () => toggleExpand(block),
-      },
-      { label: 'Duplicate', onSelect: () => void cloneBlock(block) },
-      { label: 'Delete', danger: true, onSelect: () => askRemoveBlock(block) },
-    ];
-  }
-
-  // ---- Source handlers ----
-  async function addSource(block: BriefingBlock, kind: string) {
-    const cfg: Record<string, unknown> = kind === 'email' ? { mode: 'shared' } : {};
-    const resp = await putBriefingSource({ block_id: block.id, kind, config: cfg });
-    await reloadContent();
-    if (resp.id) sourceDraft = { id: resp.id, kind, config: cfg };
-    resetPathState();
-  }
-
-  async function cloneSource(block: BriefingBlock, source: BriefingSource) {
-    blockError = '';
-    try {
-      await putBriefingSource({
-        block_id: block.id,
-        kind: source.kind,
-        config: JSON.parse(JSON.stringify(source.config ?? {})),
-      });
-      await reloadContent();
-    } catch (e) {
-      blockError = (e as Error).message || 'Duplicate failed';
-    }
-  }
-
-  function sourceMenu(block: BriefingBlock, source: BriefingSource): KebabItem[] {
-    return [
-      { label: 'Edit', onSelect: () => startEditSource(source) },
-      { label: 'Duplicate', onSelect: () => void cloneSource(block, source) },
-      { label: 'Remove', danger: true, onSelect: () => askRemoveSource(source) },
-    ];
-  }
-
-  function startEditSource(source: BriefingSource) {
-    sourceDraft = {
-      id: source.id,
-      kind: source.kind,
-      // JSON round-trip deep-clones and strips the reactive $state proxy
-      // (structuredClone rejects proxies); source config is plain JSON.
-      config: JSON.parse(JSON.stringify(source.config ?? {})),
-    };
-    resetPathState();
-    // Verify the existing path up front so the hint reflects reality on open.
-    if (FILE_KINDS.includes(source.kind)) {
-      const p = String(sourceDraft.config.path ?? '').trim();
-      if (p) refreshPathHints(p);
-    }
-  }
-
-  function cancelSource() {
-    sourceDraft = null;
-    resetPathState();
-  }
-
-  const FILE_KINDS = ['todos', 'reminders', 'notes'];
-
-  function resetPathState() {
-    clearTimeout(pathDebounce);
-    pathDebounce = undefined;
-    suggestSeq += 1;
-    verifySeq += 1;
-    pathStatus = '';
-    pathResolved = '';
-  }
-
-  // Fetch matching suggestions + verify existence for the current path. Both
-  // are advisory (verification never blocks the save) and both are guarded by
-  // a per-call sequence so a slower earlier response can't clobber a newer one.
-  async function refreshPathHints(path: string) {
-    const query = path.trim();
-
-    const sSeq = (suggestSeq += 1);
-    getBriefingPathSuggestions(query)
-      .then((r) => {
-        if (sSeq === suggestSeq) pathSuggestions = r.paths;
-      })
-      .catch(() => {});
-
-    const vSeq = (verifySeq += 1);
-    if (!query) {
-      pathStatus = '';
-      pathResolved = '';
-      return;
-    }
-    pathStatus = 'checking';
-    try {
-      const res = await checkBriefingPath(query);
-      if (vSeq !== verifySeq) return; // superseded by a later keystroke
-      pathStatus = res.ok ? 'ok' : 'missing';
-      pathResolved = res.ok ? (res.resolved ?? '') : '';
-    } catch {
-      // A transient verification failure is not the user's problem — leave
-      // the hint idle rather than showing a scary error or blocking save.
-      if (vSeq === verifySeq) {
-        pathStatus = '';
-        pathResolved = '';
-      }
-    }
-  }
-
-  // Debounced input handler for the file-path field.
-  function onPathInput(v: string) {
-    setDraftConfig({ path: v.trim() || undefined });
-    clearTimeout(pathDebounce);
-    pathDebounce = setTimeout(() => refreshPathHints(v), 150);
-  }
-
-  async function saveSource() {
-    if (!sourceDraft) return;
-    // Verification is advisory — the resolver is fail-soft (a missing file
-    // contributes a provenance note, never an error), so a not-yet-created
-    // or transiently-unreachable path must not trap the user. Save always
-    // proceeds; the inline hint tells them whether it currently resolves.
-    await putBriefingSource({ id: sourceDraft.id, config: sourceDraft.config });
-    sourceDraft = null;
-    resetPathState();
-    await reloadContent();
-  }
-
-  async function toggleSource(source: BriefingSource, enabled: boolean) {
-    await putBriefingSource({ id: source.id, enabled });
-    await reloadContent();
-  }
-
-  function askRemoveSource(source: BriefingSource) {
-    confirmDelete = {
-      kind: 'source',
-      id: source.id,
-      label: KIND_LABELS[source.kind] ?? source.kind,
-    };
+  function updateBlocks(blocks: BriefingBlock[]) {
+    if (!config) return;
+    const others = config.briefings.filter((briefing) => briefing.name !== selectedName);
+    config = { ...config, briefings: [...others, { name: selectedName, blocks }] };
   }
 
   async function performDelete() {
-    if (!confirmDelete) return;
+    if (!confirmDelete || briefingSaving) return;
     const target = confirmDelete;
-    confirmDelete = null;
+    briefingSaving = true;
     try {
-      if (target.kind === 'briefing') {
-        await deleteBriefing(target.id);
-        await Promise.all([reloadSchedule(), reloadContent()]);
-        briefingsRefreshNonce.update((n) => n + 1);
-      } else if (target.kind === 'block') {
-        await deleteBriefingBlock(target.id);
-        if (expandedId === target.id) expandedId = null;
-        await reloadContent();
-      } else {
-        await deleteBriefingSource(target.id);
-        if (sourceDraft?.id === target.id) sourceDraft = null;
-        await reloadContent();
-      }
+      await deleteBriefing(target.id);
+      await Promise.all([reloadSchedule(), reloadContent()]);
+      if (!allNames.includes(selectedName)) selectedName = allNames[0] ?? '';
+      confirmDelete = null;
+      briefingsRefreshNonce.update((n) => n + 1);
     } catch (e) {
-      error = (e as Error).message || 'Delete failed';
+      briefingError = (e as Error).message || 'Delete failed';
+    } finally {
+      briefingSaving = false;
     }
   }
-
-  // ---- Draft config helpers ----
-  function setDraftConfig(patch: Record<string, unknown>) {
-    if (!sourceDraft) return;
-    const next = { ...sourceDraft.config, ...patch };
-    for (const [k, v] of Object.entries(patch)) {
-      if (v === undefined || v === null) delete next[k];
-    }
-    sourceDraft = { ...sourceDraft, config: next };
-  }
-
-  // ---- Summaries / labels ----
-  function feedRefLabel(ref: { kind: string; value: number }): string {
-    const list = ref.kind === 'category' ? feedOptions?.categories : feedOptions?.subscriptions;
-    const hit = list?.find((o) => o.value === ref.value);
-    const prefix = ref.kind === 'category' ? 'Category' : 'Feed';
-    return hit ? `${prefix}: ${hit.label}` : `${prefix} #${ref.value}`;
-  }
-
-  function sourceSummary(s: BriefingSource): string {
-    const c = s.config ?? {};
-    switch (s.kind) {
-      case 'email':
-        return c.mode === 'senders'
-          ? `Senders: ${((c.senders as string[]) ?? []).join(', ') || '(none set)'}`
-          : 'Shared newsletter pool';
-      case 'rss': {
-        const ref = c.feed_ref as { kind: string; value: number } | undefined;
-        return ref ? feedRefLabel(ref) : 'No feed selected';
-      }
-      case 'browse':
-        if (c.preset) return presets.find((p) => p.key === c.preset)?.name ?? String(c.preset);
-        if (c.url) return String(c.url);
-        return 'No page set';
-      case 'markets': {
-        const parts = [c.indices, c.futures].filter((x) => Array.isArray(x) && x.length);
-        return parts.length ? 'Custom tickers' : 'Default indices & futures';
-      }
-      case 'calendar':
-        return 'Your connected calendars';
-      case 'todos':
-      case 'reminders':
-      case 'notes':
-        return c.path ? String(c.path) : 'No path set';
-      case 'shared_block':
-        return c.name ? `Shared: ${String(c.name)}` : 'No shared block selected';
-      default:
-        return '';
-    }
-  }
-
-  const addSourceOptions: SelectOption[] = $derived(
-    sourceKinds.map((k) => ({ value: k, label: KIND_LABELS[k] ?? k })),
-  );
 </script>
 
 <svelte:head>
@@ -982,113 +660,130 @@
     </div>
   {:else}
     <SettingsCard
-      title="Schedule &amp; delivery ({briefings.length})"
-      description="Cron-scheduled summaries posted to a Talk room or sent by email. Operator-managed entries (from config.toml) are read-only here."
+      title="Briefing"
+      description="Choose a briefing to edit its schedule and ordered content blocks."
     >
-      {#if briefings.length === 0}
-        <EmptyState>No briefings scheduled yet.</EmptyState>
-      {:else}
-        <div class="table-scroll">
-          <table class="grid sched-table">
-            <thead>
-              <tr>
-                <th class="col-name">Name</th>
-                <th>Title</th>
-                <th class="nowrap">Cron</th>
-                <th>Output</th>
-                <th class="col-token">Token</th>
-                <th class="col-source">Source</th>
-                <th class="actions"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each briefings as b (`${b.managed}-${b.id ?? b.name}`)}
-                <tr>
-                  <td class="col-name">
-                    {b.name}
-                    {#if !b.enabled}<span class="muted"> (disabled)</span>{/if}
-                  </td>
-                  <td>
-                    {#if b.title}
-                      {b.title}
-                    {:else}
-                      <span class="muted">{derivedTitle(b.name)}</span>
-                    {/if}
-                  </td>
-                  <td class="nowrap"><code>{b.cron}</code></td>
-                  <td>{b.output}</td>
-                  <td class="col-token muted"><code>{b.conversation_token || '—'}</code></td>
-                  <td class="col-source muted">
-                    {b.managed === 'config' ? 'config.toml' : 'user'}
-                  </td>
-                  <td class="actions">
-                    {#if b.managed === 'db' && b.id !== undefined}
-                      <KebabMenu items={briefingMenu(b)} ariaLabel="Briefing actions" />
-                    {/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+      {#if config}
+        <SettingsField label="Briefing" labelled={false}>
+          <Select
+            value={selectedName}
+            options={allNames.map((name) => ({
+              value: name,
+              label: `${name}${briefings.find((briefing) => briefing.name === name)?.enabled === false ? ' (disabled)' : ''}`,
+            }))}
+            onValueChange={(value) => {
+              selectedName = value;
+            }}
+            ariaLabel="Briefing"
+            fullWidth
+          />
+        </SettingsField>
+        {#if selectedName}
+          <div class="schedule-summary" aria-label="Selected briefing schedule">
+            {#if selectedSchedule}
+              <div class="schedule-text">
+                <strong>{selectedSchedule.title || derivedTitle(selectedName)}</strong>
+                <p class="caption">
+                  <code>{selectedSchedule.cron}</code> · {selectedSchedule.output}{selectedSchedule.enabled
+                    ? ''
+                    : ' · Disabled'}
+                </p>
+                {#if selectedSchedule.conversation_token}<p class="caption">
+                    Talk room: {selectedSchedule.conversation_token}
+                  </p>{/if}
+                {#if selectedSchedule.managed === 'config'}<p class="caption">
+                    Schedule managed by config.toml.
+                  </p>{/if}
+              </div>
+              {#if selectedSchedule.managed === 'db' && selectedSchedule.id !== undefined}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onclick={() => selectedSchedule && editBriefing(selectedSchedule)}
+                  >Edit schedule</Button
+                >
+                <KebabMenu items={briefingMenu(selectedSchedule)} ariaLabel="Briefing actions" />
+              {/if}
+            {:else}<p class="caption">
+                No schedule. Add one below using this briefing's name.
+              </p>{/if}
+          </div>
+          {#key selectedName}
+            <BlockBuilder
+              briefingName={selectedName}
+              blocks={currentBlocks}
+              templates={config.block_templates ?? []}
+              {sourceKinds}
+              {browseOptions}
+              {rssOptions}
+              sharedBlockOptions={sharedBlockSelectOptions}
+              feedsAvailable={!!feedOptions?.available && rssOptions.length > 0}
+              onChange={updateBlocks}
+            />
+          {/key}
+        {:else}<EmptyState>No briefings scheduled yet. Add one below.</EmptyState>{/if}
       {/if}
-
-      <form class="add-form" onsubmit={submitBriefing}>
-        <h3>{briefingEditingName ? `Edit ${briefingEditingName}` : 'Add briefing'}</h3>
-        <div class="add-grid">
-          <SettingsField label="Name">
-            <input
-              type="text"
-              placeholder="morning"
-              bind:value={newBriefing.name}
-              disabled={!!briefingEditingName}
-            />
-          </SettingsField>
-          <SettingsField
-            label="Title"
-            hint="Shown as the email subject and the archive entry. Leave it blank to derive one from the name. The run date is appended automatically."
-          >
-            <input
-              type="text"
-              placeholder={derivedTitle(newBriefing.name || 'morning')}
-              bind:value={newBriefing.title}
-            />
-          </SettingsField>
-          <SettingsField label="Cron (user TZ)">
-            <input type="text" placeholder="0 7 * * 1-5" bind:value={newBriefing.cron} />
-          </SettingsField>
-          <SettingsField label="Output">
-            <Select
-              value={newBriefing.output}
-              options={briefingOutputOptions}
-              onValueChange={(v) => (newBriefing.output = v)}
-              ariaLabel="Output"
-              fullWidth
-            />
-          </SettingsField>
-          <SettingsField label="Conversation token">
-            <input
-              type="text"
-              placeholder="Talk room token"
-              bind:value={newBriefing.conversation_token}
-            />
-          </SettingsField>
-          <SettingsField label="Enabled" checkbox>
-            <input type="checkbox" bind:checked={newBriefing.enabled} />
-          </SettingsField>
-        </div>
-        <div class="add-actions">
-          <Button variant="secondary" size="sm" type="submit" disabled={briefingSaving}>
-            {briefingSaving ? 'Saving…' : briefingEditingName ? 'Save changes' : '+ Add briefing'}
-          </Button>
-          {#if briefingEditingName}
-            <Button variant="secondary" size="sm" onclick={resetBriefingForm}>Cancel</Button>
+      <details class="schedule-form" open={!!briefingEditingName || allNames.length === 0}>
+        <summary
+          >{briefingEditingName ? `Edit ${briefingEditingName} schedule` : 'Add briefing'}</summary
+        >
+        <form class="add-form" onsubmit={submitBriefing}>
+          <h3>{briefingEditingName ? `Edit ${briefingEditingName}` : 'Add briefing'}</h3>
+          <div class="add-grid">
+            <SettingsField label="Name">
+              <input
+                type="text"
+                placeholder="morning"
+                bind:value={newBriefing.name}
+                disabled={!!briefingEditingName}
+              />
+            </SettingsField>
+            <SettingsField
+              label="Title"
+              hint="Shown as the email subject and the archive entry. Leave it blank to derive one from the name. The run date is appended automatically."
+            >
+              <input
+                type="text"
+                placeholder={derivedTitle(newBriefing.name || 'morning')}
+                bind:value={newBriefing.title}
+              />
+            </SettingsField>
+            <SettingsField label="Cron (user TZ)">
+              <input type="text" placeholder="0 7 * * 1-5" bind:value={newBriefing.cron} />
+            </SettingsField>
+            <SettingsField label="Output">
+              <Select
+                value={newBriefing.output}
+                options={briefingOutputOptions}
+                onValueChange={(v) => (newBriefing.output = v)}
+                ariaLabel="Output"
+                fullWidth
+              />
+            </SettingsField>
+            <SettingsField label="Conversation token">
+              <input
+                type="text"
+                placeholder="Talk room token"
+                bind:value={newBriefing.conversation_token}
+              />
+            </SettingsField>
+            <SettingsField label="Enabled" checkbox>
+              <input type="checkbox" bind:checked={newBriefing.enabled} />
+            </SettingsField>
+          </div>
+          <div class="add-actions">
+            <Button variant="secondary" size="sm" type="submit" disabled={briefingSaving}>
+              {briefingSaving ? 'Saving…' : briefingEditingName ? 'Save changes' : '+ Add briefing'}
+            </Button>
+            {#if briefingEditingName}
+              <Button variant="secondary" size="sm" onclick={resetBriefingForm}>Cancel</Button>
+            {/if}
+          </div>
+          {#if briefingError}
+            <div class="banner error">{briefingError}</div>
           {/if}
-        </div>
-        {#if briefingError}
-          <div class="banner error">{briefingError}</div>
-        {/if}
-      </form>
+        </form>
+      </details>
     </SettingsCard>
 
     <SettingsCard
@@ -1104,303 +799,6 @@
       >
         <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
       </SettingsField>
-    </SettingsCard>
-
-    <SettingsCard
-      title="Content blocks"
-      description="Blocks become the sections of your briefing, in order. Each block has a directive and one or more sources. Click a block to edit it."
-    >
-      {#if config}
-        {#if blockError}
-          <div class="banner error">{blockError}</div>
-        {/if}
-        <div class="briefing-pick">
-          <SettingsField label="Briefing">
-            <Select
-              value={selectedName}
-              options={allNames.map((n) => ({ value: n, label: n }))}
-              onValueChange={(v) => {
-                selectedName = v;
-                expandedId = null;
-                sourceDraft = null;
-              }}
-              ariaLabel="Briefing"
-            />
-          </SettingsField>
-          {#if allNames.length === 0}
-            <span class="muted">No briefings scheduled yet — add one above first.</span>
-          {/if}
-        </div>
-
-        {#if selectedName}
-          {#if currentBlocks.length === 0}
-            <EmptyState>No blocks yet. Add one below to start shaping this briefing.</EmptyState>
-          {:else}
-            <div class="table-scroll" bind:clientWidth={blocksWidth}>
-              <table class="grid">
-                <thead>
-                  <tr>
-                    <th class="col-order">Order</th>
-                    <th>Block</th>
-                    {#if showBlockRender}
-                      <th class="col-render">Render</th>
-                    {/if}
-                    {#if showBlockSources}
-                      <th class="col-src">Sources</th>
-                    {/if}
-                    <th class="actions"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each currentBlocks as block, idx (block.id)}
-                    <tr class:expanded={expandedId === block.id}>
-                      <td class="col-order actions">
-                        <IconButton
-                          size="sm"
-                          label="Move up"
-                          title="Move up"
-                          disabled={idx === 0}
-                          onclick={() => move(block, -1)}>↑</IconButton
-                        >
-                        <IconButton
-                          size="sm"
-                          label="Move down"
-                          title="Move down"
-                          disabled={idx === currentBlocks.length - 1}
-                          onclick={() => move(block, 1)}>↓</IconButton
-                        >
-                      </td>
-                      <td>
-                        <button
-                          class="block-name"
-                          type="button"
-                          onclick={() => toggleExpand(block)}
-                        >
-                          <span class="chevron">{expandedId === block.id ? '▾' : '▸'}</span>
-                          <span class="block-title-text">{block.title}</span>
-                        </button>
-                        {#if block.directive}
-                          <div class="block-directive muted">{block.directive}</div>
-                        {/if}
-                      </td>
-                      {#if showBlockRender}
-                        <td class="col-render">
-                          <span class="render-pill">{block.render_mode}</span>
-                        </td>
-                      {/if}
-                      {#if showBlockSources}
-                        <td class="col-src">
-                          {#if block.sources.length}
-                            <div class="kind-pills">
-                              {#each block.sources as s (s.id)}
-                                <span class="kind-pill" class:off={!s.enabled}>{s.kind}</span>
-                              {/each}
-                            </div>
-                          {:else}
-                            <span class="muted">none</span>
-                          {/if}
-                        </td>
-                      {/if}
-                      <td class="actions">
-                        <KebabMenu items={blockMenu(block)} ariaLabel="Block actions" />
-                      </td>
-                    </tr>
-                    {#if expandedId === block.id}
-                      <tr class="detail-row">
-                        <td colspan={blockColumnCount}>
-                          <div class="block-detail">
-                            <div class="detail-grid">
-                              <SettingsField label="Title">
-                                <input
-                                  type="text"
-                                  value={block.title}
-                                  onchange={(e) =>
-                                    updateBlock(block, {
-                                      title: (e.target as HTMLInputElement).value,
-                                    })}
-                                />
-                              </SettingsField>
-                              <SettingsField label="Render mode">
-                                <Select
-                                  value={block.render_mode}
-                                  options={RENDER_OPTIONS}
-                                  onValueChange={(v) => updateBlock(block, { render_mode: v })}
-                                  ariaLabel="Render mode"
-                                  fullWidth
-                                />
-                              </SettingsField>
-                              <SettingsField
-                                label="Directive"
-                                wide
-                                hint="How the model should treat this block's sources."
-                              >
-                                <textarea
-                                  rows="2"
-                                  value={block.directive}
-                                  placeholder="e.g. 3–5 stories, neutral tone"
-                                  onchange={(e) =>
-                                    updateBlock(block, {
-                                      directive: (e.target as HTMLTextAreaElement).value,
-                                    })}
-                                ></textarea>
-                              </SettingsField>
-                            </div>
-
-                            <div class="sources-block">
-                              <div class="sources-head">
-                                <h4>Sources</h4>
-                                <Select
-                                  value=""
-                                  options={addSourceOptions}
-                                  placeholder="+ Add source…"
-                                  onValueChange={(v) => {
-                                    if (v) addSource(block, v);
-                                  }}
-                                  ariaLabel="Add source"
-                                />
-                              </div>
-
-                              {#if block.sources.length === 0}
-                                <EmptyState size="sm">No sources yet — add one above.</EmptyState>
-                              {:else}
-                                <table class="grid sub">
-                                  <tbody>
-                                    {#each block.sources as source (source.id)}
-                                      {#if sourceDraft?.id === source.id}
-                                        <tr class="src-form-row">
-                                          <td colspan="4" class="src-form-cell">
-                                            <div class="source-form">
-                                              <div class="source-form-head">
-                                                <span class="kind-pill">{source.kind}</span>
-                                                <span class="kind-name"
-                                                  >{KIND_LABELS[source.kind] ?? source.kind}</span
-                                                >
-                                                <span class="source-form-editing">Editing</span>
-                                              </div>
-
-                                              {#if source.kind === 'todos' || source.kind === 'reminders' || source.kind === 'notes'}
-                                                <SettingsField
-                                                  label="File path"
-                                                  hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's folder. Required — no default."
-                                                >
-                                                  <AutocompleteInput
-                                                    value={(sourceDraft.config.path as string) ??
-                                                      ''}
-                                                    options={pathSuggestions}
-                                                    placeholder={FILE_PLACEHOLDER[source.kind]}
-                                                    invalid={pathStatus === 'missing'}
-                                                    monospace
-                                                    ariaLabel="File path"
-                                                    filter={(opts) => opts}
-                                                    onValueChange={onPathInput}
-                                                  />
-                                                  {#if pathStatus === 'checking'}
-                                                    <p class="path-msg muted">Checking…</p>
-                                                  {:else if pathStatus === 'ok'}
-                                                    <p class="path-msg path-ok">
-                                                      ✓ Resolves to {pathResolved}
-                                                    </p>
-                                                  {:else if pathStatus === 'missing'}
-                                                    <p class="path-msg path-warn">
-                                                      No file there yet — this source is skipped
-                                                      until the file exists.
-                                                    </p>
-                                                  {/if}
-                                                </SettingsField>
-                                              {:else}
-                                                <SourceConfigFields
-                                                  kind={source.kind}
-                                                  config={sourceDraft.config}
-                                                  onChange={setDraftConfig}
-                                                  {browseOptions}
-                                                  {rssOptions}
-                                                  sharedBlockOptions={sharedBlockSelectOptions}
-                                                />
-                                              {/if}
-
-                                              <div class="source-form-actions">
-                                                <Button
-                                                  variant="secondary"
-                                                  size="sm"
-                                                  onclick={cancelSource}>Cancel</Button
-                                                >
-                                                <Button
-                                                  variant="primary"
-                                                  size="sm"
-                                                  onclick={saveSource}>Save source</Button
-                                                >
-                                              </div>
-                                            </div>
-                                          </td>
-                                        </tr>
-                                      {:else}
-                                        <tr>
-                                          <td class="col-kind">
-                                            <span class="kind-pill" class:off={!source.enabled}
-                                              >{source.kind}</span
-                                            >
-                                          </td>
-                                          <td class="src-summary muted">{sourceSummary(source)}</td>
-                                          <td class="col-toggle">
-                                            <label class="toggle">
-                                              <input
-                                                type="checkbox"
-                                                checked={source.enabled}
-                                                onchange={(e) =>
-                                                  toggleSource(
-                                                    source,
-                                                    (e.target as HTMLInputElement).checked,
-                                                  )}
-                                              />
-                                              on
-                                            </label>
-                                          </td>
-                                          <td class="actions">
-                                            <KebabMenu
-                                              items={sourceMenu(block, source)}
-                                              ariaLabel="Source actions"
-                                            />
-                                          </td>
-                                        </tr>
-                                      {/if}
-                                    {/each}
-                                  </tbody>
-                                </table>
-                              {/if}
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    {/if}
-                  {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
-
-          <div class="add-block control-row">
-            <Input
-              placeholder="New block title (e.g. World News)"
-              aria-label="New block title"
-              bind:value={newBlockTitle}
-              onkeydown={(e: KeyboardEvent) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  addBlock();
-                }
-              }}
-            />
-            <Button
-              variant="secondary"
-              size="sm"
-              onclick={addBlock}
-              disabled={!newBlockTitle.trim() || addingSaving}
-            >
-              {addingSaving ? 'Adding…' : 'Add block'}
-            </Button>
-          </div>
-        {/if}
-      {/if}
     </SettingsCard>
 
     {#if isAdmin}
@@ -1576,13 +974,10 @@
 {#if confirmDelete}
   <ConfirmDialog
     open={true}
-    title={confirmDelete.kind === 'briefing'
-      ? 'Remove briefing'
-      : confirmDelete.kind === 'block'
-        ? 'Delete block'
-        : 'Remove source'}
-    message={`Are you sure you want to remove the ${confirmDelete.kind} "${confirmDelete.label}"?`}
+    title="Remove briefing"
+    message={`Are you sure you want to remove the briefing "${confirmDelete.label}"?`}
     confirmLabel="Remove"
+    confirmDisabled={briefingSaving}
     onConfirm={performDelete}
     onCancel={() => (confirmDelete = null)}
   />
@@ -1592,39 +987,6 @@
   /* Shared .settings/.card/.field/.grid/.banner/.icon-btn/.muted
 	   primitives live in web/src/lib/styles/settings.css. Only page-specific
 	   layout stays here. */
-
-  /* Seven columns don't fit a phone, and the global .grid is
-	   table-layout:fixed/width:100%, which shoehorns them in rather than
-	   overflowing — cron and tokens end up wrapping mid-token. Give the table a
-	   natural min-width so .table-scroll scrolls horizontally instead, the same
-	   treatment .sb-table gets below. */
-  .sched-table {
-    table-layout: auto;
-    min-width: 40rem;
-  }
-  .sched-table td.actions,
-  .sched-table th.actions {
-    width: 1%;
-    white-space: nowrap;
-  }
-
-  .col-name {
-    width: auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* A token is an opaque id — capped so one long room token can't stretch the
-	   scroll width past what the other six columns need. */
-  .col-token {
-    max-width: 12rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .col-source {
-    width: 6rem;
-  }
 
   .add-form {
     display: flex;
@@ -1661,69 +1023,33 @@
     justify-content: flex-start;
   }
 
-  .briefing-pick {
+  .schedule-summary {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-3);
-    align-items: flex-end;
-    margin-bottom: var(--space-4);
+    margin: var(--space-3) 0;
   }
-
-  /* ---- Blocks table ---- */
-  .col-order {
-    width: 4.5rem;
+  .schedule-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .schedule-text p {
+    margin: var(--space-1) 0;
+  }
+  .schedule-form {
+    margin-top: var(--space-4);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-3);
+  }
+  .schedule-form summary {
+    cursor: pointer;
+    font-size: var(--text-sm);
   }
   .col-render {
     width: 7rem;
   }
-  .col-src {
-    width: 10rem;
-  }
-
-  .grid td.col-order.actions {
-    text-align: left;
-    white-space: nowrap;
-  }
-
-  /* One kebab, so the column only has to reserve the trigger's width — the
-	   wider column existed for the old two-glyph ✎/× pair. */
-  .grid td.actions,
-  .grid th.actions {
-    width: 3rem;
-  }
-
-  .block-name {
-    display: inline-flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-primary);
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .block-name:hover .block-title-text {
-    text-decoration: underline;
-  }
-
-  .chevron {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
-
-  .block-directive {
-    font-size: var(--text-xs);
-    margin-top: 0.15rem;
-    max-width: 40ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .render-pill {
     display: inline-block;
     font-size: var(--text-xs);
@@ -1732,198 +1058,14 @@
     background: var(--surface-raised);
     color: var(--text-muted);
   }
-
-  .kind-pills {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-  }
-
-  .kind-pill {
-    display: inline-block;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    color: var(--text-secondary);
-  }
-
-  .kind-pill.off {
-    opacity: 0.45;
-    text-decoration: line-through;
-  }
-
-  .expanded > td {
-    border-bottom-color: transparent;
-  }
-
-  /* ---- Block detail (expanded row) ---- */
-  .detail-row > td {
-    padding: 0;
-    background: var(--surface-base);
-  }
-
-  .block-detail {
-    padding: var(--space-3) var(--space-4) var(--space-4);
-    border-left: 2px solid var(--border-default);
-  }
-
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
-    gap: var(--space-2) var(--space-4);
-  }
-
-  .sources-block {
-    margin-top: var(--space-4);
-    padding-top: var(--space-3);
-    border-top: 1px dashed var(--border-subtle);
-  }
-
-  .sources-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    margin-bottom: var(--space-2);
-  }
-
-  .sources-head h4 {
-    margin: 0;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
-  }
-
-  /* The nested sources table shares the .grid look but drops the heavy header. */
-  .grid.sub {
-    background: var(--surface-raised);
-    border-radius: var(--radius-card);
-    overflow: hidden;
-  }
-
-  .grid.sub td {
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .grid.sub tr:last-child td {
-    border-bottom: none;
-  }
-
-  .col-kind {
-    width: 6rem;
-  }
-  .col-toggle {
-    width: 4rem;
-  }
-  .grid.sub td.actions {
-    width: 3rem;
-  }
-
-  .src-summary {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 0;
-  }
-
-  .toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
-  .muted.small,
-  p.muted.small {
+  .muted.small {
     font-size: var(--text-xs);
   }
-
-  /* ---- Source config form (inline in the sources table) ----
-	   The form replaces a collapsed source row in place, so its content must
-	   share the row's left inset. The colspan cell drops the table padding and
-	   the form re-adds the same 0.5rem horizontal inset the collapsed cells use
-	   (.settings .grid td) — no jump on entering edit mode. A subtle inset
-	   background + a header divider signal the edit state. */
-  .grid.sub .src-form-cell {
-    padding: 0;
-    background: var(--surface-card);
-  }
-
-  .source-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-2) var(--space-3);
-  }
-
-  .source-form-head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding-bottom: var(--space-2);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .source-form-editing {
-    margin-left: auto;
-    font-size: var(--text-xs);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-
-  .kind-name {
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
   .source-form-actions {
     display: flex;
     justify-content: flex-end;
     gap: var(--space-2);
-    margin-top: 0.2rem;
-  }
-
-  .path-msg {
-    margin: var(--space-1) 0 0;
-    font-size: 0.85rem;
-  }
-
-  .path-ok {
-    color: var(--status-success-fg);
-  }
-
-  .path-warn {
-    color: var(--status-warn-fg);
-  }
-
-  .add-block {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-    margin-top: var(--space-3);
-  }
-
-  /* `control-row` on the wrapper is what levels the input with the Button
-     beside it: the input was a hand-rolled box at double the canonical
-     vertical padding, so the row sat uneven at every text scale and split
-     further on touch. The flex-grow is all that is left to say here. */
-  .add-block :global(.ui-input) {
-    flex: 1;
-  }
-
-  /* The blocks table's own responsive columns are driven from the script (see
-	   blocksWidth) so they stay in step with the expanded row's colspan. The
-	   schedule table scrolls instead of dropping columns. */
-  @container settings (max-width: 560px) {
-    .sb-table .col-render {
-      display: none;
-    }
+    margin-top: var(--space-1);
   }
 
   /* Admin shared-blocks editor */
