@@ -109,6 +109,10 @@ The PDF is kept and renamed with a `-VOID` suffix so it cannot be mistaken for a
 
 On the Invoices page, **Preview** opens an invoice's PDF in the file viewer, and **Download PDF** saves it. Neither is offered when the invoice has no PDF.
 
+### Payments
+
+`invoice paid` books the payment to the ledger: the bank account receives the invoice's stored total, and the income accounts are credited with the split recorded when the invoice was issued. Each service's work goes to its `income_account` (or `Income:<Service>`), and manual items go to `Income:Services`. A rate change after an invoice is issued does not change what its payment books.
+
 ### Invoice dates
 
 Each invoice row holds its issue date. Generation stores the date it put on the PDF rather than taking a fresh `date.today()`, which would disagree with the document across midnight. The matcher and both invoice lists read that one date.

@@ -586,6 +586,9 @@ def _generate_invoices(
                             issue_date=invoice_date, total=round(invoice.total, 2),
                             entry_uids=[e.uid for e in billable_entries],
                             pdf_path=str(pdf_path),
+                            income_lines=invoice_income_lines(
+                                billable_entries, config.services, invoice.total,
+                            ),
                         )
                         if record_schedule and client_config.schedule == "monthly":
                             set_invoice_schedule_generation(conn, client_key)
@@ -1001,21 +1004,44 @@ def create_income_posting(
     return "\n".join(lines)
 
 
-def compute_income_lines(
+DEFAULT_INCOME_ACCOUNT = "Income:Services"
+
+
+def invoice_income_lines(
     entries: list[WorkEntry],
     services: dict[str, ServiceConfig],
+    total: float,
 ) -> dict[str, float]:
-    """Compute income account -> amount mapping from work entries."""
-    items = build_line_items(entries, services)
-    income_lines: dict[str, float] = {}
-    for item in items:
-        income_account = "Income:Services"
-        for svc_key, svc in services.items():
-            if svc.display_name == item.display_name:
-                income_account = svc.income_account or f"Income:{svc_key.title()}"
-                break
-        income_lines[income_account] = income_lines.get(income_account, 0) + item.amount
-    return income_lines
+    """The income account -> amount split an invoice is issued with.
+
+    Each entry goes to its service's ``income_account`` (or
+    ``Income:<Service>``); a ``_manual`` item and an entry whose service is
+    not configured go to ``Income:Services``. Amounts are rounded to cents and
+    the rounding remainder is put on the largest line, so the lines sum to
+    ``round(total, 2)`` exactly: the snapshot is the invoice's total, split.
+    Stored on the invoice row at issue and read back when payment is posted,
+    so a later rate change never alters what a payment books.
+    """
+    raw: dict[str, float] = {}
+    for entry in entries:
+        svc = services.get(entry.service) if entry.service != "_manual" else None
+        if svc is not None:
+            account = svc.income_account or f"Income:{entry.service.title()}"
+            amount = entry_line_item(entry, svc).amount
+        else:
+            account = DEFAULT_INCOME_ACCOUNT
+            amount = (entry.amount or 0) if entry.service == "_manual" else 0
+        raw[account] = raw.get(account, 0) + amount
+    lines = {account: round(amount, 2) for account, amount in raw.items() if round(amount, 2)}
+    target = round(total, 2)
+    remainder = round(target - sum(lines.values()), 2)
+    if remainder:
+        if lines:
+            largest = max(sorted(lines), key=lambda a: abs(lines[a]))
+            lines[largest] = round(lines[largest] + remainder, 2)
+        else:
+            lines[DEFAULT_INCOME_ACCOUNT] = target
+    return {account: amount for account, amount in lines.items() if amount}
 
 
 def find_invoice_pdf(invoice_output_dir: Path, invoice_number: str) -> Path | None:
@@ -1272,6 +1298,7 @@ def _issue_manual_invoice(
                 group_name="", issue_date=invoice_date, total=round(total, 2),
                 entry_uids=[e.uid for e in inv_entries], pdf_path=str(pdf_path),
                 manual=True,
+                income_lines=invoice_income_lines(inv_entries, config.services, total),
             )
     except Exception as exc:
         # Never leave a PDF behind for an invoice that was not recorded, and

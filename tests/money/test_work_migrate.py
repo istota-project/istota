@@ -310,6 +310,16 @@ class TestCleanImport:
         assert manual.pdf_path == ""
 
 
+class TestIncomeSnapshot:
+    def test_every_imported_invoice_splits_its_total(self, data_dir, db_path, fixture_log):
+        assert migrate_work_log(data_dir).status == "migrated"
+        records = work.list_invoices(data_dir)
+        assert records
+        for record in records:
+            assert record.income_lines
+            assert round(sum(record.income_lines.values()), 2) == record.total
+
+
 class TestRefusals:
     """Each refusal writes nothing and leaves the year files alone."""
 

@@ -399,7 +399,7 @@ def plan_invoices(
 ) -> list[InvoiceRecord]:
     """The ``invoices`` rows the stamps on ``entries`` describe."""
     from istota.money.core.invoicing import (  # noqa: PLC0415
-        entry_entity_key, find_invoice_pdf, invoice_total,
+        entry_entity_key, find_invoice_pdf, invoice_income_lines, invoice_total,
     )
     from istota.money.work import invoice_issue_date  # noqa: PLC0415
 
@@ -418,12 +418,15 @@ def plan_invoices(
         first = group[0]
         paid_date = first.paid_date
         pdf = find_invoice_pdf(output_dir, number) if output_dir is not None else None
+        services = config.services if config else {}
+        total = round(invoice_total(group, services), 2)
         plans.append(InvoiceRecord(
             number=number,
             client=first.client,
             entity=entry_entity_key(config, first) if config is not None else first.entity,
             issue_date=invoice_issue_date(group),
-            total=round(invoice_total(group, config.services if config else {}), 2),
+            total=total,
+            income_lines=invoice_income_lines(group, services, total),
             status="paid" if paid_date is not None else "open",
             paid_date=paid_date,
             pdf_path=str(pdf) if pdf else "",
@@ -466,7 +469,7 @@ def _verify(conn, expected: list[WorkEntry], plans: list[InvoiceRecord]) -> str 
         if got is None:
             return f"invoice {plan.number} missing after the write"
         for name in ("client", "entity", "group_name", "issue_date", "total", "status",
-                     "paid_date", "pdf_path", "manual"):
+                     "paid_date", "pdf_path", "manual", "income_lines"):
             if getattr(got, name) != getattr(plan, name):
                 return (
                     f"invoice {plan.number} field {name}: planned {getattr(plan, name)!r}, "
@@ -491,7 +494,7 @@ def _write(conn, entries: list[WorkEntry], plans: list[InvoiceRecord], stamp: da
             conn, number=plan.number, client=plan.client, entity=plan.entity,
             group_name=plan.group_name, issue_date=plan.issue_date, total=plan.total,
             entry_uids=plan.entry_uids, pdf_path=plan.pdf_path, manual=plan.manual,
-            created_at=stamp.isoformat(),
+            created_at=stamp.isoformat(), income_lines=plan.income_lines,
         )
         if plan.status == "paid":
             conn.execute(

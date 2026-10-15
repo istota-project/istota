@@ -18,7 +18,6 @@ def _skip_unless_weasyprint():
 
 from istota.money.core.invoicing import (
     build_line_items,
-    compute_income_lines,
     create_income_posting,
     find_invoice_pdf,
     format_invoice_number,
@@ -293,14 +292,42 @@ class TestIncomePosting:
         assert "Income:Consulting  -1500.00 USD" in result
         assert "Income:Dev  -875.00 USD" in result
 
-    def test_compute_income_lines(self):
+    def test_income_lines_by_service_account(self):
+        from istota.money.core.invoicing import invoice_income_lines
+
         entries = [
             WorkEntry(date=date(2026, 1, 1), client="acme", service="dev", qty=8),
             WorkEntry(date=date(2026, 1, 2), client="acme", service="dev", qty=4),
         ]
         services = {"dev": ServiceConfig(key="dev", display_name="Development", rate=150, income_account="Income:Dev")}
-        result = compute_income_lines(entries, services)
-        assert result["Income:Dev"] == 1800
+        assert invoice_income_lines(entries, services, 1800) == {"Income:Dev": 1800}
+
+    def test_manual_items_go_to_the_default_account(self):
+        from istota.money.core.invoicing import invoice_income_lines
+
+        entries = [
+            WorkEntry(date=date(2026, 1, 1), client="acme", service="dev", qty=2),
+            WorkEntry(date=date(2026, 1, 1), client="acme", service="_manual", amount=300),
+        ]
+        services = {"dev": ServiceConfig(key="dev", display_name="Dev", rate=150, income_account="Income:Dev")}
+        assert invoice_income_lines(entries, services, 600) == {
+            "Income:Dev": 300, "Income:Services": 300,
+        }
+
+    def test_the_lines_sum_to_the_total_to_the_cent(self):
+        from istota.money.core.invoicing import invoice_income_lines
+
+        entries = [
+            WorkEntry(date=date(2026, 1, 1), client="acme", service="a", qty=1),
+            WorkEntry(date=date(2026, 1, 1), client="acme", service="b", qty=1),
+            WorkEntry(date=date(2026, 1, 1), client="acme", service="c", qty=1),
+        ]
+        services = {
+            k: ServiceConfig(key=k, display_name=k, rate=0.335, income_account=f"Income:{k}")
+            for k in "abc"
+        }
+        lines = invoice_income_lines(entries, services, 1.005)
+        assert round(sum(lines.values()), 2) == round(1.005, 2)
 
 
 class TestUpdateInvoiceNumber:
@@ -1288,6 +1315,8 @@ class TestTransactionalGeneration:
         assert record.pdf_path == result["file"]
         assert sorted(record.entry_uids) == sorted(e.uid for e in load_work_entries(tmp_path))
         assert {e.invoice for e in load_work_entries(tmp_path)} == {"INV-000001"}
+        assert record.income_lines == {"Income:Dev": 1500.0}
+        assert round(sum(record.income_lines.values()), 2) == record.total
 
     def test_a_commit_failure_removes_the_rendered_pdf(self, tmp_path, monkeypatch):
         from istota.money import work
@@ -1643,6 +1672,7 @@ class TestCreateManualInvoice:
         record = get_invoice(tmp_path, "INV-000001")
         assert record.manual is True
         assert record.total == 600.0
+        assert record.income_lines == {"Income:Dev": 300.0, "Income:Services": 300.0}
         assert record.pdf_path == result["file"]
         assert Path(result["file"]).exists()
         assert sorted(record.entry_uids) == sorted(result["entry_uids"])

@@ -642,6 +642,81 @@ class TestInvoicePaid:
         assert output["invoices"][0]["status"] == "paid"
 
 
+class TestInvoicePaidPostsTheIssuedAmounts:
+    """A payment books exactly what the invoice billed, split as it was issued."""
+
+    def _ledger(self, invoicing_ctx):
+        ledger = invoicing_ctx.ledgers[0]["path"]
+        ledger.write_text(
+            'option "operating_currency" "USD"\n'
+            "2020-01-01 open Assets:Bank:Checking\n"
+            "2020-01-01 open Income:Dev\n"
+            "2020-01-01 open Income:Hosting\n"
+            "2020-01-01 open Income:Services\n"
+        )
+        return ledger
+
+    def _pay(self, runner, tmp_path, obj):
+        result = _invoke(runner, [
+            "invoice", "paid", "INV-000001", "-d", "2026-04-15", "-b", "Assets:Bank:Checking",
+        ], tmp_path=tmp_path, obj=obj)
+        assert result.exit_code == 0, result.output
+        return json.loads(result.output)
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_rate_change_after_issue_changes_nothing(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        ledger = self._ledger(invoicing_ctx)
+        _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+        _seed_invoicing(
+            invoicing_ctx.db_path,
+            'accounting_path = "."\ninvoice_output = "invoices"\n\n'
+            '[company]\nname = "Test Co"\n\n[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
+            '[services.dev]\ndisplay_name = "Development"\nrate = 200.0\ntype = "hours"\n'
+            'income_account = "Income:Dev"\n',
+        )
+
+        out = self._pay(runner, tmp_path, invoicing_ctx)
+
+        assert out["status"] == "ok", out
+        assert out["amount"] == 1200.0
+        text = ledger.read_text()
+        assert "Assets:Bank:Checking  1200.00 USD" in text
+        assert "Income:Dev  -1200.00 USD" in text
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_manual_only_invoice_can_be_paid(self, mock_pdf, runner, tmp_path, invoicing_ctx):
+        ledger = self._ledger(invoicing_ctx)
+        _invoke(runner, ["invoice", "create", "acme", "--item", '"Custom work" 500'],
+            tmp_path=tmp_path, obj=invoicing_ctx)
+
+        out = self._pay(runner, tmp_path, invoicing_ctx)
+
+        assert out["status"] == "ok", out
+        assert out["amount"] == 500.0
+        assert "Income:Services  -500.00 USD" in ledger.read_text()
+
+    @patch("istota.money.core.invoicing.generate_invoice_pdf")
+    def test_a_mixed_invoice_posts_its_whole_total(
+        self, mock_pdf, runner, tmp_path, invoicing_ctx,
+    ):
+        ledger = self._ledger(invoicing_ctx)
+        _invoke(runner, [
+            "invoice", "create", "acme", "-s", "dev", "-q", "2", "--item", '"Travel" 300',
+        ], tmp_path=tmp_path, obj=invoicing_ctx)
+
+        out = self._pay(runner, tmp_path, invoicing_ctx)
+
+        assert out["status"] == "ok", out
+        assert out["amount"] == 600.0
+        text = ledger.read_text()
+        assert "Assets:Bank:Checking  600.00 USD" in text
+        assert "Income:Dev  -300.00 USD" in text
+        assert "Income:Services  -300.00 USD" in text
+
+
 class TestInvoiceUnpaid:
     """The inverse of `invoice paid`, and the way back from a wrong auto-match.
 

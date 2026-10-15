@@ -157,7 +157,7 @@ istota-skill money invoice unpaid INV-000001
 istota-skill money invoice void INV-000001 [--reason "Wrong rate"] [--replaced-by INV-000002,INV-000003] [--force] [--delete-pdf]
 ```
 
-Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`. Use `--no-post` when the bank transaction was already imported.
+Cash-basis accounting: no ledger entries at invoice time; income recognized when payment is recorded via `invoice paid`, which books the invoice's issued total split by income account as it was at issue (manual items under `Income:Services`), never a recomputation at current rates. Use `--no-post` when the bank transaction was already imported.
 
 **`--period` is an upper bound.** It bills every unbilled entry dated on or before the end of that month, earlier months included. To bill one piece of work on its own, pass its `uid` with `--entry` (read uids from `work list`). Named entries must exist and be unbilled, or the command fails and writes nothing. They still group by the normal rules, so entries named together can share one invoice. Run with `--dry-run` first and show the user what would be issued.
 

@@ -498,6 +498,7 @@ def _invoice_from_row(row, entry_uids: list[str]) -> InvoiceRecord:
         manual=bool(row["manual"]),
         created_at=row["created_at"],
         entry_uids=entry_uids,
+        income_lines=json.loads(row["income_lines"] or "{}"),
     )
 
 
@@ -579,8 +580,13 @@ def create_invoice(
     pdf_path: str | Path,
     manual: bool = False,
     created_at: str | None = None,
+    income_lines: dict[str, float] | None = None,
 ) -> None:
     """Insert an open invoice and an active line per entry, on the caller's transaction.
+
+    ``income_lines`` is the total split by income account
+    (:func:`istota.money.core.invoicing.invoice_income_lines`), what a payment
+    posts.
 
     An unknown uid is a ``ValueError``; an entry that already has an active
     line, or a number already issued, is an ``sqlite3.IntegrityError``. The
@@ -593,9 +599,11 @@ def create_invoice(
     issued = _stamp_date(issue_date)
     conn.execute(
         "INSERT INTO invoices (number, client, entity, group_name, issue_date, total, "
-        "status, pdf_path, manual, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+        "status, pdf_path, manual, created_at, income_lines) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
         (number, client, entity, group_name, issued.isoformat(), total,
-         str(pdf_path or ""), int(bool(manual)), created_at or _now()),
+         str(pdf_path or ""), int(bool(manual)), created_at or _now(),
+         json.dumps(income_lines or {}, sort_keys=True)),
     )
     for uid in uids:
         conn.execute(
@@ -632,7 +640,9 @@ def _attach(
     active lines at the current rates. A voided number is refused with a
     ``ValueError``. Returns the count attached.
     """
-    from istota.money.core.invoicing import entry_entity_key, invoice_total  # noqa: PLC0415
+    from istota.money.core.invoicing import (  # noqa: PLC0415
+        entry_entity_key, invoice_income_lines, invoice_total,
+    )
 
     entries = {e.uid: e for e in read_entries(conn)}
     wanted = [entries[u] for u in dict.fromkeys(uids) if u in entries and not entries[u].invoice]
@@ -658,9 +668,11 @@ def _attach(
             )
     covered = [e for e in read_entries(conn) if e.invoice == number]
     services = config.services if config is not None else {}
+    total = round(invoice_total(covered, services), 2)
+    lines = invoice_income_lines(covered, services, total)
     conn.execute(
-        "UPDATE invoices SET total = ? WHERE number = ?",
-        (round(invoice_total(covered, services), 2), number),
+        "UPDATE invoices SET total = ?, income_lines = ? WHERE number = ?",
+        (total, json.dumps(lines, sort_keys=True), number),
     )
     return len(wanted)
 

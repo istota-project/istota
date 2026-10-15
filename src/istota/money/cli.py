@@ -1203,12 +1203,12 @@ def invoice_list(ctx, client, show_all, active):
 def invoice_paid(ctx, invoice_number, payment_date, bank, no_post, ledger):
     """Record payment for an invoice."""
     from istota.money.core.invoicing import (
-        compute_income_lines, create_income_posting,
+        create_income_posting, invoice_income_lines,
         resolve_bank_account, resolve_currency, resolve_entity,
     )
     from istota.money.core.transactions import append_to_ledger
     from istota.money.core.ledger import run_bean_check
-    from istota.money.work import get_entries_for_invoice, mark_paid
+    from istota.money.work import get_entries_for_invoice, get_invoice, mark_paid
 
     try:
         parsed_date = datetime.strptime(payment_date, "%Y-%m-%d").date()
@@ -1242,7 +1242,13 @@ def invoice_paid(ctx, invoice_number, payment_date, bank, no_post, ledger):
     bank_account = bank or resolve_bank_account(entity, config)
     currency = resolve_currency(entity, config)
 
-    income_lines = compute_income_lines(entries, config.services)
+    # A payment books what the invoice billed, split as it was at issue, never
+    # a recomputation at today's rates. A row from before the split was stored
+    # is split now, still summing to its stored total.
+    record = get_invoice(data_dir, invoice_number)
+    income_lines = dict(record.income_lines) if record is not None else {}
+    if not income_lines and record is not None:
+        income_lines = invoice_income_lines(entries, config.services, record.total)
     if not income_lines:
         _output({"status": "error", "error": f"No billable items found for {invoice_number}"})
         return

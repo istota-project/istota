@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS invoices (
     replaced_by TEXT NOT NULL DEFAULT '[]',
     pdf_path TEXT NOT NULL DEFAULT '',
     manual INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- {income account: amount} at issue, summing to total; payment posts this.
+    income_lines TEXT NOT NULL DEFAULT '{}'
 );
 
 -- An entry is invoiced while it has an active line. The partial unique index
@@ -166,6 +168,9 @@ def init_db(db_path: Path | str) -> None:
             {"ledger": "TEXT NOT NULL DEFAULT ''",
              "income_account": "TEXT NOT NULL DEFAULT ''"},
             commit=True,
+        )
+        sqlite_util.add_columns(
+            conn, "invoices", {"income_lines": "TEXT NOT NULL DEFAULT '{}'"}, commit=True,
         )
         # Portfolio schema family (runtime import: portfolio pulls in the
         # importers package, which must not load at db-module import time).

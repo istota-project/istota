@@ -190,7 +190,9 @@ class InvoiceRecord:
     """One row of ``money.db``'s ``invoices`` table, with the entries it covers.
 
     ``total`` is what the invoice billed when it was issued and never changes.
-    ``entry_uids`` lists every entry the invoice covered, voided lines included.
+    ``income_lines`` is that total split by income account at issue, which a
+    payment posts. ``entry_uids`` lists every entry the invoice covered,
+    voided lines included.
     """
     number: str
     client: str
@@ -208,6 +210,7 @@ class InvoiceRecord:
     manual: bool = False
     created_at: str = ""
     entry_uids: list[str] = field(default_factory=list)
+    income_lines: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
