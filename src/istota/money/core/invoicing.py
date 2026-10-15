@@ -1151,6 +1151,72 @@ def void_invoice_with_cleanup(
     return out
 
 
+def record_past_void(
+    config: InvoicingConfig,
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    invoice_output_dir: Path | None,
+    client_key: str,
+    issue_date: date,
+    total: float,
+    voided_on: date,
+    entity: str = "",
+    reason: str = "",
+    replaced_by: tuple[str, ...] | list[str] = (),
+    was_paid: bool = False,
+) -> dict:
+    """Record a number voided before void records existed, as a voided invoice.
+
+    The client and entity are checked against the config, the entity
+    defaulting the way an entry's does. A PDF still on disk under the number
+    is renamed ``…-VOID.pdf``, as a live void does, and renamed back if the
+    write fails.
+    """
+    from istota.money.work import record_voided_invoice, write_transaction
+
+    if client_key not in config.clients:
+        raise ValueError(f"Client '{client_key}' not found")
+    entity = entity or config.clients[client_key].entity or config.default_entity
+    if entity not in config.companies:
+        raise ValueError(f"Entity '{entity}' not found")
+    if not _finite_number(total) or total <= 0:
+        raise ValueError("Total must be a positive number")
+    if voided_on < issue_date:
+        raise ValueError("The void date is before the issue date")
+
+    pdf = find_invoice_pdf(invoice_output_dir, invoice_number) if invoice_output_dir else None
+    target = _void_pdf_path(pdf) if pdf is not None else None
+    renamed = False
+    try:
+        with write_transaction(data_dir) as conn:
+            record = record_voided_invoice(
+                data_dir, invoice_number, client=client_key, entity=entity,
+                issue_date=issue_date, total=round(total, 2), voided_on=voided_on,
+                reason=reason, replaced_by=replaced_by, was_paid=was_paid,
+                pdf_path=str(target or ""), conn=conn,
+            )
+            if pdf is not None:
+                pdf.rename(target)
+                renamed = True
+    except Exception:
+        if renamed:
+            target.rename(pdf)
+        raise
+    return {
+        "invoice_number": record.number,
+        "client": record.client,
+        "entity": record.entity,
+        "date": record.issue_date.isoformat(),
+        "total": record.total,
+        "voided_at": record.voided_at,
+        "was_paid": record.was_paid,
+        "void_reason": record.void_reason,
+        "replaced_by": record.replaced_by,
+        "pdf_path": record.pdf_path,
+    }
+
+
 def _finite_number(value) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False

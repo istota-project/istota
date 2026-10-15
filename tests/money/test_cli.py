@@ -2060,3 +2060,104 @@ class TestSyncMonarchLoadsRules:
 
         assert result.exit_code == 0, result.output
         assert "Expenses:Business:Meals" in ledger.read_text()
+
+
+class TestInvoiceRecordVoid:
+    """A number voided before void records existed gets one after the fact."""
+
+    @staticmethod
+    def _fake_pdf(html, output_path, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"%PDF-1.4")
+
+    def _with_gap(self, runner, tmp_path, ctx):
+        """INV-000001 and INV-000003 issued, INV-000002 skipped with its PDF left behind."""
+        with patch("istota.money.core.invoicing.generate_invoice_pdf", self._fake_pdf):
+            _invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "8"],
+                tmp_path=tmp_path, obj=ctx)
+            config_store.set_next_invoice_number(ctx.db_path, 3)
+            third = json.loads(_invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "2"],
+                tmp_path=tmp_path, obj=ctx).output)
+        assert third["invoice_number"] == "INV-000003"
+        pdf = Path(third["file"]).with_name("Invoice-000002-08_30_2026.pdf")
+        pdf.write_bytes(b"%PDF-1.4")
+        return pdf
+
+    def _record(self, runner, tmp_path, ctx, number="INV-000002", *extra):
+        result = _invoke(runner, [
+            "invoice", "record-void", number, "--client", "acme", "--date", "2026-08-30",
+            "--total", "689", "--voided-on", "2026-09-14", *extra,
+        ], tmp_path=tmp_path, obj=ctx)
+        return json.loads(result.output)
+
+    def _listed(self, runner, tmp_path, ctx):
+        return json.loads(_invoke(runner, ["invoice", "list", "--all"],
+            tmp_path=tmp_path, obj=ctx).output)
+
+    def test_a_gap_is_recorded_voided_and_listed(self, runner, tmp_path, invoicing_ctx):
+        pdf = self._with_gap(runner, tmp_path, invoicing_ctx)
+
+        output = self._record(runner, tmp_path, invoicing_ctx, "INV-000002",
+            "--reason", "reissued as 3", "--replaced-by", "INV-000003")
+        assert output["status"] == "ok", output
+        renamed = pdf.with_name("Invoice-000002-08_30_2026-VOID.pdf")
+        assert not pdf.exists() and renamed.exists()
+        assert output["pdf_path"] == str(renamed)
+
+        listed = self._listed(runner, tmp_path, invoicing_ctx)
+        rows = {row["invoice_number"]: row for row in listed["invoices"]}
+        voided = rows["INV-000002"]
+        assert voided["status"] == "voided"
+        assert voided["date"] == "2026-08-30"
+        assert voided["total"] == 689.0
+        assert voided["voided_at"].startswith("2026-09-14")
+        assert voided["void_reason"] == "reissued as 3"
+        assert voided["replaced_by"] == ["INV-000003"]
+        assert listed["outstanding_count"] == 2
+
+        work = json.loads(_invoke(runner, ["work", "list", "--uninvoiced"],
+            tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert work["count"] == 0
+
+        with patch("istota.money.core.invoicing.generate_invoice_pdf", self._fake_pdf):
+            nxt = json.loads(_invoke(runner, ["invoice", "create", "acme", "-s", "dev", "-q", "1"],
+                tmp_path=tmp_path, obj=invoicing_ctx).output)
+        assert nxt["invoice_number"] == "INV-000004"
+
+    def test_a_bare_number_is_accepted(self, runner, tmp_path, invoicing_ctx):
+        self._with_gap(runner, tmp_path, invoicing_ctx)
+        output = self._record(runner, tmp_path, invoicing_ctx, "2")
+        assert output["status"] == "ok", output
+        assert output["invoice_number"] == "INV-000002"
+
+    @pytest.mark.parametrize("number, message", [
+        ("INV-000001", "already exists"),
+        ("INV-000009", "not a gap"),
+    ])
+    def test_only_a_past_gap_can_be_recorded(self, runner, tmp_path, invoicing_ctx, number, message):
+        self._with_gap(runner, tmp_path, invoicing_ctx)
+        before = self._listed(runner, tmp_path, invoicing_ctx)
+        output = self._record(runner, tmp_path, invoicing_ctx, number)
+        assert output["status"] == "error"
+        assert message in output["error"]
+        assert self._listed(runner, tmp_path, invoicing_ctx) == before
+
+    def test_a_refusal_writes_nothing_and_keeps_the_pdf(self, runner, tmp_path, invoicing_ctx):
+        pdf = self._with_gap(runner, tmp_path, invoicing_ctx)
+        output = self._record(runner, tmp_path, invoicing_ctx, "INV-000002",
+            "--replaced-by", "INV-000008")
+        assert output["status"] == "error"
+        assert "INV-000008" in output["error"]
+        assert pdf.exists()
+        numbers = [r["invoice_number"] for r in self._listed(runner, tmp_path, invoicing_ctx)["invoices"]]
+        assert "INV-000002" not in numbers
+
+    def test_an_unknown_client_is_an_error(self, runner, tmp_path, invoicing_ctx):
+        self._with_gap(runner, tmp_path, invoicing_ctx)
+        result = _invoke(runner, [
+            "invoice", "record-void", "INV-000002", "--client", "nobody", "--date", "2026-08-30",
+            "--total", "689", "--voided-on", "2026-09-14",
+        ], tmp_path=tmp_path, obj=invoicing_ctx)
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert "nobody" in output["error"]

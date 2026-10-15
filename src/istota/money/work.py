@@ -46,7 +46,7 @@ import sqlite3
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from istota.lib.file_lock import exclusive_lock
@@ -1126,6 +1126,69 @@ def void_invoice(
             voided_at=voided_at, pdf_path=stored_pdf,
             reason=reason or "", replaced_by=replacements,
         )
+
+
+def record_voided_invoice(
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    client: str,
+    entity: str,
+    issue_date: date,
+    total: float,
+    voided_on: date,
+    reason: str = "",
+    replaced_by: tuple[str, ...] | list[str] = (),
+    was_paid: bool = False,
+    pdf_path: str | Path = "",
+    conn: sqlite3.Connection | None = None,
+) -> InvoiceRecord:
+    """Record a number that was voided before the store kept void records.
+
+    The row is written already voided, with no lines: the work it covered is
+    on its replacements. Only a gap below the highest issued number can be
+    recorded, so the next number to issue does not move. Every refusal is a
+    :class:`VoidError` raised before anything is written.
+    """
+    from istota.money.core.invoicing import parse_invoice_number  # noqa: PLC0415
+
+    replacements = list(dict.fromkeys(n.strip() for n in replaced_by if n and n.strip()))
+    with write_transaction(data_dir, conn) as c:
+        row = _invoice_row(c, invoice_number)
+        if row is not None:
+            raise VoidError(
+                f"Invoice {invoice_number} already exists ({row['status']})",
+                code="exists",
+            )
+        wanted = parse_invoice_number(invoice_number)
+        highest = max(
+            (parse_invoice_number(r["number"]) or 0
+             for r in c.execute("SELECT number FROM invoices")),
+            default=0,
+        )
+        if wanted is None or wanted >= highest:
+            raise VoidError(
+                f"Invoice {invoice_number} is not a gap below the highest issued "
+                f"number; only a skipped past number can be recorded",
+                code="not_a_gap",
+            )
+        for number in replacements:
+            if number == invoice_number or _invoice_row(c, number) is None:
+                raise VoidError(
+                    f"Replacement invoice {number} not found",
+                    code="unknown_replacement",
+                )
+        create_invoice(
+            c, number=invoice_number, client=client, entity=entity, group_name="",
+            issue_date=issue_date, total=total, entry_uids=[], pdf_path=pdf_path,
+        )
+        c.execute(
+            "UPDATE invoices SET status = 'voided', voided_at = ?, was_paid = ?, "
+            "void_reason = ?, replaced_by = ? WHERE number = ?",
+            (datetime.combine(voided_on, time(), tzinfo=timezone.utc).isoformat(),
+             int(was_paid), reason or "", json.dumps(replacements), invoice_number),
+        )
+        return _invoice_from_row(_invoice_row(c, invoice_number), [])
 
 
 def get_invoice(
