@@ -5,10 +5,13 @@ description: Web browsing and scraping via headless browser
 cli: true
 companion_skills: [untrusted_input]
 requires_capability: [browser]
+source_types: [group_briefing_research]
 ---
 # Web Browsing
 
 Headless browser for fetching pages that need JavaScript rendering or bot detection bypass. For simple static pages or APIs, prefer `curl` or `httpx` — they're faster.
+
+Group briefing research uses the dedicated Briefings profile. Use `render`, `get`, `links` or `extract` to read pages and follow article URLs, then `close` to release retained tabs. Other browser operations are unavailable. Keep citations in your research result. The profile uses ordinary browser networking and does not enforce a domain allowlist.
 
 **Reach for `render` first.** It returns the page as markdown, so headings, list position and link URLs arrive together — which is what lets you tell an article link from footer chrome. `get` returns flattened text with every URL stripped out, and `links` returns a position-stripped list where nav items and articles look identical. Use those two only when you specifically want plain text or a bare link list.
 

@@ -318,14 +318,25 @@ def test_group_fence_cannot_be_closed_from_inside(env):
     assert "[delimiter removed]" in rendered
 
 
-def test_group_browse_stays_unavailable_until_restricted_adapter_exists(env, monkeypatch):
+def test_group_browse_reuses_source_client_with_briefings_identity(env, monkeypatch):
     from istota.briefings.sources.group import gather_group_sources
     import istota.briefings.sources.browse as browse
-    browser = Mock(side_effect=AssertionError("personal browser must never be called"))
+    browser = Mock(return_value=GatheredSource(kind="browse", title="Public", text="Public article", untrusted=True))
     monkeypatch.setattr(browse, "resolve", browser)
     definition = define(env, [source("browse", "browse", url="https://example.com/"), source("public", "shared_block", name="public")])
     gathered = gather_group_sources(context(env, definition))
-    assert gathered[0].failure_kind == "unavailable" and gathered[0].error_code == "research_unavailable"
+    assert gathered[0].text == "Public article" and gathered[0].untrusted
+    assert browser.call_args.args[1].user_id == "__briefings__"
+
+
+def test_group_browse_refuses_reserved_identity_collision(env, monkeypatch):
+    env.users["__briefings__"] = UserConfig()
+    browser = Mock(side_effect=AssertionError("must not borrow an installation account"))
+    monkeypatch.setattr("istota.briefings.sources.browse.resolve", browser)
+    definition = define(env, [source("browse", "browse", url="https://example.com/")])
+    result = resolve_source("browse", {"url": "https://example.com/"}, context(env, definition), source_id="browse")
+    assert result.failure_kind == "refused"
+    assert result.error_code == "briefing_browser_identity_refused"
     browser.assert_not_called()
 
 

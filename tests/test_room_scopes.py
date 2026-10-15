@@ -66,6 +66,23 @@ class TestWhatATaskIsWithheld:
         }
 
 
+def test_briefing_research_withholds_safe_mutations_as_well_as_private_skills(make_task):
+    task = make_task(user_id="__briefings__", source_type="group_briefing_research")
+    index = _index(browse="private", skills="safe", untrusted_input="safe",
+                   calendar="private", developer="private", tasks="safe",
+                   email="private")
+
+    assert room_scopes.withheld_for_task(None, task, skill_index=index) == {
+        "calendar", "developer", "tasks", "email", "files", "memory",
+    }
+
+
+def test_briefing_research_has_no_ambient_memory_or_groups(conn, make_task):
+    task = make_task(user_id="__briefings__", source_type="group_briefing_research")
+    assert room_scopes.ambient_memory_off(conn, task)
+    assert room_scopes.task_group_ids(conn, task) == []
+
+
 def _job(conn, user_id: str, token: str) -> int:
     cur = conn.execute(
         "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt, "

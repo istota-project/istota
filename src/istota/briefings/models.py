@@ -353,13 +353,9 @@ def normalize_group_generation(mode: str, raw: dict) -> dict:
         domains = research.get("allowed_domains", [])
         if not isinstance(domains, list):
             raise ValueError("allowed domains must be a list")
-        normalized_domains = []
-        for domain in domains:
-            value = _group_text(domain, "allowed domain", required=True, limit=253).lower()
-            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", value):
-                raise ValueError("allowed domains must be hostnames")
-            normalized_domains.append(value)
-        result["research"] = {"enabled": enabled, "prompt": prompt, "allowed_domains": sorted(set(normalized_domains))}
+        if domains:
+            raise ValueError("research does not enforce an allowed-domain policy")
+        result["research"] = {"enabled": enabled, "prompt": prompt, "allowed_domains": []}
         result["inputs"] = _group_sources(raw.get("inputs", []), seen)
     else:
         blocks = raw.get("blocks")

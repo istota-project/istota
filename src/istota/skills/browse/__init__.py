@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from istota.browser.owner import browser_headers, with_browser_owner
+from istota.browser.owner import BRIEFINGS_IDENTITY, browser_headers, require_briefings_profile, with_browser_owner
 from istota.browser.admission import BrowserQueueTimeout, browser_request
 
 import httpx
@@ -2080,6 +2080,16 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
+    if os.environ.get("ISTOTA_USER_ID") == BRIEFINGS_IDENTITY:
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if not raw or raw[0] not in {"get", "render", "extract", "links", "close"}:
+            print(json.dumps(error_envelope("briefing_browser_operation_refused")))
+            return 1
+        try:
+            require_briefings_profile(get_api_url())
+        except Exception:
+            print(json.dumps(error_envelope("briefing_browser_isolation_unavailable")))
+            return 1
     args = parse_and_resolve(parser, argv)
     if getattr(args, "fill_card", None) and not getattr(args, "purchase", None):
         parser.error("--fill-card requires --purchase")

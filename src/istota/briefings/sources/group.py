@@ -77,9 +77,11 @@ def _resolve_stored(source, ctx, conn, definition):
     public_ctx = SourceContext(app_config=ctx.config, user_id=SYSTEM_IDENTITY, conn=conn,
                                now=ctx.now, timezone=definition["timezone"])
     if kind == "browse":
-        # Stage 5 supplies the restricted adapter. A persistent browser profile
-        # cannot satisfy credential-free group research.
-        return _failed(kind, "unavailable", "research_unavailable")
+        from istota.browser.owner import BRIEFINGS_IDENTITY
+        from istota.briefings.sources import browse
+        if ctx.config.get_user(BRIEFINGS_IDENTITY) is not None:
+            return _failed(kind, "refused", "briefing_browser_identity_refused")
+        return browse.resolve(config, replace(public_ctx, user_id=BRIEFINGS_IDENTITY))
     if kind not in ("shared_block", "markets"):
         return _failed(kind, "refused", "source_kind_refused")
     try:

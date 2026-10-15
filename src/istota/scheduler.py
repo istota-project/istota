@@ -2878,16 +2878,15 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     so it is written before the re-raise.
     """
     from .executor import task_deferred_dir
+    from .rooms.scopes import is_briefing_research
     # The directory the run wrote to: the per-user one, or the task's own
     # when its room restricted it or a guest wrote the turn.
     user_temp_dir = task_deferred_dir(config, task)
-    if task.guest_participant_id is not None:
-        # Emissary mode (multiplayer D2): a guest's turn takes no action beyond
-        # its reply, so nothing it wrote down is replayed. The files are ops
-        # the host never asked for — a subtask would run at the host's full
-        # reach — and are dropped rather than left for the temp sweep.
+    if task.guest_participant_id is not None or is_briefing_research(task):
+        # Guests and public research cannot turn scratch files into writes
+        # or subtasks. Purge the requests instead of leaving them for a retry.
         _purge_deferred_files_for_retry(task, user_temp_dir)
-        logger.info("Task %d: emissary task, deferred ops dropped", task.id)
+        logger.info("Task %d: restricted task, deferred ops dropped", task.id)
         return
     # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
     # runs last so it reports only what the handlers genuinely left behind.

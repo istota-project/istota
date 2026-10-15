@@ -3463,6 +3463,7 @@ def health():
     data = {
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
+        "briefing_task_isolation": True,
         "credential_origin_check": True,
         "otp_expiry_check": True,
         "recovery_save": True,
@@ -3760,6 +3761,13 @@ def _log_request_start():
     request.browser_instance = pool.instance_for(user_id)
     body = request.get_json(silent=True)
     body = body if isinstance(body, dict) else {}
+    if user_id == "__briefings__":
+        owner = request.headers.get("X-Istota-Owner")
+        if (not owner or request.endpoint not in {
+                "browse", "render_page", "extract", "get_session_info", "delete_session"}):
+            return jsonify({"status": "error", "error": "briefing_browser_operation_refused"}), 403
+        # The host-side skill sets this header; page content cannot choose it.
+        body["owner"] = owner
     session_id = (request.view_args or {}).get("session_id") or body.get("session_id")
     if session_id:
         if not isinstance(session_id, str):
@@ -3768,7 +3776,8 @@ def _log_request_start():
         # expiry record may be touched by this caller, even for a missing tab.
         with _sessions_lock:
             session = _sessions.get(session_id)
-            if session is not None and session.get("user_id") != user_id:
+            if session is not None and (session.get("user_id") != user_id or (
+                    user_id == "__briefings__" and session.get("owner") != owner)):
                 return jsonify({"status": "not_found"}), 404
         if request.browser_instance is None and request.endpoint != "delete_session":
             return jsonify({"status": "not_found"}), 404

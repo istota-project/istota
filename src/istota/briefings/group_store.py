@@ -253,7 +253,7 @@ def renew_run_lease(conn, run_id, token, *, now=None, lease_seconds=300):
         return get_run(conn, run_id)
 
 
-def save_research(conn, run_id, token, artifact, *, now=None):
+def save_research(conn, run_id, token, artifact, *, now=None, config=None):
     at = _timestamp(now)
     if not isinstance(artifact, dict):
         raise GroupError(422, "invalid_research", "Research must be an object")
@@ -262,6 +262,9 @@ def save_research(conn, run_id, token, artifact, *, now=None):
         run = _owned_run(conn, run_id, token, at)
         if run["state"] != "researching" or run["research"] is not None:
             raise GroupError(409, "research_conflict", "Research was already completed or not requested")
+        if config is not None:
+            from istota.briefings.source_grants import validate_run_grants
+            validate_run_grants(conn, config, run)
         conn.execute("""UPDATE group_briefing_runs SET research_json = ?, research_attempt_token = ?,
                         state = 'generating', updated_at = ? WHERE id = ?""", (encoded, token, at, run_id))
         return get_run(conn, run_id)

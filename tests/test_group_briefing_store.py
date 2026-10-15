@@ -132,6 +132,8 @@ def test_live_capabilities_ignore_owner_module_toggle_but_gate_delivery(env):
     {"generation": {"version": 2, "prompt": "Text"}},
     {"generation": {"version": 1, "prompt": ""}},
     {"generation": {"version": 1, "prompt": "Text", "research": {"enabled": True}}},
+    {"generation": {"version": 1, "prompt": "Text", "research": {
+        "enabled": True, "prompt": "Research", "allowed_domains": ["example.com"]}}},
     {"generation": {"version": 1, "prompt": "Text", "inputs": [
         {"id": "private", "kind": "calendar", "config": {}}
     ]}},
@@ -231,7 +233,7 @@ def test_expired_worker_cannot_publish_or_overwrite_research(env):
     from istota.briefings import group_store as store
     with db.get_db(env.db_path) as conn:
         definition = define(conn, env, generation={"version": 1, "prompt": "Text", "research": {
-            "enabled": True, "prompt": "Find public news", "allowed_domains": ["example.com"]
+            "enabled": True, "prompt": "Find public news", "allowed_domains": []
         }})
         run = enqueue(conn, env, definition)
         old = store.claim_run(conn, run_id=run["id"], now=NOW, lease_seconds=10)
