@@ -1,5 +1,5 @@
 """`config_editor.reference`: the example reader, the credential map and the
-container layout, moved out of the test support so the editor can use them."""
+container layout."""
 
 from __future__ import annotations
 
@@ -9,16 +9,46 @@ from pathlib import Path
 
 from istota.config import Config
 from istota.config_editor import reference
-from tests.support import config_reference as support
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO / "config"
 
 
-def test_the_support_module_uses_the_moved_reader():
-    assert support.read_example is reference.read_example
-    assert support.credential_files is reference.credential_files
-    assert support.setup_paths is reference.setup_paths
+def test_the_example_prose_lands_on_its_key():
+    docs = reference.read_example((CONFIG_DIR / "config.example.toml").read_text())
+    assert any("name your bot uses" in line for line in docs.keys[("", "bot_name")])
+    assert any("Availability failover" in line for line in docs.keys[("brain", "fallback")])
+    # A trailing comment and its continuation lines.
+    transient = " ".join(docs.keys[("brain", "fallback_on_transient")])
+    assert "also reroute" in transient and "(429 / 5xx / 529" in transient
+
+
+class TestTheExampleReader:
+    def test_a_key_takes_the_comment_block_above_it_and_its_trailing_note(self):
+        docs = reference.read_example(
+            "# ==========\n"
+            "# Section intro\n"
+            "# ==========\n"
+            "[a]\n"
+            "# First paragraph.\n"
+            "#\n"
+            "# Second paragraph.\n"
+            "# x = 1   # the note\n"
+            "#         # more note\n"
+            "# y = \"s\"\n"
+        )
+        assert docs.sections["a"] == ["Section intro"]
+        assert docs.keys[("a", "x")] == ["First paragraph.", "", "Second paragraph.", "the note", "more note"]
+        assert docs.keys[("a", "y")] == []
+        assert docs.examples[("a", "x")] == "1"
+
+    def test_a_blank_line_ends_a_comment_block(self):
+        docs = reference.read_example("[a]\n# About something else.\n\nx = 1\n")
+        assert docs.keys[("a", "x")] == []
+
+    def test_prose_that_looks_like_an_assignment_is_not_a_key(self):
+        docs = reference.read_example("[a]\n# lower = more intermediate text is shown live.\nx = 1\n")
+        assert ("a", "lower") not in docs.keys
 
 
 def test_credential_files_is_every_credential_and_its_secrets_file():

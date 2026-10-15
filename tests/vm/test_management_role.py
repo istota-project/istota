@@ -20,8 +20,8 @@ against a stack the role converged. This file holds what is the role's own:
 - a changed rclone.conf runs provision.sh and leaves the mount, and so the
   stack, running (nextcloud);
 - settings -> snapshot -> inventory -> apply (proxied): the converged VM's
-  own `istota snapshot`, set as `istota_plan` in place of the legacy
-  variables, is no drift under --check; a timezone and a config value
+  own `istota snapshot`, set as `istota_plan` in place of the plan the
+  tier rendered, is no drift under --check; a timezone and a config value
   changed in it are drift a --check reports and does not write; a converge
   applies both and restarts the daemon once (ISSUE-741); and the next
   --check is clean.
@@ -84,7 +84,7 @@ class _RoleChecks:
     def test_a_check_reports_a_changed_config_and_writes_nothing(self, stack):
         _, variables = _last(self.mode)
         drifted = copy.deepcopy(variables)
-        drifted["istota_config"]["bot_name"] = "Drifted"
+        drifted["istota_plan"]["config"]["bot_name"] = "Drifted"
         before = _config_toml(stack)
         run = lima.converge_role(stack, drifted, check=True, timeout=1800)
         assert run.returncode == 0, _describe(run)
@@ -175,10 +175,10 @@ class TestTheRoleInProxiedMode(_RoleChecks):
         no-op: the role's settings apply stored it from the private envelope,
         and stdin crosses `docker compose exec`."""
         _, variables = _last(self.mode)
-        entry = variables["istota_user_secrets"][lima.USER][0]
+        value = variables["istota_plan_secrets"]["users"][lima.USER]["karakeep"]["base_url"]
         result = stack.run(
-            f"printf '%s' {shlex.quote(entry['value'])} | istota secret ensure --user {lima.USER} "
-            f"--service {entry['service']} --key {entry['key']} --value-stdin", check=False)
+            f"printf '%s' {shlex.quote(value)} | istota secret ensure --user {lima.USER} "
+            f"--service karakeep --key base_url --value-stdin", check=False)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "STATE: noop" in result.stdout, result.stdout
 
@@ -189,7 +189,7 @@ class TestTheRoleInProxiedMode(_RoleChecks):
         this play, without a new release."""
         _, variables = _last(self.mode)
         wanting = copy.deepcopy(variables)
-        wanting["istota_config"].setdefault("brain", {})["kind"] = "claude_code"
+        wanting["istota_plan"]["config"].setdefault("brain", {})["kind"] = "claude_code"
         tag = variables["istota_release"]
         image_env = (f"docker image inspect -f '{{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}}' "
                      f"istota:{tag}")
@@ -272,8 +272,6 @@ systemctl enable --now istota-stack.service
         assert stack.out(f"systemctl is-active {timer}", check=False) != "active"
 
 
-LEGACY_VARIABLES = ("istota_config", "istota_users", "istota_user_resources",
-                    "istota_user_briefings", "istota_user_secrets")
 TIMEZONES = ("Pacific/Auckland", "Europe/Lisbon")
 
 
@@ -313,10 +311,10 @@ def _daemon_starts(vm: lima.Vm, since: str, until: str) -> int:
 
 class TestASnapshotIsTheRolesPlan:
     """settings -> snapshot -> inventory -> apply, through the role, on the
-    VM the role converged in proxied mode. The inventory swaps the legacy
-    application variables for the VM's own snapshot as `istota_plan`, as an
-    estate would after `istota snapshot --format json`; every deployment
-    variable stays as it was."""
+    VM the role converged in proxied mode. The inventory swaps the plan the
+    tier rendered for the VM's own snapshot as `istota_plan`, as an estate
+    would after `istota snapshot --format json`; every deployment variable and
+    the vault's `istota_plan_secrets` stay as they were."""
 
     @pytest.fixture(scope="class")
     def round_trip(self, proxied_stack):
@@ -326,7 +324,7 @@ class TestASnapshotIsTheRolesPlan:
         _, variables = _last("proxied")
         snapshot = _snapshot(stack)
         canonical = copy.deepcopy(variables)
-        canonical.update(dict.fromkeys(LEGACY_VARIABLES, {}), istota_plan=snapshot)
+        canonical["istota_plan"] = snapshot
         before = snapshot["users"][lima.USER]["profile"].get("timezone", "")
         wanted = TIMEZONES[0] if before != TIMEZONES[0] else TIMEZONES[1]
         drifted = copy.deepcopy(canonical)

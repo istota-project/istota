@@ -1533,8 +1533,8 @@ timezone = "America/Los_Angeles"
 #   - notes:    {}
 # An unknown kind or a block with zero valid sources is skipped with a warning.
 #
-# To apply one block definition across many users, loop it over `istota_users`
-# in the Ansible playbook — there is no instance-wide/subscription model.
+# To apply one block definition across many users, repeat it for each user in
+# the settings plan (`istota apply`) — there is no instance-wide/subscription model.
 
 # ============================================================================
 # TASKS.md File Monitoring (Auto-Discovery)

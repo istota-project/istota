@@ -885,13 +885,14 @@ def role_vars(vm: Vm, release: Release, mode: Mode) -> dict:
         "istota_compose_profiles": list(answers.compose_profiles),
         "istota_secrets": secrets,
         "istota_admins": [answers.user_id],
-        "istota_config": config,
-        "istota_users": {USER: {"display-name": answers.display_name}},
-        "istota_user_secrets": {USER: [
-            {"service": "karakeep", "key": "base_url", "value": "https://karakeep.example.invalid"},
-            # Skipped, as the old role skipped an empty value: ensure refuses one.
-            {"service": "karakeep", "key": "api_key", "value": ""},
-        ]},
+        "istota_plan": {
+            "config": config,
+            "users": {USER: {
+                "profile": {"display_name": answers.display_name},
+                "secrets": [{"service": "karakeep", "keys": ["base_url"]}],
+            }},
+        },
+        "istota_plan_secrets": {"users": {USER: {"karakeep": {"base_url": "https://karakeep.example.invalid"}}}},
     }
 
 

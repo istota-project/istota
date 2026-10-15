@@ -9,9 +9,7 @@
 - `setup_paths` is the container layout `istota setup` writes.
 
 The header and assignment patterns are the field coverage guard's
-(`tests/test_config_field_coverage.py`), which imports them from here. The
-management role's generated `istota_config` reference
-(`tests/support/config_reference.py`) is built on the same three readers.
+(`tests/test_config_field_coverage.py`), which imports them from here.
 """
 
 from __future__ import annotations

@@ -35,27 +35,19 @@
       is one of istota_secret_names.
     quiet: true
 
-# The application settings come either as istota_plan (the CLI's plan, a
-# snapshot for instance) or as the legacy variables, never both. Deployment
-# variables sit beside either. Refused here, before anything on the VM changes;
-# the plan itself is validated by the release's own image further down.
+# Refused here, before anything on the VM changes; the plan itself is
+# validated by the release's own image further down.
 - name: Check the application-settings variables
   ansible.builtin.assert:
     that:
       - istota_plan is mapping and istota_plan_secrets is mapping
-      - >-
-        istota_plan | length == 0
-        or ((istota_config | length) + (istota_users | length) + (istota_user_resources | length)
-            + (istota_user_briefings | length) + (istota_user_secrets | length)) == 0
       - istota_plan_secrets | length == 0 or istota_plan | length > 0
       - not (istota_plan_prune_secrets | bool) or istota_plan_prune | bool
       - not (istota_plan_prune | bool) or istota_plan | length > 0
     fail_msg: >-
-      Set the application settings either as istota_plan (with
-      istota_plan_secrets) or as istota_config, istota_users,
-      istota_user_resources, istota_user_briefings and istota_user_secrets, not
-      both. istota_plan_secrets needs istota_plan, istota_plan_prune needs
-      istota_plan, and istota_plan_prune_secrets needs istota_plan_prune.
+      istota_plan and istota_plan_secrets must be mappings. istota_plan_secrets
+      needs istota_plan, istota_plan_prune needs istota_plan, and
+      istota_plan_prune_secrets needs istota_plan_prune.
     quiet: true
 
 # Two role-vars envelopes for `istota apply --input-format role-vars`: the
@@ -70,7 +62,6 @@
     _istota_settings_json: |-
       {%- set config = {} -%}
       {%- set users = {} -%}
-      {%- if istota_plan | length > 0 or istota_plan_secrets | length > 0 -%}
       {%- set plan_rest = {} -%}
       {%- for key, value in istota_plan.items() if key != 'config' -%}{%- set _ = plan_rest.update({key: value}) -%}{%- endfor -%}
       {%- set secrets_config = {} -%}
@@ -86,13 +77,6 @@
       {%- if (plan_rest.keys() | reject('equalto', 'meta') | list | length) > 0 or 'users' in istota_plan_secrets -%}
       {%- set _ = users.update({'istota_plan': plan_rest}) -%}
       {%- if 'users' in istota_plan_secrets -%}{%- set _ = users.update({'istota_plan_secrets': secrets_users}) -%}{%- endif -%}
-      {%- endif -%}
-      {%- else -%}
-      {%- if istota_config | length > 0 -%}{%- set _ = config.update({'istota_config': istota_config}) -%}{%- endif -%}
-      {%- if ((istota_users | length) + (istota_user_resources | length) + (istota_user_briefings | length) + (istota_user_secrets | length)) > 0 -%}
-      {%- set _ = users.update({'istota_users': istota_users, 'istota_user_resources': istota_user_resources,
-            'istota_user_briefings': istota_user_briefings, 'istota_user_secrets': istota_user_secrets}) -%}
-      {%- endif -%}
       {%- endif -%}
       {{ [config, users] | to_json }}
   no_log: true

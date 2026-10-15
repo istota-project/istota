@@ -15,10 +15,10 @@ export function isManaged(profile: Pick<UserProfile, 'managed'> | null, field: s
  *  can change the inventory, so the badge names where the value comes from. */
 export const ADMIN_MANAGED_BADGE = 'Set by deployment';
 
-/** Where an admin changes a managed field. The `istota_users` keys match the
- *  profile field names one to one, `whatsapp_number` included. */
+/** Where an admin changes a managed field: the user's profile in the
+ *  deployment's settings plan, whose keys are the profile field names. */
 export function adminManagedHint(userId: string, field: string): string {
-  return `Change istota_users.${userId}.${field} in inventory, or set istota_user_profile_mode: seed.`;
+  return `Change istota_plan.users.${userId}.profile.${field} in inventory, or set that user's profile_mode to seed.`;
 }
 
 /** The badge text for a field, or `undefined` when the user owns it. */

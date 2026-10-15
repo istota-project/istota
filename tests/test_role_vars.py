@@ -205,67 +205,39 @@ def test_an_unobscured_password_is_obscured_through_the_given_function():
 # --- users -----------------------------------------------------------------
 
 
-def test_users_become_the_ensure_flags_the_new_role_passes():
-    result = _convert()
-    assert result.vars["istota_admins"] == ["alice"]
-    assert result.vars["istota_users"] == {
-        "alice": {
-            "managed": True,
-            "display-name": "Alice",
-            "email": ["alice@example.com", "a@example.org"],
-            "clear-sms-number": True,
-            "whatsapp-number": "+15550100",
-            "trusted-sender": ["bob@example.com"],
-            "route": ["briefing=email"],
-            "no-default-briefings": True,
-            "outbound-approval": "untrusted",
-        },
+def test_admins_carry_over():
+    assert _convert().vars["istota_admins"] == ["alice"]
+
+
+def test_user_secrets_become_the_plans_sidecar():
+    assert _convert().vars["istota_plan_secrets"] == {
+        "users": {"alice": {"karakeep": {"api_key": "kk-0010"}}},
     }
 
 
-def test_resources_keep_folders_only_with_their_extras():
-    result = _convert()
-    assert result.vars["istota_user_resources"] == {
-        "alice": [{"type": "folder", "path": "/data/shared/papers", "permissions": "read",
-                   "extras-json": '{"label": "Papers"}'}],
-    }
-    assert any("calendar" in note for note in result.notes)
-
-
-def test_briefings_map_to_briefing_ensure_and_a_title_is_reported():
-    result = _convert()
-    assert result.vars["istota_user_briefings"] == {
-        "alice": [
-            {"name": "morning", "cron": "0 7 * * 1-5", "output": "email"},
-            {"name": "evening", "cron": "0 19 * * *", "output": "talk", "disabled": True},
-        ],
-    }
-    assert any("title" in note and "morning" in note for note in result.notes)
-
-
-def test_user_secrets_carry_over_as_they_are():
-    assert _convert().vars["istota_user_secrets"] == {
-        "alice": [{"service": "karakeep", "key": "api_key", "value": "kk-0010"}],
-    }
-
-
-def test_seed_mode_passes_seed():
-    old = _old() | {"istota_user_profile_mode": "seed"}
-    user = _convert(old).vars["istota_users"]["alice"]
-    assert user["seed"] is True and "managed" not in user
-
-
-def test_an_unknown_user_key_is_reported():
+def test_an_empty_user_secret_is_skipped_as_the_old_role_did():
     old = _old()
-    old["istota_users"]["alice"]["favourite_colour"] = "green"
-    assert any("favourite_colour" in note for note in _convert(old).notes)
+    old["istota_user_secrets"]["alice"].append({"service": "miniflux", "key": "api_key", "value": ""})
+    assert _convert(old).vars["istota_plan_secrets"]["users"]["alice"] == {"karakeep": {"api_key": "kk-0010"}}
+
+
+def test_no_user_secrets_writes_no_sidecar():
+    old = _old()
+    del old["istota_user_secrets"]
+    assert "istota_plan_secrets" not in _convert(old).vars
+
+
+def test_the_application_settings_come_from_the_vms_snapshot():
+    """Users and config are not converted; the result points at `istota snapshot`."""
+    result = _convert()
+    assert not {"istota_plan", "istota_config", "istota_users", "istota_user_resources",
+                "istota_user_briefings", "istota_user_secrets"} & set(result.vars)
+    assert any("snapshot" in note for note in result.notes)
+    dropped = next(note for note in result.notes if "not carried" in note)
+    assert "istota_users" in dropped and "istota_user_profile_mode" in dropped
 
 
 # --- the VM's own files ----------------------------------------------------
-
-
-def test_the_live_config_becomes_istota_config():
-    assert _convert().vars["istota_config"] == tomllib.loads(CONFIG_TOML)
 
 
 def test_host_env_round_trips_through_the_roles_own_derivation():
