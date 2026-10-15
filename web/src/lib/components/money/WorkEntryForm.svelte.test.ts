@@ -43,6 +43,7 @@ function row(overrides: Partial<WorkEntryRow> = {}): WorkEntryRow {
     discount: 0,
     description: 'API work',
     entity: 'main',
+    separate: false,
     invoice: '',
     paid_date: null,
     computed_amount: 450,

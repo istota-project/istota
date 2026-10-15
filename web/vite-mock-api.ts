@@ -7590,6 +7590,7 @@ const handlers: MockHandler[] = [
       discount: number;
       description: string;
       entity: string;
+      separate?: boolean;
       invoice: string;
       paid_date: string | null;
     }
@@ -7697,7 +7698,7 @@ const handlers: MockHandler[] = [
 
     function workEtag(w: Work): string {
       // Cheap content hash — enough for the mock's conflict path.
-      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}`;
+      const body = `${w.date}|${w.client}|${w.service}|${w.qty}|${w.amount}|${w.discount}|${w.description}|${w.entity}|${!!w.separate}`;
       let hash = 0;
       for (let i = 0; i < body.length; i++) hash = (hash * 31 + body.charCodeAt(i)) | 0;
       return (hash >>> 0).toString(16);
@@ -7711,6 +7712,7 @@ const handlers: MockHandler[] = [
       if (!client) warnings.push('unknown_client');
       return {
         ...w,
+        separate: !!w.separate,
         index,
         etag: workEtag(w),
         client_name: client?.name ?? w.client,
@@ -8060,6 +8062,7 @@ const handlers: MockHandler[] = [
             'discount',
             'description',
             'entity',
+            'separate',
           ] as const) {
             if (body && key in body) (entry as any)[key] = body[key];
           }
@@ -8080,6 +8083,7 @@ const handlers: MockHandler[] = [
           discount: body?.discount ?? 0,
           description: body?.description ?? '',
           entity: body?.entity ?? '',
+          separate: body?.separate === true,
           invoice: '',
           paid_date: null,
         };

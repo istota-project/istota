@@ -554,6 +554,8 @@ export interface WorkEntryRow {
   discount: number;
   description: string;
   entity: string;
+  /** Always invoiced on its own, whatever the client's bundling rules say. */
+  separate: boolean;
   invoice: string;
   paid_date: string | null;
   /** What this entry will bill for, using the same rate rules the invoice uses. */
@@ -587,6 +589,7 @@ export interface WorkEntryInput {
   discount?: number;
   description?: string;
   entity?: string;
+  separate?: boolean;
 }
 
 export async function getWorkEntries(opts?: {

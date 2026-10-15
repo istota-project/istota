@@ -114,4 +114,13 @@ describe('buildWorkEntryPayload', () => {
     expect(payload.qty).toBe(2);
     expect(payload.amount).toBeNull();
   });
+
+  it('carries the separate flag when the form has one, either way', () => {
+    expect(buildWorkEntryPayload(state({ separate: true })).separate).toBe(true);
+    expect(buildWorkEntryPayload(state({ separate: false })).separate).toBe(false);
+  });
+
+  it('omits the separate flag when the form has no control for it', () => {
+    expect('separate' in buildWorkEntryPayload(state())).toBe(false);
+  });
 });
