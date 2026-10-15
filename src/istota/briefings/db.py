@@ -191,6 +191,26 @@ def _next_block_position(conn: sqlite3.Connection, briefing_name: str) -> int:
     return int(row["p"])
 
 
+def _block_id_high_water(conn: sqlite3.Connection) -> int:
+    # Reserve under the write lock; SQLite's implicit rowids reuse deleted IDs.
+    created = conn.execute(
+        "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('block_id_high_water', '0')",
+    ).rowcount
+    highest = int(meta_get(conn, "block_id_high_water") or "0")
+    highest = max(highest, conn.execute("SELECT COALESCE(MAX(id), 0) FROM briefing_blocks").fetchone()[0])
+    if created:
+        # Seed older DBs from snapshots too, since their live blocks may be gone.
+        for row in conn.execute("SELECT document_json FROM briefing_archive WHERE document_json IS NOT NULL"):
+            try:
+                document = validate_briefing_document(json.loads(row["document_json"]))
+            except (ValueError, TypeError):
+                continue
+            for block in document["blocks"]:
+                highest = max(highest, block["block_id"])
+    meta_set(conn, "block_id_high_water", str(highest))
+    return highest
+
+
 def add_block(
     conn: sqlite3.Connection,
     *,
@@ -205,17 +225,19 @@ def add_block(
     options = validate_block_options(options if options is not None else {})
     if position is None:
         position = _next_block_position(conn, briefing_name)
+    block_id = _block_id_high_water(conn) + 1
+    meta_set(conn, "block_id_high_water", str(block_id))
     now = _now_iso()
     cur = conn.execute(
         """
         INSERT INTO briefing_blocks(
-            briefing_name, position, title, directive, render_mode,
+            id, briefing_name, position, title, directive, render_mode,
             options, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
-            briefing_name, position, title, directive, render_mode,
+            block_id, briefing_name, position, title, directive, render_mode,
             json.dumps(options or {}), now, now,
         ),
     )
@@ -261,6 +283,7 @@ def update_block(
 
 def delete_block(conn: sqlite3.Connection, block_id: int) -> None:
     """Delete a block (its sources cascade)."""
+    _block_id_high_water(conn)
     conn.execute("DELETE FROM briefing_blocks WHERE id = ?", (block_id,))
 
 

@@ -373,3 +373,57 @@ class TestDefinitionSave:
         assert len(blocks) == 1
         assert blocks[0].title == "Original"
         assert [s.id for s in blocks[0].sources] == [sid]
+
+
+class TestPreviewBlockIdentity:
+    def test_deleted_highest_block_cannot_inherit_archived_preview_content(self, conn):
+        from istota.briefings.document import document_to_markdown
+
+        old = bdb.add_block(conn, briefing_name="M", title="Old")
+        document = {"version": 1, "title": "Old edition", "blocks": [{
+            "block_id": old, "title": "Old", "kind": "markdown", "body_md": "Private old content",
+            "presentation": {"width": "auto"}, "source_status": "complete",
+        }]}
+        bdb.insert_archive(conn, briefing_name="M", subject=document["title"],
+                           body_md=document_to_markdown(document), document=document)
+        conn.commit()
+        bdb.delete_block(conn, old)
+        conn.commit()
+        # An existing v2 DB has no sequence metadata yet.
+        conn.execute("DELETE FROM schema_meta WHERE key = 'block_id_high_water'")
+        conn.commit()
+        new = bdb.add_block(conn, briefing_name="M", title="Unrelated new block")
+        assert new > old
+        assert new not in {block["block_id"] for block in document["blocks"]}
+        bdb.delete_block(conn, new)
+        conn.commit()
+        assert bdb.add_block(conn, briefing_name="Other", title="Next") > new
+
+    def test_repeated_delete_recreate_and_rollback_keep_identity(self, conn):
+        first = bdb.add_block(conn, briefing_name="M", title="First")
+        conn.commit()
+        bdb.delete_block(conn, first)
+        conn.commit()
+        second = bdb.add_block(conn, briefing_name="M", title="Second")
+        conn.commit()
+        assert second > first
+        conn.execute("SAVEPOINT aborted")
+        aborted = bdb.add_block(conn, briefing_name="M", title="Aborted")
+        conn.execute("ROLLBACK TO aborted")
+        conn.execute("RELEASE aborted")
+        assert bdb.add_block(conn, briefing_name="M", title="Actual") == aborted
+
+
+    @pytest.mark.parametrize("scope", ["block", "briefing"])
+    def test_upgrade_delete_before_first_allocation_preserves_inflight_identity(self, conn, scope):
+        old = bdb.add_block(conn, briefing_name="M", title="In-flight edition block")
+        conn.commit()
+        # Simulate an older DB with a generated manifest but no archive yet.
+        conn.execute("DELETE FROM schema_meta WHERE key = 'block_id_high_water'")
+        conn.commit()
+        if scope == "briefing":
+            bdb.delete_briefing_definitions(conn, "M")
+        else:
+            bdb.delete_block(conn, old)
+        conn.commit()
+        assert bdb.add_block(conn, briefing_name="M", title="New block") > old
