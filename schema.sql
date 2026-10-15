@@ -2495,6 +2495,8 @@ CREATE TABLE IF NOT EXISTS group_briefing_configs (
         excluded_user_ids_json TEXT NOT NULL DEFAULT '[]',
         admin_hold_at TEXT,             -- set = held by an administrator, does not run
         admin_hold_by TEXT,             -- the administrator's user id
+        deleted_at TEXT,                -- set = deleted by an administrator; editions stay readable
+        deleted_by TEXT,                -- the administrator's user id
         UNIQUE(group_id, name)
     );
 

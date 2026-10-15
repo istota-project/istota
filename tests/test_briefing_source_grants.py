@@ -502,3 +502,27 @@ def test_grants_schema_migration_is_repeatable_with_schema_parity(env):
         assert [tuple(row) for row in conn.execute("PRAGMA table_info(group_briefing_source_grants)")] == declared.execute("PRAGMA table_info(group_briefing_source_grants)").fetchall()
         assert sorted(tuple(row)[1:4] for row in conn.execute("PRAGMA index_list(group_briefing_source_grants)")) == sorted(tuple(row)[1:4] for row in declared.execute("PRAGMA index_list(group_briefing_source_grants)"))
         declared.close()
+
+
+def test_deleting_a_definition_revokes_its_grants_and_closes_its_requests(env):
+    from istota.notifications.resolvers.group_briefing import RESOLVER
+    from istota.notifications.sources import NotificationRow
+    with db.get_db(env.db_path) as conn:
+        approved = define(conn, env)
+        approve(conn, env, approved)
+        requested = define(conn, env, name="weekly")
+        requests = "SELECT * FROM notifications WHERE source='group_briefing' AND object_type='group_source' " \
+                   "AND object_id=? AND state='open'"
+        open_row = conn.execute(requests, (str(requested["id"]),)).fetchone()
+        assert open_row is not None
+        for definition in (approved, requested):
+            store.delete_definition(conn, definition["id"], admin_id="admin")
+        assert conn.execute("SELECT COUNT(*) FROM group_briefing_source_grants WHERE definition_id=? "
+                            "AND revoked_at IS NULL", (approved["id"],)).fetchone()[0] == 0
+        assert conn.execute(requests, (str(requested["id"]),)).fetchone() is None
+        # The resolver is the backstop: a request for a deleted definition is gone.
+        row = NotificationRow(id=open_row["id"], user_id=open_row["user_id"], source=open_row["source"],
+                              dedup_key=open_row["dedup_key"], object_type="group_source",
+                              object_id=open_row["object_id"], severity="info", actionable=True, title="", body="",
+                              params=json.loads(open_row["params"]))
+        assert RESOLVER.resolve(env, conn, row) is None

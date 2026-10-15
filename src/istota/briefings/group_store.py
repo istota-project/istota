@@ -125,7 +125,7 @@ def stop_definition_work(conn, definition_id, reason):
 
 def list_definitions(conn, group_id):
     return [get_definition(conn, row["id"]) for row in conn.execute(
-        "SELECT id FROM group_briefing_configs WHERE group_id = ? ORDER BY name", (group_id,)
+        "SELECT id FROM group_briefing_configs WHERE group_id = ? AND deleted_at IS NULL ORDER BY name", (group_id,)
     )]
 
 
@@ -142,7 +142,7 @@ def validate_definition_save(conn, config, group_id, payload, *, actor_id, expec
     if value["channel"] not in available_channels(config):
         raise GroupError(422, "channel_unavailable", "Delivery channel is unavailable")
     old = get_definition(conn, definition_id) if definition_id is not None else None
-    if definition_id is not None and old is None:
+    if definition_id is not None and (old is None or old["deleted_at"]):
         raise GroupError(404, "definition_not_found", "Briefing not found")
     if old and old["group_id"] != group_id:
         raise GroupError(409, "immutable_target", "Duplicate the briefing to change its target")
@@ -223,7 +223,9 @@ def set_hold(conn, config, definition_id, *, admin_id):
     from istota.notifications.resolvers.group_briefing import sync_approvals
     with _transaction(conn):
         current = get_definition(conn, definition_id)
-        if current is None or current["admin_hold_at"] is not None:
+        if current is None or current["deleted_at"]:
+            return None
+        if current["admin_hold_at"] is not None:
             return current
         conn.execute("UPDATE group_briefing_configs SET admin_hold_at = ?, admin_hold_by = ?, "
                      "revision = revision + 1, updated_at = datetime('now') WHERE id = ?",
@@ -239,13 +241,47 @@ def clear_hold(conn, config, definition_id):
     from istota.notifications.resolvers.group_briefing import sync_approvals
     with _transaction(conn):
         current = get_definition(conn, definition_id)
-        if current is None or current["admin_hold_at"] is None:
+        if current is None or current["deleted_at"]:
+            return None
+        if current["admin_hold_at"] is None:
             return current
         conn.execute("UPDATE group_briefing_configs SET admin_hold_at = NULL, admin_hold_by = NULL, "
                      "revision = revision + 1, updated_at = datetime('now') WHERE id = ?", (definition_id,))
         definition = get_definition(conn, definition_id)
         sync_approvals(conn, config, definition)
         return definition
+
+
+def delete_definition(conn, definition_id, *, admin_id):
+    """Soft-delete a definition for an administrator.
+
+    Published editions stay readable to members, so the row stays and only
+    leaves authoring: unsent work stops as on a hold, source approvals are
+    revoked, and the name is freed for the group by renaming the row.
+    """
+    from istota.briefings.source_grants import revoke_definition_grants
+    from istota.notifications.resolvers.group_briefing import close_approvals
+    with _transaction(conn):
+        current = get_definition(conn, definition_id)
+        if current is None or current["deleted_at"]:
+            raise GroupError(404, "definition_not_found", "Briefing not found")
+        # rollback_default and a re-review still act on the definition.
+        migration = conn.execute("SELECT state FROM group_briefing_migrations WHERE definition_id = ?",
+                                 (definition_id,)).fetchone()
+        if migration is not None and migration["state"] != "cutover":
+            raise GroupError(409, "migration_pending", "Finish or roll back the briefing's migration first")
+        stop_definition_work(conn, definition_id, "definition_deleted")
+        revoke_definition_grants(conn, definition_id)
+        close_approvals(conn, definition_id)
+        stem = f"deleted-{definition_id}-{current['name']}"[:100]
+        name, suffix = stem, 2
+        while conn.execute("SELECT 1 FROM group_briefing_configs WHERE group_id = ? AND name = ?",
+                           (current["group_id"], name)).fetchone():
+            name = f"{stem[:99 - len(str(suffix))]}-{suffix}"
+            suffix += 1
+        conn.execute("UPDATE group_briefing_configs SET deleted_at = ?, deleted_by = ?, enabled = 0, name = ?, "
+                     "revision = revision + 1, updated_at = datetime('now') WHERE id = ?",
+                     (_timestamp(), admin_id, name, definition_id))
 
 
 def get_run(conn, run_id):
@@ -279,7 +315,7 @@ def enqueue_run(conn, config, definition_id, *, actor_id=None, is_admin=False,
         occurrence = "scheduled:" + due
     with _transaction(conn):
         definition = get_definition(conn, definition_id)
-        if definition is None or db.get_group(conn, definition["group_id"]) is None:
+        if definition is None or definition["deleted_at"] or db.get_group(conn, definition["group_id"]) is None:
             raise GroupError(404, "definition_not_found", "Briefing not found")
         if actor_id is not None:
             _require_author(conn, config, definition["group_id"], actor_id, is_admin)
@@ -484,12 +520,14 @@ def get_recipient(conn, recipient_id):
 def delivery_refusal(conn, config, recipient):
     """Live checks for an already snapshotted member; never admit a new interval."""
     from istota.briefings.source_grants import validate_run_grants
-    if recipient["error_code"] in ("definition_disabled", "definition_held", "excluded"):
+    if recipient["error_code"] in ("definition_disabled", "definition_held", "definition_deleted", "excluded"):
         return recipient["error_code"]
     run = get_run(conn, recipient["run_id"])
     definition = get_definition(conn, run["definition_id"])
     if not definition or not db.get_group(conn, definition["group_id"]):
         return "definition_unavailable"
+    if definition["deleted_at"]:
+        return "definition_deleted"
     if not definition["enabled"]:
         return "definition_disabled"
     if definition["admin_hold_at"]:

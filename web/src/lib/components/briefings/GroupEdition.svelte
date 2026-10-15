@@ -92,7 +92,7 @@
       <p class="caption edition-meta">
         <span class="group-label"><Users size={13} aria-hidden="true" />{groupLabel}</span>
         <time datetime={at}>{formatDateTime(at, { dateStyle: 'medium', timeStyle: 'short' })}</time>
-        <span>Delivered by {channelLabel(definition!.channel)}</span>
+        {#if !definition!.deleted}<span>Delivered by {channelLabel(definition!.channel)}</span>{/if}
         {#if summary}<span>{summary}</span>{/if}
       </p>
     {/snippet}

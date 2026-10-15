@@ -24,7 +24,7 @@ DEFINITION_FIELDS = {"revision": (int,), "name": (str,), "title": (str,), "cron"
 PREFERENCE_FIELDS = {"outbound_muted": (bool,), "in_app_muted": (bool,)}
 
 
-def _access(conn, config, actor, group_id, name=None, *, author=False):
+def _access(conn, config, actor, group_id, name=None, *, author=False, deleted_ok=False):
     # The Groups summary owns the host's local-mode admin exception.
     group = db.get_group(conn, group_id)
     if group is None:
@@ -42,6 +42,9 @@ def _access(conn, config, actor, group_id, name=None, *, author=False):
         if row is None:
             raise GroupError(404, "definition_not_found", "Briefing not found")
         definition = store.get_definition(conn, row["id"])
+        # A deleted definition keeps its readable history and nothing else.
+        if definition["deleted_at"] and not deleted_ok:
+            raise GroupError(404, "definition_not_found", "Briefing not found")
     return caps, definition
 
 
@@ -52,10 +55,11 @@ def _definition_view(config, definition, caps):
     if caps["author_briefings"]:
         result = dict(definition)
     # The hold travels as a display name; the administrator's id stays here.
-    result.pop("admin_hold_at", None)
-    result.pop("admin_hold_by", None)
+    for key in ("admin_hold_at", "admin_hold_by", "deleted_at", "deleted_by"):
+        result.pop(key, None)
     held = hold_view(config, definition["admin_hold_at"], definition["admin_hold_by"])
-    return {**result, "held": held, "scope": "group", "capabilities": caps}
+    return {**result, "held": held, "deleted": bool(definition["deleted_at"]), "scope": "group",
+            "capabilities": caps}
 
 
 def _edition_view(run, *, body=False):
@@ -133,7 +137,7 @@ def _group_editions(conn, config, actor, *, group_id=None, limit=20, offset=0):
 
 
 def _definitions(conn, config, actor, group_id, name=None):
-    caps, definition = _access(conn, config, actor, group_id, name)
+    caps, definition = _access(conn, config, actor, group_id, name, deleted_ok=True)
     definitions = [definition] if definition else store.list_definitions(conn, group_id)
     items = []
     for item in definitions:
@@ -145,7 +149,7 @@ def _definitions(conn, config, actor, group_id, name=None):
         last = conn.execute(f"SELECT id, state, published_at FROM group_briefing_runs WHERE {predicate} ORDER BY id DESC LIMIT 1",
                             (item["id"],)).fetchone()
         view["last_run"] = dict(last) if last else None
-        view["source_approvals"] = [source_grants.source_approval_state(
+        view["source_approvals"] = [] if item["deleted_at"] else [source_grants.source_approval_state(
             conn, config, item["id"], source["id"], actor_id=actor, is_admin=caps["author_briefings"])
             for source in store.definition_sources(item) if source["kind"] in ("personal_file", "personal_calendar")
             and (caps["author_briefings"] or source["config"]["owner_id"] == actor)]
@@ -165,7 +169,8 @@ def _save(conn, config, actor, group_id, payload, name=None):
 
 
 def _runs(conn, config, actor, group_id, name, *, limit=20, offset=0, payload=None):
-    caps, definition = _access(conn, config, actor, group_id, name, author=payload is not None)
+    caps, definition = _access(conn, config, actor, group_id, name, author=payload is not None,
+                               deleted_ok=payload is None)
     if payload is not None:
         run = store.enqueue_run(conn, config, definition["id"], actor_id=actor,
                                 is_admin=caps["author_briefings"], **payload)
@@ -178,7 +183,8 @@ def _runs(conn, config, actor, group_id, name, *, limit=20, offset=0, payload=No
 
 
 def _read_edition(conn, config, actor, group_id, name, run_id, *, download=False, delivery=False, retry=None):
-    caps, definition = _access(conn, config, actor, group_id, name, author=retry is not None)
+    caps, definition = _access(conn, config, actor, group_id, name, author=retry is not None,
+                               deleted_ok=retry is None)
     run = _edition(conn, config, definition, caps, run_id)
     if retry is not None:
         count = store.retry_deliveries(conn, config, run_id, actor_id=actor,
@@ -211,7 +217,7 @@ def _read_edition(conn, config, actor, group_id, name, run_id, *, download=False
 
 
 def _preferences(conn, config, actor, group_id, name=None, *, payload=None):
-    _, definition = _access(conn, config, actor, group_id, name)
+    _, definition = _access(conn, config, actor, group_id, name, deleted_ok=payload is None)
     definition_id = definition["id"] if definition else None
     if payload is not None:
         store.set_delivery_preferences(conn, config, group_id, actor_id=actor,

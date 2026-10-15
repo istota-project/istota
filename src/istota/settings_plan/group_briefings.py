@@ -21,7 +21,7 @@ def snapshot_group_briefings(conn):
     """Only restorable definitions; grants, attribution and editions stay local."""
     result = []
     try:
-        for row in conn.execute("SELECT id FROM group_briefing_configs ORDER BY group_id, name"):
+        for row in conn.execute("SELECT id FROM group_briefing_configs WHERE deleted_at IS NULL ORDER BY group_id, name"):
             definition = store.get_definition(conn, row["id"])
             payload = {key: definition[key] for key in GROUP_BRIEFING_FIELDS if key != "group_id"}
             result.append({"group_id": definition["group_id"], **validate_group_definition_payload(payload)})

@@ -6443,6 +6443,9 @@ export interface GroupBriefingDefinition {
   // Set while an administrator holds the briefing; only an administrator
   // lifts it, and the owners cannot enable it meanwhile.
   held?: BriefingHold | null;
+  // An administrator deleted it. Its published editions stay readable under
+  // the renamed name; nothing else about it is live.
+  deleted?: boolean;
 }
 export type GroupBriefingPayload = Pick<
   GroupBriefingDefinition,

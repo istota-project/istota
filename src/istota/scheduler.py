@@ -5771,7 +5771,8 @@ def check_group_briefings(config: Config) -> list[int]:
         return []
     now = _now(timezone.utc)
     with db.get_db(config.db_path) as conn:
-        definitions = conn.execute("SELECT id FROM group_briefing_configs WHERE enabled = 1 AND admin_hold_at IS NULL").fetchall()
+        definitions = conn.execute("SELECT id FROM group_briefing_configs WHERE enabled = 1 AND admin_hold_at IS NULL "
+                                   "AND deleted_at IS NULL").fetchall()
         for row in definitions:
             definition = group_store.get_definition(conn, row["id"])
             tz = ZoneInfo(definition["timezone"])

@@ -588,3 +588,75 @@ def test_a_stale_editor_cannot_overwrite_a_hold(env):
             store.save_definition(conn, env, "team", payload(title="Stale"), definition_id=definition["id"],
                                   actor_id="alice", expected_revision=definition["revision"])
         assert exc.value.code == "revision_conflict"
+
+
+def test_delete_stops_work_renames_keeps_history_and_frees_the_name(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition, run, queued = _published_with_queued(conn, env)
+        assert store.delete_definition(conn, definition["id"], admin_id="admin") is None
+        deleted = store.get_definition(conn, definition["id"])
+        assert deleted["deleted_at"] and deleted["deleted_by"] == "admin"
+        assert deleted["name"] == f"deleted-{definition['id']}-daily" and deleted["title"] == "Daily news"
+        assert deleted["enabled"] is False and deleted["revision"] == definition["revision"] + 1
+        assert store.get_run(conn, queued["id"])["state"] == "superseded"
+        assert store.get_run(conn, run["id"])["state"] == "published"
+        ledger = _ledger(conn, run["id"])
+        assert ledger[("alice", "in_app")] == ("skipped", "definition_deleted")
+        assert ledger[("bob", "email")] == ("sending", "definition_deleted")
+        sending = next(r for r in store.list_recipients(conn, run["id"]) if r["state"] == "sending")
+        assert store.delivery_refusal(conn, env, sending) == "definition_deleted"
+        assert store.list_definitions(conn, "team") == []
+        reused = define(conn, env)
+        assert reused["name"] == "daily" and reused["id"] != definition["id"]
+        assert [item["id"] for item in store.list_definitions(conn, "team")] == [reused["id"]]
+
+
+def test_delete_truncates_the_renamed_name_to_the_name_limit(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env, name="n" * 100, enabled=False)
+        store.delete_definition(conn, definition["id"], admin_id="admin")
+        name = store.get_definition(conn, definition["id"])["name"]
+        assert len(name) == 100 and name.startswith(f"deleted-{definition['id']}-n")
+
+
+def test_a_deleted_definition_refuses_authoring_runs_and_admin_actions(env):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env)
+        store.delete_definition(conn, definition["id"], admin_id="admin")
+        deleted = store.get_definition(conn, definition["id"])
+        for action in (
+            lambda: store.delete_definition(conn, definition["id"], admin_id="admin"),
+            lambda: store.delete_definition(conn, 9999, admin_id="admin"),
+            lambda: store.enqueue_run(conn, env, definition["id"], due_at=NOW, now=NOW),
+            lambda: enqueue(conn, env, definition, mode="preview"),
+            lambda: store.save_definition(conn, env, "team", payload(name=deleted["name"], enabled=False),
+                                          definition_id=definition["id"], actor_id="alice",
+                                          expected_revision=deleted["revision"]),
+        ):
+            with pytest.raises(GroupError) as exc:
+                action()
+            assert (exc.value.status_code, exc.value.code) == (404, "definition_not_found")
+        assert store.set_hold(conn, env, definition["id"], admin_id="admin") is None
+        assert store.clear_hold(conn, env, definition["id"]) is None
+        assert store.get_definition(conn, definition["id"])["revision"] == deleted["revision"]
+
+
+@pytest.mark.parametrize("state", ["imported", "reviewed", "rolled_back", "cutover"])
+def test_delete_refuses_a_definition_under_an_unfinished_migration(env, state):
+    from istota.briefings import group_store as store
+    with db.get_db(env.db_path) as conn:
+        definition = define(conn, env, enabled=False)
+        conn.execute("INSERT INTO group_briefing_migrations (legacy_key, definition_id, state, data_json) "
+                     "VALUES (?, ?, ?, '{}')", ("default:daily", definition["id"], state))
+        conn.commit()
+        if state == "cutover":
+            store.delete_definition(conn, definition["id"], admin_id="admin")
+            assert store.get_definition(conn, definition["id"])["deleted_at"]
+            return
+        with pytest.raises(GroupError) as exc:
+            store.delete_definition(conn, definition["id"], admin_id="admin")
+        assert (exc.value.status_code, exc.value.code) == (409, "migration_pending")
+        assert store.get_definition(conn, definition["id"]) == definition

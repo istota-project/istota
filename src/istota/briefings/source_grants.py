@@ -100,6 +100,8 @@ def _resource_disclosure(source):
 
 def source_approval_state(conn, config, definition_id, source_id, *, actor_id, is_admin=False, resource_config=None):
     definition = get_definition(conn, definition_id)
+    if definition is None or definition["deleted_at"]:
+        raise GroupError(404, "source_not_found", "Contribution not found")
     source = _source(definition, source_id)
     caps = briefing_capabilities(conn, config, definition["group_id"], actor_id, is_admin=is_admin)
     owner = source["config"]["owner_id"]
@@ -248,6 +250,15 @@ def revoke_owner_grants(conn, owner_id, *, group_id=None):
     at = _timestamp()
     for row in rows:
         _revoke_grant(conn, _active_grant(conn, row["definition_id"], row["source_id"]), at)
+
+
+def revoke_definition_grants(conn, definition_id):
+    """Join a definition delete's transaction: no approval outlives the definition."""
+    rows = conn.execute("SELECT source_id FROM group_briefing_source_grants WHERE definition_id = ? "
+                        "AND revoked_at IS NULL", (definition_id,)).fetchall()
+    at = _timestamp()
+    for row in rows:
+        _revoke_grant(conn, _active_grant(conn, definition_id, row["source_id"]), at)
 
 
 def reconcile_source_grants(conn, config, *, registry_complete):

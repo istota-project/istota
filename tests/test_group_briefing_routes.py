@@ -388,3 +388,36 @@ async def test_definition_reports_an_admin_hold_by_name_and_refuses_enabling(cli
         store.clear_hold(conn, config, definition["id"])
         store.set_hold(conn, config, definition["id"], admin_id="root@example.com")
     assert (await client.get(ROOT + "/daily")).json()["held"]["by_label"] == "an administrator"
+
+
+async def test_a_deleted_definition_leaves_authoring_and_keeps_its_editions(client, configured):
+    definition, run = await publish(client, configured)
+    assert (await client.get(ROOT + "/daily")).json()["deleted"] is False
+    with db.get_db(configured._config.db_path) as conn:
+        store.delete_definition(conn, definition["id"], admin_id="admin")
+    renamed = f"deleted-{definition['id']}-daily"
+    assert (await client.get(ROOT)).json()["items"] == []
+    assert (await client.get(ROOT + "/daily")).status_code == 404
+    feed = (await client.get(BASE + "/briefings/group-editions")).json()
+    assert [(item["briefing_name"], item["briefing_title"]) for item in feed["items"]] == [
+        (renamed, definition["title"])]
+    for user in ("bob", "alice"):
+        session(client, configured, user)
+        view = (await client.get(ROOT + "/" + renamed)).json()
+        assert view["deleted"] is True and view["title"] == definition["title"]
+        assert not {"deleted_at", "deleted_by"} & view.keys()
+        edition = (await client.get(ROOT + f"/{renamed}/runs/{run['id']}")).json()
+        assert edition["subject"] == "Edition" and edition["body_md"] == "PRIVATE EDITION"
+        assert (await client.get(ROOT + f"/{renamed}/runs")).json()["total"] == 1
+        assert (await client.get(ROOT + f"/{renamed}/runs/{run['id']}/delivery")).status_code == 200
+        assert (await client.get(ROOT + f"/{renamed}/runs/{run['id']}/download")).status_code == 200
+    for method, path, body in [
+            ("PUT", "", {**payload(name=renamed, enabled=False, channel="in_app"), "revision": view["revision"]}),
+            ("POST", "/runs", {"request_id": str(uuid4()), "mode": "preview"}),
+            ("POST", f"/runs/{run['id']}/retry", {}),
+            ("PUT", "/delivery", {"outbound_muted": True, "in_app_muted": True}),
+            ("GET", "/audience", None)]:
+        response = await client.request(method, ROOT + "/" + renamed + path, json=body)
+        assert response.status_code == 404, (method, path, response.text)
+    recreated = await create(client)
+    assert recreated["name"] == "daily" and recreated["id"] != definition["id"]

@@ -511,3 +511,68 @@ it('opens a group run without confusing the same personal archive id and links b
   expect(screen.queryByText('One common group body')).toBeNull();
   expect(get(selectedGroupEdition)).toBeNull();
 });
+
+it('reads a group edition of a deleted definition with its stored subject and no channel line', async () => {
+  __history.reset('/istota/briefings/?group=team&briefing=deleted-7-news&run=3');
+  const definition = {
+    id: 7,
+    group_id: 'team',
+    name: 'deleted-7-news',
+    title: 'Group news',
+    channel: 'email',
+    cron: '0 7 * * *',
+    timezone: 'UTC',
+    enabled: false,
+    deleted: true,
+    capabilities: { author_briefings: false },
+  };
+  const run = {
+    id: 3,
+    group_id: 'team',
+    definition_id: 7,
+    run_id: 3,
+    state: 'published',
+    mode: 'publish',
+    subject: 'Stored edition subject',
+    body_md: 'Body kept after the delete',
+    published_at: '2026-10-15T07:00:00Z',
+  };
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [
+      {
+        scope: 'group',
+        group_id: 'team',
+        label: 'Team',
+        capabilities: { author_briefings: false },
+      },
+    ],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
+  api.getGroupBriefings.mockResolvedValue({ items: [] });
+  api.getGroupEditions.mockResolvedValue({
+    items: [
+      {
+        scope: 'group',
+        run_id: 3,
+        group_id: 'team',
+        group_label: 'Team',
+        briefing_name: 'deleted-7-news',
+        briefing_title: 'Group news',
+        subject: 'Stored edition subject',
+        published_at: '2026-10-15T07:00:00Z',
+      },
+    ],
+    total: 1,
+  });
+  api.getGroupBriefing.mockResolvedValue(definition);
+  api.getGroupBriefingRun.mockResolvedValue(run);
+  api.getGroupBriefingDelivery.mockResolvedValue({ counts: { sent: 2 }, recipients: [] });
+  render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+  await screen.findByText('Body kept after the delete');
+  expect(screen.getAllByText('Stored edition subject').length).toBeGreaterThan(0);
+  expect(api.getGroupBriefing).toHaveBeenCalledWith('team', 'deleted-7-news');
+  expect(screen.queryByText(/Delivered by/)).toBeNull();
+  expect(screen.queryByText('This edition is no longer available to you.')).toBeNull();
+});

@@ -440,7 +440,7 @@ def _publisher_consumers(conn, config, outputs, dependent_jobs):
             if migrated and migrated["state"] == "cutover" and migrated["review"]["users"].get(user, {}).get("choice") in ("retire", "mute"):
                 continue
             collect(f"personal:{user}:{name}", [source for block in blocks for source in block["sources"]])
-    for row in conn.execute("SELECT id FROM group_briefing_configs ORDER BY id"):
+    for row in conn.execute("SELECT id FROM group_briefing_configs WHERE deleted_at IS NULL ORDER BY id"):
         definition = store.get_definition(conn, row[0])
         collect(f"group:{definition['id']}", store.definition_sources(definition))
     for block in config.briefing_shared_blocks:
