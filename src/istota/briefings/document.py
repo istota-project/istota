@@ -5,7 +5,28 @@ from __future__ import annotations
 import re
 
 from istota.briefings.models import RENDER_MODES, validate_briefing_document
-from istota.skills.briefing import parse_briefing_json
+from istota.skills.briefing import parse_briefing_json, strip_markdown
+
+PREVIEW_CHARS = 160
+_NOTICE_PREFIX = "Incomplete sources:"
+
+
+def edition_preview(body_md: str | None, document: dict | None = None) -> str:
+    """The first words of an edition as one plain line, for archive lists.
+
+    A document's block bodies are used without their titles, which a list row
+    already implies; the incomplete-sources notice is left to the reader.
+    """
+    if document and isinstance(document.get("blocks"), list):
+        text = "\n".join(str(block.get("body_md", "")) for block in document["blocks"])
+    else:
+        text = body_md or ""
+    lines = [line for line in text.splitlines() if not line.startswith(_NOTICE_PREFIX)]
+    stripped = strip_markdown("\n".join(lines))
+    # List markers read as stray punctuation once the lines are joined.
+    stripped = re.sub(r"(?m)^\s*(?:[-*+]|\d+[.)])\s+", "", stripped)
+    plain = " ".join(stripped.split())
+    return plain if len(plain) <= PREVIEW_CHARS else plain[:PREVIEW_CHARS - 1].rstrip() + "…"
 
 
 def validate_briefing_manifest(manifest: object) -> dict:

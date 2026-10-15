@@ -1,5 +1,6 @@
 """Group definition and edition HTTP adapters over the framework stores."""
 from datetime import datetime
+import json
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -8,6 +9,7 @@ from fastapi.responses import Response
 
 from istota import db, modules
 from istota.briefings import group_store as store, source_grants
+from istota.briefings.document import edition_preview
 from istota.briefings.models import GROUP_SOURCE_KINDS
 from istota.groups.policy import GroupError
 from istota.groups.routes import _payload, _run, _summary, _user
@@ -95,6 +97,34 @@ def _targets(conn, config, actor):
                                      "Current group" if kind.startswith("group_") else
                                      "Installation-shared" if kind == "shared_block" else "Public")
                               for kind in sorted(GROUP_SOURCE_KINDS)}}
+
+
+def _group_editions(conn, config, actor, *, group_id=None, limit=20, offset=0):
+    """Published editions across every group the caller may read, newest first."""
+    labels = {}
+    for group in db.list_groups(conn):
+        if group_id is not None and group["group_id"] != group_id:
+            continue
+        try:
+            _access(conn, config, actor, group["group_id"])
+        except GroupError:
+            continue
+        labels[group["group_id"]] = group["display_name"]
+    if not labels:
+        return {"items": [], "total": 0}
+    marks = ",".join("?" * len(labels))
+    where = (f"FROM group_briefing_runs r JOIN group_briefing_configs c ON c.id = r.definition_id "
+             f"WHERE r.state = 'published' AND r.mode = 'publish' AND c.group_id IN ({marks})")
+    rows = conn.execute(f"SELECT r.id, r.subject, r.body_md, r.document_json, r.published_at, c.group_id, c.name, c.title {where} "
+                        "ORDER BY r.published_at DESC, r.id DESC LIMIT ? OFFSET ?",
+                        (*labels, limit, offset)).fetchall()
+    total = conn.execute(f"SELECT COUNT(*) {where}", tuple(labels)).fetchone()[0]
+    return {"total": total, "items": [
+        {"scope": "group", "run_id": row["id"], "group_id": row["group_id"], "group_label": labels[row["group_id"]],
+         "briefing_name": row["name"], "briefing_title": row["title"], "subject": row["subject"],
+         "published_at": row["published_at"],
+         "preview": edition_preview(row["body_md"], json.loads(row["document_json"]) if row["document_json"] else None)}
+        for row in rows]}
 
 
 def _definitions(conn, config, actor, group_id, name=None):
@@ -250,6 +280,13 @@ def _resources(conn, config, actor, group_id, query):
 async def resources(group_id: str, request: Request, q: str = Query("", max_length=1000),
                     user: dict = Depends(require_auth)):
     return await _run(request, user, _resources, group_id, q, read=True)
+
+
+@router.get("/briefings/group-editions")
+async def group_editions(request: Request, group: str | None = Query(None, max_length=200),
+                         limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0),
+                         user: dict = Depends(require_auth)):
+    return await _run(request, user, _group_editions, group_id=group, limit=limit, offset=offset, read=True)
 
 
 @router.get("/briefings/targets")

@@ -348,3 +348,19 @@ async def test_editable_definition_mutes_do_not_copy_inherited_group_mutes(clien
     with db.get_db(configured._config.db_path) as conn:
         assert store.delivery_preferences(conn, "family", "alice", definition_id=definition["id"]) == {
             "outbound_muted": False, "in_app_muted": True}
+
+
+async def test_group_editions_feed_lists_only_readable_published_editions(client, configured):
+    definition, run = await publish(client, configured)
+    preview = await client.post(ROOT + "/daily/runs", json={"request_id": str(uuid4()), "mode": "preview"})
+    assert preview.status_code == 200
+    feed = (await client.get(BASE + "/briefings/group-editions")).json()
+    assert feed["total"] == 1
+    assert feed["items"][0] == {"scope": "group", "run_id": run["id"], "group_id": "family",
+                                "group_label": feed["items"][0]["group_label"], "briefing_name": "daily",
+                                "briefing_title": definition["title"], "subject": "Edition",
+                                "published_at": run["published_at"], "preview": "PRIVATE EDITION"}
+    assert (await client.get(BASE + "/briefings/group-editions?group=other")).json() == {"items": [], "total": 0}
+    session(client, configured, "admin")
+    assert (await client.get(BASE + "/briefings/group-editions")).json() == {"items": [], "total": 0}
+
