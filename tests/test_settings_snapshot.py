@@ -400,3 +400,26 @@ def test_snapshot_destination_requires_private_inline_replacement(install, tmp_p
             assert (target.read_bytes(), database.read_bytes()) == before
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert tomllib.loads(target.read_text())["brain"]["native"]["extra_headers"]["x.tenant"] == "replacement-placeholder"
+
+
+def test_the_ansible_format_is_a_group_vars_file_the_role_applies_as_no_change(install, tmp_path, monkeypatch, capsys):
+    """`--format ansible` writes the role's own variable, so a snapshot goes
+    into the inventory unchanged and the role's input reads it back."""
+    path, config = install
+    cron = resolve_user_config_dir(config, "alice") / "CRON.md"
+    cron.parent.mkdir(parents=True)
+    cron.write_text('```toml\n[[jobs]]\nname="daily"\ncron="0 9 * * *"\nprompt="Review"\n```\n')
+    code, stdout, stderr = invoke(monkeypatch, capsys, path, "snapshot", "--format", "ansible")
+    assert code == 0, stderr
+    variables = json.loads(stdout)
+    assert list(variables) == ["istota_plan"]
+    code, plain, _ = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
+    assert variables["istota_plan"] == json.loads(plain)
+    role_input = tmp_path / "group_vars.json"
+    role_input.write_text(stdout)
+    role_input.chmod(0o600)
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", role_input,
+                                  "--input-format", "role-vars", "--dry-run", "--format", "json")
+    assert code in (0, 2), result + stderr
+    operations = json.loads(result)["operations"]
+    assert all(item["section"] == "config" for item in operations), operations

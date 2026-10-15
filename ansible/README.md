@@ -51,14 +51,16 @@ istota_plan:
 
 The application settings are one plan, `istota_plan`. The variables the role took before it (`istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings`, `istota_user_secrets`, `istota_user_profile_mode`) are retired, and a play that still sets one fails before it changes anything. Deployment variables (`istota_secrets`, `istota_admins`, the `host.env` variables, `istota_rclone_conf`) sit beside it, because a snapshot does not cover them.
 
-`istota_plan` is an `istota apply` plan as a mapping, with the CLI's own field names ([Declarative settings](../docs/configuration/declarative-settings.md)). A snapshot of a running install is one:
+`istota_plan` is an `istota apply` plan as a mapping, with the CLI's own field names ([Declarative settings](../docs/configuration/declarative-settings.md)). A snapshot of a running install is one, and `--format ansible` writes it as a `group_vars` file that sets `istota_plan`, so it goes into the inventory as it is:
 
 ```sh
-ssh vm sudo istota-stack exec istota snapshot --format json > settings.json
+ssh vm sudo istota snapshot --format ansible \
+  | ansible-vault encrypt --output inventory/group_vars/istota/istota_plan.json -
 ```
 
+Run that again whenever the VM's settings should become the inventory's. The output holds no credential values; it does hold names, addresses and paths, which is why it goes in the vault. The snapshot writes the same bytes when nothing changed, so the file changes in git only when a setting did. The play applies the inventory's copy, so a setting changed in the web UI since the last snapshot is put back by the next play; take a snapshot first when the VM is the source of truth. `ansible-playbook --check` after a snapshot shows no drift.
+
 ```yaml
-istota_plan: "{{ lookup('file', 'settings.json') | from_json }}"
 istota_plan_secrets:
   users:
     alice: {karakeep: {api_key: "{{ vault_alice_karakeep }}"}}
@@ -120,7 +122,7 @@ ansible-vault encrypt new.yml
 shred -u old.yml config.toml rclone.conf
 ```
 
-`--old-vars` repeats, later files winning, for a host_vars file on top of group_vars. The output is 0600 and only names are printed. It maps the old secret variables to `istota_secrets` and the old per-user credentials to `istota_plan_secrets`, and keeps the master key and web token key as `vault_istota_secret_key` and `vault_istota_web_token_key` (no task reads them; the vault is their only copy off the VM). It writes no `istota_plan`: the import already put the users and the config on the VM, with the paths rewritten, so the VM's own `istota snapshot --format json` is the plan. A Twilio or WhatsApp Cloud credential has no secrets file, so the converter refuses and writes nothing; every old variable it does not carry is listed.
+`--old-vars` repeats, later files winning, for a host_vars file on top of group_vars. The output is 0600 and only names are printed. It maps the old secret variables to `istota_secrets` and the old per-user credentials to `istota_plan_secrets`, and keeps the master key and web token key as `vault_istota_secret_key` and `vault_istota_web_token_key` (no task reads them; the vault is their only copy off the VM). It writes no `istota_plan`: the import already put the users and the config on the VM, with the paths rewritten, so the VM's own `istota snapshot --format ansible` is the plan. A Twilio or WhatsApp Cloud credential has no secrets file, so the converter refuses and writes nothing; every old variable it does not carry is listed.
 
 A secret named in `istota_secrets` is written exactly, an empty string included. A secret left out is created empty if its file is missing and otherwise left alone, so a file the wizard or the import wrote survives a play that does not manage it.
 

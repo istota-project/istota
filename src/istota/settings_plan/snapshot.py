@@ -156,9 +156,12 @@ def run(config_path: Path, *, output=None, output_format="toml", users=None, no_
         parse_plan(document)
         if no_meta:
             document.pop("meta")
+        # The management role's variable, as a group_vars file: JSON is YAML.
+        if output_format == "ansible":
+            document = {"istota_plan": document}
         # Insertion order retains operator-authored mappings and positional lists.
         text = (json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-                if output_format == "json" else toml_write.dumps(document))
+                if output_format in ("json", "ansible") else toml_write.dumps(document))
         if output and output != "-":
             destination = Path(output)
             try:

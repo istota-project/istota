@@ -94,14 +94,16 @@ On the VM, `istota-stack apply settings.json --secrets-file private-settings.jso
 
 ## With Ansible
 
-The [management role](../deployment/ansible.md) takes the same plan as `istota_plan`. Export it from the running install and read it in the estate's playbook:
+The [management role](../deployment/ansible.md) takes the same plan as `istota_plan`. `--format ansible` writes the snapshot as a `group_vars` file setting that variable, so it goes into the estate's inventory, encrypted, with nothing to edit:
 
 ```bash
-istota-stack exec istota snapshot --format json > settings.json
+ssh vm sudo istota snapshot --format ansible \
+  | ansible-vault encrypt --output inventory/group_vars/istota/istota_plan.json -
 ```
 
+Credentials are set beside it:
+
 ```yaml
-istota_plan: "{{ lookup('file', 'settings.json') | from_json }}"
 istota_plan_secrets:
   users:
     alice: {karakeep: {api_key: "{{ vault_alice_karakeep }}"}}

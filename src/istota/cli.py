@@ -5012,7 +5012,9 @@ def main():
 
     snapshot_parser = subparsers.add_parser("snapshot", help="Export application settings without credential values")
     snapshot_parser.add_argument("-o", "--output", help="Private output file (default: stdout)")
-    snapshot_parser.add_argument("--format", choices=("toml", "json"), default="toml")
+    snapshot_parser.add_argument(
+        "--format", choices=("toml", "json", "ansible"), default="toml",
+        help="ansible: JSON under an istota_plan key, a group_vars file for the management role")
     snapshot_parser.add_argument("--user", action="append", help="Export only this user; repeat for several users")
     snapshot_parser.add_argument("--no-meta", action="store_true", help="Omit snapshot metadata")
     snapshot_parser.add_argument("--patch", action="append", metavar="SOURCE=DEST", help="Rewrite selected path prefixes")

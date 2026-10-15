@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `istota snapshot --format ansible` writes the settings as a `group_vars` file for the Ansible management role, so a snapshot goes into an inventory as it is: `istota snapshot --format ansible | ansible-vault encrypt --output FILE -`.
+
 ### Changed
 
 - The Ansible management role takes the application settings only as `istota_plan`, with credentials in `istota_plan_secrets`. `istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings` and `istota_user_secrets` are gone, and so is the generated config reference in `defaults/main.yml`; set the plan from `istota snapshot --format json`. `istota migrate role-vars` now writes the old per-user credentials as `istota_plan_secrets` and leaves the plan to the VM's snapshot.

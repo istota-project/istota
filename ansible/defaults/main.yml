@@ -157,9 +157,9 @@ istota_admins: []
 # the CLI's field names. `config` is the whole of config.toml as a nested dict
 # (config/config.example.toml documents every key); `users` holds each user's
 # profile, folders, briefings, jobs, heartbeats and credential slots. A
-# snapshot of a running install is one:
-#   istota-stack exec istota snapshot --format json > settings.json
-#   istota_plan: "{{ lookup('file', 'settings.json') | from_json }}"
+# snapshot of a running install is one, and `--format ansible` writes it as a
+# group_vars file setting this variable (see the README):
+#   istota snapshot --format ansible | ansible-vault encrypt --output FILE -
 # Applied with `istota-stack apply`; under --check, with --dry-run. Empty skips
 # the step. The role marks its config as managed by ansible; each user's
 # profile_mode is left as written.
