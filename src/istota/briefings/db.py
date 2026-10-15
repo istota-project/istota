@@ -31,6 +31,9 @@ from istota.briefings.models import (
     BriefingBlock,
     parse_json_dict,
     parse_json_list,
+    presentation_for_options,
+    validate_block_options,
+    validate_briefing_document,
 )
 from istota.lib.timestamps import iso_now as _now_iso
 
@@ -38,7 +41,7 @@ from istota.lib.timestamps import iso_now as _now_iso
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA_SQL = """
@@ -74,7 +77,8 @@ CREATE TABLE IF NOT EXISTS briefing_archive (
     generated_at TEXT NOT NULL,
     task_id INTEGER,
     block_meta TEXT NOT NULL DEFAULT '{}',
-    delivered_to TEXT NOT NULL DEFAULT '[]'
+    delivered_to TEXT NOT NULL DEFAULT '[]',
+    document_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_archive_name_time
     ON briefing_archive(briefing_name, generated_at DESC);
@@ -106,9 +110,13 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 """
 
 
-# No migrations yet — v1 is the initial schema. Future column additions append
-# a (target_version, migrate_fn) tuple here (see feeds/db.py for the pattern).
-_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = []
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(briefing_archive)")}
+    if "document_json" not in columns:
+        conn.execute("ALTER TABLE briefing_archive ADD COLUMN document_json TEXT")
+
+
+_MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _migrate_v2)]
 
 
 def init_db(db_path: Path) -> None:
@@ -193,6 +201,7 @@ def add_block(
     position: int | None = None,
 ) -> int:
     """Insert a block at ``position`` (default: append). Returns the row id."""
+    options = validate_block_options(options if options is not None else {})
     if position is None:
         position = _next_block_position(conn, briefing_name)
     now = _now_iso()
@@ -222,6 +231,8 @@ def update_block(
     options: dict | None = None,
 ) -> None:
     """Patch a block's mutable fields (only non-None args are applied)."""
+    if options is not None:
+        options = validate_block_options(options)
     sets: list[str] = []
     params: list = []
     if title is not None:
@@ -452,20 +463,28 @@ def insert_archive(
     task_id: int | None = None,
     block_meta: dict | None = None,
     delivered_to: list[str] | None = None,
+    document: dict | None = None,
 ) -> int:
     """Persist one rendered briefing. Returns the row id."""
+    if document is not None:
+        from istota.briefings.document import document_to_markdown
+
+        document = validate_briefing_document(document)
+        if subject != document["title"] or body_md != document_to_markdown(document):
+            raise ValueError("briefing_document_archive_mismatch")
     cur = conn.execute(
         """
         INSERT INTO briefing_archive(
             briefing_name, subject, body_md, generated_at, task_id,
-            block_meta, delivered_to
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            block_meta, delivered_to, document_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
             briefing_name, subject, body_md, generated_at or _now_iso(),
             task_id, json.dumps(block_meta or {}),
             json.dumps(delivered_to or []),
+            json.dumps(document) if document is not None else None,
         ),
     )
     return int(cur.fetchone()["id"])
@@ -578,6 +597,9 @@ def meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
 
 
 def _row_to_block(row: sqlite3.Row) -> BriefingBlock:
+    options = parse_json_dict(row["options"])
+    if "presentation" in options:
+        options["presentation"] = presentation_for_options(options)
     return BriefingBlock(
         id=row["id"],
         briefing_name=row["briefing_name"],
@@ -585,7 +607,7 @@ def _row_to_block(row: sqlite3.Row) -> BriefingBlock:
         title=row["title"],
         directive=row["directive"],
         render_mode=row["render_mode"],
-        options=parse_json_dict(row["options"]),
+        options=options,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -604,6 +626,12 @@ def _row_to_source(row: sqlite3.Row) -> BlockSource:
 
 
 def _row_to_archived(row: sqlite3.Row) -> ArchivedBriefing:
+    document = None
+    if row["document_json"] is not None:
+        try:
+            document = validate_briefing_document(json.loads(row["document_json"]))
+        except (TypeError, ValueError):
+            logger.warning("briefing_document_invalid archive_id=%s", row["id"])
     return ArchivedBriefing(
         id=row["id"],
         briefing_name=row["briefing_name"],
@@ -613,4 +641,5 @@ def _row_to_archived(row: sqlite3.Row) -> ArchivedBriefing:
         task_id=row["task_id"],
         block_meta=parse_json_dict(row["block_meta"]),
         delivered_to=parse_json_list(row["delivered_to"]),
+        document=document,
     )

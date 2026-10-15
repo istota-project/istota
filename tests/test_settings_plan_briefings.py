@@ -511,3 +511,28 @@ def test_empty_content_after_seed_migration_stays_empty(install):
         assert bdb.list_blocks(conn, "morning") == []
     context, operations = preview(install, [{"name": "morning", "blocks": []}], prune=True)
     assert engine.execute_plan(operations, context).exit_code == 0
+
+
+@pytest.mark.parametrize("width", ["wide", "full"])
+def test_presentation_apply_snapshot_round_trip(install, width):
+    from istota.settings_plan.briefings import snapshot_blocks
+
+    options = {"tone": "neutral", "custom": 42, "presentation": {"width": width}}
+    definition = [{"name": "morning", "cron": "0 7 * * *", "output": "email", "blocks": [
+        {"title": "News", "options": options, "sources": [{"kind": "notes"}]}]}]
+    context, operations = preview(install, definition)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    with bdb.connect(module_path(install)) as conn:
+        assert snapshot_blocks(conn, "morning", "alice")[0]["options"] == options
+    context, operations = preview(install, definition)
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+def test_invalid_presentation_plan_refuses_before_any_schedule_write(install):
+    from istota.settings_plan.schema import SchemaError
+
+    with pytest.raises(SchemaError, match="presentation"):
+        preview(install, [{"name": "morning", "cron": "0 7 * * *", "output": "email", "blocks": [
+            {"title": "News", "options": {"presentation": {"width": "bad"}}, "sources": [{"kind": "notes"}]}]}])
+    assert user_briefings.list_briefings(install[1]) == []
+    assert not module_path(install).exists()

@@ -245,3 +245,70 @@ class TestArchive:
 
     def test_delete_archived_missing(self, conn):
         assert bdb.delete_archived(conn, 999) is False
+
+
+class TestDocumentStorage:
+    def test_fresh_and_v1_upgrade_keep_legacy_archive(self, tmp_path):
+        path = tmp_path / "briefings.db"
+        # Build the version-1 schema independently of the current schema text.
+        with bdb.connect(path) as conn:
+            conn.executescript("""
+                CREATE TABLE briefing_archive (
+                    id INTEGER PRIMARY KEY, briefing_name TEXT NOT NULL,
+                    subject TEXT, body_md TEXT NOT NULL, generated_at TEXT NOT NULL,
+                    task_id INTEGER, block_meta TEXT NOT NULL DEFAULT '{}',
+                    delivered_to TEXT NOT NULL DEFAULT '[]');
+                CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO schema_meta VALUES ('version', '1');
+                INSERT INTO briefing_archive (briefing_name, subject, body_md, generated_at)
+                    VALUES ('morning', 'Original title', '# Original body', '2026-01-01');
+            """)
+            conn.commit()
+        bdb.init_db(path)
+        bdb.init_db(path)
+        with bdb.connect(path) as conn:
+            assert bdb.meta_get(conn, "version") == "2"
+            archived = bdb.get_archived(conn, 1)
+            assert (archived.subject, archived.body_md, archived.document) == (
+                "Original title", "# Original body", None,
+            )
+            assert conn.execute("SELECT document_json FROM briefing_archive").fetchone()[0] is None
+        fresh = tmp_path / "fresh.db"
+        bdb.init_db(fresh)
+        with bdb.connect(fresh) as conn:
+            assert "document_json" in {r["name"] for r in conn.execute("PRAGMA table_info(briefing_archive)")}
+
+    def test_document_round_trip_and_corrupt_fallback(self, conn, caplog):
+        document = {"version": 1, "title": "Edition", "blocks": [
+            {"block_id": 42, "title": "News", "kind": "markdown", "body_md": "Complete body",
+             "presentation": {"width": "wide"}, "source_status": "complete"},
+        ]}
+        aid = bdb.insert_archive(conn, briefing_name="morning", subject="Edition",
+                                  body_md="News\n\nComplete body", document=document)
+        assert bdb.get_archived(conn, aid).document == document
+        for corrupt in ('not json', '{"version": 99}', '[]'):
+            conn.execute("UPDATE briefing_archive SET document_json = ? WHERE id = ?", (corrupt, aid))
+            archived = bdb.get_archived(conn, aid)
+            assert archived.document is None and archived.body_md == "News\n\nComplete body"
+        assert "briefing_document_invalid" in caplog.text
+        assert "not json" not in caplog.text
+
+    def test_invalid_document_write_cannot_change_archive(self, conn):
+        with pytest.raises(ValueError):
+            bdb.insert_archive(conn, briefing_name="morning", subject="Edition", body_md="Body",
+                               document={"version": 99})
+        assert bdb.count_archive(conn) == 0
+
+    def test_invalid_presentation_update_leaves_other_fields_unchanged(self, conn):
+        bid = bdb.add_block(conn, briefing_name="morning", title="Original", options={"tone": "neutral"})
+        with pytest.raises(ValueError, match="presentation"):
+            bdb.update_block(conn, bid, title="Changed", options={"presentation": {"width": "bad"}})
+        block = bdb.get_block(conn, bid)
+        assert block.title == "Original" and block.options == {"tone": "neutral"}
+
+    def test_old_invalid_presentation_is_read_as_auto(self, conn, caplog):
+        bid = bdb.add_block(conn, briefing_name="morning", title="Old")
+        conn.execute("UPDATE briefing_blocks SET options = ? WHERE id = ?",
+                     ('{"tone":"neutral","presentation":{"width":"bad"}}', bid))
+        assert bdb.get_block(conn, bid).options == {"tone": "neutral", "presentation": {"width": "auto"}}
+        assert "briefing_presentation_invalid" in caplog.text

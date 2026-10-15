@@ -13,7 +13,9 @@ section. Mirrors :mod:`istota.feeds.models`.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +43,9 @@ SOURCE_KINDS = (
 # Blocks whose gathered content is deterministically pre-formatted and passed to
 # the model for near-verbatim inclusion (markets/calendar), vs. synthesized.
 RENDER_MODES = ("synthesis", "structured")
+PRESENTATION_WIDTHS = ("auto", "wide", "full")
+
+logger = logging.getLogger(__name__)
 
 # Source kinds an admin-editable *shared* block may use — genuinely user-agnostic
 # only (a shared block is generated once globally under the __system__ identity,
@@ -127,6 +132,7 @@ class ArchivedBriefing:
     task_id: int | None = None
     block_meta: dict = field(default_factory=dict)
     delivered_to: list[str] = field(default_factory=list)
+    document: dict | None = None
 
 
 @dataclass
@@ -225,3 +231,69 @@ def validate_shared_block_payload(payload: dict) -> dict:
         "trusted": bool(payload.get("trusted", False)),
         "sources": sources,
     }
+
+
+def _validate_presentation(presentation: object) -> dict:
+    """Return the supported layout fields, rejecting malformed new values."""
+    if not isinstance(presentation, dict):
+        raise ValueError("presentation must be an object")
+    width = presentation.get("width", "auto")
+    if not isinstance(width, str) or width not in PRESENTATION_WIDTHS:
+        raise ValueError("presentation.width must be auto, wide or full")
+    return {"width": width}
+
+
+def validate_block_options(options: object) -> dict:
+    """Validate reserved options while retaining unrelated configuration."""
+    if not isinstance(options, dict):
+        raise ValueError("options must be an object")
+    if "presentation" in options:
+        _validate_presentation(options["presentation"])
+    return deepcopy(options)
+
+
+def presentation_for_options(options: dict) -> dict:
+    """Read optional stored presentation without breaking old definitions."""
+    if "presentation" not in options:
+        return {"width": "auto"}
+    try:
+        return _validate_presentation(options["presentation"])
+    except ValueError:
+        logger.warning("briefing_presentation_invalid")
+        return {"width": "auto"}
+
+
+def validate_briefing_document(document: object) -> dict:
+    """Validate a version-1 edition, retaining future kinds' Markdown fallback."""
+    if not isinstance(document, dict) or type(document.get("version")) is not int or document["version"] != 1:
+        raise ValueError("briefing_document_version")
+    if not isinstance(document.get("title"), str) or not document["title"].strip():
+        raise ValueError("briefing_document_title")
+    if not isinstance(document.get("blocks"), list):
+        raise ValueError("briefing_document_blocks")
+    blocks = []
+    seen = set()
+    for block in document["blocks"]:
+        if not isinstance(block, dict):
+            raise ValueError("briefing_document_block")
+        block_id = block.get("block_id")
+        if type(block_id) is not int or block_id in seen:
+            raise ValueError("briefing_document_block_id")
+        seen.add(block_id)
+        for name in ("title", "kind", "body_md"):
+            if not isinstance(block.get(name), str):
+                raise ValueError("briefing_document_" + name)
+        if not block["title"].strip() or not block["kind"].strip():
+            raise ValueError("briefing_document_block_label")
+        if block.get("source_status") not in ("complete", "partial"):
+            raise ValueError("briefing_document_source_status")
+        try:
+            presentation = _validate_presentation(block.get("presentation"))
+        except ValueError:
+            raise ValueError("briefing_document_presentation") from None
+        blocks.append({
+            "block_id": block_id, "title": block["title"], "kind": block["kind"],
+            "body_md": block["body_md"], "presentation": presentation,
+            "source_status": block["source_status"],
+        })
+    return {"version": 1, "title": document["title"], "blocks": blocks}

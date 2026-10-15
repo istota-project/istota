@@ -235,7 +235,7 @@ def render_briefing_html(md: str) -> str:
 def parse_briefing_json(text: str) -> dict | None:
     """Parse structured JSON output from a briefing task.
 
-    Expected format: {"subject": "...", "body": "..."}
+    Accept legacy body envelopes, versioned block output and canonical results.
 
     Handles common model quirks: markdown code fences, preamble text,
     and Unicode smart quotes. Returns None if no valid JSON found.
@@ -245,14 +245,22 @@ def parse_briefing_json(text: str) -> dict | None:
         "\u2018": "'", "\u2019": "'",
     }
 
+    def _envelope(data: object) -> dict | None:
+        if not isinstance(data, dict):
+            return None
+        if "version" in data or "blocks" in data:
+            return data
+        if isinstance(data.get("body"), str):
+            result = {"subject": data.get("subject"), "body": data["body"]}
+            if "briefing_document" in data:
+                result["briefing_document"] = data["briefing_document"]
+            return result
+        return None
+
     def _try_parse(s: str) -> dict | None:
         try:
             data = json.loads(s)
-            if isinstance(data, dict) and "body" in data:
-                return {
-                    "subject": data.get("subject"),
-                    "body": data["body"],
-                }
+            return _envelope(data)
         except (json.JSONDecodeError, TypeError, KeyError):
             return None
 
@@ -287,8 +295,9 @@ def parse_briefing_json(text: str) -> dict | None:
         try:
             decoder = json.JSONDecoder()
             data, _ = decoder.raw_decode(text, first_brace)
-            if isinstance(data, dict) and "body" in data:
-                return {"subject": data.get("subject"), "body": data["body"]}
+            result = _envelope(data)
+            if result:
+                return result
         except (json.JSONDecodeError, TypeError, KeyError):
             pass
 
