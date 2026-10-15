@@ -6894,6 +6894,18 @@ def initialize_room_read_state(
     return True
 
 
+def count_user_web_unread_messages(conn: sqlite3.Connection, user_id: str) -> int:
+    """Sum visible rooms using the web sidebar's cursors and unread rules."""
+    hidden = hidden_room_tokens_for_member(conn, user_id)
+    total = 0
+    for room in list_member_rooms(conn, user_id):
+        if room.token in hidden:
+            continue
+        initialize_room_read_state(conn, room.token, "web", user_id)
+        total += count_unread_messages(conn, room.token, "web", user_id)
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Per-message stars + cross-room aggregate views (web chat)
 # ---------------------------------------------------------------------------

@@ -1945,18 +1945,35 @@ async def setup_state():
     return {"phase": "configured"}
 
 
+def _user_show_nav_unread_badges(username: str) -> bool:
+    """Read the current account preference, falling back to config before seeding."""
+    from istota import user_profiles
+
+    if _config is None:
+        return False
+    profile = user_profiles.get_profile(_config.db_path, username)
+    preferences = profile if profile is not None else _config.users.get(username)
+    return bool(getattr(preferences, "show_nav_unread_badges", False))
+
+
+@api_router.get("/nav/unread")
+async def api_nav_unread(user: dict = Depends(_require_api_auth)):
+    from istota.webui.nav_unread import get_nav_unread_counts
+
+    username = user["username"]
+    enabled = await asyncio.to_thread(_user_show_nav_unread_badges, username)
+    counts = {"chat": None, "briefings": None, "feeds": None}
+    if enabled:
+        counts = await asyncio.to_thread(get_nav_unread_counts, _config, username)
+    return JSONResponse({"enabled": enabled, **counts}, headers={"Cache-Control": "no-store"})
+
+
 @api_router.get("/me")
 async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
     method = "none" if _no_auth_mode() else request.session["auth"]["method"]
     identity = getattr(request.state, "web_auth_identity", None)
     username = user["username"]
-    show_nav_unread_badges = False
-    if _config:
-        from istota import user_profiles
-
-        profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, username)
-        preferences = profile if profile is not None else _config.users.get(username)
-        show_nav_unread_badges = bool(getattr(preferences, "show_nav_unread_badges", False))
+    show_nav_unread_badges = await asyncio.to_thread(_user_show_nav_unread_badges, username)
     is_admin = _user_is_web_admin(username)
     features: dict = {
         "chat": True,  # web chat is always-on

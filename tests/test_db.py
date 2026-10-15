@@ -2528,6 +2528,45 @@ class TestUnreadMessageCounts:
             assert db.count_unread_messages(conn, "r1", "web", "alice") == 1
 
 
+class TestUserWebUnreadTotal:
+    def test_visibility_cursors_and_membership(self, db_path):
+        with db.get_db(db_path) as conn:
+            for token in ("one", "two", "hidden", "archived", "dismissed", "new"):
+                db.register_room(conn, token, "alice", origin="web", name=token)
+                if token != "new":
+                    db.set_room_read_state(conn, token, "web", 0, "alice")
+                db.add_message(conn, token, role="assistant", body="Reply", origin_surface="web")
+            db.add_message(conn, "one", role="system", body="Notice", origin_surface="web")
+            db.add_message(conn, "one", role="user", body="Question", origin_surface="web")
+            db.add_room_binding(conn, "hidden", "email", "<thread@example.com>")
+            conn.execute("UPDATE rooms SET archived = 1 WHERE token = 'archived'")
+            db.dismiss_room(conn, "dismissed", "alice")
+            db.register_room(conn, "other", "bob", origin="web", name="Other")
+            db.set_room_read_state(conn, "other", "web", 0, "alice")
+            db.add_message(conn, "other", role="assistant", body="Other", origin_surface="web")
+
+            assert db.count_user_web_unread_messages(conn, "alice") == 3
+            assert db.get_room_read_state(conn, "one", "web", "alice") == 0
+            assert db.get_room_read_state(conn, "new", "web", "alice") == db.room_max_message_id(conn, "new")
+            assert conn.execute("SELECT COUNT(*) FROM web_chat_rooms").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM room_bindings WHERE surface = 'web'").fetchone()[0] == 0
+
+            db.remove_room_member(conn, "two", "alice")
+            assert db.count_user_web_unread_messages(conn, "alice") == 2
+            db.add_room_member(conn, "other", "alice")
+            assert db.count_user_web_unread_messages(conn, "alice") == 3
+            handle = db.ensure_web_chat_handle(conn, "alice", "hidden", "Thread")
+            db.update_web_chat_room(conn, handle.id, listed=True)
+            assert db.count_user_web_unread_messages(conn, "alice") == 4
+            db.set_room_read_state(conn, "other", "web", 0, "bob")
+            assert db.count_user_web_unread_messages(conn, "bob") == 1
+
+    def test_empty_user_does_not_create_a_default_room(self, db_path):
+        with db.get_db(db_path) as conn:
+            assert db.count_user_web_unread_messages(conn, "alice") == 0
+            assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
+
+
 class TestConnectionPragmas:
     """WAL journal mode is set once at init_db and persists in the file
     header; get_db must NOT re-issue it (re-issuing takes a write lock on
