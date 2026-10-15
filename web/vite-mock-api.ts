@@ -4938,7 +4938,6 @@ const mockAdminUserDetail = (userId: string): AdminUserDetail | undefined => {
     outbound_approval: '',
     disabled_skills: [],
     disabled_modules: [],
-    default_briefings: true,
     max_foreground_workers: 0,
     max_background_workers: 0,
     sms_phone_number: userId === 'bob' ? '+15550100002' : '',

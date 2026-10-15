@@ -667,7 +667,9 @@
               />
             </Field>
           {/each}
-          <p class="caption">Members manage installation briefing delivery in Briefings, under All users.</p>
+          <p class="caption">
+            Members manage installation briefing delivery in Briefings, under All users.
+          </p>
         </section>
 
         <section class="editor-section" aria-labelledby="admin-user-channels">

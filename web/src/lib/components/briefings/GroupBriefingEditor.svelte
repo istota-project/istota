@@ -112,9 +112,7 @@
       directive: b.directive || null,
       render_mode: b.render_mode,
       options: b.options,
-      sources: b.sources
-        .filter((s) => s.enabled)
-        .map((s) => ({ id: sourceKeys[s.id], kind: s.kind, config: s.config })),
+      sources: b.sources.map((s) => ({ id: sourceKeys[s.id], kind: s.kind, config: s.config })),
     }));
     return {
       name: groupName,
@@ -150,6 +148,10 @@
   );
   const groupInvalidSources = $derived(
     groupBlocks.flatMap((b) => b.sources).filter((s) => !groupSourceKinds.includes(s.kind)),
+  );
+  // A group source has no disabled state; a copied disabled source must be enabled or removed.
+  const groupDisabledSources = $derived(
+    groupBlocks.flatMap((b) => b.sources).filter((s) => s.enabled === false),
   );
 
   function localBlock(title: string): BriefingBlock {
@@ -412,6 +414,7 @@
     const prompt = generationPrompt;
     const research = researchPrompt;
     const researchOn = researchEnabled;
+    const personal = personalInformation;
     startNew();
     excludedUsers = exclusions;
     groupName = `${name}-copy-${crypto.randomUUID().slice(0, 8)}`;
@@ -422,6 +425,7 @@
       generationPrompt = prompt;
       researchPrompt = research;
       researchEnabled = researchOn;
+      personalInformation = personal;
     }
     groupBlocks = old;
     for (const block of groupBlocks)
@@ -682,6 +686,7 @@
           {sharedBlockOptions}
           feedsAvailable={false}
           localDraft
+          allowSourceDisable={false}
           userId={identity.user.username}
           fileOptions={resourceOptions.files}
           calendarOptions={resourceOptions.calendars}
@@ -705,6 +710,12 @@
       {#each groupInvalidSources as source (source.id)}<p>
           {source.kind}: {String(source.config.path ?? source.config.owner_id ?? '')}
         </p>{/each}
+    {/if}
+    {#if groupDisabledSources.length}
+      <div class="banner warning">
+        Group briefings have no disabled sources. Enable or remove each disabled source before
+        saving.
+      </div>
     {/if}
     {#if groupAuthor && groupDirty}<p>
         Save a disabled draft to refresh recipient counts and review exact source approvals before
@@ -783,6 +794,7 @@
           variant="primary"
           disabled={groupBusy ||
             groupInvalidSources.length > 0 ||
+            groupDisabledSources.length > 0 ||
             !groupName.trim() ||
             (groupMode === 'prompt' &&
               (!generationPrompt.trim() || (researchEnabled && !researchPrompt.trim())))}
@@ -816,6 +828,8 @@
             briefing_name: groupName,
             subject: preview.subject ?? groupTitle,
             body_md: preview.body_md,
+            document: preview.document ?? null,
+            read_at: null,
             generated_at: preview.created_at ?? '',
             task_id: null,
             delivered_to: [],

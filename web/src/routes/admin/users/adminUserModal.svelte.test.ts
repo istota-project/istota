@@ -33,7 +33,7 @@ function detail(overrides: Partial<AdminUserDetail> = {}): AdminUserDetail {
       outbound_approval: '',
       disabled_skills: [],
       disabled_modules: [],
-        max_foreground_workers: 0,
+      max_foreground_workers: 0,
       max_background_workers: 0,
       sms_phone_number: '+15550100002',
     },

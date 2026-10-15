@@ -25,6 +25,7 @@
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
     allowPreview?: boolean;
+    allowSourceDisable?: boolean;
     userId?: string;
     fileOptions?: string[];
     calendarOptions?: SelectOption[];
@@ -40,6 +41,7 @@
     sharedBlockOptions,
     feedsAvailable,
     allowPreview = true,
+    allowSourceDisable = true,
     userId = '',
     fileOptions = [],
     calendarOptions = [],
@@ -228,15 +230,17 @@
               }}
             />
           </SettingsField>
-          <SettingsField label="Enabled" checkbox>
-            <input
-              type="checkbox"
-              checked={source.enabled !== false}
-              onchange={(event) => {
-                draft.sources[index] = { ...source, enabled: event.currentTarget.checked };
-              }}
-            />
-          </SettingsField>
+          {#if allowSourceDisable || source.enabled === false}
+            <SettingsField label="Enabled" checkbox>
+              <input
+                type="checkbox"
+                checked={source.enabled !== false}
+                onchange={(event) => {
+                  draft.sources[index] = { ...source, enabled: event.currentTarget.checked };
+                }}
+              />
+            </SettingsField>
+          {/if}
           <SourceConfigFields
             kind={source.kind}
             config={source.config ?? {}}

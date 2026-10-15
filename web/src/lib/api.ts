@@ -6458,6 +6458,7 @@ export interface GroupBriefingRun {
   state: string;
   subject?: string;
   body_md?: string;
+  document?: BriefingDocument | null;
   error_code?: string | null;
   created_at?: string;
   published_at?: string | null;

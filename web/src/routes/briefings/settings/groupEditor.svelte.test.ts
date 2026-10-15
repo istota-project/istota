@@ -154,11 +154,11 @@ beforeEach(() => {
   });
 });
 async function pick(label: string, option: string) {
-  const trigger = screen.getByRole('button', { name: label, exact: true });
+  const trigger = screen.getByRole('button', { name: label });
   await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
   await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
   await fireEvent.click(trigger);
-  const item = await screen.findByRole('option', { name: option, exact: true });
+  const item = await screen.findByRole('option', { name: option });
   await fireEvent.pointerUp(item, { pointerType: 'mouse', button: 0 });
   await fireEvent.click(item);
   await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'));
@@ -185,7 +185,7 @@ async function existingGroup() {
   }));
   render(Harness, { component: Page, user: person });
   await fireEvent.click(await screen.findByRole('button', { name: 'Edit news' }));
-  await screen.findByRole('button', { name: 'Preview', exact: true });
+  await screen.findByRole('button', { name: 'Preview' });
   await waitFor(() =>
     expect(screen.getByRole('button', { name: 'Reload saved briefing' })).not.toBeDisabled(),
   );
@@ -227,9 +227,7 @@ it('saves a disabled prompt draft, reviews recipient counts and previews without
   });
   expect(screen.queryByText(/domain allowlist/i)).not.toBeInTheDocument();
   await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Preview', exact: true })).not.toBeDisabled(),
-  );
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Preview' })).not.toBeDisabled());
   expect(api.saveGroupBriefing).toHaveBeenCalledWith(
     'research',
     expect.objectContaining({
@@ -246,7 +244,7 @@ it('saves a disabled prompt draft, reviews recipient counts and previews without
   );
   expect(screen.getByText(/1 deliverable/)).toHaveTextContent('1 muted · 1 missing destinations');
   expect(screen.getByRole('button', { name: 'Distribution target' })).toBeDisabled();
-  await fireEvent.click(screen.getByRole('button', { name: 'Preview', exact: true }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
   await screen.findByText('Private preview body');
   expect(api.runGroupBriefing).toHaveBeenCalledWith(
     'research',
@@ -273,13 +271,11 @@ it('requires unchecked source consent and renews it after a channel change', asy
   });
   expect(checkbox).not.toBeChecked();
   expect(screen.getByRole('button', { name: 'Approve source' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Preview', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Enable schedule' })).toBeDisabled();
   await fireEvent.click(checkbox);
   await fireEvent.click(screen.getByRole('button', { name: 'Approve source' }));
-  await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Preview', exact: true })).not.toBeDisabled(),
-  );
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Preview' })).not.toBeDisabled());
   expect(api.approveBriefingSource).toHaveBeenCalledWith(
     'research',
     'news',
@@ -289,7 +285,7 @@ it('requires unchecked source consent and renews it after a channel change', asy
   expect(screen.getByText(/alice's notes.md is used each run/)).toBeVisible();
   await pick('Delivery channel', 'In app');
   expect(screen.getByRole('button', { name: 'Enable schedule' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Preview', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
 });
 it('never lets an author approve another member’s contribution', async () => {
   personalSource('bob');
@@ -306,13 +302,12 @@ it('keeps the audience outside collapsed content on a narrow screen and duplicat
   await fireEvent.click(
     within(await screen.findByRole('dialog', { name: 'Edit block' })).getByRole('button', {
       name: 'Cancel',
-      exact: true,
     }),
   );
   expect(screen.getByText(/Generated once per run/)).toBeVisible();
   await fireEvent.click(screen.getByRole('button', { name: 'Duplicate for group' }));
   expect(screen.getByRole('button', { name: 'Distribution target' })).not.toBeDisabled();
-  expect(screen.getByRole('button', { name: 'Preview', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
   await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
   await waitFor(() =>
     expect(api.saveGroupBriefing).toHaveBeenCalledWith(
@@ -343,7 +338,7 @@ it('keeps a conflicted draft and removes management after an ownership refusal',
   await fireEvent.click(screen.getByRole('button', { name: 'Save draft' }));
   await screen.findByText('briefing_forbidden');
   expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Preview', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Preview' })).not.toBeInTheDocument();
   expect(screen.queryByRole('combobox', { name: 'Excluded users' })).not.toBeInTheDocument();
 });
 
@@ -375,6 +370,7 @@ it('reuses ordered block editing and preserves saved source identities', async (
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Edit' }));
   const editor = await screen.findByRole('dialog', { name: 'Edit block' });
   expect(within(editor).queryByRole('button', { name: 'Preview' })).not.toBeInTheDocument();
+  expect(within(editor).queryByLabelText('Enabled')).not.toBeInTheDocument();
   await fireEvent.input(within(editor).getByLabelText('Title'), {
     target: { value: 'Market update' },
   });
@@ -416,8 +412,8 @@ it('lets a member select and approve only their own requested calendar', async (
     expect(screen.getByRole('button', { name: 'Approve source' })).toBeDisabled(),
   );
   await pick('Personal calendar', 'My work calendar');
-  expect(screen.getByRole('checkbox', { name: 'time', exact: true })).toBeChecked();
-  expect(screen.getByRole('checkbox', { name: 'title', exact: true })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'time' })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'title' })).toBeChecked();
   expect(screen.getByRole('checkbox', { name: /Include private-marked/ })).not.toBeChecked();
   const consent = screen.getByRole('checkbox', { name: /I approve recurring sharing/ });
   expect(consent).not.toBeChecked();
@@ -475,7 +471,7 @@ it('preselects the All users group link and explains future installation members
     screen.getByText(/Everyone currently using this installation and anyone who joins later/),
   ).toBeVisible();
   expect(screen.getByLabelText(/^Timezone/)).toHaveValue('UTC');
-  expect(screen.getByRole('button', { name: 'Preview', exact: true })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
 });
 
 it('selects current members with the shared multiselect and preserves absent selections', async () => {
@@ -564,4 +560,16 @@ it('filters duplicated exclusions to the new group', async () => {
       undefined,
     ),
   );
+});
+
+it('preserves personal information classification but requires fresh audience acknowledgement on copy', async () => {
+  saved.generation.contains_personal_information = true;
+  saved.generation.audience_acknowledged = true;
+  await existingGroup();
+  await fireEvent.click(screen.getByRole('button', { name: 'Duplicate for group' }));
+  expect(
+    await screen.findByLabelText(/^My prompt or directives contain personal information/),
+  ).toBeChecked();
+  expect(screen.getByLabelText(/^I approve recurring disclosure/)).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'Preview' })).toBeDisabled();
 });

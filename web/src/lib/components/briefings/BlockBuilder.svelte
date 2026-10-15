@@ -25,6 +25,7 @@
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
     localDraft?: boolean;
+    allowSourceDisable?: boolean;
     userId?: string;
     fileOptions?: string[];
     calendarOptions?: SelectOption[];
@@ -42,6 +43,7 @@
     feedsAvailable,
     onChange,
     localDraft = false,
+    allowSourceDisable = true,
     userId = '',
     fileOptions = [],
     calendarOptions = [],
@@ -379,6 +381,7 @@
     {sharedBlockOptions}
     {feedsAvailable}
     allowPreview={!localDraft}
+    {allowSourceDisable}
     {userId}
     {fileOptions}
     {calendarOptions}

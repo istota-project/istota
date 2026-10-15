@@ -382,7 +382,7 @@
         <Button
           size="sm"
           href={groupBriefingDownloadUrl(groupId, definition.name, current.id)}
-          download>Download Markdown</Button
+          download="">Download Markdown</Button
         >
         {#key `${groupId}:${current.id}`}<BriefingEdition
             edition={{
@@ -390,6 +390,8 @@
               briefing_name: definition.name,
               subject: current.subject ?? definition.title,
               body_md: current.body_md,
+              document: current.document ?? null,
+              read_at: null,
               generated_at: current.published_at || current.created_at || '',
               task_id: null,
               delivered_to: [],
