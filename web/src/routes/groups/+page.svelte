@@ -29,6 +29,7 @@
   let detailLoading = $state(false);
   let error = $state('');
   let sidebarOpen = $state(false);
+  const selectedGroup = $derived(groups.find((group) => group.group_id === selected?.group));
   let active = true;
   let request = 0;
   // A link from before the overview may still carry `view=`; it is ignored.
@@ -120,7 +121,7 @@
 <AppShell>
   {#snippet header()}
     <ShellHeader
-      title="Groups"
+      title={selectedGroup?.display_name ?? 'Groups'}
       onTitleClick={() => (sidebarOpen = !sidebarOpen)}
       titleActionLabel="Toggle groups"
     >
