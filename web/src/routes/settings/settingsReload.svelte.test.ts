@@ -61,10 +61,6 @@ const profile = {
   },
 };
 
-const startNavUnreadPoll = vi.fn();
-const stopNavUnreadPoll = vi.fn();
-vi.mock('$lib/stores/navUnread', () => ({ startNavUnreadPoll, stopNavUnreadPoll }));
-
 const savedPreference = { value: false };
 const updateProfile = vi.fn<(patch: Partial<UserProfile>) => Promise<object>>();
 const online = writable(true);
@@ -88,6 +84,7 @@ vi.mock('$lib/api', async (importOriginal) => {
   await fillApiDouble(api, {
     ...actual,
     getMe: () => getMe(),
+    getNavUnreadCounts: async () => ({ enabled: true, chat: 4, briefings: 2, feeds: 108 }),
     getProfile: async () =>
       structuredClone({
         profile: { ...profile.profile, show_nav_unread_badges: savedPreference.value },
@@ -118,6 +115,10 @@ vi.mock('$lib/offline/lastUser', async (importOriginal) => {
     forgetLastUserId: () => {},
   };
 });
+
+const navUnread = await import('$lib/stores/navUnread');
+const startNavUnreadPoll = vi.spyOn(navUnread, 'startNavUnreadPoll');
+const stopNavUnreadPoll = vi.spyOn(navUnread, 'stopNavUnreadPoll');
 
 // Imported after the mocks, so the components' own imports resolve to them.
 const SettingsInLayout = (await import('./settingsInLayout.test.svelte')).default;
@@ -228,12 +229,16 @@ describe('navigation preference through the root identity', () => {
       expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('true'),
     );
     expect(startNavUnreadPoll).toHaveBeenCalledWith('alice');
+    expect(await screen.findByRole('link', { name: 'Chat, 4 unread messages' })).toHaveTextContent(
+      '4',
+    );
     expect(updateProfile).toHaveBeenCalledExactlyOnceWith({ show_nav_unread_badges: true });
     expect(getMe).toHaveBeenCalledTimes(3);
     view.unmount();
     render(SettingsInLayout, { component: PreferenceProbe });
     const restored = await screen.findByRole('checkbox', { name: label });
     expect(restored).toBeChecked();
+    await screen.findByRole('link', { name: 'Chat, 4 unread messages' });
     stopNavUnreadPoll.mockClear();
     await fireEvent.click(restored);
     await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -241,6 +246,7 @@ describe('navigation preference through the root identity', () => {
       expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false'),
     );
     expect(stopNavUnreadPoll).toHaveBeenCalled();
+    expect(screen.getByRole('link', { name: 'Chat' }).querySelector('.count-pill')).toBeNull();
     expect(updateProfile).toHaveBeenLastCalledWith({ show_nav_unread_badges: false });
   });
 

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Settings → Preferences can show unread counts beside Chat, Briefings and Feeds, including in the navigation menu. The choice is saved to your account and starts off.
+- Briefings remembers which editions you have read and lets you mark the whole archive or one briefing’s editions as read from the header. Existing archive entries start as read when upgrading.
+
 - `istota snapshot --format ansible` writes the settings as a `group_vars` file for the Ansible management role, so a snapshot goes into an inventory as it is: `istota snapshot --format ansible | ansible-vault encrypt --output FILE -`.
 
 ### Changed

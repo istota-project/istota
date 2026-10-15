@@ -39,3 +39,11 @@ it('gives the app nav and the page bar one shared height', () => {
   const media = style.slice(style.indexOf('@media'));
   expect(blockAfter(media, '.header {') ?? '').not.toMatch(/padding/);
 });
+
+it('lets inline links wrap when badges and large text outgrow the desktop row', () => {
+  const links = blockAfter(stripComments(readLayer('app-shell')), '.app-nav .nav-links {') ?? '';
+  expect(links).toMatch(/flex-wrap:\s*wrap;/);
+  expect(links).toMatch(/min-width:\s*0;/);
+  const controls = blockAfter(stripComments(readLayer('app-shell')), '.app-nav .nav-right {') ?? '';
+  expect(controls).toMatch(/flex-shrink:\s*0;/);
+});
