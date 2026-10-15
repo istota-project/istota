@@ -89,8 +89,23 @@ def strip_briefing_preamble(text: str) -> str:
     return "\n".join(lines[idx:])
 
 
-def strip_markdown(text: str) -> str:
-    """Strip markdown formatting for plain text output (headings, bold, italic, links)."""
+def strip_markdown(text: str, *, preserve_links: bool = False) -> str:
+    """Strip Markdown, optionally retaining complete destinations in plain text."""
+    links: list[str] = []
+    if preserve_links:
+        # Protect entire links before emphasis can change URL paths or labels.
+        marker = "\x00"
+        while marker in text:
+            marker += "\x00"
+
+        def keep_link(match: re.Match) -> str:
+            raw_label, url = match.group(1), match.group(2)
+            label = url if raw_label == url else strip_markdown(raw_label)
+            links.append(f"{label} ({url})" if url and label != url else label)
+            return f"{marker}{len(links) - 1}{marker}"
+
+        text = _HTML_LINK_RE.sub(keep_link, text)
+        text = re.sub(r"(?m)^([ \t]*)[*+]\s+", r"\1- ", text)
     # ATX headings (## Foo) — strip the leading marker, keep the text. Structured
     # briefing sources can emit these verbatim; without this they leak literally
     # into plain-text email (bold/italic get stripped below, headings didn't).
@@ -100,6 +115,9 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"_(.+?)_", r"\1", text)          # _italic_
     text = re.sub(r"==(.+?)==", r"\1", text)         # ==highlight==
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # [text](url)
+    if preserve_links:
+        for index, link in enumerate(links):
+            text = text.replace(f"{marker}{index}{marker}", link)
     return text
 
 
@@ -232,10 +250,35 @@ def render_briefing_html(md: str) -> str:
     return "<html><body>\n" + "\n".join(blocks) + "\n</body></html>"
 
 
+def render_briefing_document_html(document: dict) -> str:
+    """Render complete ordered sections with the existing bare email markup."""
+    try:
+        sections: list[str] = []
+        for block in document["blocks"]:
+            sections.append(f'<h2>{html.escape(block["title"], quote=True)}</h2>')
+            sections.extend(_render_blocks(block["body_md"].split("\n")))
+        if not sections:
+            return ""
+        return "<html><body>\n" + "\n".join(sections) + "\n</body></html>"
+    except Exception:  # noqa: BLE001 - never break delivery over markup
+        logger.warning("render_briefing_document_html failed, falling back to plain")
+        return ""
+
+
+def render_briefing_document_plain(document: dict) -> str:
+    """Render full sections as literal labels and text with usable links."""
+    sections: list[str] = []
+    for block in document["blocks"]:
+        label = block["title"]
+        body = strip_markdown(block["body_md"], preserve_links=True)
+        sections.append(label + "\n\n" + body)
+    return "\n\n".join(sections)
+
+
 def parse_briefing_json(text: str) -> dict | None:
     """Parse structured JSON output from a briefing task.
 
-    Expected format: {"subject": "...", "body": "..."}
+    Accept legacy body envelopes, versioned block output and canonical results.
 
     Handles common model quirks: markdown code fences, preamble text,
     and Unicode smart quotes. Returns None if no valid JSON found.
@@ -245,14 +288,22 @@ def parse_briefing_json(text: str) -> dict | None:
         "\u2018": "'", "\u2019": "'",
     }
 
+    def _envelope(data: object) -> dict | None:
+        if not isinstance(data, dict):
+            return None
+        if "version" in data or "blocks" in data:
+            return data
+        if isinstance(data.get("body"), str):
+            result = {"subject": data.get("subject"), "body": data["body"]}
+            if "briefing_document" in data:
+                result["briefing_document"] = data["briefing_document"]
+            return result
+        return None
+
     def _try_parse(s: str) -> dict | None:
         try:
             data = json.loads(s)
-            if isinstance(data, dict) and "body" in data:
-                return {
-                    "subject": data.get("subject"),
-                    "body": data["body"],
-                }
+            return _envelope(data)
         except (json.JSONDecodeError, TypeError, KeyError):
             return None
 
@@ -287,8 +338,9 @@ def parse_briefing_json(text: str) -> dict | None:
         try:
             decoder = json.JSONDecoder()
             data, _ = decoder.raw_decode(text, first_brace)
-            if isinstance(data, dict) and "body" in data:
-                return {"subject": data.get("subject"), "body": data["body"]}
+            result = _envelope(data)
+            if result:
+                return result
         except (json.JSONDecodeError, TypeError, KeyError):
             pass
 

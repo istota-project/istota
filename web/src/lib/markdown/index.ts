@@ -141,11 +141,7 @@ function sizeAttrs(src: string): string {
 }
 
 /** Build each presentation with the same escaping, link and image rules. */
-function createRenderer(opts: {
-  breaks: boolean;
-  imageAffordance: boolean;
-  untrusted?: boolean;
-}): (src: string, mentions?: readonly MentionTarget[]) => string {
+function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untrusted?: boolean }) {
   const md = new MarkdownIt({
     html: false, // never emit raw HTML from source — safe-by-construction
     linkify: true, // auto-link bare URLs
@@ -361,31 +357,78 @@ function createRenderer(opts: {
     return `<span class="${cls}">${md.utils.escapeHtml(tok.content)}</span>`;
   };
 
-  return (src: string, mentions?: readonly MentionTarget[]): string => {
-    if (!src) return '';
-    const env = opts.untrusted ? { untrusted: true } : mentions?.length ? { mentions } : {};
-    return md.render(src, env);
+  return {
+    parse: (src: string, env: Record<string, unknown>) => md.parse(src, env),
+    render: (
+      src: string,
+      mentions?: readonly MentionTarget[],
+      parsedEnv: Record<string, unknown> = {},
+    ): string => {
+      if (!src) return '';
+      const env = { ...parsedEnv, ...(opts.untrusted ? { untrusted: true } : { mentions }) };
+      return md.render(src, env);
+    },
   };
 }
 
 /** Render a chat message. `mentions` names who may be `@`-mentioned where it
  *  is shown; without it nothing is styled as a mention. */
-export const renderMarkdown = createRenderer({ breaks: true, imageAffordance: true });
+const chatRenderer = createRenderer({ breaks: true, imageAffordance: true });
+export const renderMarkdown = chatRenderer.render;
 
 /** Render a document without chat's hard line breaks or image controls. */
-export const renderDocument = createRenderer({ breaks: false, imageAffordance: false });
+export const renderDocument = createRenderer({ breaks: false, imageAffordance: false }).render;
 
 /** A document somebody else may have written, such as a file shared in Nextcloud. */
 export const renderUntrustedDocument = createRenderer({
   breaks: false,
   imageAffordance: false,
   untrusted: true,
-});
+}).render;
 
-const renderUntrusted = createRenderer({ breaks: true, imageAffordance: false, untrusted: true });
+const renderUntrusted = createRenderer({
+  breaks: true,
+  imageAffordance: false,
+  untrusted: true,
+}).render;
 
 /** Render text somebody outside the room wrote, such as a mail body. No
  *  mentions, no inline images, and every labelled link names its destination. */
 export function renderUntrustedMarkdown(src: string): string {
   return renderUntrusted(src);
+}
+
+/** Keep whole source ranges so omitted links never enter the preview DOM. */
+export function renderMarkdownPreview(src: string): { html: string; truncated: boolean } {
+  const normalized = src.replace(/\r\n?/g, '\n');
+  const lines = normalized.split('\n');
+  const env = {};
+  const tokens = chatRenderer.parse(normalized, env);
+  const selected: string[] = [];
+  let truncated = false;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.level !== 0 || !token.map || token.nesting === -1) continue;
+    if (selected.length === 3) {
+      truncated = true;
+      break;
+    }
+    const start = token.map[0];
+    let end = token.map[1];
+    if (token.type === 'bullet_list_open' || token.type === 'ordered_list_open') {
+      let items = 0;
+      for (let at = index + 1; at < tokens.length && tokens[at].level > 0; at++) {
+        const item = tokens[at];
+        if (item.level !== 1 || item.type !== 'list_item_open' || !item.map) continue;
+        items++;
+        if (items === 5) end = item.map[1];
+      }
+      if (items > 5) truncated = true;
+      else end = token.map[1];
+    }
+    selected.push(lines.slice(start, end).join('\n'));
+  }
+  // Reference definitions can live after an omitted block; retain the parser's
+  // resolved references while rendering only the selected source ranges.
+  return { html: renderMarkdown(selected.join('\n\n'), undefined, env), truncated };
 }

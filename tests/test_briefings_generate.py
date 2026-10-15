@@ -1,6 +1,10 @@
 """Tests for briefings generation assembly + archive + executor routing."""
 
 from datetime import datetime, timezone
+import json
+from unittest.mock import AsyncMock, MagicMock, Mock
+
+import pytest
 
 
 from istota import db
@@ -70,10 +74,9 @@ class TestAssembleBriefingInput:
         assert result.rendered_blocks == 1
         assert "### Block: Notes" in result.prompt
         assert "Buy a gift for mom" in result.prompt
-        # The envelope is body-only — the title is computed at delivery, not
-        # supplied by the model.
-        assert '"body"' in result.prompt and '"subject"' not in result.prompt
-        assert "Notes" in result.block_meta
+        assert '"body_md"' in result.prompt and '"subject"' not in result.prompt
+        assert len(result.block_meta) == 1
+        assert result.manifest["blocks"][0]["block_id"] in result.block_meta
 
     def test_empty_block_omitted(self, tmp_path):
         cfg = _config(tmp_path)
@@ -88,7 +91,8 @@ class TestAssembleBriefingInput:
         assert result.rendered_blocks == 0
         assert "### Block: Todos" not in result.prompt
         # But provenance is still recorded.
-        assert result.block_meta["Todos"]["gathered"] == 0
+        assert next(iter(result.block_meta.values()))["gathered"] == 0
+        assert result.manifest["blocks"] == []
 
     def test_block_order_preserved(self, tmp_path):
         cfg = _config(tmp_path)
@@ -353,7 +357,7 @@ class TestSchedulerArchive:
             rows = bdb.list_archive(conn, briefing_name="M")
         assert len(rows) == 1
         assert rows[0].block_meta, "provenance was lost between the two ends"
-        assert "Notes" in rows[0].block_meta
+        assert next(iter(rows[0].block_meta.values()))["gathered"] == 1
         # The reader owns the deletion; nothing else unlinks it.
         assert not meta_path.exists()
 
@@ -591,3 +595,303 @@ class TestNewsletterInlineLinks:
         assert result is not None
         assert "[Iran tensions](https://semafor.com/a/iran)" in result.prompt
         assert "unsubscribe/z" not in result.prompt
+
+
+class TestGenerationHandoff:
+    def _setup(self, tmp_path, monkeypatch, *, output="email,ntfy"):
+        from istota.briefings.sources import GatheredSource
+        from istota.config import BriefingConfig
+
+        cfg = _config(tmp_path)
+        cfg.temp_dir = tmp_path / "temp"
+        cfg.scheduler.worker_heartbeat_seconds = 0
+        cfg.users["alice"].timezone = "America/Los_Angeles"
+        cfg.users["alice"].briefings = [BriefingConfig(name="M", cron="0 6 * * *", title="Saved edition")]
+        ctx = _ctx_with_blocks(cfg, [
+            {"title": "Same title", "options": {"presentation": {"width": "wide"}},
+             "sources": [{"kind": "notes"}, {"kind": "browse"}]},
+            {"title": "Same title", "render_mode": "structured",
+             "sources": [{"kind": "calendar"}]},
+            {"title": "Empty", "sources": [{"kind": "todos"}]},
+        ])
+        db.init_db(cfg.db_path)
+
+        def gather(kind, source_config, source_ctx):
+            return GatheredSource(
+                kind=kind, title=kind, text="input" if kind in ("notes", "calendar") else "",
+                ok=kind != "browse", provenance="private failure" if kind == "browse" else "",
+            )
+
+        monkeypatch.setattr("istota.briefings.generate.resolve_source", gather)
+        with db.get_db(cfg.db_path) as conn:
+            tid = db.create_task(conn, prompt="placeholder", user_id="alice", source_type="briefing",
+                                 briefing_name="M", output_target=output)
+            conn.execute("UPDATE tasks SET created_at = '2026-10-15 01:00:00' WHERE id = ?", (tid,))
+            conn.commit()
+            task = db.get_task(conn, tid)
+        return cfg, ctx, task
+
+    def test_manifest_uses_ids_order_status_and_task_date(self, tmp_path, monkeypatch):
+        from istota.executor import build_deferred_briefing_prompt, get_task_control_dir
+
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch)
+        prompt = build_deferred_briefing_prompt(task, cfg)
+        meta = json.loads((get_task_control_dir(cfg, "alice", task.id) / "briefing_meta.json").read_text())
+        manifest = meta["manifest"]
+        assert manifest["version"] == 1
+        assert manifest["title"] == "Saved edition — Wednesday, 14 October"
+        with bdb.connect(ctx.db_path) as conn:
+            blocks = bdb.list_blocks(conn, "M")
+        assert [b["block_id"] for b in manifest["blocks"]] == [b.id for b in blocks[:2]]
+        assert [b["source_status"] for b in manifest["blocks"]] == ["partial", "complete"]
+        assert manifest["blocks"][0]["presentation"] == {"width": "wide"}
+        assert manifest["blocks"][0]["source_count"] == 2
+        assert manifest["blocks"][1]["render_mode"] == "structured"
+        assert set(meta["block_meta"]) == {str(b.id) for b in blocks}
+        assert '"version": 2' in prompt and '"body_md"' in prompt
+        assert f"Block ID: {blocks[0].id}" in prompt
+        assert "private failure" not in json.dumps(manifest)
+
+    @pytest.mark.parametrize("failure", ["write", "invalid"])
+    def test_manifest_failure_stops_preparation(self, tmp_path, monkeypatch, failure):
+        from istota.executor import execute_task
+
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch)
+        if failure == "write":
+            monkeypatch.setattr("istota.executor._write_control_file", Mock(side_effect=OSError("unavailable")))
+        else:
+            monkeypatch.setattr("istota.briefings.generate.presentation_for_options", lambda options: {"width": "bad"})
+        # dry_run would return a composed prompt if preparation reached the brain seam.
+        success, text, _, _ = execute_task(task, cfg, [], dry_run=True)
+        assert success is False
+        assert "briefing prompt build failed" in text
+
+    @pytest.mark.parametrize("change", ["edit", "delete", "archive_failure"])
+    def test_completion_keeps_snapshot_after_definition_changes(self, tmp_path, monkeypatch, change):
+        from istota import scheduler
+        from istota.briefings.document import document_to_markdown
+        from istota.executor import build_deferred_briefing_prompt, get_task_control_dir
+
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch, output="email,ntfy,talk:briefing-room,web:web-room")
+        cfg.talk.enabled = True
+        email = AsyncMock(return_value=True)
+        talk = AsyncMock(return_value=123)
+        web = AsyncMock()
+        monkeypatch.setattr(scheduler, "post_result_to_talk", talk)
+        monkeypatch.setattr("istota.transport.web.WebTransport.deliver", web)
+        if change == "archive_failure":
+            monkeypatch.setattr(bdb, "insert_archive", Mock(side_effect=OSError("archive unavailable")))
+        ntfy = AsyncMock()
+        monkeypatch.setattr(scheduler, "post_result_to_email", email)
+        monkeypatch.setattr("istota.transport.ntfy.NtfyTransport.deliver", ntfy)
+        monkeypatch.setattr("istota.transport.ntfy.ntfy_settings", lambda *args: {"topic": "briefing"})
+        indexed = Mock()
+        monkeypatch.setattr("istota.memory.search.index_conversation", indexed)
+        cfg.memory_search.enabled = True
+        cfg.memory_search.auto_index_conversations = True
+
+        def model(current, config, resources, **kwargs):
+            assert build_deferred_briefing_prompt(current, config)
+            meta_path = get_task_control_dir(config, "alice", current.id) / "briefing_meta.json"
+            manifest = json.loads(meta_path.read_text())["manifest"]
+            with bdb.connect(ctx.db_path) as conn:
+                for block in bdb.list_blocks(conn, "M"):
+                    if change == "delete":
+                        bdb.delete_block(conn, block.id)
+                    else:
+                        bdb.update_block(conn, block.id, title="Changed block", options={"presentation": {"width": "full"}})
+                conn.commit()
+            cfg.users["alice"].briefings[0].title = "Changed while generating"
+            entries = [{"block_id": b["block_id"], "body_md": f"[Story {i}](https://example.com/{i})",
+                        "title": "model title", "presentation": {"width": "full"}}
+                       for i, b in enumerate(manifest["blocks"])]
+            return True, json.dumps({"version": 2, "blocks": entries[::-1]}), None, None
+
+        monkeypatch.setattr(scheduler, "execute_task", model)
+        assert scheduler.process_one_task(cfg) == (task.id, True)
+        with db.get_db(cfg.db_path) as conn:
+            stored = db.get_task(conn, task.id)
+        canonical = json.loads(stored.result)
+        document = canonical["briefing_document"]
+        assert document["title"] == "Saved edition — Wednesday, 14 October"
+        assert [b["body_md"] for b in document["blocks"]] == [
+            "[Story 0](https://example.com/0)", "[Story 1](https://example.com/1)",
+        ]
+        assert [b["title"] for b in document["blocks"]] == ["Same title", "Same title"]
+        assert document["blocks"][0]["presentation"] == {"width": "wide"}
+        body = document_to_markdown(document)
+        assert canonical["body"] == body
+        assert indexed.call_args.args[4] == body
+        with bdb.connect(ctx.db_path) as conn:
+            archived = bdb.list_archive(conn, briefing_name="M")
+        if change == "archive_failure":
+            assert archived == []
+        else:
+            assert len(archived) == 1
+            assert archived[0].document == document
+            assert archived[0].body_md == body
+            assert archived[0].subject == document["title"]
+        assert not (get_task_control_dir(cfg, "alice", task.id) / "briefing_meta.json").exists()
+        talk.assert_awaited_once()
+        assert talk.call_args.args[2] == body
+        web.assert_awaited_once()
+        assert web.call_args.args[1] == body
+        email.assert_awaited_once()
+        assert email.call_args.args[2] == body
+        assert email.call_args.kwargs["subject"] == document["title"]
+        assert email.call_args.kwargs["briefing_document"] == document
+        ntfy.assert_awaited_once()
+        assert ntfy.call_args.args[1] == body
+        assert ntfy.call_args.kwargs["options"].title == document["title"]
+
+    def test_cross_surface_archive_preview_and_mime_acceptance(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from istota import scheduler
+        from istota.briefings.routes import get_user_context, require_auth, router, verify_origin
+        from istota.executor import build_deferred_briefing_prompt, get_task_control_dir
+
+        fixture_path = Path(__file__).parents[1] / "web/src/lib/components/briefings/edition.acceptance.json"
+        fixture = json.loads(fixture_path.read_text())
+        expected = fixture["edition"]["document"]
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch, output="email")
+        cfg.email.enabled = True
+        cfg.email.bot_email = "bot@example.com"
+        cfg.users["alice"].email_addresses = ["alice@example.com"]
+        with bdb.connect(ctx.db_path) as conn:
+            for block in expected["blocks"]:
+                bdb.update_block(conn, block["block_id"], title=block["title"])
+            conn.commit()
+        monkeypatch.setattr(bdb, "_now_iso", lambda: "2026-10-15T07:00:00+00:00")
+
+        def model(current, config, resources, **kwargs):
+            prompt = build_deferred_briefing_prompt(current, config)
+            assert prompt and '"version": 2' in prompt
+            manifest_path = get_task_control_dir(config, "alice", current.id) / "briefing_meta.json"
+            manifest = json.loads(manifest_path.read_text())["manifest"]
+            assert [block["block_id"] for block in manifest["blocks"]] == [1, 2]
+            with bdb.connect(ctx.db_path) as conn:
+                for block in bdb.list_blocks(conn, "M"):
+                    bdb.delete_block(conn, block.id)
+                replacement = bdb.add_block(conn, briefing_name="M", title="Unrelated new block")
+                assert replacement > 3
+                conn.commit()
+            cfg.users["alice"].briefings[0].title = "Changed while generating"
+            output = {"version": 2, "blocks": [
+                {"block_id": block["block_id"], "body_md": block["body_md"], "title": "Model title"}
+                for block in reversed(expected["blocks"])
+            ]}
+            return True, json.dumps(output), None, None
+
+        monkeypatch.setattr(scheduler, "execute_task", model)
+        smtp = MagicMock()
+        monkeypatch.setattr("smtplib.SMTP", lambda *args, **kwargs: smtp)
+        monkeypatch.setattr("istota.skills.email._save_to_sent", Mock())
+        assert scheduler.process_one_task(cfg) == (task.id, True)
+        smtp.send_message.assert_called_once()
+        message = smtp.send_message.call_args.args[0]
+        assert str(message["Subject"]) == expected["title"]
+        assert message.get_content_type() == "multipart/alternative"
+        parts = list(message.iter_parts())
+        assert [part.get_content_type() for part in parts] == ["text/plain", "text/html"]
+        assert parts[0].get_content().rstrip("\n") == fixture["preview"]["plain"]
+        assert parts[1].get_content().rstrip("\n") == fixture["preview"]["html"]
+        app = FastAPI()
+        app.state.istota_config = cfg
+        app.include_router(router, prefix="/istota/api/briefings")
+        app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+        app.dependency_overrides[get_user_context] = lambda: ctx
+        app.dependency_overrides[verify_origin] = lambda: None
+        with TestClient(app) as client:
+            archived = client.get("/istota/api/briefings/archive/1")
+            assert archived.status_code == 200
+            preview = client.post("/istota/api/briefings/preview", json={"document": archived.json()["document"]})
+            assert preview.status_code == 200
+            assert {"edition": archived.json(), "preview": preview.json()} == fixture
+        with db.get_db(cfg.db_path) as conn:
+            canonical = json.loads(db.get_task(conn, task.id).result)
+        assert canonical["briefing_document"] == expected
+        assert canonical["body"] == fixture["edition"]["body_md"]
+
+    @pytest.mark.parametrize("output,missing_manifest,reason", [
+        ({"version": 2, "blocks": []}, False, "briefing_output_missing_block"),
+        ({"version": 3, "blocks": []}, False, "briefing_output_version"),
+        ({"body": "legacy response to new prompt"}, False, "briefing_output_version"),
+        ("raw model text", False, "briefing_output_version"),
+        ({"version": 2, "blocks": []}, True, "briefing_manifest_missing"),
+        ("empty_blocks", False, "briefing_no_content"),
+    ])
+    def test_invalid_output_never_completes_or_delivers(self, tmp_path, monkeypatch, output, missing_manifest, reason):
+        from istota import scheduler
+        from istota.executor import build_deferred_briefing_prompt, get_task_control_dir
+
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch)
+        email = AsyncMock(return_value=True)
+        monkeypatch.setattr(scheduler, "post_result_to_email", email)
+        digest = Mock()
+        monkeypatch.setattr("istota.skills.briefing.save_briefing_digest", digest)
+
+        def model(current, config, resources, **kwargs):
+            assert build_deferred_briefing_prompt(current, config)
+            path = get_task_control_dir(config, "alice", current.id) / "briefing_meta.json"
+            response = output
+            if output == "empty_blocks":
+                manifest = json.loads(path.read_text())["manifest"]
+                response = {"version": 2, "blocks": [{"block_id": b["block_id"], "body_md": ""}
+                                                      for b in manifest["blocks"]]}
+            if missing_manifest:
+                path.unlink()
+            return True, response if isinstance(response, str) else json.dumps(response), None, None
+
+        monkeypatch.setattr(scheduler, "execute_task", model)
+        assert scheduler.process_one_task(cfg) == (task.id, False)
+        with db.get_db(cfg.db_path) as conn:
+            stored = db.get_task(conn, task.id)
+        assert stored.status in ("pending", "failed")
+        assert reason in stored.error
+        email.assert_not_called()
+        digest.assert_not_called()
+        with bdb.connect(ctx.db_path) as conn:
+            assert bdb.count_archive(conn) == 0
+
+
+    def test_legacy_body_cannot_supply_its_own_document(self, tmp_path, monkeypatch):
+        from istota import scheduler
+
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch, output="email")
+        email = AsyncMock(return_value=True)
+        monkeypatch.setattr(scheduler, "post_result_to_email", email)
+        response = json.dumps({"body": "legacy content", "briefing_document": {
+            "version": 1, "title": "Model title", "blocks": [],
+        }})
+        monkeypatch.setattr(scheduler, "execute_task", lambda *args, **kwargs: (True, response, None, None))
+        assert scheduler.process_one_task(cfg) == (task.id, True)
+        with db.get_db(cfg.db_path) as conn:
+            stored = db.get_task(conn, task.id)
+        assert "briefing_document" not in json.loads(stored.result)
+        with bdb.connect(ctx.db_path) as conn:
+            archived = bdb.list_archive(conn, briefing_name="M")
+        assert len(archived) == 1 and archived[0].document is None
+        assert archived[0].body_md == "legacy content"
+        assert email.call_args.args[2] == "legacy content"
+
+
+    def test_retry_replaces_the_protected_manifest(self, tmp_path, monkeypatch):
+        from istota.executor import build_deferred_briefing_prompt, get_task_control_dir
+
+        cfg, ctx, task = self._setup(tmp_path, monkeypatch)
+        assert build_deferred_briefing_prompt(task, cfg)
+        path = get_task_control_dir(cfg, "alice", task.id) / "briefing_meta.json"
+        first = json.loads(path.read_text())["manifest"]
+        cfg.users["alice"].briefings[0].title = "Next attempt"
+        with bdb.connect(ctx.db_path) as conn:
+            block_id = first["blocks"][0]["block_id"]
+            bdb.update_block(conn, block_id, title="New title", options={"presentation": {"width": "full"}})
+            conn.commit()
+        assert build_deferred_briefing_prompt(task, cfg)
+        second = json.loads(path.read_text())["manifest"]
+        assert second["title"] == "Next attempt — Wednesday, 14 October"
+        assert second["blocks"][0]["title"] == "New title"
+        assert second["blocks"][0]["presentation"] == {"width": "full"}
+        assert second["blocks"][0]["block_id"] == block_id

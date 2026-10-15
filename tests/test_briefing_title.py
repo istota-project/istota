@@ -199,4 +199,4 @@ class TestPromptDropsSubject:
 
         assert result is not None
         assert '"subject"' not in result.prompt
-        assert '"body"' in result.prompt
+        assert '"body_md"' in result.prompt

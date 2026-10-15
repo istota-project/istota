@@ -35,6 +35,22 @@ Content **blocks** are seeded once into the per-user briefings module DB from co
 
 Because a name can come from either source, or from blocks with no schedule at all, `istota briefings list` (and `istota-skill briefings list`) is what answers "which briefings does this user actually have" — every effective name after defaults and disabled rows are applied, with each one's block count and its latest archived generation. Asking for a name that is not on that list now returns the valid options rather than an empty briefing: a zero-row block query used to read as "configured, no content", so a typo or a case mismatch produced a confident and wrong success (ISSUE-328).
 
+## Building a briefing
+
+Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs; operator-managed schedules remain read-only.
+
+Add block opens a searchable preset list for feeds, websites, newsletters, calendar, markets, tasks, notes, reminders, shared content or a custom block. Presets use the existing sources. Feed presets need Feeds enabled with a subscription or category; shared content needs an available shared block. Choose the source's feed, website, file or shared-block name before saving.
+
+The block editor keeps a local draft of the title, source list and width. Automatic uses one column, Wide uses two where space allows, and Full width spans the reader pane. All widths become one column on a narrow pane. Advanced contains the directive, generation mode, story count and tone. Save block writes the block and all its sources together. Cancel discards the draft after confirmation when it has changes; a failed save keeps it open. The app bar's Save continues to control the separate HTML email preference.
+
+Each block's actions include Edit, Move up, Move down, Duplicate and Delete. Moves work with the keyboard or touch and keep reading order. Duplication copies every source, including disabled ones. Add a source before duplicating a legacy block that has no sources. Deleting or changing a block affects future editions; existing editions remain available. Admins can still manage and run shared blocks in their own card.
+
+## Previewing delivery
+
+Preview in the block builder opens Web, HTML email and Plain text views. Preview in the block editor includes that unsaved block draft. The example comes from the selected briefing's latest saved edition: content follows the block's saved identity while the proposed title, order and width come from the builder. Deleted blocks disappear. New blocks, blocks without saved content and legacy editions use labelled placeholders. The preview does not gather sources, call a model, save changes or send mail.
+
+Web uses the reader's cards and full-block viewer. HTML email shows the complete sections in an isolated frame with links disabled and external resources blocked. Plain text keeps complete sections and usable URLs. A preview error leaves the block draft available for editing or retry. Layout and source changes affect future editions; preview does not predict their content.
+
 ## Default briefings
 
 A canonical shared set defined once in the top-level `[[default_briefings]]` section is seeded by name into each opted-in user (per-user `default_briefings` flag, default on; an explicit user briefing of the same name wins). Seeding is one-time — later web edits win and re-runs never clobber them. Opt a user out with `istota user ensure --no-default-briefings`.
@@ -51,11 +67,12 @@ name = "morning"
 cron = "0 6 * * *"               # 6am in user's timezone
 conversation_token = "room123"    # Talk room to post to
 title = "Morning Briefing"        # optional; blank derives it from the name
-output = "both"                   # "talk", "email", or "both"
+output = "talk,email"             # one destination or a comma-separated list
 
   [[users.alice.briefings.blocks]]
   title = "Today"
   render_mode = "structured"
+  options = { presentation = { width = "wide" } }
 
     [[users.alice.briefings.blocks.sources]]
     kind = "calendar"
@@ -63,16 +80,19 @@ output = "both"                   # "talk", "email", or "both"
 
     [[users.alice.briefings.blocks.sources]]
     kind = "todos"
-    config = {}
+    config = { path = "shared/tasks.md" }
 
   [[users.alice.briefings.blocks]]
   title = "World News"
   render_mode = "synthesis"
+  options = { story_count = 5, tone = "neutral", presentation = { width = "full" } }
 
     [[users.alice.briefings.blocks.sources]]
     kind = "browse"
     config = { preset = "ap" }
 ```
+
+Width lives in `options.presentation.width` and accepts `auto`, `wide` or `full`, with `auto` as the default. The editor preserves other option fields. Config-authored blocks seed once; later config edits do not overwrite a user's saved block changes.
 
 ## Shared curated content
 
@@ -161,11 +181,35 @@ The briefings tab is a reader for generated briefings, with an archive sidebar f
 
 Selecting an archived briefing or changing the briefing-name filter adds a browser history entry. Back and Forward restore the selection, and reloading or sharing the URL opens the same briefing and filter. Returning from settings keeps the selection. If a briefing or filter is no longer available, the reader falls back to the first available briefing or All and updates the current URL without adding an entry.
 
+A generated result is an edition. New editions show one card per populated block, in the saved order, with the edition title and generation date above them. Cards use one, two or three masonry columns according to the space available beside the archive. Card heights round up to a shared height rhythm, and nearby cards with similar heights match each other. The saved order remains the keyboard and email order; visual rows can differ. Automatic blocks take one column, Wide blocks take two where space allows, and Full width blocks take the whole row. At narrow widths every block takes one column. Layout and title changes affect future editions; an archived edition keeps its saved content and layout.
+
+Every card shows its complete content, including all paragraphs and list items. The expand icon in each card header opens the complete block in a viewer. For user-managed briefings, the settings icon opens that block’s editor if the saved block still exists. Article links work directly from the card. **Some sources unavailable** means the block includes useful content despite a source failure; internal source errors are never shown in the card.
+
+Older editions without a structured document stay readable in a single full-width card. Unsupported or damaged documents also use their complete stored Markdown body. Opening an edition reads the archive without fetching sources or generating content. Changing the selection shows a loading state until that edition arrives, so the previous edition cannot appear under the new selection.
+
 Each generated briefing is archived on delivery and pruned by `[briefings] archive_retention_days` (default 90) on insert, alongside the manual per-result delete.
 
 ## Output format
 
-The model returns structured JSON — `{"body": "..."}`, body only. The scheduler parses it and handles delivery deterministically. The **title is not the model's to choose**: it is composed from the briefing's configured `title` (blank derives it from the name, so `morning` becomes "Morning Briefing") plus the run date in the user's timezone, and the archive entry, the email subject and the ntfy push title all call the same function, so they cannot disagree about the same run. A stray `subject` from an in-flight run is tolerated and ignored. The email skill is excluded from briefing tasks via `exclude_skills` to prevent the model from sending emails directly.
+Generation makes one source gather and one model call for the edition. Before the call, the worker saves a protected manifest with the edition title, ordered numeric block IDs, block titles, render modes, presentation widths and source status. Duplicate titles remain distinct. Blocks with no gathered content are omitted from the request; failed sources keep their provenance outside the reader-facing document.
+
+The model returns `{"version": 2, "blocks": [{"block_id": 42, "body_md": "..."}]}`. Each requested ID must appear exactly once. An empty string explicitly omits a block whose gathered content produced nothing useful. The model supplies only block bodies; titles, order, presentation and source status come from the manifest. The edition title uses the configured title (blank derives it from the briefing name) and the task's creation date in the user's timezone.
+
+Before marking the task completed, indexing its answer or delivering it, the scheduler validates the response against that manifest. Missing, duplicate or unknown IDs, wrong types and unsupported versions fail through the normal quiet briefing retry path. An edition with no useful blocks fails with `briefing_no_content` rather than publishing an empty edition. Useful blocks with failed sources retain a partial-source status.
+
+The completed task stores a canonical envelope with `body` and `briefing_document`. The archive stores the same immutable document and its deterministic linear Markdown projection. Editing or deleting a definition during generation cannot change that edition's titles, content, order or layout. Chat, digest and existing text destinations use the projection; email and ntfy subjects use the saved edition title even after archive cleanup removes the manifest file. An archive write failure is logged and does not repeat generation or block delivery.
+
+Email uses the same complete ordered blocks as the archive. HTML mail stacks sections under escaped headings with no added styling. Plain mail uses section labels and preserves article destinations as `Label (URL)`, or one URL when it is already the label. A partial-source block includes a short status note in both formats. The existing HTML preference selects multipart alternatives or a single plain part; an HTML rendering failure also sends the full plain edition. Delivery uses the document retained at completion, so archive cleanup cannot remove it.
+
+Old body-only tasks retain their linear path without inferred block boundaries. The parser still tolerates JSON fences and wrappers. The email skill stays excluded from briefing tasks so delivery remains scheduler-owned.
+
+## Extending blocks
+
+A preset is an ordinary default block/source definition in `BLOCK_TEMPLATES`, returned by the existing config endpoint. Add a new source kind to `SOURCE_KINDS`, the source resolver dispatch, source fields and tests before adding its preset. Availability and source choices continue to use the existing picker endpoints. A preset does not introduce executable configuration or change source authority.
+
+Every document block retains its complete `body_md`, stable numeric ID, snapshot title, source status and `presentation.width`. Add a specialized block kind only with a validated versioned data shape, web rendering and complete HTML/plain semantics together. Unknown kinds use their Markdown body; unknown document versions use the archive's linear body. Keep a small explicit component switch rather than loading components from server strings. Width remains an option, separate from the generation mode.
+
+`POST /briefings/preview` accepts `{ "document": <version-1-document> }` and returns `body_md`, `plain` and `html` from the production renderers. Authentication, origin checks and the live module gate run before rendering. The gate may read profile settings; preview content never reads a file, resolves an ID or writes the content database. Requests are limited to 2 MiB, 100 blocks and 64 KiB of UTF-8 body text per block. Malformed documents return 400; size limits return 413. Only the preview copy gains the restrictive CSP and noninteractive links; outgoing mail keeps its existing bare HTML contract.
 
 ## Reading a todo file
 

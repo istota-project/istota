@@ -367,9 +367,15 @@
   .archive-subject {
     font-size: var(--text-sm);
     font-weight: 500;
-    white-space: nowrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    line-height: 1.4;
+    min-height: 2.8em;
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
   }
 
   .archive-date {
