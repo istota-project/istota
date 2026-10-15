@@ -261,8 +261,10 @@ def test_revoked_room_is_rechecked_before_write(install):
         db.register_room(conn, "private-alice", "alice", origin="web")
     context, operations = preview(install, [{"name": "daily", "cron": "0 9 * * *", "prompt": "Review",
                                            "room": "private-alice", "target": "web:private-alice"}])
+    # Archived after the preview. Becoming shared is no longer a revocation for
+    # the job's own room: the runtime runs it there with scopes withheld.
     with db.get_db(install[1].db_path) as conn:
-        db.add_room_member(conn, "private-alice", "bob")
+        db.set_room_archived(conn, "private-alice", True)
     result = engine.execute_plan(operations, context)
     assert result.errors == [{"code": "state_changed", "path": ["users", "alice", "scheduled_jobs"]}]
     assert not install[2].exists()

@@ -526,8 +526,31 @@ def test_a_refused_job_is_named_by_its_index_in_the_plan_not_in_cron_md(install,
     code, stdout, _ = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
     document = json.loads(stdout)
     assert [job["name"] for job in document["users"]["alice"]["scheduled_jobs"]] == ["alpha", "zeta"]
+    # A target leg into another shared room is refused; the job's own room is not.
+    document["users"]["alice"]["scheduled_jobs"][0]["target"] = "room:other-group-room"
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, "other-group-room", "alice", origin="web")
+        db.add_room_member(conn, "other-group-room", "bob")
     plan = tmp_path / "settings.json"
-    plan.write_text(stdout)
+    plan.write_text(json.dumps(document))
     code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
     assert code == 1, result + stderr
-    assert json.loads(result)["errors"][0]["path"] == ["users", "alice", "scheduled_jobs", 0, "room"]
+    assert json.loads(result)["errors"][0]["path"] == ["users", "alice", "scheduled_jobs", 0, "target"]
+
+
+@pytest.mark.parametrize("target", ["talk", "room:group-room", "email,room:group-room"])
+def test_a_scheduled_job_may_run_and_reply_in_its_own_shared_room(install, tmp_path, monkeypatch, capsys, target):
+    """The runtime runs such a job with every scope withheld and keeps its reply
+    in its own room; the plan matches it, for a new job as for a stored one."""
+    path, config = install
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, "group-room", "alice", origin="web")
+        db.add_room_member(conn, "group-room", "bob")
+    plan = tmp_path / "settings.json"
+    plan.write_text(json.dumps({"users": {"alice": {"scheduled_jobs": [
+        {"name": "standup", "cron": "0 9 * * 1-5", "prompt": "Summarise", "room": "group-room", "target": target},
+    ]}}}))
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--format", "json")
+    assert code == 2, result + stderr
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--format", "json")
+    assert code == 0, result + stderr

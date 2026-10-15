@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `istota apply` accepts a scheduled job whose room is shared, and a target that replies into that same room, as the scheduler already did: the job runs there with every scope withheld. A target into any other shared room is still refused.
 - A delivery route switched off in the web UI (stored as `none`) no longer makes `istota apply` and `istota user ensure` refuse the profile with `profile_refused`.
 - When `istota apply` refuses a scheduled job, the error now gives the job's position in the plan rather than in CRON.md, which a snapshot orders differently.
 - Applying an install's own snapshot no longer fails with `validation_error` on a route, briefing output, scheduled job target or heartbeat channel that was saved earlier and no longer passes the destination check, such as a Talk conversation the user has left. A destination the plan leaves unchanged is still refused when it points into a shared room.

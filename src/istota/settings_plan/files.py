@@ -102,19 +102,22 @@ def _validate_cron(conn, config, user, job, path, previous=None):
         namespace, key = _parse_shared_kv_target(job.publish_shared_kv)
         if not config.is_shared_kv_writer(user) or not namespace or not key:
             raise ExecutionError("validation_error", [*path, "publish_shared_kv"])
+    # A cron room may be a legacy Talk binding or a canonical room token. It
+    # is where the job's task runs, so it and a leg into it may be shared.
+    own_room = (db.resolve_room_token(conn, "talk", job.room) or job.room) if job.room else None
     try:
         # Check each leaf so a dropped group destination cannot hide beside
         # a valid email destination. Explicit none is a valid no-delivery job.
         for leaf in job.target.split(","):
             if leaf.strip() and leaf.strip().lower() != "none":
-                validate_destination(conn, config, user, leaf, stored=job.target == previous.get("target"))
+                validate_destination(conn, config, user, leaf, stored=job.target == previous.get("target"),
+                                     own_room=own_room)
     except ValueError:
         raise ExecutionError("validation_error", [*path, "target"]) from None
     if job.room:
-        # A cron room may be a legacy Talk binding or a canonical room token.
-        token = db.resolve_room_token(conn, "talk", job.room) or job.room
         try:
-            validate_destination(conn, config, user, "room:" + token, stored=job.room == previous.get("room"))
+            validate_destination(conn, config, user, "room:" + own_room, stored=job.room == previous.get("room"),
+                                 own_room=own_room)
         except ValueError:
             raise ExecutionError("validation_error", [*path, "room"]) from None
     for destination in parse_output_target(job.target):

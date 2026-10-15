@@ -54,13 +54,17 @@ def _profile_state(conn, user):
     })
 
 
-def validate_destination(conn, config, user, descriptor, *, channels=(), stored=False):
+def validate_destination(conn, config, user, descriptor, *, channels=(), stored=False, own_room=None):
     """Check destination grammar and room reach without network or store writes.
 
     `stored` is a value the plan does not change. Only the shared-room refusal
     applies to it: a destination that stopped being reachable must not block an
     install's own snapshot, and delivery reports it, but personal content is
     never routed into a shared room, whoever wrote the route.
+
+    `own_room` is the room the task itself runs in. A leg into it is a reply
+    there, which delivery keeps (`routing.refuse_shared_rooms`), so it may be
+    shared: a scheduled job in a shared room runs with every scope withheld.
     """
     destinations = parse_output_target(descriptor)
     if not destinations:
@@ -90,7 +94,7 @@ def validate_destination(conn, config, user, descriptor, *, channels=(), stored=
                 if stored:
                     continue
                 raise ValueError("unavailable room")
-            if db.room_is_shared(conn, room_token):
+            if db.room_is_shared(conn, room_token) and room_token != own_room:
                 raise ValueError("shared destination")
 
 
