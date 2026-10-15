@@ -181,8 +181,12 @@ def plan_cron(plan, user, context, options):
             if doc.is_template and any(not job.name.startswith(cron_loader._MODULE_JOB_PREFIX)
                                        for job in db.get_user_scheduled_jobs(conn, user)):
                 raise ExecutionError("cron_file_migration_required", field_path)
+            # Report against the plan's own list (a snapshot sorts by name), not
+            # CRON.md's order; a job the plan only keeps has no plan index.
+            declared = {item["name"]: position for position, item in enumerate(declarations)}
             for index, job in enumerate(parsed.jobs):
-                _validate_cron(conn, config, user, job, [*field_path, index], existing.get(job.name))
+                where = [*field_path, declared[job.name]] if job.name in declared else [*field_path, "kept", index]
+                _validate_cron(conn, config, user, job, where, existing.get(job.name))
     except (sqlite3.Error, OSError):
         raise ExecutionError("cron_store_unavailable", field_path) from None
     operations = []

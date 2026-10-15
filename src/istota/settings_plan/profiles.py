@@ -124,7 +124,7 @@ def _validate_profile(conn, config, user, fields, existing):
                 else:
                     descriptors = [(value or "talk", existing is not None and value == existing.default_destination)]
                 for descriptor, stored in descriptors:
-                    if descriptor:
+                    if descriptor and descriptor.strip().lower() != "none":
                         validate_destination(conn, config, user, descriptor, channels=channels, stored=stored)
         except (ValueError, ZoneInfoNotFoundError):
             raise ExecutionError("validation_error", ["users", user, "profile", name]) from None

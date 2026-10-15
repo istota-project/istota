@@ -491,3 +491,43 @@ def test_a_stored_destination_in_a_shared_room_still_refuses_a_round_trip(instal
     code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
     assert code == 1, result + stderr
     assert json.loads(result)["errors"][0]["path"] == ["users", "alice", "profile", "routing"]
+
+
+def test_a_route_turned_off_in_the_web_ui_round_trips(install, tmp_path, monkeypatch, capsys):
+    """The delivery page stores `none` for a route switched off; it is the
+    explicit "deliver nowhere", not an invalid descriptor."""
+    path, config = install
+    user_profiles.update_profile(config.db_path, "alice", routing={"log": "none"})
+    code, stdout, _ = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
+    plan = tmp_path / "settings.json"
+    plan.write_text(stdout)
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
+    assert code == 0, result + stderr
+    document = json.loads(stdout)
+    document["users"]["alice"]["profile"]["routing"] = {"log": "none", "alert": "None"}
+    plan.write_text(json.dumps(document))
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--format", "json")
+    assert code == 2, result + stderr
+    assert user_profiles.get_profile(config.db_path, "alice").routing == {"log": "none", "alert": "None"}
+
+
+def test_a_refused_job_is_named_by_its_index_in_the_plan_not_in_cron_md(install, tmp_path, monkeypatch, capsys):
+    """A snapshot sorts jobs by name; CRON.md keeps its own order. The error
+    has to point at the entry the operator can find in the plan."""
+    path, config = install
+    with db.get_db(config.db_path) as conn:
+        db.register_room(conn, "group-room", "alice", origin="web")
+        db.add_room_member(conn, "group-room", "bob")
+    folder = resolve_user_config_dir(config, "alice")
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "CRON.md").write_text(
+        '```toml\n[[jobs]]\nname="zeta"\ncron="0 9 * * *"\nprompt="Review"\n'
+        '[[jobs]]\nname="alpha"\ncron="0 9 * * *"\nprompt="Review"\nroom="group-room"\n```\n')
+    code, stdout, _ = invoke(monkeypatch, capsys, path, "snapshot", "--format", "json")
+    document = json.loads(stdout)
+    assert [job["name"] for job in document["users"]["alice"]["scheduled_jobs"]] == ["alpha", "zeta"]
+    plan = tmp_path / "settings.json"
+    plan.write_text(stdout)
+    code, result, stderr = invoke(monkeypatch, capsys, path, "apply", "-f", plan, "--dry-run", "--format", "json")
+    assert code == 1, result + stderr
+    assert json.loads(result)["errors"][0]["path"] == ["users", "alice", "scheduled_jobs", 0, "room"]

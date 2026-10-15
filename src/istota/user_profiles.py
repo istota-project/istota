@@ -1464,5 +1464,7 @@ def validate_provisioning_route(purpose: str, descriptor: str) -> None:
         raise ValueError(
             f"unknown route purpose {purpose!r}; expected one of {', '.join(PURPOSES)}"
         )
-    if descriptor and not parse_output_target(descriptor):
+    # `none` parses to no destinations on purpose: it is the explicit "deliver
+    # nowhere" the web delivery page writes, not an unparseable descriptor.
+    if descriptor and descriptor.strip().lower() != "none" and not parse_output_target(descriptor):
         raise ValueError(f"invalid route descriptor for {purpose!r}: {descriptor!r}")
