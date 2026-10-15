@@ -650,6 +650,43 @@ class TestVoidRoute:
         assert resp.status_code == 400
 
 
+class TestInvoiceDetails:
+    URL = "/api/money/invoice-details"
+
+    def _client(self, make_client, tmp_path):
+        return make_client(_write_invoicing_config(tmp_path, "invoices"))
+
+    def test_open_invoice_lists_its_lines(self, make_client, tmp_path):
+        _seed_invoice(tmp_path)
+        client = self._client(make_client, tmp_path)
+
+        resp = client.get(self.URL, params={"invoice_number": "INV-000001"})
+
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        assert [i["quantity"] for i in items] == [8, 4]
+        assert sum(i["amount"] for i in items) == 1800.0
+
+    def test_voided_invoice_still_lists_the_work_it_billed(
+        self, make_client, tmp_path, fake_pdf,
+    ):
+        client = self._client(make_client, tmp_path)
+        number = _issue(client, qty=6)
+        assert client.post(f"/api/money/invoices/{number}/void", json={}).status_code == 200
+
+        resp = client.get(self.URL, params={"invoice_number": number})
+
+        assert resp.status_code == 200
+        [item] = resp.json()["items"]
+        assert item["quantity"] == 6
+        assert item["amount"] == 900.0
+
+    def test_unknown_invoice_is_404(self, make_client, tmp_path):
+        client = self._client(make_client, tmp_path)
+        resp = client.get(self.URL, params={"invoice_number": "INV-999999"})
+        assert resp.status_code == 404
+
+
 class TestCreateRoute:
     URL = "/api/money/invoices"
 

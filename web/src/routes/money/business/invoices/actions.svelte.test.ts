@@ -191,6 +191,18 @@ describe('voided rows', () => {
     expect(await menuLabels('INV-000009')).toEqual(['Preview', 'Download PDF']);
   });
 
+  it('expand to list the work the voided invoice billed', async () => {
+    render(Page);
+    const row = (await screen.findByText('INV-000009')).closest('[aria-expanded]') as HTMLElement;
+    await fireEvent.click(row);
+    expect(await screen.findByText('API work')).toBeTruthy();
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/invoice-details?invoice_number=INV-000009'),
+      expect.anything(),
+    );
+  });
+
   it('leave an open invoice its pay and void actions', async () => {
     render(Page);
     expect(await menuLabels('INV-000010')).toEqual([

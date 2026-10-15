@@ -514,7 +514,7 @@ async def api_invoice_details(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     from istota.money.core.invoicing import build_line_items
-    from istota.money.work import get_entries_for_invoice
+    from istota.money.work import get_invoice, load_work_entries
 
     data_dir = user_ctx.data_dir
     if not data_dir:
@@ -527,7 +527,13 @@ async def api_invoice_details(
     if config is None:
         return JSONResponse({"error": "no invoicing config"}, status_code=404)
 
-    entries = get_entries_for_invoice(data_dir, invoice_number)
+    # By the invoice's own lines, active or not: a voided invoice still lists
+    # the work it billed.
+    record = get_invoice(data_dir, invoice_number)
+    if record is None:
+        return JSONResponse({"error": "invoice not found"}, status_code=404)
+    by_uid = {e.uid: e for e in load_work_entries(data_dir)}
+    entries = [by_uid[uid] for uid in record.entry_uids if uid in by_uid]
     if not entries:
         return JSONResponse({"error": "invoice not found"}, status_code=404)
 
