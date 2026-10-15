@@ -78,7 +78,10 @@ export function layoutMasonry(
 }
 
 // CSS owns the responsive columns. Measure the inner content so a snapped card's
-// extra space never becomes its intrinsic height on the next resize.
+// extra space never becomes its intrinsic height on the next resize. A card with
+// no `[data-masonry-content]` is measured itself, with its snapped height cleared
+// first; a shrink inside it moves no observed box, so DOM changes anywhere in the
+// grid also schedule a layout.
 export function masonry(node: HTMLElement) {
   if (typeof ResizeObserver === 'undefined') return { destroy() {} };
   let frame = 0;
@@ -96,7 +99,9 @@ export function masonry(node: HTMLElement) {
   function observe() {
     resize.disconnect();
     resize.observe(node);
-    for (const content of node.querySelectorAll('[data-masonry-content]')) resize.observe(content);
+    for (const card of node.children) {
+      resize.observe(card.querySelector('[data-masonry-content]') ?? card);
+    }
   }
 
   function layout() {
@@ -111,25 +116,26 @@ export function masonry(node: HTMLElement) {
       card.style.gridColumnEnd = '';
       card.style.gridRowStart = '';
       card.style.gridRowEnd = '';
+      card.style.minHeight = '';
     }
     const style = getComputedStyle(node);
     const tracks = style.gridTemplateColumns.trim().split(/\s+/);
     if (!tracks.length || tracks.some((track) => !/^\d+(\.\d+)?px$/.test(track))) return;
     const gap = Math.round(parseFloat(style.columnGap) || 0);
     const items = cards.map((card): MasonryItem => {
+      const declared = card.dataset.width;
+      const width = declared === 'wide' || declared === 'full' ? declared : 'auto';
       const content = card.querySelector<HTMLElement>('[data-masonry-content]');
+      if (!content) {
+        return { height: card.getBoundingClientRect().height, width };
+      }
       const box = getComputedStyle(card);
       const inset = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth'].reduce(
         (sum, property) =>
           sum + (parseFloat(box[property as keyof CSSStyleDeclaration] as string) || 0),
         0,
       );
-      const width = card.dataset.width;
-      return {
-        height:
-          (content?.getBoundingClientRect().height ?? card.getBoundingClientRect().height) + inset,
-        width: width === 'wide' || width === 'full' ? width : 'auto',
-      };
+      return { height: content.getBoundingClientRect().height + inset, width };
     });
     const placed = layoutMasonry(items, tracks.length, gap);
     node.dataset.masonry = 'true';
@@ -145,7 +151,7 @@ export function masonry(node: HTMLElement) {
   }
 
   observe();
-  mutations.observe(node, { childList: true });
+  mutations.observe(node, { childList: true, subtree: true, characterData: true });
   schedule();
   return {
     destroy() {

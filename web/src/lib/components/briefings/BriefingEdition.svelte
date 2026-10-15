@@ -1,9 +1,8 @@
 <script lang="ts">
   import type { BriefingArchiveItem, BriefingDocument, BriefingDocumentBlock } from '$lib/api';
-  import { HintPopover, Modal } from '$lib/components/ui';
+  import { CardGrid, HintPopover, Modal } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import { fileLinks } from '$lib/fileViewer/links';
-  import { masonry } from '$lib/masonry';
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';
 
@@ -69,7 +68,7 @@
     {/if}
   </header>
   {#if document}
-    <div class="edition-grid" use:masonry>
+    <CardGrid masonry>
       {#each document.blocks as block}
         <BriefingBlockCard
           {block}
@@ -79,7 +78,7 @@
             : undefined}
         />
       {/each}
-    </div>
+    </CardGrid>
   {:else}
     <div class="legacy markdown prose" use:fileLinks>
       {@html renderMarkdown(edition.body_md ?? '')}
@@ -109,7 +108,6 @@
 
 <style>
   .edition {
-    container: briefing-edition / inline-size;
     min-width: 0;
   }
 
@@ -127,30 +125,6 @@
 
   .caption {
     margin: 0;
-  }
-
-  .edition-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
-    gap: var(--space-4);
-  }
-
-  .edition-grid:global([data-masonry='true']) {
-    grid-auto-rows: 1px;
-    row-gap: 0;
-  }
-
-  @container briefing-edition (min-width: 40rem) {
-    .edition-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-
-  @container briefing-edition (min-width: 64rem) {
-    .edition-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
   }
 
   .legacy {
