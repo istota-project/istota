@@ -20,6 +20,9 @@ await fillApiDouble(api, {
   chatStreamUrl: vi.fn(() => '/task-stream'),
 });
 
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('./navUnread', () => ({ invalidateNavUnreadCounts }));
+
 vi.mock('$lib/stores/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),
@@ -153,6 +156,7 @@ async function hideFor(ms: number) {
 
 describe('chat store — live room stream', () => {
   beforeEach(() => {
+    invalidateNavUnreadCounts.mockClear();
     Object.values(api).forEach((v) => {
       if (typeof v === 'function' && 'mockReset' in v) (v as any).mockReset();
     });
@@ -170,6 +174,26 @@ describe('chat store — live room stream', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('invalidates committed message, deletion and membership frames, ignoring message replay', async () => {
+    vi.useFakeTimers();
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    await vi.advanceTimersByTimeAsync(0);
+    invalidateNavUnreadCounts.mockClear();
+    es.current!.emit('message', row(10, 't2'), '10');
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(1);
+    es.current!.emit('message', row(10, 't2'), '10');
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(1);
+    es.current!.emit('message_deleted', { deletions: [{ msg_id: 10 }], cursor: 1 });
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(2);
+    es.current!.emit('room', { action: 'remove', id: 2 });
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(3);
+    s.teardown();
   });
 
   it('seeds the cursor from the server before connecting', async () => {

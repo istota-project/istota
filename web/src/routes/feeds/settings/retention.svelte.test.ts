@@ -25,6 +25,9 @@ await fillApiDouble(api, {
   exportOpmlUrl: vi.fn(() => '/istota/api/feeds/opml'),
 });
 
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('$lib/stores/navUnread', () => ({ invalidateNavUnreadCounts }));
+
 import { get } from 'svelte/store';
 
 import {
@@ -243,3 +246,15 @@ describe('entry retention settings', () => {
     });
   });
 });
+
+it.each([false, true])(
+  'invalidates only a successful saved feed configuration, failure=%s',
+  async (fails) => {
+    await mountPage();
+    await fireEvent.input(fieldInput(MAX_LABEL), { target: { value: '100' } });
+    if (fails) vi.mocked(putFeedsConfig).mockRejectedValueOnce(new Error('refused'));
+    await saveViaHeader();
+    expect(putFeedsConfig).toHaveBeenCalledOnce();
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+  },
+);

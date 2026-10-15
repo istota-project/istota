@@ -18,7 +18,7 @@
     live?: boolean;
     /** Observe session expiry in a caller-boundary test. */
     onExpireSession?: () => void;
-    component: Component<Record<string, never>>;
+    component?: Component<Record<string, never>>;
     /** A route layout to mount around the page, for a page that reads the
      * layout's context (the settings sections read `getUserSettings()`). */
     layout?: Component<{ children: Snippet }>;
@@ -42,7 +42,9 @@
 </script>
 
 {#if Layout}
-  <Layout><Page /></Layout>
-{:else}
+  <Layout
+    >{#if Page}<Page />{/if}</Layout
+  >
+{:else if Page}
   <Page />
 {/if}

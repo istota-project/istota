@@ -27,7 +27,7 @@ import { createRawSnippet } from 'svelte';
 // The stub itself, as the other route tests import it: `$app/state`'s own type
 // will not take an arbitrary URL.
 import { page } from '../../vitest-stubs/app-state.svelte';
-import type { User } from '$lib/api';
+import type { NavUnreadCounts, User } from '$lib/api';
 
 const SHELL_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.10.0';
 const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15';
@@ -57,6 +57,18 @@ function person(username = 'alice', displayName = 'Alice'): User {
 // writable, since `apiFetch` — what normally reports into it — never runs
 // behind a mocked `getMe`.
 const online = writable(true);
+const startNavUnreadPoll = vi.fn();
+const stopNavUnreadPoll = vi.fn();
+const navUnreadCounts = writable<Omit<NavUnreadCounts, 'enabled'>>({
+  chat: null,
+  briefings: null,
+  feeds: null,
+});
+vi.mock('$lib/stores/navUnread', () => ({
+  startNavUnreadPoll,
+  stopNavUnreadPoll,
+  navUnreadCounts,
+}));
 const startNotificationPoll = vi.fn();
 const stopNotificationPoll = vi.fn();
 const getMe = vi.fn<() => Promise<User>>();
@@ -113,6 +125,7 @@ function useAgent(ua: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  navUnreadCounts.set({ chat: null, briefings: null, feeds: null });
   online.set(true);
   seedUserId.mockReturnValue('alice');
   readUser.mockResolvedValue(null);
@@ -450,4 +463,125 @@ it('puts Files before Groups in the nav and the menu', async () => {
   await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
   const items = screen.getAllByRole('menuitem').map((a) => a.textContent?.trim());
   expect(items.indexOf('Files')).toBeLessThan(items.indexOf('Groups'));
+});
+
+describe('navigation counts root ownership', () => {
+  it('starts only for a live identity with the saved preference enabled', async () => {
+    getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(startNavUnreadPoll).toHaveBeenCalledWith('alice');
+    cleanup();
+    expect(stopNavUnreadPoll).toHaveBeenCalled();
+  });
+
+  it('treats a missing preference as disabled', async () => {
+    getMe.mockResolvedValue(person());
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+  });
+
+  it('does not poll for an enabled preference in a cached identity', async () => {
+    online.set(false);
+    getMe.mockRejectedValue(new TypeError('Failed to fetch'));
+    readUser.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+    getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    online.set(true);
+    await waitFor(() => expect(startNavUnreadPoll).toHaveBeenCalledWith('alice'));
+  });
+
+  it('does not restart a poll when an identity resolves after unmount', async () => {
+    let finish!: (user: User) => void;
+    getMe.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const mounted = render(Layout, { children });
+    mounted.unmount();
+    finish({ ...person(), show_nav_unread_badges: true });
+    await Promise.resolve();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+  });
+
+  it('clears the poll on authentication loss', async () => {
+    const { AuthError } = await import('$lib/api');
+    getMe.mockRejectedValue(new AuthError());
+    render(Layout, { children });
+    await waitFor(() => expect(forgetLastUserId).toHaveBeenCalled());
+    expect(stopNavUnreadPoll).toHaveBeenCalled();
+  });
+
+  it('does not start on setup routes', async () => {
+    page.url = new URL('http://localhost/setup/');
+    render(Layout, { children });
+    await Promise.resolve();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+  });
+});
+
+describe('navigation badge presentation', () => {
+  it.each([0, null, 1, 99, 100, 108])(
+    'renders exact labels for count %s in links and menu items',
+    async (count) => {
+      const user = { ...person(), show_nav_unread_badges: true };
+      user.features.briefings = true;
+      user.features.feeds = true;
+      getMe.mockResolvedValue(user);
+      navUnreadCounts.set({ chat: count, briefings: count, feeds: count });
+      render(Layout, { children });
+      await screen.findByText('Alice');
+      await fireEvent.keyDown(screen.getByRole('button', { name: 'Open menu' }), { key: 'Enter' });
+      await screen.findByRole('menu');
+      for (const [section, noun] of [
+        ['Chat', 'message'],
+        ['Briefings', 'briefing'],
+        ['Feeds', 'entry'],
+      ]) {
+        const plural = noun === 'entry' ? 'entries' : `${noun}s`;
+        const label = count
+          ? `${section}, ${count} unread ${count === 1 ? noun : plural}`
+          : section;
+        for (const role of ['link', 'menuitem']) {
+          const link = screen.getByRole(role, { name: label });
+          expect(link).toHaveAttribute(
+            'href',
+            expect.stringMatching(new RegExp(`/${section.toLowerCase()}$`)),
+          );
+          const pill = link.querySelector('.count-pill');
+          if (count) {
+            expect(pill).toHaveTextContent(count > 99 ? '99+' : String(count));
+            expect(link).toHaveAttribute('title', label);
+            expect(pill).toHaveAttribute('title', label);
+            expect(link.closest('[aria-live]')).toBeNull();
+          } else expect(pill).toBeNull();
+        }
+      }
+      expect(
+        screen.getByRole('button', { name: 'Open menu' }).querySelector('.count-pill'),
+      ).toBeNull();
+    },
+  );
+
+  it.each([false, undefined])('hides counts when the saved preference is %s', async (enabled) => {
+    getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: enabled });
+    navUnreadCounts.set({ chat: 4, briefings: 2, feeds: 108 });
+    render(Layout, { children });
+    expect(await screen.findByRole('link', { name: 'Chat' })).not.toHaveTextContent('4');
+  });
+
+  it('keeps unavailable modules out of both navigation forms', async () => {
+    getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    navUnreadCounts.set({ chat: 4, briefings: 2, feeds: 108 });
+    render(Layout, { children });
+    await screen.findByRole('link', { name: 'Chat, 4 unread messages' });
+    await fireEvent.keyDown(screen.getByRole('button', { name: 'Open menu' }), { key: 'Enter' });
+    await screen.findByRole('menu');
+    expect(screen.queryByRole('link', { name: /Briefings|Feeds/ })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Briefings|Feeds/ })).toBeNull();
+  });
 });

@@ -34,7 +34,6 @@ import {
 import Layout from './+layout.svelte';
 import { edition } from '$lib/components/briefings/edition.fixture';
 
-const children = (() => {}) as unknown as import('svelte').Snippet;
 const items: BriefingArchiveItem[] = [
   { id: 3, briefing_name: 'Evening', subject: 'Evening news' },
   { id: 2, briefing_name: 'Morning', subject: 'Morning news' },
@@ -43,6 +42,7 @@ const items: BriefingArchiveItem[] = [
   ...item,
   generated_at: '2026-01-01T12:00:00Z',
   task_id: null,
+  read_at: '2026-01-01T12:00:00Z',
   delivered_to: [],
 }));
 const currentUrl = () => __history.entries[__history.index].url;
@@ -73,7 +73,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 async function openReader() {
-  render(Layout, { children });
+  render(Harness, { layout: Layout, user: { username: 'alice' } as User });
   await waitFor(() => expect(get(briefingArchiveCount)).toBe(3));
   await tick();
 }
@@ -127,7 +127,7 @@ describe('briefing selection history', () => {
           finish = resolve;
         }),
     );
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await waitFor(() =>
       expect(getBriefingArchive).toHaveBeenCalledWith(
         expect.objectContaining({ briefing_name: 'Morning' }),
@@ -219,7 +219,7 @@ describe('briefing selection history', () => {
 
   it('falls back when an unloaded briefing belongs to a different name', async () => {
     __history.reset('/istota/briefings/?id=3&name=Morning');
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await waitFor(() => expect(currentUrl()).toBe('/istota/briefings/?id=2&name=Morning'));
     expect(get(selectedBriefingId)).toBe(2);
     expect(getBriefingArchiveItem).toHaveBeenCalledWith(3);
@@ -228,7 +228,7 @@ describe('briefing selection history', () => {
   it('keeps an unresolved id and reports a transient detail lookup failure', async () => {
     __history.reset('/istota/briefings/?id=30');
     vi.mocked(getBriefingArchiveItem).mockRejectedValue(new TypeError('Failed to fetch'));
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await waitFor(() => expect(get(briefingArchiveError)).toBe('Failed to load briefings'));
     expect(get(selectedBriefingId)).toBe(30);
     expect(currentUrl()).toBe('/istota/briefings/?id=30');
@@ -302,7 +302,7 @@ describe('briefing selection history', () => {
 
   it('applies a new reader query when the layout survives settings navigation', async () => {
     __history.reset('/istota/briefings/settings/');
-    render(Layout, { children });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await waitFor(() => expect(get(briefingArchiveCount)).toBe(3));
     window.history.replaceState(null, '', '/istota/briefings/?id=1&name=Morning');
     page.url = new URL(window.location.href);

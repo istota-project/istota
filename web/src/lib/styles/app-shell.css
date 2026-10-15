@@ -56,14 +56,18 @@
 
 .app-nav .nav-links {
   display: flex;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: var(--space-1) var(--space-3);
 }
 
 .app-nav .nav-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   color: var(--text-muted);
   text-decoration: none;
-  /* Short enough that the links stay inside the icon row's height, so the nav
-     is no taller once they appear at 1024px. */
+  /* Keep a single row inside the icon row's height; large text may wrap it. */
   padding: 0.1rem 0;
 }
 
@@ -74,6 +78,7 @@
 
 .app-nav .nav-right {
   margin-left: auto;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 0.75rem;

@@ -7,6 +7,7 @@ export const acceptancePreview: BriefingPreviewResponse = acceptance.preview;
 
 export const edition: BriefingArchiveItem = {
   id: 3,
+  read_at: null,
   briefing_name: 'morning',
   subject: 'Morning edition',
   generated_at: '2026-10-15T07:00:00Z',

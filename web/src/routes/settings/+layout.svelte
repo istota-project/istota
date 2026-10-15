@@ -58,6 +58,7 @@
         next.default_destination = next.default_destination || 'talk';
         next.default_room = next.default_room || '';
         next.relay_delivery = next.relay_delivery || '';
+        next.show_nav_unread_badges = next.show_nav_unread_badges ?? false;
       }
       profile = next;
       initialProfileJson = next ? JSON.stringify(next) : '';
@@ -87,6 +88,7 @@
         default_room: profile.default_room || '',
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
+        show_nav_unread_badges: profile.show_nav_unread_badges,
         external_turn_display: profile.external_turn_display || 'collapsed',
         relay_delivery: profile.relay_delivery || '',
       };

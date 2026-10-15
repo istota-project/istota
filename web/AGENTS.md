@@ -300,6 +300,12 @@ Capabilities and their gates: soft-keyboard geometry (0.2.0), camera / photo lib
 
 `?vpdebug=1` turns on an on-device readout of the shell version and the live geometry (`?vpdebug=0` clears it). It is the only way to see this subsystem working on a real phone, and it prints the version precisely so "a gate with no height behind it" is visible without a rebuild.
 
+## Navigation unread badges
+
+Settings → Preferences saves “Show unread counts in navigation” to the account through the shared Save flow. It defaults off and takes effect only after the root identity reload confirms the saved value. It belongs outside the browser-local Appearance card.
+
+The root layout renders the existing `CountPill` beside Chat, Briefings and Feeds in both inline links and the dropdown. Pass exact counts; the pill hides zero and caps its visible text at `99+`. Null means unavailable and hides the badge. The anchor's accessible name and tooltip include the exact number and singular/plural noun, with no live region. Keep module gates and the menu trigger unchanged. `stores/navUnread.ts` owns the counts and poll lifecycle; the bell's open-notification count remains separate. The backend contracts live in `.claude/rules/web-ui.md` and Briefings read behavior in `.claude/rules/briefings.md`.
+
 ## Client-local preferences
 
 Theme and text scale are localStorage-persisted per browser, not profile fields — they must apply before first paint, and profile data arrives after it. Both follow one shape: a `writable` seeded from `loadSetting`, a normalizer folding any unrecognized value onto the default, an `apply*` setting an attribute on `<html>`, and a matching branch in the single blocking `<script>` in `app.html`. Add to that script; never add a second one. Controls for these live in the **Appearance** card on `/settings`, which sits outside the `{#if profile}` block and applies on change — keep client-local controls out of the profile cards, whose fields need the shared Save button.

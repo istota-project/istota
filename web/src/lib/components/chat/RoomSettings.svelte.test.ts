@@ -5,6 +5,9 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 // The members and group panes fetch on mount. Answered with an empty room so
 // they settle quietly; their own behaviour is in their own test files.
 const api = vi.hoisted(() => ({}) as ApiDouble);
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('$lib/stores/navUnread', () => ({ invalidateNavUnreadCounts }));
+
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api, {
   getRoomMembers: vi.fn(async () => ({ members: [], can_manage: false, message_count: 0 })),
@@ -897,6 +900,7 @@ describe('RoomSettings — add a member', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add and share the history' }));
     await waitFor(() => expect(api.addRoomMember).toHaveBeenCalledWith(1, 'bob'));
     await waitFor(() => expect(onMembersChanged).toHaveBeenCalled());
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledOnce();
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
     expect(screen.getByRole('dialog', { name: 'Room settings' })).toBeTruthy();
     expect(await screen.findByText('Bob')).toBeTruthy();

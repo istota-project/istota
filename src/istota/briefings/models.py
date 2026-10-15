@@ -154,6 +154,7 @@ class ArchivedBriefing:
     task_id: int | None = None
     block_meta: dict = field(default_factory=dict)
     delivered_to: list[str] = field(default_factory=list)
+    read_at: str | None = None
     document: dict | None = None
 
 

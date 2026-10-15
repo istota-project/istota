@@ -156,6 +156,8 @@ export async function changePassword(
 }
 
 export interface User {
+  // Absent in older cached identities; treat as false.
+  show_nav_unread_badges?: boolean;
   // Absent on cached records from before email authentication.
   auth?: UserAuth;
   username: string;
@@ -1354,6 +1356,17 @@ export interface FeedsResponse {
  */
 export const ME_TIMEOUT_MS = 20_000;
 
+export interface NavUnreadCounts {
+  enabled: boolean;
+  chat: number | null;
+  briefings: number | null;
+  feeds: number | null;
+}
+
+export function getNavUnreadCounts(): Promise<NavUnreadCounts> {
+  return apiFetch<NavUnreadCounts>('/nav/unread', undefined, 10_000);
+}
+
 export async function getMe(timeoutMs = ME_TIMEOUT_MS): Promise<User> {
   return apiFetch<User>('/me', undefined, timeoutMs);
 }
@@ -2082,6 +2095,7 @@ export interface UserProfile {
   // Opt-in: follow the GPS timezone on travel (ISSUE-096). Off by default —
   // it overwrites the timezone the user chose above.
   timezone_follow_location: boolean;
+  show_nav_unread_badges: boolean;
   // How much of a turn that arrived from outside the room (today, mirrored
   // email) the transcript shows. The row is always there whatever this says —
   // `hidden` withholds the body, never the turn.
@@ -4835,6 +4849,7 @@ export interface BriefingDocument {
 export interface BriefingArchiveItem {
   document?: BriefingDocument | null;
   id: number;
+  read_at: string | null;
   briefing_name: string;
   subject: string;
   generated_at: string;
@@ -4927,6 +4942,26 @@ export async function getBriefingArchive(
 
 export async function getBriefingArchiveItem(id: number): Promise<BriefingArchiveItem> {
   return apiFetch<BriefingArchiveItem>(`/briefings/archive/${id}`);
+}
+
+export async function markBriefingArchiveRead(
+  id: number,
+): Promise<{ id: number; read_at: string }> {
+  return apiFetch(`/briefings/archive/${id}/read`, { method: 'POST' });
+}
+
+export async function markBriefingArchiveAsRead(
+  scope: 'all' | 'briefing',
+  briefingName?: string,
+): Promise<{ status: string; updated: number }> {
+  return apiFetch('/briefings/mark-as-read', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scope,
+      ...(scope === 'briefing' ? { briefing_name: briefingName } : {}),
+    }),
+  });
 }
 
 export async function deleteBriefingArchiveItem(id: number): Promise<void> {

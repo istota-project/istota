@@ -686,6 +686,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # rewrites a value the user chose, so it is opted into rather than
         # inferred, and an existing row must not start following on upgrade.
         "timezone_follow_location": "INTEGER NOT NULL DEFAULT 0",
+        "show_nav_unread_badges": "INTEGER NOT NULL DEFAULT 0",
         # Per-user Google Workspace scope selection (ISSUE-240). JSON object
         # {service -> off|readonly|full}, bounded by the operator's
         # [google_workspace] scopes ceiling. Empty means "unset", which
@@ -6891,6 +6892,18 @@ def initialize_room_read_state(
         (room_token, surface, user_id, room_max_message_id(conn, room_token)),
     )
     return True
+
+
+def count_user_web_unread_messages(conn: sqlite3.Connection, user_id: str) -> int:
+    """Sum visible rooms using the web sidebar's cursors and unread rules."""
+    hidden = hidden_room_tokens_for_member(conn, user_id)
+    total = 0
+    for room in list_member_rooms(conn, user_id):
+        if room.token in hidden:
+            continue
+        initialize_room_read_state(conn, room.token, "web", user_id)
+        total += count_unread_messages(conn, room.token, "web", user_id)
+    return total
 
 
 # ---------------------------------------------------------------------------

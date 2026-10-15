@@ -915,6 +915,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     relay_delivery TEXT NOT NULL DEFAULT '',             -- where relay questions from other users reach this user: '' (asker's choice) | room | whatsapp | sms
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
+    show_nav_unread_badges INTEGER NOT NULL DEFAULT 0,
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)
     google_scopes TEXT NOT NULL DEFAULT '{}',            -- JSON object: Google service -> off|readonly|full (bounded by the operator's ceiling; {} = unset = the whole ceiling)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

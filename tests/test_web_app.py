@@ -3625,6 +3625,69 @@ class TestProfileEndpoints:
         )
         assert resp.status_code == 400
 
+    async def test_nav_badge_preference_live_save(self, tmp_path, client, app):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        profile = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert profile.json()["profile"]["show_nav_unread_badges"] is False
+        for enabled in (True, False):
+            saved = await client.put(
+                "/istota/api/settings/profile", json={"show_nav_unread_badges": enabled},
+                cookies=cookies, headers={"origin": "https://example.com"},
+            )
+            assert saved.status_code == 200
+            me = await client.get("/istota/api/me", cookies=cookies)
+            assert me.json()["show_nav_unread_badges"] is enabled
+            profile = await client.get("/istota/api/settings/profile", cookies=cookies)
+            assert profile.json()["profile"]["show_nav_unread_badges"] is enabled
+        assert cfg.users["alice"].show_nav_unread_badges is False
+
+    @pytest.mark.parametrize("invalid", [1, "true", "invalid", None, [], {}])
+    async def test_nav_badge_preference_rejects_invalid_boolean(self, tmp_path, client, app, invalid):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        resp = await client.put(
+            "/istota/api/settings/profile", json={"show_nav_unread_badges": invalid},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
+    async def test_nav_badge_preference_managed(self, tmp_path, client, app):
+        from istota import user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        user_profiles.provision_user(self._db_path, "alice", {"show_nav_unread_badges": True}, mode="managed")
+        unchanged = await client.put(
+            "/istota/api/settings/profile", json={"show_nav_unread_badges": True},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert unchanged.status_code == 200
+        resp = await client.put(
+            "/istota/api/settings/profile", json={"show_nav_unread_badges": False},
+            cookies=cookies, headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 409
+        me = await client.get("/istota/api/me", cookies=cookies)
+        assert me.json()["show_nav_unread_badges"] is True
+
+    async def test_nav_badge_me_uses_config_when_profile_missing(self, tmp_path, client, app):
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        cfg.users["alice"].show_nav_unread_badges = True
+        with db.get_db(self._db_path) as conn:
+            conn.execute("DELETE FROM user_profiles WHERE user_id = 'alice'")
+        me = await client.get("/istota/api/me", cookies=cookies)
+        assert me.json()["show_nav_unread_badges"] is True
+        profile = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert profile.json()["profile"]["show_nav_unread_badges"] is True
+
     async def test_get_profile_timezone_follow_location_defaults_off(
         self, tmp_path, client, app,
     ):
