@@ -345,6 +345,26 @@ class TestCommandDispatch:
         # --qty is parsed as float by argparse; str(4.0) -> "4.0"
         assert "--qty" in args and "4.0" in args
 
+    def test_work_add_passes_separate(self, captured):
+        from istota.skills.money import main
+
+        main(["work", "add", "--date", "2026-02-01", "--client", "acme",
+              "--service", "dev", "--separate"])
+        assert captured[-1][-1] == "--separate"
+
+        main(["work", "add", "--date", "2026-02-01", "--client", "acme", "--service", "dev"])
+        assert not {"--separate", "--no-separate"} & set(captured[-1])
+
+    def test_work_update_passes_separate_either_way(self, captured):
+        from istota.skills.money import main
+
+        main(["work", "update", "5", "--separate"])
+        assert captured[-1] == ["work", "update", "5", "--separate"]
+        main(["work", "update", "5", "--no-separate"])
+        assert captured[-1] == ["work", "update", "5", "--no-separate"]
+        main(["work", "update", "5", "--qty", "2"])
+        assert not {"--separate", "--no-separate"} & set(captured[-1])
+
     def test_unknown_command_exits(self):
         from istota.skills.money import main
 

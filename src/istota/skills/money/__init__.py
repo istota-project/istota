@@ -671,6 +671,8 @@ def cmd_work_add(args):
         cli_args += ["--description", args.description]
     if args.entity:
         cli_args += ["--entity", args.entity]
+    if args.separate is not None:
+        cli_args.append("--separate" if args.separate else "--no-separate")
     _output(_run(cli_args))
 
 
@@ -692,6 +694,8 @@ def cmd_work_update(args):
         cli_args += ["--description", args.description]
     if args.entity is not None:
         cli_args += ["--entity", args.entity]
+    if args.separate is not None:
+        cli_args.append("--separate" if args.separate else "--no-separate")
     _output(_run(cli_args))
 
 
@@ -1057,6 +1061,8 @@ def build_parser():
     p_wa.add_argument("--discount", type=float, help="Discount")
     p_wa.add_argument("--description", help="Description")
     p_wa.add_argument("--entity", "-e", help="Entity override")
+    p_wa.add_argument("--separate", action=argparse.BooleanOptionalAction, default=None,
+                      help="Always invoice this entry on its own")
 
     p_wu = work_sub.add_parser("update", help="Update work entry")
     p_wu.add_argument("entry_id", type=int, help="Entry ID")
@@ -1068,6 +1074,8 @@ def build_parser():
     p_wu.add_argument("--discount", type=float, help="Discount")
     p_wu.add_argument("--description", help="Description")
     p_wu.add_argument("--entity", "-e", help="Entity override")
+    p_wu.add_argument("--separate", action=argparse.BooleanOptionalAction, default=None,
+                      help="Always invoice this entry on its own")
 
     p_wr = work_sub.add_parser("remove", help="Remove work entry")
     p_wr.add_argument("entry_id", type=int, help="Entry ID")

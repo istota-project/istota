@@ -161,7 +161,7 @@ Cash-basis accounting: no ledger entries at invoice time; income recognized when
 
 **`--period` is an upper bound.** It bills every unbilled entry dated on or before the end of that month, earlier months included. To bill one piece of work on its own, pass its `uid` with `--entry` (read uids from `work list`). Named entries must exist and be unbilled, or the command fails and writes nothing. They still group by the normal rules, so entries named together can share one invoice. Run with `--dry-run` first and show the user what would be issued.
 
-**Grouping.** A client's unbilled work for one entity goes on one invoice, split only by the client's bundles and the services it bills separately. An entry flagged `separate` always gets an invoice of its own. The flag is set from the work form in the web UI ("Invoice separately"); this skill cannot set it. `work list` shows it on each entry.
+**Grouping.** A client's unbilled work for one entity goes on one invoice, split only by the client's bundles and the services it bills separately. An entry flagged `separate` always gets an invoice of its own. Set it with `--separate` on `work add` or `work update`, and clear it with `--no-separate`; the web UI's work form has the same flag ("Invoice separately"). `work list` shows it on each entry.
 
 **Invoice records.** Every issued number has a record that is never deleted, and numbers are never reused. An invoice's total is fixed when it is issued, so a later rate change does not alter it. `invoice list` reports each invoice's `status` (`outstanding`, `paid` or `voided`); a voided one also carries `voided_at`, `void_reason` and `replaced_by`. Voided invoices are left out of the outstanding count, and `--active` hides them.
 
@@ -197,10 +197,10 @@ Matching compares the credit with the total stored when the invoice was issued. 
 istota-skill money work list [--client acme] [--period 2026-02] [--uninvoiced] [--invoiced]
 
 # Add a work entry
-istota-skill money work add --date 2026-02-01 --client acme --service consulting --qty 4 [--description "Architecture review"] [--amount 100] [--discount 10] [--entity ENTITY]
+istota-skill money work add --date 2026-02-01 --client acme --service consulting --qty 4 [--description "Architecture review"] [--amount 100] [--discount 10] [--entity ENTITY] [--separate]
 
 # Update a work entry
-istota-skill money work update 5 [--qty 8] [--description "Updated"]
+istota-skill money work update 5 [--qty 8] [--description "Updated"] [--separate | --no-separate]
 
 # Remove an uninvoiced work entry
 istota-skill money work remove 3
