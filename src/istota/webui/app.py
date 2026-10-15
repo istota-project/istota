@@ -16641,6 +16641,9 @@ app.dependency_overrides[_feeds_verify_origin] = _verify_origin
 # Briefings web API — native, in-process module backed by per-user SQLite.
 from istota.briefings.routes import require_auth as _briefings_require_auth
 from istota.briefings.routes import router as _briefings_router
+from istota.briefings.group_routes import router as _group_briefings_router
+
+app.include_router(_group_briefings_router, prefix="/istota/api", tags=["briefings"])
 from istota.briefings.routes import verify_origin as _briefings_verify_origin
 
 app.include_router(_briefings_router, prefix="/istota/api/briefings", tags=["briefings"])

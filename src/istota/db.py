@@ -11201,6 +11201,8 @@ def end_group_membership(
     if cursor.rowcount:
         from istota.briefings.source_grants import revoke_owner_grants
         revoke_owner_grants(conn, user_id, group_id=group_id)
+        from istota.notifications.resolvers.group_briefing import close_for_member
+        close_for_member(conn, group_id, user_id)
     return cursor.rowcount > 0
 
 

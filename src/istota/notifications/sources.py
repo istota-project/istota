@@ -299,6 +299,7 @@ def _register_all() -> None:
             "admin_profile_change",
             "admin_config_change",
             "job_failure",
+            "group_briefing",
         ):
             try:
                 module = importlib.import_module(

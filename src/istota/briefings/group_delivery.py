@@ -12,17 +12,23 @@ from istota.groups.service import _transaction
 
 
 def queue_deliveries(conn, config, *, now=None):
-    """Admission does no network I/O. In-app notifications belong to the reader."""
+    """Queue external work and atomically record in-app notifications."""
     store.expire_delivery_claims(conn, now=now)
     created = []
     with _transaction(conn):
         rows = conn.execute("SELECT r.* FROM group_briefing_recipients r JOIN group_briefing_runs e ON e.id=r.run_id "
-                            "WHERE e.state='published' AND r.state='pending' AND r.channel!='in_app' ORDER BY r.id").fetchall()
+                            "WHERE e.state='published' AND r.state='pending' ORDER BY r.id").fetchall()
         for row in rows:
             refusal = store.delivery_refusal(conn, config, row)
             if refusal:
                 conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code=? WHERE id=?",
                              (refusal, row["id"]))
+                continue
+            if row["channel"] == "in_app":
+                from istota.notifications.resolvers.group_briefing import write_edition
+                if write_edition(conn, row) is not None:
+                    conn.execute("UPDATE group_briefing_recipients SET state='sent', updated_at=? WHERE id=?",
+                                 (store._timestamp(now), row["id"]))
                 continue
             correlation = f"{row['id']}:{row['attempts']}"
             active = conn.execute("SELECT 1 FROM tasks WHERE source_type='group_briefing_delivery' AND briefing_name=? "

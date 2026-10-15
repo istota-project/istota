@@ -189,6 +189,8 @@ def approve_source(conn, config, definition_id, source_id, *, actor_id, expected
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                      (definition_id, source_id, actor_id, membership, _json(selected_resource), _json(audience_contract),
                       definition["channel"], revision, at))
+        from istota.notifications.resolvers.group_briefing import sync_approvals
+        sync_approvals(conn, config, get_definition(conn, definition_id))
         return _active_grant(conn, definition_id, source_id)
 
 

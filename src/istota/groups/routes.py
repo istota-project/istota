@@ -71,7 +71,7 @@ async def _run(request, user, operation, *args, read=False, **kwargs):
         return JSONResponse({"error": "groups_unavailable", "message": "Group management unavailable"}, status_code=503)
     if not read:
         logger.info("Group request actor=%s group=%s operation=%s outcome=ok",
-                    actor, result["group_id"], operation.__name__)
+                    actor, result.get("group_id", group_id), operation.__name__)
     return result
 
 

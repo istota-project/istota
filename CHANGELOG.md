@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Group briefing APIs let current owners manage the same definitions after an ownership change. Members can read and download retained editions, mute their own delivery, and approve or revoke their own contributed sources; in-app notices carry no private content.
+
 - Group briefings send the saved edition through each member’s selected email, private Talk or ntfy destination. Retries preserve confirmed message parts, respect mutes and access changes, and require acknowledgement when delivery may already have succeeded.
 
 - Group briefings generate one common edition per occurrence, with saved research reused after a synthesis retry. Previews remain drafts, and structured blocks retain their original content without a model pass.

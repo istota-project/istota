@@ -160,7 +160,10 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                  group_id, name, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                   (*fields, group_id, value["name"], actor_id))
             definition_id = cursor.lastrowid
-        return get_definition(conn, definition_id)
+        definition = get_definition(conn, definition_id)
+        from istota.notifications.resolvers.group_briefing import sync_approvals
+        sync_approvals(conn, config, definition)
+        return definition
 
 
 def get_run(conn, run_id):
@@ -528,3 +531,26 @@ def retry_deliveries(conn, config, run_id, *, actor_id, is_admin=False, acknowle
                          (_timestamp(now), row["id"]))
             count += 1
         return count
+
+
+def prune_runs(conn, *, retention_days, now=None):
+    """Prune terminal editions and their ledger in the caller's cleanup transaction."""
+    if retention_days <= 0:
+        return 0
+    cutoff = _timestamp((now or datetime.now(timezone.utc)) - timedelta(days=retention_days))
+    rows = conn.execute("SELECT id FROM group_briefing_runs WHERE state IN "
+                        "('published', 'preview_ready', 'failed', 'superseded', 'cancelled') "
+                        "AND julianday(COALESCE(published_at, updated_at)) < julianday(?) "
+                        "AND NOT EXISTS (SELECT 1 FROM group_briefing_recipients r WHERE r.run_id=group_briefing_runs.id "
+                        "AND r.state IN ('pending', 'sending', 'uncertain'))", (cutoff,)).fetchall()
+    from istota.notifications.store import resolve_by_object
+    for row in rows:
+        run_id = row["id"]
+        for notice in conn.execute("SELECT user_id FROM notifications WHERE source='group_briefing' "
+                                   "AND object_type='group_edition' AND object_id=?", (str(run_id),)):
+            resolve_by_object(conn, notice["user_id"], "group_briefing", "group_edition", str(run_id), by="retention")
+        conn.execute("DELETE FROM group_briefing_parts WHERE recipient_id IN "
+                     "(SELECT id FROM group_briefing_recipients WHERE run_id=?)", (run_id,))
+        conn.execute("DELETE FROM group_briefing_recipients WHERE run_id=?", (run_id,))
+        conn.execute("DELETE FROM group_briefing_runs WHERE id=?", (run_id,))
+    return len(rows)

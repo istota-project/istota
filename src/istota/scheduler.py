@@ -8360,6 +8360,9 @@ def run_cleanup_checks(config: Config) -> None:
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
 
+        from istota.briefings.group_store import prune_runs
+        prune_runs(conn, retention_days=config.briefings.archive_retention_days)
+
         # 4a. Prune the processed-email dedup ledger (ISSUE-231). One row per
         # polled message, including the ones that produce nothing, and until
         # now nothing ever deleted from it.
