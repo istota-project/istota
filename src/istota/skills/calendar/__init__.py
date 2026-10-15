@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -41,6 +41,9 @@ class CalendarEvent:
     description: str | None = None
     all_day: bool = False
     timezone: str | None = None  # Original TZID, None = floating
+    classification: str = "PUBLIC"
+    attendees: list[str] = field(default_factory=list)
+    links: list[str] = field(default_factory=list)
 
 
 def _require_caldav():
@@ -254,6 +257,12 @@ def get_events(
                         description=str(component.get("description", "")) or None,
                         all_day=all_day,
                         timezone=event_tz,
+                        classification=str(component.get("class", "PUBLIC")).upper(),
+                        attendees=[str(value) for value in (
+                            component.get("attendee", []) if isinstance(component.get("attendee", []), list)
+                            else [component.get("attendee")]
+                        )],
+                        links=[str(component["url"])] if component.get("url") else [],
                     )
                 )
 

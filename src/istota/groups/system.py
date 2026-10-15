@@ -17,12 +17,15 @@ ACCOUNT_HISTORY_DISCLOSURE = (
 
 def sync_account_membership(conn, user_id: str, *, enabled: bool = True) -> None:
     """Apply an account lifecycle change inside its caller's write transaction."""
+    disabled = conn.execute("SELECT disabled FROM web_auth_identities WHERE user_id = ?", (user_id,)).fetchone()
+    enabled = enabled and not user_id.startswith("__") and not (disabled and disabled["disabled"])
+    if not enabled:
+        from istota.briefings.source_grants import revoke_owner_grants
+        revoke_owner_grants(conn, user_id)
     row = conn.execute("SELECT group_id FROM groups WHERE system_key = ?", (ALL_USERS,)).fetchone()
     if row is None:
         return
     group_id = row["group_id"]
-    disabled = conn.execute("SELECT disabled FROM web_auth_identities WHERE user_id = ?", (user_id,)).fetchone()
-    enabled = enabled and not user_id.startswith("__") and not (disabled and disabled["disabled"])
     current = conn.execute(
         "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
         (group_id, user_id),
@@ -55,6 +58,8 @@ def reconcile_all_users(conn, config, *, registry_complete: bool | None = None) 
 def reconcile_all_users_in_transaction(conn, config, *, registry_complete: bool | None = None) -> dict:
     """Let an edition and its current audience commit together."""
     complete = config._user_registry_complete if registry_complete is None else registry_complete
+    from istota.briefings.source_grants import reconcile_source_grants
+    reconcile_source_grants(conn, config, registry_complete=complete)
     row = conn.execute("SELECT group_id FROM groups WHERE system_key = ?", (ALL_USERS,)).fetchone()
     if row is None:
         # Neither a display-name nor an id collision transfers old history.

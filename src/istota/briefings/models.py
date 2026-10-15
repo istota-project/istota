@@ -232,6 +232,53 @@ GROUP_SOURCE_KINDS = frozenset({
     "personal_file", "personal_calendar",
 })
 GROUP_CHANNELS = ("in_app", "email", "talk", "ntfy")
+CALENDAR_FIELDS = ("time", "title", "description", "attendees", "links", "location")
+CALENDAR_LOOKBACK_DAYS = (0, 1, 7, 30)
+CALENDAR_LOOKAHEAD_DAYS = (1, 7, 14, 30)
+
+
+def normalize_contribution_config(kind, config, *, allow_pending=False):
+    """One resource and a bounded disclosure, independent of caller authority."""
+    from urllib.parse import unquote, urlsplit
+    from istota.sandbox.user_scope import is_scopable_user_id
+
+    allowed = {"owner_id", "path"} if kind == "personal_file" else {
+        "owner_id", "calendar_url", "fields", "include_private", "lookback_days", "lookahead_days",
+    }
+    if not isinstance(config, dict) or set(config) - allowed:
+        raise ValueError("invalid contribution config")
+    owner = _group_text(config.get("owner_id"), "source owner", required=True, limit=100)
+    if not is_scopable_user_id(owner) or owner.startswith("__"):
+        raise ValueError("invalid source owner")
+    if allow_pending and set(config) == {"owner_id"}:
+        return {"owner_id": owner}
+    if kind == "personal_file":
+        path = _group_text(config.get("path"), "file path", required=True, limit=1000)
+        if (any(part in ("", ".", "..") for part in path.split("/"))
+                or any(c in path for c in ("\\", "\0", ":"))
+                or not path.lower().endswith((".txt", ".md", ".markdown"))):
+            raise ValueError("select one relative text file")
+        return {"owner_id": owner, "path": path}
+    url = _group_text(config.get("calendar_url"), "calendar reference", required=True, limit=2000)
+    parsed = urlsplit(url)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment
+            or any(part in (".", "..") for part in unquote(parsed.path).split("/"))):
+        raise ValueError("select one calendar URL")
+    fields = config.get("fields", ["time", "title"])
+    if not isinstance(fields, list) or not fields or any(not isinstance(f, str) or f not in CALENDAR_FIELDS for f in fields):
+        raise ValueError("invalid calendar fields")
+    private = config.get("include_private", False)
+    if type(private) is not bool:
+        raise ValueError("include_private must be a boolean")
+    result = {"owner_id": owner, "calendar_url": url, "fields": [f for f in CALENDAR_FIELDS if f in fields],
+              "include_private": private}
+    for window_field, default, choices in (("lookback_days", 0, CALENDAR_LOOKBACK_DAYS), ("lookahead_days", 1, CALENDAR_LOOKAHEAD_DAYS)):
+        value = config.get(window_field, default)
+        if type(value) is not int or value not in choices:
+            raise ValueError("invalid calendar window")
+        result[window_field] = value
+    return result
 
 
 def _group_text(value, field, *, required=False, limit=20000):
@@ -257,6 +304,8 @@ def _group_sources(raw, seen):
         config = source.get("config", {})
         if not isinstance(config, dict):
             raise ValueError("source config must be an object")
+        if kind in ("personal_file", "personal_calendar"):
+            config = normalize_contribution_config(kind, config, allow_pending=True)
         sources.append({"id": source_id, "kind": kind, "config": config})
     return sources
 

@@ -78,14 +78,12 @@ def definition_blocks(definition):
     return blocks
 
 
-def _validate_run_sources(conn, definition):
-    # Draft storage never implies approval to read a contributor's resource.
-    if any(s["kind"] in ("personal_file", "personal_calendar") for s in definition_sources(definition)):
-        raise GroupError(409, "source_approval_required", "Personal sources require resource-owner approval")
+def _validate_run_sources(conn, config, definition):
+    from istota.briefings.source_grants import validate_definition_grants
     generation = definition["generation"]
     if generation["contains_personal_information"] and not generation["audience_acknowledged"]:
         raise GroupError(422, "audience_acknowledgement_required", "Acknowledge the group audience for personal prompt content")
-    return []
+    return validate_definition_grants(conn, config, definition)
 
 
 def get_definition(conn, definition_id):
@@ -96,6 +94,13 @@ def get_definition(conn, definition_id):
     result["generation"] = json.loads(result.pop("generation_json"))
     result["enabled"] = bool(result["enabled"])
     return result
+
+
+def supersede_definition_runs(conn, definition_id):
+    conn.execute("""UPDATE group_briefing_runs SET state = 'superseded', error_code = 'definition_changed',
+                    attempt_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
+                    WHERE definition_id = ? AND state IN ('queued', 'researching', 'generating')""",
+                 (definition_id,))
 
 
 def list_definitions(conn, group_id):
@@ -129,8 +134,11 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                                  (group_id, value["name"])).fetchone()
         if collision and (not old or collision["id"] != old["id"]):
             raise GroupError(409, "definition_exists", "Briefing name already exists")
+        from istota.briefings.source_grants import invalidate_changed_grants
+        candidate = {**value, "id": definition_id, "group_id": group_id}
+        invalidate_changed_grants(conn, old, candidate)
         if value["enabled"]:
-            _validate_run_sources(conn, value)
+            _validate_run_sources(conn, config, candidate)
         fields = (value["title"], value["cron"], value["timezone"], int(value["enabled"]),
                   value["generation_mode"], _json(value["generation"]), value["channel"], actor_id)
         if old:
@@ -138,10 +146,7 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                             generation_mode = ?, generation_json = ?, channel = ?, updated_by = ?,
                             revision = revision + 1, updated_at = datetime('now') WHERE id = ?""",
                          (*fields, definition_id))
-            conn.execute("""UPDATE group_briefing_runs SET state = 'superseded', error_code = 'definition_changed',
-                            attempt_token = NULL, lease_expires_at = NULL, updated_at = datetime('now')
-                            WHERE definition_id = ? AND state IN ('queued', 'researching', 'generating')""",
-                         (definition_id,))
+            supersede_definition_runs(conn, definition_id)
         else:
             cursor = conn.execute("""INSERT INTO group_briefing_configs
                 (title, cron, timezone, enabled, generation_mode, generation_json, channel, updated_by,
@@ -199,7 +204,7 @@ def enqueue_run(conn, config, definition_id, *, actor_id=None, is_admin=False,
             raise GroupError(409, "definition_disabled", "Enable the briefing before publishing")
         if definition["channel"] not in available_channels(config):
             raise GroupError(422, "channel_unavailable", "Delivery channel is unavailable")
-        grants = _validate_run_sources(conn, definition)
+        grants = _validate_run_sources(conn, config, definition)
         snapshot = {"definition": definition, "grants": grants}
         cursor = conn.execute("""INSERT INTO group_briefing_runs
             (definition_id, occurrence_key, mode, due_at, request_json, snapshot_json, created_at, updated_at)
@@ -296,7 +301,7 @@ def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=Non
             raise GroupError(503, "briefings_unavailable", "Briefing generation is unavailable")
         if run["mode"] == "publish" and not definition["enabled"]:
             raise GroupError(409, "definition_disabled", "Briefing was disabled during generation")
-        if _validate_run_sources(conn, definition) != run["snapshot"]["grants"]:
+        if _validate_run_sources(conn, config, definition) != run["snapshot"]["grants"]:
             raise GroupError(409, "source_approval_changed", "Source approval changed during generation")
         conn.execute("""UPDATE group_briefing_runs SET state = ?, subject = ?, body_md = ?,
                         provenance_json = ?, usage_json = ?, published_at = ?, updated_at = ?,

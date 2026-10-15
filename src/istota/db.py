@@ -8959,6 +8959,21 @@ _GROUP_BRIEFINGS_DDL = (
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE(group_id, name)
     )""",
+    """CREATE TABLE IF NOT EXISTS group_briefing_source_grants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+        source_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        membership_id INTEGER NOT NULL REFERENCES group_members(id),
+        resource_json TEXT NOT NULL,
+        audience_json TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        revision INTEGER NOT NULL,
+        approved_at TEXT NOT NULL,
+        revoked_at TEXT
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_group_briefing_active_grant
+        ON group_briefing_source_grants(definition_id, source_id) WHERE revoked_at IS NULL""",
     """CREATE TABLE IF NOT EXISTS group_briefing_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
@@ -11158,6 +11173,9 @@ def end_group_membership(
         "ended_by = ? WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
         (at, ended_by, group_id, user_id),
     )
+    if cursor.rowcount:
+        from istota.briefings.source_grants import revoke_owner_grants
+        revoke_owner_grants(conn, user_id, group_id=group_id)
     return cursor.rowcount > 0
 
 

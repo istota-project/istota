@@ -2492,6 +2492,23 @@ CREATE TABLE IF NOT EXISTS group_briefing_configs (
         UNIQUE(group_id, name)
     );
 
+CREATE TABLE IF NOT EXISTS group_briefing_source_grants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+        source_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        membership_id INTEGER NOT NULL REFERENCES group_members(id),
+        resource_json TEXT NOT NULL,
+        audience_json TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        revision INTEGER NOT NULL,
+        approved_at TEXT NOT NULL,
+        revoked_at TEXT
+    );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_group_briefing_active_grant
+        ON group_briefing_source_grants(definition_id, source_id) WHERE revoked_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS group_briefing_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
