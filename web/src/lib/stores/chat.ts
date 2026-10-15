@@ -1,3 +1,4 @@
+import { invalidateNavUnreadCounts } from './navUnread';
 /**
  * Web chat session engine.
  *
@@ -1663,9 +1664,11 @@ function createSession(): ChatSession {
   function markActiveRead(roomId: number) {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     setRoomUnread(roomId, 0);
-    markRoomRead(roomId).catch(() => {
-      /* transient; next open/poll retries */
-    });
+    markRoomRead(roomId)
+      .then(invalidateNavUnreadCounts)
+      .catch(() => {
+        /* transient; next open/poll retries */
+      });
   }
 
   // Re-fetch the room list and merge fresh unread counts (and any name/origin
@@ -2193,6 +2196,7 @@ function createSession(): ChatSession {
     // alone rather than flushed on the way out: those frames are dropped
     // precisely because they belong to a turn nothing is going to reconcile,
     // and the cache should not be the one place they survive.
+    invalidateNavUnreadCounts();
     cacheStreamedRow(row);
     const room = get(rooms).find((r) => r.token === token);
     if (room && room.id === get(activeRoomId) && get(view) === 'room') {
@@ -2213,6 +2217,7 @@ function createSession(): ChatSession {
   // a badge the deleting client's own read cursor may already have cleared.
   function applyDeletions(deletions: { msg_id: number }[]) {
     if (!deletions.length) return;
+    invalidateNavUnreadCounts();
     const ids = deletions.map((d) => d.msg_id);
     const gone = new Set(ids);
     messages.update((arr) => arr.filter((m) => m.msgId == null || !gone.has(m.msgId)));
@@ -2256,6 +2261,7 @@ function createSession(): ChatSession {
     if (frame.action === 'remove') {
       const id = frame.id;
       if (typeof id !== 'number') return;
+      invalidateNavUnreadCounts();
       forgetRoom(id);
       rooms.update((rs) => rs.filter((r) => r.id !== id));
       if (get(activeRoomId) === id) {
@@ -2270,6 +2276,7 @@ function createSession(): ChatSession {
     }
     const fresh = frame.room;
     if (!fresh || typeof fresh.id !== 'number') return;
+    invalidateNavUnreadCounts();
     rooms.update((rs) => {
       const idx = rs.findIndex((r) => r.id === fresh.id);
       // The snapshot deliberately omits unread counts (they ride the `message`
@@ -3161,6 +3168,7 @@ function createSession(): ChatSession {
     if (!m || typeof m.msgId !== 'number') return;
     try {
       await deleteChatMessage(m.msgId);
+      invalidateNavUnreadCounts();
     } catch (e) {
       notifyError(
         e instanceof ChatMessageBusyError
@@ -3178,6 +3186,7 @@ function createSession(): ChatSession {
   async function markAllRead() {
     try {
       await markAllRoomsRead();
+      invalidateNavUnreadCounts();
     } catch {
       notifyError("Couldn't mark all rooms read.");
       return;
@@ -3480,7 +3489,9 @@ function createSession(): ChatSession {
           setRoomUnread(target.id, 0);
           await loadHistory(target.id);
           if (superseded()) return;
-          markRoomRead(target.id).catch(() => {});
+          markRoomRead(target.id)
+            .then(invalidateNavUnreadCounts)
+            .catch(() => {});
         }
       }
       loaded.set(true);
@@ -3556,13 +3567,16 @@ function createSession(): ChatSession {
     setRoomUnread(id, 0); // optimistic — chip vanishes immediately on click
     messages.set([]);
     await loadHistory(id);
-    markRoomRead(id).catch(() => {
-      /* non-fatal; refresh/poll will retry */
-    });
+    markRoomRead(id)
+      .then(invalidateNavUnreadCounts)
+      .catch(() => {
+        /* non-fatal; refresh/poll will retry */
+      });
   }
 
   async function newRoom(name: string) {
     const room = await createChatRoom(name);
+    invalidateNavUnreadCounts();
     rooms.update((r) => sortRoomsByActivity([...r, room]));
     await selectRoom(room.id);
   }
@@ -3581,6 +3595,7 @@ function createSession(): ChatSession {
     // off before the merge — spread onto the record it would stay there for the
     // life of the session and read as a standing property of the room.
     const { cleared, ...updated } = await updateChatRoom(id, patch);
+    if (patch.listed !== undefined || patch.archived !== undefined) invalidateNavUnreadCounts();
     if (patch.brain !== undefined) {
       // The room's model aliases were resolved through the brain it had when
       // they were fetched, and the picker's cache is per session. Without this
@@ -3723,6 +3738,7 @@ function createSession(): ChatSession {
 
   async function archiveRoom(id: number) {
     await updateChatRoom(id, { archived: true });
+    invalidateNavUnreadCounts();
     forgetRoom(id);
     rooms.update((r) => r.filter((x) => x.id !== id));
     if (get(activeRoomId) === id) {
@@ -3738,6 +3754,7 @@ function createSession(): ChatSession {
   async function deleteRoom(id: number) {
     try {
       await deleteChatRoom(id);
+      invalidateNavUnreadCounts();
     } catch (e) {
       if (e instanceof ChatRoomBusyError) {
         notifyWarning('This room has a task in progress — wait for it to finish or cancel it.');

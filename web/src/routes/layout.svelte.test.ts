@@ -57,6 +57,9 @@ function person(username = 'alice', displayName = 'Alice'): User {
 // writable, since `apiFetch` — what normally reports into it — never runs
 // behind a mocked `getMe`.
 const online = writable(true);
+const startNavUnreadPoll = vi.fn();
+const stopNavUnreadPoll = vi.fn();
+vi.mock('$lib/stores/navUnread', () => ({ startNavUnreadPoll, stopNavUnreadPoll }));
 const startNotificationPoll = vi.fn();
 const stopNotificationPoll = vi.fn();
 const getMe = vi.fn<() => Promise<User>>();
@@ -450,4 +453,63 @@ it('puts Files before Groups in the nav and the menu', async () => {
   await waitFor(() => expect(screen.getByRole('menu')).toBeTruthy());
   const items = screen.getAllByRole('menuitem').map((a) => a.textContent?.trim());
   expect(items.indexOf('Files')).toBeLessThan(items.indexOf('Groups'));
+});
+
+describe('navigation counts root ownership', () => {
+  it('starts only for a live identity with the saved preference enabled', async () => {
+    getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(startNavUnreadPoll).toHaveBeenCalledWith('alice');
+    cleanup();
+    expect(stopNavUnreadPoll).toHaveBeenCalled();
+  });
+
+  it('treats a missing preference as disabled', async () => {
+    getMe.mockResolvedValue(person());
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+  });
+
+  it('does not poll for an enabled preference in a cached identity', async () => {
+    online.set(false);
+    getMe.mockRejectedValue(new TypeError('Failed to fetch'));
+    readUser.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+    getMe.mockResolvedValue({ ...person(), show_nav_unread_badges: true });
+    online.set(true);
+    await waitFor(() => expect(startNavUnreadPoll).toHaveBeenCalledWith('alice'));
+  });
+
+  it('does not restart a poll when an identity resolves after unmount', async () => {
+    let finish!: (user: User) => void;
+    getMe.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const mounted = render(Layout, { children });
+    mounted.unmount();
+    finish({ ...person(), show_nav_unread_badges: true });
+    await Promise.resolve();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+  });
+
+  it('clears the poll on authentication loss', async () => {
+    const { AuthError } = await import('$lib/api');
+    getMe.mockRejectedValue(new AuthError());
+    render(Layout, { children });
+    await waitFor(() => expect(forgetLastUserId).toHaveBeenCalled());
+    expect(stopNavUnreadPoll).toHaveBeenCalled();
+  });
+
+  it('does not start on setup routes', async () => {
+    page.url = new URL('http://localhost/setup/');
+    render(Layout, { children });
+    await Promise.resolve();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
+  });
 });

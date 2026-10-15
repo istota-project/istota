@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
@@ -83,6 +84,7 @@
     markingAllRead = true;
     try {
       await markBriefingArchiveAsRead(target.name ? 'briefing' : 'all', target.name || undefined);
+      invalidateNavUnreadCounts();
     } catch {
       if (mounted && onReader && identity.user.username === target.username) {
         notifyError("Couldn't mark these as read.");
@@ -238,6 +240,7 @@
     deleteError = '';
     try {
       await deleteBriefingArchiveItem(target.id);
+      invalidateNavUnreadCounts();
       const idx = items.findIndex((i) => i.id === target.id);
       const wasSelected = $selectedBriefingId === target.id;
       // Optimistic local removal — preserves any already-loaded older pages

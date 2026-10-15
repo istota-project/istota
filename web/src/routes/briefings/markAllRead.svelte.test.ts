@@ -12,6 +12,7 @@ import {
   briefingArchiveError,
   briefingsRefreshNonce,
 } from '$lib/stores/briefings';
+import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
 import { clearNotices } from '$lib/stores/notices';
 import Page from './+page.svelte';
 import Layout from './+layout.svelte';
@@ -95,6 +96,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  stopNavUnreadPoll();
   clearNotices();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -294,4 +296,38 @@ describe('briefing bulk read in the real layout', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(bulkRequests()).toHaveLength(0);
   });
+});
+
+it('refreshes authoritative counts after a named bulk read, retaining other names', async () => {
+  archive = archive.map((item, index) => ({ ...item, read_at: index === 0 ? item.read_at : null }));
+  const existing = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+    if (url.endsWith('/nav/unread')) {
+      return response({
+        enabled: true,
+        chat: 4,
+        feeds: 108,
+        briefings: archive.filter((item) => item.read_at === null).length,
+      });
+    }
+    if (url.endsWith('/briefings/mark-as-read')) {
+      const scope = JSON.parse(init.body as string);
+      archive = archive.map((item) =>
+        item.briefing_name === scope.briefing_name
+          ? { ...item, read_at: '2026-01-03T12:00:00Z' }
+          : item,
+      );
+      return response({ status: 'ok', updated: 41 });
+    }
+    return existing(url, init);
+  });
+  startNavUnreadPoll('alice');
+  await openReader(true, named);
+  await waitFor(() => expect(get(navUnreadCounts).briefings).toBe(44));
+  await fireEvent.click(screen.getByRole('button', { name: nameLabel }));
+  await confirm();
+  await waitFor(() => expect(get(navUnreadCounts)).toEqual({ chat: 4, briefings: 3, feeds: 108 }), {
+    timeout: 2000,
+  });
+  expect(bulkRequests()).toHaveLength(1);
 });

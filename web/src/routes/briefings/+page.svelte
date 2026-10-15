@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, tick } from 'svelte';
   import { fileLinks } from '$lib/fileViewer/links';
   import { base } from '$app/paths';
@@ -62,6 +63,7 @@
     readErrorId = null;
     try {
       const result = await markBriefingArchiveRead(id);
+      invalidateNavUnreadCounts();
       confirmedReads.set(id, result.read_at);
       if (mounted && $selectedBriefingId === id && current?.id === id) {
         current = { ...current, read_at: result.read_at };

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
@@ -188,6 +189,7 @@
     markAllTargetTitle = null;
     try {
       await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
+      invalidateNavUnreadCounts();
       feedsRefreshNonce.update((n) => n + 1);
     } catch (e) {
       console.error('mark-all-read failed', e);

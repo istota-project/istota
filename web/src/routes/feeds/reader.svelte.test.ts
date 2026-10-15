@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
-import { selectedFeedId } from '$lib/stores/feeds';
+import { selectedFeedId, markReadDelay } from '$lib/stores/feeds';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { clearNotices, currentNotice } from '$lib/stores/notices';
 import Page from './+page.svelte';
@@ -12,6 +12,8 @@ import { page } from '../../../vitest-stubs/app-state.svelte';
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('$lib/stores/navUnread', () => ({ invalidateNavUnreadCounts }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -53,6 +55,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   clearNotices();
 });
@@ -197,3 +200,55 @@ it('ignores an older entry response after the URL target changes', async () => {
   expect(screen.queryByRole('heading', { name: 'Stale article' })).toBeNull();
   expect(screen.getByRole('heading', { name: 'A gallery' })).toBeTruthy();
 });
+
+it.each([false, true])(
+  'invalidates after the keyboard bulk read succeeds, failure=%s',
+  async (fails) => {
+    api.markAsRead.mockImplementation(async () => {
+      if (fails) throw new Error('refused');
+      return { status: 'ok', updated: 1 };
+    });
+    render(Page);
+    await screen.findByText('Gallery body');
+    invalidateNavUnreadCounts.mockClear();
+    await fireEvent.keyDown(window, { key: 'A', shiftKey: true });
+    expect(api.markAsRead).toHaveBeenCalledWith('all', { before_id: 1 });
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+  },
+);
+
+it.each([false, true])(
+  'invalidates the persisted visible-entry batch, failure=%s',
+  async (fails) => {
+    const observers: { callback: IntersectionObserverCallback; node?: Element }[] = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        record: (typeof observers)[number];
+        constructor(callback: IntersectionObserverCallback) {
+          this.record = { callback };
+          observers.push(this.record);
+        }
+        observe(node: Element) {
+          this.record.node = node;
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    render(Page);
+    await screen.findByText('Gallery body');
+    const card = observers.find((observer) => observer.node?.tagName === 'ARTICLE')!;
+    vi.useFakeTimers();
+    api.updateEntriesStatus.mockImplementation(async () => {
+      if (fails) throw new Error('refused');
+    });
+    card.callback(
+      [{ isIntersecting: true } as IntersectionObserverEntry],
+      {} as IntersectionObserver,
+    );
+    await vi.advanceTimersByTimeAsync(get(markReadDelay) * 1000 + 3000);
+    expect(api.updateEntriesStatus).toHaveBeenCalledWith([1], 'read');
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+  },
+);

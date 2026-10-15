@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { untrack } from 'svelte';
   import { addRoomMember } from '$lib/api';
   import type {
@@ -409,6 +410,7 @@
     const forRoom = room.id;
     try {
       await addRoomMember(forRoom, request.userId);
+      invalidateNavUnreadCounts();
       if (forRoom !== room.id) return;
       membersEpoch += 1;
       onMembersChanged?.();

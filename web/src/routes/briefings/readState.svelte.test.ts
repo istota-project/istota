@@ -13,6 +13,9 @@ import {
 import Page from './+page.svelte';
 import Layout from './+layout.svelte';
 
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('$lib/stores/navUnread', () => ({ invalidateNavUnreadCounts }));
+
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 
 const fetchMock = vi.fn();
@@ -63,6 +66,7 @@ async function settle() {
 
 beforeEach(() => {
   fetchMock.mockReset();
+  invalidateNavUnreadCounts.mockClear();
   vi.stubGlobal('fetch', fetchMock);
   visibility = 'visible';
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
@@ -304,3 +308,14 @@ describe('briefing reader acknowledgments', () => {
     expect(readRequests()).toHaveLength(0);
   });
 });
+
+it.each([false, true])(
+  'invalidates only confirmed reader acknowledgments, failure=%s',
+  async (fails) => {
+    acknowledge = async (id) => (fails ? response({}, 500) : response({ id, read_at: readAt }));
+    render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+    await waitFor(() => expect(readRequests()).toHaveLength(1));
+    await settle();
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
+  },
+);

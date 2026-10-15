@@ -8,6 +8,7 @@
 </script>
 
 <script lang="ts">
+  import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import {
     getChatUsers,
     getRoomMembers,
@@ -91,6 +92,7 @@
     error = '';
     try {
       await action();
+      invalidateNavUnreadCounts();
       await load();
       onChanged?.();
     } catch (e) {
@@ -106,6 +108,7 @@
     error = '';
     try {
       await removeRoomMember(roomId, userId!);
+      invalidateNavUnreadCounts();
       onLeft?.();
     } catch (e) {
       error = e instanceof Error ? e.message : 'That didn’t work.';

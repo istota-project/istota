@@ -61,6 +61,10 @@ const profile = {
   },
 };
 
+const startNavUnreadPoll = vi.fn();
+const stopNavUnreadPoll = vi.fn();
+vi.mock('$lib/stores/navUnread', () => ({ startNavUnreadPoll, stopNavUnreadPoll }));
+
 const savedPreference = { value: false };
 const updateProfile = vi.fn<(patch: Partial<UserProfile>) => Promise<object>>();
 const online = writable(true);
@@ -216,23 +220,27 @@ describe('navigation preference through the root identity', () => {
     const view = render(SettingsInLayout, { component: PreferenceProbe });
     const checkbox = await screen.findByRole('checkbox', { name: label });
     expect(checkbox).not.toBeChecked();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
     await fireEvent.click(checkbox);
     expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
     await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() =>
       expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('true'),
     );
+    expect(startNavUnreadPoll).toHaveBeenCalledWith('alice');
     expect(updateProfile).toHaveBeenCalledExactlyOnceWith({ show_nav_unread_badges: true });
     expect(getMe).toHaveBeenCalledTimes(3);
     view.unmount();
     render(SettingsInLayout, { component: PreferenceProbe });
     const restored = await screen.findByRole('checkbox', { name: label });
     expect(restored).toBeChecked();
+    stopNavUnreadPoll.mockClear();
     await fireEvent.click(restored);
     await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() =>
       expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false'),
     );
+    expect(stopNavUnreadPoll).toHaveBeenCalled();
     expect(updateProfile).toHaveBeenLastCalledWith({ show_nav_unread_badges: false });
   });
 
@@ -253,6 +261,7 @@ describe('navigation preference through the root identity', () => {
     expect(await screen.findByText('Save refused')).toBeInTheDocument();
     expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
     expect(screen.getByRole('checkbox', { name: label })).toBeChecked();
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
     expect(getMe).toHaveBeenCalledTimes(2);
   });
 
@@ -263,6 +272,16 @@ describe('navigation preference through the root identity', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     expect(await screen.findByText('Could not confirm your account details.')).toBeInTheDocument();
     expect(savedPreference.value).toBe(true);
+    expect(startNavUnreadPoll).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('false');
   });
+});
+
+it('hands a newly confirmed account to the poll owner on identity reload', async () => {
+  getMe
+    .mockResolvedValueOnce({ ...person(), show_nav_unread_badges: true })
+    .mockResolvedValue({ ...person('Bob'), username: 'bob', show_nav_unread_badges: true });
+  render(SettingsInLayout);
+  await screen.findByText('Identity');
+  expect(startNavUnreadPoll.mock.calls).toEqual([['alice'], ['bob']]);
 });

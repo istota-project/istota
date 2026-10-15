@@ -5,6 +5,8 @@ import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 const mocks = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => mocks);
 await fillApiDouble(mocks);
+const invalidateNavUnreadCounts = vi.hoisted(() => vi.fn());
+vi.mock('$lib/stores/navUnread', () => ({ invalidateNavUnreadCounts }));
 
 const { getRoomMembers, getChatUsers, addRoomMember, removeRoomMember } = mocks;
 
@@ -39,6 +41,7 @@ function button(label: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  invalidateNavUnreadCounts.mockClear();
   getRoomMembers.mockReset();
   getChatUsers.mockReset();
   addRoomMember.mockReset();
@@ -124,6 +127,7 @@ describe('RoomMembers', () => {
     await waitFor(() => expect(onLeft).toHaveBeenCalled());
     expect(removeRoomMember).toHaveBeenCalledWith(1, 'bob');
     expect(getRoomMembers).not.toHaveBeenCalled();
+    expect(invalidateNavUnreadCounts).toHaveBeenCalledOnce();
   });
 
   it('says a Talk room is managed in Talk, and offers no change', async () => {
@@ -140,6 +144,7 @@ describe('RoomMembers', () => {
     await screen.findByText('Bob');
     await fireEvent.click(button('Remove'));
     expect(await screen.findByText('member has a task in progress')).toBeTruthy();
+    expect(invalidateNavUnreadCounts).not.toHaveBeenCalled();
   });
 
   it('offers no add control in a private phone room', async () => {

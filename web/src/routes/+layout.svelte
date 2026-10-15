@@ -18,6 +18,7 @@
   } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
+  import { startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
@@ -234,6 +235,8 @@
    * supplied, and only the caller knows which of the two its own screen needs.
    */
   function expireSession() {
+    loadGeneration += 1;
+    stopNavUnreadPoll();
     // The session is over, so the pointer that says whose cache to read before
     // the next one resolves goes with it (ISSUE-202). Whoever signs in next
     // writes their own on the first config read; until then a cold launch with
@@ -274,6 +277,8 @@
       // authenticated endpoint fails, backs off, and is then indistinguishable
       // from a real outage at the next login.
       startNotificationPoll();
+      if (fresh.show_nav_unread_badges === true) startNavUnreadPoll(fresh.username);
+      else stopNavUnreadPoll();
       return true;
     } catch (e) {
       if (e instanceof AuthError) {
@@ -387,7 +392,11 @@
   // a *synchronous* `onMount` callback — returning one from the async hook above
   // is silently dropped, which would leave the poll running against a torn-down
   // layout.
-  onMount(() => () => stopNotificationPoll());
+  onMount(() => () => {
+    loadGeneration += 1;
+    stopNotificationPoll();
+    stopNavUnreadPoll();
+  });
 
   function isActive(path: string): boolean {
     const current = page.url.pathname;

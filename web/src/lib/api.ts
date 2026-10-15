@@ -1356,6 +1356,17 @@ export interface FeedsResponse {
  */
 export const ME_TIMEOUT_MS = 20_000;
 
+export interface NavUnreadCounts {
+  enabled: boolean;
+  chat: number | null;
+  briefings: number | null;
+  feeds: number | null;
+}
+
+export function getNavUnreadCounts(): Promise<NavUnreadCounts> {
+  return apiFetch<NavUnreadCounts>('/nav/unread', undefined, 10_000);
+}
+
 export async function getMe(timeoutMs = ME_TIMEOUT_MS): Promise<User> {
   return apiFetch<User>('/me', undefined, timeoutMs);
 }
