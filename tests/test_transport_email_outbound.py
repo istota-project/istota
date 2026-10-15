@@ -1250,7 +1250,7 @@ class TestBriefingDocumentEmail:
         assert rich.index("Headlines") < rich.index("<h2>Calendar</h2>")
         assert plain.index("Headlines") < plain.index("Calendar")
         for content in (plain, rich):
-            assert "Some sources unavailable." in content
+            assert "Some sources unavailable." not in content
             assert "Fourth paragraph" in content and "Item 7" in content and "Final block" in content
         url = "https://example.com/a_b_c?first=one_two&second=three_four#part_five"
         assert f"Story ({url})" in plain
@@ -1290,7 +1290,7 @@ class TestBriefingDocumentEmail:
         plain = msg.get_content()
         assert "Fourth paragraph" in plain and "Item 7" in plain and "Final block" in plain
         assert plain.index("Headlines") < plain.index("Calendar")
-        assert "Some sources unavailable." in plain
+        assert "Some sources unavailable." not in plain
         assert "Story (https://example.com/a_b_c?first=one_two&second=three_four#part_five)" in plain
 
 

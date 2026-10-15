@@ -8,7 +8,7 @@ import { edition } from './edition.fixture';
 afterEach(cleanup);
 
 describe('briefing editions', () => {
-  it('renders saved cards in order, with literal titles and textual source status', () => {
+  it('renders saved cards in order, with literal titles and an accessible source warning', () => {
     const { container } = render(BriefingEdition, { edition });
     expect(screen.getByRole('heading', { level: 1, name: edition.subject })).toBeInTheDocument();
     expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
@@ -17,7 +17,8 @@ describe('briefing editions', () => {
       'Notes',
     ]);
     expect(container.querySelector('h2 em')).toBeNull();
-    expect(screen.getByText('Some sources unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Some sources unavailable')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Some sources unavailable' })).toBeInTheDocument();
     expect(screen.getByText('An appointment')).toBeInTheDocument();
     expect(screen.queryByText('The linear edition fallback.')).toBeNull();
     expect(
@@ -131,4 +132,18 @@ it('shows complete long lists and all paragraphs directly in the card', () => {
   expect(screen.getAllByRole('listitem')).toHaveLength(7);
   expect(screen.getByRole('link', { name: 'Last paragraph' })).toBeInTheDocument();
   expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+it('opens the partial-source explanation on demand without adding text to the card', async () => {
+  render(BriefingEdition, { edition });
+  const warning = screen.getByRole('button', { name: 'Some sources unavailable' });
+  expect(warning.querySelector('svg')).not.toBeNull();
+  expect(warning.closest('.block-title')).not.toBeNull();
+  expect(
+    within(screen.getByRole('region', { name: 'Calendar' })).queryByRole('button', {
+      name: 'Some sources unavailable',
+    }),
+  ).toBeNull();
+  await fireEvent.click(warning);
+  expect(await screen.findByText('Some sources unavailable')).toBeVisible();
 });

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { BriefingArchiveItem, BriefingDocument, BriefingDocumentBlock } from '$lib/api';
-  import { Modal } from '$lib/components/ui';
+  import { HintPopover, Modal } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import { fileLinks } from '$lib/fileViewer/links';
   import { masonry } from '$lib/masonry';
@@ -95,7 +95,13 @@
     bodyKey={fullBlock.block_id}
   >
     {#snippet metadata()}
-      {#if fullBlock?.source_status === 'partial'}Some sources unavailable{/if}
+      {#if fullBlock?.source_status === 'partial'}
+        <HintPopover
+          variant="warning"
+          label="Some sources unavailable"
+          text="Some sources unavailable"
+        />
+      {/if}
     {/snippet}
     <BriefingBlockCard block={fullBlock} fullContent />
   </Modal>

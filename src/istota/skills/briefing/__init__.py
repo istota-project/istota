@@ -250,17 +250,12 @@ def render_briefing_html(md: str) -> str:
     return "<html><body>\n" + "\n".join(blocks) + "\n</body></html>"
 
 
-_PARTIAL_SOURCE_NOTE = "Some sources unavailable."
-
-
 def render_briefing_document_html(document: dict) -> str:
     """Render complete ordered sections with the existing bare email markup."""
     try:
         sections: list[str] = []
         for block in document["blocks"]:
             sections.append(f'<h2>{html.escape(block["title"], quote=True)}</h2>')
-            if block["source_status"] == "partial":
-                sections.append(f"<p>{_PARTIAL_SOURCE_NOTE}</p>")
             sections.extend(_render_blocks(block["body_md"].split("\n")))
         if not sections:
             return ""
@@ -275,8 +270,6 @@ def render_briefing_document_plain(document: dict) -> str:
     sections: list[str] = []
     for block in document["blocks"]:
         label = block["title"]
-        if block["source_status"] == "partial":
-            label += "\n" + _PARTIAL_SOURCE_NOTE
         body = strip_markdown(block["body_md"], preserve_links=True)
         sections.append(label + "\n\n" + body)
     return "\n\n".join(sections)

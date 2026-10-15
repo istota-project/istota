@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { BriefingDocumentBlock } from '$lib/api';
   import { Maximize2, Settings2 } from '@lucide/svelte';
-  import { IconButton } from '$lib/components/ui';
+  import { HintPopover, IconButton } from '$lib/components/ui';
   import { fileLinks } from '$lib/fileViewer/links';
   import { renderMarkdown } from '$lib/markdown';
 
@@ -29,7 +29,11 @@
         <div class="block-title">
           <h2>{block.title}</h2>
           {#if block.source_status === 'partial'}
-            <span class="caption">Some sources unavailable</span>
+            <HintPopover
+              variant="warning"
+              label="Some sources unavailable"
+              text="Some sources unavailable"
+            />
           {/if}
         </div>
         <div class="block-actions">
@@ -90,6 +94,9 @@
   }
 
   .block-title {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
     flex: 1;
     min-width: 0;
   }

@@ -657,8 +657,8 @@ class TestDocumentEmailRendering:
         plain = briefing_mod.render_briefing_document_plain(document)
         assert '<h2>&lt;img src=&quot;x&quot;&gt; &amp; **literal**</h2>' in rich
         assert "<p><strong>Full</strong> fallback</p>" in rich
-        assert "Some sources unavailable." in rich
-        assert plain == '<img src="x"> & **literal**\nSome sources unavailable.\n\nFull fallback'
+        assert "Some sources unavailable." not in rich
+        assert plain == '<img src="x"> & **literal**\n\nFull fallback'
         assert "style=" not in rich and "<style" not in rich and "<head" not in rich
 
     def test_document_html_failure_returns_empty(self, monkeypatch):
