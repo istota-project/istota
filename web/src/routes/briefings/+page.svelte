@@ -1,6 +1,12 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { getBriefingArchiveItem, type BriefingArchiveItem } from '$lib/api';
+  import { goto } from '$app/navigation';
+  import {
+    getBriefingArchiveItem,
+    getBriefings,
+    getBriefingConfig,
+    type BriefingArchiveItem,
+  } from '$lib/api';
   import {
     selectedBriefingId,
     briefingArchiveCount,
@@ -10,8 +16,42 @@
   import { EmptyState, PageLoading } from '$lib/components/ui';
 
   let current = $state<BriefingArchiveItem | null>(null);
+  let editableBlockIds = $state<number[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
+
+  $effect(() => {
+    const name = current?.briefing_name;
+    editableBlockIds = [];
+    if (!name || !current?.document) return;
+    let active = true;
+    // Live definitions govern editing only. Archived content stays immutable.
+    Promise.all([getBriefings(), getBriefingConfig()])
+      .then(([schedules, config]) => {
+        if (
+          !active ||
+          !schedules?.briefings.some(
+            (briefing) => briefing.name === name && briefing.managed === 'db',
+          )
+        )
+          return;
+        editableBlockIds =
+          config?.briefings
+            .find((briefing) => briefing.name === name)
+            ?.blocks.map((block) => block.id) ?? [];
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  });
+
+  function editBlock(blockId: number) {
+    if (!current) return;
+    void goto(
+      `${base}/briefings/settings?name=${encodeURIComponent(current.briefing_name)}&block=${blockId}`,
+    );
+  }
 
   // Fetch the full briefing (with body) whenever the selection changes.
   $effect(() => {
@@ -54,7 +94,11 @@
   {:else if error}
     <p class="center-msg error">{error}</p>
   {:else if current}
-    {#key current.id}<BriefingEdition edition={current} />{/key}
+    {#key current.id}<BriefingEdition
+        edition={current}
+        {editableBlockIds}
+        onEditBlock={editBlock}
+      />{/key}
   {:else if $briefingArchiveCount === null}
     <PageLoading />
   {:else if $briefingArchiveError}
@@ -80,14 +124,21 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    padding: var(--space-6) var(--space-8);
-    padding-bottom: max(var(--space-6), var(--safe-bottom));
+    /* design-lint-allow: match the shared settings container's bottom spacing. */
+    padding: var(--space-6) var(--space-4) 4rem;
+    padding-bottom: max(4rem, var(--safe-bottom));
   }
 
   @media (max-width: 768px) {
     .reader {
-      padding: var(--space-4) var(--space-3);
-      padding-bottom: max(var(--space-4), var(--safe-bottom));
+      /* design-lint-allow: match the shared settings container's mobile bottom spacing. */
+      padding: var(--space-4) var(--space-3) 3rem;
+      padding-bottom: max(3rem, var(--safe-bottom));
+    }
+  }
+  @media (max-width: 640px) {
+    .reader {
+      padding-top: var(--space-3);
     }
   }
 </style>

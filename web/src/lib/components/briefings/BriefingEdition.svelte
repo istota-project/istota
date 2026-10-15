@@ -3,11 +3,21 @@
   import { Modal } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import { fileLinks } from '$lib/fileViewer/links';
+  import { masonry } from '$lib/masonry';
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';
 
-  let { edition, showMetadata = true }: { edition: BriefingArchiveItem; showMetadata?: boolean } =
-    $props();
+  let {
+    edition,
+    showMetadata = true,
+    editableBlockIds = [],
+    onEditBlock,
+  }: {
+    edition: BriefingArchiveItem;
+    showMetadata?: boolean;
+    editableBlockIds?: number[];
+    onEditBlock?: (blockId: number) => void;
+  } = $props();
   let fullBlock = $state<BriefingDocumentBlock | null>(null);
   let viewerOpen = $state(false);
   const document = $derived(validDocument(edition.document) ? edition.document : null);
@@ -59,9 +69,15 @@
     {/if}
   </header>
   {#if document}
-    <div class="edition-grid">
+    <div class="edition-grid" use:masonry>
       {#each document.blocks as block}
-        <BriefingBlockCard {block} onReadFull={readFull} />
+        <BriefingBlockCard
+          {block}
+          onReadFull={readFull}
+          onEdit={onEditBlock && editableBlockIds.includes(block.block_id)
+            ? () => onEditBlock?.(block.block_id)
+            : undefined}
+        />
       {/each}
     </div>
   {:else}
@@ -112,6 +128,11 @@
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
     gap: var(--space-4);
+  }
+
+  .edition-grid:global([data-masonry='true']) {
+    grid-auto-rows: 1px;
+    row-gap: 0;
   }
 
   @container briefing-edition (min-width: 40rem) {

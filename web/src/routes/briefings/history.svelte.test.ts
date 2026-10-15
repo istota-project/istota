@@ -53,6 +53,8 @@ const archive = (name = '') => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getBriefings.mockResolvedValue({ briefings: [] });
+  api.getBriefingConfig.mockResolvedValue({ briefings: [] });
   vi.mocked(getBriefingArchiveItem).mockImplementation(async (id) => {
     const item = items.find((item) => item.id === id);
     if (!item) throw Object.assign(new Error('briefing not found'), { status: 404 });
@@ -373,3 +375,28 @@ describe('edition reader transitions', () => {
     expect(screen.queryByText('Late old body')).toBeNull();
   });
 });
+
+it.each(['db', 'config'] as const)(
+  'shows block settings only on a user-managed briefing (%s)',
+  async (managed) => {
+    selectedBriefingId.set(edition.id);
+    briefingArchiveCount.set(1);
+    api.getBriefingArchiveItem.mockResolvedValueOnce(edition);
+    api.getBriefings.mockResolvedValue({ briefings: [{ name: edition.briefing_name, managed }] });
+    api.getBriefingConfig.mockResolvedValue({
+      briefings: [
+        { name: edition.briefing_name, blocks: [{ id: edition.document!.blocks[1].block_id }] },
+      ],
+    });
+    render(Page);
+    await screen.findByRole('heading', { name: 'Calendar' });
+    await waitFor(() => expect(api.getBriefingConfig).toHaveBeenCalled());
+    await tick();
+    if (managed === 'db') {
+      await fireEvent.click(await screen.findByRole('button', { name: 'Settings for Calendar' }));
+      expect(goto).toHaveBeenCalledWith(
+        `/istota/briefings/settings?name=${edition.briefing_name}&block=${edition.document!.blocks[1].block_id}`,
+      );
+    } else expect(screen.queryByRole('button', { name: /^Settings for / })).toBeNull();
+  },
+);

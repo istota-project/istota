@@ -16,6 +16,7 @@
 
   interface Props {
     briefingName: string;
+    editBlockId?: number | null;
     blocks: BriefingBlock[];
     templates: BriefingBlockTemplate[];
     sourceKinds: string[];
@@ -23,10 +24,11 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
-    onChange: (blocks: BriefingBlock[]) => void;
+    onChange: (briefingName: string, blocks: BriefingBlock[]) => void;
   }
   let {
     briefingName,
+    editBlockId = null,
     blocks,
     templates,
     sourceKinds,
@@ -71,6 +73,16 @@
       }),
     );
   }
+
+  let openedEditorId = $state<number | null>(null);
+  $effect(() => {
+    if (!editBlockId || openedEditorId === editBlockId) return;
+    const block = blocks.find((item) => item.id === editBlockId);
+    if (block) {
+      openedEditorId = editBlockId;
+      draft = blockPayload(block);
+    }
+  });
 
   function unavailable(template: BriefingBlockTemplate): string {
     if (template.block.sources.some((source) => source.kind === 'rss') && !feedsAvailable)
@@ -120,12 +132,15 @@
   }
 
   async function save(payload: BriefingBlockSave) {
+    const name = briefingName;
+    const previous = blocks;
     const response = await putBriefingBlock(payload);
     const saved = response.block;
     onChange(
+      name,
       payload.id
-        ? blocks.map((block) => (block.id === saved.id ? saved : block))
-        : [...blocks, saved],
+        ? previous.map((block) => (block.id === saved.id ? saved : block))
+        : [...previous, saved],
     );
     draft = null;
   }
@@ -135,15 +150,19 @@
     const index = blocks.findIndex((item) => item.id === block.id);
     const next = index + direction;
     if (next < 0 || next >= blocks.length) return;
+    const name = briefingName;
     const ordered = [...blocks];
     [ordered[index], ordered[next]] = [ordered[next], ordered[index]];
     busy = true;
     error = '';
     try {
       await putBriefingBlock({
-        reorder: { briefing_name: briefingName, ordered_ids: ordered.map((item) => item.id) },
+        reorder: { briefing_name: name, ordered_ids: ordered.map((item) => item.id) },
       });
-      onChange(ordered.map((item, position) => ({ ...item, position })));
+      onChange(
+        name,
+        ordered.map((item, position) => ({ ...item, position })),
+      );
       announcement = `${block.title} moved to position ${next + 1} of ${ordered.length}`;
     } catch (e) {
       error = e instanceof Error ? e.message : 'Could not save block order.';
@@ -161,8 +180,11 @@
     busy = true;
     error = '';
     try {
-      const response = await putBriefingBlock(blockPayload(block, true));
-      onChange([...blocks, response.block]);
+      const name = briefingName;
+      const payload = blockPayload(block, true);
+      const previous = blocks;
+      const response = await putBriefingBlock(payload);
+      onChange(name, [...previous, response.block]);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Could not duplicate block.';
     } finally {
@@ -173,11 +195,16 @@
   async function remove() {
     if (!deleting || busy) return;
     const id = deleting.id;
+    const name = briefingName;
+    const previous = blocks;
     busy = true;
     deleteError = '';
     try {
       await deleteBriefingBlock(id);
-      onChange(blocks.filter((block) => block.id !== id));
+      onChange(
+        name,
+        previous.filter((block) => block.id !== id),
+      );
       deleting = null;
     } catch (e) {
       deleteError = e instanceof Error ? e.message : 'Could not delete block.';

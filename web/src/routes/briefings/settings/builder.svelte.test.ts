@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tick } from 'svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { BriefingBlock, BriefingBlockTemplate, User } from '$lib/api';
@@ -73,7 +75,6 @@ const blocks: BriefingBlock[] = [
     sources: [
       {
         id: 11,
-        block_id: 1,
         position: 0,
         kind: 'browse',
         config: { url: 'https://example.com/news', extra: true },
@@ -92,7 +93,6 @@ const blocks: BriefingBlock[] = [
     sources: [
       {
         id: 12,
-        block_id: 2,
         position: 0,
         kind: 'todos',
         config: { path: 'shared/tasks.md' },
@@ -104,6 +104,7 @@ const blocks: BriefingBlock[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  page.url = new URL('http://localhost/istota/briefings/settings');
   vi.stubGlobal(
     'ResizeObserver',
     class {
@@ -415,7 +416,7 @@ describe('briefing block builder', () => {
 
   it('includes empty disabled schedules from the live listing and pairs schedule with content', async () => {
     await mount();
-    const trigger = screen.getByRole('button', { name: 'Briefing', exact: true });
+    const trigger = screen.getByRole('button', { name: 'Briefing' });
     await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
     await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
     await fireEvent.click(trigger);
@@ -610,4 +611,66 @@ it('previews an unsaved block title and width while keeping the editor draft int
   await waitFor(() => expect(opener).toHaveFocus());
   expect(within(editor).getByRole('radio', { name: /Full width/ })).toBeChecked();
   expect(api.putBriefingBlock).not.toHaveBeenCalled();
+});
+
+it('keeps a pending block mutation attached to its originating briefing', async () => {
+  const muted = {
+    ...structuredClone(blocks[1]),
+    id: 9,
+    briefing_name: 'muted',
+    position: 0,
+    title: 'Muted notes',
+  };
+  api.getBriefingConfig.mockResolvedValue({
+    briefings: [
+      { name: 'morning', blocks: structuredClone(blocks) },
+      { name: 'muted', blocks: [muted] },
+    ],
+    schedule_names: ['morning', 'muted'],
+    source_kinds: ['browse', 'todos'],
+    structured_kinds: [],
+    block_templates: templates,
+  });
+  let finish!: (value: { status: string; reordered: number }) => void;
+  api.putBriefingBlock.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  await mount();
+  await menu('Headlines', 'Move down');
+  await waitFor(() => expect(api.putBriefingBlock).toHaveBeenCalledTimes(1));
+  const select = async (label: string) => {
+    const trigger = screen.getByRole('button', { name: 'Briefing' });
+    await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+    await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+    await fireEvent.click(trigger);
+    const option = await screen.findByRole('option', { name: label });
+    await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
+    await fireEvent.click(option);
+  };
+  await select('muted (disabled)');
+  expect(await screen.findByRole('heading', { name: 'Muted notes' })).toBeInTheDocument();
+  finish({ status: 'ok', reordered: 2 });
+  await tick();
+  expect(screen.getByRole('heading', { name: 'Muted notes' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Headlines' })).toBeNull();
+  await select('morning');
+  expect(
+    within(screen.getByRole('list', { name: 'Briefing blocks' }))
+      .getAllByRole('heading')
+      .map((h) => h.textContent),
+  ).toEqual(['Tasks', 'Headlines']);
+});
+
+it('opens the linked block editor and keeps it closed after cancel', async () => {
+  page.url = new URL('http://localhost/istota/briefings/settings?name=morning&block=2');
+  await mount();
+  const editor = await screen.findByRole('dialog', { name: 'Edit block' });
+  expect(within(editor).getByLabelText('Title')).toHaveValue('Tasks');
+  await fireEvent.click(within(editor).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await tick();
+  expect(screen.queryByRole('dialog')).toBeNull();
 });

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
+  import { page } from '$app/state';
   import {
     getProfile,
     updateProfile,
@@ -410,7 +411,10 @@
 
   async function reloadContent() {
     config = await getBriefingConfig();
-    if (!selectedName && allNames.length) selectedName = allNames[0];
+    if (!selectedName && allNames.length) {
+      const requested = page.url.searchParams.get('name');
+      selectedName = requested && allNames.includes(requested) ? requested : allNames[0];
+    }
   }
 
   /* Driven by the gate rather than by the mount, because the gate is reactive
@@ -624,10 +628,10 @@
     }
   }
 
-  function updateBlocks(blocks: BriefingBlock[]) {
+  function updateBlocks(name: string, blocks: BriefingBlock[]) {
     if (!config) return;
-    const others = config.briefings.filter((briefing) => briefing.name !== selectedName);
-    config = { ...config, briefings: [...others, { name: selectedName, blocks }] };
+    const others = config.briefings.filter((briefing) => briefing.name !== name);
+    config = { ...config, briefings: [...others, { name, blocks }] };
   }
 
   async function performDelete() {
@@ -716,6 +720,9 @@
           {#key selectedName}
             <BlockBuilder
               briefingName={selectedName}
+              editBlockId={page.url.searchParams.get('name') === selectedName
+                ? Number(page.url.searchParams.get('block')) || null
+                : null}
               blocks={currentBlocks}
               templates={config.block_templates ?? []}
               {sourceKinds}

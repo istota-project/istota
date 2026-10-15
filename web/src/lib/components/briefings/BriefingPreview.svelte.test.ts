@@ -52,7 +52,7 @@ describe('briefing delivery previews', () => {
         .getAllByRole('heading', { level: 2 })
         .map((h) => h.textContent),
     ).toEqual(blocks.map((block) => block.title));
-    const opener = within(article).getByRole('button', { name: 'Read full block' });
+    const opener = within(article).getByRole('button', { name: 'Expand Headlines <em>today</em>' });
     opener.focus();
     await fireEvent.click(opener);
     const viewer = screen.getByRole('dialog', { name: 'Headlines <em>today</em>' });
