@@ -14,7 +14,8 @@ from istota.config import Config, UserConfig
 from istota.groups.policy import GroupError
 
 NOW = datetime(2026, 10, 15, 7, tzinfo=timezone.utc)
-TABLES = ("group_briefing_configs", "group_briefing_runs", "group_briefing_recipients")
+TABLES = ("group_briefing_configs", "group_briefing_runs", "group_briefing_recipients",
+          "group_briefing_parts", "group_briefing_preferences", "group_briefing_group_preferences")
 
 
 @pytest.fixture

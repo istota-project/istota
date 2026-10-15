@@ -2562,7 +2562,37 @@ CREATE TABLE IF NOT EXISTS group_briefing_recipients (
         error_code TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        dispatch_token TEXT,
+        lease_expires_at TEXT,
+        destination_json TEXT,
+        destination_locked INTEGER NOT NULL DEFAULT 0,
         UNIQUE(run_id, user_id, channel)
     );
 
 CREATE INDEX IF NOT EXISTS idx_group_briefing_recipient_retry ON group_briefing_recipients(state, next_retry_at);
+
+CREATE TABLE IF NOT EXISTS group_briefing_parts (
+    recipient_id INTEGER NOT NULL REFERENCES group_briefing_recipients(id),
+    part_index INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    send_identity TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    provider_reference TEXT,
+    PRIMARY KEY (recipient_id, part_index)
+);
+
+CREATE TABLE IF NOT EXISTS group_briefing_preferences (
+    definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+    user_id TEXT NOT NULL,
+    outbound_muted INTEGER NOT NULL DEFAULT 0,
+    in_app_muted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (definition_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS group_briefing_group_preferences (
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    user_id TEXT NOT NULL,
+    outbound_muted INTEGER NOT NULL DEFAULT 0,
+    in_app_muted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (group_id, user_id)
+);

@@ -147,6 +147,13 @@ def save_definition(conn, config, group_id, payload, *, actor_id, expected_revis
                             revision = revision + 1, updated_at = datetime('now') WHERE id = ?""",
                          (*fields, definition_id))
             supersede_definition_runs(conn, definition_id)
+            if not value["enabled"]:
+                conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code='definition_disabled' "
+                             "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
+                             "AND state IN ('pending', 'failed')", (definition_id,))
+                conn.execute("UPDATE group_briefing_recipients SET error_code='definition_disabled' "
+                             "WHERE run_id IN (SELECT id FROM group_briefing_runs WHERE definition_id=?) "
+                             "AND state='sending'", (definition_id,))
         else:
             cursor = conn.execute("""INSERT INTO group_briefing_configs
                 (title, cron, timezone, enabled, generation_mode, generation_json, channel, updated_by,
@@ -335,3 +342,189 @@ def publish_run(conn, config, run_id, token, *, subject, body_md, provenance=Non
                                  (run_id, user_id, member["id"], channel, "skipped" if muted_module else "pending",
                                   "module_disabled" if muted_module else None, at, at))
         return get_run(conn, run_id)
+
+
+def delivery_preferences(conn, group_id, user_id, *, definition_id=None):
+    """Effective mutes are the union of group and definition preferences."""
+    rows = list(conn.execute("SELECT outbound_muted, in_app_muted FROM group_briefing_group_preferences "
+                             "WHERE group_id = ? AND user_id = ?", (group_id, user_id)))
+    if definition_id is not None:
+        rows.extend(conn.execute("SELECT outbound_muted, in_app_muted FROM group_briefing_preferences "
+                                 "WHERE definition_id = ? AND user_id = ?", (definition_id, user_id)))
+    return {key: any(row[key] for row in rows) for key in ("outbound_muted", "in_app_muted")}
+
+
+def set_delivery_preferences(conn, config, group_id, *, actor_id, outbound_muted, in_app_muted,
+                             definition_id=None):
+    if type(outbound_muted) is not bool or type(in_app_muted) is not bool:
+        raise GroupError(422, "invalid_preference", "Mute values must be booleans")
+    with _transaction(conn):
+        if not briefing_capabilities(conn, config, group_id, actor_id)["read_briefings"]:
+            raise GroupError(404, "group_not_found", "Group not found")
+        if definition_id is None:
+            table, key, value = "group_briefing_group_preferences", "group_id", group_id
+        else:
+            definition = get_definition(conn, definition_id)
+            if definition is None or definition["group_id"] != group_id:
+                raise GroupError(404, "definition_not_found", "Briefing not found")
+            table, key, value = "group_briefing_preferences", "definition_id", definition_id
+        conn.execute(f"INSERT INTO {table} ({key}, user_id, outbound_muted, in_app_muted) VALUES (?, ?, ?, ?) "
+                     f"ON CONFLICT ({key}, user_id) DO UPDATE SET outbound_muted=excluded.outbound_muted, "
+                     "in_app_muted=excluded.in_app_muted", (value, actor_id, outbound_muted, in_app_muted))
+        return delivery_preferences(conn, group_id, actor_id, definition_id=definition_id)
+
+
+def get_recipient(conn, recipient_id):
+    row = conn.execute("SELECT * FROM group_briefing_recipients WHERE id = ?", (recipient_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def delivery_refusal(conn, config, recipient):
+    """Live checks for an already snapshotted member; never admit a new interval."""
+    from istota.briefings.source_grants import validate_run_grants
+    if recipient["error_code"] == "definition_disabled":
+        return "definition_disabled"
+    run = get_run(conn, recipient["run_id"])
+    definition = get_definition(conn, run["definition_id"])
+    if not definition or not db.get_group(conn, definition["group_id"]):
+        return "definition_unavailable"
+    if not definition["enabled"]:
+        return "definition_disabled"
+    member = conn.execute("SELECT * FROM group_members WHERE id = ? AND ended_at IS NULL",
+                          (recipient["membership_id"],)).fetchone()
+    user = recipient["user_id"]
+    if (not member or member["user_id"] != user or member["group_id"] != definition["group_id"]
+            or user not in eligible_user_ids(conn, config)):
+        return "membership_ended"
+    try:
+        validate_run_grants(conn, config, run)
+    except GroupError:
+        return "source_approval_revoked"
+    prefs = delivery_preferences(conn, definition["group_id"], user, definition_id=definition["id"])
+    if prefs["in_app_muted" if recipient["channel"] == "in_app" else "outbound_muted"]:
+        return "muted"
+    if recipient["channel"] != "in_app":
+        if not config.is_module_enabled(user, "briefings", conn=conn):
+            return "module_disabled"
+        group = db.get_group(conn, definition["group_id"])
+        if group["system_key"] == "all_users" and not config.users[user].default_briefings:
+            return "muted"
+        if recipient["channel"] not in available_channels(config):
+            return "channel_unavailable"
+    return None
+
+
+def expire_delivery_claims(conn, *, now=None):
+    """An abandoned send is ambiguous, never an automatic resend."""
+    at = _timestamp(now)
+    with _transaction(conn):
+        rows = conn.execute("SELECT id FROM group_briefing_recipients WHERE state='sending' "
+                            "AND lease_expires_at <= ?", (at,)).fetchall()
+        for row in rows:
+            conn.execute("UPDATE group_briefing_parts SET state='uncertain' "
+                         "WHERE recipient_id=? AND state='sending'", (row["id"],))
+            conn.execute("UPDATE group_briefing_recipients SET state='uncertain', destination_locked=1, "
+                         "error_code='acceptance_unknown', dispatch_token=NULL, lease_expires_at=NULL, updated_at=? "
+                         "WHERE id=?", (at, row["id"]))
+
+
+def claim_recipient(conn, config, recipient_id, *, now=None):
+    at = _timestamp(now)
+    with _transaction(conn):
+        row = get_recipient(conn, recipient_id)
+        if not row or row["state"] != "pending":
+            return None
+        refusal = delivery_refusal(conn, config, row)
+        if refusal:
+            conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code=?, updated_at=? WHERE id=?",
+                         (refusal, at, recipient_id))
+            return None
+        expiry = _timestamp(datetime.fromisoformat(at.replace("Z", "+00:00")) + timedelta(minutes=5))
+        conn.execute("UPDATE group_briefing_recipients SET state='sending', attempts=attempts+1, dispatch_token=?, "
+                     "lease_expires_at=?, send_identity=COALESCE(send_identity, ?), updated_at=? WHERE id=?",
+                     (uuid4().hex, expiry, uuid4().hex, at, recipient_id))
+        return get_recipient(conn, recipient_id)
+
+
+def _owned_recipient(conn, recipient_id, token, now=None):
+    row = get_recipient(conn, recipient_id)
+    if (not row or row["state"] != "sending" or row["dispatch_token"] != token
+            or not token or row["lease_expires_at"] <= _timestamp(now)):
+        raise GroupError(409, "delivery_claim_lost", "Delivery claim is no longer current")
+    return row
+
+
+def prepare_delivery(conn, recipient_id, token, destination, parts, *, now=None):
+    with _transaction(conn):
+        row = _owned_recipient(conn, recipient_id, token, now)
+        encoded = _json(destination)
+        if row["destination_locked"] and row["destination_json"] != encoded:
+            raise GroupError(409, "destination_changed", "Uncertain delivery keeps its original destination")
+        conn.execute("UPDATE group_briefing_recipients SET destination_json=? WHERE id=?", (encoded, recipient_id))
+        if not conn.execute("SELECT 1 FROM group_briefing_parts WHERE recipient_id=?", (recipient_id,)).fetchone():
+            for index, body in enumerate(parts):
+                conn.execute("INSERT INTO group_briefing_parts (recipient_id, part_index, body, send_identity) "
+                             "VALUES (?, ?, ?, ?)", (recipient_id, index, body, f"{row['send_identity']}-{index}"))
+        return [dict(p) for p in conn.execute("SELECT * FROM group_briefing_parts WHERE recipient_id=? ORDER BY part_index",
+                                             (recipient_id,))]
+
+
+def start_delivery_part(conn, config, recipient_id, token, index, *, now=None):
+    with _transaction(conn):
+        row = _owned_recipient(conn, recipient_id, token, now)
+        refusal = delivery_refusal(conn, config, row)
+        if refusal:
+            raise GroupError(409, refusal, "Delivery is no longer eligible")
+        expiry = _timestamp(datetime.fromisoformat(_timestamp(now).replace("Z", "+00:00")) + timedelta(minutes=5))
+        conn.execute("UPDATE group_briefing_recipients SET lease_expires_at=? WHERE id=?", (expiry, recipient_id))
+        changed = conn.execute("UPDATE group_briefing_parts SET state='sending' WHERE recipient_id=? "
+                              "AND part_index=? AND state='pending'", (recipient_id, index)).rowcount
+        return bool(changed)
+
+
+def finish_delivery_part(conn, recipient_id, token, index, state, *, reference=None, now=None):
+    if state not in ("sent", "failed", "uncertain"):
+        raise ValueError("Invalid part outcome")
+    with _transaction(conn):
+        _owned_recipient(conn, recipient_id, token, now)
+        conn.execute("UPDATE group_briefing_parts SET state=?, provider_reference=? "
+                     "WHERE recipient_id=? AND part_index=? AND state='sending'",
+                     (state, reference, recipient_id, index))
+
+
+def finish_delivery(conn, recipient_id, token, state, *, error_code=None, now=None):
+    if state not in ("sent", "failed", "uncertain", "skipped"):
+        raise ValueError("Invalid delivery outcome")
+    if error_code is not None and not re.fullmatch(r"[a-z0-9_]{1,64}", error_code):
+        raise ValueError("A bounded error code is required")
+    with _transaction(conn):
+        _owned_recipient(conn, recipient_id, token, now)
+        conn.execute("UPDATE group_briefing_recipients SET state=?, error_code=?, dispatch_token=NULL, "
+                     "lease_expires_at=NULL, destination_locked=MAX(destination_locked, ?), updated_at=? WHERE id=?",
+                     (state, error_code, state == "uncertain", _timestamp(now), recipient_id))
+
+
+def retry_deliveries(conn, config, run_id, *, actor_id, is_admin=False, acknowledge_duplicates=False, now=None):
+    """Current owners may retry existing failed legs, never generate an edition."""
+    with _transaction(conn):
+        run = get_run(conn, run_id)
+        if not run or run["state"] != "published":
+            raise GroupError(404, "run_not_found", "Published edition not found")
+        _require_author(conn, config, run["snapshot"]["definition"]["group_id"], actor_id, is_admin)
+        count = 0
+        for row in list_recipients(conn, run_id):
+            if row["state"] not in ("failed", "uncertain"):
+                continue
+            if row["state"] == "uncertain" and acknowledge_duplicates is not True:
+                continue
+            refusal = delivery_refusal(conn, config, row)
+            if refusal:
+                conn.execute("UPDATE group_briefing_recipients SET state='skipped', error_code=? WHERE id=?",
+                             (refusal, row["id"]))
+                continue
+            conn.execute("UPDATE group_briefing_parts SET state='pending' WHERE recipient_id=? "
+                         "AND state IN ('failed', 'uncertain')", (row["id"],))
+            conn.execute("UPDATE group_briefing_recipients SET state='pending', error_code=NULL, updated_at=? WHERE id=?",
+                         (_timestamp(now), row["id"]))
+            count += 1
+        return count

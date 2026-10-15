@@ -3263,10 +3263,12 @@ def process_one_task(
         # Get user resources
         user_resources = db.get_user_resources(conn, task.user_id)
 
-    if task.source_type == "group_briefing_generation":
+    if task.source_type in ("group_briefing_generation", "group_briefing_delivery"):
         from .briefings.group_runs import generate_task
+        from .briefings.group_delivery import deliver_task
+        run_group_task = deliver_task if task.source_type == "group_briefing_delivery" else generate_task
         with _task_heartbeat(config, task_id):
-            success, result = (True, "dry_run") if dry_run else generate_task(task, config)
+            success, result = (True, "dry_run") if dry_run else run_group_task(task, config)
         with db.get_db(config.db_path) as conn:
             current = db.get_task(conn, task_id)
             if (current is None or current.status == "cancelled"
@@ -5732,7 +5734,10 @@ def check_group_briefings(config: Config) -> list[int]:
                 group_store.enqueue_run(conn, config, definition["id"], due_at=due, now=now)
             except GroupError as exc:
                 logger.info("group_briefing_admission_refused definition=%s code=%s", definition["id"], exc.code)
-        return group_runs.advance_runs(conn, config, now=now)
+        from .briefings.group_delivery import queue_deliveries
+        tasks = group_runs.advance_runs(conn, config, now=now)
+        tasks.extend(queue_deliveries(conn, config, now=now))
+        return tasks
 
 
 def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str]:

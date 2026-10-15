@@ -819,6 +819,7 @@ def send_email(
     in_reply_to: str | None = None,
     references: str | None = None,
     html_body: str | None = None,
+    message_id: str | None = None,
 ) -> str:
     """Send an email. Returns the generated Message-ID.
 
@@ -839,7 +840,7 @@ def send_email(
     from_address = from_addr or config.bot_email
     domain = from_address.split("@")[-1] if "@" in from_address else "localhost"
 
-    message_id = _generate_message_id(domain)
+    message_id = message_id or _generate_message_id(domain)
     msg = EmailMessage()
     msg["To"] = to
     if cc:

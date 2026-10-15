@@ -323,7 +323,14 @@ def test_scheduled_research_runs_through_existing_task_completion(env, clock, br
     assert scheduler.process_one_task(env, user_id="__briefings__") == (second[0], True)
     assert research.call_count == 1 and brain.call_count == 1
     assert "https://example.com/article" in brain.call_args.args[0].prompt
+    deliveries = scheduler.check_group_briefings(env)
+    assert len(deliveries) == 2
+    with db.get_db(env.db_path) as conn:
+        assert all(db.get_task(conn, task).source_type == "group_briefing_delivery" for task in deliveries)
+    for task in deliveries:
+        assert scheduler.process_one_task(env, user_id="__briefings__") == (task, True)
     assert scheduler.check_group_briefings(env) == []
+    assert research.call_count == 1 and brain.call_count == 1
 
 
 def test_group_generation_ignores_owner_personal_module_toggle(env, clock, brain):
