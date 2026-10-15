@@ -35,6 +35,24 @@
       is one of istota_secret_names.
     quiet: true
 
+# The role reads none of these any more, so an inventory still setting them
+# would otherwise apply no settings and report success.
+- name: Refuse the retired settings variables
+  ansible.builtin.assert:
+    that:
+      - istota_config is not defined
+      - istota_users is not defined
+      - istota_user_resources is not defined
+      - istota_user_briefings is not defined
+      - istota_user_secrets is not defined
+      - istota_user_profile_mode is not defined
+    fail_msg: >-
+      istota_config, istota_users, istota_user_resources, istota_user_briefings,
+      istota_user_secrets and istota_user_profile_mode are retired. Set the
+      application settings as istota_plan (a snapshot from `istota snapshot
+      --format json`) and their credentials as istota_plan_secrets.
+    quiet: true
+
 # Refused here, before anything on the VM changes; the plan itself is
 # validated by the release's own image further down.
 - name: Check the application-settings variables

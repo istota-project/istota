@@ -761,6 +761,17 @@ class TestTheSettingsVariablesAreCheckedFirst:
         assert self._fails(**self.PLAN, istota_secrets={"anthropic_api_key": "k"}, istota_admins=["alice"],
                            istota_rclone_conf="[x]") == []
 
+    def test_a_retired_settings_variable_is_refused_even_empty(self):
+        """The role no longer reads them; without the refusal a play would
+        apply no settings and report success."""
+        retired = "Refuse the retired settings variables"
+        assert _index(retired) < _index("Stack directories")
+        assert _assert_fails(retired, {}) == []
+        assert _assert_fails(retired, self.PLAN) == []
+        for name in ("istota_config", "istota_users", "istota_user_resources",
+                     "istota_user_briefings", "istota_user_secrets", "istota_user_profile_mode"):
+            assert _assert_fails(retired, {name: {}}) == [f"{name} is not defined"], name
+
     def test_plan_secrets_need_the_plan(self):
         assert self._fails(istota_plan_secrets={"users": {}}) != []
 

@@ -49,7 +49,7 @@ istota_plan:
 
 ### Application settings: `istota_plan`
 
-The application settings are one plan, `istota_plan`. Deployment variables (`istota_secrets`, `istota_admins`, the `host.env` variables, `istota_rclone_conf`) sit beside it, because a snapshot does not cover them.
+The application settings are one plan, `istota_plan`. The variables the role took before it (`istota_config`, `istota_users`, `istota_user_resources`, `istota_user_briefings`, `istota_user_secrets`, `istota_user_profile_mode`) are retired, and a play that still sets one fails before it changes anything. Deployment variables (`istota_secrets`, `istota_admins`, the `host.env` variables, `istota_rclone_conf`) sit beside it, because a snapshot does not cover them.
 
 `istota_plan` is an `istota apply` plan as a mapping, with the CLI's own field names ([Declarative settings](../docs/configuration/declarative-settings.md)). A snapshot of a running install is one:
 
