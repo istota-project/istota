@@ -14,7 +14,7 @@ from istota.config_editor import secrets as config_secrets
 from istota.config_mapper import collect_problems
 from istota.lib import toml_write
 from istota.lib.sqlite_util import connect_read_only
-from istota.settings_plan import briefings, files, profiles, resources, secrets, shared_briefings
+from istota.settings_plan import briefings, files, profiles, resources, secrets, shared_briefings, group_briefings
 from istota.settings_plan.engine import Context, ExecutionError, state_digest
 from istota.settings_plan.paths import patch_document
 from istota.settings_plan.schema import SchemaError, parse_plan
@@ -108,6 +108,10 @@ def _gather(config_path, selected):
                         _refuse_credentials(source["config"],
                                             ["shared_briefing_blocks", index, "sources", source_index, "config"])
                 result["shared_briefing_blocks"] = shared
+                definitions = group_briefings.snapshot_group_briefings(conn)
+                for index, definition in enumerate(definitions):
+                    _refuse_credentials(definition["generation"], ["group_briefings", index, "generation"])
+                result["group_briefings"] = definitions
             result["users"] = {}
             for user in wanted:
                 definition = profiles.snapshot_profile(stored[user])

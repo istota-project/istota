@@ -6,6 +6,7 @@ surface authorization belongs to their callers.
 """
 
 import json
+from contextlib import nullcontext
 import re
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -109,36 +110,48 @@ def list_definitions(conn, group_id):
     )]
 
 
-def save_definition(conn, config, group_id, payload, *, actor_id, expected_revision,
-                    definition_id=None, is_admin=False):
+def validate_definition_save(conn, config, group_id, payload, *, actor_id, expected_revision,
+                             definition_id=None, is_admin=False):
+    """Read-only save checks, shared with operator plan previews."""
     try:
         value = validate_group_definition_payload(payload)
     except (ValueError, TypeError, KeyError, OSError) as exc:
         raise GroupError(422, "invalid_definition", "Invalid briefing definition") from exc
     if type(expected_revision) is not int or expected_revision < 0:
         raise GroupError(422, "invalid_revision", "A nonnegative definition revision is required")
-    with _transaction(conn):
-        _require_author(conn, config, group_id, actor_id, is_admin)
-        if value["channel"] not in available_channels(config):
-            raise GroupError(422, "channel_unavailable", "Delivery channel is unavailable")
-        old = get_definition(conn, definition_id) if definition_id is not None else None
-        if definition_id is not None and old is None:
-            raise GroupError(404, "definition_not_found", "Briefing not found")
-        if old and old["group_id"] != group_id:
-            raise GroupError(409, "immutable_target", "Duplicate the briefing to change its target")
-        if old and old["name"] != value["name"]:
-            raise GroupError(409, "immutable_name", "Briefing name is fixed")
-        if expected_revision != (old["revision"] if old else 0):
-            raise GroupError(409, "revision_conflict", "Briefing changed; reload before saving")
-        collision = conn.execute("SELECT id FROM group_briefing_configs WHERE group_id = ? AND name = ?",
-                                 (group_id, value["name"])).fetchone()
-        if collision and (not old or collision["id"] != old["id"]):
-            raise GroupError(409, "definition_exists", "Briefing name already exists")
+    _require_author(conn, config, group_id, actor_id, is_admin)
+    if value["channel"] not in available_channels(config):
+        raise GroupError(422, "channel_unavailable", "Delivery channel is unavailable")
+    old = get_definition(conn, definition_id) if definition_id is not None else None
+    if definition_id is not None and old is None:
+        raise GroupError(404, "definition_not_found", "Briefing not found")
+    if old and old["group_id"] != group_id:
+        raise GroupError(409, "immutable_target", "Duplicate the briefing to change its target")
+    if old and old["name"] != value["name"]:
+        raise GroupError(409, "immutable_name", "Briefing name is fixed")
+    if expected_revision != (old["revision"] if old else 0):
+        raise GroupError(409, "revision_conflict", "Briefing changed; reload before saving")
+    collision = conn.execute("SELECT id FROM group_briefing_configs WHERE group_id = ? AND name = ?",
+                             (group_id, value["name"])).fetchone()
+    if collision and (not old or collision["id"] != old["id"]):
+        raise GroupError(409, "definition_exists", "Briefing name already exists")
+    candidate = {**value, "id": definition_id, "group_id": group_id}
+    if value["enabled"]:
+        _validate_run_sources(conn, config, candidate)
+    return value, old
+
+
+def save_definition(conn, config, group_id, payload, *, actor_id, expected_revision,
+                    definition_id=None, is_admin=False, caller_transaction=False):
+    if caller_transaction and not conn.in_transaction:
+        raise ValueError("A caller-owned transaction is required")
+    with nullcontext() if caller_transaction else _transaction(conn):
+        value, old = validate_definition_save(
+            conn, config, group_id, payload, actor_id=actor_id, expected_revision=expected_revision,
+            definition_id=definition_id, is_admin=is_admin)
         from istota.briefings.source_grants import invalidate_changed_grants
         candidate = {**value, "id": definition_id, "group_id": group_id}
         invalidate_changed_grants(conn, old, candidate)
-        if value["enabled"]:
-            _validate_run_sources(conn, config, candidate)
         fields = (value["title"], value["cron"], value["timezone"], int(value["enabled"]),
                   value["generation_mode"], _json(value["generation"]), value["channel"], actor_id)
         if old:

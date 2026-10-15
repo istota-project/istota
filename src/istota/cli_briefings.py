@@ -86,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="A source as JSON, e.g. '{\"kind\":\"markets\",\"config\":{}}'. Repeatable.",
     )
 
+    group = sub.add_parser("group", help="Manage group-owned briefing definitions")
+    group.add_argument("action", choices=["list", "save"])
+    group.add_argument("--group-id", required=True)
+    group.add_argument("--actor", required=True, help="Enabled current owner, or admin for All users")
+    group.add_argument("-f", "--file", help="JSON/TOML definition; use - for stdin")
+    group.add_argument("--revision", type=int, help="Expected revision; 0 creates a disabled draft")
+
     # archive -------------------------------------------------------------
     arc = sub.add_parser("archive", help="Read the briefing archive")
     arc.add_argument("action", choices=["list", "show"])
@@ -219,6 +226,42 @@ def _run_shared(args, config) -> int:
     return 0
 
 
+def _run_group(args, config) -> int:
+    import json
+
+    from istota import apply, db
+    from istota.briefings import group_store as store
+    from istota.groups.policy import GroupError
+    from istota.settings_plan.engine import ExecutionError
+    from istota.settings_plan.group_briefings import operator_is_admin, prepare_definition
+    from istota.settings_plan.schema import parse_plan
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            if args.action == "list":
+                store._require_author(conn, config, args.group_id, args.actor,
+                                      operator_is_admin(conn, config, args.actor))
+                result = store.list_definitions(conn, args.group_id)
+            else:
+                if not args.file or args.revision is None:
+                    raise ValueError("save requires --file and --revision (0 for a new disabled draft)")
+                declaration = {**apply.load_plan(args.file), "group_id": args.group_id}
+                parse_plan({"group_briefings": [declaration]})
+                conn.execute("BEGIN IMMEDIATE")
+                value, old = prepare_definition(conn, config, declaration, actor=args.actor,
+                                                expected_revision=args.revision)
+                result = store.save_definition(
+                    conn, config, args.group_id, value, actor_id=args.actor, expected_revision=args.revision,
+                    definition_id=old["id"] if old else None,
+                    is_admin=operator_is_admin(conn, config, args.actor), caller_transaction=True)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (GroupError, ExecutionError, apply.PlanError, ValueError, OSError) as error:
+        message = error.code if isinstance(error, (GroupError, ExecutionError)) else "invalid_definition"
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+
+
 def _invoke_module(config, user_id: str, module_argv: list[str]) -> int:
     """Resolve the user's BriefingsContext and run the module Click CLI."""
     from click.testing import CliRunner
@@ -307,6 +350,8 @@ def dispatch(argv: list[str], config) -> int:
         return _run_schedule(args, config)
     if args.group == "shared":
         return _run_shared(args, config)
+    if args.group == "group":
+        return _run_group(args, config)
 
     builders = {
         "list": lambda args: ["list"],

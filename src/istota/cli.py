@@ -395,7 +395,7 @@ def cmd_apply(args):
         out=print, err=err,
         output_format=args.format or "text", users=args.user,
         continue_on_error=args.continue_on_error, prune=args.prune, prune_secrets=args.prune_secrets,
-        secrets_file=args.secrets_file, patches=args.patch, input_format=args.input_format,
+        secrets_file=args.secrets_file, patches=args.patch, input_format=args.input_format, actor=args.actor,
     )
 
 
@@ -4992,6 +4992,7 @@ def main():
     )
     apply_parser.add_argument("--format", choices=("text", "json"), help="Execution report format (default: text)")
     apply_parser.add_argument("--user", action="append", help="Apply only this declared user; repeat for several users")
+    apply_parser.add_argument("--actor", help="Enabled current owner acting on group briefings (required for group writes)")
     apply_parser.add_argument("--continue-on-error", action="store_true", help="Continue later users after a runtime failure")
     apply_parser.add_argument("--prune", action="store_true", help="Prune undeclared entries in supplied collections")
     apply_parser.add_argument("--patch", action="append", metavar="SOURCE=DEST", help="Rewrite selected path prefixes; repeat for several patches")
