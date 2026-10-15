@@ -515,3 +515,94 @@ class TestAtomicBlockWrites:
             assert not cfg.module_db_path("alice", "briefings").exists()
             assert client.put("/istota/api/briefings/blocks", json=payload,
                               headers={"Origin": "https://bot.example.com"}).status_code == 200
+
+
+class TestPreview:
+    @pytest.fixture
+    def document(self):
+        return {
+            "version": 1, "title": "Morning edition",
+            "blocks": [{
+                "block_id": 42, "title": "Headlines <em>today</em>", "kind": "markdown",
+                "body_md": "[Story](https://example.com/a_b?one=two_three)\n\nComplete final paragraph.",
+                "presentation": {"width": "wide"}, "source_status": "partial",
+            }],
+        }
+
+    def test_renders_inline_document_without_content_lookup_or_side_effects(self, client, document, monkeypatch):
+        from unittest.mock import Mock
+        from istota.skills.briefing import render_briefing_document_html, render_briefing_document_plain
+
+        forbidden = Mock(side_effect=AssertionError("preview crossed content boundary"))
+        monkeypatch.setattr(bdb, "connect", forbidden)
+        monkeypatch.setattr("istota.briefings.routes.ensure_initialised", forbidden)
+        monkeypatch.setattr("istota.briefings.generate.resolve_source", forbidden)
+        monkeypatch.setattr("istota.scheduler.execute_task", forbidden)
+        monkeypatch.setattr("smtplib.SMTP", forbidden)
+        monkeypatch.setattr(Path, "read_text", forbidden)
+        response = client.post("/istota/api/briefings/preview", json={"document": document})
+        assert response.status_code == 200
+        assert response.json() == {
+            "body_md": document_to_markdown(document),
+            "html": render_briefing_document_html(document),
+            "plain": render_briefing_document_plain(document),
+        }
+        forbidden.assert_not_called()
+
+    @pytest.mark.parametrize("payload", [None, [], {}, {"document": {}}, {"document": {"version": 9}}])
+    def test_malformed_shape_is_bounded_400(self, client, payload):
+        response = client.post("/istota/api/briefings/preview", json=payload)
+        assert response.status_code == 400
+        assert len(response.text) < 120
+
+    def test_invalid_json_is_400(self, client):
+        assert client.post("/istota/api/briefings/preview", content=b"{").status_code == 400
+
+    def test_block_count_and_utf8_body_bounds(self, client, document):
+        block = document["blocks"][0]
+        document["blocks"] = [{**block, "block_id": i} for i in range(100)]
+        assert client.post("/istota/api/briefings/preview", json={"document": document}).status_code == 200
+        document["blocks"].append({**block, "block_id": 100})
+        assert client.post("/istota/api/briefings/preview", json={"document": document}).status_code == 413
+        document["blocks"] = [{**block, "body_md": "é" * 32768}]
+        assert client.post("/istota/api/briefings/preview", json={"document": document}).status_code == 200
+        document["blocks"][0]["body_md"] += "é"
+        assert client.post("/istota/api/briefings/preview", json={"document": document}).status_code == 413
+
+    def test_total_body_bound_precedes_json_decode(self, client):
+        response = client.post("/istota/api/briefings/preview", content=b" " * (2 * 1024 * 1024 + 1))
+        assert response.status_code == 413
+        assert len(response.text) < 120
+
+    def test_stream_is_bounded_even_with_false_declared_length(self, client):
+        response = client.post("/istota/api/briefings/preview", content=b" " * (2 * 1024 * 1024 + 1),
+                               headers={"content-length": "1"})
+        assert response.status_code == 413
+
+    def test_existing_auth_origin_and_module_gates(self, tmp_path, document, monkeypatch):
+        from istota.config import Config, UserConfig
+        from istota.webui import app as web_app
+
+        cfg = Config(db_path=tmp_path / "framework.db", users={"alice": UserConfig()})
+        cfg.site.hostname = "bot.example.com"
+        monkeypatch.setattr(web_app, "_config", cfg)
+        app = FastAPI()
+        app.state.istota_config = cfg
+        app.add_middleware(SessionMiddleware, secret_key="test-session-secret")
+        app.add_exception_handler(web_app._UnauthorizedException, web_app._handle_unauthorized)
+        app.add_exception_handler(web_app._ForbiddenException, web_app._handle_forbidden)
+        app.include_router(router, prefix="/istota/api/briefings")
+        app.dependency_overrides[require_auth] = web_app._require_api_auth
+        app.dependency_overrides[verify_origin] = web_app._verify_origin
+        with TestClient(app) as gate_client:
+            path = "/istota/api/briefings/preview"
+            assert gate_client.post(path, json={"document": document},
+                                    headers={"Origin": "https://bot.example.com"}).status_code == 401
+            app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+            for headers in ({}, {"Origin": "https://other.example.com"}):
+                assert gate_client.post(path, json={"document": document}, headers=headers).status_code == 403
+            headers = {"Origin": "https://bot.example.com"}
+            assert gate_client.post(path, json={"document": document}, headers=headers).status_code == 200
+            cfg.users["alice"].disabled_modules = ["briefings"]
+            assert gate_client.post(path, json={"document": document}, headers=headers).status_code == 403
+            assert not cfg.module_db_path("alice", "briefings").exists()

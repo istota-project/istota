@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { BriefingBlock, BriefingBlockTemplate, User } from '$lib/api';
+import { edition } from '$lib/components/briefings/edition.fixture';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -157,6 +158,23 @@ beforeEach(() => {
     block: { ...structuredClone(blocks[0]), id: 3 },
   });
   api.deleteBriefingBlock.mockResolvedValue(undefined);
+  api.getBriefingArchive.mockResolvedValue({
+    items: [edition],
+    total: 1,
+    briefing_names: ['morning'],
+  });
+  api.getBriefingArchiveItem.mockResolvedValue({
+    ...edition,
+    document: {
+      ...edition.document!,
+      blocks: edition.document!.blocks.map((block, i) => ({ ...block, block_id: i + 1 })),
+    },
+  });
+  api.previewBriefing.mockResolvedValue({
+    body_md: 'Rendered body',
+    plain: 'Complete plain preview',
+    html: '<html><body><a href="https://example.com/story">A story</a></body></html>',
+  });
 });
 afterEach(() => {
   cleanup();
@@ -538,4 +556,58 @@ describe('briefing block builder', () => {
       ),
     );
   });
+});
+
+it('previews saved content by ID in saved order without save, source or generation calls', async () => {
+  await mount();
+  await fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+  const preview = await screen.findByRole('dialog', { name: 'Briefing preview' });
+  await waitFor(() => expect(api.previewBriefing).toHaveBeenCalled());
+  expect(api.getBriefingArchive).toHaveBeenCalledWith({ briefing_name: 'morning', limit: '1' });
+  expect(api.getBriefingArchiveItem).toHaveBeenCalledWith(edition.id);
+  const document = api.previewBriefing.mock.calls[0][0];
+  expect(document.blocks.map((block: { block_id: number }) => block.block_id)).toEqual([1, 2]);
+  expect(document.blocks[0].body_md).toBe(edition.document!.blocks[0].body_md);
+  expect(document.blocks[0].title).toBe('Headlines');
+  expect(document.blocks[0].presentation.width).toBe('wide');
+  expect(
+    within(within(preview).getByRole('article'))
+      .getAllByRole('heading', { level: 2 })
+      .map((heading) => heading.textContent),
+  ).toEqual(['Headlines', 'Tasks']);
+  expect(
+    within(preview).getByText(/saved edition content with the proposed layout/i),
+  ).toBeInTheDocument();
+  expect(api.putBriefingBlock).not.toHaveBeenCalled();
+  expect(api.checkBriefingPath).not.toHaveBeenCalled();
+  expect(api.runSharedBlock).not.toHaveBeenCalled();
+});
+
+it('previews an unsaved block title and width while keeping the editor draft intact on errors', async () => {
+  await mount();
+  const editor = await edit();
+  await fireEvent.input(within(editor).getByLabelText('Title'), {
+    target: { value: 'Draft title' },
+  });
+  await fireEvent.click(within(editor).getByRole('radio', { name: /Full width/ }));
+  api.previewBriefing.mockRejectedValueOnce(new Error('Preview unavailable'));
+  const opener = within(editor).getByRole('button', { name: 'Preview' });
+  opener.focus();
+  await fireEvent.click(opener);
+  const preview = await screen.findByRole('dialog', { name: 'Briefing preview' });
+  await within(preview).findByText('Preview unavailable');
+  expect(api.previewBriefing.mock.calls[0][0].blocks[0]).toMatchObject({
+    block_id: 1,
+    title: 'Draft title',
+    presentation: { width: 'full' },
+    body_md: edition.document!.blocks[0].body_md,
+  });
+  await fireEvent.click(within(preview).getByRole('button', { name: 'Close' }));
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog', { name: 'Briefing preview' })).toBeNull(),
+  );
+  expect(within(editor).getByLabelText('Title')).toHaveValue('Draft title');
+  await waitFor(() => expect(opener).toHaveFocus());
+  expect(within(editor).getByRole('radio', { name: /Full width/ })).toBeChecked();
+  expect(api.putBriefingBlock).not.toHaveBeenCalled();
 });

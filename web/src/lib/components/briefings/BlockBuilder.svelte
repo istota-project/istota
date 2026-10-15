@@ -12,6 +12,7 @@
     type SelectOption,
   } from '$lib/components/ui';
   import BlockEditor from './BlockEditor.svelte';
+  import BriefingPreview from './BriefingPreview.svelte';
 
   interface Props {
     briefingName: string;
@@ -36,6 +37,7 @@
     onChange,
   }: Props = $props();
   let picking = $state(false);
+  let previewing = $state(false);
   let search = $state('');
   let draft = $state<BriefingBlockSave | null>(null);
   let deleting = $state<BriefingBlock | null>(null);
@@ -249,6 +251,13 @@
   <Button
     variant="secondary"
     onclick={() => {
+      previewing = true;
+    }}
+    disabled={busy}>Preview</Button
+  >
+  <Button
+    variant="secondary"
+    onclick={() => {
       search = '';
       picking = true;
     }}
@@ -297,6 +306,7 @@
 {#if draft}
   <BlockEditor
     initial={draft}
+    savedBlocks={blocks}
     {sourceKinds}
     {browseOptions}
     {rssOptions}
@@ -305,6 +315,16 @@
     onSave={save}
     onCancel={() => {
       draft = null;
+    }}
+  />
+{/if}
+
+{#if previewing}
+  <BriefingPreview
+    {briefingName}
+    {blocks}
+    onClose={() => {
+      previewing = false;
     }}
   />
 {/if}

@@ -45,6 +45,12 @@ The block editor keeps a local draft of the title, source list and width. Automa
 
 Each block's actions include Edit, Move up, Move down, Duplicate and Delete. Moves work with the keyboard or touch and keep reading order. Duplication copies every source, including disabled ones. Add a source before duplicating a legacy block that has no sources. Deleting or changing a block affects future editions; existing editions remain available. Admins can still manage and run shared blocks in their own card.
 
+## Previewing delivery
+
+Preview in the block builder opens Web, HTML email and Plain text views. Preview in the block editor includes that unsaved block draft. The example comes from the selected briefing's latest saved edition: content follows the block's saved identity while the proposed title, order and width come from the builder. Deleted blocks disappear. New blocks, blocks without saved content and legacy editions use labelled placeholders. The preview does not gather sources, call a model, save changes or send mail.
+
+Web uses the reader's cards and full-block viewer. HTML email shows the complete sections in an isolated frame with links disabled and external resources blocked. Plain text keeps complete sections and usable URLs. A preview error leaves the block draft available for editing or retry. Layout and source changes affect future editions; preview does not predict their content.
+
 ## Default briefings
 
 A canonical shared set defined once in the top-level `[[default_briefings]]` section is seeded by name into each opted-in user (per-user `default_briefings` flag, default on; an explicit user briefing of the same name wins). Seeding is one-time — later web edits win and re-runs never clobber them. Opt a user out with `istota user ensure --no-default-briefings`.
@@ -196,6 +202,14 @@ The completed task stores a canonical envelope with `body` and `briefing_documen
 Email uses the same complete ordered blocks as the archive. HTML mail stacks sections under escaped headings with no added styling. Plain mail uses section labels and preserves article destinations as `Label (URL)`, or one URL when it is already the label. A partial-source block includes a short status note in both formats. The existing HTML preference selects multipart alternatives or a single plain part; an HTML rendering failure also sends the full plain edition. Delivery uses the document retained at completion, so archive cleanup cannot remove it.
 
 Old body-only tasks retain their linear path without inferred block boundaries. The parser still tolerates JSON fences and wrappers. The email skill stays excluded from briefing tasks so delivery remains scheduler-owned.
+
+## Extending blocks
+
+A preset is an ordinary default block/source definition in `BLOCK_TEMPLATES`, returned by the existing config endpoint. Add a new source kind to `SOURCE_KINDS`, the source resolver dispatch, source fields and tests before adding its preset. Availability and source choices continue to use the existing picker endpoints. A preset does not introduce executable configuration or change source authority.
+
+Every document block retains its complete `body_md`, stable numeric ID, snapshot title, source status and `presentation.width`. Add a specialized block kind only with a validated versioned data shape, web rendering and complete HTML/plain semantics together. Unknown kinds use their Markdown body; unknown document versions use the archive's linear body. Keep a small explicit component switch rather than loading components from server strings. Width remains an option, separate from the generation mode.
+
+`POST /briefings/preview` accepts `{ "document": <version-1-document> }` and returns `body_md`, `plain` and `html` from the production renderers. Authentication, origin checks and the live module gate run before rendering. The gate may read profile settings; preview content never reads a file, resolves an ID or writes the content database. Requests are limited to 2 MiB, 100 blocks and 64 KiB of UTF-8 body text per block. Malformed documents return 400; size limits return 413. Only the preview copy gains the restrictive CSP and noninteractive links; outgoing mail keeps its existing bare HTML contract.
 
 ## Reading a todo file
 

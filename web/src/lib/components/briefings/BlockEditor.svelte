@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { BriefingBlockSave, BriefingSourceDraft } from '$lib/api';
+  import type { BriefingBlock, BriefingBlockSave, BriefingSourceDraft } from '$lib/api';
   import {
     Button,
     ConfirmDialog,
@@ -14,9 +14,11 @@
   } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
   import SourceConfigFields from './SourceConfigFields.svelte';
+  import BriefingPreview from './BriefingPreview.svelte';
 
   interface Props {
     initial: BriefingBlockSave;
+    savedBlocks: BriefingBlock[];
     sourceKinds: string[];
     browseOptions: SelectOption[];
     rssOptions: SelectOption[];
@@ -27,6 +29,7 @@
   }
   let {
     initial,
+    savedBlocks,
     sourceKinds,
     browseOptions,
     rssOptions,
@@ -48,6 +51,7 @@
   const baseline = untrack(() => JSON.stringify(draft));
   const dirty = $derived(JSON.stringify(draft) !== baseline);
   let saving = $state(false);
+  let previewing = $state(false);
   let error = $state('');
   let titleError = $state('');
   let discard = $state(false);
@@ -290,12 +294,30 @@
   </fieldset>
   {#if error}<div role="alert" class="banner error">{error}</div>{/if}
   {#snippet footer()}
+    <Button
+      variant="secondary"
+      onclick={() => {
+        previewing = true;
+      }}
+      disabled={saving}>Preview</Button
+    >
     <Button variant="secondary" onclick={close} disabled={saving}>Cancel</Button>
     <Button variant="primary" onclick={save} loading={saving} loadingLabel="Saving…"
       >Save block</Button
     >
   {/snippet}
 </Modal>
+
+{#if previewing}
+  <BriefingPreview
+    briefingName={draft.briefing_name ?? ''}
+    blocks={savedBlocks}
+    {draft}
+    onClose={() => {
+      previewing = false;
+    }}
+  />
+{/if}
 
 {#if discard}
   <ConfirmDialog

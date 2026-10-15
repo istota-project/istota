@@ -1,4 +1,9 @@
-import type { BriefingArchiveItem } from '$lib/api';
+import type { BriefingArchiveItem, BriefingPreviewResponse } from '$lib/api';
+import acceptance from './edition.acceptance.json';
+
+// Python's completion/archive/MIME fixture asserts these actual API response shapes.
+export const acceptanceEdition = acceptance.edition as BriefingArchiveItem;
+export const acceptancePreview: BriefingPreviewResponse = acceptance.preview;
 
 export const edition: BriefingArchiveItem = {
   id: 3,

@@ -18,6 +18,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -37,9 +38,11 @@ from istota.briefings.models import (
     BriefingBlock,
     BriefingsContext,
     validate_shared_block_payload,
+    validate_briefing_document,
 )
 from istota.briefings.sources.browse import BROWSE_PRESETS
 from istota.briefings.sources.kv import SHARED_BLOCK_NAMESPACE
+from istota.webui.request_guards import BodyError, read_bounded_body
 from istota.webui.router_stubs import make_get_user_context, require_auth, verify_origin
 
 
@@ -211,6 +214,45 @@ def delete_archive_item(
     if not deleted:
         raise HTTPException(404, "briefing not found")
     return {"status": "ok"}
+
+
+@router.post("/preview")
+async def preview_document(
+    request: Request,
+    _: None = Depends(verify_origin),
+    user: dict = Depends(require_auth),
+) -> dict:
+    """Render inline content without initialising or consulting the content DB."""
+    from istota.briefings.document import document_to_markdown
+    from istota.skills.briefing import render_briefing_document_html, render_briefing_document_plain
+
+    cfg = _app_config(request)
+    if cfg is not None and not cfg.is_module_enabled(user["username"], "briefings"):
+        raise HTTPException(403, "briefings disabled")
+    try:
+        raw = await read_bounded_body(request, 2 * 1024 * 1024)
+    except BodyError as error:
+        raise HTTPException(error.status, "briefing preview body refused") from None
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError
+        document = payload.get("document")
+        if isinstance(document, dict) and isinstance(document.get("blocks"), list):
+            if len(document["blocks"]) > 100:
+                raise HTTPException(413, "too many preview blocks")
+            for block in document["blocks"]:
+                body = block.get("body_md") if isinstance(block, dict) else None
+                if isinstance(body, str) and len(body.encode("utf-8")) > 64 * 1024:
+                    raise HTTPException(413, "preview block too large")
+        document = validate_briefing_document(document)
+    except (ValueError, UnicodeError, RecursionError):
+        raise HTTPException(400, "invalid briefing preview document") from None
+    return {
+        "body_md": document_to_markdown(document),
+        "plain": render_briefing_document_plain(document),
+        "html": render_briefing_document_html(document),
+    }
 
 
 # ---------------------------------------------------------------------------

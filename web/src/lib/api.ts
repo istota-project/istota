@@ -4933,6 +4933,22 @@ export async function deleteBriefingArchiveItem(id: number): Promise<void> {
   await apiFetch(`/briefings/archive/${id}`, { method: 'DELETE' });
 }
 
+export interface BriefingPreviewResponse {
+  body_md: string;
+  plain: string;
+  html: string;
+}
+
+export async function previewBriefing(
+  document: BriefingDocument,
+): Promise<BriefingPreviewResponse> {
+  return apiFetch('/briefings/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document }),
+  });
+}
+
 export async function getBriefingConfig(): Promise<BriefingConfigResponse> {
   return apiFetch<BriefingConfigResponse>('/briefings/config');
 }

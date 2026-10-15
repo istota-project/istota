@@ -6,7 +6,8 @@
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';
 
-  let { edition }: { edition: BriefingArchiveItem } = $props();
+  let { edition, showMetadata = true }: { edition: BriefingArchiveItem; showMetadata?: boolean } =
+    $props();
   let fullBlock = $state<BriefingDocumentBlock | null>(null);
   let viewerOpen = $state(false);
   const document = $derived(validDocument(edition.document) ? edition.document : null);
@@ -48,12 +49,14 @@
 <article class="content-frame edition">
   <header class="edition-head">
     <h1>{edition.subject || edition.briefing_name}</h1>
-    <p class="caption">
-      {formatDateTime(edition.generated_at, { dateStyle: 'medium', timeStyle: 'short' })}
-      {#if edition.delivered_to?.length}
-        <span> · delivered to {edition.delivered_to.join(', ')}</span>
-      {/if}
-    </p>
+    {#if showMetadata}
+      <p class="caption">
+        {formatDateTime(edition.generated_at, { dateStyle: 'medium', timeStyle: 'short' })}
+        {#if edition.delivered_to?.length}
+          <span> · delivered to {edition.delivered_to.join(', ')}</span>
+        {/if}
+      </p>
+    {/if}
   </header>
   {#if document}
     <div class="edition-grid">

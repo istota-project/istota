@@ -1,0 +1,42 @@
+{
+  "edition": {
+    "id": 1,
+    "briefing_name": "M",
+    "subject": "Saved edition — Wednesday, 14 October",
+    "generated_at": "2026-10-15T07:00:00+00:00",
+    "task_id": 1,
+    "delivered_to": ["email"],
+    "body_md": "Headlines \\<em\\>today\\</em\\>\n\n[A story](https://example.com/a_b?one=two_three&four=five_six)\n\nSecond paragraph\n\nThird paragraph\n\n[Full story](https://example.com/full)\n\nCalendar\n\n- An appointment\n- A reminder\n\n[Details](https://example.com/calendar)",
+    "document": {
+      "version": 1,
+      "title": "Saved edition — Wednesday, 14 October",
+      "blocks": [
+        {
+          "block_id": 1,
+          "title": "Headlines <em>today</em>",
+          "kind": "markdown",
+          "body_md": "[A story](https://example.com/a_b?one=two_three&four=five_six)\n\nSecond paragraph\n\nThird paragraph\n\n[Full story](https://example.com/full)",
+          "presentation": {
+            "width": "wide"
+          },
+          "source_status": "partial"
+        },
+        {
+          "block_id": 2,
+          "title": "Calendar",
+          "kind": "markdown",
+          "body_md": "- An appointment\n- A reminder\n\n[Details](https://example.com/calendar)",
+          "presentation": {
+            "width": "auto"
+          },
+          "source_status": "complete"
+        }
+      ]
+    }
+  },
+  "preview": {
+    "body_md": "Headlines \\<em\\>today\\</em\\>\n\n[A story](https://example.com/a_b?one=two_three&four=five_six)\n\nSecond paragraph\n\nThird paragraph\n\n[Full story](https://example.com/full)\n\nCalendar\n\n- An appointment\n- A reminder\n\n[Details](https://example.com/calendar)",
+    "plain": "Headlines <em>today</em>\nSome sources unavailable.\n\nA story (https://example.com/a_b?one=two_three&four=five_six)\n\nSecond paragraph\n\nThird paragraph\n\nFull story (https://example.com/full)\n\nCalendar\n\n- An appointment\n- A reminder\n\nDetails (https://example.com/calendar)",
+    "html": "<html><body>\n<h2>Headlines &lt;em&gt;today&lt;/em&gt;</h2>\n<p>Some sources unavailable.</p>\n<p><a href=\"https://example.com/a_b?one=two_three&amp;four=five_six\">A story</a></p>\n<p>Second paragraph</p>\n<p>Third paragraph</p>\n<p><a href=\"https://example.com/full\">Full story</a></p>\n<h2>Calendar</h2>\n<ul>\n<li>An appointment</li>\n<li>A reminder</li>\n</ul>\n<p><a href=\"https://example.com/calendar\">Details</a></p>\n</body></html>"
+  }
+}
