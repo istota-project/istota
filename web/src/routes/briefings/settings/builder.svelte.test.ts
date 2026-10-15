@@ -485,7 +485,7 @@ describe('briefing block builder', () => {
     await mount();
     const editor = await edit();
     await fireEvent.click(within(editor).getByRole('button', { name: 'Remove source 1' }));
-    expect(within(editor).getByText('No sources')).toBeInTheDocument();
+    expect(within(editor).getByText(/^No sources yet/)).toBeInTheDocument();
     expect(api.putBriefingBlock).not.toHaveBeenCalled();
     expect(api.deleteBriefingSource).not.toHaveBeenCalled();
     await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));
@@ -543,7 +543,7 @@ describe('briefing block builder', () => {
     await fireEvent.pointerDown(addSource, { pointerType: 'mouse', button: 0 });
     await fireEvent.pointerUp(addSource, { pointerType: 'mouse', button: 0 });
     await fireEvent.click(addSource);
-    const calendar = await screen.findByRole('option', { name: 'calendar' });
+    const calendar = await screen.findByRole('option', { name: 'Calendar' });
     await fireEvent.pointerUp(calendar, { pointerType: 'mouse', button: 0 });
     await fireEvent.click(calendar);
     await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));

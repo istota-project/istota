@@ -20,7 +20,7 @@
   import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
-  import { uniqueName } from './briefingSettings';
+  import { sourceKindLabel, uniqueName } from './briefingSettings';
 
   let { browseOptions }: { browseOptions: SelectOption[] } = $props();
 
@@ -59,7 +59,7 @@
   let confirmSharedDelete = $state<string | null>(null);
 
   const sharedKindOptions: SelectOption[] = $derived(
-    sharedAllowedKinds.map((k) => ({ value: k, label: KIND_LABELS[k] ?? k })),
+    sharedAllowedKinds.map((k) => ({ value: k, label: sourceKindLabel(k) })),
   );
 
   async function reloadSharedBlocks() {
@@ -255,17 +255,6 @@
     }
   }
 
-  const KIND_LABELS: Record<string, string> = {
-    rss: 'RSS feed',
-    email: 'Newsletters',
-    browse: 'Web page',
-    markets: 'Markets',
-    calendar: 'Calendar',
-    todos: 'Todos',
-    reminders: 'Reminders',
-    notes: 'Notes',
-    shared_block: 'Shared block',
-  };
   const RENDER_OPTIONS: SelectOption[] = [
     { value: 'synthesis', label: 'Synthesis (summarize)' },
     { value: 'structured', label: 'Structured (verbatim)' },

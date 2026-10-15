@@ -118,18 +118,7 @@
   );
   const groupTarget = $derived(targets.find((t) => t.group_id === groupId));
 
-  const KIND_LABELS: Record<string, string> = {
-    rss: 'RSS feed',
-    email: 'Newsletters',
-    browse: 'Web page',
-    markets: 'Markets',
-    calendar: 'Calendar',
-    todos: 'Todos',
-    reminders: 'Reminders',
-    notes: 'Notes',
-    shared_block: 'Shared block',
-  };
-  const sourceKinds = $derived(config?.source_kinds ?? Object.keys(KIND_LABELS));
+  const sourceKinds = $derived(config?.source_kinds ?? []);
   const rssOptions = $derived([
     ...(feedOptions?.categories ?? []).map((c) => ({
       value: `category:${c.value}`,

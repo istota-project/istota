@@ -12,6 +12,7 @@
   import { formatDateTime } from '$lib/dateFormat';
   import type { GroupEditionSelection } from '$lib/stores/briefings';
   import BriefingEdition from './BriefingEdition.svelte';
+  import { channelLabel } from './settings/briefingSettings';
 
   let { selection, groupLabel }: { selection: GroupEditionSelection; groupLabel: string } =
     $props();
@@ -22,12 +23,6 @@
   let loading = $state(true);
   let error = $state('');
 
-  const CHANNEL_LABELS: Record<string, string> = {
-    in_app: 'In app',
-    email: 'Email',
-    talk: 'Talk',
-    ntfy: 'ntfy',
-  };
   const summary = $derived(
     delivery
       ? Object.entries(delivery.counts)
@@ -93,26 +88,21 @@
     }}
   >
     {#snippet meta()}
-      <p class="caption group-meta">
-        <Users size={14} aria-hidden="true" />
-        <span
-          >{groupLabel} · {CHANNEL_LABELS[definition!.channel] ?? definition!.channel} · {formatDateTime(
-            run!.published_at || run!.created_at || '',
-            { dateStyle: 'medium', timeStyle: 'short' },
-          )}</span
-        >
-        {#if summary}<span>· {summary}</span>{/if}
+      {@const at = run!.published_at || run!.created_at || ''}
+      <p class="caption edition-meta">
+        <span class="group-label"><Users size={13} aria-hidden="true" />{groupLabel}</span>
+        <time datetime={at}>{formatDateTime(at, { dateStyle: 'medium', timeStyle: 'short' })}</time>
+        <span>Delivered by {channelLabel(definition!.channel)}</span>
+        {#if summary}<span>{summary}</span>{/if}
       </p>
     {/snippet}
   </BriefingEdition>
 {/if}
 
 <style>
-  .group-meta {
-    display: flex;
-    flex-wrap: wrap;
+  .group-label {
+    display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    margin: 0;
   }
 </style>

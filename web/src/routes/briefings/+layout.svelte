@@ -30,7 +30,6 @@
   } from '$lib/stores/briefings';
   import {
     AppShell,
-    Button,
     ShellHeader,
     Sidebar,
     SidebarToggle,
@@ -42,7 +41,16 @@
     PageLoading,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { CheckCheck, Cog, Layers, Plus, Send, Users } from '@lucide/svelte';
+  import {
+    CheckCheck,
+    CirclePause,
+    Cog,
+    Layers,
+    PencilLine,
+    Plus,
+    Send,
+    Users,
+  } from '@lucide/svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyError } from '$lib/stores/notices';
   import { formatDateTime, formatRelative } from '$lib/dateFormat';
@@ -516,11 +524,13 @@
             onValueChange={chooseAudience}
           />
         {/if}
-        {#if !onSettings}<Button href={`${base}/briefings/settings/?new=1`} size="sm"
-            >New briefing</Button
-          >{/if}
       {/snippet}
       {#snippet tools()}
+        {#if !onSettings}
+          <Chip icon onclick={() => goto(`${base}/briefings/settings/?new=1`)} title="New briefing">
+            <Plus size={14} />
+          </Chip>
+        {/if}
         {#if onReader}
           <Chip
             icon
@@ -551,75 +561,85 @@
         open={settingsSidebarOpen}
         onClose={() => (settingsSidebarOpen = false)}
       >
-        <div class="views">
-          <a
-            class="view-btn"
-            class:active={settingsActive({ new: '1' })}
-            href={settingsUrl({ new: '1' })}
-            onclick={() => (settingsSidebarOpen = false)}
-          >
-            <Plus size={14} />
-            <span class="view-name">New briefing</span>
-          </a>
-        </div>
-        <CategoryGroup label="Just me" count={personalBriefings.length}>
+        <div class="settings-index">
           <div class="views">
-            {#each personalBriefings as item (item.name)}
-              {@const query = { name: item.name }}
-              <a
-                class="view-btn"
-                class:active={settingsActive(query)}
-                href={settingsUrl(query)}
-                onclick={() => (settingsSidebarOpen = false)}
-              >
-                <span class="view-name">{item.title || item.name}</span>
-                {#if !item.enabled}<span class="view-state">Off</span>{/if}
-              </a>
-            {/each}
-          </div>
-        </CategoryGroup>
-        {#each targets as target (target.group_id)}
-          {@const items = groupBriefings[target.group_id!] ?? []}
-          {#if items.length || target.capabilities.author_briefings}
-            <CategoryGroup label={target.label} count={items.length}>
-              <div class="views">
-                {#each items as item (item.id)}
-                  {@const query = { group: target.group_id!, briefing: item.name }}
-                  <a
-                    class="view-btn"
-                    class:active={settingsActive(query)}
-                    href={settingsUrl(query)}
-                    onclick={() => (settingsSidebarOpen = false)}
-                  >
-                    <span class="view-name">{item.title || item.name}</span>
-                    {#if !item.enabled}<span class="view-state">Draft</span>{/if}
-                  </a>
-                {/each}
-              </div>
-            </CategoryGroup>
-          {/if}
-        {/each}
-        <div class="views settings-sections">
-          <a
-            class="view-btn"
-            class:active={settingsView === 'delivery'}
-            href={settingsUrl({ view: 'delivery' })}
-            onclick={() => (settingsSidebarOpen = false)}
-          >
-            <Send size={14} />
-            <span class="view-name">Delivery</span>
-          </a>
-          {#if identity.user.features?.admin}
             <a
               class="view-btn"
-              class:active={settingsView === 'shared'}
-              href={settingsUrl({ view: 'shared' })}
+              class:active={settingsActive({ new: '1' })}
+              href={settingsUrl({ new: '1' })}
               onclick={() => (settingsSidebarOpen = false)}
             >
-              <Layers size={14} />
-              <span class="view-name">Shared blocks</span>
+              <Plus size={14} />
+              <span class="view-name">New briefing</span>
             </a>
-          {/if}
+          </div>
+          <CategoryGroup label="Just me" count={personalBriefings.length}>
+            <div class="views">
+              {#each personalBriefings as item (item.name)}
+                {@const query = { name: item.name }}
+                <a
+                  class="view-btn"
+                  class:active={settingsActive(query)}
+                  href={settingsUrl(query)}
+                  onclick={() => (settingsSidebarOpen = false)}
+                >
+                  <span class="view-name">{item.title || item.name}</span>
+                  {#if !item.enabled}<span class="view-state" title="Off"
+                      ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
+                        >, off</span
+                      ></span
+                    >{/if}
+                </a>
+              {/each}
+            </div>
+          </CategoryGroup>
+          {#each targets as target (target.group_id)}
+            {@const items = groupBriefings[target.group_id!] ?? []}
+            {#if items.length || target.capabilities.author_briefings}
+              <CategoryGroup label={target.label} count={items.length}>
+                <div class="views">
+                  {#each items as item (item.id)}
+                    {@const query = { group: target.group_id!, briefing: item.name }}
+                    <a
+                      class="view-btn"
+                      class:active={settingsActive(query)}
+                      href={settingsUrl(query)}
+                      onclick={() => (settingsSidebarOpen = false)}
+                    >
+                      <span class="view-name">{item.title || item.name}</span>
+                      {#if !item.enabled}<span class="view-state" title="Draft"
+                          ><PencilLine size={13} aria-hidden="true" /><span class="visually-hidden"
+                            >, draft</span
+                          ></span
+                        >{/if}
+                    </a>
+                  {/each}
+                </div>
+              </CategoryGroup>
+            {/if}
+          {/each}
+          <div class="views settings-sections">
+            <a
+              class="view-btn"
+              class:active={settingsView === 'delivery'}
+              href={settingsUrl({ view: 'delivery' })}
+              onclick={() => (settingsSidebarOpen = false)}
+            >
+              <Send size={14} />
+              <span class="view-name">Delivery</span>
+            </a>
+            {#if identity.user.features?.admin}
+              <a
+                class="view-btn"
+                class:active={settingsView === 'shared'}
+                href={settingsUrl({ view: 'shared' })}
+                onclick={() => (settingsSidebarOpen = false)}
+              >
+                <Layers size={14} />
+                <span class="view-name">Shared blocks</span>
+              </a>
+            {/if}
+          </div>
         </div>
       </Sidebar>
     {:else}
@@ -792,17 +812,25 @@
     white-space: nowrap;
   }
 
+  /* Off or draft, as a glyph: a word-sized badge crowded the name. */
   .view-state {
+    display: inline-flex;
     flex-shrink: 0;
-    margin-left: auto;
-    font-size: var(--text-xs);
     color: var(--text-dim);
   }
 
-  .settings-sections {
-    margin-top: var(--space-3);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--border-subtle);
+  /* Group labels start on the same edge as the briefing rows under them. */
+  .settings-index :global(.cat-label) {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+  }
+
+  /* Every block above already ends in the `.views` rule, so this one draws
+     none of its own, above or below. */
+  .settings-index .settings-sections {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
   }
 
   .load-more {

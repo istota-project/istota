@@ -13,6 +13,7 @@
   } from '$lib/components/ui';
   import BlockEditor from './BlockEditor.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
+  import { sourceKindLabel } from './settings/briefingSettings';
 
   interface Props {
     briefingName: string;
@@ -131,7 +132,7 @@
     return block.sources
       .map((source) => {
         const config = source.config;
-        let label = source.kind;
+        let label = sourceKindLabel(source.kind);
         if (config.path) label += `: ${config.path}`;
         else if (config.url) label += `: ${config.url}`;
         else if (config.preset) label += `: ${config.preset}`;

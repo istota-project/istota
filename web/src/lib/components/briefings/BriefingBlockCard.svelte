@@ -27,7 +27,7 @@
     <div data-masonry-content>
       <header class="block-head">
         <div class="block-title">
-          <h2>{block.title}</h2>
+          <h2 class="micro-label">{block.title}</h2>
           {#if block.source_status === 'partial'}
             <HintPopover
               variant="warning"
@@ -88,9 +88,7 @@
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
-    padding-bottom: var(--space-3);
-    margin-bottom: var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: var(--space-2);
   }
 
   .block-title {
@@ -112,13 +110,14 @@
     min-height: 0;
     padding: 0;
     border-radius: var(--radius-sm);
+    color: var(--text-dim);
   }
 
+  /* A section label rather than a heading the size of the content's own, so
+     the block's name and the stories inside it never read as one level. */
   h2 {
     margin: 0;
-    font-size: var(--text-base);
-    font-weight: 600;
-    line-height: 1.35;
+    line-height: 1.25rem;
     overflow-wrap: anywhere;
   }
 

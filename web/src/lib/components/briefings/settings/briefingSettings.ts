@@ -13,6 +13,27 @@ export function channelLabel(channel: string): string {
   return CHANNEL_LABELS[channel] ?? channel;
 }
 
+/** How each source kind is named in the block editor and the shared-block editor. */
+export const SOURCE_KIND_LABELS: Record<string, string> = {
+  rss: 'RSS feed',
+  email: 'Newsletters',
+  browse: 'Web page',
+  markets: 'Markets',
+  calendar: 'Calendar',
+  todos: 'Todos',
+  reminders: 'Reminders',
+  notes: 'Notes',
+  shared_block: 'Shared block',
+  group_memory: 'Group notebook',
+  group_file: 'Group file',
+  personal_file: "A member's file",
+  personal_calendar: "A member's calendar",
+};
+
+export function sourceKindLabel(kind: string): string {
+  return SOURCE_KIND_LABELS[kind] ?? kind;
+}
+
 /** Briefing settings are addressed by URL, so the sidebar and every editor agree. */
 export type BriefingSettingsTarget =
   | { kind: 'personal'; name: string }

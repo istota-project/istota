@@ -1,10 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { BriefingBlock, BriefingBlockSave, BriefingSourceDraft } from '$lib/api';
+  import { Trash2 } from '@lucide/svelte';
   import {
     Button,
     ConfirmDialog,
     EmptyState,
+    IconButton,
     Input,
     Modal,
     OptionCards,
@@ -15,6 +17,7 @@
   import { SettingsField } from '$lib/components/settings';
   import SourceConfigFields from './SourceConfigFields.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
+  import { sourceKindLabel } from './settings/briefingSettings';
 
   interface Props {
     initial: BriefingBlockSave;
@@ -73,14 +76,14 @@
   const kindOptions: SelectOption[] = $derived(
     sourceKinds.map((kind) => ({
       value: kind,
-      label: kind,
+      label: sourceKindLabel(kind),
       disabled: kind === 'rss' && !feedsAvailable,
     })),
   );
   const widths = [
-    { value: 'auto', title: 'Automatic', description: 'One column when space allows.' },
-    { value: 'wide', title: 'Wide', description: 'Two columns when space allows.' },
-    { value: 'full', title: 'Full width', description: 'Use every available column.' },
+    { value: 'auto', title: 'Automatic', description: 'One column' },
+    { value: 'wide', title: 'Wide', description: 'Two columns' },
+    { value: 'full', title: 'Full width', description: 'Every column' },
   ];
   const renderOptions = [
     { value: 'synthesis', label: 'Synthesis (summarize)' },
@@ -117,6 +120,13 @@
       if (value === undefined || value === null) delete config[key];
     }
     draft.sources[index] = { ...draft.sources[index], config };
+  }
+
+  function addSource(kind: string) {
+    draft.sources = [
+      ...draft.sources,
+      { kind, config: kind.startsWith('personal_') ? { owner_id: userId } : {}, enabled: true },
+    ];
   }
 
   function setOption(key: string, value: unknown) {
@@ -200,84 +210,73 @@
       <Input bind:value={draft.title} />
     </SettingsField>
     <section aria-label="Block sources" class="sources">
-      <h3 class="micro-label">Sources</h3>
-      {#if draft.sources.length === 0}<EmptyState size="sm">No sources</EmptyState>{/if}
+      <div class="section-head">
+        <h3 class="micro-label">Sources</h3>
+        <!-- Remounted after each add: the trigger is an action, so it must go
+             back to its placeholder rather than show the kind just picked. -->
+        {#key draft.sources.length}
+          <Select
+            value=""
+            options={kindOptions}
+            placeholder="Add source"
+            ariaLabel="Add source"
+            align="end"
+            onValueChange={addSource}
+          />
+        {/key}
+      </div>
+      {#if draft.sources.length === 0}
+        <EmptyState size="sm">No sources yet. Add one to fill this block.</EmptyState>
+      {/if}
       {#each draft.sources as source, index}
-        <div class="source-entry">
-          <div class="card-head source-head">
-            <strong>Source {index + 1}</strong>
-            <Button
+        <div class="source-entry" class:off={source.enabled === false}>
+          <div class="source-head">
+            <span class="source-kind">{sourceKindLabel(source.kind)}</span>
+            {#if allowSourceDisable || source.enabled === false}
+              <label class="source-toggle">
+                <input
+                  type="checkbox"
+                  checked={source.enabled !== false}
+                  onchange={(event) => {
+                    draft.sources[index] = { ...source, enabled: event.currentTarget.checked };
+                  }}
+                />
+                Enabled
+              </label>
+            {/if}
+            <IconButton
               size="sm"
-              variant="danger"
+              danger
+              label={`Remove source ${index + 1}`}
+              title="Remove source"
               onclick={() => {
                 draft.sources = draft.sources.filter((_, i) => i !== index);
-              }}
-              ariaLabel={`Remove source ${index + 1}`}>Remove</Button
+              }}><Trash2 size={14} /></IconButton
             >
           </div>
-          <SettingsField label="Source type" labelled={false}>
-            <Select
-              value={source.kind}
-              options={kindOptions}
-              fullWidth
-              ariaLabel={`Source ${index + 1} type`}
-              onValueChange={(kind) => {
-                draft.sources[index] = {
-                  ...source,
-                  kind,
-                  config: kind.startsWith('personal_') ? { owner_id: userId } : {},
-                };
-              }}
+          <div class="source-body">
+            <SourceConfigFields
+              kind={source.kind}
+              config={source.config ?? {}}
+              onChange={(patch) => patchSource(index, patch)}
+              {browseOptions}
+              {rssOptions}
+              {sharedBlockOptions}
+              {userId}
+              {fileOptions}
+              {calendarOptions}
             />
-          </SettingsField>
-          {#if allowSourceDisable || source.enabled === false}
-            <SettingsField label="Enabled" checkbox>
-              <input
-                type="checkbox"
-                checked={source.enabled !== false}
-                onchange={(event) => {
-                  draft.sources[index] = { ...source, enabled: event.currentTarget.checked };
-                }}
-              />
-            </SettingsField>
-          {/if}
-          <SourceConfigFields
-            kind={source.kind}
-            config={source.config ?? {}}
-            onChange={(patch) => patchSource(index, patch)}
-            {browseOptions}
-            {rssOptions}
-            {sharedBlockOptions}
-            {userId}
-            {fileOptions}
-            {calendarOptions}
-          />
+          </div>
         </div>
       {/each}
-      <Select
-        value=""
-        options={kindOptions}
-        placeholder="Add source…"
-        ariaLabel="Add source"
-        onValueChange={(kind) => {
-          draft.sources = [
-            ...draft.sources,
-            {
-              kind,
-              config: kind.startsWith('personal_') ? { owner_id: userId } : {},
-              enabled: true,
-            },
-          ];
-        }}
-      />
-      {#if !feedsAvailable}<p class="caption">
-          Enable Feeds and subscribe to a feed first to use a feed source.
-        </p>{/if}
+      {#if !feedsAvailable && sourceKinds.includes('rss')}
+        <p class="caption">Enable Feeds and subscribe to a feed first to use a feed source.</p>
+      {/if}
     </section>
     <section class="width-options" aria-label="Block width">
       <h3 class="micro-label">Width</h3>
       <OptionCards options={widths} value={width} label="Width" onchange={setWidth} />
-      <p class="caption">Layout changes apply to future editions.</p>
+      <p class="caption">Applies to future editions.</p>
     </section>
     <details class="advanced">
       <summary>Advanced</summary>
@@ -372,6 +371,7 @@
     min-width: 0;
   }
   .draft-fields {
+    gap: var(--space-6);
     border: 0;
     padding: 0;
     margin: 0;
@@ -380,31 +380,79 @@
   p {
     margin: 0;
   }
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .sources {
+    gap: var(--space-2);
+  }
   .source-entry {
+    display: flex;
+    flex-direction: column;
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
-    padding: var(--space-3);
+    background: var(--surface-card);
     min-width: 0;
   }
   .source-head {
+    display: flex;
     align-items: center;
-    margin-bottom: var(--space-2);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
   }
-  .source-head strong,
-  summary {
+  .source-kind {
+    flex: 1;
+    min-width: 0;
     font-size: var(--text-sm);
+    font-weight: 600;
+  }
+  .source-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .source-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: 0 var(--space-3);
+  }
+  /* A kind with no settings (markets, calendar) leaves the card as its header. */
+  .source-body:not(:empty) {
+    padding-bottom: var(--space-3);
+  }
+  .source-entry.off .source-kind,
+  .source-entry.off .source-body {
+    opacity: 0.6;
   }
   .width-options {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
   }
+  /* Three short choices sit side by side rather than as three tall cards. */
+  @media (min-width: 640px) {
+    .width-options :global(.option-cards) {
+      flex-direction: row;
+    }
+    .width-options :global(.option-card) {
+      flex: 1;
+    }
+  }
   .advanced {
     border-top: 1px solid var(--border-subtle);
-    padding-top: var(--space-3);
+    padding-top: var(--space-4);
   }
   summary {
     cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
   }
   .advanced-fields {
     margin-top: var(--space-3);
