@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { PageLoading } from '$lib/components/ui';
+  import { CardGrid, PageLoading } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -428,26 +428,28 @@
       class:hide-images={!$showImages}
       class:hide-text={!$showText}
     >
-      {#each entries as entry (entry.id)}
-        <div
-          class="card-slot"
-          data-entry-id={entry.id}
-          onmouseenter={() => (focusedEntryId = entry.id)}
-          onfocusin={() => (focusedEntryId = entry.id)}
-          role="presentation"
-        >
-          <FeedCard
-            {entry}
-            onImageClick={(imgs, idx) => {
-              lightboxImages = imgs;
-              lightboxIndex = idx;
-            }}
-            onViewed={handleViewed}
-            onStarToggle={handleStarToggle}
-            onOpen={() => entrySel.push({ id: entry.id })}
-          />
-        </div>
-      {/each}
+      <CardGrid columns={$viewMode === 'list' ? 1 : 5}>
+        {#each entries as entry (entry.id)}
+          <div
+            class="card-slot"
+            data-entry-id={entry.id}
+            onmouseenter={() => (focusedEntryId = entry.id)}
+            onfocusin={() => (focusedEntryId = entry.id)}
+            role="presentation"
+          >
+            <FeedCard
+              {entry}
+              onImageClick={(imgs, idx) => {
+                lightboxImages = imgs;
+                lightboxIndex = idx;
+              }}
+              onViewed={handleViewed}
+              onStarToggle={handleStarToggle}
+              onOpen={() => entrySel.push({ id: entry.id })}
+            />
+          </div>
+        {/each}
+      </CardGrid>
     </div>
 
     <div bind:this={sentinel} class="sentinel">
@@ -492,14 +494,7 @@
   }
 
   /* Grid layout */
-  .feed-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
-    gap: var(--space-4);
-  }
-
   .feed-grid.list-view {
-    grid-template-columns: 1fr;
     max-width: 640px;
     margin: 0 auto;
   }
