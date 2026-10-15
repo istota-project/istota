@@ -14,7 +14,7 @@ import json
 import click
 
 from istota.briefings import db as bdb
-from istota.briefings.models import SOURCE_KINDS, BriefingsContext
+from istota.briefings.models import SOURCE_KINDS, BriefingsContext, validate_block_options
 
 
 def _emit(payload) -> None:
@@ -144,9 +144,9 @@ def blocks_set(ctx, block_id, title, directive, render_mode, options):
     opts = None
     if options is not None:
         try:
-            opts = json.loads(options)
+            opts = validate_block_options(json.loads(options))
         except ValueError as e:
-            raise click.ClickException(f"invalid --options JSON: {e}")
+            raise click.ClickException(f"invalid --options: {e}")
     with bdb.connect(bctx.db_path) as conn:
         if not bdb.get_block(conn, block_id, with_sources=False):
             raise click.ClickException("block not found")

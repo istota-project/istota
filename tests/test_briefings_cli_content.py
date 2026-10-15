@@ -99,3 +99,23 @@ def test_list_reports_names_block_counts_and_last_generated_timestamp(ctx):
             },
         ],
     }
+
+
+@pytest.mark.parametrize("options", [[], {"presentation": {"width": "invalid"}}])
+def test_invalid_options_refuse_before_cli_title_change(ctx, options):
+    with bdb.connect(ctx.db_path) as conn:
+        block = bdb.list_blocks(conn, "morning")[0]
+    result = CliRunner().invoke(cli, ["blocks", "set", "--id", str(block.id),
+                                    "--title", "Changed", "--options", json.dumps(options)], obj=ctx)
+    assert result.exit_code != 0
+    assert "options" in result.output or "presentation" in result.output
+    with bdb.connect(ctx.db_path) as conn:
+        assert bdb.get_block(conn, block.id).title == block.title
+
+
+def test_cli_presentation_preserves_unrelated_options(ctx):
+    with bdb.connect(ctx.db_path) as conn:
+        bid = bdb.list_blocks(conn, "morning")[0].id
+    options = {"tone": "neutral", "custom": 42, "presentation": {"width": "full"}}
+    _, response = _invoke(ctx, ["blocks", "set", "--id", str(bid), "--options", json.dumps(options)])
+    assert response["block"]["options"] == options

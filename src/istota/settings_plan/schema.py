@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from istota.apply import Meta, PlanError, _check_meta
-from istota.briefings.models import ALLOWED_SHARED_SOURCE_KINDS, RENDER_MODES, SOURCE_KINDS
+from istota.briefings.models import ALLOWED_SHARED_SOURCE_KINDS, RENDER_MODES, SOURCE_KINDS, validate_block_options
 from istota.lib.user_ids import user_id_index
 from istota.sandbox.user_scope import is_scopable_user_id
 
@@ -192,6 +192,11 @@ def _sources(sources, path, *, shared=False):
 
 def _blocks(blocks, path):
     for block, block_path in _entries(blocks, BLOCK_FIELDS, path, identity=()):
+        if "options" in block:
+            try:
+                validate_block_options(block["options"])
+            except ValueError as error:
+                _fail([*block_path, "options"], str(error))
         if "render_mode" in block:
             _choice(block["render_mode"], RENDER_MODES, [*block_path, "render_mode"])
         if "sources" in block:
