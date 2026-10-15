@@ -21,7 +21,7 @@ from istota.money.work import (
     assign_invoice_number,
     entry_etag,
     load_work_entries,
-    record_invoice_payment,
+    mark_paid,
 )
 
 
@@ -46,7 +46,7 @@ def make_client(tmp_path: Path):
         ctx = UserContext(
             data_dir=tmp_path,
             ledgers=[],
-            db_path=tmp_path / "money.db",
+            db_path=tmp_path / "data" / "money.db",
             invoicing_config_path=_write_invoicing_config(tmp_path) if with_config else None,
         )
         app = FastAPI()
@@ -115,7 +115,7 @@ class TestListWork:
     def test_paid_date_surfaced(self, make_client, tmp_path):
         add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
         assign_invoice_number(tmp_path, [1], "INV-000001")
-        record_invoice_payment(tmp_path, "INV-000001", "2026-04-15")
+        mark_paid(tmp_path, "INV-000001", "2026-04-15")
         row = make_client().get("/api/money/work").json()["entries"][0]
         assert row["paid_date"] == "2026-04-15"
 
@@ -131,17 +131,6 @@ class TestListWork:
         row = make_client().get("/api/money/work").json()["entries"][0]
         assert "unknown_client" in row["warnings"]
         assert row["client_name"] == "nobody"
-
-    def test_entry_without_uid_is_not_editable(self, make_client, tmp_path):
-        work_dir = tmp_path / "invoices" / "work"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        (work_dir / "2026.toml").write_text(
-            '[[entries]]\ndate = 2026-03-01\nclient = "acme"\nservice = "dev"\nqty = 1\n'
-        )
-        row = make_client().get("/api/money/work").json()["entries"][0]
-        assert row["uid"] == ""
-        assert row["editable"] is False
-        assert "no_uid" in row["warnings"]
 
     def test_filter_by_client(self, make_client, tmp_path):
         add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1)
@@ -167,7 +156,7 @@ class TestListWork:
         add_work_entry(tmp_path, "2026-03-03", "acme", "dev", qty=1, description="settled")
         assign_invoice_number(tmp_path, [2], "INV-000001")
         assign_invoice_number(tmp_path, [3], "INV-000002")
-        record_invoice_payment(tmp_path, "INV-000002", "2026-04-01")
+        mark_paid(tmp_path, "INV-000002", "2026-04-01")
         client = make_client()
 
         def descs(status):
@@ -399,8 +388,7 @@ class TestUpdateWork:
         resp = make_client().patch(f"/api/money/work/{uid}", json={"date": "2027-01-05"})
         assert resp.status_code == 200
         assert resp.json()["entry"]["date"] == "2027-01-05"
-        assert (tmp_path / "invoices" / "work" / "2027.toml").exists()
-        assert not (tmp_path / "invoices" / "work" / "2026.toml").exists()
+        assert [e.date.isoformat() for e in load_work_entries(tmp_path)] == ["2027-01-05"]
 
 
 class TestDeleteWork:
@@ -505,7 +493,7 @@ class TestMutationsRequireCsrf:
         ctx = UserContext(
             data_dir=tmp_path,
             ledgers=[],
-            db_path=tmp_path / "money.db",
+            db_path=tmp_path / "data" / "money.db",
             invoicing_config_path=_write_invoicing_config(tmp_path),
         )
         app = FastAPI()

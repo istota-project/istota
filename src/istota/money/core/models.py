@@ -168,11 +168,9 @@ class WorkEntry:
     discount: float = 0
     description: str = ""
     entity: str = ""
+    # The next three are read-only on an entry: they come from the entry's
+    # active invoice line and that invoice's row, and are filled by the read.
     invoice: str = ""
-    # When the invoice this entry belongs to was issued. Stamped at the same
-    # moment as ``invoice`` and cleared with it. ``None`` on every entry
-    # invoiced before the field existed — nothing can reconstruct those, so
-    # readers fall back to the latest work date as a lower bound.
     invoice_date: date | None = None
     paid_date: date | None = None
     id: int | None = None  # 1-based display index, recomputed on every load
@@ -183,6 +181,31 @@ class WorkEntry:
     # Keys present in the TOML that the loader doesn't recognise, kept so a
     # hand-authored custom key survives an unrelated programmatic write.
     extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class InvoiceRecord:
+    """One row of ``money.db``'s ``invoices`` table, with the entries it covers.
+
+    ``total`` is what the invoice billed when it was issued and never changes.
+    ``entry_uids`` lists every entry the invoice covered, voided lines included.
+    """
+    number: str
+    client: str
+    entity: str
+    issue_date: date
+    total: float
+    status: str  # "open" | "paid" | "voided"
+    group_name: str = ""
+    paid_date: date | None = None
+    voided_at: str | None = None
+    was_paid: bool = False
+    void_reason: str = ""
+    replaced_by: list[str] = field(default_factory=list)
+    pdf_path: str = ""
+    manual: bool = False
+    created_at: str = ""
+    entry_uids: list[str] = field(default_factory=list)
 
 
 @dataclass

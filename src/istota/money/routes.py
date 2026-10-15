@@ -625,7 +625,7 @@ async def api_invoice_mark_paid(
 
     from istota.money.work import (
         get_entries_for_invoice,
-        record_invoice_payment,
+        mark_paid,
     )
 
     data_dir = user_ctx.data_dir
@@ -641,7 +641,7 @@ async def api_invoice_mark_paid(
         body = {}
     paid_date = (body or {}).get("paid_date") or date.today().isoformat()
 
-    count = record_invoice_payment(data_dir, invoice_number, paid_date)
+    count = mark_paid(data_dir, invoice_number, paid_date)
     return {
         "status": "ok",
         "invoice_number": invoice_number,
@@ -838,6 +838,11 @@ def _work_mutation_error(result, config) -> JSONResponse:
     if result.status == "invoiced":
         return JSONResponse(
             {"status": "error", "error": "entry is invoiced"}, status_code=409,
+        )
+    if result.status == "on_voided_invoice":
+        return JSONResponse(
+            {"status": "error", "error": "entry is listed on a voided invoice"},
+            status_code=409,
         )
     if result.status == "conflict":
         return JSONResponse(

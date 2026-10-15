@@ -1,8 +1,9 @@
 """Invoicing: config-driven invoice generation, PDF export, payment recording (cash-basis).
 
-Work entries are stored in plaintext TOML files (see work.py). Config (clients,
-services, entities, rates) is parsed from a plain TOML file. No ledger entries
-at invoice time — income is recognized when payment is recorded (cash-basis).
+Work entries and invoices are stored in money.db (see work.py). Config
+(clients, services, entities, rates) comes from the config store. No ledger
+entries at invoice time — income is recognized when payment is recorded
+(cash-basis).
 """
 
 from __future__ import annotations
@@ -169,6 +170,16 @@ def resolve_entity(
     return config.companies.get(entity_key, config.company)
 
 
+def entry_entity_key(config: InvoicingConfig, entry: WorkEntry) -> str:
+    """The entity key an entry bills under: entry, then client, then default."""
+    if entry.entity:
+        return entry.entity
+    cc = config.clients.get(entry.client) or config.clients.get(entry.client.lower())
+    if cc and cc.entity:
+        return cc.entity
+    return config.default_entity
+
+
 def resolve_bank_account(entity: CompanyConfig, config: InvoicingConfig) -> str:
     if entity.bank_account:
         return entity.bank_account
@@ -243,6 +254,23 @@ def build_line_items(
     return items
 
 
+def invoice_total(
+    entries: list[WorkEntry],
+    services: dict[str, ServiceConfig],
+) -> float:
+    """What an invoice over ``entries`` bills, at the current rates.
+
+    ``_manual`` entries (``invoice create --item``) bill their own amount; the
+    rest go through :func:`build_line_items`.
+    """
+    total = sum(
+        item.amount
+        for item in build_line_items([e for e in entries if e.service != "_manual"], services)
+    )
+    total += sum(e.amount or 0 for e in entries if e.service == "_manual")
+    return total
+
+
 def group_entries_by_bundle(
     entries: list[WorkEntry],
     client_config: ClientConfig,
@@ -290,16 +318,16 @@ def parse_invoice_number(number_str: str) -> int | None:
 
 
 def highest_existing_invoice_number(data_dir: Path) -> int:
-    """Return the highest invoice number already stamped on work entries (0 if none).
+    """Return the highest invoice number ever issued (0 if none).
 
-    The work log is the ground truth for what's been issued. Deriving the next
-    number from this (rather than trusting a separate counter) self-heals counter
-    drift and prevents duplicate numbers.
+    Read from the ``invoices`` table, voided invoices included, so a voided
+    number is never issued again. Deriving the next number from this (rather
+    than trusting a separate counter) self-heals counter drift.
     """
-    from istota.money.work import get_invoice_numbers
+    from istota.money.work import list_invoices
 
     highest = 0
-    for inv in get_invoice_numbers(data_dir):
+    for inv in (record.number for record in list_invoices(data_dir)):
         n = parse_invoice_number(inv)
         if n is not None and n > highest:
             highest = n
@@ -364,40 +392,36 @@ def generate_invoices_for_period(
     dry_run: bool = False,
     invoice_output_dir: Path | None = None,
     db_path: Path | None = None,
+    record_schedule: bool = False,
 ) -> list[dict]:
     """Generate invoices for uninvoiced work entries.
 
-    Reads uninvoiced entries from TOML files, groups by client+entity and
-    bundle rules, generates PDFs, assigns invoice numbers.
+    Groups uninvoiced entries by client+entity and bundle rules, renders each
+    invoice's PDF, then records the invoice and its lines in one transaction.
+    If that transaction fails the PDF is deleted and an
+    :class:`InvoiceRecordError` is raised, after the counter is advanced past
+    the invoices this run did record; no PDF is left without its invoice.
+
+    ``record_schedule`` writes a monthly client's schedule state in the same
+    transaction as each of its invoices.
 
     If ``invoice_output_dir`` is given it is used as the base directory for
     generated PDFs (a year subdirectory is appended).  Otherwise falls back to
     ``accounting_path / config.invoice_output`` for backward compatibility.
     """
+    from istota.money.db import set_invoice_schedule_generation
     from istota.money.work import (
-        assign_invoice_number_by_uids,
-        backfill_work_ids,
+        create_invoice,
         get_uninvoiced_entries,
+        write_transaction,
     )
-
-    if not dry_run:
-        # Stamping is uid-addressed (see below), so every entry we might bill
-        # needs one. Reading never stamps, and a hand-added entry can arrive
-        # without a uid at any time, so make sure before we resolve anything.
-        backfill_work_ids(data_dir)
 
     entries = get_uninvoiced_entries(data_dir, client=client_filter, period=period)
     if not entries:
         return []
 
-    # Resolve entity key for each entry
     def _entity_key(entry: WorkEntry) -> str:
-        if entry.entity:
-            return entry.entity
-        cc = config.clients.get(entry.client) or config.clients.get(entry.client.lower())
-        if cc and cc.entity:
-            return cc.entity
-        return config.default_entity
+        return entry_entity_key(config, entry)
 
     # Group entries by (client, entity_key)
     grouped: dict[tuple[str, str], list[WorkEntry]] = {}
@@ -418,9 +442,8 @@ def generate_invoices_for_period(
     output_dir = base_dir / year
 
     # Start at the higher of the stored counter and one past the highest invoice
-    # already issued. The work log is ground truth, so this self-heals counter
-    # drift (e.g. a counter left behind by the DB migration) and prevents
-    # collisions across both runs and multiple clients within one run.
+    # ever issued. The invoices table is ground truth, so this self-heals
+    # counter drift and prevents collisions across runs and clients.
     invoice_number = max(
         config.next_invoice_number,
         highest_existing_invoice_number(data_dir) + 1,
@@ -480,26 +503,35 @@ def generate_invoices_for_period(
                 generate_invoice_pdf(html, pdf_path, root=accounting_path)
                 summary["file"] = str(pdf_path)
 
-                # By uid, never by display index: the entries were resolved
-                # before the PDF render above, and any concurrent insert has
-                # since shifted every index past it.
-                entry_uids = [e.uid for e in billable_entries if e.uid]
-                stamped = (
-                    assign_invoice_number_by_uids(
-                        data_dir, entry_uids, number_str, invoice_date,
-                    )
-                    if entry_uids
-                    else 0
-                )
-                if stamped != len(billable_entries):
-                    # An entry on a rendered PDF that didn't get stamped will
-                    # be picked up as uninvoiced again next run and billed
-                    # twice. Loud, because nothing downstream can detect it.
+                # By uid: the entries were resolved before the PDF render, and
+                # an entry another writer invoiced since then fails the active
+                # line index rather than being billed twice.
+                try:
+                    with write_transaction(data_dir) as conn:
+                        create_invoice(
+                            conn, number=number_str, client=client_key,
+                            entity=entity_key, group_name=group_name,
+                            issue_date=invoice_date, total=round(invoice.total, 2),
+                            entry_uids=[e.uid for e in billable_entries],
+                            pdf_path=str(pdf_path),
+                        )
+                        if record_schedule and client_config.schedule == "monthly":
+                            set_invoice_schedule_generation(conn, client_key)
+                except Exception as exc:
+                    pdf_path.unlink(missing_ok=True)
                     logger.error(
-                        "invoice_stamp_incomplete invoice=%s client=%s expected=%d stamped=%d — "
-                        "entries on this invoice may be re-billed; reconcile by hand",
-                        number_str, client_key, len(billable_entries), stamped,
+                        "invoice_record_failed invoice=%s client=%s error=%s — PDF removed",
+                        number_str, client_key, exc,
                     )
+                    if results:
+                        persist_next_invoice_number(
+                            invoice_number, db_path=db_path, config_path=config_path,
+                        )
+                    issued = ", ".join(r["invoice_number"] for r in results) or "none"
+                    raise InvoiceRecordError(
+                        f"could not record {number_str}: {exc} "
+                        f"(issued earlier in this run: {issued})"
+                    ) from exc
 
             results.append(summary)
             invoice_number += 1
@@ -510,6 +542,10 @@ def generate_invoices_for_period(
         )
 
     return results
+
+
+class InvoiceRecordError(RuntimeError):
+    """An invoice's PDF was rendered but its row and lines could not be recorded."""
 
 
 def check_scheduled_invoices(

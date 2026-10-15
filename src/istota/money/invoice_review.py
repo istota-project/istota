@@ -1,8 +1,9 @@
 """Invoice match actions shared by the CLI and web routes.
 
-Money writers take the DB write reservation before the work lock. A review
-commits its chosen invoice before stamping work, so a failed decision write
-cannot release the same credit to another invoice.
+Invoices and payment matches live in the same money.db, so a review's reads
+and writes run on one connection. A review commits its chosen invoice before
+marking it paid, so a failed decision write cannot release the same credit to
+another invoice.
 """
 
 import logging
@@ -136,11 +137,10 @@ def settle_payment_review(db_path, data_dir, config, ledger_txn_id, invoice_numb
             raise ValueError("Payment review already chose another invoice; retry that invoice")
 
         if not row["invoice_number"]:
-            with work._work_lock(data_dir):
-                live = open_invoice(config, invoice_number,
-                                    work.get_entries_for_invoice(data_dir, invoice_number))
-                if live is None or not row["account"] or live.bank_account != row["account"]:
-                    raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
+            live = open_invoice(config, invoice_number,
+                                work.get_entries_for_invoice(data_dir, invoice_number, conn=conn))
+            if live is None or not row["account"] or live.bank_account != row["account"]:
+                raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
             if not db.claim_review(conn, ledger_txn_id, invoice_number):
                 raise ValueError("Could not reserve payment review")
             conn.commit()
@@ -165,8 +165,8 @@ def settle_payment_review(db_path, data_dir, config, ledger_txn_id, invoice_numb
             live = open_invoice(config, invoice_number, entries)
             return live is not None and bool(row["account"]) and live.bank_account == row["account"]
 
-        count = work.record_invoice_payment(
-            data_dir, invoice_number, row["txn_date"], validate=validate,
+        count = work.mark_paid(
+            data_dir, invoice_number, row["txn_date"], validate=validate, conn=conn,
         ) or already_paid
         if not count:
             raise ValueError("Invoice is no longer wholly unpaid and eligible; review remains open")
@@ -184,9 +184,9 @@ def dismiss_payment_review(db_path, ledger_txn_id):
 
 
 def revert_invoice_payment(conn, data_dir, invoice_number):
-    """Reopen work and its match history with the same lock order as settlement."""
+    """Reopen an invoice and its match history in one transaction."""
     with conn:
         conn.execute("BEGIN IMMEDIATE")
-        count = work.clear_invoice_payment(data_dir, invoice_number)
+        count = work.mark_unpaid(data_dir, invoice_number, conn=conn)
         db.revert_settled(conn, invoice_number)
     return count

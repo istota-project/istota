@@ -1,5 +1,6 @@
 """Tests for money.core.invoicing module."""
 
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -1194,11 +1195,158 @@ class TestInvoiceNumberStampingIsUidAddressed:
         monkeypatch.setattr(invoicing_mod, "generate_invoice_html", lambda *a, **k: "<html></html>")
         monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", fake_pdf)
 
-        generate_invoices_for_period(
-            config=config, config_path=config_file,
-            accounting_path=tmp_path, data_dir=tmp_path,
-        )
+        # The active-line index refuses the second invoice, the transaction
+        # rolls back, and the PDF rendered for it is removed.
+        with pytest.raises(invoicing_mod.InvoiceRecordError, match="INV-000001"):
+            generate_invoices_for_period(
+                config=config, config_path=config_file,
+                accounting_path=tmp_path, data_dir=tmp_path,
+            )
         assert load_work_entries(tmp_path)[0].invoice == "INV-000999"
+        assert list((tmp_path / "invoices").rglob("*.pdf")) == []
+
+
+class TestTransactionalGeneration:
+    """An invoice and its lines are one transaction, with its PDF before it."""
+
+    def _setup(self, tmp_path, monkeypatch, *, schedule="on-demand"):
+        from istota.money.core import invoicing as invoicing_mod
+
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            f'accounting_path = "{tmp_path}"\n'
+            'invoice_output = "invoices"\n'
+            'next_invoice_number = 1\n\n'
+            '[company]\nname = "My Co"\n\n'
+            f'[clients.acme]\nname = "Acme Corp"\nterms = 30\n'
+            f'[clients.acme.invoicing]\nschedule = "{schedule}"\n\n'
+            '[services.dev]\ndisplay_name = "Development"\nrate = 150\ntype = "hours"\n'
+        )
+
+        def fake_pdf(html, output_path, **kwargs):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"%PDF-1.4")
+
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_html", lambda *a, **k: "<html></html>")
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", fake_pdf)
+        return config_file, parse_invoicing_config(config_file)
+
+    def _generate(self, tmp_path, config_file, config, **kwargs):
+        from istota.money.core.invoicing import generate_invoices_for_period
+
+        return generate_invoices_for_period(
+            config=config, config_path=config_file,
+            accounting_path=tmp_path, data_dir=tmp_path, **kwargs,
+        )
+
+    def test_records_the_invoice_row_with_its_total_and_pdf(self, tmp_path, monkeypatch):
+        from istota.money.work import add_work_entry, list_invoices, load_work_entries
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+        add_work_entry(tmp_path, "2026-03-11", "acme", "dev", qty=2)
+
+        (result,) = self._generate(tmp_path, config_file, config)
+
+        (record,) = list_invoices(tmp_path)
+        assert record.number == "INV-000001" == result["invoice_number"]
+        assert record.client == "acme"
+        assert record.status == "open"
+        assert record.total == 1500.0
+        assert record.issue_date == date.today()
+        assert record.pdf_path == result["file"]
+        assert sorted(record.entry_uids) == sorted(e.uid for e in load_work_entries(tmp_path))
+        assert {e.invoice for e in load_work_entries(tmp_path)} == {"INV-000001"}
+
+    def test_a_commit_failure_removes_the_rendered_pdf(self, tmp_path, monkeypatch):
+        from istota.money import work
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.work import add_work_entry, list_invoices, load_work_entries
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+
+        def failing_create(conn, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(work, "create_invoice", failing_create)
+
+        with pytest.raises(invoicing_mod.InvoiceRecordError, match="disk I/O error"):
+            self._generate(tmp_path, config_file, config)
+
+        assert list((tmp_path / "invoices").rglob("*.pdf")) == []
+        assert list_invoices(tmp_path) == []
+        assert load_work_entries(tmp_path)[0].invoice == ""
+        assert parse_invoicing_config(config_file).next_invoice_number == 1
+
+    def test_schedule_state_is_written_with_the_invoice(self, tmp_path, monkeypatch):
+        from istota.money import db
+        from istota.money.work import add_work_entry, db_path_for
+
+        config_file, config = self._setup(tmp_path, monkeypatch, schedule="monthly")
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+
+        self._generate(tmp_path, config_file, config, record_schedule=True)
+
+        with db.get_db(db_path_for(tmp_path)) as conn:
+            state = db.get_invoice_schedule_state(conn, "acme")
+        assert state is not None and state.last_generation_at
+
+    def test_schedule_state_rolls_back_with_a_failed_invoice(self, tmp_path, monkeypatch):
+        from istota.money import db
+        from istota.money.core import invoicing as invoicing_mod
+        from istota.money.work import add_work_entry, db_path_for
+
+        config_file, config = self._setup(tmp_path, monkeypatch, schedule="monthly")
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+
+        def failing_schedule(conn, client_key):
+            db.set_invoice_schedule_generation(conn, client_key)
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(db, "set_invoice_schedule_generation", failing_schedule)
+        with pytest.raises(invoicing_mod.InvoiceRecordError):
+            self._generate(tmp_path, config_file, config, record_schedule=True)
+
+        monkeypatch.undo()
+        with db.get_db(db_path_for(tmp_path)) as conn:
+            assert db.get_invoice_schedule_state(conn, "acme") is None
+            assert conn.execute("SELECT COUNT(*) FROM invoices").fetchone()[0] == 0
+
+    def test_the_next_number_skips_a_voided_number(self, tmp_path, monkeypatch):
+        from istota.money.core.invoicing import highest_existing_invoice_number
+        from istota.money.work import add_work_entry, void_invoice
+
+        config_file, config = self._setup(tmp_path, monkeypatch)
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+        self._generate(tmp_path, config_file, config)
+        void_invoice(tmp_path, "INV-000001")
+        assert highest_existing_invoice_number(tmp_path) == 1
+
+        # The counter in the config is behind on purpose: the invoices table wins.
+        config.next_invoice_number = 1
+        (result,) = self._generate(tmp_path, config_file, config)
+        assert result["invoice_number"] == "INV-000002"
+
+    def test_the_index_rejects_a_second_active_line(self, tmp_path):
+        from istota.money.work import (
+            add_work_entry, create_invoice, load_work_entries, write_transaction,
+        )
+
+        add_work_entry(tmp_path, "2026-03-10", "acme", "dev", qty=8)
+        uid = load_work_entries(tmp_path)[0].uid
+        with write_transaction(tmp_path) as conn:
+            create_invoice(
+                conn, number="INV-000001", client="acme", entity="default", group_name="",
+                issue_date=date(2026, 3, 31), total=1200, entry_uids=[uid], pdf_path="",
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            with write_transaction(tmp_path) as conn:
+                create_invoice(
+                    conn, number="INV-000002", client="acme", entity="default", group_name="",
+                    issue_date=date(2026, 3, 31), total=1200, entry_uids=[uid], pdf_path="",
+                )
+        assert load_work_entries(tmp_path)[0].invoice == "INV-000001"
 
 
 class TestInvoiceHtmlEscaping:

@@ -606,6 +606,9 @@ def ensure_initialised(ctx: UserContext) -> None:
     tracking_init_db(db_path)
     if ctx.db_path is None:
         ctx.db_path = db_path
+    from istota.money.work import bind_db_path  # noqa: PLC0415
+
+    bind_db_path(data_dir, db_path)
 
     migrate_legacy_workspace_config(ctx)
     # Fold the legacy year-keyed bracket columns into the status-keyed table.
@@ -614,6 +617,21 @@ def ensure_initialised(ctx: UserContext) -> None:
     seed_default_ledger(ctx)
     backfill_transaction_ids(ctx)
     backfill_work_entry_ids(ctx)
+    import_work_log(ctx)
+
+
+def import_work_log(ctx: UserContext) -> None:
+    """Import the TOML work log into money.db on first use, if it hasn't been.
+
+    Never fatal here: a blocked import is reported by every work and invoice
+    command, which is where the user can act on it.
+    """
+    from istota.money.work import WorkStoreBlocked, ensure_store
+
+    try:
+        ensure_store(Path(ctx.data_dir))
+    except WorkStoreBlocked as exc:
+        logger.warning("money_work_log_import_blocked %s", exc)
 
 
 def backfill_work_entry_ids(ctx: UserContext) -> int:

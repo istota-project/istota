@@ -36,6 +36,13 @@ class UserContext:
     # so both the web routes and the CLI honour one switch.
     autoclass_lookup: bool = True
 
+    def __post_init__(self):
+        # The work store lives in this context's money.db (see work.py).
+        if self.data_dir is not None and self.db_path is not None:
+            from istota.money.work import bind_db_path  # noqa: PLC0415
+
+            bind_db_path(self.data_dir, self.db_path)
+
 
 class Context:
     """CLI context holding resolved configuration.
@@ -78,6 +85,10 @@ class Context:
         self.tax_config_path = uctx.tax_config_path
         self.db_path = uctx.db_path
         self.autoclass_lookup = uctx.autoclass_lookup
+        if uctx.data_dir is not None:
+            from istota.money.work import bind_db_path  # noqa: PLC0415
+
+            bind_db_path(uctx.data_dir, uctx.db_path)
 
     def for_user(self, user_key: str) -> Context:
         """Return a shallow copy with the given user activated.
@@ -193,7 +204,7 @@ def _get_db_conn(ctx: Context):
     # rather than inherited, because `open_db` defaults to 30 and raising a CLI
     # command's lock budget is a change to what succeeds, not a refactor.
     return sqlite_util.connect(
-        ctx.db_path, timeout=5.0, busy_timeout_ms=None, foreign_keys=False,
+        ctx.db_path, timeout=5.0, busy_timeout_ms=None, foreign_keys=True,
     )
 
 
@@ -276,10 +287,54 @@ def list_users(ctx):
 # =============================================================================
 
 
+def _require_work_store(ctx: Context) -> None:
+    """Refuse a work or invoice command while the work log import is blocked.
+
+    The import runs the first time the store opens; a refused or failed one
+    leaves every work and invoice command answering with its reason and
+    writing nothing (see ``work.py``).
+    """
+    if ctx is None or ctx.data_dir is None:
+        return
+    from istota.money.work import WorkStoreBlocked, bind_db_path, ensure_store
+
+    bind_db_path(ctx.data_dir, ctx.db_path)
+
+    try:
+        ensure_store(ctx.data_dir)
+    except WorkStoreBlocked as exc:
+        _output({"status": "error", "error": str(exc)})
+
+
 @cli.group()
-def work():
+@click.pass_context
+def work(click_ctx):
     """Manage work log entries."""
-    pass
+    # `backfill-ids` is the fix for one refusal, so it runs while blocked.
+    if click_ctx.invoked_subcommand not in ("migrate", "backfill-ids"):
+        _require_work_store(click_ctx.find_object(Context))
+
+
+@work.command("migrate")
+@click.option("--dry-run", is_flag=True, help="Parse, write and verify, then roll back")
+@pass_ctx
+def work_migrate(ctx, dry_run):
+    """Import the TOML work log into money.db.
+
+    Runs automatically the first time the work store opens; this runs it by
+    hand, or previews it with --dry-run. A refusal names what to fix.
+    """
+    from istota.money.work import bind_db_path
+    from istota.money.work_migrate import migrate_work_log
+
+    data_dir = _require_data_dir(ctx)
+    bind_db_path(data_dir, ctx.db_path)
+    report = migrate_work_log(data_dir, dry_run=dry_run, db_path=ctx.db_path)
+    if not report.ok:
+        _output({"status": "error", "error": f"work log migration blocked: {report.reason}",
+                 "migration": report.as_dict()})
+        return
+    _output({"status": "ok", "migration": report.as_dict()})
 
 
 @work.command("add")
@@ -798,7 +853,7 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
     from istota.money.core.invoice_matching import (
         Payment, match_payments_to_invoices, summarize_matches,
     )
-    from istota.money.work import record_invoice_payment
+    from istota.money.work import mark_paid
 
     log = logging.getLogger("istota.money.cli")
 
@@ -885,12 +940,13 @@ def _match_invoices_unguarded(ctx, result: dict, tolerance: float, *, deliver_re
             if match.status == "matched" and match.invoice_number:
                 number = match.invoice_number
                 try:
-                    stamped = record_invoice_payment(
+                    stamped = mark_paid(
                         ctx.data_dir, number, match.payment.date,
                         validate=lambda entries: open_invoice(
                             config, number, entries, automatic=True, ledgers=ctx.ledgers,
                             detection_cache=detection_cache,
                         ) == original[number],
+                        conn=conn,
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("auto-match: could not mark %s paid: %s", number, exc)
@@ -1027,9 +1083,10 @@ def debug_monarch(ctx):
 
 
 @cli.group()
-def invoice():
+@click.pass_context
+def invoice(click_ctx):
     """Invoice management."""
-    pass
+    _require_work_store(click_ctx.find_object(Context))
 
 
 @invoice.command("generate")
@@ -1041,7 +1098,6 @@ def invoice():
 def invoice_generate(ctx, period, client, entity, dry_run):
     """Generate invoices for uninvoiced work entries."""
     from istota.money.core.invoicing import generate_invoices_for_period
-    from istota.money.db import set_invoice_schedule_generation
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -1051,28 +1107,16 @@ def invoice_generate(ctx, period, client, entity, dry_run):
 
     data_dir = _require_data_dir(ctx)
     try:
+        # Each invoice records its monthly client's schedule state in the
+        # transaction that issues it.
         results = generate_invoices_for_period(
             config=config, config_path=ctx.invoicing_config_path,
             accounting_path=accounting_path, data_dir=data_dir,
             period=period, client_filter=client,
             entity_filter=entity, dry_run=dry_run,
             invoice_output_dir=invoice_output_dir,
-            db_path=ctx.db_path,
+            db_path=ctx.db_path, record_schedule=True,
         )
-        if not dry_run:
-            scheduled_clients = {
-                result["client_key"]
-                for result in results
-                if config.clients[result["client_key"]].schedule == "monthly"
-            }
-            if scheduled_clients:
-                db_conn = _require_db(ctx)
-                try:
-                    for client_key in scheduled_clients:
-                        set_invoice_schedule_generation(db_conn, client_key)
-                    db_conn.commit()
-                finally:
-                    db_conn.close()
     except Exception as e:
         _output({"status": "error", "error": str(e)})
         return
@@ -1177,7 +1221,7 @@ def invoice_paid(ctx, invoice_number, payment_date, bank, no_post, ledger):
     )
     from istota.money.core.transactions import append_to_ledger
     from istota.money.core.ledger import run_bean_check
-    from istota.money.work import get_entries_for_invoice, record_invoice_payment
+    from istota.money.work import get_entries_for_invoice, mark_paid
 
     try:
         parsed_date = datetime.strptime(payment_date, "%Y-%m-%d").date()
@@ -1239,7 +1283,7 @@ def invoice_paid(ctx, invoice_number, payment_date, bank, no_post, ledger):
             })
             return
 
-    record_invoice_payment(data_dir, invoice_number, parsed_date.isoformat())
+    mark_paid(data_dir, invoice_number, parsed_date.isoformat())
 
     result = {
         "status": "ok",
@@ -1276,8 +1320,9 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
         persist_next_invoice_number,
         resolve_entity as resolve_entity_fn, build_line_items,
     )
-    from istota.money.core.models import InvoiceLineItem, Invoice
-    from istota.money.work import add_work_entry, get_entries_for_invoice
+    from istota.money.core.ids import new_txn_id
+    from istota.money.core.models import InvoiceLineItem, Invoice, WorkEntry
+    from istota.money.work import create_invoice, insert_entry, write_transaction
 
     try:
         config, accounting_path, invoice_output_dir = _load_invoicing_config(ctx)
@@ -1335,24 +1380,17 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     invoice_date = date.today()
     number_str = format_invoice_number(invoice_number)
 
-    # Insert service-based work entries with invoice pre-assigned
-    for svc_key, svc_qty, svc_desc, svc_entity in service_entries:
-        add_work_entry(
-            data_dir, invoice_date.isoformat(), client_key, svc_key,
-            qty=svc_qty, description=svc_desc, entity=svc_entity,
-            invoice=number_str, invoice_date=invoice_date,
-        )
-
-    # Insert manual items with invoice pre-assigned
-    for desc, amt in manual_items:
-        add_work_entry(
-            data_dir, invoice_date.isoformat(), client_key, "_manual",
-            amount=amt, description=desc, entity=entity or "",
-            invoice=number_str, invoice_date=invoice_date,
-        )
-
-    # Build line items from the entries we just created
-    inv_entries = get_entries_for_invoice(data_dir, number_str)
+    # The entries are built in memory and written with the invoice, in one
+    # transaction after the PDF exists.
+    inv_entries = [
+        WorkEntry(date=invoice_date, client=client_key.lower(), service=svc_key,
+                  qty=svc_qty, description=svc_desc, entity=svc_entity, uid=new_txn_id())
+        for svc_key, svc_qty, svc_desc, svc_entity in service_entries
+    ] + [
+        WorkEntry(date=invoice_date, client=client_key.lower(), service="_manual",
+                  amount=amt, description=desc, entity=entity or "", uid=new_txn_id())
+        for desc, amt in manual_items
+    ]
 
     items = build_line_items(
         [e for e in inv_entries if e.service != "_manual"],
@@ -1387,6 +1425,23 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
     pdf_filename = f"Invoice-{invoice_number:06d}-{invoice_date.strftime('%m_%d_%Y')}.pdf"
     pdf_path = output_dir / pdf_filename
     generate_invoice_pdf(html, pdf_path, root=accounting_path)
+
+    try:
+        with write_transaction(data_dir) as conn:
+            for new_entry in inv_entries:
+                insert_entry(conn, new_entry)
+            create_invoice(
+                conn, number=number_str, client=client_key.lower(),
+                entity=resolved_entity.key or entity or config.default_entity,
+                group_name="", issue_date=invoice_date, total=round(total, 2),
+                entry_uids=[e.uid for e in inv_entries], pdf_path=str(pdf_path),
+                manual=True,
+            )
+    except Exception as exc:
+        # Never leave a PDF behind for an invoice that was not recorded.
+        pdf_path.unlink(missing_ok=True)
+        _output({"status": "error", "error": f"could not record {number_str}: {exc}"})
+        return
 
     persist_next_invoice_number(
         invoice_number + 1, db_path=ctx.db_path,
@@ -1533,18 +1588,12 @@ def invoice_void(ctx, invoice_number, force, delete_pdf):
         })
         return
 
-    count = void_invoice(data_dir, invoice_number)
+    from istota.money.db import clear_invoice_state
+    from istota.money.work import write_transaction
 
-    # Clean up DB state
-    db_cleanup = {}
-    db_conn = _get_db_conn(ctx)
-    if db_conn:
-        try:
-            from istota.money.db import clear_invoice_state
-            db_cleanup = clear_invoice_state(db_conn, invoice_number)
-            db_conn.commit()
-        finally:
-            db_conn.close()
+    with write_transaction(data_dir) as conn:
+        count = void_invoice(data_dir, invoice_number, conn=conn)
+        db_cleanup = clear_invoice_state(conn, invoice_number)
 
     # Optionally delete PDF
     pdf_deleted = False
@@ -1618,7 +1667,6 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
     """
     from istota.money import config_store
     from istota.money.core.invoicing import check_scheduled_invoices, generate_invoices_for_period
-    from istota.money.db import set_invoice_schedule_generation
 
     error = _tolerance_error(tolerance)
     if error:
@@ -1671,13 +1719,9 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
                 accounting_path=accounting_path, data_dir=data_dir,
                 client_filter=client_key, dry_run=dry_run,
                 invoice_output_dir=invoice_output_dir,
-                db_path=ctx.db_path,
+                db_path=ctx.db_path, record_schedule=True,
             )
-            if results and not dry_run:
-                set_invoice_schedule_generation(db_conn, client_key)
             all_results.extend(results)
-
-        db_conn.commit()
 
         total = sum(r["total"] for r in all_results)
         out = {
@@ -1693,7 +1737,6 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
         _apply_monarch_status(out, monarch_result)
         _output(out)
     finally:
-        db_conn.commit()
         db_conn.close()
 
 

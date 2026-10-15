@@ -17,12 +17,10 @@ from istota.money import db as money_db
 from istota.money.cli import UserContext
 from istota.money.routes import get_user_config, require_auth, router, verify_origin
 from istota.money.work import (
-    _save_entries,
     add_work_entry,
     assign_invoice_number,
     get_entries_for_invoice,
-    load_work_entries,
-    record_invoice_payment,
+    mark_paid,
 )
 
 
@@ -32,9 +30,10 @@ def make_client(tmp_path: Path):
         ctx = UserContext(
             data_dir=tmp_path,
             ledgers=[],
-            db_path=tmp_path / "money.db",
+            db_path=tmp_path / "data" / "money.db",
             invoicing_config_path=invoicing_config_path,
         )
+        ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
         money_db.init_db(ctx.db_path)
         app = FastAPI()
         app.include_router(router, prefix="/api/money")
@@ -83,14 +82,16 @@ class TestInvoiceListDate:
         assert invoices[0]["date"] == "2026-04-01"
 
     def test_a_legacy_invoice_shows_its_latest_work(self, make_client, tmp_path):
-        """No stored date to show, and the earliest work is the wrong guess."""
-        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
-        add_work_entry(tmp_path, "2026-03-20", "acme", "dev", qty=4)
-        assign_invoice_number(tmp_path, [1, 2], "INV-000001")
-        entries = load_work_entries(tmp_path)
-        for entry in entries:
-            entry.invoice_date = None
-        _save_entries(tmp_path, entries)
+        """An invoice imported with no stored date was issued no earlier than
+        its latest work; the earliest work is the wrong guess."""
+        work_dir = tmp_path / "invoices" / "work"
+        work_dir.mkdir(parents=True)
+        (work_dir / "2026.toml").write_text(
+            '[[entries]]\nuid = "a"\ndate = 2026-03-01\nclient = "acme"\n'
+            'service = "dev"\nqty = 8\ninvoice = "INV-000001"\n\n'
+            '[[entries]]\nuid = "b"\ndate = 2026-03-20\nclient = "acme"\n'
+            'service = "dev"\nqty = 4\ninvoice = "INV-000001"\n'
+        )
 
         client = make_client(_write_invoicing_config(tmp_path, "invoices"))
         invoices = client.get("/api/money/invoices").json()["invoices"]
@@ -131,7 +132,7 @@ class TestMarkPaid:
 class TestMarkPending:
     def test_mark_pending_clears_paid_date_keeps_invoice(self, make_client, tmp_path):
         _seed_invoice(tmp_path)
-        record_invoice_payment(tmp_path, "INV-000001", "2026-04-15")
+        mark_paid(tmp_path, "INV-000001", "2026-04-15")
         client = make_client()
         resp = client.post("/api/money/invoices/INV-000001/mark-pending", json={})
         assert resp.status_code == 200
@@ -193,9 +194,9 @@ class TestInvoicePaymentMatches:
             add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=8)
             assign_invoice_number(tmp_path, [index], f"INV-{index:06d}", date(2026, 3, 2))
         for index in range(2, 5):
-            record_invoice_payment(tmp_path, f"INV-{index:06d}", "2026-04-15")
+            mark_paid(tmp_path, f"INV-{index:06d}", "2026-04-15")
         client = make_client(config)
-        with money_db.get_db(tmp_path / "money.db") as conn:
+        with money_db.get_db(tmp_path / "data" / "money.db") as conn:
             for index, status, decided_by in [(2, "settled", "auto"), (3, "settled", "user"), (4, "reverted", "auto")]:
                 money_db.record_payment_match(
                     conn, ledger_txn_id=str(index) * 32, txn_date="2026-04-15",
@@ -241,7 +242,7 @@ class TestInvoicePaymentMatches:
         db.init_db(framework)
         client.app.state.istota_config = Config(db_path=framework)
         ident = "a" * 32
-        with money_db.get_db(tmp_path / "money.db") as conn:
+        with money_db.get_db(tmp_path / "data" / "money.db") as conn:
             money_db.record_payment_match(
                 conn, ledger_txn_id=ident, txn_date="2026-04-15", amount=1800,
                 status="review", account="Assets:Bank:Checking", candidates=["INV-000001"],

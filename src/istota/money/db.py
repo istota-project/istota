@@ -1,7 +1,7 @@
-"""SQLite persistence for dedup tracking and schedule state.
+"""SQLite persistence for money: dedup tracking, schedule state, work and invoices.
 
-Single-user per instance — no user_id parameter in public API.
-Work entries are stored in plaintext TOML files (see work.py).
+Single-user per instance — no user_id parameter in public API. Work entries,
+invoices and invoice lines are read and written through ``work.py``.
 """
 
 from __future__ import annotations
@@ -86,6 +86,52 @@ CREATE TABLE IF NOT EXISTS kv_store (
     value TEXT NOT NULL,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS work_entries (
+    uid TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    client TEXT NOT NULL,
+    service TEXT NOT NULL,
+    qty REAL,
+    amount REAL,
+    discount REAL NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
+    entity TEXT NOT NULL DEFAULT '',
+    separate INTEGER NOT NULL DEFAULT 0,
+    extra TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_work_entries_date ON work_entries(date);
+
+CREATE TABLE IF NOT EXISTS invoices (
+    number TEXT PRIMARY KEY,
+    client TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    group_name TEXT NOT NULL DEFAULT '',
+    issue_date TEXT NOT NULL,
+    total REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open','paid','voided')),
+    paid_date TEXT,
+    voided_at TEXT,
+    was_paid INTEGER NOT NULL DEFAULT 0,
+    void_reason TEXT NOT NULL DEFAULT '',
+    replaced_by TEXT NOT NULL DEFAULT '[]',
+    pdf_path TEXT NOT NULL DEFAULT '',
+    manual INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- An entry is invoiced while it has an active line. The partial unique index
+-- makes billing one entry twice a constraint error rather than a code path.
+CREATE TABLE IF NOT EXISTS invoice_lines (
+    invoice_number TEXT NOT NULL REFERENCES invoices(number),
+    entry_uid TEXT NOT NULL REFERENCES work_entries(uid),
+    active INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (invoice_number, entry_uid)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invoice_lines_one_active
+    ON invoice_lines(entry_uid) WHERE active = 1;
 """
 
 
@@ -95,10 +141,11 @@ def get_db(db_path: Path | str):
 
     journal_mode (WAL) is set once by ``init_db`` and persists in the SQLite
     file header — not re-issued here. 30s busy handler absorbs any residual
-    contention instead of raising SQLITE_BUSY.
+    contention instead of raising SQLITE_BUSY. Foreign keys are on for the
+    invoice lines' references to invoices and work entries.
     """
     with sqlite_util.open_db(
-        db_path, foreign_keys=False, commit=True, rollback_on_error=True,
+        db_path, foreign_keys=True, commit=True, rollback_on_error=True,
     ) as conn:
         yield conn
 

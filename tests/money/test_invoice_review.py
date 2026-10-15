@@ -7,7 +7,9 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from tests.money.test_cli import TestSyncMonarchInvoiceMatching as SyncFixtures, _invoke, _seed_monarch
+from tests.money.test_cli import (
+    TestSyncMonarchInvoiceMatching as SyncFixtures, _invoke, _seed_monarch, _set_entry,
+)
 from istota.money import db, work
 
 
@@ -76,20 +78,15 @@ def test_dismiss_and_invalid_candidate(scenario):
     assert all(e.paid_date is None for e in work.load_work_entries(ctx.data_dir))
 
 
-@pytest.mark.parametrize("change", ["paid", "partial", "void"])
+@pytest.mark.parametrize("change", ["paid", "void"])
 def test_review_refuses_invoice_no_longer_open(scenario, change):
     ctx, call, sync = scenario
     sync()
     ident = call("invoice", "review", "list")["matches"][0]["ledger_txn_id"]
     if change == "void":
         call("invoice", "void", "INV-000001")
-    elif change == "paid":
-        call("invoice", "paid", "INV-000001", "--date", date.today().isoformat(), "--no-post")
     else:
-        entries = work.load_work_entries(ctx.data_dir)
-        from dataclasses import replace
-        entries.append(replace(entries[0], uid="other-work-entry", paid_date=date.today()))
-        work._save_entries(ctx.data_dir, entries)
+        call("invoice", "paid", "INV-000001", "--date", date.today().isoformat(), "--no-post")
     call("invoice", "review", "settle", ident, "--invoice", "INV-000001", ok=False)
     with db.get_db(ctx.db_path) as conn:
         assert db.list_payment_matches(conn)[0]["status"] == "review"
@@ -147,29 +144,20 @@ def test_match_identity_is_ledger_id_not_monarch_id(tmp_path):
         assert len(db.list_payment_matches(conn)) == 2
 
 
-def test_review_validates_after_acquiring_work_lock(scenario):
-    from contextlib import contextmanager
-
+def test_review_validates_the_invoice_as_it_stands(scenario):
+    """The review was listed against a live invoice; settling re-reads it."""
     ctx, call, sync = scenario
     sync()
     ident = call("invoice", "review", "list")["matches"][0]["ledger_txn_id"]
-    original_lock = work._work_lock
+    _set_entry(ctx.data_dir, 0, service="retired-service")
 
-    @contextmanager
-    def changed_before_lock(data_dir):
-        with original_lock(data_dir):
-            entries = work.load_work_entries(data_dir)
-            entries[0].service = "retired-service"
-            work._save_entries(data_dir, entries)
-            yield
-
-    with patch.object(work, "_work_lock", changed_before_lock):
-        call("invoice", "review", "settle", ident, "--invoice", "INV-000001", ok=False)
+    call("invoice", "review", "settle", ident, "--invoice", "INV-000001", ok=False)
     assert all(e.paid_date is None for e in work.load_work_entries(ctx.data_dir))
     assert call("invoice", "review", "list")["matches"][0]["status"] == "review"
 
 
-def test_failed_decision_write_leaves_stamped_work_and_open_review(scenario):
+def test_failed_decision_write_rolls_back_the_payment_and_keeps_the_choice(scenario):
+    """Marking paid and closing the review are one transaction now."""
     from istota.money import config_store
     from istota.money.invoice_review import settle_payment_review
 
@@ -180,11 +168,11 @@ def test_failed_decision_write_leaves_stamped_work_and_open_review(scenario):
         with pytest.raises(RuntimeError, match="write failed"):
             settle_payment_review(ctx.db_path, ctx.data_dir,
                                   config_store.load_invoicing(ctx.db_path), ident, "INV-000001")
-    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000001")[0].paid_date == date.today()
+    assert work.get_entries_for_invoice(ctx.data_dir, "INV-000001")[0].paid_date is None
     review = call("invoice", "review", "list")["matches"][0]
     assert review["status"] == "review"
     assert review["invoice_number"] == "INV-000001"
-    assert review["candidate_details"] == []
+    assert [c["invoice_number"] for c in review["candidate_details"]] == ["INV-000001"]
     call("invoice", "review", "settle", ident, "--invoice", "INV-000002", ok=False)
     assert work.get_entries_for_invoice(ctx.data_dir, "INV-000002")[0].paid_date is None
     call("invoice", "review", "settle", ident, "--invoice", "INV-000001")
@@ -210,7 +198,7 @@ def test_uncertain_work_write_keeps_review_choice(scenario):
     ctx, call, sync = scenario
     sync()
     ident = call("invoice", "review", "list")["matches"][0]["ledger_txn_id"]
-    with patch.object(work, "_save_entries", side_effect=OSError("write interrupted")):
+    with patch.object(work, "mark_paid", side_effect=OSError("write interrupted")):
         with pytest.raises(OSError, match="write interrupted"):
             settle_payment_review(ctx.db_path, ctx.data_dir,
                                   config_store.load_invoicing(ctx.db_path), ident, "INV-000001")
@@ -296,9 +284,7 @@ def test_two_ledgers_keep_equal_invoice_payments_separate(scenario, second_enabl
         payment_detection_ledger="missing" if invalid else "oThEr",
     )
     config_store.save_invoicing(ctx.db_path, config)
-    entries = work.load_work_entries(ctx.data_dir)
-    entries[1].entity = "other"
-    work._save_entries(ctx.data_dir, entries)
+    _set_entry(ctx.data_dir, 1, entity="other")
     _seed_monarch(ctx.db_path, SyncFixtures._MONARCH_TOML +
                   '\n[monarch.profiles.default.tags]\ninclude = ["default"]\n'
                   '[monarch.profiles.feed]\nledger = "OTHER"\n'
@@ -356,9 +342,7 @@ def test_valid_entity_is_validated_once_across_invoices_and_settlement(scenario)
     from istota.money.invoice_review import validate_payment_detection
 
     ctx, call, _ = scenario
-    entries = work.load_work_entries(ctx.data_dir)
-    entries[1].qty = 4
-    work._save_entries(ctx.data_dir, entries)
+    _set_entry(ctx.data_dir, 1, qty=4)
     helper = SyncFixtures()
     with patch("istota.money.invoice_review.validate_payment_detection",
                wraps=validate_payment_detection) as validate:

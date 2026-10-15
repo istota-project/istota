@@ -1,91 +1,87 @@
-"""File-based work entry storage using yearly TOML files.
+"""Work entries and invoices, stored in ``money.db``.
 
-Entries are stored in {data_dir}/invoices/work/{year}.toml files, sorted by date.
-Display indices (1-based) are assigned across all loaded entries, sorted by date.
+Entries live in ``work_entries``, invoices in ``invoices`` and the link between
+them in ``invoice_lines``. An entry is invoiced while it has an *active* line;
+voiding an invoice deactivates its lines, so the voided invoice still lists the
+entries it covered and the entries become billable again. A partial unique
+index allows one active line per entry, so double billing is a constraint
+error. ``WorkEntry.invoice``, ``invoice_date`` and ``paid_date`` are filled by
+the read from the active line and its invoice, and writing them on an entry
+does nothing.
 
-Two kinds of identity live here, and they are not interchangeable:
+The TOML year files under ``{data_dir}/invoices/work/`` are the old store.
+The first time a work function opens the store and the ``work_store`` key is
+missing, :func:`istota.money.work_migrate.migrate_work_log` imports them. A
+refused or failed import raises :class:`WorkStoreBlocked` from every function
+here, and nothing is written.
 
-* ``entry.id`` — the 1-based display index, recomputed on every load. It is a
-  presentation detail (the CLI's ``#N`` UX) and shifts whenever anything is
-  inserted before an entry.
-* ``entry.uid`` — a stable id stamped by every writer, mirroring the ``id:``
-  metadata beancount transactions carry (see ``core/edit.py``). Programmatic
-  callers that resolve an entry at one moment and mutate it at another — the
-  web UI above all — must address it by ``uid`` via
-  :func:`update_work_entry_by_uid` / :func:`remove_work_entry_by_uid`, which
-  resolve *inside* the write lock. Reading never stamps a uid;
-  :func:`backfill_work_ids` does, and runs from ``ensure_initialised``.
+Two kinds of identity, not interchangeable:
 
-Round-trip caveat: these files are deliberately hand-editable, but a write
-rewrites the whole year file from the serializer's output. Unrecognised keys
-survive (they're captured into ``WorkEntry.extra``); **comments do not**, and
-neither do nested tables. Preserving comments would need a comment-aware TOML
-library, which this module doesn't carry.
+* ``entry.id`` — the 1-based display index, recomputed on every read, ordered
+  by ``(date, created_at, uid)``. The CLI's ``#N``.
+* ``entry.uid`` — the stable primary key. Anything that holds a reference
+  across time (the web UI, invoice generation) addresses entries by uid.
+
+**Where the database is.** ``money.db`` is the same file the rest of the money
+module uses, which on a deployment is ``Config.module_db_path`` on local disk,
+not ``{data_dir}/data/money.db`` on the workspace mount. The functions here
+take ``data_dir``, so the money contexts (``cli.UserContext`` on construction,
+``cli.Context.activate_user`` and ``_migrate.ensure_initialised``) call
+:func:`bind_db_path` with their ``db_path``; an unbound ``data_dir`` falls back
+to ``{data_dir}/data/money.db``.
+
+Writes run under ``BEGIN IMMEDIATE``. A caller already holding a transaction
+on ``money.db`` passes its connection as ``conn=`` so the write joins it; a
+second connection would wait on the first one's lock.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
-from contextlib import contextmanager
+import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import date, datetime
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time
 from pathlib import Path
 
-import tomli
-
-from istota.lib.atomic_write import write_text_atomic
 from istota.lib.file_lock import exclusive_lock
+from istota.lib.timestamps import iso_now
 from istota.money.core.ids import new_txn_id
-from istota.money.core.models import WorkEntry
+from istota.money.core.models import InvoiceRecord, WorkEntry
 
 logger = logging.getLogger(__name__)
 
-# Fields the loader understands. Anything else in a year file is captured into
-# WorkEntry.extra and written back verbatim.
-_KNOWN_ENTRY_KEYS = frozenset({
-    "uid", "date", "client", "service", "qty", "amount",
-    "discount", "description", "entity", "invoice", "invoice_date", "paid_date",
-})
-
-# Fields a caller may never set through the generic update path.
-_PROTECTED_FIELDS = frozenset({"uid", "id", "extra"})
+# Fields a caller may never set through the generic update path. The invoice
+# fields are read from the invoice, so an update that names them goes through
+# the attach path instead (``invoice``) or is ignored.
+_PROTECTED_FIELDS = frozenset({"uid", "id", "extra", "invoice_date", "paid_date"})
 
 
 class WorkStoreLocked(RuntimeError):
-    """Raised when the work-entry write lock can't be acquired in time."""
+    """Raised when the legacy work-file lock can't be acquired in time."""
 
 
-class WorkFileQuarantined(RuntimeError):
-    """Raised when a write would drop a row the loader couldn't read.
+class WorkStoreBlocked(RuntimeError):
+    """The TOML work log could not be imported, so the store is unavailable.
 
-    A write rewrites the whole year file from the loaded list, so a row that
-    was skipped on read would be silently deleted. Reads degrade (the other
-    entries load); writes to that year fail until a human fixes the row.
+    The message is ``work log migration blocked: <reason>``, which the CLI and
+    routes pass through as the error.
     """
-
-
-# Year files whose last read skipped at least one entry, and the reason. A read
-# always precedes a write inside the lock, so this is current by the time
-# _save_year consults it. Process-local; a stale entry only ever refuses a
-# write it could have allowed, which is the safe direction.
-_QUARANTINED_YEARS: dict[Path, str] = {}
 
 
 @dataclass
 class WorkMutationResult:
     """Outcome of a uid-addressed mutation.
 
-    ``update_work_entry``/``remove_work_entry`` return a bare bool, which
-    can't tell "no such entry" from "found it, but it's invoiced" — a
-    distinction the web API needs to pick 404 vs 409.
-
     ``status`` is one of ``ok`` / ``not_found`` / ``invoiced`` / ``conflict``
-    / ``no_fields``. ``entry`` carries the current server-side entry when one
-    was resolved (so a conflict can show the caller what it actually looks like).
+    / ``no_fields`` / ``on_voided_invoice`` (a removal refused because a
+    voided invoice still lists the entry). ``entry`` carries the current
+    server-side entry when one was resolved.
     """
     status: str
     entry: WorkEntry | None = None
@@ -95,33 +91,130 @@ class WorkMutationResult:
         return self.status == "ok"
 
 
+# =============================================================================
+# Where the store is, and opening it
+# =============================================================================
+
+_BOUND_DB_PATHS: dict[str, Path] = {}
+_INITIALISED: set[str] = set()
+
+
+def _key(data_dir: Path) -> str:
+    return os.path.abspath(os.fspath(data_dir))
+
+
+def bind_db_path(data_dir: Path, db_path: Path | None) -> None:
+    """Record which ``money.db`` holds the work store for ``data_dir``."""
+    if db_path is None:
+        return
+    _BOUND_DB_PATHS[_key(data_dir)] = Path(db_path)
+
+
+def db_path_for(data_dir: Path) -> Path:
+    bound = _BOUND_DB_PATHS.get(_key(data_dir))
+    if bound is not None:
+        return bound
+    return Path(data_dir) / "data" / "money.db"
+
+
+def _init(path: Path) -> None:
+    from istota.money import db  # noqa: PLC0415
+
+    key = os.path.abspath(path)
+    if key in _INITIALISED and path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db.init_db(path)
+    _INITIALISED.add(key)
+
+
+def _is_migrated(conn: sqlite3.Connection) -> bool:
+    from istota.money import db  # noqa: PLC0415
+    from istota.money.work_migrate import WORK_STORE_KEY  # noqa: PLC0415
+
+    return db.kv_get(conn, WORK_STORE_KEY) is not None
+
+
+def ensure_store(data_dir: Path) -> Path:
+    """Make sure the store is usable: schema present and the work log imported.
+
+    Returns the database path. Raises :class:`WorkStoreBlocked` when the
+    import refuses or fails.
+    """
+    from istota.money import db  # noqa: PLC0415
+    from istota.money.work_migrate import migrate_work_log  # noqa: PLC0415
+
+    path = db_path_for(data_dir)
+    _init(path)
+    with db.get_db(path) as conn:
+        if _is_migrated(conn):
+            return path
+    report = migrate_work_log(data_dir, db_path=path)
+    if not report.ok:
+        raise WorkStoreBlocked(f"work log migration blocked: {report.reason}")
+    return path
+
+
+def _check_conn(conn: sqlite3.Connection, data_dir: Path) -> None:
+    if _is_migrated(conn):
+        return
+    if conn.in_transaction:
+        # Importing needs a write lock this caller's own transaction holds.
+        raise WorkStoreBlocked(
+            "work log migration blocked: the work log has not been imported yet",
+        )
+    ensure_store(data_dir)
+
+
+@contextmanager
+def _reading(data_dir: Path, conn: sqlite3.Connection | None = None):
+    from istota.money import db  # noqa: PLC0415
+
+    if conn is not None:
+        _check_conn(conn, data_dir)
+        yield conn
+        return
+    path = ensure_store(data_dir)
+    with db.get_db(path) as own:
+        yield own
+
+
+@contextmanager
+def write_transaction(data_dir: Path, conn: sqlite3.Connection | None = None):
+    """A ``BEGIN IMMEDIATE`` transaction on the store, committed on a clean exit.
+
+    With ``conn``, the caller owns the transaction: nothing begins or commits
+    here.
+    """
+    from istota.money import db  # noqa: PLC0415
+
+    if conn is not None:
+        _check_conn(conn, data_dir)
+        yield conn
+        return
+    path = ensure_store(data_dir)
+    with db.get_db(path) as own:
+        own.execute("BEGIN IMMEDIATE")
+        yield own
+
+
+# =============================================================================
+# Legacy file lock (the TOML store's writers; kept for the import and backfill)
+# =============================================================================
+
+
 def _work_dir(data_dir: Path) -> Path:
     from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415
 
     # Created from the money data dir with no link followed at `invoices` or
-    # `work` (ISSUE-723): the year files are written under it.
+    # `work` (ISSUE-723).
     os.close(open_or_create_dirs(data_dir, ["invoices", "work"]))
     return data_dir / "invoices" / "work"
 
 
-def _year_file(work_dir: Path, year: int) -> Path:
-    return work_dir / f"{year}.toml"
-
-
 @contextmanager
 def _work_lock(data_dir: Path, *, timeout_seconds: float = 10.0):
-    """Serialize read-modify-write cycles on the work-entry store.
-
-    The web process (mark-paid / mark-pending) and the scheduler/CLI
-    (invoice generate, invoice paid, add) both rewrite these yearly TOML
-    files. Without a lock, two concurrent load→modify→save cycles are
-    last-writer-wins on the whole file and one mutation is silently lost.
-
-    Holds an exclusive flock on ``{work_dir}/.work.lock`` (a sibling anchor
-    file, never the data files themselves) for the duration of the context.
-    Readers don't take the lock; atomic per-file writes (see ``_save_year``)
-    keep each file individually consistent for them. Linux + macOS only.
-    """
+    """Exclusive flock on ``{work_dir}/.work.lock`` for the year files' writers."""
     lock_path = _work_dir(data_dir) / ".work.lock"
     with exclusive_lock(
         lock_path,
@@ -131,109 +224,14 @@ def _work_lock(data_dir: Path, *, timeout_seconds: float = 10.0):
         yield
 
 
+# =============================================================================
+# Serialization (the etag, and the uid backfill's year files)
+# =============================================================================
+
+
 def _parse_date(s: str) -> date:
     parts = s.split("-")
     return date(int(parts[0]), int(parts[1]), int(parts[2]))
-
-
-def _coerce_date(value) -> date | None:
-    """Read a date field written as a TOML date, datetime, or quoted string."""
-    if isinstance(value, datetime):
-        # A TOML datetime is a `date` subclass whose isoformat() carries a time
-        # component — narrow it so downstream string comparisons still work.
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        try:
-            return _parse_date(value.strip())
-        except (ValueError, IndexError):
-            return None
-    return None
-
-
-def _coerce_number(value) -> float | int | None:
-    """Read a numeric field, tolerating a quoted number. None if unusable."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
-
-
-def _coerce_text(value) -> str | None:
-    """Read a string field, stringifying a bare scalar. None if unusable."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return _format_num(value)
-    return None
-
-
-def _load_year(path: Path) -> list[WorkEntry]:
-    """Load one year file, skipping rows the loader can't model.
-
-    These files are hand-editable, and a plausible mistake — a quoted date,
-    a quoted number — used to load as the wrong type and surface three layers
-    later as an ``AttributeError`` from ``.isoformat()`` or a ``TypeError``
-    from the sort, taking down every reader of the store. Coercible values are
-    coerced; a row missing a usable date/client/service is skipped and its year
-    marked quarantined, so the rest of the year stays readable and no write can
-    silently delete the row we couldn't read.
-    """
-    if not path.exists():
-        _QUARANTINED_YEARS.pop(path, None)
-        return []
-    # UTF-8 both ways. `_save_year` writes through `atomic_write`, which
-    # encodes UTF-8 rather than taking the locale's encoding, so a reader
-    # left implicit would decode a non-ASCII payee with whatever `LANG`
-    # happened to say and mangle it on the next save.
-    data = tomli.loads(path.read_text(encoding="utf-8"))
-    entries = []
-    skipped: list[str] = []
-    for position, raw in enumerate(data.get("entries", []), 1):
-        entry_date = _coerce_date(raw.get("date"))
-        client = _coerce_text(raw.get("client"))
-        service = _coerce_text(raw.get("service"))
-        if entry_date is None or client is None or service is None:
-            skipped.append(f"entry #{position} (uid={raw.get('uid') or '?'})")
-            logger.error(
-                "work_entry_unreadable file=%s position=%d date=%r client=%r service=%r — "
-                "skipped; fix the row by hand (writes to this year are refused until then)",
-                path.name, position, raw.get("date"), raw.get("client"), raw.get("service"),
-            )
-            continue
-        # An unusable optional number is dropped rather than skipping the whole
-        # row: a $0 line on the Work tab is something a human notices, a
-        # billable entry that silently vanished is not.
-        qty = _coerce_number(raw["qty"]) if raw.get("qty") is not None else None
-        amount = _coerce_number(raw["amount"]) if raw.get("amount") is not None else None
-        discount = _coerce_number(raw.get("discount", 0))
-        entries.append(WorkEntry(
-            date=entry_date,
-            client=client,
-            service=service,
-            qty=qty,
-            amount=amount,
-            discount=0 if discount is None else discount,
-            description=_coerce_text(raw.get("description", "")) or "",
-            entity=_coerce_text(raw.get("entity", "")) or "",
-            invoice=_coerce_text(raw.get("invoice", "")) or "",
-            invoice_date=_coerce_date(raw.get("invoice_date")),
-            paid_date=_coerce_date(raw.get("paid_date")),
-            uid=_coerce_text(raw.get("uid", "")) or "",
-            extra={k: v for k, v in raw.items() if k not in _KNOWN_ENTRY_KEYS},
-        ))
-    if skipped:
-        _QUARANTINED_YEARS[path] = ", ".join(skipped)
-    else:
-        _QUARANTINED_YEARS.pop(path, None)
-    return entries
 
 
 def _format_num(n: float) -> str:
@@ -252,21 +250,13 @@ _TOML_ESCAPES = {
     "\r": "\\r",
 }
 
-# Bare TOML keys are letters, digits, underscores and dashes. Anything else —
-# a space, a dot, a quote — has to be written as a quoted key or the file
-# fails to parse on the next read.
+# Bare TOML keys are letters, digits, underscores and dashes; anything else is
+# written as a quoted key.
 _BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _escape(s: str) -> str:
-    """Escape a string for a TOML basic string.
-
-    Every control character has to be escaped, not just the newline: a bare
-    CR (or tab, or NUL) inside a basic string makes the whole year file
-    unparseable, which takes down every reader including invoicing. The web
-    routes put arbitrary user strings on this path, so partial escaping was a
-    persisted-corruption bug rather than a cosmetic one.
-    """
+    """Escape a string for a TOML basic string, every control character included."""
     out = []
     for ch in s:
         esc = _TOML_ESCAPES.get(ch)
@@ -280,29 +270,20 @@ def _escape(s: str) -> str:
 
 
 def _format_toml_key(key: str) -> str:
-    """Render an ``extra`` key, quoting it when it can't be written bare."""
     if _BARE_KEY_RE.match(key):
         return key
     return f'"{_escape(key)}"'
 
 
 def _format_toml_value(value) -> str | None:
-    """Render a value from ``WorkEntry.extra`` back to TOML, or None if we can't.
-
-    Deliberately narrow: the serializer is hand-rolled string building, so a
-    nested table or an arbitrary object has no place to go. Returning None
-    drops the key rather than writing something that won't parse back — a
-    hand edit must not be able to poison every subsequent save.
-    """
+    """Render a value from ``WorkEntry.extra`` as TOML, or None if it has no flat form."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return _format_num(value)
     if isinstance(value, str):
         return f'"{_escape(value)}"'
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
+    if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, list):
         rendered = [_format_toml_value(v) for v in value]
@@ -338,11 +319,6 @@ def _serialize_entry(entry: WorkEntry) -> str:
     for key in sorted(entry.extra):
         rendered = _format_toml_value(entry.extra[key])
         if rendered is None:
-            logger.warning(
-                "work_entry_extra_key_dropped key=%s type=%s — "
-                "the work serializer only writes scalars and flat lists",
-                key, type(entry.extra[key]).__name__,
-            )
             continue
         lines.append(f"{_format_toml_key(key)} = {rendered}")
     return "\n".join(lines)
@@ -352,124 +328,290 @@ def entry_etag(entry: WorkEntry) -> str:
     """Content hash of an entry, for optimistic-concurrency checks.
 
     Derived from the serialized form, so it covers every persisted field
-    (``extra`` included) and nothing transient — notably not the display
-    index, which shifts whenever an earlier entry is inserted. Never stored.
+    (``extra`` and the invoice stamps included) and not the display index.
+    Never stored.
     """
     return hashlib.sha256(_serialize_entry(entry).encode()).hexdigest()[:12]
 
 
-def _render_year(entries: list[WorkEntry]) -> str:
-    """Serialize a year's entries, sorted by date. Empty list renders as ''."""
-    if not entries:
-        return ""
-    entries.sort(key=lambda e: e.date)
-    return "\n\n".join(_serialize_entry(e) for e in entries) + "\n"
+# =============================================================================
+# Rows
+# =============================================================================
+
+# TOML has date, datetime and time values that JSON does not. ``extra`` keeps
+# them as one-key objects so they read back as the same type.
+_EXTRA_TAGS = {"$date": date, "$datetime": datetime, "$time": time}
 
 
-def _save_year(path: Path, entries: list[WorkEntry]) -> None:
-    text = _render_year(entries)
-
-    if _QUARANTINED_YEARS.get(path):
-        # A write rewrites the whole file, so the row we couldn't read would be
-        # deleted. A write that changes nothing visible (this year wasn't the
-        # target — _save_entries rewrites every year it knows about) just skips
-        # the file; one that would change something is refused.
-        if text == _render_year(_load_year(path)):
-            return
-        raise WorkFileQuarantined(
-            f"{path.name} has an entry this version can't read "
-            f"({_QUARANTINED_YEARS.get(path)}); writing would delete it. "
-            "Fix the row by hand and retry."
-        )
-
-    if not entries:
-        if path.exists():
-            path.unlink()
-        return
-    # Parse what we're about to write. The serializer is hand-rolled string
-    # building, so a field it doesn't escape correctly produces a file that
-    # loads back as a TOMLDecodeError — and by then it's on disk, taking down
-    # every reader of that year until someone hand-repairs it. Failing the
-    # write instead keeps the last good file and surfaces the bug at its source.
-    try:
-        tomli.loads(text)
-    except tomli.TOMLDecodeError as e:
-        raise ValueError(f"refusing to write unparseable work file {path.name}: {e}") from e
-    # Atomic write: a crash (or a half-written FUSE/rclone flush) mid-write
-    # must not leave a truncated or partial year file. The staging name is
-    # unique per *call* — it was `.{name}.{pid}.tmp`, which two threads of one
-    # process (the web routes reach the store through `asyncio.to_thread`)
-    # compute identically, so only `_work_lock` above stood between that and a
-    # torn publish.
-    write_text_atomic(path, text)
+def _tag(value):
+    if isinstance(value, datetime):
+        return {"$datetime": value.isoformat()}
+    if isinstance(value, date):
+        return {"$date": value.isoformat()}
+    if isinstance(value, time):
+        return {"$time": value.isoformat()}
+    if isinstance(value, list):
+        return [_tag(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _tag(v) for k, v in value.items()}
+    return value
 
 
-def _load_all(data_dir: Path) -> list[WorkEntry]:
-    # Reading must not create the store. ensure_initialised runs a backfill on
-    # every money request, and that used to mkdir invoices/work/ (plus a lock
-    # anchor) on the Nextcloud mount for users who never touch invoicing.
-    wd = data_dir / "invoices" / "work"
-    if not wd.is_dir():
-        return []
-    all_entries = []
-    for f in sorted(wd.glob("*.toml")):
-        try:
-            int(f.stem)
-        except ValueError:
-            continue
-        all_entries.extend(_load_year(f))
-    all_entries.sort(key=lambda e: e.date)
-    return all_entries
+def _untag(value):
+    if isinstance(value, list):
+        return [_untag(v) for v in value]
+    if isinstance(value, dict):
+        if len(value) == 1:
+            (tag, raw), = value.items()
+            kind = _EXTRA_TAGS.get(tag)
+            if kind is not None and isinstance(raw, str):
+                return kind.fromisoformat(raw)
+        return {k: _untag(v) for k, v in value.items()}
+    return value
 
 
-def _save_entries(data_dir: Path, entries: list[WorkEntry]) -> None:
-    wd = _work_dir(data_dir)
-    # Any entry touched by a write acquires a uid as a side effect, so the
-    # store converges on full coverage even between explicit backfills.
-    for entry in entries:
-        if not entry.uid:
-            entry.uid = new_txn_id()
-    by_year: dict[int, list[WorkEntry]] = {}
-    for entry in entries:
-        by_year.setdefault(entry.date.year, []).append(entry)
-    existing_years: set[int] = set()
-    for f in wd.glob("*.toml"):
-        try:
-            existing_years.add(int(f.stem))
-        except ValueError:
-            pass
-    for year in existing_years | by_year.keys():
-        _save_year(_year_file(wd, year), by_year.get(year, []))
+def _encode_extra(extra: dict) -> str:
+    return json.dumps(_tag(extra or {}), sort_keys=True, ensure_ascii=False)
 
 
-def load_work_entries(data_dir: Path) -> list[WorkEntry]:
-    """Load all entries from all year files, sorted by date.
-    Sets entry.id to 1-based display index."""
-    entries = _load_all(data_dir)
-    for i, entry in enumerate(entries, 1):
-        entry.id = i
+def _decode_extra(text: str) -> dict:
+    return _untag(json.loads(text or "{}"))
+
+
+def _opt_date(value: str | None) -> date | None:
+    return date.fromisoformat(value) if value else None
+
+
+def _now() -> str:
+    return iso_now()
+
+
+_ENTRY_QUERY = """
+SELECT e.uid, e.date, e.client, e.service, e.qty, e.amount, e.discount,
+       e.description, e.entity, e.extra,
+       l.invoice_number AS invoice, i.issue_date, i.paid_date
+FROM work_entries e
+LEFT JOIN invoice_lines l ON l.entry_uid = e.uid AND l.active = 1
+LEFT JOIN invoices i ON i.number = l.invoice_number
+ORDER BY e.date, e.created_at, e.uid
+"""
+
+
+def read_entries(conn: sqlite3.Connection) -> list[WorkEntry]:
+    """Every entry, in display order, with ``id`` set to its display index."""
+    entries = []
+    for position, row in enumerate(conn.execute(_ENTRY_QUERY), 1):
+        entries.append(WorkEntry(
+            date=date.fromisoformat(row["date"]),
+            client=row["client"],
+            service=row["service"],
+            qty=row["qty"],
+            amount=row["amount"],
+            discount=row["discount"],
+            description=row["description"],
+            entity=row["entity"],
+            invoice=row["invoice"] or "",
+            invoice_date=_opt_date(row["issue_date"]),
+            paid_date=_opt_date(row["paid_date"]),
+            id=position,
+            uid=row["uid"],
+            extra=_decode_extra(row["extra"]),
+        ))
     return entries
 
 
-def quarantined_years(data_dir: Path) -> dict[str, str]:
-    """Year files under ``data_dir`` holding a row this version can't read.
+def _invoice_from_row(row, entry_uids: list[str]) -> InvoiceRecord:
+    return InvoiceRecord(
+        number=row["number"],
+        client=row["client"],
+        entity=row["entity"],
+        group_name=row["group_name"],
+        issue_date=date.fromisoformat(row["issue_date"]),
+        total=row["total"],
+        status=row["status"],
+        paid_date=_opt_date(row["paid_date"]),
+        voided_at=row["voided_at"],
+        was_paid=bool(row["was_paid"]),
+        void_reason=row["void_reason"],
+        replaced_by=json.loads(row["replaced_by"] or "[]"),
+        pdf_path=row["pdf_path"],
+        manual=bool(row["manual"]),
+        created_at=row["created_at"],
+        entry_uids=entry_uids,
+    )
 
-    Maps file name to the reason recorded by the last read. A caller counting
-    references has to consult this: a skipped row is invisible to
-    ``load_work_entries``, so a reference living in one reads as zero and a
-    guard built on that count fails *open* — which is how deleting the service
-    an unreadable row names would unbill it once someone repairs the row.
 
-    ``_QUARANTINED_YEARS`` is process-local and refreshed per year file on
-    every read, so this is only meaningful immediately after a
-    ``load_work_entries`` call against the same store.
+def read_invoices(
+    conn: sqlite3.Connection,
+    *,
+    client: str | None = None,
+    include_voided: bool = True,
+) -> list[InvoiceRecord]:
+    """Every invoice row, by number, each with all the entries it covered."""
+    lines: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT l.invoice_number, l.entry_uid FROM invoice_lines l "
+        "JOIN work_entries e ON e.uid = l.entry_uid "
+        "ORDER BY e.date, e.created_at, e.uid"
+    ):
+        lines.setdefault(row["invoice_number"], []).append(row["entry_uid"])
+    records = []
+    for row in conn.execute("SELECT * FROM invoices ORDER BY number"):
+        if client and row["client"].lower() != client.lower():
+            continue
+        if not include_voided and row["status"] == "voided":
+            continue
+        records.append(_invoice_from_row(row, lines.get(row["number"], [])))
+    return records
+
+
+def insert_entry(
+    conn: sqlite3.Connection, entry: WorkEntry, *, created_at: str | None = None,
+) -> None:
+    """Insert one entry row. The invoice fields on ``entry`` are not written."""
+    if not entry.uid:
+        raise ValueError("a work entry needs a uid")
+    stamp = created_at or _now()
+    conn.execute(
+        "INSERT INTO work_entries (uid, date, client, service, qty, amount, discount, "
+        "description, entity, extra, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (entry.uid, entry.date.isoformat(), entry.client, entry.service,
+         entry.qty, entry.amount, entry.discount or 0, entry.description,
+         entry.entity, _encode_extra(entry.extra), stamp, stamp),
+    )
+
+
+def _update_entry_row(conn: sqlite3.Connection, entry: WorkEntry) -> None:
+    conn.execute(
+        "UPDATE work_entries SET date = ?, client = ?, service = ?, qty = ?, amount = ?, "
+        "discount = ?, description = ?, entity = ?, updated_at = ? WHERE uid = ?",
+        (entry.date.isoformat(), entry.client, entry.service, entry.qty, entry.amount,
+         entry.discount or 0, entry.description, entry.entity, _now(), entry.uid),
+    )
+
+
+def _stamp_date(value: str | date | None) -> date:
+    """An issue date: what the caller passed, or today. Anything else is refused."""
+    if value is None:
+        return date.today()
+    if isinstance(value, str):
+        return _parse_date(value)
+    if isinstance(value, datetime):
+        return value.date()
+    if not isinstance(value, date):
+        raise TypeError(f"invoice_date must be a date or ISO string, got {type(value).__name__}")
+    return value
+
+
+def create_invoice(
+    conn: sqlite3.Connection,
+    *,
+    number: str,
+    client: str,
+    entity: str,
+    group_name: str,
+    issue_date: date | str,
+    total: float,
+    entry_uids: list[str],
+    pdf_path: str | Path,
+    manual: bool = False,
+    created_at: str | None = None,
+) -> None:
+    """Insert an open invoice and an active line per entry, on the caller's transaction.
+
+    An unknown uid is a ``ValueError``; an entry that already has an active
+    line, or a number already issued, is an ``sqlite3.IntegrityError``. The
+    caller rolls back either way.
     """
-    wd = data_dir / "invoices" / "work"
-    return {
-        path.name: reason
-        for path, reason in _QUARANTINED_YEARS.items()
-        if path.parent == wd and reason
-    }
+    uids = list(dict.fromkeys(u for u in entry_uids if u))
+    for uid in uids:
+        if conn.execute("SELECT 1 FROM work_entries WHERE uid = ?", (uid,)).fetchone() is None:
+            raise ValueError(f"no work entry with uid {uid}")
+    issued = _stamp_date(issue_date)
+    conn.execute(
+        "INSERT INTO invoices (number, client, entity, group_name, issue_date, total, "
+        "status, pdf_path, manual, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+        (number, client, entity, group_name, issued.isoformat(), total,
+         str(pdf_path or ""), int(bool(manual)), created_at or _now()),
+    )
+    for uid in uids:
+        conn.execute(
+            "INSERT INTO invoice_lines (invoice_number, entry_uid, active) VALUES (?, ?, 1)",
+            (number, uid),
+        )
+
+
+# =============================================================================
+# Hand assignment (work update --invoice, add_work_entry(invoice=...))
+# =============================================================================
+
+
+def _invoicing_config(data_dir: Path):
+    """The invoicing config beside the store, or None. Read before a write begins."""
+    from istota.money import config_store  # noqa: PLC0415
+
+    path = ensure_store(data_dir)
+    if not config_store.has_invoicing_data(path):
+        return None
+    return config_store.load_invoicing(path)
+
+
+def _attach(
+    conn: sqlite3.Connection,
+    number: str,
+    uids: list[str],
+    issue_date: date | None,
+    config,
+) -> int:
+    """Put uninvoiced entries on ``number``, creating the invoice if it is new.
+
+    A hand assignment edits the invoice, so its total is recomputed over its
+    active lines at the current rates. A voided number is refused with a
+    ``ValueError``. Returns the count attached.
+    """
+    from istota.money.core.invoicing import entry_entity_key, invoice_total  # noqa: PLC0415
+
+    entries = {e.uid: e for e in read_entries(conn)}
+    wanted = [entries[u] for u in dict.fromkeys(uids) if u in entries and not entries[u].invoice]
+    if not wanted:
+        return 0
+    row = conn.execute("SELECT status FROM invoices WHERE number = ?", (number,)).fetchone()
+    if row is not None and row["status"] == "voided":
+        raise ValueError(f"{number} was voided; a voided number is never reused")
+    if row is None:
+        first = wanted[0]
+        create_invoice(
+            conn, number=number, client=first.client,
+            entity=entry_entity_key(config, first) if config is not None else first.entity,
+            group_name="", issue_date=issue_date or date.today(), total=0.0,
+            entry_uids=[e.uid for e in wanted], pdf_path="",
+        )
+    else:
+        for entry in wanted:
+            conn.execute(
+                "INSERT INTO invoice_lines (invoice_number, entry_uid, active) VALUES (?, ?, 1) "
+                "ON CONFLICT (invoice_number, entry_uid) DO UPDATE SET active = 1",
+                (number, entry.uid),
+            )
+    covered = [e for e in read_entries(conn) if e.invoice == number]
+    services = config.services if config is not None else {}
+    conn.execute(
+        "UPDATE invoices SET total = ? WHERE number = ?",
+        (round(invoice_total(covered, services), 2), number),
+    )
+    return len(wanted)
+
+
+# =============================================================================
+# Public API
+# =============================================================================
+
+
+def load_work_entries(data_dir: Path, *, conn: sqlite3.Connection | None = None) -> list[WorkEntry]:
+    """Every entry, sorted for display, with ``id`` set to the display index."""
+    with _reading(data_dir, conn) as c:
+        return read_entries(c)
 
 
 def add_work_entry(
@@ -485,37 +627,31 @@ def add_work_entry(
     invoice: str = "",
     invoice_date: str | date | None = None,
     uid: str = "",
+    *,
+    conn: sqlite3.Connection | None = None,
 ) -> int:
-    """Append entry to correct year file, return display index.
+    """Insert an entry and return its display index.
 
-    Pass ``uid`` to choose the stable id up front — a caller that needs to
-    find the entry it just created (the web API) generates one, passes it,
-    and looks the entry back up by it, since the returned display index is
-    already stale the moment another writer inserts something earlier.
-
-    ``invoice_date`` is only meaningful alongside ``invoice`` — the one caller
-    that pre-assigns a number (``invoice create``) passes the date it put on
-    the PDF, so the record and the document agree. It defaults to today when a
-    number is given without one, and is ignored entirely without a number.
+    Pass ``uid`` to choose the stable id up front; the returned index is stale
+    the moment another writer inserts something earlier. ``invoice`` puts the
+    entry on that invoice (creating it, dated ``invoice_date`` or today, when
+    the number is new).
     """
-    d = _parse_date(entry_date)
-    stamped = _coerce_stamp_date(invoice_date) if invoice else None
     new_entry = WorkEntry(
-        date=d, client=client.lower(), service=service,
+        date=_parse_date(entry_date), client=client.lower(), service=service,
         qty=qty, amount=amount, discount=discount,
-        description=description, entity=entity, invoice=invoice,
-        invoice_date=stamped,
+        description=description, entity=entity,
         uid=uid or new_txn_id(),
     )
-    with _work_lock(data_dir):
-        entries = _load_all(data_dir)
-        entries.append(new_entry)
-        entries.sort(key=lambda e: e.date)
-        _save_entries(data_dir, entries)
-    for i, e in enumerate(entries, 1):
-        if e is new_entry:
-            return i
-    return len(entries)
+    config = _invoicing_config(data_dir) if invoice and conn is None else None
+    with write_transaction(data_dir, conn) as c:
+        insert_entry(c, new_entry)
+        if invoice:
+            _attach(c, invoice, [new_entry.uid], _stamp_date(invoice_date), config)
+        for entry in read_entries(c):
+            if entry.uid == new_entry.uid:
+                return entry.id
+    raise RuntimeError("work entry not readable after insert")
 
 
 def list_work_entries(
@@ -538,100 +674,64 @@ def list_work_entries(
     return entries
 
 
-def _coerce_stamp_date(value: str | date | None) -> date:
-    """The issue date to stamp: what the caller passed, or today.
-
-    Anything that isn't a date is refused here rather than assigned. The
-    serializer calls ``.isoformat()`` on it, and ``_save_entries`` writes year
-    files one at a time, so a bad value raises part-way through and leaves
-    some years written and some not.
-    """
-    if value is None:
-        return date.today()
-    if isinstance(value, str):
-        return _parse_date(value)
-    if isinstance(value, datetime):
-        return value.date()
-    if not isinstance(value, date):
-        raise TypeError(f"invoice_date must be a date or ISO string, got {type(value).__name__}")
-    return value
-
-
 def _apply_fields(entry: WorkEntry, fields: dict) -> None:
-    """Assign updatable fields onto an entry, coercing date/client as the CLI does."""
+    """Assign updatable entry fields, coercing date and client as the CLI does."""
     for key, value in fields.items():
-        if key in _PROTECTED_FIELDS:
+        if key in _PROTECTED_FIELDS or key == "invoice":
             continue
         if key == "date" and isinstance(value, str):
             value = _parse_date(value)
         if key == "client" and isinstance(value, str):
             value = value.lower()
-        if key == "invoice_date" and value is not None:
-            value = _coerce_stamp_date(value)
         if hasattr(entry, key):
             setattr(entry, key, value)
 
 
-def _sync_invoice_date(entry: WorkEntry, entries: list[WorkEntry], fields: dict) -> None:
-    """Keep ``invoice_date`` tied to the number a hand-assignment just wrote.
-
-    ``work update --invoice`` is the one path that stamps a number without
-    going through an assign call, and what it should stamp depends on whether
-    the number is new:
-
-    * **An invoice that already went out** — inherit its date. Stamping today
-      would drag the whole invoice forward (readers take the earliest stored
-      date, but the entry would still disagree with the document) and could
-      push the matcher's bound past a payment that really did settle it.
-    * **An invoice raised before this field existed** — leave it unstamped, so
-      the invoice keeps its legacy fallback. There is no date to inherit and a
-      synthesized one would be a guess recorded as a fact.
-    * **A number nothing else carries** — today, the same as any other
-      first-time assignment.
-
-    Clearing the number clears the date. That is unreachable today, since both
-    update paths refuse an entry that already carries an invoice, but it keeps
-    the two fields tied together here rather than resting on a caller's guard.
-    """
-    if "invoice" not in fields or "invoice_date" in fields:
-        return
-    if not entry.invoice:
-        entry.invoice_date = None
-        return
-    siblings = [e for e in entries if e is not entry and e.invoice == entry.invoice]
-    if not siblings:
-        entry.invoice_date = _coerce_stamp_date(None)
-        return
-    stamped = [e.invoice_date for e in siblings if e.invoice_date is not None]
-    entry.invoice_date = min(stamped) if stamped else None
+def _update(
+    data_dir: Path,
+    find: Callable[[list[WorkEntry]], WorkEntry | None],
+    expect_etag: str | None,
+    fields: dict,
+) -> WorkMutationResult:
+    if not fields:
+        return WorkMutationResult("no_fields")
+    number = fields.get("invoice") or ""
+    config = _invoicing_config(data_dir) if number else None
+    with write_transaction(data_dir) as conn:
+        entry = find(read_entries(conn))
+        if entry is None:
+            return WorkMutationResult("not_found")
+        if entry.invoice:
+            return WorkMutationResult("invoiced", entry)
+        if expect_etag and entry_etag(entry) != expect_etag:
+            return WorkMutationResult("conflict", entry)
+        changed = replace(entry, extra=dict(entry.extra))
+        _apply_fields(changed, fields)
+        _update_entry_row(conn, changed)
+        if number:
+            stamp = fields.get("invoice_date")
+            _attach(conn, number, [entry.uid], _stamp_date(stamp) if stamp else None, config)
+        fresh = _find_by_uid(read_entries(conn), entry.uid)
+        return WorkMutationResult("ok", fresh)
 
 
 def update_work_entry(data_dir: Path, index: int, **fields) -> bool:
-    """Update fields on entry at 1-based display index. Only if uninvoiced.
+    """Update the entry at a 1-based display index. Only if uninvoiced.
 
     Index-addressed, so only safe when the caller read the list and acts on it
-    immediately (the CLI). Anything holding a reference across time should use
-    :func:`update_work_entry_by_uid`.
+    immediately (the CLI). Anything else uses :func:`update_work_entry_by_uid`.
     """
-    if not fields:
-        return False
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
+    def find(entries):
         if index < 1 or index > len(entries):
-            return False
-        entry = entries[index - 1]
-        if entry.invoice:
-            return False
-        _apply_fields(entry, fields)
-        _sync_invoice_date(entry, entries, fields)
-        _save_entries(data_dir, entries)
-        return True
+            return None
+        return entries[index - 1]
+
+    return _update(data_dir, find, None, fields).ok
 
 
 def _find_by_uid(entries: list[WorkEntry], uid: str) -> WorkEntry | None:
     if not uid:
-        # An un-backfilled entry carries uid == "" — it must not be addressable
-        # by an empty uid, or one bad request would hit an arbitrary row.
+        # An empty uid must not address an arbitrary row.
         return None
     for entry in entries:
         if entry.uid == uid:
@@ -648,29 +748,32 @@ def update_work_entry_by_uid(
 ) -> WorkMutationResult:
     """Update an entry addressed by its stable ``uid``. Only if uninvoiced.
 
-    Resolve-and-mutate happens inside the write lock, so a concurrent insert
-    can't make this land on a different entry. ``expect_etag`` adds an
-    optimistic-concurrency check: a mismatch means the entry changed since the
-    caller read it, and nothing is written.
+    ``expect_etag`` adds an optimistic-concurrency check: a mismatch means the
+    entry changed since the caller read it, and nothing is written.
     """
-    if not fields:
-        return WorkMutationResult("no_fields")
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        entry = _find_by_uid(entries, uid)
+    return _update(data_dir, lambda entries: _find_by_uid(entries, uid), expect_etag, fields)
+
+
+def _remove(
+    data_dir: Path,
+    find: Callable[[list[WorkEntry]], WorkEntry | None],
+    expect_etag: str | None,
+) -> WorkMutationResult:
+    with write_transaction(data_dir) as conn:
+        entry = find(read_entries(conn))
         if entry is None:
             return WorkMutationResult("not_found")
         if entry.invoice:
             return WorkMutationResult("invoiced", entry)
         if expect_etag and entry_etag(entry) != expect_etag:
             return WorkMutationResult("conflict", entry)
-        _apply_fields(entry, fields)
-        _sync_invoice_date(entry, entries, fields)
-        _save_entries(data_dir, entries)
-        # Re-read so the caller gets a correct display index (a date change
-        # may have moved the entry) rather than the pre-save one.
-        fresh = _find_by_uid(load_work_entries(data_dir), uid)
-        return WorkMutationResult("ok", fresh or entry)
+        listed = conn.execute(
+            "SELECT 1 FROM invoice_lines WHERE entry_uid = ?", (entry.uid,),
+        ).fetchone()
+        if listed is not None:
+            return WorkMutationResult("on_voided_invoice", entry)
+        conn.execute("DELETE FROM work_entries WHERE uid = ?", (entry.uid,))
+        return WorkMutationResult("ok", entry)
 
 
 def remove_work_entry_by_uid(
@@ -680,67 +783,47 @@ def remove_work_entry_by_uid(
     expect_etag: str | None = None,
 ) -> WorkMutationResult:
     """Remove an entry addressed by its stable ``uid``. Only if uninvoiced."""
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        entry = _find_by_uid(entries, uid)
-        if entry is None:
-            return WorkMutationResult("not_found")
-        if entry.invoice:
-            return WorkMutationResult("invoiced", entry)
-        if expect_etag and entry_etag(entry) != expect_etag:
-            return WorkMutationResult("conflict", entry)
-        entries.remove(entry)
-        _save_entries(data_dir, entries)
-        return WorkMutationResult("ok", entry)
-
-
-def backfill_work_ids(data_dir: Path, *, timeout_seconds: float = 10.0) -> int:
-    """Stamp a ``uid`` on every entry that lacks one. Returns the count stamped.
-
-    Idempotent, and safe to run from ``ensure_initialised`` on every entry
-    point: it only writes when something is actually missing an id, so a
-    fully-backfilled store costs one lock-free read. That pre-check matters —
-    ``ensure_initialised`` runs on every money web request and every skill
-    invocation, so taking the exclusive write lock first put a plain
-    ``GET /work`` in contention with ``invoice generate`` and made it wait out
-    the lock timeout. Unlike the ledger's equivalent this carries no sentinel —
-    a hand-added entry with no ``uid`` can appear at any time, and re-running
-    is how that self-heals.
-    """
-    if not any(not e.uid for e in _load_all(data_dir)):
-        return 0
-    with _work_lock(data_dir, timeout_seconds=timeout_seconds):
-        # Re-read under the lock: another writer may have stamped these while
-        # we were deciding, and its entries are the ones we must not clobber.
-        entries = load_work_entries(data_dir)
-        missing = [e for e in entries if not e.uid]
-        if not missing:
-            return 0
-        _save_entries(data_dir, entries)  # stamps every uid-less entry
-        return len(missing)
+    return _remove(data_dir, lambda entries: _find_by_uid(entries, uid), expect_etag)
 
 
 def remove_work_entry(data_dir: Path, index: int) -> bool:
-    """Remove entry at 1-based display index. Only if uninvoiced."""
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
+    """Remove the entry at a 1-based display index. Only if uninvoiced."""
+    def find(entries):
         if index < 1 or index > len(entries):
-            return False
-        entry = entries[index - 1]
-        if entry.invoice:
-            return False
-        entries.pop(index - 1)
-        _save_entries(data_dir, entries)
-        return True
+            return None
+        return entries[index - 1]
+
+    return _remove(data_dir, find, None).ok
+
+
+def backfill_work_ids(data_dir: Path, *, timeout_seconds: float = 10.0) -> int:
+    """Stamp a uid on year-file entries that lack one, before the import.
+
+    The import refuses an entry with no uid, and a hand-added one can appear
+    in the year files until the import has run. After it, every entry is a
+    row with a primary key and this is a no-op.
+    """
+    from istota.money import db  # noqa: PLC0415
+    from istota.money.work_migrate import backfill_legacy_uids  # noqa: PLC0415
+
+    path = db_path_for(data_dir)
+    if path.exists():
+        _init(path)
+        with db.get_db(path) as conn:
+            if _is_migrated(conn):
+                return 0
+    return backfill_legacy_uids(data_dir, timeout_seconds=timeout_seconds)
 
 
 def get_uninvoiced_entries(
     data_dir: Path,
     client: str | None = None,
     period: str | None = None,
+    *,
+    conn: sqlite3.Connection | None = None,
 ) -> list[WorkEntry]:
-    """Get entries where invoice is not set."""
-    entries = load_work_entries(data_dir)
+    """Entries with no active invoice line, optionally up to the end of ``period``."""
+    entries = load_work_entries(data_dir, conn=conn)
     result = [e for e in entries if not e.invoice]
     if client:
         client_lower = client.lower()
@@ -761,45 +844,19 @@ def assign_invoice_number_by_uids(
     invoice_number: str,
     invoice_date: str | date | None = None,
 ) -> int:
-    """Stamp an invoice number on the entries with these ``uid``s. Returns count.
+    """Put the entries with these uids on an invoice, by hand. Returns the count.
 
-    The uid-addressed form of :func:`assign_invoice_number`, and the one
-    invoice generation uses. Generation resolves its billable entries, renders
-    PDFs (seconds), and only then stamps — a window in which any other writer
-    (the web Work tab above all) can insert an earlier-dated entry and shift
-    every display index. An index-addressed stamp then lands on the wrong row:
-    one client's entry takes another's invoice number, and the entry actually
-    on the rendered PDF stays uninvoiced and is billed again next run.
-
-    Entries that already carry an invoice are skipped, so a concurrent stamp
-    wins rather than being overwritten.
-
-    ``invoice_date`` is stamped in the same lock acquisition as the number, so
-    the two cannot diverge. Pass the date the caller already committed to —
-    invoice generation renders one onto the PDF before it stamps, and a fresh
-    ``date.today()`` here would disagree with the document across midnight.
+    Entries already on an invoice are skipped. A new number creates the
+    invoice dated ``invoice_date`` (or today). Invoice generation does not use
+    this: it creates its invoices with :func:`create_invoice`.
     """
     wanted = [u for u in uids if u]
     if not wanted:
         return 0
-    stamp = _coerce_stamp_date(invoice_date)
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        count = 0
-        seen: set[str] = set()
-        for uid in wanted:
-            if uid in seen:
-                continue
-            seen.add(uid)
-            entry = _find_by_uid(entries, uid)
-            if entry is None or entry.invoice:
-                continue
-            entry.invoice = invoice_number
-            entry.invoice_date = stamp
-            count += 1
-        if count:
-            _save_entries(data_dir, entries)
-        return count
+    stamp = _stamp_date(invoice_date)
+    config = _invoicing_config(data_dir)
+    with write_transaction(data_dir) as conn:
+        return _attach(conn, invoice_number, wanted, stamp, config)
 
 
 def assign_invoice_number(
@@ -808,127 +865,128 @@ def assign_invoice_number(
     invoice_number: str,
     invoice_date: str | date | None = None,
 ) -> int:
-    """Stamp invoice number and issue date on entries at display indices.
-
-    Index-addressed, so only safe when the caller resolved the indices and
-    stamps immediately. Anything holding a reference across time — invoice
-    generation, the web UI — must use :func:`assign_invoice_number_by_uids`.
-    Returns the number of entries stamped.
-    """
+    """The display-index form of :func:`assign_invoice_number_by_uids`."""
     if not indices:
         return 0
-    stamp = _coerce_stamp_date(invoice_date)
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        count = 0
-        for idx in indices:
-            if idx < 1 or idx > len(entries):
-                continue
-            entry = entries[idx - 1]
-            if entry.invoice:
-                continue
-            entry.invoice = invoice_number
-            entry.invoice_date = stamp
-            count += 1
-        if count:
-            _save_entries(data_dir, entries)
-        return count
+    stamp = _stamp_date(invoice_date)
+    config = _invoicing_config(data_dir)
+    with write_transaction(data_dir) as conn:
+        entries = read_entries(conn)
+        uids = [entries[i - 1].uid for i in indices if 1 <= i <= len(entries)]
+        return _attach(conn, invoice_number, uids, stamp, config)
 
 
-def record_invoice_payment(
+def _invoice_row(conn: sqlite3.Connection, number: str):
+    return conn.execute("SELECT * FROM invoices WHERE number = ?", (number,)).fetchone()
+
+
+def mark_paid(
     data_dir: Path,
     invoice_number: str,
     paid_date: str | date,
     *,
     validate: Callable[[list[WorkEntry]], bool] | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> int:
-    """Set paid_date on all entries for an invoice. Returns count."""
+    """Mark an open invoice paid. Returns the count of entries it covers, or 0.
+
+    ``validate`` sees the invoice's entries before anything is written and can
+    refuse the write by returning False. A paid or voided invoice is left
+    alone and returns 0.
+    """
     if isinstance(paid_date, str):
         paid_date = _parse_date(paid_date)
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        invoice_entries = [entry for entry in entries if entry.invoice == invoice_number]
-        if validate is not None and not validate(invoice_entries):
+    with write_transaction(data_dir, conn) as c:
+        entries = [e for e in read_entries(c) if e.invoice == invoice_number]
+        if validate is not None and not validate(entries):
             return 0
-        count = 0
-        for entry in entries:
-            if entry.invoice == invoice_number and entry.paid_date is None:
-                entry.paid_date = paid_date
-                count += 1
-        if count:
-            _save_entries(data_dir, entries)
-        return count
+        row = _invoice_row(c, invoice_number)
+        if row is None or row["status"] != "open":
+            return 0
+        c.execute(
+            "UPDATE invoices SET status = 'paid', paid_date = ? WHERE number = ?",
+            (paid_date.isoformat(), invoice_number),
+        )
+        return len(entries)
 
 
-def clear_invoice_payment(data_dir: Path, invoice_number: str) -> int:
-    """Clear paid_date on all entries for an invoice, keeping the invoice number.
+def mark_unpaid(
+    data_dir: Path,
+    invoice_number: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    """Reopen a paid invoice, keeping its number. Returns its entry count, or 0."""
+    with write_transaction(data_dir, conn) as c:
+        row = _invoice_row(c, invoice_number)
+        if row is None or row["status"] != "paid":
+            return 0
+        c.execute(
+            "UPDATE invoices SET status = 'open', paid_date = NULL WHERE number = ?",
+            (invoice_number,),
+        )
+        return len([e for e in read_entries(c) if e.invoice == invoice_number])
 
-    The inverse of :func:`record_invoice_payment` — marks a paid invoice
-    pending again without un-invoicing it (unlike :func:`void_invoice`).
-    Returns the number of entries modified.
-    """
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        count = 0
-        for entry in entries:
-            if entry.invoice == invoice_number and entry.paid_date is not None:
-                entry.paid_date = None
-                count += 1
-        if count:
-            _save_entries(data_dir, entries)
-        return count
 
-
-def get_entries_for_invoice(data_dir: Path, invoice_number: str) -> list[WorkEntry]:
-    """Get all entries assigned to an invoice."""
-    return [e for e in load_work_entries(data_dir) if e.invoice == invoice_number]
+def get_entries_for_invoice(
+    data_dir: Path, invoice_number: str, *, conn: sqlite3.Connection | None = None,
+) -> list[WorkEntry]:
+    """The entries on an invoice's active lines (none for a voided invoice)."""
+    return [e for e in load_work_entries(data_dir, conn=conn) if e.invoice == invoice_number]
 
 
 def invoice_issue_date(entries: list[WorkEntry]) -> date | None:
     """When an invoice was issued, or the closest sound estimate.
 
-    Every path that stamps an invoice number now stamps the date with it, so
-    for anything invoiced since that landed this is the real issue date.
-    Invoices raised before it have no stored date and nothing can reconstruct
-    one, so they fall back to the *latest* work billed — an invoice cannot
-    predate the last work on it. That fallback is the legacy path, not the
-    design: it is a lower bound, weeks early on a period invoiced in arrears,
-    and it stays only because those records exist.
-
-    Returns ``None`` for an empty list.
+    Every entry read from the store carries its invoice's issue date. The
+    import uses this on the year files, where invoices raised before the
+    ``invoice_date`` stamp existed have none: those fall back to the *latest*
+    work billed, since an invoice cannot predate the last work on it. Stamps
+    that disagree take the earliest. ``None`` for an empty list.
     """
     if not entries:
         return None
     stamped = [e.invoice_date for e in entries if e.invoice_date is not None]
     if stamped:
-        # Entries on one invoice are stamped together, so these normally agree.
-        # A hand-edited file can disagree with itself; take the earliest, since
-        # this is a "cannot have existed before this" bound and the earliest is
-        # the reading that cannot reject a payment the invoice really caused.
         return min(stamped)
     return max(e.date for e in entries)
 
 
-def void_invoice(data_dir: Path, invoice_number: str) -> int:
-    """Clear invoice, issue date and paid_date on all entries for an invoice.
+def void_invoice(
+    data_dir: Path, invoice_number: str, *, conn: sqlite3.Connection | None = None,
+) -> int:
+    """Void an invoice and release its entries. Returns the count released.
 
-    Returns the number of entries modified.
+    The invoice row stays, with ``status = 'voided'``, and its lines stay
+    listed with ``active = 0``. An unknown or already voided invoice returns 0.
     """
-    with _work_lock(data_dir):
-        entries = load_work_entries(data_dir)
-        count = 0
-        for entry in entries:
-            if entry.invoice == invoice_number:
-                entry.invoice = ""
-                entry.invoice_date = None
-                entry.paid_date = None
-                count += 1
-        if count:
-            _save_entries(data_dir, entries)
-        return count
+    with write_transaction(data_dir, conn) as c:
+        row = _invoice_row(c, invoice_number)
+        if row is None or row["status"] == "voided":
+            return 0
+        released = c.execute(
+            "UPDATE invoice_lines SET active = 0 WHERE invoice_number = ? AND active = 1",
+            (invoice_number,),
+        ).rowcount
+        c.execute(
+            "UPDATE invoices SET status = 'voided', voided_at = ?, was_paid = ? WHERE number = ?",
+            (_now(), int(row["status"] == "paid"), invoice_number),
+        )
+        return released
+
+
+def list_invoices(
+    data_dir: Path,
+    *,
+    client: str | None = None,
+    include_voided: bool = True,
+    conn: sqlite3.Connection | None = None,
+) -> list[InvoiceRecord]:
+    """Every invoice record, by number."""
+    with _reading(data_dir, conn) as c:
+        return read_invoices(c, client=client, include_voided=include_voided)
 
 
 def get_invoice_numbers(data_dir: Path) -> list[str]:
-    """Get distinct invoice numbers, sorted."""
-    entries = load_work_entries(data_dir)
-    return sorted(set(e.invoice for e in entries if e.invoice))
+    """Numbers of the invoices that are not voided, sorted."""
+    return [r.number for r in list_invoices(data_dir, include_voided=False)]
