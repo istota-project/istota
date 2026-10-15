@@ -324,11 +324,6 @@ export interface ConfigReferences {
   default_entity?: boolean;
   /** Clients with a blank entity — they bill under whichever one is default. */
   default_for_clients?: number;
-  /**
-   * Year files holding a row this version can't read. Non-empty means the
-   * counts above are lower bounds, so the two strict deletes refuse.
-   */
-  quarantined?: string[];
 }
 
 export interface ConfigDeleteResponse {

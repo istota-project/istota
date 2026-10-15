@@ -7930,7 +7930,6 @@ const handlers: MockHandler[] = [
           work_entries: pinned,
           default_entity: isDefault,
           default_for_clients: fallbackClients,
-          quarantined: [],
         };
         if (!clients.length && !pinned && !isDefault && !fallbackClients) return null;
         let error: string;
@@ -7967,7 +7966,7 @@ const handlers: MockHandler[] = [
           error:
             `service '${row.key}' is used by ${entries.length} work ` +
             `entr${entries.length === 1 ? 'y' : 'ies'}`,
-          references: { work_entries: entries.length, invoices: invoices.size, quarantined: [] },
+          references: { work_entries: entries.length, invoices: invoices.size },
         };
       },
     });
