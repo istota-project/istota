@@ -114,7 +114,7 @@ describe('briefing reader acknowledgments', () => {
 
   it('does not acknowledge archive preloads on the settings route', async () => {
     __history.reset('/istota/briefings/settings/');
-    render(Layout, { children: (() => {}) as unknown as import('svelte').Snippet });
+    render(Harness, { layout: Layout, user: { username: 'alice' } as User });
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     await settle();
     expect(readRequests()).toHaveLength(0);

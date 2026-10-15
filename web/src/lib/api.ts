@@ -4890,6 +4890,20 @@ export async function markBriefingArchiveRead(
   return apiFetch(`/briefings/archive/${id}/read`, { method: 'POST' });
 }
 
+export async function markBriefingArchiveAsRead(
+  scope: 'all' | 'briefing',
+  briefingName?: string,
+): Promise<{ status: string; updated: number }> {
+  return apiFetch('/briefings/mark-as-read', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scope,
+      ...(scope === 'briefing' ? { briefing_name: briefingName } : {}),
+    }),
+  });
+}
+
 export async function deleteBriefingArchiveItem(id: number): Promise<void> {
   await apiFetch(`/briefings/archive/${id}`, { method: 'DELETE' });
 }

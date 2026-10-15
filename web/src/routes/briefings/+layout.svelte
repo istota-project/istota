@@ -7,6 +7,7 @@
     getBriefingArchive,
     getBriefingArchiveItem,
     deleteBriefingArchiveItem,
+    markBriefingArchiveAsRead,
     type BriefingArchiveItem,
   } from '$lib/api';
   import {
@@ -28,12 +29,15 @@
     EmptyState,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { Cog } from '@lucide/svelte';
+  import { CheckCheck, Cog } from '@lucide/svelte';
+  import { getCurrentUser } from '$lib/userContext';
+  import { notifyError } from '$lib/stores/notices';
   import { formatDateTime } from '$lib/dateFormat';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();
 
+  const identity = getCurrentUser();
   const PAGE = 20;
 
   let items = $state<BriefingArchiveItem[]>([]);
@@ -46,6 +50,9 @@
   // The archived briefing pending a delete confirmation (null = no dialog).
   let deleteTarget = $state<BriefingArchiveItem | null>(null);
   let deleteError = $state('');
+  let markAllTarget = $state<{ name: string; username: string } | null>(null);
+  let markingAllRead = $state(false);
+  let mounted = false;
 
   // Briefing-name filter, auto-populated from the archive's distinct names.
   let nameOptions = $derived([
@@ -54,6 +61,36 @@
   ]);
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/briefings/settings`));
+
+  let onReader = $derived(page.url.pathname.startsWith(`${base}/briefings`) && !onSettings);
+
+  $effect(() => {
+    if (markAllTarget && (!onReader || identity.user.username !== markAllTarget.username)) {
+      markAllTarget = null;
+    }
+  });
+
+  function handleMarkAllRead() {
+    if (markingAllRead || !onReader) return;
+    markAllTarget = { name: $briefingFilterName, username: identity.user.username };
+  }
+
+  async function performMarkAllRead() {
+    const target = markAllTarget;
+    markAllTarget = null;
+    if (!target || markingAllRead || !onReader || identity.user.username !== target.username)
+      return;
+    markingAllRead = true;
+    try {
+      await markBriefingArchiveAsRead(target.name ? 'briefing' : 'all', target.name || undefined);
+    } catch {
+      if (mounted && onReader && identity.user.username === target.username) {
+        notifyError("Couldn't mark these as read.");
+      }
+    } finally {
+      markingAllRead = false;
+    }
+  }
 
   type BriefingSelection = { id: number | null; name: string };
   let initialized = $state(false);
@@ -235,10 +272,14 @@
   });
 
   onMount(() => {
+    mounted = true;
     const selection = briefingSel.current();
     if (selection) void applySelection(selection);
     else void load();
     initialized = true;
+    return () => {
+      mounted = false;
+    };
   });
 </script>
 
@@ -276,6 +317,18 @@
         {/if}
       {/snippet}
       {#snippet tools()}
+        {#if !onSettings}
+          <Chip
+            icon
+            onclick={handleMarkAllRead}
+            disabled={markingAllRead}
+            title={$briefingFilterName
+              ? "Mark this briefing's archive as read"
+              : 'Mark all briefings as read'}
+          >
+            <CheckCheck size={14} />
+          </Chip>
+        {/if}
         <!-- Ahead of the cog, so the cog keeps the bar's right edge and stays
 			     put whether or not the open page offers a save. Renders nothing
 			     unless one is registered. -->
@@ -327,6 +380,20 @@
 
   {@render children()}
 </AppShell>
+
+{#if markAllTarget}
+  <ConfirmDialog
+    open={true}
+    title="Mark all as read"
+    message={markAllTarget.name
+      ? `Are you sure you want to mark all unread editions of ${markAllTarget.name} as read? This can't be undone.`
+      : "Are you sure you want to mark all unread briefings as read? This can't be undone."}
+    confirmLabel="Mark all read"
+    confirmVariant="primary"
+    onConfirm={performMarkAllRead}
+    onCancel={() => (markAllTarget = null)}
+  />
+{/if}
 
 {#if deleteTarget}
   <ConfirmDialog
