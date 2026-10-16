@@ -640,6 +640,24 @@ def run_shared_block_now(
     return {"id": made["id"]}
 
 
+@router.get("/email-accounts")
+def get_email_accounts(
+    request: Request,
+    user: dict = Depends(require_auth),
+) -> dict:
+    """The signed-in user's mail accounts a ``my_email`` source can read.
+
+    Always the bot plus-address; Gmail too when Google Workspace is on, marked
+    unavailable until the user grants Gmail access.
+    """
+    from istota import db as fdb
+    from istota.briefings.sources.my_email import list_accounts
+
+    cfg = _app_config(request)
+    with fdb.get_db(cfg.db_path) as conn:
+        return {"accounts": list_accounts(cfg, conn, user["username"])}
+
+
 @router.get("/shared-block-options")
 def get_shared_block_options(
     request: Request,

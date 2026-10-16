@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Your own email in a briefing.** A personal briefing can now have a My email block that reads your mail from one connected account: your bot address, or Gmail once you allow Gmail access. By default it lists the five most pressing action items from the past 24 hours. Group briefings and shared blocks cannot use it.
 - **Scheduled jobs in the admin pane.** Every user's scheduled jobs now have their own page in the admin sidebar instead of a card on Status. An admin can disable, enable or delete a user's job from there, and the change is written to that user's CRON.md so it sticks. Deleting asks for the job's name and a confirmation code. Module pollers can be disabled but not deleted. The job's owner gets a notification whenever an admin changes one of their jobs.
 - Admin → Briefings lists every personal, group and All users briefing with its owner, schedule, delivery and state. Administrators can pause a briefing so it does not run until an administrator resumes it, and delete one after typing its name and confirming with a code or password. Owners are notified; deleted group briefings keep their published editions in the reader.
 
