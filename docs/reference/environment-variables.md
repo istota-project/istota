@@ -237,6 +237,7 @@ The VM keeps two settings files beside the checkout. `istota setup` writes the k
 | `RELEASE_SIGNING_KEY` | The release key, one line of an SSH public key, written to `allowed_signers`. The installer writes the project's key (`host/release-signing-key.pub`) unless it was given another |
 | `CLAUDE_CODE_VERSION` | The Claude Code version a build pins, when it pins one |
 | `APT_MIRROR` | A Debian mirror (`http://` or `https://`, a path ending in `debian`, no trailing slash) used instead of deb.debian.org for Debian's main archive, by the host's apt (set by `provision.sh`) and by the image builds. The security archive is unchanged. Removing it puts deb.debian.org back on the next `provision.sh` |
+| `APT_SNAPSHOT` | A snapshot.debian.org id (`YYYYMMDDTHHMMSSZ`) the host's apt reads Debian's archives at, through apt's `APT::Snapshot`. Set by release builds so the source of every package they ship stays available; unset on a server. Removing it puts the live archives back on the next `provision.sh` |
 | `ZRAM_ENABLED` | `0` leaves swap alone |
 | `HOST_LOOPBACK_BLOCK`, `HOST_GATEWAY_ADDR`, `HOST_LOOPBACK_ALLOW` | The local VM's block on container traffic to the Mac's loopback (`HOST_GATEWAY_ADDR`), except DNS and the TCP ports in `HOST_LOOPBACK_ALLOW`, which `allow-host-port` and `deny-host-port` edit |
 

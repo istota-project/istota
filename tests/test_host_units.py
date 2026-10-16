@@ -651,6 +651,147 @@ class TestChangedFile:
         assert path.read_text() == "x = 1\n"
         assert path.stat().st_mode & 0o777 == 0o644
 
+
+def _provision_function(name: str) -> str:
+    match = re.search(rf"^{name}\(\) \{{.*?^\}}", PROVISION.read_text(), re.M | re.S)
+    assert match, f"provision.sh defines {name}"
+    return match.group(0)
+
+
+class TestTheOfflineRule:
+    """apt-get update runs only when a package the run installs is missing (the
+    Mac app spec, Stage 2). The appliance disk has every package already, so its
+    first boot makes no network request; Stage 1 measured today's unconditional
+    update spending about 174 s on DNS retries there."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, tmp_path, calls_script: str, installed: dict[str, str]):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        calls = tmp_path / "calls"
+        calls.touch()
+        status = "\n".join(f'  {name}) echo "{state}"; exit 0 ;;' for name, state in installed.items())
+        _stub(bindir, "dpkg-query", (
+            '[ "$1" = -W ] || exit 2\n'
+            '[ "$2" = "-f=\\${db:Status-Status}" ] || exit 2\n'
+            f'case "$3" in\n{status}\n  *) echo "dpkg-query: no packages found matching $3" >&2; exit 1 ;;\nesac\n'
+        ))
+        _stub(bindir, "apt-get", f'echo "apt-get $*" >> {calls}\n')
+        script = (
+            "set -euo pipefail\napt_lists_fresh=\"\"\n"
+            f"{_provision_function('package_installed')}\n"
+            f"{_provision_function('apt_install')}\n"
+            f"{calls_script}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30,
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"},
+        )
+        assert result.returncode == 0, result.stderr
+        return calls.read_text().splitlines()
+
+    def test_with_everything_installed_apt_is_never_called(self, tmp_path):
+        calls = self._run(tmp_path, "apt_install curl git\napt_install docker-ce",
+                          {"curl": "installed", "git": "installed", "docker-ce": "installed"})
+        assert calls == []
+
+    def test_a_missing_package_updates_once_and_installs_only_what_is_missing(self, tmp_path):
+        calls = self._run(tmp_path, "apt_install curl git\napt_install docker-ce certbot",
+                          {"curl": "installed", "docker-ce": "installed"})
+        assert calls == [
+            "apt-get update -qq",
+            "apt-get install -y -qq --no-install-recommends git",
+            "apt-get install -y -qq --no-install-recommends certbot",
+        ]
+
+    def test_a_removed_package_with_its_config_left_is_missing(self, tmp_path):
+        calls = self._run(tmp_path, "apt_install fuse3", {"fuse3": "config-files"})
+        assert calls == ["apt-get update -qq", "apt-get install -y -qq --no-install-recommends fuse3"]
+
+    def test_a_new_apt_source_updates_again_before_the_next_install(self, tmp_path):
+        calls = self._run(tmp_path, 'apt_install git\napt_lists_fresh=""\napt_install docker-ce', {})
+        assert calls.count("apt-get update -qq") == 2
+
+    def test_every_install_and_update_goes_through_the_rule(self):
+        body = "\n".join(line for line in self.TEXT.replace(_provision_function("apt_install"), "").splitlines()
+                         if not line.lstrip().startswith("#"))
+        assert "apt-get update" not in body
+        assert not re.search(r"apt-get[^\n]*\binstall\b", body)
+        docker = self.TEXT.split("if [ ! -f /etc/apt/sources.list.d/docker.sources ]; then", 1)
+        assert len(docker) == 2, "Docker's apt source is added only when it is absent"
+        block = docker[1].split("\nfi\n", 1)[0]
+        assert "download.docker.com/linux/debian/gpg" in block
+        assert 'apt_lists_fresh=""' in block, "lists from before the source was added would miss Docker's packages"
+        assert self.TEXT.count("download.docker.com/linux/debian/gpg") == 1
+
+
+class TestTheAptSnapshot:
+    """APT_SNAPSHOT pins Debian's archives to snapshot.debian.org at one moment,
+    through apt 3's own `APT::Snapshot`, so a release build's packages keep their
+    source available. Release builds only; unset on servers and on a user's VM."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, tmp_path, value: str, conf: Path):
+        script = (
+            "set -euo pipefail\n"
+            'log() { echo "$*"; }\n'
+            f"{_provision_function('changed_file')}\n"
+            f"{_provision_function('use_apt_snapshot')}\n"
+            'use_apt_snapshot "$1" "$2"\n'
+        )
+        result = subprocess.run(["bash", "-c", script, "_", value, str(conf)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return result
+
+    def test_a_snapshot_id_pins_apt(self, tmp_path):
+        conf = tmp_path / "apt.conf.d" / "50istota-snapshot"
+        result = self._run(tmp_path, "20261016T000000Z", conf)
+        assert conf.read_text() == 'APT::Snapshot "20261016T000000Z";\nAcquire::Check-Valid-Until "false";\n'
+        assert "20261016T000000Z" in result.stdout
+
+    def test_unset_removes_the_pin(self, tmp_path):
+        conf = tmp_path / "50istota-snapshot"
+        conf.write_text('APT::Snapshot "20261016T000000Z";\n')
+        self._run(tmp_path, "", conf)
+        assert not conf.exists()
+
+    @pytest.mark.parametrize("value", ["latest", "2026-10-16", '20261016T000000Z";\nAPT::Get::AllowUnauthenticated "true'])
+    def test_anything_but_a_snapshot_id_is_a_warning_and_changes_nothing(self, tmp_path, value):
+        conf = tmp_path / "50istota-snapshot"
+        result = self._run(tmp_path, value, conf)
+        assert "WARNING" in result.stdout
+        assert not conf.exists()
+
+    def test_provision_reads_it_from_host_env_before_any_install(self):
+        call = self.TEXT.index('use_apt_snapshot "$(host_env APT_SNAPSHOT)" /etc/apt/apt.conf.d/50istota-snapshot')
+        assert call < self.TEXT.index("\napt_install ")
+
+
+class TestUnattendedUpgrades:
+    """The local VM's root disk is never replaced and nobody runs its provision
+    by hand, so Debian's security updates reach it through unattended-upgrades.
+    The Debian 13 cloud image already ships the package, so on the appliance
+    this installs nothing and stays offline; the file makes sure it runs."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def test_the_local_vm_installs_and_enables_it(self):
+        block = self.TEXT.split('if [ "$(host_env INGRESS)" = "local" ]; then', 1)
+        assert len(block) == 2, "provision.sh has no INGRESS=local branch"
+        branch = block[1].split("\nfi\n", 1)[0]
+        assert re.search(r"^\s+apt_install unattended-upgrades$", branch, re.M)
+        assert "/etc/apt/apt.conf.d/20auto-upgrades" in branch
+        assert 'APT::Periodic::Update-Package-Lists "1";' in branch
+        assert 'APT::Periodic::Unattended-Upgrade "1";' in branch
+
+    def test_only_there(self):
+        assert self.TEXT.count("apt_install unattended-upgrades") == 1
+        assert self.TEXT.count("20auto-upgrades") == 1
+
+
 class TestUpstreamRclone:
     """The mount runs rclone.org's own build, pinned, never Debian's package (#694).
 

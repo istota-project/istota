@@ -92,6 +92,7 @@ istota_host_env:
   RELEASE_SIGNING_KEY: "{{ istota_release_signing_key }}"
   CLAUDE_CODE_VERSION: "{{ istota_claude_code_version }}"
   APT_MIRROR: "{{ istota_apt_mirror }}"
+  APT_SNAPSHOT: ""
   ACME_EMAIL: "{{ istota_acme_email }}"
   ACME_SERVER: "{{ istota_acme_server }}"
   RCLONE_REMOTE: "{{ istota_rclone_remote }}"
