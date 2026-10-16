@@ -27,6 +27,7 @@ from istota.groups.policy import GroupError
 from istota.groups.routes import _payload, _run, _user, require_admin
 from istota.groups.service import _transaction
 from istota.groups.system import ALL_USERS
+from istota.lib.date_parse import iso_utc
 from istota.webui.router_stubs import verify_origin
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ def _personal_view(conn, config, briefing):
         "timezone": profile.timezone if profile else None,
         "output": briefing.output, "enabled": briefing.enabled,
         "held": user_briefings.hold_view(config, briefing.admin_hold_at, briefing.admin_hold_by),
-        "last_run_at": db.get_briefing_last_run(conn, briefing.user_id, briefing.name),
+        "last_run_at": iso_utc(db.get_briefing_last_run(conn, briefing.user_id, briefing.name)),
     }
 
 
@@ -116,7 +117,7 @@ def _group_view(conn, config, definition, groups):
         "held": user_briefings.hold_view(config, definition["admin_hold_at"], definition["admin_hold_by"]),
         "owners": [_user(config, user_id)["display_name"]
                    for user_id in _group_owners(conn, definition["group_id"])],
-        "last_published_at": last,
+        "last_published_at": iso_utc(last),
     }
 
 
