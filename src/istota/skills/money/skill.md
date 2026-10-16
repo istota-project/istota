@@ -248,8 +248,8 @@ the counts without writing anything.
 ## Invoicing config: clients, entities and services
 
 These are managed with the operator CLI (`istota money client|company|service
-add|update|remove|list -u USER`) or from the web UI — the Clients tab and the
-money settings page. Both surfaces enforce the same rules; four to know before
+add|update|remove|list -u USER`) or from the web UI, in money Settings →
+Invoicing. Both surfaces enforce the same rules; four to know before
 proposing a change:
 
 - **Two fields are closed sets.** A service's `type` is `hours`, `days`, `flat`

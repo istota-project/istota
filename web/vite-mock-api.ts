@@ -7543,6 +7543,7 @@ const handlers: MockHandler[] = [
     const SOURCE_KINDS = [
       'rss',
       'email',
+      'my_email',
       'browse',
       'markets',
       'calendar',
@@ -8129,6 +8130,19 @@ const handlers: MockHandler[] = [
         },
       },
       {
+        id: 'my_email',
+        label: 'My email',
+        description: 'Action items from an inbox you connected.',
+        block: {
+          title: 'My email',
+          directive:
+            'List the five most pressing action items from my email in the past 24 hours, as bullet points. Name who is asking and by when.',
+          render_mode: 'synthesis',
+          options: { presentation: { width: 'auto' } },
+          sources: [{ kind: 'my_email', config: {}, enabled: true }],
+        },
+      },
+      {
         id: 'calendar',
         label: 'Calendar',
         description: 'Show your upcoming calendar events.',
@@ -8561,6 +8575,26 @@ const handlers: MockHandler[] = [
       }
 
       // --- Shared blocks (admin) + options (any user) ---
+      if (p === '/email-accounts' && method === 'GET') {
+        return {
+          accounts: [
+            {
+              id: 'bot',
+              label: 'Your bot address',
+              address: 'istota+carol@example.com',
+              available: true,
+              reason: '',
+            },
+            {
+              id: 'google',
+              label: 'Gmail',
+              address: null,
+              available: false,
+              reason: 'Allow Gmail access for your Google connection in Settings.',
+            },
+          ],
+        };
+      }
       if (p === '/shared-block-options' && method === 'GET') {
         const opts: {
           name: string;

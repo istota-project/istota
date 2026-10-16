@@ -1,5 +1,10 @@
 <script lang="ts">
-  import type { BriefingBlock, BriefingBlockSave, BriefingBlockTemplate } from '$lib/api';
+  import type {
+    BriefingBlock,
+    BriefingBlockSave,
+    BriefingBlockTemplate,
+    EmailAccount,
+  } from '$lib/api';
   import { deleteBriefingBlock, putBriefingBlock } from '$lib/api';
   import {
     Button,
@@ -15,6 +20,7 @@
     Bell,
     CalendarDays,
     Globe,
+    Inbox,
     ListChecks,
     Mail,
     NotebookPen,
@@ -43,6 +49,7 @@
     userId?: string;
     fileOptions?: string[];
     calendarOptions?: SelectOption[];
+    emailAccounts?: EmailAccount[];
     onChange: (briefingName: string, blocks: BriefingBlock[]) => void;
   }
   let {
@@ -61,6 +68,7 @@
     userId = '',
     fileOptions = [],
     calendarOptions = [],
+    emailAccounts = [],
   }: Props = $props();
   let picking = $state(false);
   let previewing = $state(false);
@@ -85,6 +93,7 @@
     feeds: Rss,
     websites: Globe,
     newsletters: Mail,
+    my_email: Inbox,
     calendar: CalendarDays,
     markets: TrendingUp,
     tasks: ListChecks,
@@ -95,7 +104,8 @@
   };
   const PRESET_GROUPS: { label: string; ids: string[] }[] = [
     { label: 'News', ids: ['feeds', 'websites', 'newsletters', 'markets'] },
-    { label: 'Your day', ids: ['calendar', 'tasks', 'reminder', 'notes'] },
+    { label: 'Your day', ids: ['my_email', 'calendar', 'tasks', 'reminder'] },
+    { label: 'More', ids: ['notes', 'shared', 'custom'] },
   ];
   const groupedPresets = $derived.by(() => {
     const groups = PRESET_GROUPS.map((group) => ({
@@ -103,10 +113,7 @@
       items: group.ids.flatMap((id) => filtered.filter((template) => template.id === id)),
     }));
     const known = new Set(PRESET_GROUPS.flatMap((group) => group.ids));
-    groups.push({
-      label: 'More',
-      items: filtered.filter((template) => !known.has(template.id)),
-    });
+    groups[groups.length - 1].items.push(...filtered.filter((template) => !known.has(template.id)));
     return groups.filter((group) => group.items.length);
   });
 
@@ -147,6 +154,12 @@
       !sharedBlockOptions.length
     )
       return 'No shared blocks are available yet.';
+    if (
+      template.block.sources.some((source) => source.kind === 'my_email') &&
+      emailAccounts.length > 0 &&
+      !emailAccounts.some((account) => account.available)
+    )
+      return 'Email is not set up on this installation.';
     return '';
   }
 
@@ -450,6 +463,7 @@
     {userId}
     {fileOptions}
     {calendarOptions}
+    {emailAccounts}
     onSave={save}
     onCancel={() => {
       draft = null;
@@ -547,6 +561,9 @@
   }
   .preset-grid li {
     display: flex;
+  }
+  .preset-grid li:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
   .preset {
     flex: 1;

@@ -12,6 +12,7 @@ Source kinds (`kind = …`):
 |---|---|
 | `rss` | A Feeds subscription or category (needs the Feeds module) |
 | `email` | Shared-pool newsletters, windowed and owner-filtered |
+| `my_email` | Your own mail from one connected account: your bot plus-address, or Gmail through your Google connection. Personal briefings only |
 | `browse` | A bundled preset frontpage or an arbitrary URL (needs the browser) |
 | `markets` | Futures / indices via yfinance |
 | `calendar` | Today's / tomorrow's events |
@@ -36,7 +37,9 @@ Because a name can come from a schedule, or from blocks with no schedule at all,
 
 Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs.
 
-Add block opens a searchable preset list for feeds, websites, newsletters, calendar, markets, tasks, notes, reminders, shared content or a custom block. Presets use the existing sources. Feed presets need Feeds enabled with a subscription or category; shared content needs an available shared block. Choose the source's feed, website, file or shared-block name before saving.
+Add block opens a searchable preset list for feeds, websites, newsletters, your own email, calendar, markets, tasks, notes, reminders, shared content or a custom block. Presets use the existing sources. Feed presets need Feeds enabled with a subscription or category; shared content needs an available shared block. Choose the source's feed, website, file or shared-block name before saving.
+
+The My email preset reads one account per block, chosen from the accounts you have: your bot address (`bot+<you>@…`) is always listed, and Gmail is listed when Google Workspace is set up and becomes selectable once you allow Gmail access in Settings. Its default instructions ask for the five most pressing action items from the past 24 hours. From your bot address it reads only mail that is yours by the same rule the email skill uses: sent to your plus-address, sent from one of your own addresses, or a reply in one of your threads. From Gmail it reads your inbox. It reads at most 50 messages, treats them as untrusted text, and is refused in group briefings and shared blocks.
 
 The block editor keeps a local draft of the title, source list and width. Automatic uses one column, Wide uses two where space allows, and Full width spans the reader pane. All widths become one column on a narrow pane. Advanced contains the directive, generation mode, story count and tone. Save block writes the block and all its sources together. Cancel discards the draft after confirmation when it has changes; a failed save keeps it open. The app bar's Save continues to control the separate HTML email preference.
 

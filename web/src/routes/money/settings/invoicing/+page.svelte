@@ -1,6 +1,12 @@
 <script lang="ts">
   import {
     getBusinessSettings,
+    getClients,
+    getClientConfigs,
+    getWorkEntries,
+    createClient,
+    updateClient,
+    deleteClient,
     createEntity,
     updateEntity,
     deleteEntity,
@@ -8,6 +14,9 @@
     updateService,
     deleteService,
     ApiError,
+    type ClientRow,
+    type ClientConfigRow,
+    type ClientInput,
     type EntityRow,
     type ServiceRow,
     type EntityInput,
@@ -24,6 +33,7 @@
     NoticeBanner,
     type KebabItem,
   } from '$lib/components/ui';
+  import ClientForm from '$lib/components/money/ClientForm.svelte';
   import EntityForm from '$lib/components/money/EntityForm.svelte';
   import ServiceForm from '$lib/components/money/ServiceForm.svelte';
   import { formatDecimal } from '$lib/format';
@@ -34,6 +44,16 @@
   let defaults: BusinessDefaults | null = $state(null);
   let businessError = $state('');
 
+  // Two reads of the same collection, each keeping one honest meaning:
+  // `/clients` resolves the business defaults into `entity` and `ar_account`
+  // for display, which is exactly wrong to bind an edit form to — saving it
+  // back would *materialise* the default onto the record, so a later change
+  // to `default_entity` would stop propagating to a client that never had an
+  // explicit one. `/config/clients` is the raw shape the form edits.
+  let clients: ClientRow[] = $state([]);
+  let clientConfigs: Record<string, ClientConfigRow> = $state({});
+  let clientsError = $state('');
+
   async function loadBusiness() {
     try {
       const resp = await getBusinessSettings();
@@ -43,8 +63,17 @@
       businessError = '';
     } catch (e) {
       businessError = e instanceof Error ? e.message : 'Failed to load business settings';
-    } finally {
-      loading = false;
+    }
+  }
+
+  async function loadClients() {
+    try {
+      const [display, raw] = await Promise.all([getClients(), getClientConfigs()]);
+      clients = display.clients;
+      clientConfigs = Object.fromEntries(raw.clients.map((c) => [c.key, c]));
+      clientsError = '';
+    } catch (e) {
+      clientsError = e instanceof Error ? e.message : 'Failed to load clients';
     }
   }
 
@@ -53,7 +82,9 @@
   // `refresh()` from `onMount`, so every visit fetched this twice.)
   $effect(() => {
     $selectedLedger;
-    void loadBusiness();
+    void Promise.all([loadBusiness(), loadClients()]).finally(() => {
+      loading = false;
+    });
   });
 
   const formatRate = formatDecimal;
@@ -68,12 +99,20 @@
     return labels[t] || t;
   }
 
-  // --- Entity + service editing ---
+  // --- Client, entity and service editing ---
   //
   // A refused delete (409) gets its own banner rather than being folded into
   // the card's error: the server's reason names records the user has to go
   // look at — the clients still pointing at an entity, or the work entries
   // still naming a service.
+  let clientFormOpen = $state(false);
+  let editingClient: ClientConfigRow | null = $state(null);
+  let clientFormError = $state('');
+  let clientSaving = $state(false);
+  let clientNotice = $state('');
+  let busyClient = $state('');
+  let pendingReferences = $state(0);
+
   let entityFormOpen = $state(false);
   let editingEntity: EntityRow | null = $state(null);
   let entityFormError = $state('');
@@ -87,8 +126,29 @@
   let serviceNotice = $state('');
 
   let confirmOpen = $state(false);
-  let pendingDelete: { kind: 'entity' | 'service'; key: string; label: string } | null =
-    $state(null);
+  type DeleteKind = 'client' | 'entity' | 'service';
+  let pendingDelete: { kind: DeleteKind; key: string; label: string } | null = $state(null);
+
+  function openClientForm(client: ClientRow | null) {
+    clientNotice = '';
+    if (client) {
+      editingClient = clientConfigs[client.key] ?? null;
+      if (!editingClient) {
+        clientNotice = `Could not load the stored record for "${client.key}".`;
+        return;
+      }
+    } else {
+      editingClient = null;
+    }
+    clientFormError = '';
+    clientFormOpen = true;
+  }
+
+  function closeClientForm() {
+    clientFormOpen = false;
+    editingClient = null;
+    clientFormError = '';
+  }
 
   function openEntityForm(entity: EntityRow | null) {
     editingEntity = entity;
@@ -102,6 +162,21 @@
     serviceFormOpen = true;
   }
 
+  async function saveClient(key: string, data: ClientInput) {
+    clientSaving = true;
+    clientFormError = '';
+    try {
+      if (editingClient) await updateClient(key, data);
+      else await createClient(key, data);
+      closeClientForm();
+      await loadClients();
+    } catch (e) {
+      clientFormError = e instanceof Error ? e.message : 'Failed to save client';
+    } finally {
+      clientSaving = false;
+    }
+  }
+
   async function saveEntity(key: string, data: EntityInput) {
     entitySaving = true;
     entityFormError = '';
@@ -110,7 +185,8 @@
       else await createEntity(key, data);
       entityFormOpen = false;
       editingEntity = null;
-      await loadBusiness();
+      // The client rows carry the entity's resolved name, so they go stale too.
+      await Promise.all([loadBusiness(), loadClients()]);
     } catch (e) {
       entityFormError = e instanceof Error ? e.message : 'Failed to save entity';
     } finally {
@@ -134,9 +210,35 @@
     }
   }
 
-  function askDelete(kind: 'entity' | 'service', key: string, label: string) {
+  function askDelete(kind: DeleteKind, key: string, label: string) {
     pendingDelete = { kind, key, label };
     confirmOpen = true;
+  }
+
+  async function askDeleteClient(client: ClientRow) {
+    pendingReferences = 0;
+    askDelete('client', client.key, client.name || client.key);
+    // Best-effort: the confirm still works without a count, it just can't
+    // say what the deletion costs.
+    try {
+      const resp = await getWorkEntries({ client: client.key, status: 'all' });
+      if (pendingDelete?.key === client.key) pendingReferences = resp.entries.length;
+    } catch {
+      /* leave the count out of the message */
+    }
+  }
+
+  async function deleteClientNow(key: string) {
+    clientNotice = '';
+    busyClient = key;
+    try {
+      await deleteClient(key);
+      await loadClients();
+    } catch (e) {
+      clientNotice = e instanceof Error ? e.message : 'Failed to delete client';
+    } finally {
+      busyClient = '';
+    }
   }
 
   async function handleDelete() {
@@ -144,13 +246,17 @@
     confirmOpen = false;
     pendingDelete = null;
     if (!target) return;
+    if (target.kind === 'client') {
+      await deleteClientNow(target.key);
+      return;
+    }
 
     entityNotice = '';
     serviceNotice = '';
     try {
       if (target.kind === 'entity') await deleteEntity(target.key);
       else await deleteService(target.key);
-      await loadBusiness();
+      await Promise.all([loadBusiness(), loadClients()]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : `Failed to delete ${target.kind}`;
       const refused = e instanceof ApiError && e.status === 409;
@@ -162,6 +268,15 @@
 
   const deleteMessage = $derived.by(() => {
     if (!pendingDelete) return '';
+    if (pendingDelete.kind === 'client') {
+      const head = `Are you sure you want to delete ${pendingDelete.label}?`;
+      if (!pendingReferences) return `${head} This cannot be undone.`;
+      const plural = pendingReferences === 1 ? 'entry references' : 'entries reference';
+      return (
+        `${head} ${pendingReferences} work ${plural} this client and will show ` +
+        `"${pendingDelete.key}" instead of a name.`
+      );
+    }
     if (pendingDelete.kind === 'entity') {
       return (
         `Are you sure you want to delete ${pendingDelete.label}? ` +
@@ -175,6 +290,18 @@
       'unbill that work and shrink the totals of invoices that already went out.'
     );
   });
+
+  function clientMenu(client: ClientRow): KebabItem[] {
+    const busy = busyClient === client.key;
+    return [
+      { label: 'Edit', onSelect: () => openClientForm(client), disabled: busy },
+      { label: 'Delete', onSelect: () => askDeleteClient(client), danger: true, disabled: busy },
+    ];
+  }
+
+  function termsLabel(terms: number | string): string {
+    return typeof terms === 'number' ? `Net ${terms}` : terms;
+  }
 
   function entityMenu(entity: EntityRow): KebabItem[] {
     return [
@@ -201,7 +328,7 @@
 
 <SettingsLayout
   title="Invoicing"
-  description="The entities that bill, the services they bill for, and the defaults an invoice is generated from. Clients are edited on the Business → Clients tab."
+  description="The entities that bill, the clients they bill, the services they bill for, and the defaults an invoice is generated from."
   {loading}
 >
   <SettingsCard title="Business defaults">
@@ -236,8 +363,8 @@
   </SettingsCard>
 
   <!-- Outside the `{#if defaults}` guard on purpose: a user with no
-       invoicing configuration has to be able to create the first entity
-       and the first service from here. -->
+       invoicing configuration has to be able to create the first entity,
+       service and client from here. -->
   <SettingsCard title="Entities ({entities.length})">
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openEntityForm(null)}>Add entity</Button>
@@ -337,7 +464,73 @@
       </div>
     {/if}
   </SettingsCard>
+
+  <!-- No count while the list failed to load: it would report 0 of something
+       that is not known, or a stale number from the last good load. -->
+  <SettingsCard title={clientsError ? 'Clients' : `Clients (${clients.length})`}>
+    {#snippet actions()}
+      <Button variant="primary" size="sm" onclick={() => openClientForm(null)}>Add client</Button>
+    {/snippet}
+    {#if clientNotice}
+      <NoticeBanner title={clientNotice} variant="warn" />
+    {/if}
+    {#if clientsError}
+      <div class="banner error">{clientsError}</div>
+    {:else if clients.length === 0}
+      <EmptyState>No clients yet. Add the first one you invoice.</EmptyState>
+    {:else}
+      <div class="table-scroll">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th>Entity</th>
+              <th>Terms</th>
+              <th>Schedule</th>
+              <th class="actions" aria-label="Actions"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each clients as client (client.key)}
+              <tr>
+                <td>
+                  {client.name}
+                  <span class="muted"> <code>{client.key}</code></span>
+                  <div class="caption">
+                    {#if client.email}{client.email} ·
+                    {/if}<code>{client.ar_account}</code>
+                  </div>
+                </td>
+                <td class="muted">{client.entity_name || client.entity}</td>
+                <td class="muted">{termsLabel(client.terms)}</td>
+                <td class="muted">
+                  {client.schedule === 'monthly'
+                    ? `${client.schedule}, day ${client.schedule_day}`
+                    : client.schedule}
+                </td>
+                <td class="actions">
+                  <KebabMenu items={clientMenu(client)} ariaLabel="Client actions" />
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/if}
+  </SettingsCard>
 </SettingsLayout>
+
+{#if clientFormOpen}
+  <ClientForm
+    client={editingClient}
+    {entities}
+    defaultEntity={defaults?.default_entity ?? ''}
+    onSave={saveClient}
+    onCancel={closeClientForm}
+    error={clientFormError}
+    saving={clientSaving}
+  />
+{/if}
 
 {#if entityFormOpen}
   <EntityForm
@@ -367,7 +560,7 @@
 
 <ConfirmDialog
   bind:open={confirmOpen}
-  title={pendingDelete?.kind === 'entity' ? 'Delete entity' : 'Delete service'}
+  title={`Delete ${pendingDelete?.kind ?? 'service'}`}
   message={deleteMessage}
   confirmLabel="Delete"
   onConfirm={handleDelete}

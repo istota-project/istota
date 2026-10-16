@@ -156,6 +156,7 @@ beforeEach(() => {
     categories: [],
   });
   api.getSharedBlockOptions.mockResolvedValue({ options: [] });
+  api.getEmailAccounts.mockResolvedValue({ accounts: [] });
   api.getBriefingPathSuggestions.mockResolvedValue({ paths: ['shared/tasks.md'] });
   api.checkBriefingPath.mockResolvedValue({ ok: false });
   api.getProfile.mockResolvedValue({ profile: { briefing_email_html: true, managed: [] } });
@@ -700,4 +701,65 @@ it('opens the linked block editor and keeps it closed after cancel', async () =>
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   await tick();
   expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+it('adds a My email block that reads the account picked from the connected ones', async () => {
+  const current = await api.getBriefingConfig();
+  api.getBriefingConfig.mockResolvedValue({
+    ...current,
+    source_kinds: [...current.source_kinds, 'my_email'],
+    block_templates: [
+      ...templates,
+      {
+        id: 'my_email',
+        label: 'My email',
+        description: 'Action items from an inbox you connected.',
+        block: {
+          title: 'My email',
+          directive: 'List the five most pressing action items from my email.',
+          render_mode: 'synthesis',
+          options: { presentation: { width: 'auto' } },
+          sources: [{ kind: 'my_email', config: {}, enabled: true }],
+        },
+      },
+    ],
+  });
+  api.getEmailAccounts.mockResolvedValue({
+    accounts: [
+      {
+        id: 'bot',
+        label: 'Your bot address',
+        address: 'bot+alice@example.com',
+        available: true,
+        reason: '',
+      },
+      {
+        id: 'google',
+        label: 'Gmail',
+        address: null,
+        available: false,
+        reason: 'Allow Gmail access for your Google connection in Settings.',
+      },
+    ],
+  });
+  await mount();
+  await fireEvent.click(screen.getByRole('button', { name: 'Add block' }));
+  const picker = await screen.findByRole('dialog', { name: 'Add block' });
+  await fireEvent.click(within(picker).getByRole('button', { name: 'My email' }));
+  const editor = await screen.findByRole('dialog', { name: 'New block' });
+  expect(
+    await within(editor).findByText('Your bot address (bot+alice@example.com)'),
+  ).toBeInTheDocument();
+  expect(editor).toHaveTextContent(
+    'Gmail: Allow Gmail access for your Google connection in Settings.',
+  );
+  await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));
+  await waitFor(() => expect(api.putBriefingBlock).toHaveBeenCalledTimes(1));
+  expect(api.putBriefingBlock).toHaveBeenCalledWith(
+    expect.objectContaining({
+      title: 'My email',
+      directive: 'List the five most pressing action items from my email.',
+      sources: [{ kind: 'my_email', config: {}, enabled: true }],
+    }),
+  );
 });

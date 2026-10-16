@@ -5159,6 +5159,19 @@ export async function runSharedBlock(name: string): Promise<{ id: string }> {
   return apiFetch(`/briefings/shared-blocks/${encodeURIComponent(name)}/run`, { method: 'POST' });
 }
 
+/** A mail account a `my_email` briefing source can read: the user's bot address, or Gmail. */
+export interface EmailAccount {
+  id: 'bot' | 'google';
+  label: string;
+  address: string | null;
+  available: boolean;
+  reason: string;
+}
+
+export async function getEmailAccounts(): Promise<{ accounts: EmailAccount[] }> {
+  return apiFetch('/briefings/email-accounts');
+}
+
 export async function getSharedBlockOptions(): Promise<{ options: SharedBlockOption[] }> {
   return apiFetch('/briefings/shared-block-options');
 }

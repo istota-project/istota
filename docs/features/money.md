@@ -85,7 +85,7 @@ Matching runs once across all sync profiles rather than once per profile. `sync_
 
 ## Business
 
-The web dashboard's Business section is **Work | Invoices | Clients**. Work is a full CRUD surface over the work log: entries addressed by stable id, with per-entry etags so a concurrent agent edit conflicts loudly instead of being silently reverted. Invoices lists every invoice, voided ones included, and is where invoices are generated, created by hand and voided. Clients, together with the money settings page, is the CRUD surface over the invoicing config (clients, entities, services), so nothing about invoicing needs the CLI.
+The web dashboard's Business section is **Work | Invoices**. Work is a full CRUD surface over the work log: entries addressed by stable id, with per-entry etags so a concurrent agent edit conflicts loudly instead of being silently reverted. Invoices lists every invoice, voided ones included, and is where invoices are generated, created by hand and voided. The invoicing config (clients, entities and services) is edited in money **Settings → Invoicing**, so nothing about invoicing needs the CLI.
 
 ### Work entries and invoices
 

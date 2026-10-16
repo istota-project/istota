@@ -86,6 +86,17 @@ class TestArchive:
         assert "document" not in listed
         assert listed["body_md"] == document_to_markdown(document)
 
+    def test_preview_is_on_list_rows_only(self, ctx, client):
+        with bdb.connect(ctx.db_path) as conn:
+            aid = bdb.insert_archive(
+                conn, briefing_name="morning", subject="Edition", body_md="The first words",
+            )
+            conn.commit()
+        listed = client.get("/istota/api/briefings/archive").json()["items"][0]
+        assert listed["preview"] == "The first words"
+        detail = client.get(f"/istota/api/briefings/archive/{aid}").json()
+        assert "preview" not in detail
+
     @pytest.mark.parametrize("stored", [None, "{", '{"version": 99}', '{"version": 1}'])
     def test_detail_keeps_legacy_body_when_document_is_unreadable(self, ctx, client, stored):
         with bdb.connect(ctx.db_path) as conn:
@@ -474,8 +485,8 @@ class TestAtomicBlockWrites:
     def test_catalog_contains_editable_defaults_without_user_selections(self, client):
         config = client.get("/istota/api/briefings/config").json()
         catalog = config["block_templates"]
-        assert [t["label"] for t in catalog] == ["News from feeds", "News from websites", "Newsletters", "Calendar", "Markets", "Tasks", "Notes", "Reminder", "Shared content", "Custom"]
-        assert len({t["id"] for t in catalog}) == 10
+        assert [t["label"] for t in catalog] == ["News from feeds", "News from websites", "Newsletters", "My email", "Calendar", "Markets", "Tasks", "Notes", "Reminder", "Shared content", "Custom"]
+        assert len({t["id"] for t in catalog}) == 11
         for template in catalog:
             assert template["description"]
             block = template["block"]

@@ -5,6 +5,7 @@
     type BriefingBlock,
     type BriefingBlockTemplate,
     type BriefingRoomOption,
+    type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
   import { Input, NoticeBanner, Select, type SelectOption } from '$lib/components/ui';
@@ -25,6 +26,7 @@
     rssOptions,
     sharedBlockOptions,
     feedsAvailable,
+    emailAccounts = [],
     outputs,
     rooms,
     editBlockId = null,
@@ -40,6 +42,7 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
+    emailAccounts?: EmailAccount[];
     outputs: string[];
     rooms: BriefingRoomOption[];
     editBlockId?: number | null;
@@ -185,6 +188,7 @@
       {rssOptions}
       {sharedBlockOptions}
       {feedsAvailable}
+      {emailAccounts}
       onChange={onBlocksChange}
     />
   {/key}

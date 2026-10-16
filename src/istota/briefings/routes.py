@@ -129,7 +129,6 @@ def _map_archive(row: ArchivedBriefing, *, with_body: bool = True) -> dict:
     }
     if with_body:
         out["body_md"] = row.body_md
-    out["preview"] = edition_preview(row.body_md, row.document)
     return out
 
 
@@ -187,7 +186,10 @@ def get_archive(
         total = bdb.count_archive(conn, briefing_name=briefing_name)
         names = bdb.list_briefing_names(conn)
     return {
-        "items": [_map_archive(r) for r in rows],
+        "items": [
+            {**_map_archive(r), "preview": edition_preview(r.body_md, r.document)}
+            for r in rows
+        ],
         "total": total,
         "briefing_names": names,
     }
@@ -638,6 +640,24 @@ def run_shared_block_now(
         raise HTTPException(404, "shared block not found")
     made = shared_block_runs.request_run(cfg, name)
     return {"id": made["id"]}
+
+
+@router.get("/email-accounts")
+def get_email_accounts(
+    request: Request,
+    user: dict = Depends(require_auth),
+) -> dict:
+    """The signed-in user's mail accounts a ``my_email`` source can read.
+
+    Always the bot plus-address; Gmail too when Google Workspace is on, marked
+    unavailable until the user grants Gmail access.
+    """
+    from istota import db as fdb
+    from istota.briefings.sources.my_email import list_accounts
+
+    cfg = _app_config(request)
+    with fdb.get_db(cfg.db_path) as conn:
+        return {"accounts": list_accounts(cfg, conn, user["username"])}
 
 
 @router.get("/shared-block-options")
