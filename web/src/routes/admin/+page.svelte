@@ -7,19 +7,11 @@
     getAdminStats,
     uploadBotAvatar,
     type AdminStats,
-    type AdminStatsJob,
     type AdminStatsUser,
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import {
-    Avatar,
-    AvatarPicker,
-    EmptyState,
-    Field,
-    StatTile,
-    PageLoading,
-  } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, Field, StatTile, PageLoading } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -37,8 +29,6 @@
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
   let error = $state('');
-  let expandedJobs: Record<number, boolean> = $state({});
-  let modulesExpanded = $state(false);
 
   const REFRESH_MS = 60_000;
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -259,10 +249,6 @@
     'last_scheduler_run',
   ]);
 
-  function toggleJob(id: number) {
-    expandedJobs = { ...expandedJobs, [id]: !expandedJobs[id] };
-  }
-
   // Source colours — a categorical palette: the hue identifies *which* source,
   // it carries no severity meaning. The four sources that actually carry
   // traffic (scheduled / talk / web / briefing) take hues roughly a quarter of
@@ -326,53 +312,6 @@
     if (seg.failed > 0) parts.push(`${seg.failed} failed`);
     if (seg.avg !== null) parts.push(`avg ${seg.avg.toFixed(1)}s`);
     return parts.join(' · ');
-  }
-
-  function isModuleJob(name: string): boolean {
-    return name.startsWith('_module.');
-  }
-
-  /** A job fires only when both of its two authors agree: the user has not
-   *  switched it off in CRON.md, and the scheduler has not suspended it after
-   *  N consecutive failures. Same conjunction the backend counts `jobs_active`
-   *  on and `db.get_enabled_scheduled_jobs` selects on. */
-  function jobRuns(j: AdminStatsJob): boolean {
-    return j.enabled && !j.auto_disabled_at;
-  }
-
-  /** Three states, not two. `paused` is the user's own doing and there is a
-   *  verb for it; `suspended` is the scheduler's, and it says so because the
-   *  two need different things done about them. A job that is both reads as
-   *  `paused`, the more informative of the two. */
-  function jobStatusLabel(j: AdminStatsJob): string {
-    if (!j.enabled) return 'paused';
-    return j.auto_disabled_at ? 'suspended' : 'enabled';
-  }
-
-  interface PartitionedJobs {
-    regular: AdminStatsJob[];
-    moduleJobs: AdminStatsJob[];
-  }
-
-  function partitionJobs(jobs: AdminStatsJob[]): PartitionedJobs {
-    const regular: AdminStatsJob[] = [];
-    const moduleJobs: AdminStatsJob[] = [];
-    for (const j of jobs) {
-      (isModuleJob(j.name) ? moduleJobs : regular).push(j);
-    }
-    return { regular, moduleJobs };
-  }
-
-  function moduleJobSummary(jobs: AdminStatsJob[]): { failures: number; lastRun: string | null } {
-    let failures = 0;
-    let lastRun: string | null = null;
-    for (const j of jobs) {
-      failures += j.consecutive_failures;
-      if (j.last_run_at && (!lastRun || j.last_run_at > lastRun)) {
-        lastRun = j.last_run_at;
-      }
-    }
-    return { failures, lastRun };
   }
 
   const BRAIN_LABELS: Record<string, string> = {
@@ -855,112 +794,6 @@
       </section>
     {/if}
 
-    <!-- Scheduler -->
-    <section class="card">
-      <header class="section-header">
-        <h2>Scheduler</h2>
-        <span class="muted meta"
-          >{stats.scheduler.jobs_active} active · {stats.scheduler.jobs_paused} paused</span
-        >
-      </header>
-      {#if stats.scheduler.jobs.length === 0}
-        <EmptyState>No scheduled jobs.</EmptyState>
-      {:else}
-        {@const parts = partitionJobs(stats.scheduler.jobs)}
-        <div class="table-scroll">
-          <table class="grid jobs-grid">
-            <thead>
-              <tr>
-                <th>Job</th>
-                <th class="col-cron">Cron</th>
-                <th class="col-status">Status</th>
-                <th class="col-lastrun">Last run</th>
-                <th class="num col-failures"
-                  ><span class="label-full">Failures</span><span class="label-abbr">Fails</span></th
-                >
-              </tr>
-            </thead>
-            <tbody>
-              {#each parts.regular as j (j.id)}
-                {@const expandable = !!j.last_error}
-                <tr
-                  class:row-error={j.consecutive_failures > 0}
-                  class:row-clickable={expandable}
-                  onclick={() => expandable && toggleJob(j.id)}
-                >
-                  <td>
-                    <span class="username">{j.user_id}</span>
-                    <span class="muted">/</span>
-                    <span class="job-name">{j.name}</span>
-                  </td>
-                  <td class="col-cron"><code>{j.cron}</code></td>
-                  <td class="col-status">
-                    <span class="dot" class:dot-ok={jobRuns(j)} class:dot-mute={!jobRuns(j)}></span>
-                    <span class="status-label">{jobStatusLabel(j)}</span>
-                  </td>
-                  <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
-                  <td class="num col-failures">{j.consecutive_failures}</td>
-                </tr>
-                {#if expandable && expandedJobs[j.id]}
-                  <tr class="error-row">
-                    <td colspan="5"><pre>{j.last_error}</pre></td>
-                  </tr>
-                {/if}
-              {/each}
-              {#if parts.moduleJobs.length > 0}
-                {@const summary = moduleJobSummary(parts.moduleJobs)}
-                <tr
-                  class:row-error={summary.failures > 0}
-                  class="row-clickable module-summary-row"
-                  onclick={() => (modulesExpanded = !modulesExpanded)}
-                >
-                  <td>
-                    <span class="disclosure">{modulesExpanded ? '▾' : '▸'}</span>
-                    <span class="muted">Module pollers</span>
-                    <span class="badge">{parts.moduleJobs.length}</span>
-                  </td>
-                  <td class="col-cron"><span class="muted">—</span></td>
-                  <td class="col-status"><span class="muted">—</span></td>
-                  <td class="col-lastrun">{formatTimestamp(summary.lastRun)}</td>
-                  <td class="num col-failures">{summary.failures}</td>
-                </tr>
-                {#if modulesExpanded}
-                  {#each parts.moduleJobs as j (j.id)}
-                    {@const expandable = !!j.last_error}
-                    <tr
-                      class:row-error={j.consecutive_failures > 0}
-                      class:row-clickable={expandable}
-                      class="module-child-row"
-                      onclick={() => expandable && toggleJob(j.id)}
-                    >
-                      <td>
-                        <span class="username">{j.user_id}</span>
-                        <span class="muted">/</span>
-                        <span class="job-name">{j.name}</span>
-                      </td>
-                      <td class="col-cron"><code>{j.cron}</code></td>
-                      <td class="col-status">
-                        <span class="dot" class:dot-ok={jobRuns(j)} class:dot-mute={!jobRuns(j)}
-                        ></span>
-                        <span class="status-label">{jobStatusLabel(j)}</span>
-                      </td>
-                      <td class="col-lastrun">{formatTimestamp(j.last_run_at)}</td>
-                      <td class="num col-failures">{j.consecutive_failures}</td>
-                    </tr>
-                    {#if expandable && expandedJobs[j.id]}
-                      <tr class="error-row">
-                        <td colspan="5"><pre>{j.last_error}</pre></td>
-                      </tr>
-                    {/if}
-                  {/each}
-                {/if}
-              {/if}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </section>
-
     <!-- Storage -->
     <section class="card">
       <header class="section-header">
@@ -1110,9 +943,6 @@
   .dot-warn {
     background: var(--status-dot-warn);
   }
-  .dot-mute {
-    background: var(--text-dim);
-  }
   .dot-source {
     width: 6px;
     height: 6px;
@@ -1122,22 +952,6 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-  }
-
-  .username {
-    font-weight: 500;
-  }
-
-  /* Neutral count chip (module-poller row). Distinct from .admin-badge — this
-	   one carries a number, not an identity. */
-  .badge {
-    display: inline-block;
-    margin-left: var(--space-2);
-    font-size: var(--text-xs);
-    padding: 0.05rem var(--space-2);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-muted);
   }
 
   /* The tiles themselves are `StatTile`; this sizes the wall they sit in. */
@@ -1253,7 +1067,7 @@
     width: 9rem;
   }
 
-  /* The two columns `formatTimestamp` writes into, and the only cells in either
+  /* The column `formatTimestamp` writes into, and the only cell in the
 	   table whose content is a localized string of unbounded width: past thirty
 	   days it renders a date, and `5. Sept. 2026` is longer than the
 	   `Sep 5, 2026` these were sized against. Nothing sets `overflow` on a
@@ -1261,12 +1075,11 @@
 	   it rather than wrapping. The widths elsewhere still carry the common case;
 	   this is the backstop.
 
-	   `td` only. The header cells carry the same class, and `Last active` and
-	   `Last run` are two words that are *meant* to wrap to a second line at the
+	   `td` only. The header cell carries the same class, and `Last active` is
+	   two words that are *meant* to wrap to a second line at the
 	   narrow breakpoints — clipping those would cost more than it saves, and a
 	   header has no tooltip to fall back on. */
-  .users-grid td.col-active,
-  .jobs-grid td.col-lastrun {
+  .users-grid td.col-active {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1379,62 +1192,6 @@
     color: var(--status-danger-fg);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
-  }
-
-  /* Scheduler table */
-  .jobs-grid {
-    min-width: 580px;
-  }
-
-  .job-name {
-    word-break: break-word;
-  }
-
-  .label-abbr {
-    display: none;
-  }
-
-  .row-clickable {
-    cursor: pointer;
-  }
-
-  .row-clickable:hover {
-    background: var(--surface-raised);
-  }
-
-  .row-error td:first-child::before {
-    content: '!';
-    display: inline-block;
-    color: var(--status-danger-fg);
-    margin-right: var(--space-2);
-    font-weight: 700;
-  }
-
-  .module-summary-row td {
-    color: var(--text-muted);
-  }
-
-  .module-child-row td:first-child {
-    padding-left: var(--space-6);
-  }
-
-  .disclosure {
-    display: inline-block;
-    width: 1em;
-    color: var(--text-dim);
-    margin-right: var(--space-1);
-  }
-
-  .error-row td {
-    background: var(--surface-base);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .error-row pre {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--status-danger-fg);
-    white-space: pre-wrap;
   }
 
   code {
@@ -1616,40 +1373,12 @@
   }
 
   @media (max-width: 640px) {
-    .col-cron {
-      display: none;
-    }
     /* :global because the subject is a class handed to StatTile now, and
        Svelte prunes a selector whose subject it cannot see in the markup —
        silently. Scoped under the page container, so it is placement rather
        than a leak. */
     .admin-page :global(.col-total-kpi) {
       display: none;
-    }
-    .jobs-grid {
-      min-width: 0;
-    }
-    /* Fixed table layout splits unsized columns evenly, which gave the job
-		   name the same quarter of a phone-width table as a status dot and a
-		   one-digit failure count. Pin the three narrow columns to just what
-		   their content (and header) needs and leave Job unsized so it takes
-		   the remainder — same approach as .users-grid. */
-    .jobs-grid .col-status {
-      width: 3.75rem;
-    }
-    .jobs-grid .col-lastrun {
-      width: 4.5rem;
-    }
-    .jobs-grid .col-failures {
-      width: 3.25rem;
-    }
-    /* "Failures" is one long word that can't wrap; the short form is what
-		   lets that column shrink to its integer. */
-    .col-failures .label-full {
-      display: none;
-    }
-    .col-failures .label-abbr {
-      display: inline;
     }
     /* Source greys are hard to tell apart in the stack-bar at any width;
 		   on mobile the bar is even narrower, so keep the labelled chips
@@ -1664,12 +1393,6 @@
   }
 
   @media (max-width: 480px) {
-    .col-status .status-label {
-      display: none;
-    }
-    .col-lastrun {
-      max-width: 6rem;
-    }
     .admin-page .system-banner {
       grid-template-columns: 1fr 1fr;
     }

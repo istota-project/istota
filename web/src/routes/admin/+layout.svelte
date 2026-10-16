@@ -5,6 +5,7 @@
   import { HeaderSave } from '$lib/components/settings';
   import {
     Activity,
+    CalendarClock,
     Monitor,
     Newspaper,
     Plug,
@@ -27,6 +28,7 @@
     { href: '/users', label: 'Users', icon: Users },
     { href: '/groups', label: 'Groups', icon: UsersRound },
     { href: '/briefings', label: 'Briefings', icon: Newspaper },
+    { href: '/jobs', label: 'Scheduled jobs', icon: CalendarClock },
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
     { href: '/connections', label: 'Connections', icon: Plug },

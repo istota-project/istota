@@ -3929,6 +3929,116 @@ async def admin_stats(_: dict = Depends(_require_admin)):
     return await asyncio.to_thread(_gather_admin_stats)
 
 
+# ---- Admin scheduled jobs ----
+#
+# Every user's scheduled jobs, with disable, enable and delete. A change goes
+# through CRON.md the way `!cron` does (`cron_loader.set_job_enabled`), since the
+# sync reads the file back. A delete needs the job's name typed back and a
+# step-up proof for `admin_cron_delete`, redeemed after every refusal the admin
+# would have to fix first. Module pollers can be switched off but not deleted:
+# their module re-seeds the row.
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _admin_job_refusal(status: int, error: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": error, "message": message}, status_code=status, headers=_NO_STORE)
+
+
+def _admin_job_not_found() -> JSONResponse:
+    return _admin_job_refusal(404, "job_not_found", "Scheduled job not found")
+
+
+def _admin_job_view(conn: sqlite3.Connection, job_id: int) -> dict | None:
+    section = _admin_scheduler_section(conn)
+    return next((job for job in section["jobs"] if job["id"] == job_id), None)
+
+
+def _log_admin_job(action: str, job, admin: str, **extra) -> None:
+    # No job name: the log is read more widely than the admin pane.
+    tail = "".join(f" {key}={value}" for key, value in extra.items())
+    logger.info("admin_cron action=%s user=%s job_id=%s admin=%s%s",
+                action, job.user_id, job.id, admin, tail)
+
+
+@api_router.get("/admin/scheduled-jobs")
+async def admin_scheduled_jobs(_: dict = Depends(_require_admin)):
+    def read():
+        with _db.get_db(_config.db_path) as conn:
+            return _admin_scheduler_section(conn)
+    return JSONResponse(await asyncio.to_thread(read), headers=_NO_STORE)
+
+
+async def _admin_set_job_enabled(job_id: int, enabled: bool, admin: str) -> JSONResponse:
+    from istota.cron_loader import set_job_enabled
+
+    def write():
+        with _db.get_db(_config.db_path) as conn:
+            job = _db.get_scheduled_job(conn, job_id)
+            if job is None:
+                return None
+            outcome = set_job_enabled(_config, conn, job, enabled, by="web")
+            _log_admin_job("enable" if enabled else "disable", job, admin, outcome=outcome)
+            return {"outcome": outcome, "job": _admin_job_view(conn, job_id)}
+    result = await asyncio.to_thread(write)
+    if result is None:
+        return _admin_job_not_found()
+    return JSONResponse(result, headers=_NO_STORE)
+
+
+@api_router.post("/admin/scheduled-jobs/{job_id}/disable")
+async def admin_disable_scheduled_job(job_id: int, user: dict = Depends(_require_admin),
+                                      _csrf: None = Depends(_verify_origin)):
+    return await _admin_set_job_enabled(job_id, False, user["username"])
+
+
+@api_router.post("/admin/scheduled-jobs/{job_id}/enable")
+async def admin_enable_scheduled_job(job_id: int, user: dict = Depends(_require_admin),
+                                     _csrf: None = Depends(_verify_origin)):
+    return await _admin_set_job_enabled(job_id, True, user["username"])
+
+
+@api_router.delete("/admin/scheduled-jobs/{job_id}")
+async def admin_delete_scheduled_job(job_id: int, request: Request, user: dict = Depends(_require_admin),
+                                     _csrf: None = Depends(_verify_origin)):
+    from istota.cron_loader import _MODULE_JOB_PREFIX, remove_job_definition
+    from istota.notifications.resolvers import cron_job as cron_job_source
+
+    body = await _credential_json(request)
+
+    def read():
+        with _db.get_db(_config.db_path) as conn:
+            return _db.get_scheduled_job(conn, job_id)
+    job = await asyncio.to_thread(read)
+    if job is None:
+        return _admin_job_not_found()
+    if body.get("confirm") != job.name:
+        return _admin_job_refusal(409, "confirm_required", "Type the job's name to delete it")
+    if job.name.startswith(_MODULE_JOB_PREFIX):
+        return _admin_job_refusal(409, "module_job",
+                                  "A module poller is re-created by its module; disable it instead")
+    refusal = await _require_step_up(request, body, "admin_cron_delete")
+    if refusal is not None:
+        return refusal
+    # The file first and outside any transaction (ISSUE-387); a row whose
+    # definition is still in CRON.md would be re-inserted by the next sync.
+    if not await asyncio.to_thread(remove_job_definition, _config, job.user_id, job.name):
+        return _admin_job_refusal(409, "cron_md_unwritable",
+                                  "The job is still in the user's CRON.md, which could not be "
+                                  "rewritten. Nothing was deleted.")
+
+    def delete():
+        with _db.get_db(_config.db_path) as conn:
+            # By name: a sync between the file write and here may have replaced the row.
+            current = _db.get_scheduled_job_by_name(conn, job.user_id, job.name)
+            if current is not None:
+                cron_job_source.resolve_for_job(conn, current.user_id, current.id, by="web")
+                _db.delete_scheduled_job(conn, current.id)
+    await asyncio.to_thread(delete)
+    _log_admin_job("delete", job, user["username"])
+    return JSONResponse({"deleted": True, "id": job_id}, headers=_NO_STORE)
+
+
 # ---- Task event stream (task-event-streaming spec) ----
 #
 # SSE and snapshot consumers read the task_events table from the web process —
@@ -14165,10 +14275,10 @@ _STEP_UP_LABELS = {
     "history_purge": "permanently delete credential history",
     "admin_config_change": "change this instance's configuration",
     "admin_briefing_delete": "delete a briefing",
+    "admin_cron_delete": "delete a scheduled job",
 }
-
 # Codes that guard no vault: an admin may ask for one without the vault gate.
-_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete"})
+_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete"})
 
 
 def _step_up_session(request: Request) -> str:
