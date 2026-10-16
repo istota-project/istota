@@ -139,6 +139,26 @@ class TestTheAdminStoragePane:
         assert out["nextcloud_configured"] is configured
         assert (out["nextcloud_username"] == "istota") is configured
 
+    @pytest.mark.parametrize(
+        "shape, env, mode",
+        [
+            (LOCAL, {}, "local"),
+            (MOUNT, {}, "nextcloud"),
+            (LOCAL, {"ISTOTA_WORKSPACE_FSTYPE": "virtiofs",
+                     "ISTOTA_WORKSPACE_MARKER_REQUIRED": "1"}, "host-folder"),
+        ],
+    )
+    def test_the_storage_mode_names_the_install(self, tmp_path, monkeypatch, shape, env, mode):
+        import istota.webui.app as app
+
+        monkeypatch.delenv("ISTOTA_WORKSPACE_FSTYPE", raising=False)
+        monkeypatch.delenv("ISTOTA_WORKSPACE_MARKER_REQUIRED", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        config = _config(tmp_path, shape)
+        with patch.object(app, "_config", config):
+            assert app._admin_storage_section(config.db_path)["mode"] == mode
+
 
 class TestTheBootTimeShare:
     """The OCS share names a path that exists in Nextcloud only under the mount."""

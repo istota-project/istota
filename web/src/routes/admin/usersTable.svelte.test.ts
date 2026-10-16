@@ -147,7 +147,7 @@ function reader(): User {
 async function show(users: AdminStatsUser[]) {
   vi.mocked(getAdminStats).mockResolvedValue(stats(users));
   const rendered = render(Harness, { component: Page, user: reader() });
-  await screen.findByText('Users');
+  await screen.findByRole('heading', { name: 'Users' });
   return rendered;
 }
 
@@ -202,17 +202,33 @@ describe('the admin users table counts job runs apart', () => {
   });
 });
 
-describe('the status page lays its cards out as a masonry wall', () => {
-  it('puts every card straight into the grid, with the banner and Users at full width', async () => {
+describe('the status page lays its cards out in rows of three', () => {
+  it('opens on status, models and activity, then Users across the full width', async () => {
     const { container } = await show([member('bob', 'Bob')]);
-    const grid = container.querySelector('.card-grid-tracks.masonry') as HTMLElement;
-    expect(grid).toBeTruthy();
-    // Masonry places and measures only the grid's own children.
+    const grid = container.querySelector('.card-grid-tracks') as HTMLElement;
+    expect(grid.getAttribute('data-columns')).toBe('3');
+    expect(grid.classList.contains('masonry')).toBe(false);
+    // Each card is a grid item; a wrapper would collapse a row into one track.
     const cards = Array.from(grid.children);
-    expect(cards.length).toBeGreaterThan(3);
     expect(cards.every((c) => c.classList.contains('card'))).toBe(true);
-    expect(grid.querySelector(':scope > .system-banner')?.getAttribute('data-width')).toBe('full');
-    const users = cards.find((c) => c.querySelector('.users-grid'));
-    expect(users?.getAttribute('data-width')).toBe('full');
+    const title = (c: Element) => c.querySelector('h2')?.textContent?.trim();
+    // This fixture carries no `models` section, so its card is absent.
+    // The installation card is headed by the bot's name.
+    expect(cards[0].classList.contains('installation')).toBe(true);
+    expect(title(cards[0])).toContain('Istota');
+    expect(cards.slice(1, 3).map(title)).toEqual(['Task activity', 'Users']);
+    expect(cards.slice(0, 2).every((c) => !c.hasAttribute('data-width'))).toBe(true);
+    expect(cards[2].getAttribute('data-width')).toBe('full');
+  });
+
+  it('folds storage into the installation card', async () => {
+    const { container } = await show([member('bob', 'Bob')]);
+    const card = container.querySelector('.installation') as HTMLElement;
+    const labels = Array.from(card.querySelectorAll('dt')).map((d) => d.textContent?.trim());
+    expect(labels).toEqual(expect.arrayContaining(['Version', 'Users', 'Database', 'Backups']));
+    // The fixture predates the storage mode, so the row stays out rather than
+    // reading "undefined".
+    expect(labels).not.toContain('Storage');
+    expect(container.textContent).not.toContain('Database size');
   });
 });

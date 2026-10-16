@@ -72,6 +72,7 @@ from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from istota.config import Config, load_config, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
+from istota.lib.workspace_marker import storage_mode
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
 from istota.storage import NOTES_MAX_BYTES
 from istota.workspace import text_files
@@ -3077,6 +3078,9 @@ def _admin_storage_section(db_path: Path) -> dict:
         # the row on an install with none.
         "nextcloud_configured": bool(_config and _config.nextcloud_enabled),
         "nextcloud_mount_healthy": mount_healthy,
+        # Where the workspace lives, which also tells the local Mac VM from a
+        # server: only the Mac installer writes host-folder.
+        "mode": storage_mode(bool(_config and _config.storage_is_nextcloud)),
         # The bot's own Nextcloud account, so the bot-icon control can name the
         # picture it is *not* changing rather than implying the two are linked.
         # The app password the daemon holds cannot set an avatar there —

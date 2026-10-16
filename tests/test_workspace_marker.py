@@ -75,3 +75,24 @@ class TestExpectedType:
         assert workspace_marker.undeclared_mount("/mnt/shared", False, env) is False
         assert workspace_marker.undeclared_mount("/mnt/shared", True, {}) is False
         assert workspace_marker.undeclared_mount(None, False, {}) is False
+
+
+class TestStorageMode:
+    """What the admin page names the install by, from what istota-stack
+    derived out of host.env's STORAGE."""
+
+    def test_the_mac_folder_is_host_folder(self):
+        env = {
+            workspace_marker.FSTYPE_ENV: "virtiofs",
+            workspace_marker.REQUIRED_ENV: "1",
+        }
+        assert workspace_marker.storage_mode(False, env) == "host-folder"
+        assert workspace_marker.storage_mode(True, env) == "host-folder"
+
+    def test_an_rclone_mount_is_nextcloud(self):
+        env = {workspace_marker.FSTYPE_ENV: "fuse.rclone"}
+        assert workspace_marker.storage_mode(False, env) == "nextcloud"
+        assert workspace_marker.storage_mode(True, {}) == "nextcloud"
+
+    def test_nothing_declared_is_local(self):
+        assert workspace_marker.storage_mode(False, {}) == "local"

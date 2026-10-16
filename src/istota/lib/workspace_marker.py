@@ -61,6 +61,19 @@ def marker_required(environ: Mapping[str, str] | None = None) -> bool:
     return env.get(REQUIRED_ENV, "").strip() == "1"
 
 
+def storage_mode(nextcloud: bool, environ: Mapping[str, str] | None = None) -> str:
+    """Where the workspace lives: "host-folder", "nextcloud" or "local".
+
+    Read from what istota-stack derives from host.env's STORAGE. Only the Mac
+    installer writes host-folder, so it also tells a Lima VM from a server.
+    """
+    if marker_required(environ):
+        return "host-folder"
+    if expected_fstype(nextcloud, environ) == RCLONE_FSTYPE:
+        return "nextcloud"
+    return "local"
+
+
 def marker_present(root: str | os.PathLike) -> bool:
     """Whether ``root`` holds the marker as a regular file.
 

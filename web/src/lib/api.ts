@@ -467,6 +467,9 @@ export interface AdminStats {
     last_backup: string | null;
     nextcloud_configured: boolean;
     nextcloud_mount_healthy: boolean;
+    /** Where the workspace lives; host-folder is only ever the local Mac VM.
+     *  Absent from an older backend. */
+    mode?: 'host-folder' | 'nextcloud' | 'local';
     /** The bot's own Nextcloud account, for the bot-icon control's copy. */
     nextcloud_username?: string | null;
   };

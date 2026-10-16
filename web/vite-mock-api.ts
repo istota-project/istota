@@ -2691,6 +2691,7 @@ const mockAdminStats = {
     // hidden in the UI.
     nextcloud_configured: false,
     nextcloud_mount_healthy: false,
+    mode: 'host-folder',
   },
   models: {
     brain_kind: 'native',
