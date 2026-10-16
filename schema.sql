@@ -1531,7 +1531,12 @@ CREATE TABLE IF NOT EXISTS messages (
     received_mail TEXT,
     -- An email note's parts, JSON: header, outcome, remark (ISSUE-644). The
     -- body stays the whole note for the push surfaces. NULL on every other row.
-    email_note TEXT
+    email_note TEXT,
+    -- The location share cards an answer carries, as a JSON array of projected
+    -- observations (`location.sharing.attach_location_cards`). Written in the
+    -- row's own INSERT, since the room stream's cursor is `messages.id` and a
+    -- later UPDATE would never stream. NULL on every other row.
+    location_shares TEXT
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     body, title,
@@ -2119,6 +2124,35 @@ BEGIN
         SELECT request_id FROM location_share_grants WHERE room_token=OLD.token
     );
     DELETE FROM location_share_grants WHERE room_token=OLD.token;
+END;
+
+-- One map card per share result: the projected observation only, never a raw
+-- ping. Attached to the answer that carries its `map_url`; the image columns
+-- belong to the Talk and WhatsApp delivery.
+CREATE TABLE IF NOT EXISTS location_share_cards (
+    id INTEGER PRIMARY KEY,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    request_id TEXT,
+    owner_user_id TEXT NOT NULL,
+    actor_user_id TEXT NOT NULL,
+    room_token TEXT NOT NULL,
+    grant_id TEXT,
+    observation TEXT NOT NULL,
+    map_url TEXT NOT NULL,
+    message_id INTEGER,
+    image_state TEXT NOT NULL DEFAULT 'none'
+        CHECK (image_state IN ('none','pending','sending','sent','failed','uncertain','skipped')),
+    image_surface TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    attached_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_location_share_cards_task ON location_share_cards(task_id);
+CREATE INDEX IF NOT EXISTS idx_location_share_cards_request ON location_share_cards(request_id);
+-- Runtime connections leave foreign_keys off, so the SET NULL is done here.
+CREATE TRIGGER IF NOT EXISTS location_share_card_task_deleted
+BEFORE DELETE ON tasks
+BEGIN
+    UPDATE location_share_cards SET task_id=NULL WHERE task_id=OLD.id;
 END;
 
 -- A recipient's block on one asker. Asking is open by default between users of

@@ -854,6 +854,20 @@ def _record_email_note_step(config, task, decision: str) -> None:
                        task.id, type(exc).__name__)
 
 
+def _location_cards_for_answer(conn, config, task_id: int, room_token: str, body: str):
+    """The map cards an answer carries, or none when they cannot be read.
+
+    A map never decides whether the text is stored.
+    """
+    from .location.sharing import location_cards_for_answer
+    try:
+        return location_cards_for_answer(
+            conn, config, task_id=task_id, room_token=room_token, body=body)
+    except Exception as exc:
+        logger.warning("Task %d: location cards skipped (%s)", task_id, type(exc).__name__)
+        return [], []
+
+
 def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | None:
     """Store a task's delivered result as an assistant spine row in a room's
     canonical transcript — for ANY source type — when the room is web-visible.
@@ -4171,13 +4185,21 @@ def process_one_task(
                     # asked it once the room has moved on (ISSUE-641).
                     from .transport.reply_quote import quoted_trigger
                     _quoted = quoted_trigger(conn, task_id, task.conversation_token)
+                    # Map cards ride the row's own INSERT: the room stream
+                    # cursors on `messages.id`, so a later UPDATE never streams.
+                    _cards, _card_ids = _location_cards_for_answer(
+                        conn, config, task_id, task.conversation_token, result)
                     stored_assistant_msg_id = db.store_turn_message(
                         conn, task.conversation_token, role="assistant",
                         body=result, task_id=task_id,
                         origin_surface=task.source_type,
                         about_room_token=task.about_room_token or None,
                         reply_to_message_id=_quoted.message_id if _quoted else None,
+                        location_shares=_cards or None,
                     )
+                    if stored_assistant_msg_id is not None and _card_ids:
+                        from .location.sharing import mark_location_cards_attached
+                        mark_location_cards_attached(conn, _card_ids, stored_assistant_msg_id)
                     # A retry that re-completes the task finds the row already
                     # stored (store returns None) — recover its id so the star
                     # key still rides the terminal event.

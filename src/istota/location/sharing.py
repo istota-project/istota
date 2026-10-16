@@ -58,8 +58,40 @@ def _snapshot_text(snapshot):
     return "\n".join(lines)
 
 
+# The projected fields a map card carries, beside its owner's label and id.
+_CARD_FIELDS = ("precision", "lat", "lon", "accuracy_m", "observed_at", "freshness", "map_url")
+MAX_CARDS_PER_MESSAGE = 3
+
+
+def _owner_label(config, owner_user_id):
+    from istota.confirmations import flatten
+
+    user = config.users.get(owner_user_id)
+    return flatten((user.display_name if user else "") or owner_user_id)
+
+
+def _record_card(conn, config, *, task_id, actor_user_id, room_token, snapshot, grant_id=None):
+    """Record a map card for one share result, on the caller's transaction.
+
+    It holds the projection the text already discloses and nothing else. It
+    reaches a room only if the task's answer carries its `map_url`
+    (`location_cards_for_answer`).
+    """
+    observation = {"owner_user_id": snapshot["owner_user_id"],
+                   "owner_label": _owner_label(config, snapshot["owner_user_id"])}
+    observation.update({key: snapshot[key] for key in _CARD_FIELDS})
+    conn.execute(
+        "INSERT INTO location_share_cards "
+        "(task_id, owner_user_id, actor_user_id, room_token, grant_id, observation, map_url) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (task_id, snapshot["owner_user_id"], actor_user_id, room_token, grant_id,
+         json.dumps(observation), snapshot["map_url"]),
+    )
+
+
 def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key,
-                            now, room=None, precision="exact", allow_last_known=False):
+                            now, room=None, precision="exact", allow_last_known=False,
+                            map_card=True):
     """Return the owner's projection here, or hold one frozen post from private chat.
 
     Request context travels in the existing immutable post destination, so a
@@ -113,6 +145,9 @@ def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key
         return snapshot
     snapshot["owner_user_id"] = actor_user_id
     if shared:
+        if map_card:
+            _record_card(conn, config, task_id=task_id, actor_user_id=actor_user_id,
+                         room_token=target, snapshot=snapshot)
         return {"delivery": "reply", "snapshot": snapshot}
     return private_replies.hold_room_post(
         conn, config, actor_user_id=actor_user_id, task_id=task_id,
@@ -424,7 +459,8 @@ def _readable_location_grant(conn, config, grant, terms, now):
             and config.is_module_enabled(owner, "location", conn=conn))
 
 
-def _read_room_locations(config, *, actor_user_id, task_id, subject_user_id, now):
+def _read_room_locations(config, *, actor_user_id, task_id, subject_user_id, now,
+                         map_card=False):
     try:
         with db.get_db(config.db_path) as conn:
             conn.execute("BEGIN")
@@ -482,6 +518,9 @@ def _read_room_locations(config, *, actor_user_id, task_id, subject_user_id, now
                 result = {"owner_user_id": grant["owner_user_id"], **snapshot}
                 if "error" not in snapshot:
                     result["expires_at"] = current["expires_at"]
+                    if map_card and subject_user_id is not None:
+                        _record_card(conn, config, task_id=task_id, actor_user_id=actor_user_id,
+                                     room_token=terms[0], snapshot=result, grant_id=grant["id"])
                 results.append(result)
             if subject_user_id is not None:
                 return results[0] if results else {"error": "location_unavailable"}
@@ -494,11 +533,73 @@ def _read_room_locations(config, *, actor_user_id, task_id, subject_user_id, now
         raise RequestError("location_temporarily_unavailable") from None
 
 
-def read_room_location(config, *, actor_user_id, task_id, subject_user_id, now):
+def read_room_location(config, *, actor_user_id, task_id, subject_user_id, now, map_card=True):
     return _read_room_locations(config, actor_user_id=actor_user_id, task_id=task_id,
-                                subject_user_id=subject_user_id, now=now)
+                                subject_user_id=subject_user_id, now=now, map_card=map_card)
 
 
 def read_room_locations(config, *, actor_user_id, task_id, now):
     return _read_room_locations(config, actor_user_id=actor_user_id, task_id=task_id,
                                 subject_user_id=None, now=now)
+
+
+def _card_grant_readable(conn, config, card, observation, now):
+    """The room-query stage's final check, asked again when the answer is stored."""
+    grant = conn.execute("SELECT * FROM location_share_grants WHERE id=?",
+                         (card["grant_id"],)).fetchone()
+    if (grant is None or grant["owner_user_id"] != card["owner_user_id"]
+            or grant["precision"] != observation.get("precision")
+            or not is_current_member(conn, card["room_token"], card["actor_user_id"])):
+        return False
+    try:
+        _, audience, fingerprint, epoch = _timed_room_terms(
+            conn, config, card["room_token"], card["actor_user_id"])
+    except RequestError:
+        return False
+    terms = (card["room_token"], audience, fingerprint, epoch)
+    return _readable_location_grant(conn, config, grant, terms, now)
+
+
+def location_cards_for_answer(conn, config, *, task_id, room_token, body):
+    """The cards a task's answer carries, and their ids, for the row about to be stored.
+
+    A card goes with the answer only when the answer has its `map_url`
+    verbatim, which is the deterministic sign the model shared it, and only
+    into the room it was recorded for. A granted read's card is dropped when
+    the grant no longer reads. One card per link, in recording order, at most
+    `MAX_CARDS_PER_MESSAGE`.
+    """
+    if not body:
+        return [], []
+    room = canonical_token(conn, room_token)
+    rows = conn.execute(
+        "SELECT * FROM location_share_cards WHERE task_id=? AND message_id IS NULL ORDER BY id",
+        (task_id,),
+    ).fetchall()
+    now = datetime.now(timezone.utc)
+    shares, card_ids, seen = [], [], set()
+    for card in rows:
+        if len(shares) >= MAX_CARDS_PER_MESSAGE:
+            break
+        if card["room_token"] != room or card["map_url"] in seen or card["map_url"] not in body:
+            continue
+        try:
+            observation = json.loads(card["observation"])
+        except ValueError:
+            continue
+        if card["grant_id"] is not None and not _card_grant_readable(
+                conn, config, card, observation, now):
+            continue
+        seen.add(card["map_url"])
+        shares.append({"card_id": card["id"], **observation})
+        card_ids.append(card["id"])
+    return shares, card_ids
+
+
+def mark_location_cards_attached(conn, card_ids, message_id):
+    """Point the attached cards at their row, in the transaction that inserted it."""
+    for card_id in card_ids:
+        conn.execute(
+            "UPDATE location_share_cards SET message_id=?, attached_at=datetime('now') WHERE id=?",
+            (message_id, card_id),
+        )

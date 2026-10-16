@@ -8063,7 +8063,38 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     mail = _outgoing_mail_field(_row_get(row, "outgoing_mail"))
     if mail is not None:
         out["mail"] = mail
+    shares = _location_shares_field(_row_get(row, "location_shares"))
+    if shares is not None:
+        out["location_shares"] = shares
     return out
+
+
+_LOCATION_SHARE_KEYS = (
+    "card_id", "owner_user_id", "owner_label", "precision", "lat", "lon",
+    "accuracy_m", "observed_at", "freshness", "map_url",
+)
+
+
+def _location_shares_field(raw) -> list[dict] | None:
+    """A row's location share cards as the web card reads them.
+
+    Only the listed keys pass, so anything a later writer adds stays
+    server-side. None for a row with no cards or a record that cannot be read,
+    which then renders as a plain answer.
+    """
+    if not raw:
+        return None
+    try:
+        shares = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    if not isinstance(shares, list):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    out = [{key: share.get(key) for key in _LOCATION_SHARE_KEYS}
+           for share in shares if isinstance(share, dict)]
+    return out or None
 
 
 _MAIL_STATES = frozenset({"sent", "held", "failed", "discarded"})
@@ -8340,7 +8371,7 @@ _SPINE_COLUMNS = (
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
     "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
-    "  m.received_mail AS received_mail, "
+    "  m.received_mail AS received_mail, m.location_shares AS location_shares, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.

@@ -49,6 +49,7 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
     ("outbound_drafts", "room_token"): "room_token",
     ("notifications", "room_token"): "room_token",
     ("location_share_grants", "room_token"): "room_token",
+    ("location_share_cards", "room_token"): "room_token",
     ("user_profiles", "default_room"): "room_token",
     # Parse the descriptor: room:/web: identities differ from talk: refs.
     ("tasks", "output_target"): "descriptor",
