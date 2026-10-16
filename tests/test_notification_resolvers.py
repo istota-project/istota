@@ -1128,6 +1128,49 @@ def test_every_object_backed_source_is_registered_and_none_auto_resolves():
     assert sources.auto_resolve_sources() & _STAGE_SOURCES == set()
 
 
+class TestAdminCronChange:
+    """Fire-and-forget: registered, keyed per job and action, closed by being seen."""
+
+    def _write(self, conn, action="disable", job_id=7, job_name="digest"):
+        from istota.notifications.resolvers import admin_cron_change as source
+
+        result = source.write(conn, "alice", admin_name="Admin", action=action,
+                              job_id=job_id, job_name=job_name)
+        conn.commit()
+        return result
+
+    def test_registered_and_resolved_on_seen(self):
+        assert "admin_cron_change" in sources.all_resolvers()
+        assert "admin_cron_change" in sources.auto_resolve_sources()
+
+    def test_a_repeat_bumps_one_row_and_another_action_adds_one(self, conn):
+        self._write(conn)
+        self._write(conn)
+        self._write(conn, action="enable")
+        rows = conn.execute("SELECT dedup_key, title, body FROM notifications "
+                            "WHERE source = 'admin_cron_change' ORDER BY id").fetchall()
+        assert [row["dedup_key"] for row in rows] == ["job:7:disable", "job:7:enable"]
+        assert rows[0]["title"] == "An administrator disabled your scheduled job"
+        assert "digest" in rows[0]["body"] and "Admin" in rows[0]["body"]
+        assert "!cron enable digest" in rows[0]["body"]
+
+    def test_an_unknown_action_is_refused(self, conn):
+        with pytest.raises(ValueError):
+            self._write(conn, action="edit")
+
+    def test_the_view_renders_the_stored_text_and_seeing_it_closes_it(self, config, conn):
+        self._write(conn, action="delete")
+        views, total = store.list_open(config, conn, "alice")
+        assert total == 1
+        view = views[0]
+        assert view.title == "An administrator deleted your scheduled job"
+        assert "CRON.md" in view.body and view.actions == ()
+        row = conn.execute("SELECT id, updated_at FROM notifications").fetchone()
+        store.mark_seen(conn, "alice", [(row["id"], row["updated_at"])])
+        conn.commit()
+        assert store.list_open(config, conn, "alice")[1] == 0
+
+
 class TestAdminBriefingChange:
     """Fire-and-forget: registered, keyed per briefing and action, closed by being seen."""
 
