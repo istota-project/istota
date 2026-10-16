@@ -38,22 +38,42 @@ def _interactive_task(conn, config, *, actor_user_id, task_id):
     return task
 
 
-def _snapshot_text(snapshot):
-    from istota.confirmations import flatten
+def observed_label(observed_at: str) -> str:
+    """An observation's time as a post shows it, ``2026-10-16 14:02 UTC``.
 
-    label = flatten(snapshot["owner_user_id"])
-    lines = [f"{label}: Location observed at {snapshot['observed_at']}"]
-    if snapshot["freshness"] == "last_known":
-        lines.append("Last known location")
-    if snapshot["precision"] == "area":
-        lines.append("Approximate area")
+    Raises ValueError or TypeError for a time that cannot be read.
+    """
+    moment = datetime.fromisoformat(observed_at)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def observation_line(observation: dict) -> str:
+    """A location post's first line, from a card observation's own fields.
+
+    A held post's approval binds its map through this line and the map link
+    (`rooms.private_replies._location_bound`), so every field the card draws
+    is either here or in the link. Raises KeyError, TypeError or ValueError
+    for an observation it cannot render.
+    """
+    line = (f"{observation['owner_label']}'s location, "
+            f"observed {observed_label(observation['observed_at'])}")
+    if observation["precision"] == "area":
+        line += ". Approximate area"
     else:
-        lines.append(f"Accuracy: {snapshot['accuracy_m']:g} m")
-    lines.append(f"Age when prepared: {snapshot['age_seconds']:g} seconds")
+        line += f" ({float(observation['accuracy_m']):g} m accuracy)"
+    if observation["freshness"] == "last_known":
+        line += ". Last known location"
+    elif observation["freshness"] == "fresh_clock_skew":
+        line += ". Observation clock is slightly ahead"
+    return line + "."
+
+
+def _snapshot_text(config, snapshot):
+    lines = [observation_line(_card_observation(config, snapshot))]
     if snapshot["observation_kind"] == "declared":
         lines.append("Declared observation")
-    if snapshot["freshness"] == "fresh_clock_skew":
-        lines.append("Observation clock is slightly ahead")
     lines.append(snapshot["map_url"])
     return "\n".join(lines)
 
@@ -177,7 +197,7 @@ def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key
         return {"delivery": "reply", "snapshot": snapshot}
     return private_replies.hold_room_post(
         conn, config, actor_user_id=actor_user_id, task_id=task_id,
-        request_key=request_key, room=target, text=_snapshot_text(snapshot),
+        request_key=request_key, room=target, text=_snapshot_text(config, snapshot),
         request_context=context, require_confirmation=True,
         attachment=_card_observation(config, snapshot) if map_card else None,
     )
@@ -329,6 +349,55 @@ def _timed_room_terms(conn, config, room_token, owner_user_id):
     return destination, sorted(readers), fingerprint, epoch
 
 
+def _plural(count, unit):
+    return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
+
+
+def _duration_text(seconds):
+    """``1 hour 30 minutes``: a grant's duration as a person says it."""
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, seconds = divmod(rest, 60)
+    parts = [_plural(n, unit) for n, unit in
+             ((days, "day"), (hours, "hour"), (minutes, "minute"), (seconds, "second")) if n]
+    return " ".join(parts)
+
+
+_MAX_NAMED_READERS = 5
+
+
+def _reader_list(names):
+    """``A, B and C``; past five, the first three and a count."""
+    if len(names) > _MAX_NAMED_READERS:
+        named = names[:3] + [f"{len(names) - 3} others"]
+    else:
+        named = list(names)
+    if len(named) == 1:
+        return named[0]
+    return f"{', '.join(named[:-1])} and {named[-1]}"
+
+
+def _grant_preview(config, *, label, precision, duration_seconds, owner_user_id, audience):
+    """What the owner approves: where, how precisely, for how long, and who can ask.
+
+    The owner is not among the readers named. The rest of what a grant means
+    (no tracker started, no periodic posts, screenshots) is in the skill's
+    guidance and the docs.
+    """
+    what = ("your exact location" if precision == "exact"
+            else "your approximate location (about 1 km)")
+    readers = sorted((_owner_label(config, user) for user in audience if user != owner_user_id),
+                     key=str.casefold)
+    if readers:
+        who = f"{_reader_list(readers)} can ask where you are until then."
+    else:
+        # `_timed_room_terms` requires a shared room, so this is defensive. A
+        # reader joining later ends the grant (`invalidate_room_location_shares`).
+        who = "Only you are in this room right now. If anyone joins, the share stops."
+    return (f"Share {what} with {label} for {_duration_text(duration_seconds)}?\n\n"
+            f"{who} You can stop at any time; anything already posted stays in the room.")
+
+
 def request_location_share(conn, config, *, actor_user_id, task_id, request_key,
                            duration_seconds, precision, now, room=None):
     from istota.confirmations import check_preview_delivery, flatten
@@ -367,18 +436,9 @@ def request_location_share(conn, config, *, actor_user_id, task_id, request_key,
         except location.UserNotFoundError:
             raise RequestError("location_unavailable") from None
         destination, audience, fingerprint, epoch = _timed_room_terms(conn, config, target, actor_user_id)
-        readers = ", ".join(flatten(user) for user in audience)
-        preview = (
-            f"Share your location with {flatten(destination['label'])}?\n"
-            f"Readers: {readers}\n"
-            "Answers are visible to the whole room.\n"
-            f"Precision: {precision} ({'exact coordinates' if precision == 'exact' else 'approximate area, rounded coordinates'}).\n"
-            f"Duration: {duration_seconds / 60:g} minutes from approval.\n"
-            "Members may request fresh observations supplied by your existing tracker. "
-            "This does not start tracking or send periodic updates.\n"
-            "Stop with room location-stop or ask me to stop sharing. "
-            "Stopping prevents later reads; it cannot erase messages or screenshots already shared."
-        )
+        preview = _grant_preview(config, label=flatten(destination["label"]), precision=precision,
+                                 duration_seconds=duration_seconds, owner_user_id=actor_user_id,
+                                 audience=audience)
         if len(preview) > MAX_CONTENT_CHARS:
             raise RequestError("invalid_preview")
         check_preview_delivery(conn, config, task, preview)

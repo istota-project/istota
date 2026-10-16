@@ -820,7 +820,7 @@ async def send_private(config, delivery: PrivateDelivery, *, body: str,
     caller nothing: it has no park bell, so whenever it was not pushed to the
     member (no private room, or a push that reached nobody) this function
     writes and delivers its `private_note` bell row itself. ``body`` is what the surface carries, which may differ from the row (a
-    WhatsApp confirmation names its `!confirm` command). Failures are logged
+    WhatsApp confirmation says how to answer it). Failures are logged
     with the kind and reference, never the body.
     """
     try:
@@ -930,14 +930,16 @@ def pin_plan(config, task, plan: list, *, fallback=None) -> list:
     return kept
 
 
-def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
+def whatsapp_confirmation_body(prompt: str, task_id: int, *, bare: bool = True) -> str:
     """A privately routed question as the member's WhatsApp chat carries it.
 
-    The question is parked against the shared room's task, and a bare YES in
-    that chat answers only a question parked there, so the message names the
+    A bare YES or NO in that chat answers the one question parked there
+    (`transport.whatsapp.webhook.private_chat_resolution`), so the message
+    asks for one. ``bare=False`` is for a question a bare answer would not
+    reach, because another is already waiting in the chat: it names the
     command that answers it by id. The question is trimmed rather than the
-    instruction, leaving room for the ``re: <room>`` header
-    `send_private` puts in front.
+    instruction, leaving room for the ``re: <room>`` header `send_private`
+    puts in front.
 
     The suffix carries no Markdown: the renderer strips backticks, and
     `check_preview_delivery` requires this body to survive rendering unchanged
@@ -945,7 +947,8 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     """
     from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
 
-    suffix = (f"\n\nTask #{task_id}. Reply !confirm {task_id} yes "
+    suffix = ("\n\nReply YES or NO" if bare else
+              f"\n\nTask #{task_id}. Reply !confirm {task_id} yes "
               f"or !confirm {task_id} no")
     budget = WHATSAPP_TEXT_LIMIT - len(suffix) - len(HEADER_PREFIX) - _LABEL_MAX - 2
     return render_whatsapp(prompt, limit=budget) + suffix
@@ -1236,15 +1239,31 @@ def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: s
 LOCATION_SHARE_KEY = "location_share"
 
 
-def _map_preview_line(observation: dict) -> str:
-    """The preview's line naming the map a post carries.
+#: The preview's line saying a post carries a map.
+MAP_PREVIEW_LINE = "A map of this location will be posted with it."
 
-    The approval digest is the preview's hash, so carrying a hash of the
-    observation's canonical form here binds the map to the approval the way
-    the text is bound; `_claim` recomputes it from the frozen observation.
+
+def _location_bound(observation, text: str) -> bool:
+    """Whether ``text`` shows ``observation`` whole, so approving it binds the map.
+
+    The approval digest is the preview's hash. The observation is bound when
+    the text carries its own line (`location.sharing.observation_line`: owner,
+    observed time, precision, accuracy, freshness) and its map link, and that
+    link is the one its precision and coordinates make. Checked at hold and
+    again by `_claim` against the approved preview.
     """
-    canonical = json.dumps(observation, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-    return f"A map of this location is posted with it (map {text_hash(canonical)[:16]})."
+    from istota.location.logic import share_map_url
+    from istota.location.sharing import observation_line
+
+    if not isinstance(observation, dict):
+        return False
+    try:
+        line = observation_line(observation)
+        url = share_map_url(observation["precision"], observation["lat"], observation["lon"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    lines = text.splitlines()
+    return observation["map_url"] == url and line in lines and url in lines
 
 
 def _check_location_attachment(attachment, *, actor_user_id: str, text: str) -> None:
@@ -1252,8 +1271,7 @@ def _check_location_attachment(attachment, *, actor_user_id: str, text: str) -> 
 
     if (not isinstance(attachment, dict) or set(attachment) != CARD_OBSERVATION_KEYS
             or attachment["owner_user_id"] != actor_user_id
-            or not isinstance(attachment["map_url"], str) or not attachment["map_url"]
-            or attachment["map_url"] not in text):
+            or not _location_bound(attachment, text)):
         raise RequestError("invalid_attachment")
 
 
@@ -1459,9 +1477,9 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
     with ``require_confirmation`` and bind retry options in ``request_context``.
 
     ``attachment`` is a location share's map: the member's own observation,
-    whose `map_url` the text carries. It is frozen into the destination, named
-    in the preview so the approval binds it, and drawn as the released row's
-    card. A post without one is held exactly as before.
+    which the text shows whole (`_location_bound`), so the approval binds it.
+    It is frozen into the destination and drawn as the released row's card.
+    A post without one is held exactly as before.
     """
     from istota.relay import relays as message_relays
 
@@ -1493,7 +1511,7 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
                 raise RequestError("invalid_rendering")
         from istota.confirmations import flatten
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
-        map_line = f"{_map_preview_line(attachment)}\n" if attachment is not None else ""
+        map_line = f"{MAP_PREVIEW_LINE}\n" if attachment is not None else ""
         preview = (f"Post this in {destination['label']} as {bot}?\n"
                    "Only the message below is posted, exactly as written. "
                    "Sending must start within 10 minutes of approval.\n"
@@ -1562,9 +1580,7 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                         or text_hash(row["preview"] or "") != row["approved_digest"]):
                     raise RequestError("request_unavailable")
                 share = destination.get(LOCATION_SHARE_KEY)
-                if share is not None and (
-                        not isinstance(share, dict)
-                        or _map_preview_line(share) not in (row["preview"] or "")):
+                if share is not None and not _location_bound(share, row["preview"] or ""):
                     raise RequestError("request_unavailable")
                 current = _post_destination(conn, destination.get("room_token") or "", user)
                 if current["fingerprint"] != row["binding_fingerprint"]:

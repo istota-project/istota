@@ -443,6 +443,17 @@ def utc_day_bounds(day: str, zone: tzinfo) -> tuple[str, str]:
     )
 
 
+def share_map_url(precision: str, lat: float, lon: float) -> str:
+    """The OpenStreetMap link a shared observation carries, from its
+    (already rounded, for area) coordinates. A held location post's approval
+    checks its observation against this (`rooms.private_replies`)."""
+    if precision == "area":
+        return f"https://www.openstreetmap.org/#map=12/{lat}/{lon}"
+    if precision == "exact":
+        return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
+    raise ValueError("precision must be exact or area")
+
+
 def location_snapshot(
     db_path: str | Path, *, now: datetime, precision: str,
     accuracy_threshold_m: float, allow_last_known: bool = False,
@@ -516,9 +527,7 @@ def location_snapshot(
     if precision == "area":
         lat, lon = round(lat, 2), round(lon, 2)
         accuracy = None
-        map_url = f"https://www.openstreetmap.org/#map=12/{lat}/{lon}"
-    else:
-        map_url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
+    map_url = share_map_url(precision, lat, lon)
     return {
         "precision": precision,
         "observed_at": observed_at.isoformat(),

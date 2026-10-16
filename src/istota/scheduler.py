@@ -3875,6 +3875,9 @@ def process_one_task(
     private_park: "private_replies.PrivateDelivery | None" = None
     # What that row says: the question, or on an email thread the note shape.
     private_park_body = result
+    # Whether a bare YES in the member's WhatsApp chat would reach this park,
+    # so its body asks for one; otherwise it names `!confirm <id>`.
+    private_park_bare = True
     _note_parts = None
     # The body an email thread task mailed, read before delivery consumes it,
     # for the note written after delivery (hidden email threads, section 2).
@@ -4003,6 +4006,10 @@ def process_one_task(
                     # Room or bell alike: the shared room never saw the
                     # question, so the park must not hold it.
                     db.set_task_private_park(conn, task_id)
+                    if private_park.dest is not None and private_park.dest.whatsapp:
+                        from istota.transport.whatsapp.webhook import private_chat_resolution
+                        _reached = private_chat_resolution(conn, task.user_id).task
+                        private_park_bare = _reached is not None and _reached.id == task_id
                     if private_park.dest is None and _talk_leg:
                         post_talk_message = private_replies.SHARED_ROOM_NOTICE
                         shared_room_notice = True
@@ -4930,7 +4937,7 @@ def process_one_task(
         from istota.rooms.private_replies import whatsapp_confirmation_body
         _dest = private_park.dest
         _private_body = (
-            whatsapp_confirmation_body(private_park_body, task.id)
+            whatsapp_confirmation_body(private_park_body, task.id, bare=private_park_bare)
             if _dest is not None and _dest.whatsapp else private_park_body
         )
         private_delivered = run_coro(private_replies.send_private(

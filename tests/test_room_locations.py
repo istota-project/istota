@@ -78,7 +78,9 @@ def test_private_post_is_frozen_replayed_and_delivered_only_after_approval(setup
     ident = turn(config, private, about_room_token=shared)
     held = share(config, ident)
     assert held["status"] == "held"
-    assert "Location observed at 2026-03-08T11:59:00+00:00" in held["preview"]
+    lines = held["preview"].splitlines()
+    assert "alice's location, observed 2026-03-08 11:59 UTC (10 m accuracy)." in lines
+    assert "Age when prepared" not in held["preview"]
     with location_db.connect(path) as conn:
         location_db.insert_ping(conn, NOW.isoformat(), lat=22, lon=33, accuracy=10)
         conn.commit()
@@ -148,9 +150,9 @@ def test_last_known_area_post_has_only_rounded_coordinates_and_original_time(set
     ident = turn(config, private)
     assert share(config, ident, room="Hiking") == {"error": "no_fresh_location"}
     held = share(config, ident, room="Hiking", allow_last_known=True, precision="area")
-    assert "Last known" in held["preview"] and "Approximate area" in held["preview"]
+    assert ("alice's location, observed 2026-03-08 10:00 UTC. Approximate area. "
+            "Last known location.") in held["preview"].splitlines()
     assert "12.345678" not in held["preview"] and "accuracy" not in held["preview"].lower()
-    assert "Location observed at 2026-03-08T10:00:00+00:00" in held["preview"]
 
 
 def test_cli_uses_trusted_task_and_config_path_not_location_env(setup, monkeypatch, capsys):
@@ -281,7 +283,9 @@ def test_owner_management_refuses_forged_task(setup, monkeypatch):
 # --- the map a held post carries --------------------------------------------
 
 
-MAP_TEXT = "Here\nhttps://www.openstreetmap.org/?mlat=12.345678&mlon=-45.678912"
+MAP_URL = ("https://www.openstreetmap.org/?mlat=12.345678&mlon=-45.678912"
+           "#map=16/12.345678/-45.678912")
+MAP_TEXT = f"alice's location, observed 2026-03-08 11:59 UTC (10 m accuracy).\n{MAP_URL}"
 
 
 def _request(config):
@@ -321,7 +325,7 @@ def _observation(**changes):
     observation = {"owner_user_id": "alice", "owner_label": "alice", "precision": "exact",
                    "lat": 12.345678, "lon": -45.678912, "accuracy_m": 10.0,
                    "observed_at": "2026-03-08T11:59:00+00:00", "freshness": "fresh",
-                   "map_url": "https://www.openstreetmap.org/?mlat=12.345678&mlon=-45.678912"}
+                   "map_url": MAP_URL}
     observation.update(changes)
     return observation
 
@@ -339,7 +343,8 @@ def test_released_post_carries_its_frozen_map_card_in_the_rows_insert(setup, mon
                            "accuracy_m", "observed_at", "freshness", "map_url"}
     assert frozen["lat"] == 12.345678 and frozen["owner_user_id"] == "alice"
     assert frozen["map_url"] in held["preview"]
-    assert "A map of this location is posted with it (map " in held["preview"]
+    assert "A map of this location will be posted with it." in held["preview"].splitlines()
+    assert "(map " not in held["preview"]
     assert destination["request_context"]["kind"] == "location_snapshot"
     assert _cards(config) == []
     # A newer fix after the hold does not move the approved map.
@@ -387,17 +392,29 @@ def test_text_only_post_preview_and_destination_are_unchanged(setup):
     assert set(json.loads(row["destination"])) == {"kind", "room_token", "talk_ref", "label"}
 
 
+def _map_text(observation):
+    from istota.location.sharing import observation_line
+
+    return f"{observation_line(observation)}\n{observation['map_url']}"
+
+
 def test_the_preview_digest_binds_the_observation(setup):
+    """A post shows its observation in words and a link, so a changed
+    observation is a changed text and a changed digest."""
     config, shared, private, _ = setup
+    moved = ("https://www.openstreetmap.org/?mlat=12.3457&mlon=-45.678912"
+             "#map=16/12.3457/-45.678912")
     digests = set()
-    for changes in ({}, {"lat": 12.3457}, {"accuracy_m": 50.0}, {"freshness": "last_known"}):
+    for changes in ({}, {"lat": 12.3457, "map_url": moved}, {"accuracy_m": 50.0},
+                    {"freshness": "last_known"}, {"observed_at": "2026-03-08T11:58:00+00:00"}):
         ident = turn(config, private, about_room_token=shared)
-        _hold(config, ident, text=MAP_TEXT, attachment=_observation(**changes))
+        observation = _observation(**changes)
+        _hold(config, ident, text=_map_text(observation), attachment=observation)
         with db.get_db(config.db_path) as conn:
             digests.add(conn.execute(
                 "SELECT preview_digest FROM whatsapp_skill_requests WHERE origin_task_id=?",
                 (ident,)).fetchone()[0])
-    assert len(digests) == 4
+    assert len(digests) == 5
 
 
 def test_retry_with_another_observation_is_a_conflict(setup):
@@ -405,9 +422,11 @@ def test_retry_with_another_observation_is_a_conflict(setup):
     ident = turn(config, private, about_room_token=shared)
     first = _hold(config, ident, text=MAP_TEXT, attachment=_observation())
     assert _hold(config, ident, text=MAP_TEXT, attachment=_observation()) == first
-    for attachment in (_observation(lat=1.0), None):
-        with pytest.raises(RequestError, match="request_conflict"):
-            _hold(config, ident, text=MAP_TEXT, attachment=attachment)
+    with pytest.raises(RequestError, match="request_conflict"):
+        _hold(config, ident, text=MAP_TEXT, attachment=None)
+    # Another observation under the same text is not the one the text shows.
+    with pytest.raises(RequestError, match="invalid_attachment"):
+        _hold(config, ident, text=MAP_TEXT, attachment=_observation(lat=1.0))
 
 
 @pytest.mark.parametrize("attachment", [
@@ -416,6 +435,14 @@ def test_retry_with_another_observation_is_a_conflict(setup):
     {**_observation(), "ssid": "private-network"},
     {key: value for key, value in _observation().items() if key != "observed_at"},
     "not a dict",
+    # The text does not show this observation: each must be refused, since
+    # the approval binds only what the preview shows.
+    _observation(lat=40.0),
+    _observation(accuracy_m=50.0),
+    _observation(freshness="last_known"),
+    _observation(observed_at="2026-03-08T11:58:00+00:00"),
+    _observation(precision="area"),
+    _observation(observed_at="not a time"),
 ])
 def test_an_attachment_that_is_not_the_members_own_shown_map_is_refused(setup, attachment):
     config, shared, private, _ = setup
@@ -425,7 +452,9 @@ def test_an_attachment_that_is_not_the_members_own_shown_map_is_refused(setup, a
     assert _request(config) is None
 
 
-def test_an_observation_changed_after_approval_posts_nothing(setup):
+@pytest.mark.parametrize("change", [{"lat": 40.0}, {"accuracy_m": 99.0},
+                                    {"observed_at": "2026-03-08T10:00:00+00:00"}])
+def test_an_observation_changed_after_approval_posts_nothing(setup, change):
     config, shared, private, _ = setup
     ident = turn(config, private, about_room_token=shared)
     share(config, ident)
@@ -434,7 +463,7 @@ def test_an_observation_changed_after_approval_posts_nothing(setup):
         confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
         row = conn.execute("SELECT id, destination FROM whatsapp_skill_requests").fetchone()
         destination = json.loads(row["destination"])
-        destination["location_share"]["lat"] = 40.0
+        destination["location_share"].update(change)
         conn.execute("UPDATE whatsapp_skill_requests SET destination=? WHERE id=?",
                      (json.dumps(destination), row["id"]))
     asyncio.run(requests.drain_requests(config))

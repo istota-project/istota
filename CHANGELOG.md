@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Shorter location approvals.** Approving a timed location share is now two short paragraphs naming the room, how long and who can ask, and a location post reads as one line plus its map link. On WhatsApp a plain YES or NO answers a question a shared room asked you in your private chat, as it already did on web and Talk.
 - The file viewer header fits a phone. The file name gets its own row with Close, up to two lines, and the actions move to a row below it; the size and modified time stay on one line. Rendered, Source, Download and Open in Nextcloud are icon buttons at every width, named on hover.
 - Clients are now edited in money Settings → Invoicing, beside entities and services, and the Business section is Work and Invoices. Clients are listed as a table there, and the old Clients address redirects to the new page.
 - The Add block dialog in briefing settings shows each preset as a card with an icon, grouped into News, Your day and More. The whole card is clickable, and a preset that cannot be used yet says why in place of its description.

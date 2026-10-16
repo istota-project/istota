@@ -790,8 +790,9 @@ def _own_parked_confirmation(conn, user_id: str, token: str):
     `YES` reaching Path C could approve the untrusted-email confirmation gate,
     and `apply_answer` with `trust_sender` then writes a permanent trust row
     for somebody else's correspondent. Path A needs a surface-native response
-    id WhatsApp does not have, so this is Path B alone. `!confirm <id> yes|no`
-    stays the explicit route to any other surface's question.
+    id WhatsApp does not have, so this is Path B; `private_chat_resolution`
+    adds the questions a shared room parked in this chat. `!confirm <id>
+    yes|no` stays the explicit route to any other surface's question.
     """
     if not _confirmation_tokens(conn, token):
         return None
@@ -799,6 +800,29 @@ def _own_parked_confirmation(conn, user_id: str, token: str):
     if task is None or task.source_type != "whatsapp":
         return None
     return task
+
+
+def private_chat_resolution(conn, user_id: str, token: str | None = None):
+    """What a bare answer in ``user_id``'s own WhatsApp chat lands on.
+
+    A question asked in this chat first (`_own_parked_confirmation`), then
+    one a shared room parked here privately, by the rule web and Talk use
+    (`confirmations.resolve_parked_here`): one resolves, several are
+    ambiguous. Never `resolve`'s Path C. ``token`` is the chat's room as
+    `_dispatch_inbound` resolves it.
+    """
+    from ..routing import private_phone_room
+
+    if token is None:
+        surface_ref = whatsapp_conversation_token(user_id)
+        token = db.resolve_room_token(conn, "whatsapp", surface_ref) or surface_ref
+    own = _own_parked_confirmation(conn, user_id, token)
+    if own is not None:
+        return confirmations.Resolution(task=own)
+    room = private_phone_room(conn, "whatsapp", user_id)
+    if room is None:
+        return confirmations.Resolution()
+    return confirmations.resolve_parked_here(conn, room, user_id)
 
 
 def _confirmation_tokens(conn, token: str) -> list[str]:
@@ -1139,12 +1163,20 @@ def _dispatch_inbound(
     # the same answer was accepted, which is one rule with two answers.
     answer = confirmations.parse_answer(text) if text else None
     if answer is not None:
-        parked = _own_parked_confirmation(conn, user_id, token)
+        resolution = private_chat_resolution(conn, user_id, token)
+        if resolution.ambiguous:
+            # Nothing is decided: the listing names each question's id.
+            turn = record_whatsapp_turn(conn, config, user_id, text, record_only=True)
+            listing = confirmations.ambiguity_listing(conn, resolution.ambiguous)
+            _ack_in_private_room(conn, user_id, turn.room_token, listing)
+            return WhatsAppEventResult(
+                "confirmation_ambiguous", user_id=user_id, response_text=listing,
+                response_logical_key=f"confirmation-ambiguous:{event.message_id}",
+            )
+        parked = resolution.task
         if parked is not None:
             turn = record_whatsapp_turn(conn, config, user_id, text, record_only=True)
-            response = confirmations.apply_answer(
-                conn, parked, answer, config, by="whatsapp",
-            )
+            response = _answer_in_private_chat(conn, config, parked, answer, user_id, token)
             _ack_in_private_room(conn, user_id, turn.room_token, response)
             return WhatsAppEventResult(
                 "confirmation_answer", user_id=user_id, response_text=response,
@@ -1208,6 +1240,21 @@ def _dispatch_inbound(
     )
     confirmations.cancel_for_conversation(conn, turn.room_token, user_id, by="whatsapp")
     return WhatsAppEventResult("task", user_id=user_id, task_id=turn.task_id)
+
+
+def _answer_in_private_chat(conn, config, task, answer, user_id, token) -> str:
+    """Apply a bare answer typed in the private chat; a relay-held task first
+    passes the private-origin check `!confirm` runs for it."""
+    if task.whatsapp_confirmation_request_id:
+        from istota.relay.relays import private_origin
+        from istota.relay.requests import RequestError
+
+        try:
+            private_origin(conn, config, actor_user_id=user_id, surface="whatsapp",
+                           conversation_token=token)
+        except RequestError:
+            return "Confirm relay questions from a verified private conversation."
+    return confirmations.apply_answer(conn, task, answer, config, by="whatsapp")
 
 
 def _ack_in_private_room(conn, user_id, room_token, ack):

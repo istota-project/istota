@@ -710,7 +710,7 @@ class TestPrivateRepliesFromAGroup:
         (request,) = sent
         assert request.to == ALICE_JID
         assert request.text.startswith("re: Family")
-        assert f"!confirm {result.task_id} yes" in request.text
+        assert request.text.endswith("Reply YES or NO")
         assert _rows(group, "SELECT logical_key FROM sent_whatsapp") == [
             {"logical_key": f"private-reply:{delivery.message_id}"}]
 
@@ -736,15 +736,18 @@ class TestPrivateRepliesFromAGroup:
             assert response["status"] == "held"
             assert conn.execute("SELECT state FROM location_share_grants").fetchone()[0] == "held"
 
-    def test_the_confirmation_body_survives_whatsapp_rendering(self):
-        body = private_replies.whatsapp_confirmation_body("Book it?", 7)
+    @pytest.mark.parametrize("bare", [True, False])
+    def test_the_confirmation_body_survives_whatsapp_rendering(self, bare):
+        body = private_replies.whatsapp_confirmation_body("Book it?", 7, bare=bare)
 
         assert outbound.render_whatsapp(body) == body
 
-    def test_a_long_question_keeps_the_instruction_that_answers_it(self):
-        body = private_replies.whatsapp_confirmation_body("x" * 10000, 7)
+    @pytest.mark.parametrize("bare,ending", [(True, "Reply YES or NO"),
+                                             (False, "!confirm 7 no")])
+    def test_a_long_question_keeps_the_instruction_that_answers_it(self, bare, ending):
+        body = private_replies.whatsapp_confirmation_body("x" * 10000, 7, bare=bare)
 
-        assert body.endswith("!confirm 7 no")
+        assert body.endswith(ending)
         assert len(body) + len("re: ") + 80 <= 4096
 
     def test_a_whisper_reaches_the_members_own_chat_headed_with_the_room(self, group, sent):
@@ -783,6 +786,131 @@ class TestPrivateRepliesFromAGroup:
         asyncio.run(requests.drain_requests(group))
 
         assert [(r.to, r.text) for r in sent] == [(GROUP, "Thursday after 7 works")]
+
+
+def _park_privately(config, *, message_id="M1", question="Book it?"):
+    """A group turn of Alice's parked on a question asked in her own chat,
+    as the scheduler's privately routed park leaves it."""
+    (result,) = _apply(config, _message("Istota, book the table?", message_id=message_id))
+    with db.get_db(config.db_path) as conn:
+        task = db.get_task(conn, result.task_id)
+        db.set_task_confirmation(conn, task.id, question)
+        db.set_task_private_park(conn, task.id)
+        delivery = private_replies.deliver_private(
+            conn, config, user_id="alice", about_token=private_replies.park_about(conn, task),
+            kind="confirmation", reference=f"{task.id}:abc", body=question)
+    assert delivery.dest is not None and delivery.dest.whatsapp
+    return result.task_id
+
+
+def _private_text(text, *, message_id="P2", jid=ALICE_JID):
+    return proto.inbound_event({
+        "message_id": message_id, "jid": jid, "message_type": "text", "text": text,
+        "timestamp": int(datetime.now(timezone.utc).timestamp()),
+    })
+
+
+class TestABareAnswerInThePrivateChat:
+    """A bare YES or NO in the member's own chat answers the one question a
+    shared room parked there, by the rule web and Talk use
+    (`private_replies.parked_here`)."""
+
+    @pytest.mark.parametrize("word,status", [("YES", "pending"), ("no", "cancelled")])
+    def test_the_one_question_parked_here_is_answered(self, group, word, status):
+        _private_chat(group)
+        parked = _park_privately(group)
+
+        (result,) = _apply(group, _private_text(word))
+
+        assert result.disposition == "confirmation_answer"
+        assert result.response_text
+        assert _task(group, parked).status == status
+
+    def test_two_questions_parked_here_are_listed_and_neither_is_approved(self, group):
+        _private_chat(group)
+        first = _park_privately(group, message_id="M1")
+        second = _park_privately(group, message_id="M2", question="Order the cake?")
+
+        (result,) = _apply(group, _private_text("yes"))
+
+        assert result.disposition == "confirmation_ambiguous"
+        assert f"#{first}" in result.response_text and f"#{second}" in result.response_text
+        assert result.task_id is None
+        assert _task(group, first).status == "pending_confirmation"
+        assert _task(group, second).status == "pending_confirmation"
+
+    def test_a_bare_yes_in_the_group_approves_nothing(self, group):
+        _private_chat(group)
+        parked = _park_privately(group)
+
+        _apply(group, _message("yes", message_id="M9"))
+
+        assert _task(group, parked).status == "pending_confirmation"
+
+    def test_confirm_by_id_still_answers_it(self, group):
+        from istota.transport.whatsapp.webhook import resolve_event_response
+
+        _private_chat(group)
+        first = _park_privately(group, message_id="M1")
+        _park_privately(group, message_id="M2", question="Order the cake?")
+
+        (result,) = _apply(group, _private_text(f"!confirm {first}"))
+        assert result.disposition == "command"
+        asyncio.run(resolve_event_response(group, result))
+
+        assert _task(group, first).status == "pending"
+
+    def test_a_question_asked_in_this_chat_itself_comes_first(self, group):
+        mine = _private_chat(group)
+        parked = _park_privately(group)
+        with db.get_db(group.db_path) as conn:
+            own = db.create_task(conn, user_id="alice", source_type="whatsapp",
+                                 prompt="delete it", conversation_token=mine)
+            db.set_task_confirmation(conn, own, "May I delete it?")
+
+        (result,) = _apply(group, _private_text("yes"))
+
+        assert result.disposition == "confirmation_answer"
+        assert _task(group, own).status == "pending"
+        assert _task(group, parked).status == "pending_confirmation"
+
+    def test_with_no_private_chat_a_bare_yes_is_an_ordinary_turn(self, group):
+        """The question went to the bell; the first text mints the chat and
+        is a request, not an answer to anything."""
+        (result,) = _apply(group, _message("Istota, book the table?"))
+        with db.get_db(group.db_path) as conn:
+            db.set_task_confirmation(conn, result.task_id, "Book it?")
+            db.set_task_private_park(conn, result.task_id)
+
+        (answer,) = _apply(group, _private_text("yes"))
+
+        assert answer.disposition == "task"
+        assert _task(group, result.task_id).status == "pending_confirmation"
+
+
+class TestTheConfirmationBodyNamesAnAnswerThatWorks:
+    def test_a_lone_question_asks_for_a_bare_answer(self):
+        body = private_replies.whatsapp_confirmation_body("Book it?", 7)
+
+        assert body == "Book it?\n\nReply YES or NO"
+
+    def test_the_id_form_is_kept_when_a_bare_answer_would_not_reach_it(self):
+        body = private_replies.whatsapp_confirmation_body("Book it?", 7, bare=False)
+
+        assert body.endswith("Reply !confirm 7 yes or !confirm 7 no")
+
+    def test_the_bare_form_only_for_the_question_a_bare_answer_resolves(self, group):
+        from istota.transport.whatsapp.webhook import private_chat_resolution
+
+        _private_chat(group)
+        first = _park_privately(group, message_id="M1")
+        with db.get_db(group.db_path) as conn:
+            assert private_chat_resolution(conn, "alice").task.id == first
+        second = _park_privately(group, message_id="M2", question="Order the cake?")
+        with db.get_db(group.db_path) as conn:
+            resolution = private_chat_resolution(conn, "alice")
+        assert resolution.task is None
+        assert {t.id for t in resolution.ambiguous} == {first, second}
 
 
 class TestTheClassifierReachesTheGroup:
