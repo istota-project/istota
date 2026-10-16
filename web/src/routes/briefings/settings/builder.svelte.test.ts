@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 import Page from './+page.svelte';
+import Layout from '../+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
 const user = {
@@ -122,7 +123,6 @@ beforeEach(() => {
         title: '',
         output: 'email',
         enabled: true,
-        managed: 'db',
       },
       {
         id: 2,
@@ -131,11 +131,16 @@ beforeEach(() => {
         title: '',
         output: 'web',
         enabled: false,
-        managed: 'db',
       },
     ],
     outputs: ['email', 'web'],
     rooms: [],
+  });
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
   });
   api.getBriefingConfig.mockResolvedValue({
     briefings: [{ name: 'morning', blocks: structuredClone(blocks) }],
@@ -414,22 +419,45 @@ describe('briefing block builder', () => {
     );
   });
 
-  it('includes empty disabled schedules from the live listing and pairs schedule with content', async () => {
+  it('edits every schedule row, with no administrator lock, keyed by its id alone', async () => {
     await mount();
-    const trigger = screen.getByRole('button', { name: 'Briefing' });
-    await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
-    await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
-    await fireEvent.click(trigger);
-    const option = await screen.findByRole('option', { name: 'muted (disabled)' });
-    await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
-    await fireEvent.click(option);
+    expect(screen.queryByText('Set by your administrator')).toBeNull();
+    expect(screen.getByRole('textbox', { name: /^Schedule/ })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: /^Enabled/ })).toBeEnabled();
+    await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+    expect(await screen.findByRole('menuitem', { name: 'Duplicate' })).toBeInTheDocument();
+  });
+
+  it('shows an administrator hold, locks Enabled alone, and marks it in the sidebar', async () => {
+    const listed = await api.getBriefings();
+    listed.briefings[0].held = { at: '2026-10-15T09:00:00+00:00', by_label: 'Rosa Admin' };
+    api.getBriefings.mockResolvedValue(listed);
+    // `base` is '' under vitest.
+    window.history.replaceState(null, '', '/briefings/settings/?name=morning');
+    page.url = new URL(window.location.href);
+    render(Harness, { layout: Layout, component: Page, user });
+    await screen.findByRole('button', { name: 'Add block' });
+    expect(
+      screen.getByText('Paused by an administrator', { selector: '*:not([title])' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('This briefing will not run until an administrator resumes it.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: /^Enabled/ })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: /^Schedule/ })).toBeEnabled();
+    expect(await screen.findByTitle('Paused by an administrator')).toBeInTheDocument();
+    expect(screen.getAllByTitle('Off')).toHaveLength(1);
+  });
+
+  it('opens an empty disabled schedule by URL with its schedule beside its content', async () => {
+    page.url = new URL('http://localhost/istota/briefings/settings?name=muted');
+    await mount();
     expect(
       screen.getByText('No blocks yet. Add a block to start this briefing.'),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText('Selected briefing schedule')).toHaveTextContent('0 18 * * *');
-    expect(screen.getByLabelText('Selected briefing schedule')).toHaveTextContent('web');
-    await fireEvent.click(screen.getByRole('button', { name: 'Edit schedule' }));
-    expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue('muted');
+    expect(screen.getByRole('textbox', { name: /^Schedule/ })).toHaveValue('0 18 * * *');
+    expect(screen.getByRole('checkbox', { name: /^Enabled/ })).not.toBeChecked();
+    expect(screen.getByText(/^Just me · Web · Off$/)).toBeInTheDocument();
   });
 
   it('edits synthesis controls without losing source state or other options', async () => {
@@ -486,7 +514,7 @@ describe('briefing block builder', () => {
     await mount();
     const editor = await edit();
     await fireEvent.click(within(editor).getByRole('button', { name: 'Remove source 1' }));
-    expect(within(editor).getByText('No sources')).toBeInTheDocument();
+    expect(within(editor).getByText(/^No sources yet/)).toBeInTheDocument();
     expect(api.putBriefingBlock).not.toHaveBeenCalled();
     expect(api.deleteBriefingSource).not.toHaveBeenCalled();
     await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));
@@ -544,7 +572,7 @@ describe('briefing block builder', () => {
     await fireEvent.pointerDown(addSource, { pointerType: 'mouse', button: 0 });
     await fireEvent.pointerUp(addSource, { pointerType: 'mouse', button: 0 });
     await fireEvent.click(addSource);
-    const calendar = await screen.findByRole('option', { name: 'calendar' });
+    const calendar = await screen.findByRole('option', { name: 'Calendar' });
     await fireEvent.pointerUp(calendar, { pointerType: 'mouse', button: 0 });
     await fireEvent.click(calendar);
     await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));
@@ -641,16 +669,11 @@ it('keeps a pending block mutation attached to its originating briefing', async 
   await mount();
   await menu('Headlines', 'Move down');
   await waitFor(() => expect(api.putBriefingBlock).toHaveBeenCalledTimes(1));
-  const select = async (label: string) => {
-    const trigger = screen.getByRole('button', { name: 'Briefing' });
-    await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
-    await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
-    await fireEvent.click(trigger);
-    const option = await screen.findByRole('option', { name: label });
-    await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
-    await fireEvent.click(option);
+  const select = async (name: string) => {
+    page.url = new URL(`http://localhost/istota/briefings/settings?name=${name}`);
+    await tick();
   };
-  await select('muted (disabled)');
+  await select('muted');
   expect(await screen.findByRole('heading', { name: 'Muted notes' })).toBeInTheDocument();
   finish({ status: 'ok', reordered: 2 });
   await tick();

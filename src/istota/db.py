@@ -774,6 +774,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # existing row — no backfill needed.
     _add_columns(conn, "briefing_configs", {"title": "TEXT NOT NULL DEFAULT ''"})
 
+    # Briefing configs: an administrator's hold, separate from the owner's
+    # `enabled`. Only an administrator sets or lifts it.
+    _add_columns(conn, "briefing_configs", {"admin_hold_at": "TEXT", "admin_hold_by": "TEXT"})
+
     # Knowledge facts dedup: invalidate older duplicate current facts so the
     # partial unique index in schema.sql can be created without IntegrityError
     # on legacy DBs written before ISSUE-042's fix landed. Keeps the newest id
@@ -1205,6 +1209,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_email_thread_members(conn)
     _migrate_groups(conn)
     _migrate_group_management(conn)
+    _migrate_system_groups(conn)
+    _migrate_group_briefings(conn)
     _migrate_room_group(conn)
     # ISSUE-612. Nothing to backfill: no earlier row recorded its mail.
     _add_columns(conn, "messages", {"outgoing_mail": "TEXT"})
@@ -1611,6 +1617,16 @@ def create_task(
             f"create_task: user_id {user_id!r} cannot name a per-user directory; "
             "it must be a non-empty path component other than '.' or '..'."
         )
+    if source_type == "briefing" and briefing_name:
+        from istota.briefings.group_migrate import require_personal_schedule
+        require_personal_schedule(conn, user_id, briefing_name)
+        from istota.user_briefings import require_runnable
+        require_runnable(conn, user_id, briefing_name)
+    if scheduled_job_id is not None:
+        from istota.briefings.group_migrate import publisher_retired
+        job = get_scheduled_job(conn, scheduled_job_id)
+        if job and publisher_retired(conn, job.user_id, job.name):
+            raise ValueError("publisher_retired")
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
     if talk_message_id is not None:
         existing = find_task_by_talk_message_id(
@@ -8856,7 +8872,8 @@ _GROUPS_DDL = (
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     created_by   TEXT NOT NULL,
     archived_at  TEXT,
-    revision     INTEGER NOT NULL DEFAULT 0
+    revision     INTEGER NOT NULL DEFAULT 0,
+    system_key   TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS group_members (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8948,6 +8965,150 @@ def _migrate_email_thread_members(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('email_thread_members_v1')"
     )
+
+
+_GROUP_BRIEFINGS_DDL = (
+    """CREATE TABLE IF NOT EXISTS group_briefing_configs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL REFERENCES groups(group_id),
+        name TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        cron TEXT NOT NULL,
+        timezone TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        generation_mode TEXT NOT NULL CHECK (generation_mode IN ('prompt', 'blocks')),
+        generation_json TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        revision INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(group_id, name)
+    )""",
+    """CREATE TABLE IF NOT EXISTS group_briefing_source_grants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+        source_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        membership_id INTEGER NOT NULL REFERENCES group_members(id),
+        resource_json TEXT NOT NULL,
+        audience_json TEXT NOT NULL,
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        revision INTEGER NOT NULL,
+        approved_at TEXT NOT NULL,
+        revoked_at TEXT
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_group_briefing_active_grant
+        ON group_briefing_source_grants(definition_id, source_id) WHERE revoked_at IS NULL""",
+    """CREATE TABLE IF NOT EXISTS group_briefing_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+        occurrence_key TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('publish', 'preview')),
+        due_at TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN (
+            'queued', 'researching', 'generating', 'preview_ready', 'published',
+            'failed', 'superseded', 'cancelled')),
+        attempt_token TEXT,
+        lease_expires_at TEXT,
+        research_json TEXT,
+        research_attempt_token TEXT,
+        subject TEXT,
+        body_md TEXT,
+        document_json TEXT,
+        provenance_json TEXT NOT NULL DEFAULT '{}',
+        usage_json TEXT NOT NULL DEFAULT '{}',
+        error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        published_at TEXT,
+        UNIQUE(definition_id, occurrence_key)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_group_briefing_run_claim ON group_briefing_runs(state, lease_expires_at)",
+    """CREATE TRIGGER IF NOT EXISTS group_briefing_immutable_edition
+        BEFORE UPDATE ON group_briefing_runs
+        WHEN OLD.state IN ('published', 'preview_ready')
+        BEGIN SELECT RAISE(ABORT, 'edition immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS group_briefing_immutable_target
+        BEFORE UPDATE OF group_id ON group_briefing_configs
+        WHEN NEW.group_id != OLD.group_id
+        BEGIN SELECT RAISE(ABORT, 'target immutable'); END""",
+    """CREATE TABLE IF NOT EXISTS group_briefing_recipients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES group_briefing_runs(id),
+        user_id TEXT NOT NULL,
+        membership_id INTEGER NOT NULL REFERENCES group_members(id),
+        channel TEXT NOT NULL CHECK (channel IN ('in_app', 'email', 'talk', 'ntfy')),
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN (
+            'pending', 'sending', 'sent', 'failed', 'uncertain', 'skipped')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_retry_at TEXT,
+        send_identity TEXT,
+        provider_reference TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(run_id, user_id, channel)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_group_briefing_recipient_retry ON group_briefing_recipients(state, next_retry_at)",
+)
+
+
+_GROUP_BRIEFING_MIGRATIONS_DDL = """CREATE TABLE IF NOT EXISTS group_briefing_migrations (
+    legacy_key TEXT PRIMARY KEY,
+    definition_id INTEGER UNIQUE REFERENCES group_briefing_configs(id),
+    state TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+)"""
+
+
+def _migrate_group_briefings(conn: sqlite3.Connection) -> None:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='group_briefing_migrations'").fetchone():
+        upgrading = bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name='tasks'").fetchone())
+        conn.execute(_GROUP_BRIEFING_MIGRATIONS_DDL)
+        conn.execute("INSERT INTO group_briefing_migrations (legacy_key, state, data_json) VALUES (?, ?, ?)",
+                     ("registry:v1", "registry", json.dumps({"capture": upgrading, "users": []})))
+    for statement in _GROUP_BRIEFINGS_DDL:
+        conn.execute(statement)
+    _add_columns(conn, "group_briefing_configs", {"excluded_user_ids_json": "TEXT NOT NULL DEFAULT '[]'"})
+    _add_columns(conn, "group_briefing_configs", {"admin_hold_at": "TEXT", "admin_hold_by": "TEXT"})
+    _add_columns(conn, "group_briefing_configs", {"deleted_at": "TEXT", "deleted_by": "TEXT"})
+    _add_columns(conn, "group_briefing_runs", {"document_json": "TEXT"})
+    _add_columns(conn, "group_briefing_recipients", {'dispatch_token': 'TEXT', 'lease_expires_at': 'TEXT', 'destination_json': 'TEXT', 'destination_locked': 'INTEGER NOT NULL DEFAULT 0'})
+    conn.execute("""CREATE TABLE IF NOT EXISTS group_briefing_parts (
+    recipient_id INTEGER NOT NULL REFERENCES group_briefing_recipients(id),
+    part_index INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    send_identity TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    provider_reference TEXT,
+    PRIMARY KEY (recipient_id, part_index)
+)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS group_briefing_preferences (
+    definition_id INTEGER NOT NULL REFERENCES group_briefing_configs(id),
+    user_id TEXT NOT NULL,
+    outbound_muted INTEGER NOT NULL DEFAULT 0,
+    in_app_muted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (definition_id, user_id)
+)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS group_briefing_group_preferences (
+    group_id TEXT NOT NULL REFERENCES groups(group_id),
+    user_id TEXT NOT NULL,
+    outbound_muted INTEGER NOT NULL DEFAULT 0,
+    in_app_muted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (group_id, user_id)
+)""")
+
+
+
+def _migrate_system_groups(conn: sqlite3.Connection) -> None:
+    _add_columns(conn, "groups", {"system_key": "TEXT"})
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_groups_system_key ON groups(system_key) WHERE system_key IS NOT NULL")
+    conn.execute("INSERT OR IGNORE INTO _migration_state (name) VALUES ('system_groups_v1')")
 
 
 def _migrate_group_management(conn: sqlite3.Connection) -> None:
@@ -10990,6 +11151,7 @@ def _group_dict(row: sqlite3.Row) -> dict:
         "created_by": row["created_by"],
         "archived_at": row["archived_at"],
         "revision": row["revision"],
+        "system_key": row["system_key"],
     }
 
 
@@ -11018,7 +11180,7 @@ def archive_group(
     """Retire a group. True if a live group was archived."""
     cursor = conn.execute(
         "UPDATE groups SET archived_at = COALESCE(?, datetime('now')) "
-        "WHERE group_id = ? AND archived_at IS NULL",
+        "WHERE group_id = ? AND archived_at IS NULL AND system_key IS NULL",
         (at, group_id),
     )
     return cursor.rowcount > 0
@@ -11082,6 +11244,11 @@ def end_group_membership(
         "ended_by = ? WHERE group_id = ? AND user_id = ? AND ended_at IS NULL",
         (at, ended_by, group_id, user_id),
     )
+    if cursor.rowcount:
+        from istota.briefings.source_grants import revoke_owner_grants
+        revoke_owner_grants(conn, user_id, group_id=group_id)
+        from istota.notifications.resolvers.group_briefing import close_for_member
+        close_for_member(conn, group_id, user_id)
     return cursor.rowcount > 0
 
 
@@ -11096,7 +11263,8 @@ def is_group_member(conn: sqlite3.Connection, group_id: str, user_id: str) -> bo
     row = conn.execute(
         "SELECT 1 FROM group_members m JOIN groups g ON g.group_id = m.group_id "
         "WHERE m.group_id = ? AND m.user_id = ? AND m.ended_at IS NULL "
-        "AND g.archived_at IS NULL LIMIT 1",
+        "AND g.archived_at IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) LIMIT 1",
         (group_id, user_id),
     ).fetchone()
     return row is not None
@@ -11119,6 +11287,7 @@ def list_user_groups(conn: sqlite3.Connection, user_id: str) -> list[str]:
         "SELECT DISTINCT m.group_id FROM group_members m "
         "JOIN groups g ON g.group_id = m.group_id "
         "WHERE m.user_id = ? AND m.ended_at IS NULL AND g.archived_at IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM web_auth_identities i WHERE i.user_id = m.user_id AND i.disabled = 1) "
         "ORDER BY m.group_id",
         (user_id,),
     ).fetchall()
@@ -11805,6 +11974,10 @@ def enable_scheduled_job(conn: sqlite3.Connection, job_id: int) -> None:
     used, and a running job carrying that stamp would be a lie to whoever reads
     the column next.
     """
+    from istota.briefings.group_migrate import publisher_retired
+    job = get_scheduled_job(conn, job_id)
+    if job and publisher_retired(conn, job.user_id, job.name):
+        raise ValueError("publisher_retired")
     conn.execute(
         """
         UPDATE scheduled_jobs

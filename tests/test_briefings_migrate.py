@@ -446,6 +446,7 @@ class TestConfigAuthoredBlocksSeeding:
         )
         monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
         cfg = load_config(cfg_path)
+        _import_retired_config_briefings(cfg)
 
         ctx = resolve_for_user("dana", cfg)
         ensure_initialised(ctx, app_config=cfg)
@@ -485,6 +486,16 @@ class TestConfigAuthoredBlocksSeeding:
         assert titles == ["B"]
 
 
+def _import_retired_config_briefings(config) -> None:
+    """The scheduler's boot step for the retired `[users.X.briefings]`."""
+    from istota import db, user_briefings
+    from istota.config import _apply_user_briefings
+
+    db.init_db(config.db_path)
+    user_briefings.import_from_user_configs(config.db_path, config.users)
+    _apply_user_briefings(config)
+
+
 @pytest.mark.parametrize("width", ["wide", "full"])
 def test_config_width_seeds_once_without_losing_options(tmp_path, width):
     from istota.briefings import db as bdb
@@ -494,11 +505,12 @@ def test_config_width_seeds_once_without_losing_options(tmp_path, width):
     from istota.lib import toml_write
 
     path = tmp_path / "config.toml"
-    path.write_text(toml_write.dumps({"users": {"alice": {"briefings": [
-        {"name": "morning", "blocks": [{"title": "News", "options": {
+    path.write_text(toml_write.dumps({"db_path": str(tmp_path / "istota.db"), "users": {"alice": {"briefings": [
+        {"name": "morning", "cron": "0 7 * * *", "blocks": [{"title": "News", "options": {
             "custom": 42, "presentation": {"width": width}}, "sources": [{"kind": "notes"}]}]},
     ]}}}))
     config = load_config(path)
+    _import_retired_config_briefings(config)
     ctx = BriefingsContext("alice", tmp_path / "data", tmp_path / "briefings.db")
     ensure_initialised(ctx, app_config=config)
     ensure_initialised(ctx, app_config=config)

@@ -12,6 +12,12 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 const managed = vi.hoisted(() => ({ value: [] as string[] }));
 await fillApiDouble(api, {
+  getBriefingTargets: vi.fn(async () => ({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  })),
   getBriefings: vi.fn(async () => ({ briefings: [], rooms: [], outputs: ['email'] })),
   getBrowsePresets: vi.fn(async () => ({ presets: [] })),
   getFeedOptions: vi.fn(async () => ({ available: false, subscriptions: [], categories: [] })),
@@ -36,6 +42,7 @@ vi.mock('$lib/platform/native', () => ({
 }));
 
 import Page from './+page.svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
 const person: User = {
@@ -61,6 +68,7 @@ afterEach(() => cleanup());
 describe('Send as HTML', () => {
   it('is locked and badged when the deployment manages it', async () => {
     managed.value = ['briefing_email_html'];
+    page.url = new URL('http://localhost/istota/briefings/settings?view=delivery');
     render(Harness, { component: Page, user: person });
     const toggle = await screen.findByRole('checkbox', { name: /Send as HTML/ });
     await waitFor(() => expect(toggle).toBeDisabled());
@@ -69,6 +77,7 @@ describe('Send as HTML', () => {
 
   it('stays editable otherwise', async () => {
     managed.value = [];
+    page.url = new URL('http://localhost/istota/briefings/settings?view=delivery');
     render(Harness, { component: Page, user: person });
     const toggle = await screen.findByRole('checkbox', { name: /Send as HTML/ });
     expect(toggle).not.toBeDisabled();

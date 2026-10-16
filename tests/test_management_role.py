@@ -488,7 +488,7 @@ def _role_context(variables: dict) -> dict:
     from istota.settings_plan.role_input import ROLE_VARIABLES
 
     defaults = _defaults()
-    names = (*ROLE_VARIABLES, "istota_plan_prune", "istota_plan_prune_secrets")
+    names = (*ROLE_VARIABLES, "istota_plan_prune", "istota_plan_prune_secrets", "istota_plan_actor")
     return {name: defaults[name] for name in names} | variables
 
 
@@ -608,6 +608,10 @@ class TestTheApplyCalls:
             STACK_COMMAND, "apply", "/tmp/config.json", "--input-format", "role-vars"]
         assert _apply_argv("istota-stack apply (user settings)") == [
             STACK_COMMAND, "apply", "/tmp/users.json", "--input-format", "role-vars"]
+
+    def test_group_changes_forward_only_an_explicit_actor(self):
+        assert "--actor" not in _apply_argv("istota-stack apply (user settings)")
+        assert _apply_argv("istota-stack apply (user settings)", istota_plan_actor="alice")[-2:] == ["--actor", "alice"]
 
     def test_prune_reaches_only_the_user_settings(self):
         """The config is a whole document, so prune means nothing to it."""

@@ -273,6 +273,9 @@
   /* min-height: 0 or the body refuses to shrink below its content and the
      panel overflows its own max-height instead of scrolling here. */
   :global(.ui-modal-body) {
+    /* The panel is already --surface-card, so a card inside it steps up a
+       level rather than vanishing into the panel. */
+    --surface-card: var(--surface-raised);
     font-size: var(--text-sm);
     min-height: 0;
     overflow: auto;

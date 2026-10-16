@@ -24,7 +24,7 @@ PROFILE_FIELDS = {
     "default_destination": str, "default_room": str, "outbound_approval": str,
     "external_turn_display": str, "relay_delivery": str, "sms_phone_number": str,
     "max_foreground_workers": int, "max_background_workers": int,
-    "default_briefings": bool, "briefing_email_html": bool, "timezone_follow_location": bool,
+    "briefing_email_html": bool, "timezone_follow_location": bool,
     "show_nav_unread_badges": bool,
 }
 JOB_FIELDS = {
@@ -37,6 +37,10 @@ RESOURCE_FIELDS = {"type": str, "path": str, "name": str, "permissions": str, "e
 BRIEFING_FIELDS = {
     "name": str, "cron": str, "title": str, "conversation_token": str,
     "output": str, "enabled": bool, "blocks": list,
+}
+GROUP_BRIEFING_FIELDS = {
+    "group_id": str, "name": str, "title": str, "cron": str, "timezone": str,
+    "enabled": bool, "generation_mode": str, "generation": dict, "channel": str, "excluded_user_ids": list,
 }
 BLOCK_FIELDS = {"title": str, "directive": str, "render_mode": str, "options": dict, "sources": list}
 SOURCE_FIELDS = {"kind": str, "enabled": bool, "config": dict}
@@ -90,6 +94,7 @@ class Plan:
     config: dict | None = field(default=None, repr=False)
     users: dict[str, UserPlan] | None = field(default=None, repr=False)
     shared_briefing_blocks: list[dict] | None = field(default=None, repr=False)
+    group_briefings: list[dict] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -254,6 +259,8 @@ def validate_user_plan(user_id: str, document: dict) -> UserPlan:
     if "profile" in document:
         profile = document["profile"]
         profile_path = [*path, "profile"]
+        if isinstance(profile, dict) and "default_briefings" in profile:
+            _fail([*profile_path, "default_briefings"], "migration input retired; use All users delivery preferences")
         _fields(profile, PROFILE_FIELDS, profile_path)
         for name, value in profile.items():
             if PROFILE_FIELDS[name] is list:
@@ -288,7 +295,7 @@ def validate_user_plan(user_id: str, document: dict) -> UserPlan:
 def parse_plan(document: dict) -> Plan:
     """Validate the whole input, before selecting the users to reconcile."""
     _values(document, [], json_only=False)
-    _fields(document, {"meta": dict, "config": dict, "users": dict, "shared_briefing_blocks": list}, [])
+    _fields(document, {"meta": dict, "config": dict, "users": dict, "shared_briefing_blocks": list, "group_briefings": list}, [])
     metadata = document.get("meta", {})
     meta = _check_meta(metadata)
     users = None
@@ -302,8 +309,13 @@ def parse_plan(document: dict) -> Plan:
                 _choice(block["render_mode"], RENDER_MODES, [*path, "render_mode"])
             if "sources" in block:
                 _sources(block["sources"], [*path, "sources"], shared=True)
+    if "group_briefings" in document:
+        _values(document["group_briefings"], ["group_briefings"])
+        for item, path in _entries(document["group_briefings"], GROUP_BRIEFING_FIELDS,
+                                   ["group_briefings"], ("group_id", "name")):
+            pass
     return Plan(meta, deepcopy(metadata), deepcopy(document.get("config")), users,
-                deepcopy(document.get("shared_briefing_blocks")))
+                deepcopy(document.get("shared_briefing_blocks")), deepcopy(document.get("group_briefings")))
 
 
 def select_users(plan: Plan, user_ids: list[str] | None) -> Plan:

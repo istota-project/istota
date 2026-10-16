@@ -34,6 +34,8 @@ from istota.config import (
 from istota.executor_stream import TaskStreamAdapter
 from istota.scheduler import process_one_task
 
+from .support.briefing_rows import briefing_row
+
 HOST = "carol"
 HOST_ADDR = "carol@test.com"
 BOT = "bot@test.com"
@@ -307,6 +309,7 @@ class TestTheFinalFrameIsTheStoredRow:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "briefroom", HOST, origin="web")
             db.add_room_binding(conn, "briefroom", "web", "briefroom")
+            briefing_row(conn, HOST, "morning")
             task_id = db.create_task(
                 conn, prompt="brief", user_id=HOST, source_type="briefing",
                 conversation_token="briefroom", output_target="web:briefroom",

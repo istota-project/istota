@@ -213,38 +213,28 @@ class TestUserEnsureDefaultBriefings:
         profile = user_profiles.get_profile(db_path, "alice")
         assert profile.default_briefings is True
 
-    def test_opt_out_persists(self, cfg_with_db):
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_legacy_flag_refuses_with_migration_diagnostic(self, cfg_with_db, capsys, enabled):
         from istota.cli import cmd_user_ensure
 
         cfg, db_path = cfg_with_db
-        cmd_user_ensure(_FakeArgs(
-            config=str(cfg), name="alice", default_briefings=False,
-        ))
-        profile = user_profiles.get_profile(db_path, "alice")
-        assert profile.default_briefings is False
+        with pytest.raises(SystemExit) as error:
+            cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_briefings=enabled))
+        assert error.value.code == 1
+        assert "migration input" in capsys.readouterr().err
+        assert user_profiles.get_profile(db_path, "alice") is None
 
-    def test_omitted_flag_preserves_existing(self, cfg_with_db):
+    def test_omitted_flag_preserves_legacy_optout(self, cfg_with_db):
         from istota.cli import cmd_user_ensure
 
         cfg, db_path = cfg_with_db
-        cmd_user_ensure(_FakeArgs(
-            config=str(cfg), name="alice", default_briefings=False,
-        ))
-        cmd_user_ensure(_FakeArgs(
-            config=str(cfg), name="alice", display_name="Alice K",
-        ))
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice"))
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE user_profiles SET default_briefings=0 WHERE user_id='alice'")
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice K"))
         profile = user_profiles.get_profile(db_path, "alice")
         assert profile.default_briefings is False
         assert profile.display_name == "Alice K"
-
-    def test_re_enable(self, cfg_with_db):
-        from istota.cli import cmd_user_ensure
-
-        cfg, db_path = cfg_with_db
-        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_briefings=False))
-        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_briefings=True))
-        profile = user_profiles.get_profile(db_path, "alice")
-        assert profile.default_briefings is True
 
 
 class TestUserEnsureOutboundApproval:

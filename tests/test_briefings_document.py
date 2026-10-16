@@ -151,3 +151,15 @@ def test_linear_title_cannot_become_html_or_an_entity(manifest):
         {"block_id": 42, "body_md": "News"}, {"block_id": 17, "body_md": "Agenda"},
     ]), manifest)
     assert document_to_markdown(document).splitlines()[0] == r"News \<script\> \&copy;"
+
+
+def test_edition_preview_reads_block_bodies_without_titles_or_the_notice():
+    from istota.briefings.document import PREVIEW_CHARS, edition_preview
+    document = {"version": 1, "title": "Daily", "blocks": [
+        {"block_id": 0, "title": "Overview", "kind": "markdown",
+         "body_md": "Incomplete sources: some selected sources were unavailable or empty.\n\n**Rates** held [today](https://example.com/rates).",
+         "presentation": {"width": "auto"}, "source_status": "partial"}]}
+    assert edition_preview("Overview\n\nignored", document) == "Rates held today."
+    assert edition_preview("## Heading\n\n- one\n- two") == "Heading one two"
+    long = edition_preview("word " * 100)
+    assert len(long) == PREVIEW_CHARS and long.endswith("…")

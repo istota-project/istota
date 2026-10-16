@@ -110,6 +110,7 @@ const sidebars: SidebarsConfig = {
         'deployment/running-the-stack',
         'deployment/security',
         'deployment/migrating-from-bare-metal',
+        'deployment/migrating-group-briefings',
         'deployment/moving-the-bundled-nextcloud',
         'deployment/moving-to-a-local-workspace',
         'deployment/ansible',

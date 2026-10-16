@@ -683,9 +683,9 @@ class BriefingConfig:
     # ``compare=False`` keeps it out of ``ensure_briefing`` no-op equality (block
     # edits must not perturb the framework row); ``repr=False`` keeps it terse.
     blocks: list[dict] = field(default_factory=list, repr=False, compare=False)
-    # Marks entries appended by ``_apply_user_briefings`` from the DB. The
-    # web listing endpoint skips these so post-delete in-memory staleness
-    # cannot resurface a removed briefing as "managed=config".
+    # Set on every entry ``_apply_user_briefings`` builds. Kept as a field
+    # because migration journal records store ``asdict(BriefingConfig)`` and
+    # are read back with ``BriefingConfig(**record)``.
     from_db: bool = field(default=False, repr=False, compare=False)
 
 
@@ -825,7 +825,11 @@ class UserConfig:
     email_addresses: list[str] = field(default_factory=list)  # for email-to-user mapping
     sms_phone_number: str = ""  # operator-bound E.164 identity for the SMS surface
     timezone: str = "UTC"  # user's timezone for briefing scheduling
+    # Built from `briefing_configs` rows by `_apply_user_briefings`, never from TOML.
     briefings: list[BriefingConfig] = field(default_factory=list)
+    # The retired `[users.X.briefings]` entries: the one-time import's input, and
+    # the source of config-authored `blocks` for a row of the same name.
+    legacy_briefing_seeds: list[BriefingConfig] = field(default_factory=list)
     resources: list[ResourceConfig] = field(default_factory=list)
     log_channel: str = ""  # Talk room token for verbose task execution logs
     alerts_channel: str = ""  # Talk room token for confirmations and alerts
@@ -846,7 +850,7 @@ class UserConfig:
     # answer with no question above it is the defect the inbound mirror exists
     # to fix (ISSUE-136).
     external_turn_display: str = "collapsed"
-    default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
+    default_briefings: bool = True  # Legacy migration input; delivery preferences live on the group.
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
     show_nav_unread_badges: bool = False
@@ -2240,11 +2244,7 @@ class Config:
     models: ModelsConfig = field(default_factory=ModelsConfig)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
-    # Canonical shared briefing set, seeded into each opted-in user (retire-
-    # legacy-briefing-components spec). Parsed from the top-level
-    # ``[[default_briefings]]`` TOML section; merged by name into a user's
-    # briefings (user wins) in ``_apply_user_briefings`` when their
-    # ``default_briefings`` flag is true.
+    # Legacy migration declarations. Never copied into new personal schedules.
     default_briefings: list[BriefingConfig] = field(default_factory=list)
     # Module-owned shared briefing blocks (shared-kv-curated-content spec):
     # generated once globally and written into ``shared_kv``; per-user briefings
@@ -2278,6 +2278,9 @@ class Config:
     _profile_generation: int = field(default=-1, repr=False, compare=False)
     _profile_checked_at: float = field(default=0.0, repr=False, compare=False)
     _profile_refresh_failing: bool = field(default=False, repr=False, compare=False)
+    _profile_user_ids: set[str] = field(default_factory=set, repr=False, compare=False)
+    _configured_user_ids: set[str] | None = field(default=None, repr=False, compare=False)
+    _user_registry_complete: bool = field(default=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.workspace_path is None:
@@ -3014,8 +3017,18 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
 
 def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     """Parse a user data dict (from main config or per-user file) into UserConfig."""
-    # Parse briefings
-    briefings = _parse_briefing_specs(
+    if "default_briefings" in user_data:
+        report_problem("retired", ("users", user_id, "default_briefings"),
+                       "default_briefings is migration input only; use All users delivery preferences")
+    # Retired input: imported once into briefing_configs by
+    # `user_briefings.import_from_user_configs`, never scheduled from here.
+    if "briefings" in user_data:
+        report_problem(
+            "retired", ("users", user_id, "briefings"),
+            "[users.%s.briefings] is retired. Its entries were imported into the "
+            "briefings database; remove them from config.toml.", user_id,
+        )
+    legacy_briefing_seeds = _parse_briefing_specs(
         user_data.get("briefings", []), ("users", user_id, "briefings"),
     )
 
@@ -3085,7 +3098,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         email_addresses=user_data.get("email_addresses", []),
         sms_phone_number=sms_phone_number,
         timezone=user_data.get("timezone", "UTC"),
-        briefings=briefings,
+        legacy_briefing_seeds=legacy_briefing_seeds,
         resources=resources,
         log_channel=user_data.get("log_channel", ""),
         alerts_channel=user_data.get("alerts_channel", ""),
@@ -3736,6 +3749,9 @@ _NOT_CONFIGURATION = frozenset({
     "_profile_generation",
     "_profile_checked_at",
     "_profile_refresh_failing",
+    "_profile_user_ids",
+    "_configured_user_ids",
+    "_user_registry_complete",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -4798,6 +4814,9 @@ def load_config(
                     "[experimental] unknown feature %r — typo or stale flag", f,
                 )
 
+    if data.get("default_briefings"):
+        report_problem("retired", ("default_briefings",),
+                       "default_briefings is migration input only; use istota briefings migrate report/import and All users definitions")
     if "default_briefings" in data:
         # The canonical shared briefing set. Same name/cron/output/blocks shape
         # as ``[[users.X.briefings]]`` — parsed via the shared helper (fail-soft:
@@ -4977,10 +4996,10 @@ def load_config(
         # cycle sees the post-cleanup state.
         _migrate_obsolete_resources(config)
 
-        # Phase 7b: overlay briefing_configs rows onto config.users[*].briefings.
-        # DB rows replace TOML rows of the same ``name``; distinct names coexist.
-        # ``check_briefings`` and ``get_briefings_for_user`` keep reading
-        # ``user_config.briefings`` unchanged.
+        # Phase 7b: build config.users[*].briefings from briefing_configs rows.
+        # ``check_briefings`` and ``get_briefings_for_user`` read that list.
+        from .briefings.group_migrate import preserve_legacy_defaults
+        preserve_legacy_defaults(config)
         _apply_user_briefings(config)
 
         # admin-shared-briefing-blocks: overlay shared_block_configs rows onto
@@ -6158,11 +6177,14 @@ def _apply_user_profiles(config: "Config") -> None:
     (callers like ``istota init`` run before the DB exists). The DB wins for
     profile-shaped fields; TOML keeps resources and briefings.
     """
+    config._user_registry_complete = False
     try:
         from . import user_profiles as _up  # avoid import cycles at module load
     except Exception:  # pragma: no cover - defensive
         return
 
+    if config._configured_user_ids is None:
+        config._configured_user_ids = set(config.users)
     db_path = config.db_path
     if db_path is None or not Path(db_path).exists():
         return
@@ -6182,6 +6204,12 @@ def _apply_user_profiles(config: "Config") -> None:
         return
 
     _merge_profile_rows(config, rows)
+    config._user_registry_complete = True
+    from .groups.system import refresh_all_users
+    try:
+        refresh_all_users(config)
+    except Exception:
+        logger.warning("All users reconciliation failed; keeping membership intervals")
 
 
 def _merge_profile_rows(config: "Config", rows: dict) -> None:
@@ -6195,10 +6223,13 @@ def _merge_profile_rows(config: "Config", rows: dict) -> None:
     """
     from . import user_profiles as _up  # avoid import cycles at module load
 
+    if config._configured_user_ids is None:
+        config._configured_user_ids = set(config.users)
     current = config.users
     from .lib.user_ids import user_id_index
     # Validate the whole snapshot before changing any existing profile.
     user_id_index([*current, *rows])
+    config._profile_user_ids.update(rows)
     added: dict[str, UserConfig] = {}
     for user_id, profile in rows.items():
         existing = current.get(user_id)
@@ -6256,6 +6287,9 @@ def refresh_user_profiles_if_changed(
                 return False
             rows = _up.list_profiles(Path(db_path), busy_timeout_ms=busy_timeout_ms)
             _merge_profile_rows(config, rows)
+            config._user_registry_complete = True
+            from .groups.system import refresh_all_users
+            refresh_all_users(config, busy_timeout_ms=busy_timeout_ms)
         except Exception as e:  # noqa: BLE001
             level = logging.DEBUG if config._profile_refresh_failing else logging.WARNING
             logger.log(
@@ -6264,6 +6298,7 @@ def refresh_user_profiles_if_changed(
                 "per-user settings", e,
             )
             config._profile_refresh_failing = True
+            config._user_registry_complete = False
             return False
         config._profile_generation = generation
         config._profile_refresh_failing = False
@@ -6389,46 +6424,18 @@ def _migrate_obsolete_resources(config: "Config") -> None:
         uc.resources = [rc for rc in uc.resources if rc.type not in obsolete]
 
 
-def _merge_default_briefings(config: "Config") -> None:
-    """Seed the shared ``[[default_briefings]]`` set into each opted-in user.
-
-    For each user whose ``default_briefings`` flag is true, append every
-    default briefing whose ``name`` the user does not already define (an
-    explicit user briefing wins). Seed-once + edit-preservation fall out of
-    the downstream machinery for free: ``import_from_user_configs`` never
-    overwrites an existing ``briefing_configs`` row and the block seeder is
-    one-time, so after the first seed the user's edits survive an Ansible
-    re-run. Runs before the DB overlay so a seeded default's config-authored
-    blocks are captured and ride onto its DB-sourced entry.
-    """
-    if not config.default_briefings:
-        return
-    for user_config in config.users.values():
-        if not getattr(user_config, "default_briefings", True):
-            continue
-        existing = {b.name for b in user_config.briefings}
-        for default in config.default_briefings:
-            if default.name and default.name not in existing:
-                # Copy so a per-user edit can't mutate the shared template.
-                user_config.briefings.append(_dc_replace(default))
-                existing.add(default.name)
-
-
 def _apply_user_briefings(config: "Config", *, rows=None) -> None:
-    """Merge ``briefing_configs`` rows into ``config.users[*].briefings``.
+    """Build ``config.users[*].briefings`` from ``briefing_configs`` rows.
 
-    DB rows replace TOML rows of the same ``name``; distinct names coexist.
-    Disabled DB rows (enabled=0) drop the matching TOML name without adding
-    a replacement, so an operator can switch a TOML-templated briefing off
-    via the web UI without re-templating.
-
-    Also seeds the shared ``[[default_briefings]]`` set into opted-in users
-    (by name, user wins) before the DB overlay.
+    The table is the only source. Disabled rows are left out, so
+    ``check_briefings`` never sees them. A row an administrator holds stays in:
+    ``db.create_task`` refuses it, so a resume takes effect without a reload.
+    Config-authored ``blocks`` from the
+    retired ``[users.X.briefings]`` ride on the row of the same name: rows never
+    carry blocks, and the module-DB seeder reads them from here once.
 
     Best-effort: a missing DB does not fail config loading.
     """
-    _merge_default_briefings(config)
-
     try:
         from . import user_briefings as _ub  # avoid import cycles at module load
     except Exception:  # pragma: no cover - defensive
@@ -6449,25 +6456,17 @@ def _apply_user_briefings(config: "Config", *, rows=None) -> None:
     for row in rows:
         by_user.setdefault(row.user_id, []).append(row)
 
-    for user_id, db_rows in by_user.items():
+    for user_id in [*config.users, *(u for u in by_user if u not in config.users)]:
         user_config = config.users.get(user_id)
         if user_config is None:
             user_config = UserConfig(display_name=user_id)
             config.users[user_id] = user_config
 
-        db_names = {r.name for r in db_rows}
-        # Config-authored blocks live only in TOML (never in the DB row). Capture
-        # them before the drop so they can ride on the surviving DB-sourced entry;
-        # otherwise the module-DB seeder would never see them.
         blocks_by_name = {
-            b.name: b.blocks for b in user_config.briefings if b.blocks
+            b.name: b.blocks for b in user_config.legacy_briefing_seeds if b.blocks
         }
-        # Drop TOML briefings whose names are claimed by DB rows.
-        user_config.briefings = [
-            b for b in user_config.briefings if b.name not in db_names
-        ]
-        # Append enabled DB rows as BriefingConfig entries.
-        for r in db_rows:
+        briefings = []
+        for r in by_user.get(user_id, []):
             if not r.enabled:
                 continue
             bc = BriefingConfig(
@@ -6480,7 +6479,8 @@ def _apply_user_briefings(config: "Config", *, rows=None) -> None:
                 blocks=blocks_by_name.get(r.name, []),
             )
             bc.from_db = True
-            user_config.briefings.append(bc)
+            briefings.append(bc)
+        user_config.briefings = briefings
 
 
 def shared_block_from_row(r) -> BriefingSharedBlock:

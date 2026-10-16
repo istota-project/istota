@@ -276,8 +276,8 @@ def test_invalid_or_uninitialized_state_refuses_without_replacement(install, tmp
         if invalid == "legacy_user":
             raw["users"] = {"bob": {"display_name": "Legacy"}}
         else:
-            raw["default_briefings"] = [{"name": "morning", "cron": "0 7 * * *", "output": "email",
-                                        "blocks": [{"title": "Calendar", "sources": [{"kind": "calendar"}]}]}]
+            raw["users"] = {"alice": {"briefings": [{"name": "morning", "cron": "0 7 * * *", "output": "email",
+                                        "blocks": [{"title": "Calendar", "sources": [{"kind": "calendar"}]}]}]}}
         path.write_text(toml_write.dumps(raw))
     else:
         file = resolve_user_config_dir(config, "alice") / ("CRON.md" if invalid == "cron" else "HEARTBEAT.md")

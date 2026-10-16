@@ -323,6 +323,16 @@ class TestPreview:
         found, _ = _preview(CURRENT, {"raw": CURRENT + '\n[users.sam]\ndisplay_name = "Sam"\n'})
         assert found.errors == []
 
+    def test_user_briefings_are_retired_and_not_written(self):
+        added = CURRENT + '\n[[users.sam.briefings]]\nname = "morning"\ncron = "0 7 * * *"\n'
+        found, _ = _preview(CURRENT, {"raw": added})
+        assert found.errors and found.errors[0].startswith("users.sam.briefings is not edited here.")
+
+    def test_a_retired_user_briefings_block_may_be_removed(self):
+        held = CURRENT + '\n[users.sam]\ndisplay_name = "Sam"\n\n[[users.sam.briefings]]\nname = "morning"\n'
+        found, _ = _preview(held, {"ops": [{"op": "unset", "path": ["users", "sam", "briefings"]}]})
+        assert found.errors == []
+
     def test_risky_keys_and_admins_are_listed(self, db_path):
         user_profiles.ensure_profile(db_path, "alice")
         web_auth.upsert_identity(db_path, "alice", "alice@example.org")

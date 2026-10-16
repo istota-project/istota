@@ -569,26 +569,7 @@ Module-owned shared blocks generated once globally under the reserved `__system_
 
 ## `[[default_briefings]]`
 
-A canonical shared briefing set, seeded once into each opted-in user (per-user
-`default_briefings` flag, default on). Same `name`/`cron`/`output`/`blocks`
-shape as a per-user briefing; content is blocks-only. A user's later edits in
-the web editor win, and re-runs never overwrite them. (Replaces the retired
-`[briefing_defaults]` boolean-component defaults.)
-
-```toml
-[[default_briefings]]
-name = "Daily"
-cron = "0 7 * * *"
-output = "talk"
-
-  [[default_briefings.blocks]]
-  title = "World News"
-  render_mode = "synthesis"
-
-    [[default_briefings.blocks.sources]]
-    kind = "browse"
-    config = { preset = "ap" }
-```
+Deprecated migration input, with the old personal `name`/`cron`/`output`/`blocks` shape. Existing effective defaults are preserved once during upgrade; new accounts receive no copied defaults. Import disabled All users definitions and review cutover with `istota briefings migrate`. DB edits win after import. See [Migrating group briefings](../deployment/migrating-group-briefings.md). New authoring uses Briefings or the `group_briefings` settings-plan section.
 
 ## `[developer]`
 

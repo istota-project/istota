@@ -115,7 +115,7 @@ describe('briefing bulk read in the real layout', () => {
       within(tools)
         .getAllByRole('button')
         .map((el) => el.title),
-    ).toEqual([allLabel, 'Briefing settings']);
+    ).toEqual(['New briefing', allLabel, 'Briefing settings']);
     await fireEvent.click(button);
     expect(
       screen.getByText(
@@ -154,7 +154,7 @@ describe('briefing bulk read in the real layout', () => {
       within(tools)
         .getAllByRole('button')
         .map((el) => el.title || el.textContent?.trim()),
-    ).toEqual([allLabel, 'Save changes', 'Briefing settings']);
+    ).toEqual(['New briefing', allLabel, 'Save changes', 'Briefing settings']);
   });
 
   it('allows a no-op on an empty archive without fetching counts', async () => {

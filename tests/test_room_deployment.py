@@ -17,7 +17,7 @@ def test_offline_init_migrates_rooms_and_sweeps_mount(tmp_path, monkeypatch):
     old = config.workspace_path / 'Channels' / 'old-talk'
     old.mkdir(parents=True)
     (old / 'CHANNEL.md').write_text('Keep this memory')
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     args = SimpleNamespace(config=None, relocate_rooms=True)
     assert cli.cmd_init(args) in (None, 0)
     with db.get_db(config.db_path) as conn:
@@ -42,7 +42,7 @@ def test_offline_init_refusal_does_not_move_workspace(tmp_path, monkeypatch, sta
         conn.execute('UPDATE tasks SET status=? WHERE id=?', (status, task))
     old = config.workspace_path / 'Channels' / 'old-talk'
     old.mkdir(parents=True)
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 1
     assert old.is_dir()
     with db.get_db(config.db_path) as conn:
@@ -71,7 +71,7 @@ def _migrated_with_orphan(tmp_path, status):
 def test_a_stopped_scheduler_s_orphan_does_not_defer_the_sweep(tmp_path, monkeypatch, capsys, status):
     """What the pool's shutdown left running is released, as the next start would (ISSUE-690)."""
     config, task, token = _migrated_with_orphan(tmp_path, status)
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     args = SimpleNamespace(config=None, relocate_rooms=True, scheduler_stopped=True)
     assert cli.cmd_init(args) == 0
     assert 'refusal:' not in capsys.readouterr().err
@@ -84,7 +84,7 @@ def test_a_stopped_scheduler_s_orphan_does_not_defer_the_sweep(tmp_path, monkeyp
 
 def test_without_the_flag_a_running_row_still_defers_the_sweep(tmp_path, monkeypatch, capsys):
     config, task, _ = _migrated_with_orphan(tmp_path, 'running')
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 1
     assert 'refusal: live_tasks' in capsys.readouterr().err
     with db.get_db(config.db_path) as conn:
@@ -94,7 +94,7 @@ def test_without_the_flag_a_running_row_still_defers_the_sweep(tmp_path, monkeyp
 
 def test_a_parked_question_is_not_an_orphan(tmp_path, monkeypatch, capsys):
     config, task, _ = _migrated_with_orphan(tmp_path, 'pending_confirmation')
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     args = SimpleNamespace(config=None, relocate_rooms=True, scheduler_stopped=True)
     assert cli.cmd_init(args) == 1
     assert 'refusal: pending_confirmation' in capsys.readouterr().err
@@ -115,7 +115,7 @@ def test_partial_sweep_raises_an_admin_alert_and_a_clean_one_closes_it(tmp_path,
     (channels / 'old-talk').mkdir(parents=True)
     conflict = channels / 'old-talk' / 'CHANNEL.md'
     conflict.write_text('alias notes')
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     monkeypatch.setattr('istota.config.load_admin_users', lambda *a, **k: {'bob'})
     args = SimpleNamespace(config=None, relocate_rooms=True)
     assert cli.cmd_init(args) == 0
@@ -140,6 +140,6 @@ def test_partial_sweep_raises_an_admin_alert_and_a_clean_one_closes_it(tmp_path,
 
 def test_fresh_offline_init_needs_no_workspace(tmp_path, monkeypatch):
     config = Config(db_path=tmp_path / 'state.db')
-    monkeypatch.setattr(cli, 'load_config', lambda path: config)
+    monkeypatch.setattr(cli, 'load_config', lambda path, **kwargs: config)
     assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 0
 

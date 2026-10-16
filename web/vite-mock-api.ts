@@ -528,6 +528,60 @@ const mockNotifications = [
     dismissed: false,
   },
   {
+    id: 140,
+    source: 'group_briefing',
+    severity: 'info' as const,
+    actionable: true,
+    title: 'A group briefing requests source approval',
+    body: 'Review the requested source and audience in Groups before approving.',
+    link: '/groups',
+    occurrences: 1,
+    created_at: new Date(Date.now() - 50 * 60_000).toISOString(),
+    updated_at: new Date(Date.now() - 50 * 60_000).toISOString(),
+    seen_at: null,
+    object_type: 'group_source',
+    object_id: '1',
+    actions: [
+      {
+        id: 'open',
+        label: 'Open',
+        kind: 'primary' as const,
+        method: 'LINK' as const,
+        endpoint: null,
+        href: '/briefings/settings/?group=team&briefing=team-digest',
+      },
+    ],
+    status_note: null,
+    dismissed: false,
+  },
+  {
+    id: 141,
+    source: 'group_briefing',
+    severity: 'info' as const,
+    actionable: false,
+    title: 'A group briefing is ready',
+    body: 'Open Groups to read the edition.',
+    link: '/groups',
+    occurrences: 1,
+    created_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    updated_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    seen_at: null,
+    object_type: 'group_edition',
+    object_id: '103',
+    actions: [
+      {
+        id: 'open',
+        label: 'Open',
+        kind: 'primary' as const,
+        method: 'LINK' as const,
+        endpoint: null,
+        href: '/groups',
+      },
+    ],
+    status_note: null,
+    dismissed: false,
+  },
+  {
     id: 92,
     source: 'cron_job',
     severity: 'danger' as const,
@@ -4938,7 +4992,6 @@ const mockAdminUserDetail = (userId: string): AdminUserDetail | undefined => {
     outbound_approval: '',
     disabled_skills: [],
     disabled_modules: [],
-    default_briefings: true,
     max_foreground_workers: 0,
     max_background_workers: 0,
     sms_phone_number: userId === 'bob' ? '+15550100002' : '',
@@ -5674,11 +5727,15 @@ const mockGroup = {
   kind: 'team',
   revision: 1,
   role: 'owner' as const,
+  system_key: null as string | null,
   capabilities: {
     member: true,
     owner: true,
     manage: true,
     archive: true,
+    read_briefings: true,
+    author_briefings: true,
+    receive_briefings: true,
     read_memory: true,
     edit_memory: true,
     leave: true,
@@ -5796,9 +5853,126 @@ function mockAdminGroupDetail(id: string) {
     ],
   };
 }
+// Admin › Briefings: definitions and state, never content. Mirrors the
+// server's refusals so the page's confirm and step-up paths run in dev.
+const mockAdminHeld = (at: string) => ({ at, by_label: 'Alice' });
+const mockAdminBriefings = {
+  personal: [
+    {
+      id: 201,
+      user_id: 'carol',
+      owner_label: 'Carol',
+      name: 'weekly',
+      title: 'Weekly Review',
+      cron: '0 9 * * 1',
+      timezone: 'Europe/Berlin',
+      output: 'email',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      last_run_at: '2026-10-12T07:00:00+00:00',
+    },
+    {
+      id: 202,
+      user_id: 'dave',
+      owner_label: 'Dave',
+      name: 'weekend',
+      title: 'Weekend Reading',
+      cron: '0 10 * * 6',
+      timezone: 'UTC',
+      output: 'talk',
+      enabled: false,
+      held: mockAdminHeld('2026-10-10T09:30:00+00:00') as null | { at: string; by_label: string },
+      last_run_at: null,
+    },
+    {
+      id: 203,
+      user_id: 'former-user',
+      owner_label: 'former-user',
+      name: 'morning',
+      title: '',
+      cron: '0 7 * * *',
+      timezone: null,
+      output: 'ntfy',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      last_run_at: '2026-09-01T07:00:00+00:00',
+    },
+  ],
+  group: [
+    {
+      id: 301,
+      group_id: 'team',
+      group_label: 'Team',
+      system_key: null,
+      name: 'daily',
+      title: 'Team daily',
+      cron: '0 8 * * 1-5',
+      timezone: 'Europe/Berlin',
+      channel: 'email',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      owners: ['Carol'],
+      last_published_at: '2026-10-14T06:00:00Z',
+    },
+    {
+      id: 302,
+      group_id: 'all-users',
+      group_label: 'All users',
+      system_key: 'all_users' as string | null,
+      name: 'common',
+      title: 'Daily news',
+      cron: '0 7 * * *',
+      timezone: 'Europe/Berlin',
+      channel: 'in_app',
+      enabled: true,
+      held: null as null | { at: string; by_label: string },
+      owners: [] as string[],
+      last_published_at: '2026-10-15T05:00:00Z',
+    },
+  ],
+};
+function mockAdminBriefingRoutes(path: string, method: string, body: any) {
+  if (path === '/istota/api/admin/briefings' && method === 'GET') return mockAdminBriefings;
+  const action = path.match(
+    /^\/istota\/api\/admin\/briefings\/(personal|group)\/(\d+)(?:\/(hold|resume))?$/,
+  );
+  if (!action) return undefined;
+  const kind = action[1] as 'personal' | 'group';
+  const rows: { id: number; name: string; held: null | { at: string; by_label: string } }[] =
+    mockAdminBriefings[kind];
+  const index = rows.findIndex((row) => row.id === Number(action[2]));
+  if (index < 0)
+    return { __status: 404, error: 'briefing_not_found', message: 'Briefing not found' };
+  const row = rows[index];
+  if (method === 'POST' && action[3]) {
+    if (action[3] === 'hold' && !row.held) row.held = mockAdminHeld(mockIso(Date.now()));
+    if (action[3] === 'resume') row.held = null;
+    return row;
+  }
+  if (method === 'DELETE' && !action[3]) {
+    if (body?.confirm !== row.name)
+      return {
+        __status: 409,
+        error: 'confirm_required',
+        message: "Type the briefing's name to delete it",
+      };
+    if (!/^[0-9]{6}$/.test(String(body.step_up?.code ?? '')))
+      return {
+        __status: 403,
+        detail: 'That code was not accepted. Try again.',
+        field: 'code',
+        reason: 'bad',
+      };
+    rows.splice(index, 1);
+    return { ok: true, deleted: true, id: row.id };
+  }
+  return undefined;
+}
 function mockGroups(path: string, method: string) {
   if (method !== 'GET') return undefined;
-  if (path === '/istota/api/admin/groups') return { groups: mockAdminGroups };
+  if (path === '/istota/api/admin/groups')
+    return { groups: [mockAllUsersAdminGroup, ...mockAdminGroups] };
+  if (path === '/istota/api/admin/groups/all-users') return mockAllUsersAdminGroup;
   if (path === '/istota/api/admin/groups/user-options')
     return {
       users: [
@@ -5809,14 +5983,35 @@ function mockGroups(path: string, method: string) {
     };
   const adminMatch = path.match(/^\/istota\/api\/admin\/groups\/([^/]+)$/);
   if (adminMatch) return mockAdminGroupDetail(decodeURIComponent(adminMatch[1]));
-  if (path === '/istota/api/groups') return { groups: [mockGroup] };
+  if (path === '/istota/api/groups') return { groups: [mockGroup, mockAllUsersGroup] };
+  if (path === '/istota/api/groups/all-users')
+    return {
+      ...mockAllUsersGroup,
+      members: mockAllUsersMembers,
+      rooms: [],
+      disclosure: {
+        memory: 'Everyone in this installation can read and edit the notebook.',
+        rooms: [],
+        briefings: ['Daily news'],
+      },
+    };
+  if (path === '/istota/api/groups/all-users/memory')
+    return {
+      group_id: 'all-users',
+      status: 'readable',
+      content: '# All users\n\nNotes shared with everyone on this installation.\n',
+      revision: 'r1',
+      bytes: 56,
+      max_bytes: 32 * 1024,
+      large: false,
+      last_change: null,
+    };
+  if (path === '/istota/api/groups/all-users/memory/activity')
+    return { entries: [], next_cursor: null };
   if (path === '/istota/api/groups/team')
     return {
       ...mockGroup,
-      members: [
-        { user_id: 'carol', display_name: 'Carol', role: 'owner' },
-        { user_id: 'dave', display_name: 'Dave', role: 'member' },
-      ],
+      members: mockTeamMembers,
       // Tokens of mocked chat rooms, so the overview's Rooms card has activity to sort by.
       rooms: [
         { token: 'web-carol-general', name: 'general', origin: 'web' },
@@ -5836,6 +6031,759 @@ function mockGroups(path: string, method: string) {
       last_change: null,
     };
   if (path === '/istota/api/groups/team/memory/activity') return { entries: [], next_cursor: null };
+  return undefined;
+}
+// The mock's stand-in for `briefings.document.edition_preview`.
+function mockPreview(markdown: string | undefined): string {
+  const plain = (markdown ?? '')
+    .split('\n')
+    .filter((line) => !line.startsWith('Incomplete sources:'))
+    .join('\n')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s*(?:[-*+]|\d+[.)]|#+|\|)\s*/gm, '')
+    .replace(/[*_`|]/g, '')
+    .split(/\s+/)
+    .join(' ')
+    .trim();
+  return plain.length <= 160 ? plain : `${plain.slice(0, 159).trimEnd()}…`;
+}
+
+// The built-in All users group: automatic membership, no owners, admin-authored briefings.
+const mockAllUsersMembers = [
+  { user_id: 'carol', display_name: 'Carol', role: 'member' },
+  { user_id: 'dave', display_name: 'Dave', role: 'member' },
+  { user_id: 'erin', display_name: 'Erin', role: 'member' },
+  { user_id: 'frank', display_name: 'Frank', role: 'member' },
+  { user_id: 'kasia', display_name: 'Kasia', role: 'member' },
+  { user_id: 'liam', display_name: 'Liam', role: 'member' },
+];
+const mockTeamMembers = [
+  { user_id: 'carol', display_name: 'Carol', role: 'owner' },
+  { user_id: 'dave', display_name: 'Dave', role: 'member' },
+  { user_id: 'erin', display_name: 'Erin', role: 'member' },
+  { user_id: 'frank', display_name: 'Frank', role: 'member' },
+];
+const mockAllUsersGroup = {
+  ...mockGroup,
+  group_id: 'all-users',
+  display_name: 'All users',
+  kind: 'group',
+  role: 'member' as const,
+  system_key: 'all_users' as string | null,
+  capabilities: {
+    ...mockGroup.capabilities,
+    owner: false,
+    manage: false,
+    archive: false,
+    leave: false,
+  },
+};
+const mockAllUsersAdminGroup = {
+  ...mockAllUsersGroup,
+  created_by: null,
+  created_at: '2026-10-01 00:00:00',
+  archived_at: null,
+  needs_owner: false,
+  members: mockAllUsersMembers,
+  disclosure: { memory: 'Groups/all-users/GROUP.md', rooms: [], briefings: ['Daily news'] },
+  history: [],
+  events: [],
+};
+
+// Group briefings: one stateful store behind every /groups/{id}/briefings route.
+// Covers both generation modes, drafts, personal-source approvals (own and another
+// member's), owner exclusions, block widths, an incomplete-sources edition, failed
+// and uncertain delivery, and preview/publish runs that settle after a few seconds.
+type MockGroupRun = {
+  id: number;
+  run_id: number;
+  group_id: string;
+  definition_id: number;
+  mode: 'preview' | 'publish';
+  state: string;
+  subject?: string;
+  body_md?: string;
+  document?: BriefingDocument | null;
+  error_code?: string | null;
+  created_at: string;
+  published_at: string | null;
+  settles_at?: number;
+};
+const groupBriefingState = (() => {
+  const ago = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString();
+  const digestBlocks = [
+    {
+      title: 'Overview',
+      directive: 'Summarize what the team shipped and what is blocked.',
+      render_mode: 'synthesis',
+      options: { presentation: { width: 'full' } },
+      sources: [{ id: 'notebook', kind: 'group_memory', config: {} }],
+    },
+    {
+      title: 'This week',
+      directive: null,
+      render_mode: 'structured',
+      options: { presentation: { width: 'auto' } },
+      sources: [
+        {
+          id: 'carol-calendar',
+          kind: 'personal_calendar',
+          config: {
+            owner_id: 'carol',
+            calendar_url: 'https://cloud.example.com/remote.php/dav/calendars/carol/work/',
+            fields: ['time', 'title'],
+            include_private: false,
+            lookback_days: 0,
+            lookahead_days: 7,
+          },
+        },
+      ],
+    },
+    {
+      title: 'Markets',
+      directive: null,
+      render_mode: 'structured',
+      options: { presentation: { width: 'wide' } },
+      sources: [{ id: 'markets', kind: 'markets', config: { preset: 'indices' } }],
+    },
+    {
+      title: 'Roadmap notes',
+      directive: 'Quote decisions verbatim.',
+      render_mode: 'synthesis',
+      options: { presentation: { width: 'auto' } },
+      sources: [
+        {
+          id: 'dave-roadmap',
+          kind: 'personal_file',
+          config: { owner_id: 'dave', path: 'notes/roadmap.md' },
+        },
+      ],
+    },
+  ];
+  const caps = (author: boolean) => ({
+    read_briefings: true,
+    author_briefings: author,
+    generate_briefings: author,
+    receive_briefings: true,
+  });
+  const definitions = [
+    {
+      id: 1,
+      group_id: 'team',
+      name: 'team-digest',
+      title: 'Team digest',
+      cron: '0 8 * * 1-5',
+      timezone: 'Europe/Berlin',
+      enabled: true,
+      channel: 'email',
+      revision: 4,
+      excluded_user_ids: ['dave'],
+      generation_mode: 'blocks' as const,
+      generation: {
+        version: 1,
+        contains_personal_information: false,
+        audience_acknowledged: false,
+        blocks: digestBlocks,
+      },
+    },
+    {
+      id: 2,
+      group_id: 'team',
+      name: 'weekly-research',
+      title: 'Weekly research',
+      cron: '0 9 * * 1',
+      timezone: 'Europe/Berlin',
+      enabled: false,
+      channel: 'in_app',
+      revision: 1,
+      excluded_user_ids: [] as string[],
+      generation_mode: 'prompt' as const,
+      generation: {
+        version: 1,
+        contains_personal_information: true,
+        audience_acknowledged: false,
+        prompt: 'Write a short research note on what changed in our field this week.',
+        research: {
+          enabled: true,
+          prompt: 'Find this week’s releases and announcements from the projects we track.',
+        },
+        inputs: [{ id: 'notes', kind: 'group_file', config: { path: 'research/tracked.md' } }],
+      },
+    },
+    {
+      id: 3,
+      group_id: 'all-users',
+      name: 'daily-news',
+      title: 'Daily news',
+      cron: '0 7 * * *',
+      timezone: 'UTC',
+      enabled: true,
+      channel: 'talk',
+      revision: 2,
+      excluded_user_ids: [] as string[],
+      generation_mode: 'prompt' as const,
+      generation: {
+        version: 1,
+        contains_personal_information: false,
+        audience_acknowledged: false,
+        prompt: 'Write a neutral morning news briefing with five items and links.',
+        research: { enabled: true, prompt: 'Read the front pages of the configured news sites.' },
+        inputs: [{ id: 'headlines', kind: 'shared_block', config: { name: 'headlines' } }],
+      },
+    },
+  ];
+  const digestDocument = (title: string, partial: boolean): BriefingDocument => ({
+    version: 1,
+    title,
+    blocks: [
+      {
+        block_id: 0,
+        title: 'Overview',
+        kind: 'markdown',
+        body_md: `${partial ? 'Incomplete sources: some selected sources were unavailable or empty.\n\n' : ''}The release branch is green. Two reviews are waiting on design sign-off, and the migration is scheduled for Thursday.`,
+        presentation: { width: 'full' },
+        source_status: 'complete',
+      },
+      {
+        block_id: 1,
+        title: 'This week',
+        kind: 'markdown',
+        body_md: '- Mon 10:00 Planning\n- Wed 14:00 Design review\n- Thu 09:00 Migration window',
+        presentation: { width: 'auto' },
+        source_status: 'complete',
+      },
+      {
+        block_id: 2,
+        title: 'Markets',
+        kind: 'markdown',
+        body_md:
+          '| Index | Close | Change |\n| --- | --- | --- |\n| S&P 500 | 5,210 | +0.4% |\n| DAX | 18,320 | -0.2% |',
+        presentation: { width: 'wide' },
+        source_status: partial ? 'partial' : 'complete',
+      },
+    ],
+  });
+  const projection = (doc: BriefingDocument) =>
+    doc.blocks.map((b) => `${b.title}\n\n${b.body_md}`).join('\n\n');
+  const runs: MockGroupRun[] = [];
+  const addRun = (run: Omit<MockGroupRun, 'run_id'>) => runs.push({ ...run, run_id: run.id });
+  const digest1 = digestDocument('Team digest — Wednesday 14 October', false);
+  const digest2 = digestDocument('Team digest — Thursday 15 October', true);
+  addRun({
+    id: 101,
+    group_id: 'team',
+    definition_id: 1,
+    mode: 'publish',
+    state: 'published',
+    subject: digest1.title,
+    body_md: projection(digest1),
+    document: digest1,
+    created_at: ago(26),
+    published_at: ago(26),
+  });
+  addRun({
+    id: 102,
+    group_id: 'team',
+    definition_id: 1,
+    mode: 'publish',
+    state: 'failed',
+    error_code: 'source_approval_changed',
+    created_at: ago(14),
+    published_at: null,
+  });
+  addRun({
+    id: 103,
+    group_id: 'team',
+    definition_id: 1,
+    mode: 'publish',
+    state: 'published',
+    subject: digest2.title,
+    body_md: projection(digest2),
+    document: digest2,
+    created_at: ago(2),
+    published_at: ago(2),
+  });
+  addRun({
+    id: 201,
+    group_id: 'team',
+    definition_id: 2,
+    mode: 'preview',
+    state: 'preview_ready',
+    subject: 'Weekly research — preview',
+    body_md: 'A preview of the research note. It is visible only to owners and was sent to nobody.',
+    document: null,
+    created_at: ago(5),
+    published_at: ago(5),
+  });
+  addRun({
+    id: 301,
+    group_id: 'all-users',
+    definition_id: 3,
+    mode: 'publish',
+    state: 'published',
+    subject: 'Daily news — Thursday 15 October',
+    body_md:
+      'Incomplete sources: some selected sources were unavailable or empty.\n\n1. Parliament passes the budget after a late session ([source](https://example.com/budget)).\n2. Rail strike called off ([source](https://example.com/rail)).\n3. Storm warning for the coast this weekend ([source](https://example.com/storm)).',
+    document: null,
+    created_at: ago(3),
+    published_at: ago(3),
+  });
+  addRun({
+    id: 302,
+    group_id: 'all-users',
+    definition_id: 3,
+    mode: 'publish',
+    state: 'published',
+    subject: 'Daily news — Wednesday 14 October',
+    body_md:
+      '1. Central bank holds rates ([source](https://example.com/rates)).\n2. New library opens downtown ([source](https://example.com/library)).',
+    document: null,
+    created_at: ago(27),
+    published_at: ago(27),
+  });
+  const deliveries: Record<
+    number,
+    {
+      user_id: string;
+      display_name: string;
+      channel: string;
+      state: string;
+      attempts: number;
+      error_code: string | null;
+    }[]
+  > = {
+    101: [
+      {
+        user_id: 'carol',
+        display_name: 'Carol',
+        channel: 'email',
+        state: 'sent',
+        attempts: 1,
+        error_code: null,
+      },
+      {
+        user_id: 'dave',
+        display_name: 'Dave',
+        channel: 'email',
+        state: 'skipped',
+        attempts: 0,
+        error_code: 'excluded',
+      },
+      {
+        user_id: 'erin',
+        display_name: 'Erin',
+        channel: 'email',
+        state: 'sent',
+        attempts: 2,
+        error_code: null,
+      },
+      {
+        user_id: 'frank',
+        display_name: 'Frank',
+        channel: 'email',
+        state: 'sent',
+        attempts: 1,
+        error_code: null,
+      },
+    ],
+    103: [
+      {
+        user_id: 'carol',
+        display_name: 'Carol',
+        channel: 'email',
+        state: 'sent',
+        attempts: 1,
+        error_code: null,
+      },
+      {
+        user_id: 'dave',
+        display_name: 'Dave',
+        channel: 'email',
+        state: 'skipped',
+        attempts: 0,
+        error_code: 'excluded',
+      },
+      {
+        user_id: 'erin',
+        display_name: 'Erin',
+        channel: 'email',
+        state: 'failed',
+        attempts: 3,
+        error_code: 'smtp_rejected',
+      },
+      {
+        user_id: 'frank',
+        display_name: 'Frank',
+        channel: 'email',
+        state: 'uncertain',
+        attempts: 1,
+        error_code: 'acceptance_unknown',
+      },
+    ],
+    301: [
+      ...mockAllUsersMembers
+        .slice(0, 4)
+        .map((m) => ({ ...m, channel: 'talk', state: 'sent', attempts: 1, error_code: null })),
+      {
+        user_id: 'kasia',
+        display_name: 'Kasia',
+        channel: 'talk',
+        state: 'skipped',
+        attempts: 0,
+        error_code: 'missing_talk',
+      },
+      {
+        user_id: 'liam',
+        display_name: 'Liam',
+        channel: 'talk',
+        state: 'skipped',
+        attempts: 0,
+        error_code: 'muted',
+      },
+    ],
+  };
+  const approvals: Record<string, boolean> = { 'carol-calendar': false, 'dave-roadmap': true };
+  const preferences: Record<string, { outbound_muted: boolean; in_app_muted: boolean }> = {
+    'group:all-users': { outbound_muted: false, in_app_muted: false },
+    'group:team': { outbound_muted: false, in_app_muted: false },
+  };
+  return { definitions, runs, deliveries, approvals, preferences, caps, ago };
+})();
+
+function mockGroupBriefings(path: string, method: string, body: any) {
+  const st = groupBriefingState;
+  const membersOf = (group: string) => (group === 'team' ? mockTeamMembers : mockAllUsersMembers);
+  const groupCaps = (group: string) => st.caps(group === 'team' || group === 'all-users');
+  const groups = ['team', 'all-users'];
+  if (path === '/istota/api/briefings/targets' && method === 'GET')
+    return {
+      targets: [
+        { scope: 'user', label: 'Just me', capabilities: { author_briefings: true } },
+        ...groups.map((g) => ({
+          scope: 'group',
+          group_id: g,
+          label: g === 'team' ? 'Team' : 'All users',
+          system_key: g === 'all-users' ? 'all_users' : null,
+          member_count: membersOf(g).length,
+          capabilities: groupCaps(g),
+        })),
+      ],
+      channels: ['in_app', 'email', 'talk', 'ntfy'],
+      timezone: 'Europe/Berlin',
+      source_scopes: {
+        browse: 'Public',
+        markets: 'Public',
+        group_file: 'Current group',
+        group_memory: 'Current group',
+        personal_calendar: 'Personal contribution',
+        personal_file: 'Personal contribution',
+        shared_block: 'Installation-shared',
+      },
+    };
+  if (path === '/istota/api/briefings/group-editions' && method === 'GET') {
+    const label = (g: string) => (g === 'team' ? 'Team' : 'All users');
+    const published = st.runs
+      .filter((r) => r.mode === 'publish' && r.state === 'published')
+      .map((r) => {
+        const def = st.definitions.find((d) => d.id === r.definition_id)!;
+        return {
+          scope: 'group',
+          run_id: r.id,
+          group_id: def.group_id,
+          group_label: label(def.group_id),
+          briefing_name: def.name,
+          briefing_title: def.title,
+          subject: r.subject ?? null,
+          published_at: r.published_at!,
+          preview: mockPreview(
+            r.document ? r.document.blocks.map((b) => b.body_md).join('\n') : r.body_md,
+          ),
+        };
+      })
+      .sort((a, b) => b.published_at.localeCompare(a.published_at));
+    return { items: published, total: published.length };
+  }
+  const resources = path.match(/^\/istota\/api\/groups\/([^/]+)\/briefing-resources$/);
+  if (resources && method === 'GET')
+    return {
+      files: ['notes/roadmap.md', 'notes/standup.md', 'research/tracked.md'],
+      calendars: [
+        { label: 'Work', value: 'https://cloud.example.com/remote.php/dav/calendars/carol/work/' },
+        {
+          label: 'Personal',
+          value: 'https://cloud.example.com/remote.php/dav/calendars/carol/personal/',
+        },
+      ],
+      calendar_unavailable: false,
+    };
+  const groupPrefs = path.match(/^\/istota\/api\/groups\/([^/]+)\/briefing-delivery$/);
+  if (groupPrefs) {
+    const key = `group:${decodeURIComponent(groupPrefs[1])}`;
+    if (method === 'PUT') st.preferences[key] = { ...st.preferences[key], ...body };
+    return {
+      group_id: groupPrefs[1],
+      ...(st.preferences[key] ?? { outbound_muted: false, in_app_muted: false }),
+    };
+  }
+  const m = path.match(/^\/istota\/api\/groups\/([^/]+)\/briefings(?:\/([^/]+))?(\/.*)?$/);
+  if (!m) return undefined;
+  const group = decodeURIComponent(m[1]);
+  const name = m[2] === undefined ? undefined : decodeURIComponent(m[2]);
+  const rest = m[3] ?? '';
+  if (!groups.includes(group))
+    return { __status: 404, error: 'Group not found', detail: 'Group not found' };
+  const caps = groupCaps(group);
+  const approvalState = (def: (typeof st.definitions)[number], source: any) => {
+    const owner = source.config.owner_id as string;
+    const audience =
+      group === 'all-users'
+        ? 'everyone currently using this installation and anyone who joins later'
+        : `every member of Team, including future members`;
+    return {
+      source_id: source.id,
+      owner_id: owner,
+      resource: { kind: source.kind, config: source.config },
+      approved: st.approvals[source.id] ?? false,
+      warning: `${owner}'s selected resource will be used on each run of this briefing for ${audience} via ${def.channel} (${membersOf(group).length} current members). ${source.kind === 'personal_calendar' ? 'Disclosed fields: time, title.' : 'The full file contents may be summarized or quoted.'} Future members can read retained editions. Revocation stops future use; published editions remain in group history until normal retention. Downloaded copies and copies sent by email cannot be recalled.`,
+      audience_contract: { version: 1, future_members: true, retained_history: true },
+      grant_revision: st.approvals[source.id] ? 1 : 0,
+      definition_revision: def.revision,
+    };
+  };
+  const sourcesOf = (def: (typeof st.definitions)[number]) =>
+    def.generation_mode === 'blocks'
+      ? (def.generation.blocks ?? []).flatMap((b: any) => b.sources)
+      : ((def.generation as any).inputs ?? []);
+  const view = (def: (typeof st.definitions)[number]) => {
+    const last = st.runs
+      .filter((r) => r.definition_id === def.id && r.mode === 'publish')
+      .sort((a, b) => b.id - a.id)[0];
+    return {
+      ...def,
+      scope: 'group',
+      capabilities: caps,
+      next_run: def.enabled ? new Date(Date.now() + 14 * 3600_000).toISOString() : null,
+      last_run: last ? { id: last.id, state: last.state, published_at: last.published_at } : null,
+      source_approvals: sourcesOf(def)
+        .filter((s: any) => s.kind === 'personal_file' || s.kind === 'personal_calendar')
+        .map((s: any) => approvalState(def, s)),
+    };
+  };
+  const settle = (run: MockGroupRun) => {
+    if (run.settles_at && Date.now() >= run.settles_at) {
+      const def = st.definitions.find((d) => d.id === run.definition_id)!;
+      const latest = st.runs
+        .filter((r) => r.definition_id === def.id && r.body_md)
+        .sort((a, b) => b.id - a.id)[0];
+      run.state = run.mode === 'preview' ? 'preview_ready' : 'published';
+      run.subject = `${def.title} — ${run.mode === 'preview' ? 'preview' : 'new edition'}`;
+      run.body_md = latest?.body_md ?? 'Generated from the saved definition.';
+      run.document = latest?.document ? { ...latest.document, title: run.subject } : null;
+      run.published_at = new Date().toISOString();
+      delete run.settles_at;
+      if (run.mode === 'publish')
+        st.deliveries[run.id] = membersOf(group).map((member) => ({
+          ...member,
+          channel: def.channel,
+          state: def.excluded_user_ids.includes(member.user_id) ? 'skipped' : 'sent',
+          attempts: def.excluded_user_ids.includes(member.user_id) ? 0 : 1,
+          error_code: def.excluded_user_ids.includes(member.user_id) ? 'excluded' : null,
+        }));
+    }
+    return run;
+  };
+  const editionView = (run: MockGroupRun, withBody: boolean) => {
+    settle(run);
+    const { settles_at: _settles, body_md, document, subject, ...meta } = run;
+    const ready = run.state === 'published' || run.state === 'preview_ready';
+    return {
+      ...meta,
+      scope: 'group',
+      ...(ready ? { subject } : {}),
+      ...(ready && withBody ? { body_md, document: document ?? null } : {}),
+    };
+  };
+
+  if (name === undefined) {
+    if (method === 'GET')
+      return {
+        group_id: group,
+        items: st.definitions.filter((d) => d.group_id === group).map(view),
+        capabilities: caps,
+      };
+    if (method === 'POST') {
+      if (st.definitions.some((d) => d.group_id === group && d.name === body.name))
+        return {
+          __status: 409,
+          error: 'A briefing with this name already exists.',
+          detail: 'A briefing with this name already exists.',
+        };
+      const def = {
+        ...body,
+        id: Math.max(...st.definitions.map((d) => d.id)) + 1,
+        group_id: group,
+        enabled: false,
+        revision: 1,
+        excluded_user_ids: body.excluded_user_ids ?? [],
+      };
+      st.definitions.push(def);
+      return view(def);
+    }
+    return undefined;
+  }
+  const def = st.definitions.find((d) => d.group_id === group && d.name === name);
+  if (!def) return { __status: 404, error: 'Briefing not found', detail: 'Briefing not found' };
+
+  if (rest === '') {
+    if (method === 'GET') return view(def);
+    if (method === 'PUT') {
+      if (body.revision !== def.revision)
+        return {
+          __status: 409,
+          error: 'This briefing changed since you opened it. Reload it.',
+          detail: 'This briefing changed since you opened it. Reload it.',
+        };
+      const blocked =
+        body.enabled &&
+        sourcesOf({ ...def, ...body }).some(
+          (s: any) =>
+            (s.kind === 'personal_file' || s.kind === 'personal_calendar') && !st.approvals[s.id],
+        );
+      if (blocked)
+        return {
+          __status: 409,
+          error: 'Every personal source needs its owner’s approval before enabling.',
+          detail: 'Every personal source needs its owner’s approval before enabling.',
+        };
+      const { revision: _revision, ...changes } = body;
+      Object.assign(def, changes, {
+        revision: def.revision + 1,
+        excluded_user_ids: body.excluded_user_ids ?? def.excluded_user_ids,
+      });
+      return view(def);
+    }
+    return undefined;
+  }
+  if (rest === '/audience' && method === 'GET') {
+    const members = membersOf(group);
+    const excluded = members.filter((mm) => def.excluded_user_ids.includes(mm.user_id)).length;
+    const missing = def.channel === 'in_app' ? 0 : group === 'all-users' ? 1 : 0;
+    const muted = group === 'all-users' ? 1 : 0;
+    return {
+      group_id: group,
+      member_count: members.length,
+      future_members_read_history: true,
+      excluded,
+      muted,
+      missing_destination: missing,
+      deliverable: members.length - excluded - muted - missing,
+      sources: sourcesOf(def)
+        .filter((s: any) => s.kind === 'personal_file' || s.kind === 'personal_calendar')
+        .map((s: any) => approvalState(def, s)),
+    };
+  }
+  if (rest === '/delivery') {
+    const key = `def:${def.id}`;
+    if (method === 'PUT')
+      st.preferences[key] = {
+        ...(st.preferences[key] ?? { outbound_muted: false, in_app_muted: false }),
+        ...body,
+      };
+    return {
+      group_id: group,
+      ...(st.preferences[key] ?? { outbound_muted: false, in_app_muted: false }),
+    };
+  }
+  const approval = rest.match(/^\/sources\/([^/]+)\/approval$/);
+  if (approval) {
+    const source = sourcesOf(def).find((s: any) => s.id === decodeURIComponent(approval[1]));
+    if (!source)
+      return { __status: 404, error: 'Contribution not found', detail: 'Contribution not found' };
+    if (method !== 'GET' && source.config.owner_id !== 'carol')
+      return {
+        __status: 403,
+        error: 'Only the resource owner may approve or revoke this source.',
+        detail: 'Only the resource owner may approve or revoke this source.',
+      };
+    if (method === 'PUT') {
+      if (body.resource_config) source.config = { ...source.config, ...body.resource_config };
+      st.approvals[source.id] = true;
+    }
+    if (method === 'DELETE') st.approvals[source.id] = false;
+    return { group_id: group, ...approvalState(def, source) };
+  }
+  if (rest === '/runs') {
+    if (method === 'GET') {
+      const items = st.runs
+        .filter(
+          (r) => r.definition_id === def.id && (caps.author_briefings || r.state === 'published'),
+        )
+        .sort((a, b) => b.id - a.id);
+      return {
+        group_id: group,
+        items: items.map((r) => editionView(r, false)),
+        total: items.length,
+      };
+    }
+    if (method === 'POST') {
+      const id = Math.max(...st.runs.map((r) => r.id)) + 1;
+      const run: MockGroupRun = {
+        id,
+        run_id: id,
+        group_id: group,
+        definition_id: def.id,
+        mode: body.mode,
+        state: 'queued',
+        error_code: null,
+        created_at: new Date().toISOString(),
+        published_at: null,
+        settles_at: Date.now() + 4000,
+      };
+      st.runs.push(run);
+      return editionView(run, false);
+    }
+    return undefined;
+  }
+  const runMatch = rest.match(/^\/runs\/(\d+)(\/delivery|\/retry|\/download)?$/);
+  if (runMatch) {
+    const run = st.runs.find((r) => r.id === Number(runMatch[1]) && r.definition_id === def.id);
+    if (!run) return { __status: 404, error: 'Edition not found', detail: 'Edition not found' };
+    if (runMatch[2] === '/delivery') {
+      const rows = st.deliveries[run.id] ?? [];
+      const counts: Record<string, number> = {};
+      const reasons = { excluded: 0, muted: 0, missing_destination: 0 };
+      for (const row of rows) {
+        counts[row.state] = (counts[row.state] ?? 0) + 1;
+        if (row.state === 'skipped') {
+          const reason = row.error_code?.startsWith('missing_')
+            ? 'missing_destination'
+            : row.error_code;
+          if (reason && reason in reasons) reasons[reason as keyof typeof reasons] += 1;
+        }
+      }
+      return { group_id: group, counts, reasons, recipients: rows };
+    }
+    if (runMatch[2] === '/retry' && method === 'POST') {
+      const rows = st.deliveries[run.id] ?? [];
+      let retried = 0;
+      for (const row of rows) {
+        if (row.state === 'failed' || (row.state === 'uncertain' && body.acknowledge_duplicates)) {
+          row.state = 'sent';
+          row.attempts += 1;
+          row.error_code = null;
+          retried += 1;
+        }
+      }
+      return { group_id: group, retried };
+    }
+    if (runMatch[2] === '/download')
+      return {
+        __raw: run.body_md ?? '',
+        __contentType: 'text/markdown',
+        __disposition: `attachment; filename="briefing-${run.id}.md"`,
+      };
+    if (method === 'GET') return editionView(run, true);
+  }
   return undefined;
 }
 function mockConfigFiles(path: string, method: string, body: any) {
@@ -5967,6 +6915,12 @@ const workspaceHandler: MockHandler = ({ url, method, body }) => {
 
   const configFiles = mockConfigFiles(driveUrl.pathname, method, body);
   if (configFiles !== undefined) return configFiles;
+
+  const groupBriefingReply = mockGroupBriefings(driveUrl.pathname, method, body);
+  if (groupBriefingReply !== undefined) return groupBriefingReply;
+
+  const adminBriefingReply = mockAdminBriefingRoutes(driveUrl.pathname, method, body);
+  if (adminBriefingReply !== undefined) return adminBriefingReply;
 
   const groupReply = mockGroups(driveUrl.pathname, method);
   if (groupReply !== undefined) return groupReply;
@@ -6497,6 +7451,16 @@ const handlers: MockHandler[] = [
       enabled: boolean;
     }[] = [
       {
+        id: 199,
+        name: 'morning',
+        cron: '0 7 * * 1-5',
+        // Blank exercises the derived-title placeholder in the editor.
+        title: '',
+        conversation_token: 'abc123',
+        output: 'talk',
+        enabled: true,
+      },
+      {
         id: 200,
         name: 'evening',
         cron: '0 18 * * 1-5',
@@ -6524,24 +7488,10 @@ const handlers: MockHandler[] = [
         enabled: false,
       },
     ];
-    const tomlBriefings = [
-      {
-        name: 'morning',
-        cron: '0 7 * * 1-5',
-        // Blank exercises the derived-title placeholder in the editor.
-        title: '',
-        conversation_token: 'abc123',
-        output: 'talk' as const,
-        enabled: true,
-      },
-    ];
     return ({ url, method, body }: { url: string; method: string; body?: unknown }) => {
       if (url === '/istota/api/settings/briefings' && method === 'GET') {
         return {
-          briefings: [
-            ...tomlBriefings.map((b) => ({ managed: 'config', ...b })),
-            ...mockDbBriefings.map((b) => ({ managed: 'db', ...b })),
-          ],
+          briefings: mockDbBriefings.map((b) => ({ managed: 'db', ...b })),
           rooms: [
             { token: 'abc123', name: 'Log channel' },
             { token: 'def456', name: 'Alerts channel' },
@@ -7433,9 +8383,12 @@ const handlers: MockHandler[] = [
         const selected = name ? archive.filter((a) => a.briefing_name === name) : archive;
         const offset = Math.max(0, Number(qs.get('offset') || 0));
         const limit = Math.max(1, Number(qs.get('limit') || 50));
-        const items = selected
-          .slice(offset, offset + limit)
-          .map(({ document: _document, ...row }) => row);
+        const items = selected.slice(offset, offset + limit).map(({ document, ...row }) => ({
+          ...row,
+          preview: mockPreview(
+            document ? document.blocks.map((b) => b.body_md).join('\n') : row.body_md,
+          ),
+        }));
         return { items, total: selected.length, briefing_names: briefingNames };
       }
       const am = p.match(/^\/archive\/(\d+)$/);

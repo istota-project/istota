@@ -354,3 +354,28 @@ def test_the_probe_helper_refuses_an_unsandboxed_run(layout, task, user_temp):
     with patch("istota.executor._bwrap_available", return_value=False), \
          pytest.raises(AssertionError, match="sandbox unavailable"):
         run_probe("true", layout, task, user_temp, profile=SandboxProfile.NATIVE)
+
+
+@pytest.mark.parametrize("profile", [SandboxProfile.CLAUDE, SandboxProfile.NATIVE])
+def test_briefing_research_has_scratch_without_personal_or_group_files(layout, claude_home, make_task, profile):
+    from istota.executor import task_temp_dir
+    from istota.rooms.scopes import withheld_for_task
+    from istota.skills._loader import load_skill_index
+
+    task = make_task(id=19, user_id="__briefings__", source_type="group_briefing_research")
+    scratch = task_temp_dir(layout, task, restricted=True)
+    scratch.mkdir(parents=True)
+    targets = [layout.workspace_path / "Users" / "alice" / "private.txt",
+               layout.workspace_path / "Users" / "__briefings__" / "private.txt",
+               layout.workspace_path / "Groups" / "team" / "GROUP.md",
+               claude_home / "private.txt"]
+    for path in targets:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("private-input-canary")
+    index = load_skill_index(layout.skills_dir, bundled_dir=layout.bundled_skills_dir)
+    withheld = withheld_for_task(None, task, skill_index=index)
+    script = "\n".join(f"test ! -e {_q(path)} || exit 41" for path in targets)
+    script += f"\nprintf scratch-ok > {_q(scratch / 'note.txt')}\ncat {_q(scratch / 'note.txt')}"
+    result = run_probe(script, layout, task, scratch, profile=profile, withheld_scopes=withheld, group_ids=[])
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "scratch-ok"

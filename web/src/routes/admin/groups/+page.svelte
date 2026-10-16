@@ -373,6 +373,12 @@
             </p>{/if}
         </SettingsCard>
       {/if}
+      {#if group.system_key === 'all_users'}
+        <p class="caption">
+          Its notebook, files and retained briefing history are shared with all current and future
+          installation users.
+        </p>
+      {/if}
       <SettingsCard title="Membership history">
         {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState>{:else}
           <div class="table-scroll">

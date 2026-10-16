@@ -13,6 +13,8 @@ from istota.briefings import ensure_initialised, resolve_for_user
 from istota.briefings.generate import archive_briefing, assemble_briefing_input
 from istota.config import Config, UserConfig
 
+from .support.briefing_rows import briefing_row
+
 
 def _config(tmp_path) -> Config:
     return Config(
@@ -624,6 +626,7 @@ class TestGenerationHandoff:
 
         monkeypatch.setattr("istota.briefings.generate.resolve_source", gather)
         with db.get_db(cfg.db_path) as conn:
+            briefing_row(conn, "alice", "M")
             tid = db.create_task(conn, prompt="placeholder", user_id="alice", source_type="briefing",
                                  briefing_name="M", output_target=output)
             conn.execute("UPDATE tasks SET created_at = '2026-10-15 01:00:00' WHERE id = ?", (tid,))

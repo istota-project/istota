@@ -19,6 +19,7 @@
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import GroupRooms from '$lib/components/groups/GroupRooms.svelte';
   import GroupFiles from '$lib/components/groups/GroupFiles.svelte';
+  import GroupBriefings from '$lib/components/groups/GroupBriefings.svelte';
   type Selection = { group: string };
   const current = getCurrentUser();
   const user = $derived(current.user);
@@ -176,6 +177,12 @@
   {:else if detail && selected}
     <div class="settings groups-page card-pane">
       {#key detail.group_id}
+        {#if detail.system_key === 'all_users'}
+          <p class="caption">
+            The notebook, files and retained briefing history are shared with all current and future
+            installation users, including editions published before they joined.
+          </p>
+        {/if}
         <CardGrid masonry>
           <div class="wide" data-width="wide"><GroupNotebook groupId={detail.group_id} /></div>
           <SettingsCard title="Members">
@@ -183,6 +190,10 @@
             <GroupMembers group={detail} onChanged={changed} />
           </SettingsCard>
           <GroupRooms rooms={detail.rooms} />
+          {#if detail.capabilities.read_briefings}<GroupBriefings
+              groupId={detail.group_id}
+              canAuthor={!!detail.capabilities.author_briefings}
+            />{/if}
           {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
         </CardGrid>
       {/key}

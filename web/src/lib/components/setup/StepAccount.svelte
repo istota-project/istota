@@ -40,6 +40,10 @@
     {/if}
     Use one you don't use anywhere else.
   </p>
+  <p>
+    Your account joins All users automatically. Its notebook, files and retained briefing history
+    are shared with everyone in this installation, including anyone who joins later.
+  </p>
   <SecretField
     label="Password"
     configured={draft.isSet('password')}

@@ -440,3 +440,65 @@ it('keeps an owner metadata draft when reloading a revision conflict', async () 
     }),
   );
 });
+
+it('explains automatic membership and future history beside shared content', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    system_key: 'all_users',
+    display_name: 'All users',
+    capabilities: { ...group.capabilities, manage: false, leave: false },
+  });
+  render(Groups);
+  await screen.findByText('Everyone in this installation; membership is automatic.');
+  expect(screen.getByText(/current and future installation users/)).toBeTruthy();
+  for (const name of ['Add member', 'Leave group', 'Edit group details', 'Actions for Bob'])
+    expect(screen.queryByRole('button', { name })).toBeNull();
+  expect(screen.getByRole('heading', { name: 'Notebook' })).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Shared files' })).toBeTruthy();
+});
+
+it('opens group briefings through Groups when personal Briefings is disabled', async () => {
+  api.getGroup.mockResolvedValue({
+    ...group,
+    capabilities: { ...group.capabilities, read_briefings: true, author_briefings: true },
+  });
+  api.getGroupBriefings.mockResolvedValue({
+    items: [
+      {
+        id: 1,
+        group_id: 'team',
+        name: 'digest',
+        title: 'Team digest',
+        enabled: true,
+        channel: 'email',
+        last_run: { id: 9, state: 'published', published_at: '2026-10-15T07:00:00Z' },
+      },
+      {
+        id: 2,
+        group_id: 'team',
+        name: 'draft',
+        title: 'Research',
+        enabled: false,
+        channel: 'in_app',
+      },
+    ],
+  });
+  render(Groups);
+  await screen.findByRole('heading', { name: 'Briefings' });
+  // An index into Briefings: read the latest edition there, or edit in settings.
+  expect(await screen.findByRole('link', { name: 'Team digest' })).toHaveAttribute(
+    'href',
+    '/briefings/?group=team&briefing=digest&run=9',
+  );
+  expect(screen.queryByRole('link', { name: 'Research' })).toBeNull();
+  expect(screen.getByText('In app · Draft')).toBeTruthy();
+  expect(screen.getAllByRole('link', { name: 'Edit' })[0]).toHaveAttribute(
+    'href',
+    '/briefings/settings/?group=team&briefing=digest',
+  );
+  expect(screen.getByRole('link', { name: 'New briefing' })).toHaveAttribute(
+    'href',
+    '/briefings/settings/?group=team&new=1',
+  );
+  expect(screen.queryByRole('checkbox')).toBeNull();
+});

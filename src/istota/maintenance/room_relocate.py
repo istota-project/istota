@@ -85,6 +85,9 @@ REWRITE_COLUMNS: dict[tuple[str, str], str] = {
 # Credentials and the permanent mapping are included because they too have
 # token-bearing column names. Nothing may blanket-rewrite these columns.
 PRESERVE_COLUMNS: dict[tuple[str, str], str] = {
+    ("group_briefing_runs", "attempt_token"): "generation worker claim",
+    ("group_briefing_runs", "research_attempt_token"): "saved research attempt identity",
+    ("group_briefing_recipients", "dispatch_token"): "delivery worker claim",
     ("room_bindings", "surface_ref"): "native surface reference",
     ("room_participants", "surface_ref"): "native actor identity",
     ("talk_poll_state", "conversation_token"): "Talk poll cursor",

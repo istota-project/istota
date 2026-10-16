@@ -86,6 +86,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="A source as JSON, e.g. '{\"kind\":\"markets\",\"config\":{}}'. Repeatable.",
     )
 
+    group = sub.add_parser("group", help="Manage group-owned briefing definitions")
+    group.add_argument("action", choices=["list", "save"])
+    group.add_argument("--group-id", required=True)
+    group.add_argument("--actor", required=True, help="Enabled current owner, or admin for All users")
+    group.add_argument("-f", "--file", help="JSON/TOML definition; use - for stdin")
+    group.add_argument("--revision", type=int, help="Expected revision; 0 creates a disabled draft")
+
+    migration = sub.add_parser("migrate", help="Review and retire legacy defaults or publishing jobs")
+    migration.add_argument("action", choices=["report", "import", "review", "cutover", "rollback"])
+    migration.add_argument("--name")
+    migration.add_argument("--producer-user", help="Migrate this user's publishing job named by --name")
+    migration.add_argument("-f", "--file", help="Publishing import: group definition, outputs and dependent_jobs")
+    migration.add_argument("--confirm-cutover", action="store_true",
+                           help="Confirm cutover after reviewing all dependencies, including scripts and prompts")
+    migration.add_argument("--actor", required=True)
+    migration.add_argument("--timezone", help="Explicit common timezone, required for import/review")
+    migration.add_argument("--revision", type=int, help="Expected imported definition revision")
+    migration.add_argument("--dispositions", help="JSON/TOML map: default user dispositions, or publishing consumer ids to replacement job ids")
+    migration.add_argument("--accept-source-changes", action="store_true", help="Acknowledge removed/converted sources and delivery changes")
+
     # archive -------------------------------------------------------------
     arc = sub.add_parser("archive", help="Read the briefing archive")
     arc.add_argument("action", choices=["list", "show"])
@@ -219,6 +239,103 @@ def _run_shared(args, config) -> int:
     return 0
 
 
+def _run_group(args, config) -> int:
+    import json
+
+    from istota import apply, db
+    from istota.briefings import group_store as store
+    from istota.groups.policy import GroupError
+    from istota.settings_plan.engine import ExecutionError
+    from istota.settings_plan.group_briefings import operator_is_admin, prepare_definition
+    from istota.settings_plan.schema import parse_plan
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            if args.action == "list":
+                store._require_author(conn, config, args.group_id, args.actor,
+                                      operator_is_admin(conn, config, args.actor))
+                result = store.list_definitions(conn, args.group_id)
+            else:
+                if not args.file or args.revision is None:
+                    raise ValueError("save requires --file and --revision (0 for a new disabled draft)")
+                declaration = {**apply.load_plan(args.file), "group_id": args.group_id}
+                parse_plan({"group_briefings": [declaration]})
+                conn.execute("BEGIN IMMEDIATE")
+                value, old = prepare_definition(conn, config, declaration, actor=args.actor,
+                                                expected_revision=args.revision)
+                result = store.save_definition(
+                    conn, config, args.group_id, value, actor_id=args.actor, expected_revision=args.revision,
+                    definition_id=old["id"] if old else None,
+                    is_admin=operator_is_admin(conn, config, args.actor), caller_transaction=True)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (GroupError, ExecutionError, apply.PlanError, ValueError, OSError) as error:
+        message = error.code if isinstance(error, (GroupError, ExecutionError)) else "invalid_definition"
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+
+
+def _run_migration(args, config):
+    import json
+
+    from istota import apply, db
+    from istota.briefings import group_migrate as migration
+    from istota.groups.policy import GroupError
+    from istota.settings_plan.group_briefings import operator_is_admin
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            if not operator_is_admin(conn, config, args.actor):
+                raise ValueError("migration requires an installation admin")
+            if args.producer_user:
+                if not args.name:
+                    raise ValueError("--name is required")
+                common = {"actor_id": args.actor}
+                if args.action == "report":
+                    result = migration.publisher_report(conn, config, args.producer_user, args.name, **common)
+                elif args.action == "import":
+                    if not args.file:
+                        raise ValueError("--file is required; supply the replacement prompt and dependency inventory")
+                    result = migration.import_publisher(conn, config, args.producer_user, args.name,
+                                                        apply.load_plan(args.file), **common)
+                elif args.action == "review":
+                    raise ValueError("Use report, generate a preview of the current draft, then cutover --confirm-cutover")
+                else:
+                    if args.revision is None:
+                        raise ValueError("--revision is required")
+                    common["expected_revision"] = args.revision
+                    if args.action == "cutover":
+                        result = migration.cutover_publisher(conn, config, args.producer_user, args.name,
+                            replacements=apply.load_plan(args.dispositions) if args.dispositions else {},
+                            confirmed=args.confirm_cutover, **common)
+                    else:
+                        result = migration.rollback_publisher(conn, config, args.producer_user, args.name, **common)
+            elif args.action == "report":
+                result = migration.migration_report(conn, config, args.name)
+            else:
+                if not args.name:
+                    raise ValueError("--name is required")
+                if args.action in ("import", "review") and not args.timezone:
+                    raise ValueError("--timezone is required; review each candidate's local timezone")
+                if args.action != "import" and args.revision is None:
+                    raise ValueError("--revision is required")
+                if args.action == "import":
+                    result = migration.import_default(conn, config, args.name, actor_id=args.actor, timezone=args.timezone)
+                elif args.action == "review":
+                    dispositions = apply.load_plan(args.dispositions) if args.dispositions else {}
+                    result = migration.review_default(conn, config, args.name, actor_id=args.actor,
+                        expected_revision=args.revision, timezone=args.timezone, dispositions=dispositions,
+                        accept_source_changes=args.accept_source_changes)
+                else:
+                    operation = migration.cutover_default if args.action == "cutover" else migration.rollback_default
+                    result = operation(conn, config, args.name, actor_id=args.actor, expected_revision=args.revision)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except (GroupError, apply.PlanError, ValueError, OSError) as error:
+        print("Error: " + (error.code if isinstance(error, GroupError) else str(error)), file=sys.stderr)
+        return 1
+
+
 def _invoke_module(config, user_id: str, module_argv: list[str]) -> int:
     """Resolve the user's BriefingsContext and run the module Click CLI."""
     from click.testing import CliRunner
@@ -307,6 +424,10 @@ def dispatch(argv: list[str], config) -> int:
         return _run_schedule(args, config)
     if args.group == "shared":
         return _run_shared(args, config)
+    if args.group == "group":
+        return _run_group(args, config)
+    if args.group == "migrate":
+        return _run_migration(args, config)
 
     builders = {
         "list": lambda args: ["list"],

@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 
 def _now_in_user_tz(ctx: SourceContext) -> tuple[datetime, str, bool, bool]:
     """Return (now, tz_str, is_morning, is_weekend) for the user's timezone."""
-    tz_str = "UTC"
-    try:
-        tz_str = ctx.app_config.resolve_user_timezone(ctx.user_id)
-    except Exception:  # noqa: BLE001
-        pass
+    tz_str = ctx.timezone or "UTC"
+    if ctx.timezone is None:
+        try:
+            tz_str = ctx.app_config.resolve_user_timezone(ctx.user_id)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         tz = ZoneInfo(tz_str)
     except Exception:  # noqa: BLE001
@@ -101,7 +102,7 @@ def _read_workspace_text(ctx: SourceContext, path: str) -> str | None:
 # -- markets ------------------------------------------------------------------
 
 
-def resolve_markets(config: dict, ctx: SourceContext) -> GatheredSource:
+def resolve_markets(config: dict, ctx: SourceContext, *, allow_browser=True) -> GatheredSource:
     now, tz_str, is_morning, is_weekend = _now_in_user_tz(ctx)
     mode = "morning" if is_morning else "evening"
     try:
@@ -127,7 +128,7 @@ def resolve_markets(config: dict, ctx: SourceContext) -> GatheredSource:
         if market_data:
             parts.append(market_data)
         browser = getattr(ctx.app_config, "browser", None)
-        if not is_morning and browser and getattr(browser, "enabled", False):
+        if allow_browser and not is_morning and browser and getattr(browser, "enabled", False):
             # The daemon has no task environment, so the identity, the API
             # address and the admission lock come from the context rather than
             # ISTOTA_USER_ID, BROWSER_API_URL and ISTOTA_DB_PATH.

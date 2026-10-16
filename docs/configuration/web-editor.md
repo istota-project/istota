@@ -46,7 +46,7 @@ If the optional [Ansible management role](../deployment/ansible.md) (or a plan w
 
 ## Tables, the whole file, and ignored keys
 
-A table such as `[models.aliases]`, `[[default_briefings]]` or `[[briefing_shared_blocks]]` is edited as TOML that defines that one key, starting from what the file holds. "Reset to default" removes the key; `briefing_shared_blocks = []` is a different edit, and means no shared blocks rather than the shipped ones.
+A table such as `[models.aliases]` or `[[briefing_shared_blocks]]` is edited as TOML that defines that one key, starting from what the file holds. "Reset to default" removes the key; `briefing_shared_blocks = []` is a different edit, and means no shared blocks rather than the shipped ones.
 
 The whole of `config.toml` can also be edited as text. Every credential in it reads `"<unchanged>"`, which keeps the stored value; typing over it sets a new one. The text replaces the whole file, so it cannot be combined with field edits in one change. `[users.*]` can be edited there, but it only seeds users on first start; per-user settings belong on the Users page.
 
@@ -64,3 +64,5 @@ Every write goes through the same TOML writer `istota apply` uses, so comments i
 
 - A request still waiting after two minutes: check `systemctl status istota-config-apply.path istota-config-apply.timer` on the host, or run `istota-stack config-apply` by hand. `istota doctor --only web.config_applier` warns about a request pending for ten minutes or taken for an hour.
 - The web does not come back after a change: on the host, run `istota-stack apply` with an earlier plan, or copy `config/config.toml.bak.<timestamp>` back as uid 10001 and run `istota-stack up`.
+
+Legacy `[[default_briefings]]` is read-only migration input. Create group definitions in Briefings and use the [migration workflow](../deployment/migrating-group-briefings.md) to retire old defaults.

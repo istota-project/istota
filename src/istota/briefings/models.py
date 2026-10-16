@@ -133,7 +133,7 @@ class BlockSource:
     ``config`` is a decoded JSON dict, kind-specific (see the module docs).
     """
 
-    id: int
+    id: int | str
     block_id: int
     position: int
     kind: str
@@ -253,6 +253,202 @@ def validate_shared_block_payload(payload: dict) -> dict:
         "enabled": bool(payload.get("enabled", True)),
         "trusted": bool(payload.get("trusted", False)),
         "sources": sources,
+    }
+
+
+GROUP_SOURCE_KINDS = frozenset({
+    "browse", "markets", "group_memory", "group_file", "shared_block",
+    "personal_file", "personal_calendar",
+})
+GROUP_CHANNELS = ("in_app", "email", "talk", "ntfy")
+CALENDAR_FIELDS = ("time", "title", "description", "attendees", "links", "location")
+CALENDAR_LOOKBACK_DAYS = (0, 1, 7, 30)
+CALENDAR_LOOKAHEAD_DAYS = (1, 7, 14, 30)
+
+
+def normalize_text_file_reference(raw):
+    path = _group_text(raw, "file path", required=True, limit=1000)
+    if (any(part in ("", ".", "..") for part in path.split("/"))
+            or any(c in path for c in ("\\", "\0", ":"))
+            or not path.lower().endswith((".txt", ".md", ".markdown"))):
+        raise ValueError("select one relative text file")
+    return path
+
+
+def normalize_group_resource_config(kind, config):
+    if kind == "group_memory":
+        if config:
+            raise ValueError("group memory takes no resource override")
+        return {}
+    if set(config) != {"path"}:
+        raise ValueError("select one group file")
+    return {"path": normalize_text_file_reference(config["path"])}
+
+
+def normalize_contribution_config(kind, config, *, allow_pending=False):
+    """One resource and a bounded disclosure, independent of caller authority."""
+    from urllib.parse import unquote, urlsplit
+    from istota.sandbox.user_scope import is_scopable_user_id
+
+    allowed = {"owner_id", "path"} if kind == "personal_file" else {
+        "owner_id", "calendar_url", "fields", "include_private", "lookback_days", "lookahead_days",
+    }
+    if not isinstance(config, dict) or set(config) - allowed:
+        raise ValueError("invalid contribution config")
+    owner = _group_text(config.get("owner_id"), "source owner", required=True, limit=100)
+    if not is_scopable_user_id(owner) or owner.startswith("__"):
+        raise ValueError("invalid source owner")
+    if allow_pending and set(config) == {"owner_id"}:
+        return {"owner_id": owner}
+    if kind == "personal_file":
+        return {"owner_id": owner, "path": normalize_text_file_reference(config.get("path"))}
+    url = _group_text(config.get("calendar_url"), "calendar reference", required=True, limit=2000)
+    parsed = urlsplit(url)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment
+            or any(part in (".", "..") for part in unquote(parsed.path).split("/"))):
+        raise ValueError("select one calendar URL")
+    fields = config.get("fields", ["time", "title"])
+    if not isinstance(fields, list) or not fields or any(not isinstance(f, str) or f not in CALENDAR_FIELDS for f in fields):
+        raise ValueError("invalid calendar fields")
+    private = config.get("include_private", False)
+    if type(private) is not bool:
+        raise ValueError("include_private must be a boolean")
+    result = {"owner_id": owner, "calendar_url": url, "fields": [f for f in CALENDAR_FIELDS if f in fields],
+              "include_private": private}
+    for window_field, default, choices in (("lookback_days", 0, CALENDAR_LOOKBACK_DAYS), ("lookahead_days", 1, CALENDAR_LOOKAHEAD_DAYS)):
+        value = config.get(window_field, default)
+        if type(value) is not int or value not in choices:
+            raise ValueError("invalid calendar window")
+        result[window_field] = value
+    return result
+
+
+def _group_text(value, field, *, required=False, limit=20000):
+    if not isinstance(value, str) or len(value) > limit or (required and not value.strip()):
+        raise ValueError(f"invalid {field}")
+    return value.strip()
+
+
+def _group_sources(raw, seen):
+    if not isinstance(raw, list):
+        raise ValueError("sources must be a list")
+    sources = []
+    for source in raw:
+        if not isinstance(source, dict) or set(source) - {"id", "kind", "config"}:
+            raise ValueError("invalid source")
+        source_id = _group_text(source.get("id"), "source id", required=True, limit=100)
+        if not _SLUG_RE.fullmatch(source_id) or source_id in seen:
+            raise ValueError("source ids must be unique slugs")
+        seen.add(source_id)
+        kind = source.get("kind")
+        if not isinstance(kind, str) or kind not in GROUP_SOURCE_KINDS:
+            raise ValueError("source kind is not allowed for group briefings")
+        config = source.get("config", {})
+        if not isinstance(config, dict):
+            raise ValueError("source config must be an object")
+        if kind in ("personal_file", "personal_calendar"):
+            config = normalize_contribution_config(kind, config, allow_pending=True)
+        elif kind in ("group_memory", "group_file"):
+            config = normalize_group_resource_config(kind, config)
+        sources.append({"id": source_id, "kind": kind, "config": config})
+    return sources
+
+
+def normalize_group_generation(mode: str, raw: dict) -> dict:
+    """Strict group input validation; personal seeding's fail-soft parser cannot be used."""
+    if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
+        raise ValueError("generation version must be 1")
+    common = {"version", "contains_personal_information", "audience_acknowledged"}
+    allowed = common | ({"prompt", "research", "inputs"} if mode == "prompt" else {"blocks"})
+    if set(raw) - allowed:
+        raise ValueError("unknown generation setting")
+    result = {"version": 1}
+    for flag in ("contains_personal_information", "audience_acknowledged"):
+        value = raw.get(flag, False)
+        if type(value) is not bool:
+            raise ValueError(f"{flag} must be a boolean")
+        result[flag] = value
+    seen = set()
+    if mode == "prompt":
+        result["prompt"] = _group_text(raw.get("prompt"), "generation prompt", required=True)
+        research = raw.get("research", {})
+        if not isinstance(research, dict) or set(research) - {"enabled", "prompt", "allowed_domains"}:
+            raise ValueError("invalid research settings")
+        enabled = research.get("enabled", False)
+        if type(enabled) is not bool:
+            raise ValueError("research enabled must be a boolean")
+        prompt = _group_text(research.get("prompt", ""), "research prompt", required=enabled)
+        domains = research.get("allowed_domains", [])
+        if not isinstance(domains, list):
+            raise ValueError("allowed domains must be a list")
+        if domains:
+            raise ValueError("research does not enforce an allowed-domain policy")
+        result["research"] = {"enabled": enabled, "prompt": prompt, "allowed_domains": []}
+        result["inputs"] = _group_sources(raw.get("inputs", []), seen)
+    else:
+        blocks = raw.get("blocks")
+        if not isinstance(blocks, list) or not blocks:
+            raise ValueError("blocks mode requires blocks")
+        result["blocks"] = []
+        for block in blocks:
+            if not isinstance(block, dict) or set(block) - {"title", "directive", "render_mode", "options", "sources"}:
+                raise ValueError("invalid block")
+            sources = _group_sources(block.get("sources"), seen)
+            if not sources:
+                raise ValueError("each block requires a source")
+            render_mode = block.get("render_mode", "structured" if sources[0]["kind"] in STRUCTURED_KINDS else "synthesis")
+            if render_mode not in RENDER_MODES:
+                raise ValueError("invalid block render mode")
+            options = block.get("options", {})
+            if not isinstance(options, dict):
+                raise ValueError("block options must be an object")
+            directive = block.get("directive")
+            if directive is not None:
+                directive = _group_text(directive, "block directive") or None
+            result["blocks"].append({
+                "title": _group_text(block.get("title"), "block title", required=True, limit=200),
+                "directive": directive, "render_mode": render_mode, "options": options, "sources": sources,
+            })
+    # Roundtrip rejects non-JSON inputs and prevents caller mutations of snapshots.
+    return json.loads(json.dumps(result, allow_nan=False))
+
+
+def validate_group_definition_payload(payload: dict) -> dict:
+    from croniter import croniter
+    from zoneinfo import ZoneInfo
+
+    if not isinstance(payload, dict) or set(payload) - {
+        "name", "title", "cron", "timezone", "enabled", "generation_mode", "generation", "channel", "excluded_user_ids",
+    }:
+        raise ValueError("invalid definition fields")
+    name = _group_text(payload.get("name"), "name", required=True, limit=100)
+    if not _SLUG_RE.fullmatch(name):
+        raise ValueError("name must be a slug")
+    cron = _group_text(payload.get("cron"), "cron", required=True, limit=100)
+    if len(cron.split()) != 5 or not croniter.is_valid(cron):
+        raise ValueError("invalid cron expression")
+    zone = _group_text(payload.get("timezone"), "timezone", required=True, limit=100)
+    ZoneInfo(zone)
+    mode = payload.get("generation_mode")
+    if mode not in ("prompt", "blocks"):
+        raise ValueError("generation mode must be prompt or blocks")
+    channel = payload.get("channel", "in_app")
+    if channel not in GROUP_CHANNELS:
+        raise ValueError("invalid delivery channel")
+    enabled = payload.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("enabled must be a boolean")
+    excluded = payload.get("excluded_user_ids", [])
+    if not isinstance(excluded, list) or any(
+        not isinstance(user, str) or not user or user != user.strip() for user in excluded
+    ):
+        raise ValueError("excluded_user_ids must be user ids")
+    return {
+        "excluded_user_ids": sorted(set(excluded)),
+        "name": name, "title": _group_text(payload.get("title", ""), "title", limit=200),
+        "cron": cron, "timezone": zone, "generation_mode": mode, "channel": channel,
+        "enabled": enabled, "generation": normalize_group_generation(mode, payload.get("generation")),
     }
 
 

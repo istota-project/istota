@@ -1126,3 +1126,47 @@ def test_every_object_backed_source_is_registered_and_none_auto_resolves():
     resolvers = sources.all_resolvers()
     assert set(resolvers) >= _STAGE_SOURCES
     assert sources.auto_resolve_sources() & _STAGE_SOURCES == set()
+
+
+class TestAdminBriefingChange:
+    """Fire-and-forget: registered, keyed per briefing and action, closed by being seen."""
+
+    def _write(self, conn, action="hold", briefing_id=7, kind="personal", **extra):
+        from istota.notifications.resolvers import admin_briefing_change as source
+
+        result = source.write(conn, "alice", admin_name="Admin", action=action, kind=kind,
+                              briefing_id=briefing_id, briefing_title="Weekly review", **extra)
+        conn.commit()
+        return result
+
+    def test_registered_and_resolved_on_seen(self):
+        assert "admin_briefing_change" in sources.all_resolvers()
+        assert "admin_briefing_change" in sources.auto_resolve_sources()
+
+    def test_a_repeat_bumps_one_row_and_another_action_adds_one(self, conn):
+        self._write(conn)
+        self._write(conn)
+        self._write(conn, action="resume")
+        self._write(conn, kind="group")
+        rows = conn.execute("SELECT dedup_key, title, body FROM notifications "
+                            "WHERE source = 'admin_briefing_change' ORDER BY id").fetchall()
+        assert [row["dedup_key"] for row in rows] == ["personal:7:hold", "personal:7:resume", "group:7:hold"]
+        assert rows[0]["title"] == "An administrator paused your briefing"
+        assert "Weekly review" in rows[0]["body"] and "Admin" in rows[0]["body"]
+        assert rows[1]["title"] == "An administrator resumed your briefing"
+
+    def test_an_unknown_action_is_refused(self, conn):
+        with pytest.raises(ValueError):
+            self._write(conn, action="edit")
+
+    def test_the_view_renders_the_stored_text_and_seeing_it_closes_it(self, config, conn):
+        self._write(conn, action="delete", kind="group", group_label="Family")
+        views, total = store.list_open(config, conn, "alice")
+        assert total == 1
+        view = views[0]
+        assert view.title == "An administrator deleted your briefing"
+        assert "Family" in view.body and view.actions == ()
+        row = conn.execute("SELECT id, updated_at FROM notifications").fetchone()
+        store.mark_seen(conn, "alice", [(row["id"], row["updated_at"])])
+        conn.commit()
+        assert store.list_open(config, conn, "alice")[1] == 0

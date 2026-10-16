@@ -424,7 +424,7 @@ class TalkTransport:
     async def _post_part(
         self, client, token: str, part: str, *,
         reply_to: int | None, reference_id: str | None,
-        readback_allowed: bool, task: "db.Task | None",
+        readback_allowed: bool, task: "db.Task | None", report_errors: bool = True,
     ) -> int | None:
         """Post one part of a message, retrying a transient failure.
 
@@ -498,11 +498,12 @@ class TalkTransport:
                 last_exc = e
                 if attempt == _POST_ATTEMPTS - 1 or not _is_transient(e):
                     break
-                logger.warning(
-                    "Talk post to %s failed for task %s (attempt %d/%d): %s: %r",
-                    token, task_id, attempt + 1, _POST_ATTEMPTS,
-                    type(e).__name__, e,
-                )
+                if report_errors:
+                    logger.warning(
+                        "Talk post to %s failed for task %s (attempt %d/%d): %s: %r",
+                        token, task_id, attempt + 1, _POST_ATTEMPTS,
+                        type(e).__name__, e,
+                    )
         if last_exc is None:
             # Not reachable while `_POST_ATTEMPTS` is at least 1: the loop
             # returns or records a failure on every path. Kept so that setting

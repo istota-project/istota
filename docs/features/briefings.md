@@ -1,10 +1,10 @@
 # Briefings
 
-Scheduled summaries delivered to Talk and/or email. A morning briefing might include today's calendar events, market futures, headline news, and pending todos.
+Briefings can be personal or group-owned. A personal briefing gathers content for one person. A group briefing generates one common edition and sends that saved edition to the group’s eligible members. Open Briefings and choose New briefing to select Just me or a group you can author for.
 
 ## Content model: blocks
 
-Blocks are the sole content model. A briefing is an ordered list of **blocks**, each with a title, an optional synthesis directive, a render mode (`synthesis` / `structured`), and 1..N **sources**. Each block is gathered and synthesized into one section at generation time.
+Personal briefings use blocks. A group briefing can generate from a prompt or use an ordered list of blocks. Each block has a title, an optional synthesis directive, a render mode (`synthesis` / `structured`), and 1..N **sources**. Each block is gathered and synthesized into one section at generation time.
 
 Source kinds (`kind = …`):
 
@@ -22,22 +22,19 @@ Source kinds (`kind = …`):
 
 > The legacy boolean-`components` content model (and its `[briefing_defaults]` expansion) is retired. Existing component-based briefings migrate once into blocks on first touch of the briefings module DB.
 
-## Configuration sources
+## Personal configuration sources
 
-Schedule + delivery are loaded from (higher precedence wins):
+Schedule and delivery come from one place, the `briefing_configs` table. Rows are written by the web UI (Briefings → Settings), by `istota briefings schedule ensure`, and by a settings plan (`istota apply`). `enabled=0` mutes a row without scheduling it. Each row belongs to its user, who can edit, disable and delete it.
 
-1. `briefing_configs` DB table — provisioned via `istota briefings schedule ensure` or the web UI (briefings tab → settings); `enabled=0` mutes a row without scheduling.
-2. `[[users.alice.briefings]]` in main `config/config.toml` (name/cron/title/output; DB rows win by name).
+`[[users.alice.briefings]]` in `config/config.toml` is retired. On the first start after the upgrade, each entry is imported into `briefing_configs` once per user: an entry whose name already has a row is skipped, and an entry with no `cron` is imported disabled. After that the file is not read for briefings again, so a briefing deleted in the settings page stays deleted. Content blocks written under an entry are copied into the briefing's content at the same start, so nothing is lost when the block is removed. Until it is removed from the file, loading the config reports it as a retired key. A user's workspace `{bot_dir}/config/BRIEFINGS.md` was retired the same way: what it held is imported once and an existing file is left on disk, inert.
 
-Those two are the whole surface. A user's workspace `{bot_dir}/config/BRIEFINGS.md` was a third source, applied over both at read time; it is retired, and on first start after the upgrade whatever it held is imported into `briefing_configs`, once per user. An existing file is left on disk and is inert.
+Content **blocks** live in the per-user briefings module DB and are edited in the web block editor. Blocks authored under a retired `[[users.X.briefings.blocks]]` entry are seeded once into the row of the same name.
 
-Content **blocks** are seeded once into the per-user briefings module DB from config-authored `[[users.X.briefings.blocks]]` and are then edited in the web block editor.
-
-Because a name can come from either source, or from blocks with no schedule at all, `istota briefings list` (and `istota-skill briefings list`) is what answers "which briefings does this user actually have" — every effective name after defaults and disabled rows are applied, with each one's block count and its latest archived generation. Asking for a name that is not on that list now returns the valid options rather than an empty briefing: a zero-row block query used to read as "configured, no content", so a typo or a case mismatch produced a confident and wrong success (ISSUE-328).
+Because a name can come from a schedule, or from blocks with no schedule at all, `istota briefings list` (and `istota-skill briefings list`) is what answers "which briefings does this user actually have" — every effective name after defaults and disabled rows are applied, with each one's block count and its latest archived generation. Asking for a name that is not on that list now returns the valid options rather than an empty briefing: a zero-row block query used to read as "configured, no content", so a typo or a case mismatch produced a confident and wrong success (ISSUE-328).
 
 ## Building a briefing
 
-Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs; operator-managed schedules remain read-only.
+Open Briefings → Settings and choose a briefing. Its schedule, destinations and ordered blocks appear together. Disabled schedules remain available for editing, including briefings with no blocks yet. Use Edit schedule to change when and where it runs.
 
 Add block opens a searchable preset list for feeds, websites, newsletters, calendar, markets, tasks, notes, reminders, shared content or a custom block. Presets use the existing sources. Feed presets need Feeds enabled with a subscription or category; shared content needs an available shared block. Choose the source's feed, website, file or shared-block name before saving.
 
@@ -45,23 +42,60 @@ The block editor keeps a local draft of the title, source list and width. Automa
 
 Each block's actions include Edit, Move up, Move down, Duplicate and Delete. Moves work with the keyboard or touch and keep reading order. Duplication copies every source, including disabled ones. Add a source before duplicating a legacy block that has no sources. Deleting or changing a block affects future editions; existing editions remain available. Admins can still manage and run shared blocks in their own card.
 
-## Previewing delivery
+## Previewing personal delivery
 
 Preview in the block builder opens Web, HTML email and Plain text views. Preview in the block editor includes that unsaved block draft. The example comes from the selected briefing's latest saved edition: content follows the block's saved identity while the proposed title, order and width come from the builder. Deleted blocks disappear. New blocks, blocks without saved content and legacy editions use labelled placeholders. The preview does not gather sources, call a model, save changes or send mail.
 
 Web uses the reader's cards and full-block viewer. HTML email shows the complete sections in an isolated frame with links disabled and external resources blocked. Plain text keeps complete sections and usable URLs. A preview error leaves the block draft available for editing or retry. Layout and source changes affect future editions; preview does not predict their content.
 
-## Default briefings
+## Group briefings
 
-A canonical shared set defined once in the top-level `[[default_briefings]]` section is seeded by name into each opted-in user (per-user `default_briefings` flag, default on; an explicit user briefing of the same name wins). Seeding is one-time — later web edits win and re-runs never clobber them. Opt a user out with `istota user ensure --no-default-briefings`.
+Select a group, one delivery channel and an explicit timezone before choosing Generate from prompt or Build from blocks. The audience review shows deliverable members, mutes, exclusions and missing destinations without contact details. Email sends individual copies, Talk uses each member’s private destination, and ntfy splits the saved text into bounded messages. In app creates no external sends. Every published edition remains available in group history regardless of the selected channel.
+
+Only current group owners manage ordinary group briefings. A new owner can manage the existing definitions and editions immediately; the creator has no special rights after losing ownership. Installation admins outside an ordinary group cannot author or read its content. Saves check the current revision and refuse stale edits. A saved target cannot change: Duplicate for group creates a disabled draft with a new source review.
+
+Owners may select Excluded users from the current group’s members. Exclusions suppress outbound sends and in-app notices, while retained history remains readable. They persist across departure and rejoin. Removing an exclusion does not resend skipped work. Members can separately mute outbound delivery or in-app notices for a briefing, or set group-wide mutes. A member’s own mute always applies.
+
+Preview gathers and generates through the same authorization checks as publication, but its result is visible only to authors and sends nothing. Generate now creates a fresh publishable occurrence; it does not publish an old preview. Delivery status is separate from generation status. Retry failed deliveries reuses the saved edition and confirmed message parts. Uncertain delivery means the provider may already have accepted it; retry requires acknowledgement that it could create a duplicate. An already-started send may complete after membership removal, exclusion or source revocation. Delivered copies cannot be recalled.
+
+Current members can read and download retained editions, including editions from before they joined. Joining creates no backlog of sends or notices. Removing or disabling a member denies subsequent reads and pending deliveries. Group editions have no personal Delete action. The Groups page links to the same editor and reader; turning off a personal Briefings module does not remove membership or history access through Groups.
+
+### Sources and research
+
+Group sources are public browse/market inputs, selected group notebook or text files, shared blocks, and explicitly approved personal file or calendar contributions. Direct personal email, RSS, notes, tasks and calendar sources cannot be copied into a group definition. Each contributor approves their exact resource and the recurring disclosure to current and future group members. Calendar approval states the date window and disclosed fields. Changing the resource, projection or channel requires renewed approval; an author or admin cannot approve for another person.
+
+Public research has its own prompt. It runs through the existing browse skill in an ordinary sandboxed service task with a dedicated Briefings browser profile. It does not inherit a human browser session, personal memory or group files. The research prompt is sent to the configured model provider. Mark prompts containing personal information and acknowledge the group audience before enabling them; a pasted path never grants file access. Final synthesis receives the saved research and approved private inputs without tools; put private generation instructions in that separate prompt. Browser networking keeps its normal behavior, with no additional domain or public-IP firewall promised by this feature.
+
+A refused selected source blocks publication, including structured-only editions. External outages can yield an edition labelled Incomplete sources when usable content remains. An all-empty requested gather fails and leaves the prior edition unchanged. An intentionally source-free prompt with research off remains valid. Revoking a contribution stops future use and pending delivery, but retained published history is not rewritten.
+
+### All users and former defaults
+
+All users is the built-in group of enabled installation accounts. Membership is automatic, including for users whose personal Briefings module is off. It cannot be manually changed or archived. Installation admins author its briefings; joining the installation grants access to retained All users history. Its creation alone enables no mailing and injects no group memory into ordinary tasks.
+
+Legacy `[[default_briefings]]` and the old per-user default toggle are migration inputs only. Upgrade preserves existing effective personal schedules and content once. New accounts receive no copied schedules. Operators import disabled All users drafts, review personal variants and opt-outs, and explicitly cut over each definition. Existing personal archives stay personal. See [Migrating group briefings](../deployment/migrating-group-briefings.md) for the report, import, cutover and rollback commands.
+
+## Administrator pause and delete
+
+Admin → Briefings lists every personal, group and All users briefing on the installation, with its owner or group, schedule, delivery channel, state and last run. A text filter narrows both lists by owner, group or title. The page shows definitions and state only, never blocks, sources, prompts or editions.
+
+Pause places an administrator hold. A held briefing does not run, and pending runs are cancelled; a run already in progress finishes, and earlier runs keep their recorded outcome. Pause, resume and delete take effect without a restart, and a resumed briefing runs again at its next scheduled time. The hold is separate from the owner's own on/off setting. The owner sees "Paused by an administrator" in Briefings settings and cannot turn the briefing on until an administrator chooses Resume, which restores whatever setting the owner had. A group's owners can still edit a held definition and turn it off.
+
+Delete asks for the briefing's name typed back and then a confirmation code or password, the same two checks the configuration editor uses. A personal briefing is removed the way its owner would remove it, and past editions stay in the owner's archive. A group briefing leaves the group's settings and stops running, its source approvals are revoked, and its name is free to reuse. Members keep its published editions in the reader. A definition created by a former default or publishing-job migration cannot be deleted until that migration is cut over or rolled back. Importing the same default again after a delete starts a new draft (see [Migrating group briefings](../deployment/migrating-group-briefings.md)).
+
+The owner of a personal briefing, or the current owners of a group, get a notification when an administrator pauses, resumes or deletes it. The acting administrator is not notified, and nobody is notified about an All users briefing.
 
 ## Memory isolation
 
 Briefing prompts intentionally exclude USER.md and dated memories. This prevents private context from leaking into what may be shared or newsletter-style output.
 
-## Example config (TOML)
+## Example settings plan
+
+A plan applied with `istota apply -f plan.toml` writes the same rows the settings page does.
 
 ```toml
+[meta]
+version = 1
+
 [[users.alice.briefings]]
 name = "morning"
 cron = "0 6 * * *"               # 6am in user's timezone
@@ -92,7 +126,7 @@ output = "talk,email"             # one destination or a comma-separated list
     config = { preset = "ap" }
 ```
 
-Width lives in `options.presentation.width` and accepts `auto`, `wide` or `full`, with `auto` as the default. The editor preserves other option fields. Config-authored blocks seed once; later config edits do not overwrite a user's saved block changes.
+Width lives in `options.presentation.width` and accepts `auto`, `wide` or `full`, with `auto` as the default. The editor preserves other option fields.
 
 ## Shared curated content
 
@@ -102,7 +136,7 @@ It has two layers over one storage substrate — the **shared KV store** (`share
 
 ### Module-owned shared blocks (batteries-included — the default)
 
-The briefings module ships **shared blocks**: one-block briefings it schedules and generates *once globally*, writing the rendered section into `shared_kv`. A fresh deploy ships a canonical set (`world-headlines` via browse presets, `markets-summary` via the markets source) and the default morning briefing references `world-headlines` — so the N-way frontpage fetch + N-way synthesis collapses to **one generation total**, with no operator scripting.
+The briefings module ships **shared blocks**: one-block briefings it schedules and generates *once globally*, writing the rendered section into `shared_kv`. A fresh deploy ships a canonical set (`world-headlines` via browse presets, `markets-summary` via the markets source) for existing consumers. New group briefings can generate directly, without a shared-block publishing job.
 
 A shared block is defined at the instance level (top-level `[[briefing_shared_blocks]]`):
 
@@ -177,7 +211,7 @@ The **writer** chooses whether the fetch or the synthesis is shared, via the sto
 
 ## Reading briefings (web)
 
-The briefings tab is a reader for generated briefings, with an archive sidebar for past results (filterable by briefing name from the header, each result deletable from its kebab menu) and a settings page behind the cog for editing blocks, sources, schedule and delivery. Source paths use a searching file picker with an advisory existence check — advisory rather than blocking, because the path resolver is fail-soft, so a not-yet-created file must not trap the editor. Admins additionally get a "Shared blocks" card for the module-owned blocks.
+The briefings tab lists personal and group editions with target labels and filters. Personal archive results can be deleted from their kebab menu; group editions stay in group history. Personal briefings have an archive sidebar and a settings page behind the cog for editing blocks, sources, schedule and delivery. Source paths use a searching file picker with an advisory existence check — advisory rather than blocking, because the path resolver is fail-soft, so a not-yet-created file must not trap the editor. Admins additionally get a "Shared blocks" card for the module-owned blocks.
 
 Selecting an archived briefing or changing the briefing-name filter adds a browser history entry. Back and Forward restore the selection, and reloading or sharing the URL opens the same briefing and filter. Returning from settings keeps the selection. If a briefing or filter is no longer available, the reader falls back to the first available briefing or All and updates the current URL without adding an entry.
 
@@ -187,9 +221,9 @@ Every card shows its complete content, including all paragraphs and list items. 
 
 Older editions without a structured document stay readable in a single full-width card. Unsupported or damaged documents also use their complete stored Markdown body. Opening an edition reads the archive without fetching sources or generating content. Changing the selection shows a loading state until that edition arrives, so the previous edition cannot appear under the new selection.
 
-Each generated briefing is archived on delivery and pruned by `[briefings] archive_retention_days` (default 90) on insert, alongside the manual per-result delete.
+Personal briefings are archived on delivery and pruned by `[briefings] archive_retention_days` (default 90) on insert, alongside manual per-result deletion. Group editions are saved before delivery and use the same retention duration; active or uncertain deliveries delay pruning.
 
-## Output format
+## Personal output format
 
 Generation makes one source gather and one model call for the edition. Before the call, the worker saves a protected manifest with the edition title, ordered numeric block IDs, block titles, render modes, presentation widths and source status. Duplicate titles remain distinct. Blocks with no gathered content are omitted from the request; failed sources keep their provenance outside the reader-facing document.
 
@@ -223,4 +257,4 @@ The size cap is `[briefings] max_source_chars`, spent item by item: an item that
 
 ## Scheduling
 
-Cron expressions are evaluated in each user's timezone. The scheduler checks for due briefings every `briefing_check_interval` (60s) and tracks the last run per briefing in the `briefing_state` table.
+Personal cron expressions are evaluated in each user's timezone. Group schedules use their definition’s stored timezone and a unique occurrence per due instant. The scheduler checks for due briefings every `briefing_check_interval` (60s). Personal schedules track their last run in `briefing_state`; group runs use the framework occurrence ledger.

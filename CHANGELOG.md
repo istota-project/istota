@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Scheduled jobs in the admin pane.** Every user's scheduled jobs now have their own page in the admin sidebar instead of a card on Status. An admin can disable, enable or delete a user's job from there, and the change is written to that user's CRON.md so it sticks. Deleting asks for the job's name and a confirmation code. Module pollers can be disabled but not deleted.
+- Admin → Briefings lists every personal, group and All users briefing with its owner, schedule, delivery and state. Administrators can pause a briefing so it does not run until an administrator resumes it, and delete one after typing its name and confirming with a code or password. Owners are notified; deleted group briefings keep their published editions in the reader.
+
+- Operators can import publishing prompts into disabled group briefings, review dependent consumers, and retire the old job after a successful preview and confirmed cutover. Retirement survives schedule reloads and restarts; existing shared content and personal archives remain available for rollback.
+
+- Group briefing owners can exclude selected members from deliveries and in-app notifications. Excluded members keep access to group history, and removing an exclusion does not resend skipped editions.
+
+- Operators can review and import former default briefings as disabled All users drafts, then cut over or roll back each schedule. Existing personal edits, archives and delivery opt-outs are preserved; new accounts receive no copied defaults. Members can change their All users delivery mute in Briefings.
+
+- Operators can save group briefing drafts and roundtrip their definitions through apply and snapshot. Writes require an explicit current owner, or an administrator for All users; imported definitions carry no source-sharing approvals.
+
+- Group editions can be read from Briefings or Groups, with audience labels, delivery status and personal mute controls. Current owners can generate, preview or retry delivery from the same reader; ownership changes and lost membership remove access from an open view.
+
+- Briefings can be drafted for a group with a prompt or the existing block editor, an explicit timezone and a delivery channel. Owners can review the audience and generate a private preview; personal file and calendar sources require their contributor’s approval before previewing or enabling the schedule.
+
+- Group briefing APIs let current owners manage the same definitions after an ownership change. Members can read and download retained editions, mute their own delivery, and approve or revoke their own contributed sources; in-app notices carry no private content.
+
+- Group briefings send the saved edition through each member’s selected email, private Talk or ntfy destination. Retries preserve confirmed message parts, respect mutes and access changes, and require acknowledgement when delivery may already have succeeded.
+
+- Group briefings generate one common edition per occurrence, with saved research reused after a synthesis retry. Previews remain drafts, and structured blocks retain their original content without a model pass.
+
+- All users is a built-in group whose membership follows enabled installation accounts. Its notebook, files and retained briefing history are shared with current and future users; membership cannot be changed by hand.
+
+
 - Settings → Preferences can show unread counts beside Chat, Briefings and Feeds, including in the navigation menu. The choice is saved to your account and starts off.
 - Briefings remembers which editions you have read and lets you mark the whole archive or one briefing’s editions as read from the header. Existing archive entries start as read when upgrading.
 
@@ -22,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Record an old void.** `invoice record-void` puts a number voided before voids were kept back on record, with its client, date, total, reason and replacements, so a gap in the numbering shows as a voided invoice instead of a missing one.
 
 ### Changed
+
+- `[users.X.briefings]` in `config.toml` is retired. Each entry is imported once into the briefings database, and the config reports the block until it is removed; a briefing deleted in the settings page no longer comes back on restart. Every personal briefing is now editable by its owner, with no "Set by your administrator" lock.
 
 - **The work log and invoices moved into the money database.** Each invoice now has a record with the total it was issued at, split by income account, so a later rate change no longer alters past invoices, `invoice paid` books exactly that total (manual items included, where a manual-only invoice used to be refused as having no billable items), and generating, voiding and paying each happen in one step that cannot be left half done. An invoice is paid as a whole; payment is no longer recorded per work entry. See `docs/features/money.md`.
   **Upgrade note:** the yearly `invoices/work/{year}.toml` files are imported the first time the work log is used and then renamed `{year}.toml.migrated`; edits to them no longer do anything. If the import refuses (an unreadable file, an entry with no uid, a duplicated uid, or one invoice's entries disagreeing on the paid date), work and invoice commands fail with `work log migration blocked` until an operator fixes it and runs `istota money work migrate -u USER`. A number voided before the upgrade stays a gap until it is recorded with `invoice record-void`.
@@ -36,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[security] vault_fetch_limit_per_task` now counts distinct credentials rather than reads. A credential already served in a task attempt can be read again at no cost, so a WordPress session no longer runs out after ten calls against one site. A name not yet served, whether absent or refused, is still charged every time, and setting the limit to `1` limits a task to one credential.
 
 ### Fixed
+
+- Upgrades with legacy default briefings can initialize the database and start the container. Startup now creates the migration journal before preserving the old schedules.
 
 - Switching briefing types no longer flashes “No briefings yet” while the archive loads. The archive sidebar also waits for its first load before showing an empty state.
 - Generated briefings keep their saved block titles, order and presentation even if a definition changes or is deleted during generation. Malformed or empty generation results retry quietly before delivery.

@@ -33,6 +33,12 @@ def _read_only() -> dict[tuple[str, ...], str]:
     found: dict[tuple[str, ...], str] = {}
     for name in config_module._NOT_CONFIGURATION:
         found[(name,)] = "Not a setting: istota sets this itself."
+    found[("default_briefings",)] = "default_briefings is migration input only; use istota briefings migrate report/import."
+    # `*` is any user id. Retired: imported once, so it may be removed but not written.
+    found[("users", "*", "briefings")] = (
+        "[users.*.briefings] is retired: its entries were imported into the briefings "
+        "database once. Edit briefings on the Briefings settings page."
+    )
     found[("admin_users",)] = "Edited in the admins editor, which writes config/admins."
     found[("users",)] = (
         "Per-user settings are edited on the Users page. [users.*] in config.toml "
@@ -75,6 +81,19 @@ def _read_only() -> dict[tuple[str, ...], str]:
 
 
 READ_ONLY: dict[tuple[str, ...], str] = _read_only()
+
+
+def read_only_reason(path: tuple[str, ...] | list[str]) -> str | None:
+    """The `READ_ONLY` reason for `path`, a `*` segment matching any one segment."""
+    path = tuple(path)
+    if path in READ_ONLY:
+        return READ_ONLY[path]
+    for pattern, reason in READ_ONLY.items():
+        if "*" in pattern and len(pattern) == len(path) and all(
+            want in ("*", got) for want, got in zip(pattern, path)
+        ):
+            return reason
+    return None
 
 RISKY_KEYS: frozenset[tuple[str, ...]] = frozenset({
     ("web", "auth"),
@@ -228,7 +247,7 @@ def editor_kind(path: tuple[str, ...] | list[str], declared: Any, value: Any) ->
     variable or a managed resource makes read-only is the view's to decide.
     """
     path = tuple(path)
-    if path in READ_ONLY:
+    if read_only_reason(path) is not None:
         return "readonly"
     if path in TABLE_PATHS:
         return "table"

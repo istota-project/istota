@@ -207,6 +207,8 @@ async def lifespan(app: FastAPI):
     _started_at = _utc_stamp()
     _reload_config(app)
     _publish_config(app)
+    from istota.groups.system import refresh_all_users
+    await asyncio.to_thread(refresh_all_users, _config, provision=True)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
     # Wrap the stop signals so the SSE streams below can end themselves instead
     # of being cancelled at the graceful-shutdown timeout — which is what put a
@@ -1012,6 +1014,8 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
     Unauthenticated, so it names no version: an exact version tells a visitor
     which advisories apply (ISSUE-569). `/admin` carries it instead.
     """
+    from istota.groups.system import ACCOUNT_HISTORY_DISCLOSURE
+    body += f'<p class="muted">{escape(ACCOUNT_HISTORY_DISCLOSURE)}</p>'
     name = escape(bot_name)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -2451,6 +2455,8 @@ async def admin_user_update(
         raise HTTPException(status_code=400, detail="Invalid settings request.")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
+    if "default_briefings" in payload:
+        raise HTTPException(status_code=400, detail="default_briefings is migration input only; use All users delivery preferences")
     unknown = sorted(set(payload) - set(_ADMIN_PATCH_FIELDS))
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown field: {unknown[0]}")
@@ -14268,11 +14274,11 @@ _STEP_UP_LABELS = {
     "history_restore": "restore credential history",
     "history_purge": "permanently delete credential history",
     "admin_config_change": "change this instance's configuration",
+    "admin_briefing_delete": "delete a briefing",
     "admin_cron_delete": "delete a scheduled job",
 }
-# Admin actions guard no vault, so the vault's isolation gate does not apply to
-# their codes; being an admin does.
-_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_cron_delete"})
+# Codes that guard no vault: an admin may ask for one without the vault gate.
+_ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete"})
 
 
 def _step_up_session(request: Request) -> str:
@@ -14363,6 +14369,8 @@ async def settings_step_up(request: Request, user: dict = Depends(_require_api_a
     body = await _credential_json(request)
     action, name = body.get("action"), body.get("name")
     if action in _ADMIN_STEP_UP_ACTIONS:
+        # These codes guard no vault, so the vault's isolation gate does not
+        # apply; being an admin does.
         if not _user_is_web_admin(user["username"]):
             raise _ForbiddenException("admin only")
     else:
@@ -15046,7 +15054,6 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
     # Admin-only, below: the authority table says who may send them.
-    "default_briefings":      {"type": "bool"},
     "sms_phone_number":       {"type": "sms_phone"},
     "outbound_approval":      {"type": "outbound_approval"},
     "default_destination":    {"type": "descriptor"},
@@ -16068,73 +16075,48 @@ def _write_self_profile(
 # ============================================================================
 # Phase 7b — User-managed briefings (briefing_configs table)
 # ============================================================================
-#
-# Briefings can be declared in two places:
-#   1. config.toml / per-user TOML  — Ansible-managed (legacy, being retired)
-#   2. briefing_configs DB table    — web UI / `istota briefing ensure`
-#
-# Both sources are merged at config-load time in ``_apply_user_briefings``.
-# DB rows replace TOML rows of the same name. The web UI only writes to (2);
-# TOML briefings appear with ``"managed": "config"`` so the UI can render
-# them as read-only.
 
-def _briefing_to_dict(b, *, managed: str) -> dict:
-    """Serialize a BriefingConfig (TOML) or UserBriefing (DB) for the API."""
-    out = {
-        "managed": managed,
-        "name": getattr(b, "name", "") or "",
-        "cron": getattr(b, "cron", "") or "",
-        "title": getattr(b, "title", "") or "",
-        "conversation_token": getattr(b, "conversation_token", "") or "",
-        "output": getattr(b, "output", "talk") or "talk",
-        "enabled": bool(getattr(b, "enabled", True)),
+def _briefing_to_dict(b) -> dict:
+    """Serialize a UserBriefing row for the API.
+
+    ``managed`` is the constant ``"db"``, kept for one release so a cached
+    client that still checks it keeps working; nothing current reads it.
+    ``held`` is ``{at, by_label}`` while an administrator holds the briefing.
+    """
+    from istota.user_briefings import hold_view
+
+    return {
+        "managed": "db",
+        "id": int(b.id),
+        "name": b.name or "",
+        "cron": b.cron or "",
+        "title": b.title or "",
+        "conversation_token": b.conversation_token or "",
+        "output": b.output or "talk",
+        "enabled": bool(b.enabled),
+        "held": hold_view(_config, getattr(b, "admin_hold_at", None), getattr(b, "admin_hold_by", None)),
     }
-    if managed == "db":
-        out["id"] = int(getattr(b, "id", 0))
-    return out
 
 
 @api_router.get("/settings/briefings")
 async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
-    """List the current user's briefings, merged from TOML + DB.
+    """List the current user's briefings from ``briefing_configs``.
 
     Response: ``{"briefings": [{...}], "rooms": [{token, name, channel}]}``.
-    Each entry carries ``managed: "config" | "db"`` so the UI can render
-    TOML rows as read-only. ``rooms`` is the Talk conversations a briefing can
-    be delivered to — the same `_user_talk_rooms` list the routing rows offer,
-    rather than a second answer to the same question (ISSUE-475). The briefings
-    form still asks for the token as free text; pointing it at this list is the
-    obvious follow-on and is not part of that change.
+    ``rooms`` is the Talk conversations a briefing can be delivered to — the
+    same `_user_talk_rooms` list the routing rows offer, rather than a second
+    answer to the same question (ISSUE-475). The briefings form still asks for
+    the token as free text; pointing it at this list is the obvious follow-on
+    and is not part of that change.
     """
     if _config is None:
         return {"briefings": [], "rooms": []}
 
     from istota import user_briefings as _ub
 
-    username = user["username"]
-    out: list[dict] = []
-
-    db_rows = _ub.list_briefings(_config.db_path, username)
-    db_names = {r.name for r in db_rows}
-
-    uc = _config.get_user(username)
-    if uc:
-        for b in uc.briefings:
-            # Skip DB-merged copies: the current DB query is authoritative,
-            # and a stale in-memory copy from startup must not resurface a
-            # briefing the user has since deleted as "managed=config".
-            if getattr(b, "from_db", False):
-                continue
-            if b.name in db_names:
-                # The DB entry will be rendered below with its real id.
-                continue
-            out.append(_briefing_to_dict(b, managed="config"))
-
-    for r in db_rows:
-        out.append(_briefing_to_dict(r, managed="db"))
-
+    rows = _ub.list_briefings(_config.db_path, user["username"])
     return {
-        "briefings": out,
+        "briefings": [_briefing_to_dict(r) for r in rows],
         "rooms": _user_talk_rooms(user["username"]),
         "outputs": _registered_delivery_surfaces(),
     }
@@ -16777,6 +16759,9 @@ app.dependency_overrides[_feeds_verify_origin] = _verify_origin
 # Briefings web API — native, in-process module backed by per-user SQLite.
 from istota.briefings.routes import require_auth as _briefings_require_auth
 from istota.briefings.routes import router as _briefings_router
+from istota.briefings.group_routes import router as _group_briefings_router
+
+app.include_router(_group_briefings_router, prefix="/istota/api", tags=["briefings"])
 from istota.briefings.routes import verify_origin as _briefings_verify_origin
 
 app.include_router(_briefings_router, prefix="/istota/api/briefings", tags=["briefings"])
@@ -16833,6 +16818,13 @@ app.include_router(_groups_router, prefix="/istota/api", tags=["groups"])
 app.dependency_overrides[_groups_require_admin] = _require_admin
 app.dependency_overrides[_groups_require_auth] = _require_api_auth
 app.dependency_overrides[_groups_verify_origin] = _verify_origin
+
+# Admin › Briefings spans the personal and group stores, so it is its own router.
+from istota.briefings.admin_routes import router as _admin_briefings_router
+from istota.briefings.admin_routes import step_up_gate as _admin_briefings_step_up
+
+app.include_router(_admin_briefings_router, prefix="/istota/api", tags=["briefings"])
+app.dependency_overrides[_admin_briefings_step_up] = lambda: _require_step_up
 
 # Serve SvelteKit build as static files (catch-all for SPA routing)
 if _STATIC_DIR.is_dir():

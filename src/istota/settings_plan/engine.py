@@ -44,6 +44,7 @@ class Options:
     users: list[str] | None = None
     prune: bool = False
     prune_secrets: bool = False
+    actor: str | None = None
 
 
 @dataclass
@@ -146,7 +147,7 @@ def _unit_order(unit):
         return (0, "", 0, 0)
     if unit.section == "config_metadata":
         return (0, "", 1, 0)
-    if unit.section == "shared_briefing_blocks":
+    if unit.section in ("shared_briefing_blocks", "group_briefings"):
         return (3 if unit.phase == "delete" else 1, "", 0, 0)
     return (2, unit.user or "", USER_SECTIONS.index(unit.section), 0)
 
@@ -248,6 +249,7 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     from istota.settings_plan.files import plan_cron, plan_heartbeat
     from istota.settings_plan.briefings import plan_schedules
     from istota.settings_plan.shared_briefings import plan_shared_blocks, validate_references
+    from istota.settings_plan.group_briefings import plan_group_briefings
 
     context.config = None
     context.profiles.clear()
@@ -255,12 +257,14 @@ def build_plan(plan: Plan, context: Context, options: Options) -> list[Operation
     context.briefing_blocks.clear()
     planners = {"config": _plan_config, "profile": plan_profile, "resources": plan_resources,
                 "briefings": plan_schedules, "scheduled_jobs": plan_cron, "heartbeat": plan_heartbeat,
-                "shared_briefing_blocks": plan_shared_blocks, "secrets": plan_secrets, **context.planners}
+                "shared_briefing_blocks": plan_shared_blocks, "group_briefings": plan_group_briefings, "secrets": plan_secrets, **context.planners}
     sections = []
     if plan.config is not None:
         sections.append(("config", None))
     if plan.shared_briefing_blocks is not None:
         sections.append(("shared_briefing_blocks", None))
+    if plan.group_briefings is not None:
+        sections.append(("group_briefings", None))
     for user, user_plan in sorted((plan.users or {}).items()):
         sections.append(("profile", user))
         for section in USER_SECTIONS[1:]:

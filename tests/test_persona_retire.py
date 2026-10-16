@@ -410,7 +410,7 @@ class TestInit:
         config, root = setup
         seeded = _plant(config, root, "alice", OLD_SHIPPED)
         edited = _plant(config, root, "bob", EDITED)
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=False)) is None
         assert (root / "PERSONA.md").read_text() == SHIPPED
         assert not seeded.exists()
@@ -426,7 +426,7 @@ class TestInit:
         target = tmp_path / "elsewhere.md"
         target.write_text("x")
         (_config_dir(config, root, "alice") / "PERSONA.md").symlink_to(target)
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=True)) == 0
         assert "user persona alice: refused" in capsys.readouterr().err
 
@@ -439,7 +439,7 @@ class TestInit:
         edited = _plant(config, root, "alice", EDITED)
         with db.get_db(config.db_path) as conn:
             conn.execute("DROP TABLE notifications")
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
         # `init_db` would recreate the table this test removed.
         monkeypatch.setattr(cli.db, "init_db", lambda path: None)
         assert cli.cmd_init(SimpleNamespace(config=None, relocate_rooms=False)) is None
@@ -451,7 +451,7 @@ class TestInit:
         from istota import cli
 
         config, _root = setup
-        monkeypatch.setattr(cli, "load_config", lambda path: config)
+        monkeypatch.setattr(cli, "load_config", lambda path, **kwargs: config)
 
         def _boom(_config):
             raise RuntimeError("unexpected")

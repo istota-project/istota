@@ -59,6 +59,7 @@
   ansible.builtin.assert:
     that:
       - istota_plan is mapping and istota_plan_secrets is mapping
+      - istota_plan_actor is string
       - istota_plan_secrets | length == 0 or istota_plan | length > 0
       - not (istota_plan_prune_secrets | bool) or istota_plan_prune | bool
       - not (istota_plan_prune | bool) or istota_plan | length > 0
@@ -592,7 +593,7 @@
     # The prune flags apply here only: the config is a whole document.
     - name: istota-stack apply (user settings)
       ansible.builtin.command:
-        argv: "{{ [istota_stack_command, 'apply', _istota_users_input.path, '--input-format', 'role-vars'] + (['--dry-run'] if ansible_check_mode else []) + (['--prune'] if istota_plan_prune | bool else []) + (['--prune-secrets'] if istota_plan_prune_secrets | bool else []) }}"
+        argv: "{{ [istota_stack_command, 'apply', _istota_users_input.path, '--input-format', 'role-vars'] + (['--dry-run'] if ansible_check_mode else []) + (['--actor', istota_plan_actor] if istota_plan_actor | length > 0 else []) + (['--prune'] if istota_plan_prune | bool else []) + (['--prune-secrets'] if istota_plan_prune_secrets | bool else []) }}"
       register: _istota_users_applied
       changed_when: _istota_users_applied.rc == 2
       failed_when: _istota_users_applied.delta is not defined or _istota_users_applied.rc not in [0, 1, 2]

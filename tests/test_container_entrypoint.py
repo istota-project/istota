@@ -678,3 +678,16 @@ class TestIstotaSecrets:
 
         assert result.returncode == 78
         assert "chown 10001:10001" in result.stderr
+
+
+def test_legacy_defaults_reach_init_before_preflight_loads_database_overlays(tmp_path):
+    config = LOCAL_CONFIG + '\n[[default_briefings]]\nname = "daily"\ncron = "0 7 * * *"\noutput = "email"\n'
+    volume = Volume(tmp_path, config)
+    with db.get_db(volume.db) as conn:
+        conn.execute("DROP TABLE group_briefing_migrations")
+    (volume.bin / "istota").write_text(f"#!{sys.executable}\nfrom istota.cli import main\nmain()\n")
+    result = volume.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scheduler --daemon" in "\n".join(volume.calls())
+    with db.get_db(volume.db) as conn:
+        assert conn.execute("SELECT name FROM briefing_configs WHERE user_id='alice'").fetchone()[0] == "daily"

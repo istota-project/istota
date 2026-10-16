@@ -19,6 +19,8 @@ def test_owner_manages_with_same_content_access(conn):
     owner = group_capabilities(conn, "family", "alice", is_admin=False)
     member = group_capabilities(conn, "family", "bob", is_admin=False)
     assert owner["manage"] and not member["manage"]
+    assert owner["author_briefings"] and not member["author_briefings"]
+    assert owner["read_briefings"] and member["read_briefings"]
     assert owner["read_memory"] and member["read_memory"]
     assert owner["edit_memory"] and member["edit_memory"]
     assert not group_capabilities(conn, "family", "carol", is_admin=False)["manage"]

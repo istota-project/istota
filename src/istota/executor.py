@@ -7780,6 +7780,26 @@ def execute_task(
     # the room restricts gets its own (`task_temp_dir`).
     from .skills._loader import load_skill_index
 
+    from .rooms.scopes import is_briefing_research
+    from .browser.owner import BRIEFINGS_IDENTITY
+
+    research = is_briefing_research(task)
+    if research:
+        if (task.user_id != BRIEFINGS_IDENTITY or task.source_type != "group_briefing_research"
+                or task.conversation_token or task.attachments or workspace_dir is not None
+                or config.get_user(BRIEFINGS_IDENTITY) is not None):
+            return False, "briefing_research_identity_refused", None, None
+        for capability, enabled in (
+            ("sandbox", effective_sandboxing(config)),
+            ("network", config.security.network.enabled),
+            ("skill_proxy", config.security.skill_proxy_enabled),
+            ("browser", config.browser.enabled),
+        ):
+            if not enabled:
+                return False, f"briefing_research_{capability}_unavailable", None, None
+        use_context = False
+        user_resources = []
+
     skill_index = load_skill_index(
         config.skills_dir, bundled_dir=config.bundled_skills_dir,
     )
@@ -7841,7 +7861,7 @@ def execute_task(
     from .workspace.places import user_resources_for
 
     user_config = config.get_user(task.user_id)
-    user_resources = user_resources_for(config, conn, task.user_id, resources=user_resources)
+    user_resources = [] if research else user_resources_for(config, conn, task.user_id, resources=user_resources)
 
     # Briefing tasks defer their prompt build to here (ISSUE-143): building a
     # briefing prompt does slow network I/O (news, yfinance, FinViz, IMAP).
@@ -7980,7 +8000,7 @@ def execute_task(
         effective_disabled_skills,
     )
 
-    is_admin = config.is_admin(task.user_id)
+    is_admin = False if research else config.is_admin(task.user_id)
 
     _bundled_dir = config.bundled_skills_dir
     user_resource_types = {r.resource_type for r in user_resources}
@@ -8039,6 +8059,8 @@ def execute_task(
         sticky_skills=sticky_skills or None,
         enabled_experimental_features=frozenset(config.experimental.features),
     )
+    if research and "browse" not in selected_skills:
+        return False, "briefing_research_browse_skill_unavailable", None, None
 
     # The native WebFetch tool ingests untrusted external content, but as a
     # *core tool* it doesn't drive companion-skill selection the way ingest
