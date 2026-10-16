@@ -221,4 +221,6 @@ class TestTheHost:
 
     def test_provision_sets_the_mirror_before_its_first_apt_call(self):
         call = self.TEXT.index('use_apt_mirror "$(host_env APT_MIRROR)" "${STACK}/.apt-mirror" ""')
-        assert call < self.TEXT.index("apt-get update -qq")
+        # apt-get update lives inside apt_install (the offline rule), so the
+        # first apt call is the first apt_install invocation, not the definition.
+        assert call < self.TEXT.index("\napt_install ")
