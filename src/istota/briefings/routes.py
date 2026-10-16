@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from istota.briefings import db as bdb
+from istota.briefings.document import edition_preview
 from istota.briefings._loader import UserNotFoundError, resolve_for_user
 from istota.briefings._migrate import ensure_initialised
 from istota.briefings.models import (
@@ -128,6 +129,7 @@ def _map_archive(row: ArchivedBriefing, *, with_body: bool = True) -> dict:
     }
     if with_body:
         out["body_md"] = row.body_md
+    out["preview"] = edition_preview(row.body_md, row.document)
     return out
 
 

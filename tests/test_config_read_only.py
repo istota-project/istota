@@ -73,7 +73,8 @@ def test_read_only_load_preserves_paths_seeds_and_existing_state(installed_confi
     alice = config.users["alice"]
     assert alice.display_name == "File Alice"
     assert [(r.type, r.name) for r in alice.resources] == [("folder", "File docs")]
-    assert [(b.name, b.cron) for b in alice.briefings] == [("morning", "0 6 * * *")]
+    assert alice.briefings == []
+    assert [(b.name, b.cron) for b in alice.legacy_briefing_seeds] == [("morning", "0 6 * * *")]
     assert [b.name for b in config.default_briefings] == ["daily"]
     assert [(b.name, b.title) for b in config.briefing_shared_blocks] == [("news", "File news")]
 

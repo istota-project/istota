@@ -111,6 +111,7 @@ def _build_headers(
 
 def _post_ntfy_blocking(
     settings: dict[str, str], message: str, options: DeliveryOptions,
+    raise_errors: bool = False,
 ) -> bool:
     """The blocking httpx POST. Runs in a thread executor so it never blocks the
     persistent asyncio loop the transport is awaited on."""
@@ -129,12 +130,16 @@ def _post_ntfy_blocking(
             # Shouldn't happen — encode_header_value emits pure ASCII — but a
             # title must never cost us the body, so flatten and try once more.
             if ascii_only:
+                if raise_errors:
+                    raise
                 logger.error("Failed to send ntfy notification: %s", e)
                 return False
             logger.warning(
                 "ntfy header encoding failed (%s); retrying with ASCII-only headers", e,
             )
         except Exception as e:
+            if raise_errors:
+                raise
             logger.error("Failed to send ntfy notification: %s", e)
             return False
     return False

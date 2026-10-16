@@ -2878,16 +2878,15 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     so it is written before the re-raise.
     """
     from .executor import task_deferred_dir
+    from .rooms.scopes import is_briefing_research
     # The directory the run wrote to: the per-user one, or the task's own
     # when its room restricted it or a guest wrote the turn.
     user_temp_dir = task_deferred_dir(config, task)
-    if task.guest_participant_id is not None:
-        # Emissary mode (multiplayer D2): a guest's turn takes no action beyond
-        # its reply, so nothing it wrote down is replayed. The files are ops
-        # the host never asked for — a subtask would run at the host's full
-        # reach — and are dropped rather than left for the temp sweep.
+    if task.guest_participant_id is not None or is_briefing_research(task):
+        # Guests and public research cannot turn scratch files into writes
+        # or subtasks. Purge the requests instead of leaving them for a retry.
         _purge_deferred_files_for_retry(task, user_temp_dir)
-        logger.info("Task %d: emissary task, deferred ops dropped", task.id)
+        logger.info("Task %d: restricted task, deferred ops dropped", task.id)
         return
     # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
     # runs last so it reports only what the handlers genuinely left behind.
@@ -3263,6 +3262,25 @@ def process_one_task(
 
         # Get user resources
         user_resources = db.get_user_resources(conn, task.user_id)
+
+    if task.source_type in ("group_briefing_generation", "group_briefing_delivery"):
+        from .briefings.group_runs import generate_task
+        from .briefings.group_delivery import deliver_task
+        run_group_task = deliver_task if task.source_type == "group_briefing_delivery" else generate_task
+        with _task_heartbeat(config, task_id):
+            success, result = (True, "dry_run") if dry_run else run_group_task(task, config)
+        with db.get_db(config.db_path) as conn:
+            current = db.get_task(conn, task_id)
+            if (current is None or current.status == "cancelled"
+                    or current.attempt_count != task.attempt_count):
+                return task_id, False
+            decision = decide_retry(task, result, success=success, **retry_flags(task, result, success=success))
+            if decision.will_retry:
+                db.set_task_pending_retry(conn, task_id, result, decision.delay_minutes)
+            else:
+                db.update_task_status(conn, task_id, "completed" if success else "failed",
+                                      result=result if success else None, error=None if success else result)
+        return task_id, success
 
     # Log channel setup — resolve before execution starts. The verbose log is
     # opt-in and routes to any user-routable transport destination (talk default
@@ -5726,6 +5744,13 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             try:
                 task_id = _create_briefing_task(conn, user_id, briefing)
             except ValueError as e:
+                if str(e) in ("briefing_held", "briefing_deleted"):
+                    # Held, or deleted since this config was loaded. Stamp the
+                    # slot so the next tick does not retry it and a resume
+                    # waits for the next scheduled slot.
+                    logger.info("Briefing '%s' skipped: %s", briefing.name, e)
+                    db.set_briefing_last_run(conn, user_id, briefing.name)
+                    continue
                 logger.error(
                     "Briefing '%s' skipped: %s", briefing.name, e,
                 )
@@ -5734,6 +5759,43 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             created_tasks.append(task_id)
 
     return created_tasks
+
+
+def check_group_briefings(config: Config) -> list[int]:
+    """Admit one recent wall-clock occurrence and advance ordinary phase tasks."""
+    from .briefings import group_runs, group_store
+    from .groups.policy import GroupError
+    from . import modules
+
+    if not modules.module_available("briefings"):
+        return []
+    now = _now(timezone.utc)
+    with db.get_db(config.db_path) as conn:
+        definitions = conn.execute("SELECT id FROM group_briefing_configs WHERE enabled = 1 AND admin_hold_at IS NULL "
+                                   "AND deleted_at IS NULL").fetchall()
+        for row in definitions:
+            definition = group_store.get_definition(conn, row["id"])
+            tz = ZoneInfo(definition["timezone"])
+            local = now.astimezone(tz)
+            wall = local.replace(tzinfo=None)
+            # Evaluate naive wall time like personal/shared cron scheduling.
+            # The latest due occurrence avoids a backlog after downtime.
+            due_wall = croniter(definition["cron"], wall + timedelta(microseconds=1)).get_prev(datetime)
+            if _is_stale_fire(f"group briefing {definition['id']}", due_wall, wall,
+                              config.scheduler.cron_max_staleness_minutes):
+                continue
+            due = due_wall.replace(tzinfo=tz)
+            # A nonexistent spring-forward wall time is never a real occurrence.
+            if due.astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None) != due_wall:
+                continue
+            try:
+                group_store.enqueue_run(conn, config, definition["id"], due_at=due, now=now)
+            except GroupError as exc:
+                logger.info("group_briefing_admission_refused definition=%s code=%s", definition["id"], exc.code)
+        from .briefings.group_delivery import queue_deliveries
+        tasks = group_runs.advance_runs(conn, config, now=now)
+        tasks.extend(queue_deliveries(conn, config, now=now))
+        return tasks
 
 
 def check_shared_blocks(config: Config, *, run_inline: bool = False) -> list[str]:
@@ -8356,6 +8418,9 @@ def run_cleanup_checks(config: Config) -> None:
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
 
+        from istota.briefings.group_store import prune_runs
+        prune_runs(conn, retention_days=config.briefings.archive_retention_days)
+
         # 4a. Prune the processed-email dedup ledger (ISSUE-231). One row per
         # polled message, including the ones that produce nothing, and until
         # now nothing ever deleted from it.
@@ -9349,6 +9414,9 @@ def _create_scheduled_job_task(
     occurrence it replaces. Raises ``ValueError`` from ``db.create_task`` for a
     ``user_id`` that cannot name a directory.
     """
+    from istota.briefings.group_migrate import publisher_retired
+    if publisher_retired(conn, job.user_id, job.name):
+        raise ValueError("publisher_retired")
     # `TEXT` in a dynamically typed store, so coerce once and use
     # the same value for the resolution and the column:
     # `resolve_brain_kind` opens with `(override or "").strip()`,
@@ -9515,6 +9583,10 @@ def run_briefing_now(
             conn, user_id, briefing, parent_task_id=parent_task_id,
         )
     except ValueError as e:
+        if str(e) == "briefing_deleted":
+            return None, f"{label} no longer exists."
+        if str(e) == "briefing_held":
+            return None, f"{label} is paused by an administrator."
         return None, f"{label} can't be queued: {e}"
     logger.info(
         "Briefing '%s' (user: %s) run by hand as task %d",
@@ -9807,6 +9879,7 @@ def build_interval_gates(
         # Manages its own DB connections so no lock is held during the slow
         # network pre-fetching.
         briefing_tasks = check_briefings(config.db_path, config)
+        briefing_tasks.extend(check_group_briefings(config))
         if briefing_tasks:
             logger.info("Queued %d briefing(s)", len(briefing_tasks))
 
@@ -11025,13 +11098,15 @@ def run_daemon(
         from .config import _apply_user_profiles  # noqa: PLC0415
 
         _apply_user_profiles(config)
+        from .groups.system import refresh_all_users
+        refresh_all_users(config, provision=True)
     except Exception as e:  # noqa: BLE001
         logger.warning("user_profiles migration skipped: %s", e)
 
-    # Phase 7b: migrate per-user TOML briefings into the briefing_configs
-    # table on first run. Idempotent — only writes rows whose
-    # (user_id, name) pair doesn't already exist. Re-applies the overlay
-    # so the in-memory config reflects DB-managed briefings.
+    # Phase 7b: copy the retired [users.X.briefings] into briefing_configs,
+    # once per user (a sentinel per user, so a deleted row is never
+    # re-imported). Re-applies the overlay so the in-memory config reflects
+    # the rows.
     #
     # The workspace pass follows it and carries each user's retired
     # BRIEFINGS.md into the same table, once. Order matters: the file was the
@@ -11048,6 +11123,15 @@ def run_daemon(
         _apply_user_briefings(config)
     except Exception as e:  # noqa: BLE001
         logger.warning("user_briefings migration skipped: %s", e)
+
+    # The retired TOML's blocks go into the module DBs now rather than on first
+    # touch, so removing the block from config.toml after this boot loses nothing.
+    try:
+        from .briefings import seed_retired_config_blocks  # noqa: PLC0415
+
+        seed_retired_config_blocks(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("briefing config block seeding skipped: %s", e)
 
     # admin-shared-briefing-blocks: seed shared_block_configs from config
     # (DEFAULT_SHARED_BLOCKS / [[briefing_shared_blocks]]) on first run — seed-once,

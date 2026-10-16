@@ -238,6 +238,23 @@ def apply_raw(text: Any) -> dict:
         raise ChangeError(f"the TOML does not parse: {exc}") from None
 
 
+def _expand(document: Any, pattern: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """The concrete paths in `document` that `pattern` names, `*` matching any table key."""
+    found: list[tuple[str, ...]] = [()]
+    for segment in pattern:
+        nxt = []
+        for prefix in found:
+            _, node = secrets.lookup(document, prefix)
+            if not isinstance(node, dict):
+                continue
+            if segment == "*":
+                nxt.extend((*prefix, key) for key in node)
+            elif segment in node:
+                nxt.append((*prefix, segment))
+        found = nxt
+    return found
+
+
 def _differs(new: dict, current: dict, path: tuple[str, ...]) -> bool:
     return secrets.lookup(new, path) != secrets.lookup(current, path)
 
@@ -352,12 +369,18 @@ def check_read_only(
     """Keys the editor shows and never edits, and keys the environment sets.
 
     `[users.*]` is the exception: seed-only, it may be edited in the raw editor.
+    A path with a `*` segment is retired input: it may be removed, never written.
     """
     from istota.config_editor import schema
 
     errors = []
     for path, reason in schema.READ_ONLY.items():
         if path == ("users",):
+            continue
+        if "*" in path:
+            for concrete in _expand(new, path):
+                if _differs(new, current, concrete):
+                    errors.append(f"{secrets.label(concrete)} is not edited here. {reason}")
             continue
         if _differs(new, current, path):
             errors.append(f"{secrets.label(path)} is not edited here. {reason}")

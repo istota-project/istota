@@ -166,8 +166,11 @@
 </script>
 
 <div class="members">
+  {#if group.system_key === 'all_users'}
+    <p class="caption">Everyone in this installation; membership is automatic.</p>
+  {/if}
   <div class="actions">
-    {#if group.capabilities.manage}
+    {#if group.capabilities.manage && !group.system_key}
       <Button size="sm" onclick={() => openMember(null)}>Add member</Button>
       {#if administration && 'needs_owner' in group && group.needs_owner}
         <Button size="sm" variant="primary" onclick={() => openMember(null, 'owner')}
@@ -176,7 +179,7 @@
       {/if}
       <Button size="sm" onclick={openMetadata}>Edit group details</Button>
     {/if}
-    {#if !administration && group.capabilities.leave}
+    {#if !administration && group.capabilities.leave && !group.system_key}
       <Button
         variant="danger"
         size="sm"
@@ -196,7 +199,7 @@
         <Badge variant={member.role === 'owner' ? 'info' : 'neutral'} size="sm"
           >{member.role === 'owner' ? 'Owner' : 'Member'}</Badge
         >
-        {#if group.capabilities.manage}<KebabMenu
+        {#if group.capabilities.manage && !group.system_key}<KebabMenu
             ariaLabel={`Actions for ${member.display_name}`}
             items={[
               { label: 'Change role', onSelect: () => openMember(member) },

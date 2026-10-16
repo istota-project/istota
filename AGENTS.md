@@ -22,7 +22,7 @@ Subsystems:
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
 - `search.md` — unified web search: source scope, query matching, deadlines, result links and the search dialog
 - `notifications.md` — the notifications table, the resolver seam, and the shipped sources
-- `briefings.md` — block/source briefings, shared blocks, titles, HTML email
+- `briefings.md` — personal/group briefings, source grants, common editions and delivery, All users/default/publisher migration, shared blocks and HTML email
 - `health.md` — health module schema, documents store, OCR/explainer, serialisers, surfaces
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest
 - `feeds.md` — native RSS/Atom/Tumblr/Are.na poller, per-user SQLite, image dedupe
@@ -205,7 +205,7 @@ src/istota/
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   ├── dav_xml.py        # Hardened DAV multistatus parsing, principal hrefs and path segments, for CardDAV and the web sharing module → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
-├── briefings/            # Block/source briefings module — DB, source resolvers, generation, reader/settings routes, migration
+├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe
 ├── health/               # Body stats, bloodwork, biomarker trends, encounters, immunizations, Garmin, OCR
 └── location/             # Per-user location.db module (pings, places, visits, state, migration)

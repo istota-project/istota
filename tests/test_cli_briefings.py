@@ -39,6 +39,18 @@ class TestSchedule:
         rows = ub.list_briefings(config.db_path)
         assert any(r.name == "Morning" for r in rows)
 
+    def test_list_marks_a_held_briefing(self, config, capsys):
+        from istota import config as cfgmod
+        from istota import user_briefings as ub
+        row, _ = ub.ensure_briefing(config.db_path, user_id="alice", name="M",
+                                    cron="0 7 * * *", conversation_token="tok")
+        ub.set_hold(config.db_path, row.id, admin_id="root")
+        cfgmod._apply_user_briefings(config)
+        capsys.readouterr()
+        assert cli_briefings.dispatch(["schedule", "list", "-u", "alice"], config) == 0
+        (line,) = [x for x in capsys.readouterr().out.splitlines() if " M " in x]
+        assert line.endswith("(held by an administrator)")
+
     def test_delete(self, config, capsys):
         cli_briefings.dispatch(
             ["schedule", "ensure", "-u", "alice", "--name", "M",

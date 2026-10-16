@@ -72,9 +72,8 @@ def _finish(conn, group_id):
 
 
 def history_disclosure(group_id: str) -> dict:
-    # Linked rooms do not grant history. Owned rooms and editions arrive in
-    # the companion specs and must extend this list when they ship.
-    return {"memory": f"Groups/{group_id}/GROUP.md", "rooms": [], "briefings": []}
+    return {"memory": f"Groups/{group_id}/GROUP.md", "rooms": [],
+            "briefings": ["All retained group briefing editions, including those published before joining"]}
 
 
 def create_group(conn, config, group_id: str, *, actor_id: str, expected_revision: int,
@@ -111,6 +110,8 @@ def update_group(conn, group_id: str, *, actor_id: str, expected_revision: int,
                  is_admin: bool = False, is_operator: bool = False) -> dict:
     with _transaction(conn):
         group = _managed_group(conn, group_id, actor_id, is_admin, is_operator)
+        if group["system_key"]:
+            raise GroupError(403, "system_group", "System group details are fixed")
         _revision(group, expected_revision)
         changes = {}
         for field, value in (("display_name", display_name), ("kind", kind)):
@@ -135,6 +136,8 @@ def change_membership(conn, config, group_id: str, user_id: str, *, actor_id: st
             group = db.get_group(conn, group_id)
         else:
             group = _managed_group(conn, group_id, actor_id, is_admin, is_operator)
+        if group["system_key"]:
+            raise GroupError(403, "automatic_membership", "System group membership is automatic")
         _revision(group, expected_revision)
         if role is not None and role not in db.GROUP_ROLES:
             raise GroupError(422, "invalid_role", "Unknown group role")
@@ -186,6 +189,8 @@ def archive_group(conn, group_id: str, *, actor_id: str, expected_revision: int,
         group = _managed_group(conn, group_id, actor_id, is_admin, is_operator)
         if not (is_admin or is_operator):
             raise GroupError(403, "group_forbidden", "Administrator required")
+        if group["system_key"]:
+            raise GroupError(403, "system_group", "System groups cannot be archived")
         _revision(group, expected_revision)
         if confirm is not True:
             raise GroupError(409, "confirmation_required", "Confirm archiving the group")

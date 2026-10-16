@@ -1,10 +1,9 @@
 """Source resolvers for the briefings module.
 
 Each resolver gathers content for one :class:`BlockSource` and returns a
-:class:`GatheredSource`. The contract is **fail-soft**: a resolver that errors
-or finds nothing returns an empty result carrying a ``provenance`` note; it
-never raises to the generation pipeline. This keeps one bad source (a dead
-feed, an unreachable browser, an empty inbox) from failing the whole briefing.
+:class:`GatheredSource`. Personal sources fail soft: errors and empty reads
+carry provenance rather than stopping generation. Group dispatch preserves
+authorization and local-read refusals, which gathering rejects before rendering.
 
 Four ingestion paths under one typed abstraction:
 
@@ -21,9 +20,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,8 @@ class GatheredSource:
     # delimiter at prompt-assembly time (web-sourced curated content that a
     # trusted identity merely relayed — the content itself is untrusted).
     untrusted: bool = False
+    failure_kind: Literal["unavailable", "refused"] | None = None
+    error_code: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -70,6 +72,7 @@ class SourceContext:
     user_id: str
     conn: sqlite3.Connection | None = None
     now: datetime | None = None
+    timezone: str | None = None
 
     @property
     def module_config(self):
@@ -80,12 +83,16 @@ class SourceContext:
         return cfg if cfg is not None else BriefingsModuleConfig()
 
 
-def resolve_source(kind: str, config: dict, ctx: SourceContext) -> GatheredSource:
+def resolve_source(kind: str, config: dict, ctx: SourceContext, *, source_id=None) -> GatheredSource:
     """Dispatch to the resolver for ``kind``. Never raises.
 
     An unknown kind returns an empty, not-ok result. Any resolver exception is
     caught here as a last-resort backstop (resolvers are already defensive).
     """
+    from istota.briefings.sources.group import GroupSourceContext, resolve_group_source
+
+    if isinstance(ctx, GroupSourceContext):
+        return resolve_group_source(kind, config or {}, ctx, source_id=source_id)
     try:
         resolver = _RESOLVERS.get(kind)
         if resolver is None:
@@ -100,6 +107,25 @@ def resolve_source(kind: str, config: dict, ctx: SourceContext) -> GatheredSourc
             kind=kind, title=kind,
             provenance=f"({kind} source error)", ok=False,
         )
+
+
+def raise_for_refused(gathered):
+    from istota.groups.policy import GroupError
+
+    if any(source.failure_kind == "refused" for source in gathered):
+        raise GroupError(422, "source_refused", "A selected source was refused")
+
+
+def gather_sources(sources, gather_one):
+    """Bound concurrent I/O and return results in configured order."""
+    if not sources:
+        return []
+    by_index = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(sources))) as pool:
+        futures = {pool.submit(gather_one, source): i for i, source in enumerate(sources)}
+        for future in as_completed(futures):
+            by_index[futures[future]] = future.result()
+    return [by_index[i] for i in range(len(sources))]
 
 
 def _load_resolvers() -> dict:

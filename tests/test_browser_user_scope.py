@@ -161,6 +161,35 @@ def test_close_missing_session_does_not_launch(api):
     assert api.pool.live() == []
 
 
+def test_briefings_profile_requires_task_and_refuses_mutating_operations(api):
+    client = api.app.test_client()
+    headers = {"X-Istota-User": "__briefings__"}
+    assert client.post("/render", headers=headers, json={"url": "https://example.com"}).status_code == 403
+    headers["X-Istota-Owner"] = "research-1"
+    for path in ("/interact", "/evaluate", "/state", "/challenge", "/screenshot"):
+        assert client.post(path, headers=headers, json={}).status_code == 403
+    assert client.delete("/state", headers=headers, json={"all": True}).status_code == 403
+    assert api.pool.live() == []
+
+
+def test_briefings_sessions_belong_to_task_inside_shared_profile(api):
+    client = api.app.test_client()
+    headers = {"X-Istota-User": "__briefings__", "X-Istota-Owner": "research-1"}
+    created = client.post("/render", headers=headers,
+                          json={"url": "https://example.com", "keep_session": True, "owner": "forged"})
+    assert created.status_code == 200
+    sid = created.json["session_id"]
+    assert api._sessions[sid]["owner"] == "research-1"
+    assert api.pool.instance_for("alice") is None
+    other = {**headers, "X-Istota-Owner": "research-2"}
+    for method in ("GET", "DELETE"):
+        assert client.open(f"/sessions/{sid}", method=method, headers=other).status_code == 404
+    assert client.post("/render", headers=other, json={"session_id": sid}).status_code == 404
+    assert client.get(f"/sessions/{sid}", headers=headers).status_code == 200
+    assert client.delete(f"/sessions/{sid}", headers=headers).status_code == 200
+    assert client.get("/health").json["briefing_task_isolation"] is True
+
+
 def test_pool_errors_keep_scope_and_retry_metadata(api, monkeypatch):
     monkeypatch.setattr(api.pool, "acquire", MagicMock(side_effect=api.pool.PoolFull("busy")))
     response = post(api, "/browse", url="https://example.com/")

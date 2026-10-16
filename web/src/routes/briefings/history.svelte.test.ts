@@ -26,6 +26,7 @@ import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 import {
   selectedBriefingId,
+  selectedGroupEdition,
   briefingFilterName,
   briefingArchiveCount,
   briefingArchiveError,
@@ -53,6 +54,12 @@ const archive = (name = '') => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
   api.getBriefings.mockResolvedValue({ briefings: [] });
   api.getBriefingConfig.mockResolvedValue({ briefings: [] });
   vi.mocked(getBriefingArchiveItem).mockImplementation(async (id) => {
@@ -62,6 +69,7 @@ beforeEach(() => {
   });
   __history.reset('/istota/briefings/');
   selectedBriefingId.set(null);
+  selectedGroupEdition.set(null);
   briefingFilterName.set('');
   briefingArchiveCount.set(null);
   briefingArchiveError.set(null);
@@ -78,16 +86,6 @@ async function openReader() {
   await tick();
 }
 
-async function chooseName(name: string) {
-  const trigger = screen.getByRole('button', { name: 'Filter by briefing' });
-  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
-  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
-  await fireEvent.click(trigger);
-  const option = await screen.findByRole('option', { name });
-  await fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 });
-  await fireEvent.click(option);
-}
-
 describe('briefing selection history', () => {
   it('pushes an item once, then restores the reader on Back and Forward', async () => {
     await openReader();
@@ -101,21 +99,6 @@ describe('briefing selection history', () => {
     __history.forward();
     await waitFor(() => expect(get(selectedBriefingId)).toBe(1));
     expect(__history.entries).toHaveLength(2);
-  });
-
-  it('pushes a name filter and keeps it when selecting an item', async () => {
-    await openReader();
-    await chooseName('Morning');
-    await waitFor(() => expect(currentUrl()).toBe('/istota/briefings/?id=2&name=Morning'));
-    await fireEvent.click(screen.getByRole('button', { name: /Earlier news/ }));
-    expect(currentUrl()).toBe('/istota/briefings/?id=1&name=Morning');
-    expect(__history.entries).toHaveLength(3);
-    __history.back();
-    await waitFor(() => expect(get(selectedBriefingId)).toBe(2));
-    __history.back();
-    await waitFor(() => expect(get(briefingFilterName)).toBe(''));
-    await waitFor(() => expect(get(briefingArchiveCount)).toBe(3));
-    expect(get(selectedBriefingId)).toBe(3);
   });
 
   it('restores a reload selection before the archive request resolves', async () => {
@@ -157,26 +140,6 @@ describe('briefing selection history', () => {
     expect(currentUrl()).toBe('/istota/briefings/?id=3');
     expect(getBriefingArchive).toHaveBeenLastCalledWith({ limit: '20', offset: '0' });
     expect(__history.entries).toHaveLength(1);
-  });
-
-  it('ignores a filter response that arrives after Back restored All', async () => {
-    await openReader();
-    let finish!: (value: ReturnType<typeof archive>) => void;
-    vi.mocked(getBriefingArchive).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
-    await chooseName('Morning');
-    expect(currentUrl()).toBe('/istota/briefings/?name=Morning');
-    __history.back();
-    await waitFor(() => expect(get(briefingFilterName)).toBe(''));
-    await waitFor(() => expect(get(selectedBriefingId)).toBe(3));
-    finish(archive('Morning'));
-    await tick();
-    expect(get(briefingArchiveCount)).toBe(3);
-    expect(currentUrl()).toBe('/istota/briefings/?id=3');
   });
 
   it('replaces Back onto an item removed from the archive', async () => {
@@ -344,7 +307,10 @@ describe('edition reader transitions', () => {
             fail = reject;
           }),
       );
-      await chooseName('Morning');
+      window.history.replaceState(null, '', '/istota/briefings/?name=Morning');
+      page.url = new URL(window.location.href);
+      page.state = {};
+      await waitFor(() => expect(get(briefingFilterName)).toBe('Morning'));
       expect(screen.queryByText(/No briefings yet/)).toBeNull();
       expect(screen.getByText('Loading…')).toBeInTheDocument();
       expect(screen.queryByRole('heading', { name: 'Evening news' })).toBeNull();
@@ -437,13 +403,15 @@ describe('edition reader transitions', () => {
   });
 });
 
-it.each(['db', 'config'] as const)(
-  'shows block settings only on a user-managed briefing (%s)',
-  async (managed) => {
+it.each([true, false])(
+  'shows block settings only while the briefing has a schedule row (%s)',
+  async (live) => {
     selectedBriefingId.set(edition.id);
     briefingArchiveCount.set(1);
     api.getBriefingArchiveItem.mockResolvedValueOnce(edition);
-    api.getBriefings.mockResolvedValue({ briefings: [{ name: edition.briefing_name, managed }] });
+    api.getBriefings.mockResolvedValue({
+      briefings: live ? [{ id: 1, name: edition.briefing_name }] : [],
+    });
     api.getBriefingConfig.mockResolvedValue({
       briefings: [
         { name: edition.briefing_name, blocks: [{ id: edition.document!.blocks[1].block_id }] },
@@ -453,7 +421,7 @@ it.each(['db', 'config'] as const)(
     await screen.findByRole('heading', { name: 'Calendar' });
     await waitFor(() => expect(api.getBriefingConfig).toHaveBeenCalled());
     await tick();
-    if (managed === 'db') {
+    if (live) {
       await fireEvent.click(await screen.findByRole('button', { name: 'Settings for Calendar' }));
       expect(goto).toHaveBeenCalledWith(
         `/istota/briefings/settings?name=${edition.briefing_name}&block=${edition.document!.blocks[1].block_id}`,
@@ -461,3 +429,150 @@ it.each(['db', 'config'] as const)(
     } else expect(screen.queryByRole('button', { name: /^Settings for / })).toBeNull();
   },
 );
+
+it('opens a group run without confusing the same personal archive id and links back to personal reading', async () => {
+  __history.reset('/istota/briefings/?group=team&briefing=news&run=3');
+  const definition = {
+    id: 7,
+    group_id: 'team',
+    name: 'news',
+    title: 'Group news',
+    channel: 'email',
+    cron: '0 7 * * *',
+    timezone: 'UTC',
+    enabled: true,
+    capabilities: { author_briefings: false },
+  };
+  const run = {
+    id: 3,
+    group_id: 'team',
+    definition_id: 7,
+    run_id: 3,
+    state: 'published',
+    mode: 'publish',
+    subject: 'Group edition',
+    body_md: 'One common group body',
+    published_at: '2026-10-15T07:00:00Z',
+  };
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [
+      {
+        scope: 'group',
+        group_id: 'team',
+        label: 'Team',
+        capabilities: { author_briefings: false },
+      },
+    ],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
+  api.getGroupBriefings.mockResolvedValue({ items: [definition] });
+  api.getGroupEditions.mockResolvedValue({
+    items: [
+      {
+        scope: 'group',
+        run_id: 3,
+        group_id: 'team',
+        group_label: 'Team',
+        briefing_name: 'news',
+        briefing_title: 'Group news',
+        subject: 'Group edition',
+        published_at: '2026-10-15T07:00:00Z',
+      },
+    ],
+    total: 1,
+  });
+  api.getGroupBriefing.mockResolvedValue(definition);
+  api.getGroupBriefingRuns.mockResolvedValue({ items: [run], total: 1 });
+  api.getGroupBriefingRun.mockResolvedValue(run);
+  api.getGroupBriefingDelivery.mockResolvedValue({ counts: { sent: 2 }, recipients: [] });
+  api.getGroupBriefingPreferences.mockResolvedValue({ outbound_muted: false, in_app_muted: false });
+  api.getBriefingArchiveItem.mockResolvedValue({
+    ...items[0],
+    body_md: 'Personal body must stay hidden',
+  });
+  render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+  await screen.findByText('One common group body');
+  // The sidebar lists the group edition beside personal ones, marked by its group.
+  expect(await screen.findByText('Team', { selector: '.archive-audience span' })).toBeTruthy();
+  expect(screen.queryByText('Personal body must stay hidden')).toBeNull();
+  expect(get(selectedGroupEdition)).toEqual({ group: 'team', briefing: 'news', run: 3 });
+  // A group edition is read-only here: no delete, retry or edit actions.
+  expect(screen.queryByRole('button', { name: 'Edition actions' })).toBeNull();
+  expect(api.getGroupBriefingRun).toHaveBeenCalledWith('team', 'news', 3);
+  expect(api.markBriefingArchiveRead).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Mark all briefings as read' })).toBeNull();
+  // The personal archive and group run keep separate URL identities.
+  window.history.replaceState(null, '', '/istota/briefings/?id=3');
+  page.url = new URL(window.location.href);
+  page.state = {};
+  await screen.findByText('Personal body must stay hidden');
+  expect(screen.queryByText('One common group body')).toBeNull();
+  expect(get(selectedGroupEdition)).toBeNull();
+});
+
+it('reads a group edition of a deleted definition with its stored subject and no channel line', async () => {
+  __history.reset('/istota/briefings/?group=team&briefing=deleted-7-news&run=3');
+  const definition = {
+    id: 7,
+    group_id: 'team',
+    name: 'deleted-7-news',
+    title: 'Group news',
+    channel: 'email',
+    cron: '0 7 * * *',
+    timezone: 'UTC',
+    enabled: false,
+    deleted: true,
+    capabilities: { author_briefings: false },
+  };
+  const run = {
+    id: 3,
+    group_id: 'team',
+    definition_id: 7,
+    run_id: 3,
+    state: 'published',
+    mode: 'publish',
+    subject: 'Stored edition subject',
+    body_md: 'Body kept after the delete',
+    published_at: '2026-10-15T07:00:00Z',
+  };
+  api.getBriefingTargets.mockResolvedValue({
+    targets: [
+      {
+        scope: 'group',
+        group_id: 'team',
+        label: 'Team',
+        capabilities: { author_briefings: false },
+      },
+    ],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  });
+  api.getGroupBriefings.mockResolvedValue({ items: [] });
+  api.getGroupEditions.mockResolvedValue({
+    items: [
+      {
+        scope: 'group',
+        run_id: 3,
+        group_id: 'team',
+        group_label: 'Team',
+        briefing_name: 'deleted-7-news',
+        briefing_title: 'Group news',
+        subject: 'Stored edition subject',
+        published_at: '2026-10-15T07:00:00Z',
+      },
+    ],
+    total: 1,
+  });
+  api.getGroupBriefing.mockResolvedValue(definition);
+  api.getGroupBriefingRun.mockResolvedValue(run);
+  api.getGroupBriefingDelivery.mockResolvedValue({ counts: { sent: 2 }, recipients: [] });
+  render(Harness, { layout: Layout, component: Page, user: { username: 'alice' } as User });
+  await screen.findByText('Body kept after the delete');
+  expect(screen.getAllByText('Stored edition subject').length).toBeGreaterThan(0);
+  expect(api.getGroupBriefing).toHaveBeenCalledWith('team', 'deleted-7-news');
+  expect(screen.queryByText(/Delivered by/)).toBeNull();
+  expect(screen.queryByText('This edition is no longer available to you.')).toBeNull();
+});

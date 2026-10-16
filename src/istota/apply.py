@@ -512,14 +512,14 @@ def run(
     users: list[str] | None = None, continue_on_error: bool = False,
     prune: bool = False, prune_secrets: bool = False,
     secrets_file: Path | str | None = None, patches: list[str] | None = None,
-    input_format: str = "plan",
+    input_format: str = "plan", actor: str | None = None,
 ) -> int:
     """Plan every section, print, and write unless `dry_run`. Returns the exit code."""
     from istota.settings_plan import engine
     from istota.settings_plan.report import render_text, result_document
     from istota.settings_plan.schema import SchemaError, parse_plan
 
-    options = engine.Options(dry_run, continue_on_error, users, prune, prune_secrets)
+    options = engine.Options(dry_run, continue_on_error, users, prune, prune_secrets, actor)
     context = engine.Context(config_path, options=options, backup=backup)
     try:
         from istota.settings_plan.paths import patch_document

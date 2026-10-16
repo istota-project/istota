@@ -168,3 +168,9 @@ def test_a_live_password_request_is_reused_until_used_expired_or_stale(db_path, 
     assert fourth != third
     assert auth.redeem_password_step_up(db_path, policy, fourth, "alice", "export", "session-a",
                                         PASSWORD, ip=None) == "ok"
+
+def test_an_admin_briefing_delete_code_redeems_for_that_action_only(db_path, identity):
+    request_id, code = auth.start_step_up(db_path, identity, "alice", "admin_briefing_delete", "session-a")
+    assert auth.redeem_step_up(db_path, request_id, "alice", "admin_config_change", "session-a", code) == "dead"
+    request_id, code = auth.start_step_up(db_path, identity, "alice", "admin_briefing_delete", "session-a")
+    assert auth.redeem_step_up(db_path, request_id, "alice", "admin_briefing_delete", "session-a", code) == "ok"

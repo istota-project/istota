@@ -4,6 +4,8 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
+    getBriefingTargets,
+    type BriefingTarget,
     getBriefingArchiveItem,
     markBriefingArchiveRead,
     getBriefings,
@@ -12,12 +14,31 @@
   } from '$lib/api';
   import {
     selectedBriefingId,
+    selectedGroupEdition,
+    briefingDeleteRequest,
     briefingArchiveCount,
     briefingArchiveError,
   } from '$lib/stores/briefings';
+  import GroupEdition from '$lib/components/briefings/GroupEdition.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
-  import { Button, EmptyState, PageLoading } from '$lib/components/ui';
+  import { Button, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
 
+  let groupTarget = $state<BriefingTarget | null>(null);
+  $effect(() => {
+    const group = $selectedGroupEdition?.group;
+    groupTarget = null;
+    if (!group) return;
+    let active = true;
+    getBriefingTargets()
+      .then((response) => {
+        if (active)
+          groupTarget = response.targets.find((target) => target.group_id === group) ?? null;
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  });
   let current = $state<BriefingArchiveItem | null>(null);
   let editableBlockIds = $state<number[]>([]);
   let loading = $state(false);
@@ -45,6 +66,7 @@
     await tick();
     if (
       !mounted ||
+      $selectedGroupEdition ||
       !stillPresented() ||
       document.visibilityState !== 'visible' ||
       $selectedBriefingId !== id ||
@@ -81,7 +103,7 @@
   // Only a new presentation schedules an attempt. Read errors and pending
   // requests are deliberately outside the effect's dependencies.
   $effect(() => {
-    const id = $selectedBriefingId;
+    const id = $selectedGroupEdition ? null : $selectedBriefingId;
     if (!visible || id == null || current?.id !== id || loading || error) return;
     let active = true;
     void acknowledgeRead(id, () => active);
@@ -101,7 +123,7 @@
         if (
           !active ||
           !schedules?.briefings.some(
-            (briefing) => briefing.name === name && briefing.managed === 'db',
+            (briefing) => briefing.name === name && briefing.id !== undefined,
           )
         )
           return;
@@ -125,7 +147,7 @@
 
   // Fetch the full briefing (with body) whenever the selection changes.
   $effect(() => {
-    const id = $selectedBriefingId;
+    const id = $selectedGroupEdition ? null : $selectedBriefingId;
     readErrorId = null;
     if (id == null) {
       current = null;
@@ -160,7 +182,12 @@
 </svelte:head>
 
 <div class="reader card-pane">
-  {#if loading}
+  {#if $selectedGroupEdition}
+    {#key `${$selectedGroupEdition.group}:${$selectedGroupEdition.run}`}<GroupEdition
+        selection={$selectedGroupEdition}
+        groupLabel={groupTarget?.label ?? $selectedGroupEdition.group}
+      />{/key}
+  {:else if loading}
     <PageLoading />
   {:else if error}
     <p class="center-msg error">{error}</p>
@@ -171,11 +198,16 @@
         <Button size="sm" onclick={() => acknowledgeRead(current!.id)}>Retry</Button>
       </div>
     {/if}
-    {#key current.id}<BriefingEdition
-        edition={current}
-        {editableBlockIds}
-        onEditBlock={editBlock}
-      />{/key}
+    {#key current.id}<BriefingEdition edition={current} {editableBlockIds} onEditBlock={editBlock}>
+        {#snippet actions()}
+          <KebabMenu
+            ariaLabel="Briefing actions"
+            items={[
+              { label: 'Delete', danger: true, onSelect: () => briefingDeleteRequest.set(current) },
+            ]}
+          />
+        {/snippet}
+      </BriefingEdition>{/key}
   {:else if $briefingArchiveCount === null}
     <PageLoading />
   {:else if $briefingArchiveError}

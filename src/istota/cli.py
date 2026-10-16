@@ -84,7 +84,9 @@ def _refuse_newer_schema(refusal) -> int:
 
 def cmd_init(args):
     """Initialize the database."""
-    config = load_config(Path(args.config) if args.config else None)
+    path = Path(args.config) if args.config else None
+    # Schema preparation must precede DB overlays and legacy-default capture.
+    config = load_config(path, apply_db_overlays=False)
     if getattr(args, "check_schema", False):
         refusal = db.check_schema_version(config.db_path)
         return _refuse_newer_schema(refusal) if refusal is not None else 0
@@ -93,6 +95,7 @@ def cmd_init(args):
         db.init_db(config.db_path)
     except db.SchemaTooNew as refusal:
         return _refuse_newer_schema(refusal)
+    config = load_config(path)
     print(f"Database initialized at {config.db_path}")
     _init_sync_operator_persona(config)
     _init_retire_user_personas(config)
@@ -395,7 +398,7 @@ def cmd_apply(args):
         out=print, err=err,
         output_format=args.format or "text", users=args.user,
         continue_on_error=args.continue_on_error, prune=args.prune, prune_secrets=args.prune_secrets,
-        secrets_file=args.secrets_file, patches=args.patch, input_format=args.input_format,
+        secrets_file=args.secrets_file, patches=args.patch, input_format=args.input_format, actor=args.actor,
     )
 
 
@@ -968,6 +971,8 @@ def run_briefing_schedule(
 
     if action == "list":
         found = False
+        db_rows = _ub.list_briefings(config.db_path)
+        held = {(r.user_id, r.name) for r in db_rows if r.admin_hold_at}
         for user_id, user_config in config.users.items():
             if user and user_id != user:
                 continue
@@ -975,8 +980,8 @@ def run_briefing_schedule(
                 continue
             found = True
             for b in user_config.briefings:
-                print(f"{user_id:15} {b.name:10} {b.cron:15} -> {b.conversation_token}")
-        db_rows = _ub.list_briefings(config.db_path)
+                note = " (held by an administrator)" if (user_id, b.name) in held else ""
+                print(f"{user_id:15} {b.name:10} {b.cron:15} -> {b.conversation_token}{note}")
         disabled_rows = [r for r in db_rows if not r.enabled]
         if user:
             disabled_rows = [r for r in disabled_rows if r.user_id == user]
@@ -1736,7 +1741,7 @@ def user_ensure_updates(args):
     if getattr(args, "external_turn_display", None) is not None:
         updates["external_turn_display"] = args.external_turn_display
     if getattr(args, "default_briefings", None) is not None:
-        updates["default_briefings"] = args.default_briefings
+        raise ValueError("default_briefings is migration input only; use All users delivery preferences")
     if getattr(args, "briefing_email_html", None) is not None:
         updates["briefing_email_html"] = args.briefing_email_html
     if getattr(args, "timezone_follow_location", None) is not None:
@@ -4838,9 +4843,7 @@ def add_user_ensure_arguments(user_ensure_parser):
         dest="default_briefings", default=None,
         action=argparse.BooleanOptionalAction,
         help=(
-            "Seed the shared [[default_briefings]] set into this user (default on). "
-            "Pass --no-default-briefings to opt out; already-seeded briefings are "
-            "left intact."
+            "Retired migration input; use All users delivery preferences."
         ),
     )
     user_ensure_parser.add_argument(
@@ -4992,6 +4995,7 @@ def main():
     )
     apply_parser.add_argument("--format", choices=("text", "json"), help="Execution report format (default: text)")
     apply_parser.add_argument("--user", action="append", help="Apply only this declared user; repeat for several users")
+    apply_parser.add_argument("--actor", help="Enabled current owner acting on group briefings (required for group writes)")
     apply_parser.add_argument("--continue-on-error", action="store_true", help="Continue later users after a runtime failure")
     apply_parser.add_argument("--prune", action="store_true", help="Prune undeclared entries in supplied collections")
     apply_parser.add_argument("--patch", action="append", metavar="SOURCE=DEST", help="Rewrite selected path prefixes; repeat for several patches")

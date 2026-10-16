@@ -21,6 +21,7 @@ from istota.briefings._migrate import (
     blocks_from_components,
     ensure_initialised,
     normalize_block_specs,
+    seed_retired_config_blocks,
 )
 
 
@@ -33,4 +34,5 @@ __all__ = [
     "list_users",
     "normalize_block_specs",
     "resolve_for_user",
+    "seed_retired_config_blocks",
 ]

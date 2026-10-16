@@ -71,7 +71,7 @@ async def _run(request, user, operation, *args, read=False, **kwargs):
         return JSONResponse({"error": "groups_unavailable", "message": "Group management unavailable"}, status_code=503)
     if not read:
         logger.info("Group request actor=%s group=%s operation=%s outcome=ok",
-                    actor, result["group_id"], operation.__name__)
+                    actor, result.get("group_id", group_id), operation.__name__)
     return result
 
 
@@ -80,10 +80,13 @@ def _user(config, user_id):
     return {"user_id": user_id, "display_name": (profile.display_name if profile else "") or user_id}
 
 
-def _summary(conn, group, actor, *, admin=False):
-    capabilities = group_capabilities(conn, group["group_id"], actor, is_admin=admin)
+def _summary(conn, group, actor, *, admin=False, config=None):
+    is_admin = admin or bool(config and (
+        config.is_named_admin(actor) or (config.web.has_method("none") and actor == config.local_user_id)
+    ))
+    capabilities = group_capabilities(conn, group["group_id"], actor, is_admin=is_admin)
     role = "owner" if capabilities["owner"] else "member" if capabilities["member"] else None
-    metadata = group if admin else {field: group[field] for field in ("group_id", "display_name", "kind", "revision")}
+    metadata = group if admin else {field: group[field] for field in ("group_id", "display_name", "kind", "revision", "system_key")}
     return {**metadata, "role": role, "capabilities": capabilities}
 
 
@@ -92,10 +95,10 @@ def _list(conn, config, actor, *, admin=False):
         db.get_group(conn, group_id) for group_id in db.list_user_groups(conn, actor)]
     result = []
     for group in groups:
-        item = _summary(conn, group, actor, admin=admin)
+        item = _summary(conn, group, actor, admin=admin, config=config)
         if admin:
             members = db.group_membership_history(conn, group["group_id"])
-            item["needs_owner"] = not group["archived_at"] and not any(
+            item["needs_owner"] = not group["archived_at"] and not group["system_key"] and not any(
                 m["role"] == "owner" and m["ended_at"] is None for m in members)
         result.append(item)
     return {"groups": result}
@@ -108,7 +111,7 @@ def _detail(conn, config, actor, group_id, *, admin=False):
     if group is None:
         raise GroupError(404, "group_not_found", "Group not found")
     history = db.group_membership_history(conn, group_id)
-    result = _summary(conn, group, actor, admin=admin)
+    result = _summary(conn, group, actor, admin=admin, config=config)
     result["members"] = [{**_user(config, m["user_id"]), "role": m["role"]}
                          for m in history if m["ended_at"] is None]
     if admin:
@@ -119,7 +122,7 @@ def _detail(conn, config, actor, group_id, *, admin=False):
                                     "FROM group_events WHERE group_id = ? ORDER BY id", (group_id,))]
         for event in result["events"]:
             del event["details_json"]
-        result["needs_owner"] = not group["archived_at"] and not any(
+        result["needs_owner"] = not group["archived_at"] and not group["system_key"] and not any(
             m["role"] == "owner" and m["ended_at"] is None for m in history)
     else:
         result["rooms"] = [{"token": room.token, "name": room.name, "origin": room.origin}

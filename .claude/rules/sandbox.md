@@ -184,3 +184,8 @@ Browser secret capture uses `read_secret` (with `read_recovery` as a compatibili
 ## Workspace reach projection
 
 `sandbox.plan.user_data_mounts` is the shared derivation of home, Talk, channel, group and linked-resource binds. `build_mount_plan` inserts those mounts in their original positions; `workspace.reach.place_reach` uses the same pure function to describe private, shared-member and restricted reach without constructing a whole plan. Web browsing re-derives current places and never treats Talk as a browsable root. Workspace pins do not grant access: creation validates the current viewer roots and prompt inclusion follows ambient memory, absent on shared-room member and guest turns, with the existing email-thread exception.
+
+
+## Group briefing research
+
+A `group_briefing_research` task uses the reserved `__briefings__` identity and the existing withheld-scope path, ordinary brain/runtime and skill proxy. Its reachable skills permit browse and shipped instruction dependencies while withholding personal resources, credentials, mutation and sends. It has normal scratch space but no personal/group file binds or ambient memories. The trusted browser-owner boundary selects the dedicated Briefings profile; the model cannot choose a human profile. Existing browser network behavior is unchanged. Approved group and personal contributions enter only the later tool-less synthesis. See `briefings.md` for the attempt-bound research artifact and source-grant checks.

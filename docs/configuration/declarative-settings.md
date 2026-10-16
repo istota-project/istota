@@ -12,7 +12,7 @@ Apply exits **0** for unchanged settings, **2** for changes made or proposed by 
 
 ## What a snapshot contains
 
-A snapshot includes the raw configuration document, live shared briefing definitions, and every stored user's restorable profile fields, folder resources, briefing schedules and ordered blocks/sources, scheduled jobs from CRON.md, heartbeat definitions from HEARTBEAT.md, and provisionable credential declarations. It includes explicit defaults and empty collections so a destination can clear stale values.
+A snapshot includes the raw configuration document, live shared and group briefing definitions, and every stored user's restorable profile fields, folder resources, briefing schedules and ordered blocks/sources, scheduled jobs from CRON.md, heartbeat definitions from HEARTBEAT.md, and provisionable credential declarations. It includes explicit defaults and empty collections so a destination can clear stale values.
 
 It omits task and delivery history, generated briefing content, heartbeat history, native login identities, WhatsApp enrollment, consent, credential values and deployment inputs. Referenced scripts, prompts and workspace files are not bundled. Use the backup and migration tools for recovery or a whole-install move; a settings plan cannot reconstruct a VM, remote accounts or runtime databases.
 
@@ -28,7 +28,7 @@ istota -c /data/config/config.toml snapshot --no-meta
 
 TOML is the default. Without `-o`, or with `-o -`, the document goes to stdout; diagnostics go to stderr. A file is replaced atomically with mode 0600 only after gathering and validation succeed. Non-regular output files and symlinks are refused. Unchanged settings produce the same bytes in the same format.
 
-`--user` is repeatable. It exports only the named users and omits instance configuration and shared briefing definitions. A scoped snapshot warns about shared briefing references that need definitions at the destination. Unknown users are refused. Apply's `--user` likewise selects declared users and excludes instance sections.
+`--user` is repeatable. It exports only the named users and omits instance configuration and shared/group briefing definitions. A scoped snapshot warns about shared briefing references that need definitions at the destination. Unknown users are refused. Apply's `--user` likewise selects declared users and excludes instance sections.
 
 The stable metadata identifies the document as a snapshot. Profiles use `profile_mode = "update"`, so existing managed-field locks survive. Snapshot metadata preserves the destination's configuration ownership marker. `--no-meta` removes that metadata; applying such a document uses ordinary plan ownership defaults. To adopt settings as managed configuration, explicitly set `meta.managed = true` and select `profile_mode = "managed"` for the profiles to manage.
 
@@ -112,3 +112,11 @@ istota_plan_secrets:
 Credentials stay in the vault and reach the plan through `istota_plan_secrets`, the sidecar in variable form. Host settings, deployment secrets and the admins list keep their own role variables; a snapshot does not contain them, so it is not a complete inventory. The role marks the config as managed by ansible. `istota_plan_prune` and `istota_plan_prune_secrets` pass `--prune` and `--prune-secrets`. Under `ansible-playbook --check` the role runs the same dry run and reports per-user drift without writing anything or restarting the stack. The variables it took before `istota_plan` (`istota_config`, `istota_users` and the rest) are retired, and a play that still sets one fails before it changes anything.
 
 A settings plan applied by the role is a settings import, not a recovery. To move a whole install, use the backup, restore and migration tools.
+
+## Group briefing definitions
+
+`[[group_briefings]]` entries are identified by `group_id` and `name`. They carry title, cron, timezone, channel, enabled state, generation mode/settings and `excluded_user_ids`. Supply `--actor USER` for changes: the current owner of an ordinary group or an admin for All users. A new definition must be a disabled draft. An existing definition can be enabled only after its source approvals and any migration cutover checks pass. A saved target cannot move to another group.
+
+The adapter checks live authority and saved-state preconditions in the write transaction. It cannot manufacture contributor grants. Omitted fields preserve existing values; `excluded_user_ids = []` explicitly clears exclusions. New exclusions must be current members, while already excluded departed users may remain. `--prune` retains group definitions and history; disable unwanted definitions explicitly.
+
+Snapshots include definitions without creator attribution, revisions, grants, editions or delivery state. Restore into existing target groups as disabled drafts and obtain fresh approvals where required. Legacy default-template authoring receives a migration diagnostic; it cannot restart per-user seeding. See [Migrating group briefings](../deployment/migrating-group-briefings.md).

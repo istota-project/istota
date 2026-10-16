@@ -9,13 +9,17 @@ from pathlib import Path
 import pytest
 
 from istota import apply as apply_module
-from istota.config import Config
+from istota.config import Config, UserConfig
 from istota.config_editor import check, schema
 
 
 def _resolve(path: tuple[str, ...]) -> None:
     node = Config()
     for segment in path:
+        if segment == "*":
+            assert path[:1] == ("users",), f"{'.'.join(path)}: only a user id is a wildcard"
+            node = UserConfig()
+            continue
         assert hasattr(node, segment), f"{'.'.join(path)} is not on the Config tree"
         node = getattr(node, segment)
 
@@ -35,6 +39,12 @@ class TestReadOnly:
     def test_the_spec_list_is_read_only_with_a_reason(self, dotted):
         reason = schema.READ_ONLY[tuple(dotted.split("."))]
         assert reason.strip()
+
+    def test_user_briefings_are_retired_for_every_user(self):
+        reason = schema.read_only_reason(("users", "alex", "briefings"))
+        assert reason and "retired" in reason
+        assert schema.editor_kind(("users", "alex", "briefings"), list, []) == "readonly"
+        assert schema.read_only_reason(("users", "alex", "timezone")) is None
 
     def test_each_host_reason_names_where_it_is_changed(self):
         for path in [("site", "hostname"), ("db_path",), ("browser", "enabled"), ("web", "port")]:

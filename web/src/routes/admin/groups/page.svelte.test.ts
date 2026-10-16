@@ -291,3 +291,27 @@ it('keeps archived groups inspectable without management or notebook controls', 
   expect(screen.queryByRole('button', { name: 'Retry storage setup' })).toBeNull();
   expect(api.getGroupMemory).not.toHaveBeenCalled();
 });
+
+it('keeps automatic groups ownerless without management controls', async () => {
+  const automatic = {
+    ...group,
+    system_key: 'all_users',
+    display_name: 'All users',
+    needs_owner: false,
+    capabilities: { ...group.capabilities, manage: false, archive: false },
+  };
+  api.getAdminGroups.mockResolvedValue({ groups: [automatic] });
+  api.getAdminGroup.mockResolvedValue(automatic);
+  render(Groups);
+  await screen.findByText('Everyone in this installation; membership is automatic.');
+  expect(screen.queryByText('Needs owner')).toBeNull();
+  for (const name of [
+    'Add member',
+    'Assign owner',
+    'Edit group details',
+    'Archive group',
+    'Actions for Alice',
+  ])
+    expect(screen.queryByRole('button', { name })).toBeNull();
+  expect(screen.getByText(/current and future installation users/)).toBeTruthy();
+});

@@ -39,10 +39,15 @@ import sqlite3
 from collections.abc import Mapping
 
 from istota import db
+from istota.browser.owner import BRIEFINGS_IDENTITY
 
 logger = logging.getLogger(__name__)
 
 SYNTHETIC_SCOPES = ("files", "memory")
+
+
+def is_briefing_research(task: "db.Task") -> bool:
+    return task.source_type == "group_briefing_research" or task.user_id == BRIEFINGS_IDENTITY
 
 
 def scope_names(skill_index: Mapping[str, object]) -> list[str]:
@@ -83,6 +88,8 @@ def withheld_for_task(
     """
     from .surfaces import origin_surface_for_source_type
 
+    if is_briefing_research(task):
+        return frozenset(set(skill_index) - {"browse", "skills", "untrusted_input"}) | frozenset(SYNTHETIC_SCOPES)
     if task.guest_participant_id is not None:
         return all_scopes(skill_index)
     if not task.conversation_token:
@@ -207,7 +214,7 @@ def ambient_memory_off(conn: sqlite3.Connection | None, task: "db.Task") -> bool
     (the poller marks every thread turn a group chat): the thread is the
     host's correspondence and their memory loads as on any email turn.
     """
-    if task.guest_participant_id is not None:
+    if is_briefing_research(task) or task.guest_participant_id is not None:
         return True
     if task.conversation_token and conn is not None:
         try:
@@ -331,10 +338,12 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     full reach in a shared room is their own data and never widens it. Raises
     on a database error; the caller treats that as the empty set.
     """
-    if task.guest_participant_id is not None or task.audience == "mixed":
+    if is_briefing_research(task) or task.guest_participant_id is not None or task.audience == "mixed":
         return []
     groups = db.list_user_groups(conn, task.user_id)
-    if not groups or not task.conversation_token:
+    automatic = {g for g in groups if db.get_group(conn, g)["system_key"] == "all_users"}
+    groups = [g for g in groups if g not in automatic]
+    if not task.conversation_token:
         return groups
 
     from istota.rooms import policy as room_policy
@@ -363,7 +372,7 @@ def task_group_ids(conn: sqlite3.Connection, task: "db.Task") -> list[str]:
     # never makes a reader a member.
     registered = db.get_room(conn, room_token)
     if registered is not None and registered.group_id:
-        groups = [g for g in groups if g == registered.group_id]
+        groups = [g for g in [*groups, *automatic] if g == registered.group_id]
     return [
         g for g in groups if readers <= set(db.list_group_members(conn, g))
     ]

@@ -13,6 +13,7 @@
   } from '$lib/components/ui';
   import BlockEditor from './BlockEditor.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
+  import { sourceKindLabel } from './settings/briefingSettings';
 
   interface Props {
     briefingName: string;
@@ -24,6 +25,11 @@
     rssOptions: SelectOption[];
     sharedBlockOptions: SelectOption[];
     feedsAvailable: boolean;
+    localDraft?: boolean;
+    allowSourceDisable?: boolean;
+    userId?: string;
+    fileOptions?: string[];
+    calendarOptions?: SelectOption[];
     onChange: (briefingName: string, blocks: BriefingBlock[]) => void;
   }
   let {
@@ -37,6 +43,11 @@
     sharedBlockOptions,
     feedsAvailable,
     onChange,
+    localDraft = false,
+    allowSourceDisable = true,
+    userId = '',
+    fileOptions = [],
+    calendarOptions = [],
   }: Props = $props();
   let picking = $state(false);
   let previewing = $state(false);
@@ -121,7 +132,7 @@
     return block.sources
       .map((source) => {
         const config = source.config;
-        let label = source.kind;
+        let label = sourceKindLabel(source.kind);
         if (config.path) label += `: ${config.path}`;
         else if (config.url) label += `: ${config.url}`;
         else if (config.preset) label += `: ${config.preset}`;
@@ -131,11 +142,37 @@
       .join(' · ');
   }
 
+  let nextDraftId = 0;
+  async function persistBlock(payload: BriefingBlockSave): Promise<BriefingBlock> {
+    if (!localDraft) return (await putBriefingBlock(payload)).block;
+    let id = Math.max(
+      nextDraftId,
+      ...blocks.flatMap((block) => [block.id, ...block.sources.map((source) => source.id)]),
+    );
+    const saved = {
+      id: payload.id ?? ++id,
+      briefing_name: briefingName,
+      position: blocks.length,
+      title: payload.title ?? '',
+      directive: payload.directive ?? '',
+      render_mode: payload.render_mode ?? 'synthesis',
+      options: payload.options ?? {},
+      sources: (payload.sources ?? []).map((source, position) => ({
+        ...source,
+        id: source.id ?? ++id,
+        position,
+        config: source.config ?? {},
+        enabled: source.enabled !== false,
+      })),
+    };
+    nextDraftId = id;
+    return saved;
+  }
+
   async function save(payload: BriefingBlockSave) {
     const name = briefingName;
     const previous = blocks;
-    const response = await putBriefingBlock(payload);
-    const saved = response.block;
+    const saved = await persistBlock(payload);
     onChange(
       name,
       payload.id
@@ -156,9 +193,10 @@
     busy = true;
     error = '';
     try {
-      await putBriefingBlock({
-        reorder: { briefing_name: name, ordered_ids: ordered.map((item) => item.id) },
-      });
+      if (!localDraft)
+        await putBriefingBlock({
+          reorder: { briefing_name: name, ordered_ids: ordered.map((item) => item.id) },
+        });
       onChange(
         name,
         ordered.map((item, position) => ({ ...item, position })),
@@ -183,8 +221,8 @@
       const name = briefingName;
       const payload = blockPayload(block, true);
       const previous = blocks;
-      const response = await putBriefingBlock(payload);
-      onChange(name, [...previous, response.block]);
+      const saved = await persistBlock(payload);
+      onChange(name, [...previous, saved]);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Could not duplicate block.';
     } finally {
@@ -200,7 +238,7 @@
     busy = true;
     deleteError = '';
     try {
-      await deleteBriefingBlock(id);
+      if (!localDraft) await deleteBriefingBlock(id);
       onChange(
         name,
         previous.filter((block) => block.id !== id),
@@ -276,13 +314,15 @@
     </ol>
   {/if}
   <div class="builder-actions">
-    <Button
-      variant="secondary"
-      onclick={() => {
-        previewing = true;
-      }}
-      disabled={busy}>Preview</Button
-    >
+    {#if !localDraft}
+      <Button
+        variant="secondary"
+        onclick={() => {
+          previewing = true;
+        }}
+        disabled={busy}>Preview</Button
+      >
+    {/if}
     <Button
       variant="secondary"
       onclick={() => {
@@ -341,6 +381,11 @@
     {rssOptions}
     {sharedBlockOptions}
     {feedsAvailable}
+    allowPreview={!localDraft}
+    {allowSourceDisable}
+    {userId}
+    {fileOptions}
+    {calendarOptions}
     onSave={save}
     onCancel={() => {
       draft = null;

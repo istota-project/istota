@@ -221,6 +221,7 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 | `/istota/api/admin/users/{user_id}` | One user's settings (GET, PATCH); remove an email identity (DELETE); action suffixes: invite, reset, disable, logout-all (POST) |
 | `/istota/api/admin/users/{user_id}/identity` | Attach or change the login email (PUT) |
 | `/istota/api/admin/users/{user_id}/whatsapp/reset` | Forget the enrolled WhatsApp identity, keeping the number (POST) |
+| `/istota/api/admin/briefings` | Every personal and group briefing's definition and state (GET); `/{kind}/{id}/hold` and `/resume` (POST) and `/{kind}/{id}` with the typed name and a step-up proof (DELETE), where `kind` is `personal` or `group` |
 | `/istota/callback` | Token exchange + identity resolution |
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |

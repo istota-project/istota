@@ -667,19 +667,9 @@
               />
             </Field>
           {/each}
-          <Field
-            label="Seed the default briefings"
-            checkbox
-            badge={badge('default_briefings')}
-            hint={hint('default_briefings', 'Applies when the user’s briefings are first seeded.')}
-            error={errors.default_briefings}
-          >
-            <input
-              type="checkbox"
-              bind:checked={form.default_briefings}
-              disabled={locked('default_briefings')}
-            />
-          </Field>
+          <p class="caption">
+            Members manage installation briefing delivery in Briefings, under All users.
+          </p>
         </section>
 
         <section class="editor-section" aria-labelledby="admin-user-channels">

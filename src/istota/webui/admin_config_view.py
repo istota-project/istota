@@ -356,7 +356,7 @@ def _editor_keys(
     choices = schema.choices_for(path)
     multi_choices = schema.multi_choices_for(path)
 
-    reason = schema.READ_ONLY.get(path)
+    reason = schema.read_only_reason(path)
     if reason is None and env_override:
         reason = (
             f"Set by the environment variable {env_override}, which wins over "

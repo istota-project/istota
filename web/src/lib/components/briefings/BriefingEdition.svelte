@@ -5,14 +5,20 @@
   import { fileLinks } from '$lib/fileViewer/links';
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';
+  import { channelLabel } from './settings/briefingSettings';
+  import type { Snippet } from 'svelte';
 
   let {
     edition,
     showMetadata = true,
     editableBlockIds = [],
     onEditBlock,
+    meta,
+    actions,
   }: {
     edition: BriefingArchiveItem;
+    meta?: Snippet;
+    actions?: Snippet;
     showMetadata?: boolean;
     editableBlockIds?: number[];
     onEditBlock?: (blockId: number) => void;
@@ -57,15 +63,22 @@
 
 <article class="edition">
   <header class="edition-head">
-    <h1>{edition.subject || edition.briefing_name}</h1>
+    <div class="edition-title">
+      <h1>{edition.subject || edition.briefing_name}</h1>
+      {#if actions}{@render actions()}{/if}
+    </div>
     {#if showMetadata}
-      <p class="caption">
-        {formatDateTime(edition.generated_at, { dateStyle: 'medium', timeStyle: 'short' })}
+      <p class="caption edition-meta">
+        <span>Just me</span>
+        <time datetime={edition.generated_at}
+          >{formatDateTime(edition.generated_at, { dateStyle: 'medium', timeStyle: 'short' })}</time
+        >
         {#if edition.delivered_to?.length}
-          <span> · delivered to {edition.delivered_to.join(', ')}</span>
+          <span>Delivered by {edition.delivered_to.map(channelLabel).join(', ')}</span>
         {/if}
       </p>
     {/if}
+    {#if meta}{@render meta()}{/if}
   </header>
   {#if document}
     <CardGrid masonry>
@@ -112,19 +125,39 @@
   }
 
   .edition-head {
-    padding-bottom: var(--space-4);
-    margin-bottom: var(--space-4);
-    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-bottom: var(--space-6);
     overflow-wrap: anywhere;
   }
 
-  .edition-head h1 {
-    margin: 0 0 var(--space-2);
-    font-size: var(--text-xl);
+  /* One line of facts, dot-separated, shared with the group edition's meta. */
+  .edition-head :global(.edition-meta) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    margin: 0;
   }
 
-  .caption {
+  .edition-head :global(.edition-meta > * + *::before) {
+    content: '·';
+    margin-right: var(--space-2);
+  }
+
+  .edition-title {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .edition-head h1 {
+    flex: 1;
+    min-width: 0;
     margin: 0;
+    font-size: var(--text-xl);
+    line-height: 1.3;
   }
 
   .legacy {

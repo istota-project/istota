@@ -6,6 +6,7 @@
   import {
     Activity,
     Monitor,
+    Newspaper,
     Plug,
     ScrollText,
     SlidersHorizontal,
@@ -25,6 +26,7 @@
     { href: '', label: 'Status', icon: Activity },
     { href: '/users', label: 'Users', icon: Users },
     { href: '/groups', label: 'Groups', icon: UsersRound },
+    { href: '/briefings', label: 'Briefings', icon: Newspaper },
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
     { href: '/connections', label: 'Connections', icon: Plug },

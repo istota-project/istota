@@ -370,6 +370,10 @@ def _migrate_components(ctx: BriefingsContext, app_config) -> None:
         )
         return
 
+    _seed_briefings(ctx, briefings)
+
+
+def _seed_briefings(ctx: BriefingsContext, briefings) -> None:
     with briefings_db.connect(ctx.db_path) as conn:
         for briefing in briefings:
             sentinel = _briefing_sentinel(briefing.name)
@@ -399,3 +403,34 @@ def ensure_initialised(ctx: BriefingsContext, *, app_config=None) -> None:
     ctx.ensure_dirs()
     briefings_db.init_db(ctx.db_path)
     _migrate_components(ctx, app_config)
+
+
+def seed_retired_config_blocks(app_config) -> None:
+    """Seed each retired ``[[users.X.briefings.blocks]]`` into the module DB now.
+
+    Run at boot right after ``user_briefings.import_from_user_configs``. The
+    lazy seed in :func:`ensure_initialised` reads blocks off the in-memory
+    overlay, so an operator who removed the retired TOML block before the
+    module was first touched lost them, and a disabled row was never seeded.
+    Only a seed whose row still exists is seeded, under the same per-briefing
+    sentinel, so this is idempotent and never resurrects a deleted briefing.
+    """
+    from istota import user_briefings
+    from istota.briefings._loader import UserNotFoundError, resolve_for_user
+
+    for user_id, user_config in app_config.users.items():
+        seeds = [s for s in getattr(user_config, "legacy_briefing_seeds", None) or []
+                 if s.name and s.blocks]
+        if not seeds:
+            continue
+        stored = {row.name for row in user_briefings.list_briefings(app_config.db_path, user_id)}
+        seeds = [s for s in seeds if s.name in stored]
+        if not seeds:
+            continue
+        try:
+            ctx = resolve_for_user(user_id, app_config)
+            ensure_initialised(ctx)
+        except UserNotFoundError as e:
+            logger.info("briefings config blocks not seeded for %s: %s", user_id, e)
+            continue
+        _seed_briefings(ctx, seeds)

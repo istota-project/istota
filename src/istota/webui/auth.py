@@ -269,6 +269,9 @@ def _change_credential(db_path: Path, user_id: str, *, password_hash: str | None
                       identity.disabled if disabled is None else disabled, epoch, _timestamp(), user_id))
         if password_hash is not None:
             _invalidate_tokens(conn, user_id)
+        if disabled is not None:
+            from istota.groups.system import sync_account_membership
+            sync_account_membership(conn, user_id, enabled=not disabled and _has_profile(conn, user_id))
         return epoch
 
 
@@ -672,7 +675,7 @@ def authenticate(db_path: Path, policy: Policy, email: str, password: str, *, ip
 
 STEP_UP_ACTIONS = (
     "export", "recovery_reveal", "backup_recipient", "history_restore", "history_purge",
-    "admin_config_change",
+    "admin_config_change", "admin_briefing_delete",
 )
 
 

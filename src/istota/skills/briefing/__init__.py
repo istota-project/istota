@@ -680,10 +680,11 @@ def get_briefings_for_user(config: Config, user_id: str) -> list[BriefingConfig]
     """
     Get a user's briefings from the loaded config.
 
-    ``UserConfig.briefings`` is TOML with the ``briefing_configs`` overlay
-    applied on top (``config._apply_user_briefings``), so this is the whole
-    picture: the operator's TOML and whatever the web UI or
-    ``istota briefing ensure`` last wrote.
+    ``UserConfig.briefings`` is built from ``briefing_configs`` rows alone
+    (``config._apply_user_briefings``): every enabled row, held ones included,
+    since ``db.create_task`` refuses a held or deleted briefing. The retired
+    ``[users.X.briefings]`` TOML only contributes blocks to the row of the
+    same name, until they are seeded.
 
     Workspace ``BRIEFINGS.md`` used to be applied over that result and is
     retired — it beat the row the settings page had just written and showed

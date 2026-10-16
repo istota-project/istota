@@ -356,7 +356,7 @@ class TestConfigLoading:
         assert d.output == "talk"
         assert d.blocks[0]["title"] == "News"
 
-    def test_default_briefings_seeded_into_user(self, tmp_path):
+    def test_default_briefings_are_migration_inputs_only(self, tmp_path):
         db_file = tmp_path / "istota.db"
         from istota import db as _db
         _db.init_db(db_file)
@@ -373,7 +373,7 @@ class TestConfigLoading:
         )
         cfg = load_config(p)
         names = [b.name for b in cfg.users["alice"].briefings]
-        assert "Daily" in names
+        assert names == []
 
     def test_toml_components_authoring_ignored(self, tmp_path):
         # Legacy `[[briefings]] [briefings.components]` authoring is dropped;
@@ -392,7 +392,7 @@ class TestConfigLoading:
             'calendar = true\n'
         )
         cfg = load_config(p)
-        briefings = cfg.users["alice"].briefings
+        briefings = cfg.users["alice"].legacy_briefing_seeds
         assert len(briefings) == 1
         assert briefings[0].name == "morning"
         assert briefings[0].components == {}
@@ -451,15 +451,17 @@ class TestConfigLoading:
         )
         cfg = load_config(p)
         bob = cfg.users["bob"]
-        assert len(bob.briefings) == 2
-        morning = bob.briefings[0]
+        # Retired input: parsed as one-time import seeds, never scheduled from here.
+        assert bob.briefings == []
+        assert len(bob.legacy_briefing_seeds) == 2
+        morning = bob.legacy_briefing_seeds[0]
         assert morning.name == "morning"
         assert morning.cron == "0 7 * * *"
         assert morning.conversation_token == "room1"
         assert morning.output == "both"
         # TOML component authoring is retired — the stray section is ignored.
         assert morning.components == {}
-        evening = bob.briefings[1]
+        evening = bob.legacy_briefing_seeds[1]
         assert evening.name == "evening"
         assert evening.cron == "0 18 * * *"
         assert evening.conversation_token == ""
@@ -2533,22 +2535,14 @@ class TestConfigToplevelKeyOrdering:
                 )
 
 
-def test_config_example_blocks_round_trip():
-    """The worked example in config.example.toml parses and seeds cleanly."""
+def test_config_example_carries_no_retired_user_briefings():
+    """`[users.X.briefings]` is retired, so the example does not teach it."""
     import tomllib
-
-    from istota.briefings import normalize_block_specs
-    from istota.config import _parse_user_data
 
     example = Path(__file__).resolve().parent.parent / "config" / "config.example.toml"
     parsed = tomllib.loads(example.read_text())
-    alice = parsed["users"]["alice"]
-    world = [b for b in alice["briefings"] if b["name"] == "world"]
-    assert world, "expected a config-authored 'world' briefing with blocks"
-    uc = _parse_user_data(alice, "alice")
-    world_bc = [b for b in uc.briefings if b.name == "world"][0]
-    specs = normalize_block_specs(world_bc.blocks, briefing_name="world")
-    assert [s["title"] for s in specs] == ["World News", "Markets"]
+    for user_id, user in parsed["users"].items():
+        assert "briefings" not in user, user_id
 
 
 class TestApplyUserResources:
@@ -2768,7 +2762,7 @@ class TestApplyUserBriefings:
         assert briefings[0].cron == "0 8 * * *"
         assert briefings[0].conversation_token == "db-room"
 
-    def test_distinct_names_coexist(self, tmp_path, monkeypatch):
+    def test_a_config_only_name_is_not_scheduled(self, tmp_path, monkeypatch):
         from istota import db, user_briefings
 
         db_path = tmp_path / "test.db"
@@ -2794,7 +2788,8 @@ class TestApplyUserBriefings:
         monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
         config = load_config(cfg)
         names = {b.name for b in config.users["alice"].briefings}
-        assert names == {"morning", "evening"}
+        # The TOML entry waits for the one-time import; only rows are scheduled.
+        assert names == {"evening"}
 
     def test_disabled_db_row_drops_toml_briefing(self, tmp_path, monkeypatch):
         # Operator can mute a TOML-templated briefing via the web UI by
@@ -2866,7 +2861,7 @@ class TestConfigAuthoredBriefingBlocks:
     )
 
     def test_parse_user_data_populates_blocks(self, tmp_path, monkeypatch):
-        # No DB row → the TOML briefing survives natively, blocks intact.
+        # Parsed into the one-time import seeds, blocks intact.
         cfg = tmp_path / "config.toml"
         cfg.write_text(
             f'db_path = "{tmp_path / "does-not-exist.db"}"\n'
@@ -2877,7 +2872,8 @@ class TestConfigAuthoredBriefingBlocks:
         )
         monkeypatch.delenv("ISTOTA_ADMINS_FILE", raising=False)
         config = load_config(cfg)
-        briefings = config.users["alice"].briefings
+        assert config.users["alice"].briefings == []
+        briefings = config.users["alice"].legacy_briefing_seeds
         assert len(briefings) == 1
         blocks = briefings[0].blocks
         assert len(blocks) == 1

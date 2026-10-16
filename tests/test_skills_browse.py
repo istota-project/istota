@@ -43,6 +43,26 @@ from tests.support.broker import broker_off
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image data"
 
 
+def test_briefings_refuse_old_browser_before_render(monkeypatch, capsys):
+    monkeypatch.setenv("ISTOTA_USER_ID", "__briefings__")
+    monkeypatch.setenv("ISTOTA_TASK_ID", "11")
+    with patch("istota.browser.admission.browser_call") as request:
+        request.return_value.status_code = 200
+        request.return_value.json.return_value = {"status": "ok"}
+        assert main(["render", "https://example.com"]) == 1
+        assert request.call_count == 1
+        assert request.call_args.args[1].endswith("/health")
+    assert "briefing_browser_isolation_unavailable" in capsys.readouterr().out
+
+
+def test_briefings_refuse_credential_action_before_resolving(monkeypatch, capsys):
+    monkeypatch.setenv("ISTOTA_USER_ID", "__briefings__")
+    with patch("istota.skills.browse.parse_and_resolve") as parse:
+        assert main(["interact", "--fill", "#password=credential:password"]) == 1
+        parse.assert_not_called()
+    assert "briefing_browser_operation_refused" in capsys.readouterr().out
+
+
 @pytest.fixture(autouse=True)
 def browser_identity(monkeypatch, tmp_path):
     # The task env a skill CLI runs in: its user, and the framework database

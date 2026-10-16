@@ -66,7 +66,7 @@ async def test_member_listing_detail_and_room_visibility(client):
     assert response.status_code == 200
     groups = response.json()["groups"]
     assert [g["group_id"] for g in groups] == ["family"]
-    assert set(groups[0]) == {"group_id", "display_name", "kind", "role", "revision", "capabilities"}
+    assert set(groups[0]) == {"group_id", "display_name", "kind", "role", "revision", "capabilities", "system_key"}
     assert groups[0]["role"] == "owner" and groups[0]["revision"] == 0
     assert groups[0]["capabilities"]["edit_memory"]
     detail = (await client.get(BASE + "/groups/family")).json()
@@ -123,7 +123,10 @@ async def test_history_acknowledgement_revision_and_rejoin(client, configured):
     payload = {"revision": 0, "role": "member"}
     response = await client.put(url, json=payload)
     assert response.status_code == 409
-    assert response.json()["disclosure"] == {"memory": "Groups/family/GROUP.md", "rooms": [], "briefings": []}
+    assert response.json()["disclosure"] == {
+        "memory": "Groups/family/GROUP.md", "rooms": [],
+        "briefings": ["All retained group briefing editions, including those published before joining"],
+    }
     with db.get_db(configured._config.db_path) as conn:
         assert not db.is_group_member(conn, "family", "carol")
         assert conn.execute("SELECT COUNT(*) FROM group_events").fetchone()[0] == 0
@@ -237,3 +240,27 @@ async def test_all_writes_reject_unknown_authority_fields(client, configured, me
     session(client, configured, "admin")
     response = await client.request(method, BASE + path, json={"revision": 0, "is_operator": True})
     assert response.status_code == 422
+
+
+async def test_system_group_capabilities_and_write_refusals(client, configured):
+    from istota.groups.system import refresh_all_users
+    refresh_all_users(configured._config, provision=True)
+    with db.get_db(configured._config.db_path) as conn:
+        gid = conn.execute("SELECT group_id FROM groups WHERE system_key = 'all_users'").fetchone()["group_id"]
+    detail = (await client.get(BASE + f"/groups/{gid}")).json()
+    assert detail["system_key"] == "all_users"
+    assert not detail["capabilities"]["leave"] and not detail["capabilities"]["author_briefings"]
+    assert "disabled" not in {m["user_id"] for m in detail["members"]}
+    revision = detail["revision"]
+    response = await client.request("DELETE", BASE + f"/groups/{gid}/members/alice", json={"revision": revision})
+    assert response.status_code == 403 and response.json()["error"] == "automatic_membership"
+    session(client, configured, "admin")
+    detail = (await client.get(BASE + f"/admin/groups/{gid}")).json()
+    assert not detail["needs_owner"] and detail["capabilities"]["author_briefings"]
+    public_detail = (await client.get(BASE + f"/groups/{gid}")).json()
+    assert public_detail["capabilities"]["author_briefings"]
+    response = await client.patch(BASE + f"/admin/groups/{gid}", json={"revision": revision, "user_id": "alice", "role": "owner"})
+    assert response.status_code == 403 and response.json()["error"] == "automatic_membership"
+    response = await client.post(BASE + f"/admin/groups/{gid}/archive", json={"revision": revision, "confirm": True})
+    assert response.status_code == 403 and response.json()["error"] == "system_group"
+    assert (await client.patch(BASE + f"/admin/groups/{gid}", json={"revision": revision, "system_key": None})).status_code == 422

@@ -32,7 +32,7 @@ import re
 
 from istota.briefings.sources import GatheredSource, SourceContext
 from istota.browser.admission import browser_admission, browser_call, BrowserQueueTimeout
-from istota.browser.owner import browser_headers
+from istota.browser.owner import BRIEFINGS_IDENTITY, browser_headers, require_briefings_profile
 
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,8 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
         )
     try:
         with browser_admission(db_path=ctx.app_config.db_path, queue_timeout=_QUEUE_WAIT_TIMEOUT):
+            if ctx.user_id == BRIEFINGS_IDENTITY:
+                require_briefings_profile(api_url)
             body, truncated = _render_markdown(api_url, url, mode, markdown_max, headers)
             if body is None:
                 body = _browse_text(api_url, url, headers)

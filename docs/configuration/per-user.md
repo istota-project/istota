@@ -120,11 +120,16 @@ CalDAV calendars are auto-discovered from Nextcloud and don't need to be configu
 
 ### Briefings
 
-Schedule and delivery are provisioned with `istota briefings schedule ensure --user alice --name morning --cron "0 6 * * *" --conversation-token room123 --output both`, or from the web UI (briefings tab → settings). The `[[users.X.briefings]]` TOML block is a docker-entrypoint shortcut.
+Schedule and delivery are provisioned with `istota briefings schedule ensure --user alice --name morning --cron "0 6 * * *" --conversation-token room123 --output both`, from the web UI (briefings tab → settings), or with a settings plan (`istota apply`). Every briefing is a row in the `briefing_configs` table that its user can edit, disable and delete.
 
-Content is an ordered list of **blocks**, each with 1..N sources — the boolean `components` model and its `--component` / `--components-json` flags are retired. Config-authored blocks are seeded **once** into the user's briefings module DB as an editable baseline, after which web edits win and operator re-runs never clobber them.
+`[[users.X.briefings]]` in `config.toml` is retired. Each entry is imported into the table once per user on the first start after the upgrade, and the key is reported as retired until it is removed from the file. A briefing its user deletes is not imported again.
+
+Content is an ordered list of **blocks**, each with 1..N sources. The boolean `components` model and its `--component` / `--components-json` flags are retired. A settings plan declares a briefing with its blocks:
 
 ```toml
+[meta]
+version = 1
+
 [[users.alice.briefings]]
 name = "morning"
 cron = "0 6 * * *"

@@ -37,6 +37,12 @@ function block(answer: SharedBlockRunAnswer | null): SharedBlock {
 }
 
 await fillApiDouble(api, {
+  getBriefingTargets: vi.fn(async () => ({
+    targets: [],
+    channels: [],
+    timezone: 'UTC',
+    source_scopes: {},
+  })),
   getBriefings: vi.fn(async () => ({ briefings: [], rooms: [], outputs: ['email'] })),
   getBrowsePresets: vi.fn(async () => ({ presets: [] })),
   getFeedOptions: vi.fn(async () => ({ available: false, subscriptions: [], categories: [] })),
@@ -66,6 +72,7 @@ vi.mock('$lib/platform/native', () => ({
 }));
 
 import Page from './+page.svelte';
+import { page } from '../../../../vitest-stubs/app-state.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
 const admin: User = {
@@ -98,6 +105,7 @@ describe('Shared block Run now', () => {
   it('keeps the shared source editor and admin save working', async () => {
     answers.queue = [null];
     api.putSharedBlock.mockResolvedValueOnce({ status: 'ok' });
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
     render(Harness, { component: Page, user: admin });
     const trigger = await screen.findByLabelText('Shared block actions');
     await fireEvent.keyDown(trigger, { key: 'Enter' });
@@ -122,6 +130,7 @@ describe('Shared block Run now', () => {
       { id: 'req-1', outcome: 'regenerated', at: '2026-10-11T00:00:00Z' },
       { id: 'req-2', outcome: 'kept_prior', at: '2026-10-11T00:01:00Z' },
     ];
+    page.url = new URL('http://localhost/istota/briefings/settings?view=shared');
     render(Harness, { component: Page, user: admin });
     await pressRunNow();
     expect(api.runSharedBlock).toHaveBeenCalledWith('mk');

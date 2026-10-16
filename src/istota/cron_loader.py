@@ -1271,6 +1271,8 @@ def sync_cron_jobs_to_db(
     state columns are left alone rather than surviving by omission.
     """
     # Constant per call; sorted only so the generated clauses are stable.
+    from istota.briefings.group_migrate import publisher_retired
+
     file_columns = sorted(FILE_OWNED_COLUMNS)
     db_jobs = db.get_user_scheduled_jobs(conn, user_id)
     # Module-managed jobs are owned by their integration (see jobs.py in the
@@ -1306,6 +1308,8 @@ def sync_cron_jobs_to_db(
         file_values = _file_owned_values(
             fj, cmd_val, skill_val, skill_args_val, brain_val,
         )
+        if publisher_retired(conn, user_id, fj.name):
+            file_values["enabled"] = 0
         existing = db_by_name.get(fj.name)
         if existing:
             # Update definition fields, preserve state
