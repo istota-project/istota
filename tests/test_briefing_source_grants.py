@@ -526,3 +526,21 @@ def test_deleting_a_definition_revokes_its_grants_and_closes_its_requests(env):
                               object_id=open_row["object_id"], severity="info", actionable=True, title="", body="",
                               params=json.loads(open_row["params"]))
         assert RESOLVER.resolve(env, conn, row) is None
+
+
+def test_hold_writes_no_approval_request_and_resume_writes_one(env):
+    with db.get_db(env.db_path) as conn:
+        requested = define(conn, env, name="weekly")
+        rows = "SELECT state FROM notifications WHERE source='group_briefing' AND object_type='group_source' " \
+               "AND object_id=?"
+
+        def states():
+            return sorted(r["state"] for r in conn.execute(rows, (str(requested["id"]),)))
+
+        assert states() == ["open"]
+        store.set_hold(conn, env, requested["id"], admin_id="admin")
+        assert "open" not in states()
+        assert len(states()) == 1
+        store.clear_hold(conn, env, requested["id"])
+        assert states().count("open") == 1
+        assert len(states()) == 2

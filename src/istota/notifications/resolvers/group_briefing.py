@@ -14,12 +14,17 @@ def write_edition(conn, recipient):
 
 
 def sync_approvals(conn, config, definition):
-    """Reconcile requests in the definition transaction; never send source details."""
+    """Reconcile requests in the definition transaction; never send source details.
+
+    A held definition asks for nothing: its open requests close, and a resume
+    writes them once for the revision it lands on.
+    """
     from istota.briefings import group_store, source_grants
     from istota.groups.policy import GroupError
     from istota.notifications.store import resolve_notification, write_notification
     pending = {}
-    for source in group_store.definition_sources(definition):
+    sources = [] if definition.get("admin_hold_at") else group_store.definition_sources(definition)
+    for source in sources:
         if source["kind"] not in ("personal_file", "personal_calendar"):
             continue
         owner = source["config"]["owner_id"]
