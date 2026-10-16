@@ -36,6 +36,7 @@ import chrome
 import pool
 
 import browsing
+import map_snapshot
 import render
 import visual
 import xdotool
@@ -1429,6 +1430,87 @@ def screenshot():
         if created_new:
             _close_session(session_id)
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# Live /map-snapshot contexts per user. Each counts against the same session
+# budget a tab does, and no tab is ever closed to make room for one.
+_map_renders = Counter()
+
+_MAP_SNAPSHOT_STATUS = {
+    "bad_request": 400,
+    "not_mercator_safe": 400,
+    "render_unavailable": 503,
+    "capacity": 503,
+    "render_timeout": 504,
+    "destination_blocked": 502,
+    "render_failed": 502,
+    "bad_png": 502,
+}
+
+
+def _map_snapshot_error(reason):
+    body = {"status": "error", "error": reason}
+    if reason == "capacity":
+        body["retry_after_seconds"] = 30
+    return jsonify(body), _MAP_SNAPSHOT_STATUS.get(reason, 502)
+
+
+def _claim_map_render(user_id):
+    """Count one render against `user_id`'s session budget, or refuse. Evicts nothing."""
+    if MAX_SESSIONS <= 0 or MAX_TOTAL_SESSIONS <= 0:
+        return False
+    if _get_memory_pct() > MEMORY_REJECT_PCT:
+        return False
+    with _sessions_lock:
+        own = _map_renders[user_id] + sum(
+            1 for session in _sessions.values() if session.get("user_id") == user_id)
+        total = len(_sessions) + sum(_map_renders.values())
+        if own >= MAX_SESSIONS or total >= MAX_TOTAL_SESSIONS:
+            return False
+        _map_renders[user_id] += 1
+    return True
+
+
+def _release_map_render(user_id):
+    with _sessions_lock:
+        _map_renders[user_id] -= 1
+        if _map_renders[user_id] <= 0:
+            del _map_renders[user_id]
+
+
+@app.route("/map-snapshot", methods=["POST"])
+def map_snapshot_render():
+    """A location share's map as a 640 x 360 PNG, or a JSON error with a stable reason.
+
+    The body is `{observation, basemap, owner}` and nothing else
+    (`map_snapshot.validate_request`). The page is the web app's
+    `/map-snapshot/`, at `ISTOTA_MAP_RENDER_URL`; with that unset this answers
+    503 `render_unavailable` and opens nothing. The context is a fresh one,
+    closed before the answer, and every request it makes passes the
+    destination guard. Logs carry the reason only.
+    """
+    payload, refusal = map_snapshot.validate_request(request.get_json(silent=True))
+    if refusal:
+        return _map_snapshot_error(refusal)
+    render_url = map_snapshot.configured_render_url()
+    if render_url is None:
+        return _map_snapshot_error("render_unavailable")
+    inst = _request_instance()
+    user_id = inst.user_id
+    if not _claim_map_render(user_id):
+        return _map_snapshot_error("capacity")
+    try:
+        with chrome.temporary_context(inst, **map_snapshot.CONTEXT_OPTIONS) as context:
+            png, reason = map_snapshot.render(context, render_url, payload)
+    except Exception as error:
+        log.warning("map-snapshot failed: %s", type(error).__name__)
+        png, reason = None, "render_failed"
+    finally:
+        _release_map_render(user_id)
+    if reason:
+        log.info("map-snapshot refused: %s", reason)
+        return _map_snapshot_error(reason)
+    return Response(png, mimetype="image/png")
 
 
 # Retained across this user's tabs and session closure, like their profile.
@@ -3784,7 +3866,7 @@ def _log_request_start():
     if request.browser_instance is not None:
         _track_request_instance(request.browser_instance)
     page_endpoints = {"browse", "render_page", "extract", "screenshot",
-                      "interact", "evaluate", "challenge"}
+                      "interact", "evaluate", "challenge", "map_snapshot_render"}
     if request.endpoint not in page_endpoints:
         return None
     try:

@@ -44,6 +44,7 @@
 #   scripts/test-image-negative-control.sh rendered-config
 #   scripts/test-image-negative-control.sh web-setup
 #   scripts/test-image-negative-control.sh devbox
+#   scripts/test-image-negative-control.sh map-snapshot
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -61,7 +62,8 @@
 # old release rendered, against an image whose entrypoint appends to that file.
 # The fifth runs the first-run setup server against an image that takes any
 # setup code. The sixth runs only the devbox half, for a change that touches
-# nothing else.
+# nothing else. The seventh runs the browser image's share-map render against
+# the built web bundle with MapLibre's chunk removed (needs `web/build`).
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -93,6 +95,11 @@ fi
 only_devbox=""
 if [ "$platform" = "devbox" ]; then
     only_devbox=1
+    platform=""
+fi
+only_map_snapshot=""
+if [ "$platform" = "map-snapshot" ]; then
+    only_map_snapshot=1
     platform=""
 fi
 control_tag="istota-test/no-forge:control"
@@ -407,8 +414,52 @@ print(_tag_for(ISTOTA_DOCKERFILE, "", "istota"))
     echo "[control] OK: web-setup turned the wrong-code witness red and Finish still ran."
 }
 
+MAP_SNAPSHOT_TESTS="tests/image/test_browser_image.py"
+
+# The share-map render against a web bundle with MapLibre's chunk removed: the
+# page loads, the dynamic import fails, and the render must go red rather than
+# hand back a frame with no map in it.
+map_snapshot_half() {
+    if [ ! -f web/build/map-snapshot/index.html ]; then
+        echo "[control] no web build — run \`npm --prefix web run build\` first." >&2
+        exit 2
+    fi
+    map_site="$(mktemp -d)"
+    cp -R web/build/. "$map_site/"
+    # The JavaScript chunk only: ShareMap's own stylesheet names the same
+    # classes, and removing it would break the page for a different reason.
+    map_chunks="$(grep -l -r --include='*.js' 'maplibregl' "$map_site/_app/immutable" 2>/dev/null || true)"
+    if [ -z "$map_chunks" ]; then
+        rm -rf "$map_site"
+        echo "[control] FAILED: found no MapLibre chunk in the web build to remove." >&2
+        exit 1
+    fi
+    echo
+    echo "[control] map-snapshot: the built page with MapLibre removed ($(echo "$map_chunks" | wc -l | tr -d ' ') chunk(s))"
+    echo "$map_chunks" | while IFS= read -r chunk; do rm -f "$chunk"; done
+    map_out="$(mktemp)"
+    set +e
+    ISTOTA_MAP_SNAPSHOT_SITE="$map_site" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly \
+        "${MAP_SNAPSHOT_TESTS}::test_map_snapshot_renders_the_built_page" 2>&1 | tee "$map_out"
+    set -e
+    rm -rf "$map_site"
+    map_node="${MAP_SNAPSHOT_TESTS}::test_map_snapshot_renders_the_built_page"
+    if ! grep -Fq "FAILED ${map_node}" "$map_out"; then
+        rm -f "$map_out"
+        echo "[control] FAILED: map-snapshot did not turn ${map_node} red."
+        exit 1
+    fi
+    rm -f "$map_out"
+    echo "[control] OK: map-snapshot turned the render witness red without MapLibre."
+}
+
 if [ -n "$only_run_contract" ]; then
     run_contract_half
+    exit 0
+fi
+if [ -n "$only_map_snapshot" ]; then
+    map_snapshot_half
     exit 0
 fi
 if [ -n "$only_rendered_config" ]; then
@@ -783,4 +834,5 @@ if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     secrets_half
     rendered_config_half
     web_setup_half
+    map_snapshot_half
 fi
