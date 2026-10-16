@@ -179,10 +179,11 @@
               <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
               {#if metadata}<div class="ui-viewer-metadata">{@render metadata()}</div>{/if}
             </div>
-            <div class="ui-viewer-actions">
-              {#if actions}{@render actions()}{/if}
+            {#if actions}<div class="ui-viewer-actions">{@render actions()}</div>{/if}
+            <div class="ui-viewer-close">
               <IconButton
                 label="Close"
+                title="Close"
                 onclick={() => {
                   open = false;
                   onOpenChange?.(false);
@@ -397,6 +398,9 @@
     gap: var(--space-2);
     max-width: 100%;
   }
+  .ui-viewer-close {
+    display: flex;
+  }
   .ui-viewer-panel :global(.ui-modal-body) {
     flex: 1;
     padding: var(--space-2) var(--space-3);
@@ -429,7 +433,54 @@
       display: flex;
       justify-content: flex-end;
       gap: var(--space-2);
-      width: 100%;
+      /* Shares row 2 with the actions rather than sitting under Close, so the
+         pair's width never narrows the title's column. */
+      grid-row: 2;
+      grid-column: 1 / -1;
+      justify-self: end;
+    }
+    /* A flex row let the actions squeeze the title to a few characters (ISSUE-761).
+       The title and Close take the first row, actions and navigation the second. */
+    .ui-viewer-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+    }
+    /* Placed by line rather than by named areas: a second row exists only when
+       actions or navigation are there to fill it, so it costs no gap otherwise. */
+    .ui-viewer-heading {
+      grid-row: 1;
+      grid-column: 1;
+    }
+    .ui-viewer-close {
+      grid-row: 1;
+      grid-column: 2;
+      align-self: start;
+      justify-self: end;
+    }
+    .ui-viewer-actions {
+      grid-row: 2;
+      grid-column: 1 / -1;
+      justify-self: start;
+    }
+    .ui-viewer-actions:empty {
+      display: none;
+    }
+    .ui-viewer-heading :global(.ui-modal-title) {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    /* clip on x only: a hint trigger in the metadata keeps its focus ring. */
+    .ui-viewer-metadata {
+      overflow-x: clip;
+      overflow-y: visible;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      overflow-wrap: normal;
     }
   }
 </style>

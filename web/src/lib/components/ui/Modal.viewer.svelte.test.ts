@@ -38,6 +38,23 @@ describe('viewer modal', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('keeps Close out of the actions group, so a phone can give the title its own row', async () => {
+    const { dialog } = await open({ navigation: navigation() });
+    const header = dialog.querySelector('.ui-viewer-header')!;
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    const actions = header.querySelector('.ui-viewer-actions')!;
+    expect(actions.contains(close)).toBe(false);
+    expect(close.closest('.ui-viewer-close')?.parentElement).toBe(header);
+    expect(actions.contains(within(dialog).getByRole('link', { name: 'Download' }))).toBe(true);
+    const order = [...header.children].map((child) => child.className.match(/ui-viewer-\w+/)?.[0]);
+    expect(order).toEqual([
+      'ui-viewer-heading',
+      'ui-viewer-actions',
+      'ui-viewer-close',
+      'ui-viewer-mobile',
+    ]);
+  });
+
   it('preserves the default dialog and does not add viewer controls', async () => {
     const { dialog } = await open({ variant: 'default', navigation: navigation() });
     expect(dialog).toHaveClass('ui-modal-content');
