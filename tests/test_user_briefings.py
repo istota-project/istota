@@ -172,15 +172,26 @@ class TestAdminHold:
         user_briefings.clear_hold(db_path, b.id)
         assert self._task(db_path, "alice", "morning", "pending")
 
-    def test_overlay_leaves_a_held_row_out(self, db_path):
+    def test_overlay_keeps_a_held_row(self, db_path):
+        # create_task refuses it, so a daemon that booted during the hold can
+        # still run it once the hold is lifted.
         from istota import config as cfgmod
         b = self._row(db_path)
         self._row(db_path, name="evening")
+        self._row(db_path, name="off", enabled=False)
         user_briefings.set_hold(db_path, b.id, admin_id="root")
         cfg = Config(db_path=db_path)
         cfg.users = {"alice": UserConfig(display_name="Alice")}
         cfgmod._apply_user_briefings(cfg)
-        assert [x.name for x in cfg.users["alice"].briefings] == ["evening"]
+        assert sorted(x.name for x in cfg.users["alice"].briefings) == ["evening", "morning"]
+
+    def test_create_task_refuses_a_deleted_briefing(self, db_path):
+        from istota import db
+        b = self._row(db_path)
+        assert user_briefings.delete_briefing_by_id(db_path, "alice", b.id)
+        with db.get_db(db_path) as conn, pytest.raises(ValueError, match="briefing_deleted"):
+            db.create_task(conn, prompt="p", user_id="alice", source_type="briefing",
+                           briefing_name="morning")
 
     def test_migration_adds_the_hold_columns(self, tmp_path):
         import sqlite3

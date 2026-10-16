@@ -253,17 +253,20 @@ def hold_view(config, held_at: str | None, held_by: str | None) -> dict | None:
     return {"at": held_at, "by_label": label}
 
 
-def require_not_held(conn: sqlite3.Connection, user_id: str, name: str) -> None:
-    """Refuse to queue a run of a briefing an administrator holds.
+def require_runnable(conn: sqlite3.Connection, user_id: str, name: str) -> None:
+    """Refuse to queue a run of a briefing that is gone or an administrator holds.
 
     Called from ``db.create_task``, so a manual run, a trigger file and a
-    daemon whose loaded config predates the hold are all refused.
+    daemon whose loaded config predates the delete or the hold are all refused:
+    ``briefing_deleted`` when no row names it, ``briefing_held`` when one is held.
     """
     row = conn.execute(
         "SELECT admin_hold_at FROM briefing_configs WHERE user_id = ? AND name = ?",
         (user_id, name),
     ).fetchone()
-    if row is not None and row[0] is not None:
+    if row is None:
+        raise ValueError("briefing_deleted")
+    if row[0] is not None:
         raise ValueError("briefing_held")
 
 

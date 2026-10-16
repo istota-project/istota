@@ -61,6 +61,7 @@ from istota.transport.email.outbound import (
     _load_deferred_email_output,
 )
 
+from .support.briefing_rows import briefing_row
 from .support.rooms import plain_talk_room, promoted_room
 
 
@@ -1703,6 +1704,13 @@ class TestDownloadTalkAttachments:
 # ---------------------------------------------------------------------------
 
 
+def _briefing_rows(db_path, config):
+    with db.get_db(db_path) as conn:
+        for user_id, user in config.users.items():
+            for briefing in user.briefings:
+                briefing_row(conn, user_id, briefing.name, cron=briefing.cron)
+
+
 class TestCheckBriefings:
     def test_no_briefings(self, db_path):
         config = Config(db_path=db_path, users={})
@@ -1735,6 +1743,7 @@ class TestCheckBriefings:
                 ("alice", "morning", yesterday),
             )
 
+        _briefing_rows(db_path, config)
         result = check_briefings(db_path, config)
 
         assert len(result) == 1
@@ -1790,6 +1799,7 @@ class TestCheckBriefings:
             scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
         )
 
+        _briefing_rows(db_path, config)
         result = check_briefings(db_path, config)
         assert len(result) == 1
 
@@ -1845,6 +1855,7 @@ class TestCheckBriefings:
                 ("alice", "morning", yesterday),
             )
 
+        _briefing_rows(db_path, config)
         result = check_briefings(db_path, config)
         assert len(result) == 1
 
@@ -1872,7 +1883,14 @@ class TestCheckBriefingsAdminHold:
         with db.get_db(db_path) as conn:
             return conn.execute("SELECT id FROM tasks WHERE source_type = 'briefing'").fetchall()
 
-    def test_a_held_briefing_is_not_in_the_overlay_so_never_due(self, db_path):
+    def _last_run_is_recent(self, db_path):
+        with db.get_db(db_path) as conn:
+            last = datetime.fromisoformat(db.get_briefing_last_run(conn, "alice", "morning"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=ZoneInfo("UTC"))
+        return datetime.now(ZoneInfo("UTC")) - last < timedelta(minutes=5)
+
+    def test_a_briefing_held_at_boot_is_refused_and_its_slot_stamped(self, db_path):
         from istota import user_briefings
         from istota.config import _apply_user_briefings
         config, row = self._config_and_row(db_path)
@@ -1880,6 +1898,20 @@ class TestCheckBriefingsAdminHold:
         _apply_user_briefings(config)
         assert check_briefings(db_path, config) == []
         assert self._briefing_tasks(db_path) == []
+        assert self._last_run_is_recent(db_path)
+
+    def test_a_deleted_briefing_stops_in_a_running_daemon(self, db_path, caplog):
+        from istota import user_briefings
+        from istota.config import _apply_user_briefings
+        config, row = self._config_and_row(db_path)
+        _apply_user_briefings(config)  # loaded before the delete, as a running daemon has it
+        assert user_briefings.delete_briefing_by_id(db_path, "alice", row.id)
+        with caplog.at_level("ERROR", logger="istota.scheduler"):
+            assert check_briefings(db_path, config) == []
+            assert check_briefings(db_path, config) == []
+        assert self._briefing_tasks(db_path) == []
+        assert self._last_run_is_recent(db_path)
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
     def test_a_hold_after_config_load_is_refused_at_create_task(self, db_path):
         from istota import user_briefings
@@ -1898,13 +1930,13 @@ class TestCheckBriefingsAdminHold:
             last = last.replace(tzinfo=ZoneInfo("UTC"))
         assert datetime.now(ZoneInfo("UTC")) - last < timedelta(minutes=5)
 
-    def test_resume_lets_it_run_again(self, db_path):
+    def test_resume_takes_effect_in_a_daemon_that_booted_during_the_hold(self, db_path):
         from istota import user_briefings
         from istota.config import _apply_user_briefings
         config, row = self._config_and_row(db_path)
         user_briefings.set_hold(db_path, row.id, admin_id="root")
+        _apply_user_briefings(config)  # the daemon boots while held; nothing reloads after
         user_briefings.clear_hold(db_path, row.id)
-        _apply_user_briefings(config)
         assert len(check_briefings(db_path, config)) == 1
 
 
@@ -1927,6 +1959,7 @@ class TestBriefingDeferredPrompt:
             db_path=db_path, users={"alice": user},
             scheduler=SchedulerConfig(cron_max_staleness_minutes=0),
         )
+        _briefing_rows(db_path, config)
         with db.get_db(db_path) as conn:
             yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).isoformat()
             conn.execute(
@@ -2010,6 +2043,7 @@ class TestBriefingDeferredPrompt:
         )
         (tmp_path / "mount").mkdir()
         with db.get_db(db_path) as conn:
+            briefing_row(conn, "alice", "morning")
             task_id = db.create_task(
                 conn, prompt="Generate the 'morning' briefing.", user_id="alice",
                 source_type="briefing", conversation_token="room1",
@@ -2042,10 +2076,12 @@ class TestBriefingDeferredPrompt:
             temp_dir=tmp_path / "temp",
         )
         with db.get_db(db_path) as conn:
+            briefing_row(conn, "alice", "gone")
             task_id = db.create_task(
                 conn, prompt="Generate the 'gone' briefing.", user_id="alice",
                 source_type="briefing", queue="background", briefing_name="gone",
             )
+            conn.execute("DELETE FROM briefing_configs WHERE name = 'gone'")
             task = db.get_task(conn, task_id)
 
         success, result, _a, _t = execute_task(task, config, [], dry_run=True)
@@ -2108,6 +2144,7 @@ class TestCheckBriefingsStaleGate:
                 ("alice", "morning", "2026-06-14 06:00:00"),
             )
 
+        _briefing_rows(db_path, config)
         result = check_briefings(db_path, config)
         assert len(result) == 1
 
@@ -2130,6 +2167,7 @@ class TestCheckBriefingsStaleGate:
                 ("alice", "morning", "2026-06-14 06:00:00"),
             )
 
+        _briefing_rows(db_path, config)
         result = check_briefings(db_path, config)
         assert len(result) == 1
 
@@ -2600,6 +2638,7 @@ class TestCheckBriefingsDST:
                 ("alice", "morning", "2026-03-07 14:00:00"),
             )
 
+        _briefing_rows(db_path, config)
         result = check_briefings(db_path, config)
         assert len(result) == 1, "Briefing should fire at the correct wall-clock time"
 

@@ -971,6 +971,8 @@ def run_briefing_schedule(
 
     if action == "list":
         found = False
+        db_rows = _ub.list_briefings(config.db_path)
+        held = {(r.user_id, r.name) for r in db_rows if r.admin_hold_at}
         for user_id, user_config in config.users.items():
             if user and user_id != user:
                 continue
@@ -978,8 +980,8 @@ def run_briefing_schedule(
                 continue
             found = True
             for b in user_config.briefings:
-                print(f"{user_id:15} {b.name:10} {b.cron:15} -> {b.conversation_token}")
-        db_rows = _ub.list_briefings(config.db_path)
+                note = " (held by an administrator)" if (user_id, b.name) in held else ""
+                print(f"{user_id:15} {b.name:10} {b.cron:15} -> {b.conversation_token}{note}")
         disabled_rows = [r for r in db_rows if not r.enabled]
         if user:
             disabled_rows = [r for r in disabled_rows if r.user_id == user]

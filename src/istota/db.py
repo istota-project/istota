@@ -1620,8 +1620,8 @@ def create_task(
     if source_type == "briefing" and briefing_name:
         from istota.briefings.group_migrate import require_personal_schedule
         require_personal_schedule(conn, user_id, briefing_name)
-        from istota.user_briefings import require_not_held
-        require_not_held(conn, user_id, briefing_name)
+        from istota.user_briefings import require_runnable
+        require_runnable(conn, user_id, briefing_name)
     if scheduled_job_id is not None:
         from istota.briefings.group_migrate import publisher_retired
         job = get_scheduled_job(conn, scheduled_job_id)

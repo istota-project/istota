@@ -5744,11 +5744,11 @@ def check_briefings(db_path, app_config: Config) -> list[int]:
             try:
                 task_id = _create_briefing_task(conn, user_id, briefing)
             except ValueError as e:
-                if str(e) == "briefing_held":
-                    # Held after this config was loaded. Stamp the slot so the
-                    # next tick does not retry it and a resume waits for the
-                    # next scheduled slot.
-                    logger.info("Briefing '%s' skipped: held by an administrator", briefing.name)
+                if str(e) in ("briefing_held", "briefing_deleted"):
+                    # Held, or deleted since this config was loaded. Stamp the
+                    # slot so the next tick does not retry it and a resume
+                    # waits for the next scheduled slot.
+                    logger.info("Briefing '%s' skipped: %s", briefing.name, e)
                     db.set_briefing_last_run(conn, user_id, briefing.name)
                     continue
                 logger.error(
@@ -9583,6 +9583,10 @@ def run_briefing_now(
             conn, user_id, briefing, parent_task_id=parent_task_id,
         )
     except ValueError as e:
+        if str(e) == "briefing_deleted":
+            return None, f"{label} no longer exists."
+        if str(e) == "briefing_held":
+            return None, f"{label} is paused by an administrator."
         return None, f"{label} can't be queued: {e}"
     logger.info(
         "Briefing '%s' (user: %s) run by hand as task %d",

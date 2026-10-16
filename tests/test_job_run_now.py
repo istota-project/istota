@@ -21,6 +21,8 @@ from istota.config import (
 from istota.credentials.broker import grants
 from istota.scheduler import run_briefing_now, run_scheduled_job_now
 
+from .support.briefing_rows import briefing_row
+
 
 @pytest.fixture
 def config(tmp_path):
@@ -72,6 +74,7 @@ def _failed_job_task(conn, job_id, *, prompt="Write the digest", status="failed"
 
 
 def _failed_briefing_task(conn, *, name="morning"):
+    briefing_row(conn, "alice", name)
     tid = db.create_task(
         conn, prompt=f"Generate the '{name}' briefing.", user_id="alice",
         source_type="briefing", conversation_token="room1", queue="background",
@@ -159,8 +162,27 @@ class TestRetryRoutesToRunNow:
     async def test_a_removed_briefing_is_refused(self, config):
         with db.get_db(config.db_path) as conn:
             old = _failed_briefing_task(conn, name="gone")
+            conn.execute("DELETE FROM briefing_configs WHERE name = 'gone'")
             out = await cmd_retry(_ctx(config, conn, args=f"#{old}"))
         assert "no longer exists" in out
+
+
+class TestBriefingRefusals:
+    def test_a_held_briefing_says_an_administrator_paused_it(self, config):
+        with db.get_db(config.db_path) as conn:
+            briefing_row(conn, "alice", "morning")
+            conn.execute("UPDATE briefing_configs SET admin_hold_at = '2026-10-15T08:00:00+00:00', "
+                         "admin_hold_by = 'root' WHERE name = 'morning'")
+            task_id, refusal = run_briefing_now(conn, config, "alice", "morning")
+        assert task_id is None
+        assert refusal == "Briefing 'morning' is paused by an administrator."
+
+    def test_a_briefing_deleted_since_the_config_loaded_no_longer_exists(self, config):
+        # The in-memory config still lists it, as a running daemon's does.
+        with db.get_db(config.db_path) as conn:
+            task_id, refusal = run_briefing_now(conn, config, "alice", "morning")
+        assert task_id is None
+        assert refusal == "Briefing 'morning' no longer exists."
 
 
 class TestGuards:
@@ -423,6 +445,7 @@ class TestTheFailureNotice:
     def test_a_failed_briefing_raises_a_row(self, tmp_path):
         config = self._config(tmp_path)
         with db.get_db(config.db_path) as conn:
+            briefing_row(conn, "alice", "morning")
             tid = db.create_task(
                 conn, prompt="Generate the 'morning' briefing.", user_id="alice",
                 source_type="briefing", conversation_token="room1",
