@@ -185,6 +185,18 @@ class TestAdminHold:
         cfgmod._apply_user_briefings(cfg)
         assert sorted(x.name for x in cfg.users["alice"].briefings) == ["evening", "morning"]
 
+    def test_hold_leaves_failed_history_alone(self, db_path):
+        from istota import db
+        b = self._row(db_path)
+        old = self._task(db_path, "alice", "morning", "failed")
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE tasks SET error = 'boom', created_at = datetime('now', '-30 days') "
+                         "WHERE id = ?", (old,))
+        user_briefings.set_hold(db_path, b.id, admin_id="root")
+        with db.get_db(db_path) as conn:
+            row = conn.execute("SELECT status, error FROM tasks WHERE id = ?", (old,)).fetchone()
+        assert tuple(row) == ("failed", "boom")
+
     def test_create_task_refuses_a_deleted_briefing(self, db_path):
         from istota import db
         b = self._row(db_path)

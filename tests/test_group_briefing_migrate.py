@@ -93,10 +93,13 @@ def test_cutover_cancels_queued_cached_config_and_rollback(tmp_path, monkeypatch
         archive_before = [tuple(row) for row in content.execute("SELECT * FROM briefing_archive")]
     with db.get_db(config.db_path) as conn:
         task_id = _create_briefing_task(conn, "alice", config.users["alice"].briefings[0])
+        failed_id = _create_briefing_task(conn, "alice", config.users["alice"].briefings[0])
+        conn.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (failed_id,))
     with db.get_db(config.db_path) as conn:
         migration.review_default(conn, config, "daily", actor_id="alice", expected_revision=1, timezone="UTC", dispositions={})
         migration.cutover_default(conn, config, "daily", actor_id="alice", expected_revision=1)
         assert db.get_task(conn, task_id).status == "cancelled"
+        assert db.get_task(conn, failed_id).status == "cancelled"
         assert store.get_definition(conn, result["definition_id"])["enabled"]
         with pytest.raises(ValueError, match="briefing_retired"):
             _create_briefing_task(conn, "alice", config.users["alice"].briefings[0])

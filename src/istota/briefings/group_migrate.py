@@ -331,7 +331,8 @@ def cutover_default(conn, config, name, *, actor_id, expected_revision, now=None
                                  (user, name)).fetchall()
             if any(task["status"] not in ("pending", "completed", "failed", "cancelled") for task in tasks):
                 _error("legacy_tasks_inflight")
-            cancelled = user_briefings.cancel_queued_tasks(conn, user, name)
+            cancelled = user_briefings.cancel_queued_tasks(conn, user, name,
+                                                           statuses=("pending", "failed"))
             for task in tasks:
                 outcomes.append({"task_id": task["id"], "before": task["status"],
                                  "outcome": "cancelled" if task["id"] in cancelled else task["status"]})

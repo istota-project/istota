@@ -270,19 +270,23 @@ def require_runnable(conn: sqlite3.Connection, user_id: str, name: str) -> None:
         raise ValueError("briefing_held")
 
 
-def cancel_queued_tasks(conn: sqlite3.Connection, user_id: str, name: str) -> set[int]:
-    """Cancel the briefing's tasks that have not started; return their ids.
+def cancel_queued_tasks(
+    conn: sqlite3.Connection, user_id: str, name: str,
+    *, statuses: tuple[str, ...] = ("pending",),
+) -> set[int]:
+    """Cancel the briefing's tasks in ``statuses``; return their ids.
 
-    ``pending`` and ``failed`` are cancelled. A task already claimed or running
-    is left to finish. Shared by an administrator's hold and the default
-    briefing cutover in ``group_migrate``.
+    An administrator's hold cancels only ``pending``, so failed history stays
+    as it was. The default briefing cutover in ``group_migrate`` passes
+    ``failed`` too. A task already claimed or running is left to finish.
     """
     from . import db
 
+    placeholders = ", ".join("?" for _ in statuses)
     rows = conn.execute(
         "SELECT id FROM tasks WHERE source_type = 'briefing' AND user_id = ? "
-        "AND briefing_name = ? AND status IN ('pending', 'failed')",
-        (user_id, name),
+        f"AND briefing_name = ? AND status IN ({placeholders})",
+        (user_id, name, *statuses),
     ).fetchall()
     cancelled = set()
     for row in rows:
