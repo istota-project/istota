@@ -353,3 +353,49 @@ def test_group_markets_uses_system_identity_without_browser_profile(env, monkeyp
     gathered = gather_group_sources(replace(context(env, definition), now=NOW.replace(hour=17)))
     assert gathered[0].text == "PUBLIC QUOTES" and len(calls) == 1
     browser.assert_not_called()
+
+
+def test_group_email_reads_the_shared_pool_under_the_system_identity(env, monkeypatch):
+    from istota.briefings.sources.group import gather_group_sources
+    import istota.briefings.sources.email as email
+    seen = []
+
+    def pool(config, ctx):
+        seen.append((config, ctx.user_id, ctx.conn is not None))
+        return GatheredSource(kind="email", title="Newsletters", items=[{"subject": "POOL STORY"}])
+
+    monkeypatch.setattr(email, "resolve", pool)
+    definition = define(env, [source("news", "email", mode="senders", senders=["*@example.com"],
+                                     lookback_hours=12)])
+    gathered = gather_group_sources(context(env, definition))
+    assert gathered[0].items == [{"subject": "POOL STORY"}]
+    assert seen == [({"mode": "senders", "senders": ["*@example.com"], "lookback_hours": 12},
+                     "__system__", True)]
+
+
+@pytest.mark.parametrize("config", [
+    {"mode": "own"}, {"folder": "INBOX"}, {"senders": "*@example.com"},
+    {"senders": [3]}, {"lookback_hours": 0}, {"lookback_hours": "12"}, {"lookback_hours": True},
+])
+def test_group_email_config_is_validated_at_save(env, config):
+    with pytest.raises(GroupError) as exc:
+        define(env, [{"id": "news", "kind": "email", "config": config}])
+    assert exc.value.status_code == 422
+
+
+def test_group_email_accepts_the_config_a_personal_briefing_carries(env):
+    for config in ({}, {"mode": "shared", "lookback_hours": 12},
+                   {"mode": "senders", "senders": ["*@example.com"], "lookback_hours": 6.5}):
+        with db.get_db(env.db_path) as conn:
+            conn.execute("DELETE FROM group_briefing_configs")
+        definition = define(env, [source("news", "email", **config)])
+        assert store.definition_sources(definition)[0]["config"] == config
+
+
+def test_web_group_source_kinds_match_the_server():
+    import re
+    from pathlib import Path
+    from istota.briefings.models import GROUP_SOURCE_KINDS
+    text = (Path(__file__).parents[1] / "web/src/lib/components/briefings/settings/briefingSettings.ts").read_text()
+    body = re.search(r"export const GROUP_SOURCE_KINDS = \[(.*?)\];", text, re.S).group(1)
+    assert set(re.findall(r"'([a-z_]+)'", body)) == GROUP_SOURCE_KINDS

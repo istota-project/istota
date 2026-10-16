@@ -30,6 +30,18 @@ export const SOURCE_KIND_LABELS: Record<string, string> = {
   personal_calendar: "A member's calendar",
 };
 
+/** The source kinds a group briefing can run; `briefings.models.GROUP_SOURCE_KINDS` on the server. */
+export const GROUP_SOURCE_KINDS = [
+  'browse',
+  'markets',
+  'email',
+  'group_memory',
+  'group_file',
+  'shared_block',
+  'personal_file',
+  'personal_calendar',
+];
+
 export function sourceKindLabel(kind: string): string {
   return SOURCE_KIND_LABELS[kind] ?? kind;
 }

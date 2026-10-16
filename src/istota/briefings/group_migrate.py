@@ -226,7 +226,7 @@ def import_default(conn, config, name, *, actor_id, timezone):
         for index, block in enumerate(_migrate.block_specs(legacy)):
             sources = []
             for pos, source in enumerate(block["sources"]):
-                if source["kind"] not in ("browse", "markets", "shared_block"):
+                if source["kind"] not in ("browse", "markets", "email", "shared_block"):
                     issues.append({"block": index, "source": pos, "kind": source["kind"]})
                 else:
                     sources.append({"id": f"source-{index}-{pos}", **source})

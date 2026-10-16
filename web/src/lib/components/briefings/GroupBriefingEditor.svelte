@@ -56,6 +56,7 @@
     channelLabel,
     contributionLabel,
     derivedTitle,
+    GROUP_SOURCE_KINDS,
   } from './settings/briefingSettings';
 
   let {
@@ -127,15 +128,7 @@
   const held = $derived(!!saved?.held);
   const allUsers = $derived(target?.system_key === 'all_users');
   const groupLabel = $derived(target?.label ?? group);
-  const SOURCE_KINDS = [
-    'browse',
-    'markets',
-    'group_memory',
-    'group_file',
-    'shared_block',
-    'personal_file',
-    'personal_calendar',
-  ];
+  const SOURCE_KINDS = GROUP_SOURCE_KINDS;
 
   const payload = $derived.by((): GroupBriefingPayload => {
     const shaped = blocks.map((b) => ({

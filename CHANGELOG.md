@@ -63,6 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Group briefings can use the shared newsletter pool. Duplicating a personal briefing to a group used to leave its Newsletters source out as if it were personal, though the pool holds only mail addressed to no user.
 - Admin › Briefings shows the right "Last run" time for personal and group briefings. Runs were read as the viewer's local time instead of UTC, so a recent run west of UTC showed as "just now" and older ones hours off.
 - Upgrades with legacy default briefings can initialize the database and start the container. Startup now creates the migration journal before preserving the old schedules.
 

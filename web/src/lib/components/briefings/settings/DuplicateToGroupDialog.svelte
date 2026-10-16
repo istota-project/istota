@@ -9,7 +9,7 @@
   import { Button, Modal, NoticeBanner, OptionCards, type OptionCard } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
-  import { briefingSettingsUrl } from './briefingSettings';
+  import { briefingSettingsUrl, GROUP_SOURCE_KINDS } from './briefingSettings';
 
   type SourceDraft = {
     kind: string;
@@ -51,15 +51,7 @@
     onClose: () => void;
   } = $props();
 
-  const GROUP_KINDS = [
-    'browse',
-    'markets',
-    'group_memory',
-    'group_file',
-    'shared_block',
-    'personal_file',
-    'personal_calendar',
-  ];
+  const GROUP_KINDS = GROUP_SOURCE_KINDS;
   const choices = $derived(
     targets.filter(
       (t) => t.scope === 'group' && t.capabilities.author_briefings && t.group_id !== excludeGroup,
