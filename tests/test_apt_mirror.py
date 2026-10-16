@@ -64,7 +64,10 @@ def _instructions(dockerfile: Path) -> list[str]:
 
 
 def _apt_runs(dockerfile: Path) -> list[str]:
-    return [i for i in _instructions(dockerfile) if i.startswith("RUN ") and "apt-get" in i]
+    """The steps that fetch from Debian. The browser's chrome stage runs only
+    `dpkg -i` and `apt-get check`, which read dpkg's status and fetch nothing."""
+    return [i for i in _instructions(dockerfile)
+            if i.startswith("RUN ") and re.search(r"apt-get (update|install)", i)]
 
 
 def _mirror_line(dockerfile: Path) -> str:

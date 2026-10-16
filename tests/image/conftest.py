@@ -181,7 +181,15 @@ def _tag_for(dockerfile: Path, platform: str, prefix: str) -> str:
     return f"istota-test/{prefix}:{revision}-{digest}-{checkout}-{arch}"
 
 
-def build_image(dockerfile: Path, context: Path, *, platform: str = "", prefix: str) -> BuiltImage:
+def build_image(
+    dockerfile: Path,
+    context: Path,
+    *,
+    platform: str = "",
+    prefix: str,
+    target: str = "",
+    build_args: dict[str, str] | None = None,
+) -> BuiltImage:
     """`docker build`, surfacing output only on failure.
 
     Ends the *session* rather than failing a test. `pytest.fail` inside a
@@ -198,6 +206,10 @@ def build_image(dockerfile: Path, context: Path, *, platform: str = "", prefix: 
     argv = ["docker", "build", "-f", str(dockerfile), "-t", tag]
     if platform:
         argv += ["--platform", platform]
+    if target:
+        argv += ["--target", target]
+    for name, value in (build_args or {}).items():
+        argv += ["--build-arg", f"{name}={value}"]
     argv.append(str(context))
 
     result = subprocess.run(argv, capture_output=True, text=True, timeout=BUILD_TIMEOUT)
