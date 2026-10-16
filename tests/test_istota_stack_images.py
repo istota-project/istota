@@ -51,7 +51,7 @@ ARCHIVE = b"a docker save archive\n"
 def _images(tag: str) -> list[dict]:
     return [
         {"ref": f"istota:{tag}", "id": ISTOTA_ID},
-        {"ref": f"istota-browser:{tag}", "id": BROWSER_ID},
+        {"ref": f"istota-browser-base:{tag}", "id": BROWSER_ID},
         {"ref": "nginx:alpine", "id": NGINX_ID},
     ]
 
@@ -104,6 +104,11 @@ def _signed_release(fx: Fixture, tag: str = "v1") -> Path:
     fx.commit(tag)
     fx.tag(tag, key=fx.release_key)
     return _bundle(fx, tag)
+
+
+def _compose_builds(calls: list[str]) -> list[str]:
+    """Builds of the release's images, as opposed to `local-layers`' `docker build`."""
+    return [c for c in calls if c.startswith("compose ") and " build " in f" {c} "]
 
 
 def _loads(fx: Fixture) -> list[str]:
@@ -184,7 +189,7 @@ class TestOnlyImagesTheSignedManifestNamesLoad:
         _assert_nothing_changed(fx, result, before)
         assert len(_loads(fx)) == 1
         removed = fx.docker_calls()
-        for ref in ("istota:v1", "istota-browser:v1", "nginx:alpine"):
+        for ref in ("istota:v1", "istota-browser-base:v1", "nginx:alpine"):
             assert f"image rm {ref}" in removed, removed
 
     def test_an_image_the_manifest_does_not_name_is_refused_and_removed(self, fx, before):
@@ -246,11 +251,48 @@ class TestUpdateFromTheImagesArchive:
         assert result.returncode == 0, result.stdout + result.stderr
         calls = fx.docker_calls()
         assert _loads(fx) == [f"load -i {release / 'images-v1.tar'}"]
-        assert not any(" build " in f" {c} " for c in calls), calls
+        assert _compose_builds(calls) == [], calls
         assert any(" up -d " in f"{c} " for c in calls), calls
         assert "ISTOTA_TAG=v1\n" in fx.env_text()
         assert fx.head() == commit
         assert (fx.stack / "allowed_signers").read_text() == signers
+
+    def test_the_local_layers_are_built_once_the_stack_is_up(self, fx):
+        """Claude Code and Chrome are no release's to carry: built on the VM
+        after the stack runs the release's own images, and then run."""
+        bundle = _signed_release(fx)
+        release = _release_images(fx, "v1", key=fx.release_key)
+        result = fx.run("update", "v1", "--bundle", str(bundle), "--images", str(release),
+                        STUB_LOAD_IDS=_load_ids(_images("v1")), STUB_MISSING_IMAGES="istota-browser:v1",
+                        STUB_IMAGE_ENV_CC=stack_tests.CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        first_up = next(i for i, c in enumerate(calls) if " up -d " in f"{c} ")
+        layers = [i for i, c in enumerate(calls) if c.startswith("build ")]
+        assert [calls[i].split(" -t ")[1].split()[0] for i in layers] == ["istota:v1-cc", "istota-browser:v1"]
+        assert first_up < layers[0]
+        assert any(" up -d " in f"{c} " for c in calls[layers[-1]:]), "not recreated on the layer"
+        assert "ISTOTA_IMAGE=istota:v1-cc\n" in fx.env_text()
+
+    def test_a_layer_that_fails_does_not_fail_the_update(self, fx):
+        bundle = _signed_release(fx)
+        release = _release_images(fx, "v1", key=fx.release_key)
+        result = fx.run("update", "v1", "--bundle", str(bundle), "--images", str(release),
+                        STUB_LOAD_IDS=_load_ids(_images("v1")), STUB_BUILD_FAIL="istota:v1-cc")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "local-layers --status" in result.stderr + result.stdout
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "ISTOTA_IMAGE=\n" in fx.env_text()
+
+    def test_no_layer_is_built_before_there_is_a_config(self, fx):
+        """First launch: no network, and nothing is up to build on."""
+        (fx.stack / "config" / "config.toml").unlink()
+        bundle = _signed_release(fx)
+        release = _release_images(fx, "v1", key=fx.release_key)
+        result = fx.run("update", "v1", "--bundle", str(bundle), "--images", str(release),
+                        STUB_LOAD_IDS=_load_ids(_images("v1")), STUB_MISSING_IMAGES="istota-browser:v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not [c for c in fx.docker_calls() if c.startswith("build ")]
 
     def test_the_releases_own_script_is_told_not_to_build(self, fx):
         """The handoff: the release's istota-stack runs the rest of the update."""
@@ -265,7 +307,7 @@ class TestUpdateFromTheImagesArchive:
                         STUB_LOAD_IDS=_load_ids(_images("v1")))
         assert result.returncode == 0, result.stdout + result.stderr
         assert "handing the update" in result.stdout + result.stderr
-        assert not any(" build " in f" {c} " for c in fx.docker_calls())
+        assert _compose_builds(fx.docker_calls()) == []
         assert "ISTOTA_TAG=v1\n" in fx.env_text()
 
     def test_the_options_may_come_in_any_order(self, fx):

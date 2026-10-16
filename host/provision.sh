@@ -42,6 +42,10 @@
 #   LOCAL_FORWARD_PORT   the Mac port Lima forwards to this VM, written by the
 #                        Mac's istota-stack and empty on a server; setup
 #                        publishes nginx and its setup page on it
+#   ISTOTA_LOCAL_LAYERS  the layers `istota-stack local-layers` builds on a
+#                        release's loaded images, separated by spaces or commas
+#                        (claude-code, chrome); all of them when absent, none
+#                        when empty. A server builds neither and never reads it
 set -euo pipefail
 # The checkout it clones is what the images are built from: under a hardened
 # umask (027) it would be root-only, and out of uid 10001's reach in them.

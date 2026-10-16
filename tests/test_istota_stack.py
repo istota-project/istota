@@ -52,9 +52,37 @@ DOCKER_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$STUB_CALLS"
 [ -z "${COMPOSE_IGNORE_ORPHANS:-}" ] || printf '%s\n' "$*" >> "$STUB_CALLS.ignore-orphans"
 args=" $* "
+# An image is missing when STUB_MISSING_IMAGES names it and no build since
+# made it.
 for ref in ${STUB_MISSING_IMAGES:-}; do
-  case "$args" in *" image inspect $ref "*) exit 1 ;; esac
+  grep -qxF -- "$ref" "$STUB_CALLS.built" 2>/dev/null && continue
+  case "$args" in *" image inspect $ref "*|*" image inspect "*" $ref "*) exit 1 ;; esac
 done
+case " $* " in
+  *" build "*)
+    # What a build was told: ISTOTA_IMAGE as compose would read it, the
+    # Dockerfile on stdin (`-`), and the tag it made. The arm below exits.
+    echo "ISTOTA_IMAGE=${ISTOTA_IMAGE-unset}" >> "$STUB_CALLS.build-image"
+    if [ "${!#}" = - ]; then cat > "$STUB_CALLS.dockerfile"; fi
+    if [ -n "${STUB_BUILD_FAIL:-}" ]; then
+      case "$args" in *"$STUB_BUILD_FAIL"*) echo "npm ERR! network request failed"; exit 1 ;; esac
+    fi
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = -t ] && [ "${STUB_BUILD_RC:-0}" = 0 ]; then echo "$a" >> "$STUB_CALLS.built"; fi
+      prev="$a"
+    done ;;
+  *" image inspect "*"-cc "*)
+    # No Claude Code layer exists, as on a server, unless a build made one or
+    # STUB_CC_IMAGES names it; STUB_IMAGE_ENV_CC is its environment.
+    ref="${!#}"; present=""
+    for r in ${STUB_CC_IMAGES:-} $(cat "$STUB_CALLS.built" 2>/dev/null); do
+      if [ "$r" = "$ref" ]; then present=1; fi
+    done
+    [ -n "$present" ] || exit 1
+    if [ -n "${STUB_IMAGE_ENV_CC+set}" ]; then printf '%s\n' "$STUB_IMAGE_ENV_CC"; fi
+    exit 0 ;;
+esac
 case "$args" in
   *" setup --web "*)
     # The setup server: snapshot what root handed it, run STUB_DURING while it
@@ -139,7 +167,9 @@ case "$args" in
   *" ps -a --filter label=com.docker.compose.project=istota "*) printf '%b' "${STUB_PROJECT_CONTAINERS:-}" ;;
   *" ps -q daemon"*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
   *" ps -q "*) [ -n "${STUB_STACK_DOWN:-}" ] || echo running-container ;;
-  *" --check-schema"*) exit "${STUB_CHECK_RC:-0}" ;;
+  *" --check-schema"*)
+    echo "ISTOTA_IMAGE=${ISTOTA_IMAGE-unset}" >> "$STUB_CALLS.check-env"
+    exit "${STUB_CHECK_RC:-0}" ;;
   *" istota apply "*)
     # What each bind holds while apply runs: target, name, mode, contents.
     prev=""
@@ -4046,3 +4076,223 @@ class TestSetupInTheTerminal:
     def test_a_first_run_takes_no_backup(self, web):
         assert web.run("setup", "--yes").returncode == 0
         assert not (web.stack / "backups").exists()
+
+
+# --- local layers --------------------------------------------------------------
+
+CC_ENV = "ISTOTA_CLAUDE_CODE_INSTALLED=1\nISTOTA_CLAUDE_CODE_VERSION=2.1.296"
+
+
+def _status(fx: Fixture, **env: str) -> dict[str, dict]:
+    result = fx.run("local-layers", "--status", **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [line["layer"] for line in lines] == ["claude-code", "chrome"]
+    return {line["layer"]: line for line in lines}
+
+
+def _layer_builds(fx: Fixture) -> list[str]:
+    return [call for call in fx.docker_calls() if call.startswith("build ")]
+
+
+def _stubfile(fx: Fixture, suffix: str) -> str:
+    path = Path(f"{fx.calls}.{suffix}")
+    return path.read_text() if path.exists() else ""
+
+
+class TestLocalLayers:
+    """`istota-stack local-layers`: what a release's images leave out because
+    it may not be redistributed, built on the VM. Claude Code becomes
+    istota:<tag>-cc, which .env's ISTOTA_IMAGE makes the stack run; Chrome
+    becomes istota-browser:<tag>, the browser Dockerfile's chrome stage on the
+    release's istota-browser-base:<tag>."""
+
+    MISSING = "istota-browser:v0"
+
+    def test_with_nothing_built_both_are_absent(self, fx):
+        status = _status(fx, STUB_MISSING_IMAGES=self.MISSING)
+        assert status["claude-code"]["state"] == "absent"
+        assert status["chrome"]["state"] == "absent"
+
+    def test_status_is_a_read_and_waits_for_no_lock(self, fx):
+        lock = HeldLock(fx.stack / ".stack.lock", "update")
+        try:
+            status = _status(fx, STUB_MISSING_IMAGES=self.MISSING, ISTOTA_STACK_LOCK_WAIT="1")
+        finally:
+            lock.release()
+        assert status["chrome"]["state"] == "absent"
+
+    def test_claude_code_is_built_on_the_release_image_and_run(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING, STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        builds = _layer_builds(fx)
+        assert builds[0] == "build --build-arg CLAUDE_CODE_VERSION=2.1.296 -t istota:v0-cc -"
+        dockerfile = _stubfile(fx, "dockerfile").splitlines()
+        assert dockerfile[0] == "FROM istota:v0"
+        assert 'npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"' in dockerfile[2]
+        assert "ISTOTA_CLAUDE_CODE_INSTALLED=1" in dockerfile[3]
+        assert "ISTOTA_IMAGE=istota:v0-cc\n" in fx.env_text()
+        calls = fx.docker_calls()
+        layer = calls.index(builds[0])
+        assert any(" up -d " in f"{c} " for c in calls[layer:]), "the stack was not recreated on the layer"
+        status = _status(fx, STUB_MISSING_IMAGES=self.MISSING, STUB_IMAGE_ENV_CC=CC_ENV)
+        assert status["claude-code"]["state"] == "ready"
+
+    def test_chrome_is_the_chrome_stage_on_the_releases_base(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING, STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _layer_builds(fx)[1] == (
+            "build --build-arg BROWSER_BASE=istota-browser-base:v0 --target chrome "
+            f"-t istota-browser:v0 {fx.src}/docker/browser"
+        )
+        assert _status(fx, STUB_MISSING_IMAGES=self.MISSING)["chrome"]["state"] == "ready"
+
+    def test_the_version_is_the_releases_when_host_env_pins_none(self, fx):
+        (fx.stack / "host.env").write_text("INGRESS=local\n")
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING,
+                        STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0\nISTOTA_CLAUDE_CODE_VERSION=2.1.300",
+                        STUB_IMAGE_ENV_CC="ISTOTA_CLAUDE_CODE_VERSION=2.1.300")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _layer_builds(fx)[0] == "build --build-arg CLAUDE_CODE_VERSION=2.1.300 -t istota:v0-cc -"
+
+    def test_ready_layers_are_not_built_again(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _layer_builds(fx) == []
+        assert not any(" up -d " in f"{c} " for c in fx.docker_calls())
+
+    def test_a_layer_at_another_version_than_the_pin_is_built_again(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc",
+                        STUB_IMAGE_ENV_CC="ISTOTA_CLAUDE_CODE_VERSION=2.0.1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert [b for b in _layer_builds(fx) if "istota:v0-cc" in b]
+
+    def test_a_failed_layer_leaves_the_stack_on_the_release_image(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING, STUB_BUILD_FAIL="istota:v0-cc")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "ISTOTA_IMAGE=istota" not in fx.env_text()
+        assert not any(" up -d " in f"{c} " for c in fx.docker_calls())
+        status = _status(fx, STUB_MISSING_IMAGES=self.MISSING)
+        assert status["claude-code"]["state"] == "failed"
+        assert "npm ERR! network request failed" in status["claude-code"]["detail"]
+        assert status["chrome"]["state"] == "ready", "one failed layer stopped the other"
+
+    def test_a_failed_layer_is_tried_again_on_the_next_run(self, fx):
+        fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING, STUB_BUILD_FAIL="istota:v0-cc")
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING, STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _status(fx, STUB_IMAGE_ENV_CC=CC_ENV)["claude-code"]["state"] == "ready"
+
+    def test_chrome_without_the_releases_base_image_fails(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=f"{self.MISSING} istota-browser-base:v0",
+                        STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 1
+        assert not [b for b in _layer_builds(fx) if "istota-browser" in b]
+        status = _status(fx, STUB_MISSING_IMAGES=f"{self.MISSING} istota-browser-base:v0")
+        assert status["chrome"]["state"] == "failed"
+        assert "istota-browser-base:v0" in status["chrome"]["detail"]
+
+    def test_a_run_that_died_reads_as_failed_and_a_live_one_as_building(self, fx):
+        layers = fx.stack / "local-layers"
+        layers.mkdir()
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (layers / "chrome.state").write_text(f"state=building\ntag=v0\npid={dead.pid}\n")
+        (layers / "claude-code.state").write_text(f"state=building\ntag=v0\npid={os.getpid()}\n")
+        status = _status(fx, STUB_MISSING_IMAGES=self.MISSING)
+        assert status["chrome"]["state"] == "failed"
+        assert status["claude-code"]["state"] == "building"
+
+    def test_opting_out_of_claude_code_removes_the_layer(self, fx):
+        (fx.stack / "host.env").write_text('INGRESS=local\nCLAUDE_CODE_VERSION=2.1.296\nISTOTA_LOCAL_LAYERS="chrome"\n')
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("local-layers", STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_IMAGE=\n" in fx.env_text()
+        calls = fx.docker_calls()
+        assert not [b for b in _layer_builds(fx) if "-cc" in b]
+        up = next(i for i, c in enumerate(calls) if " up -d " in f"{c} ")
+        assert up < calls.index("image rm istota:v0-cc")
+        status = _status(fx)
+        assert status["claude-code"]["state"] == "absent"
+        assert "ISTOTA_LOCAL_LAYERS" in status["claude-code"]["detail"]
+
+    def test_a_stopped_stack_is_not_started(self, fx):
+        result = fx.run("local-layers", STUB_MISSING_IMAGES=self.MISSING, STUB_IMAGE_ENV_CC=CC_ENV,
+                        STUB_STACK_DOWN="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_IMAGE=istota:v0-cc\n" in fx.env_text()
+        assert not any(" up -d " in f"{c} " for c in fx.docker_calls())
+
+    def test_it_takes_the_stack_lock(self, fx):
+        lock = HeldLock(fx.stack / ".stack.lock", "update")
+        try:
+            result = fx.run("local-layers", ISTOTA_STACK_LOCK_WAIT="1")
+        finally:
+            lock.release()
+        assert result.returncode == 1
+        assert "istota-stack update" in result.stderr
+        assert _layer_builds(fx) == []
+
+
+class TestTheClaudeCodeLayerAcrossTags:
+    """ISTOTA_IMAGE names one tag's layer. A switch to another tag points it at
+    that tag's layer or clears it, and nothing that names a tag of its own (a
+    build, rollback's schema check) runs or tags the running tag's layer."""
+
+    def test_a_build_ignores_the_running_layer(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_CC_IMAGES="istota:v0-cc")
+        assert result.returncode == 0, result.stdout + result.stderr
+        seen = _stubfile(fx, "build-image").splitlines()
+        assert seen and set(seen) == {"ISTOTA_IMAGE="}, seen
+        assert "ISTOTA_IMAGE=\n" in fx.env_text()
+        assert not _layer_builds(fx), "a server update built a local layer"
+
+    def test_an_update_to_the_running_tag_keeps_its_layer(self, fx):
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("update", "v0", STUB_CC_IMAGES="istota:v0-cc")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_IMAGE=istota:v0-cc\n" in fx.env_text()
+
+    @pytest.fixture
+    def updated(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        (fx.stack / ".env").write_text(fx.env_text().replace("ISTOTA_IMAGE=\n", "ISTOTA_IMAGE=istota:v1-cc\n"))
+        fx.calls.unlink()
+        return fx
+
+    def test_rollback_runs_the_previous_tags_layer(self, updated):
+        result = updated.run("rollback", STUB_CC_IMAGES="istota:v0-cc istota:v1-cc")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_IMAGE=istota:v0-cc\n" in updated.env_text()
+        assert _stubfile(updated, "check-env") == "ISTOTA_IMAGE=\n", "the schema check ran another image"
+
+    def test_rollback_to_a_tag_without_a_layer_clears_it(self, updated):
+        result = updated.run("rollback", STUB_CC_IMAGES="istota:v1-cc")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_IMAGE=\n" in updated.env_text()
+
+    def test_a_layer_is_kept_and_pruned_with_its_tag(self, fx):
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        result = fx.run("update", "v1", STUB_IMAGES="istota:v0\nistota:v0-cc\nistota:v1\nistota:old\nistota:old-cc\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        removed = [c for c in fx.docker_calls() if c.startswith("image rm ")]
+        assert "image rm istota:old-cc" in removed
+        assert "image rm istota:v0-cc" not in removed
+
+    def test_check_image_reads_the_layer_the_stack_runs(self, fx):
+        (fx.stack / "config" / "config.toml").write_text('[brain]\nkind = "claude_code"\n')
+        without = "ISTOTA_CLAUDE_CODE_INSTALLED=0\nISTOTA_CLAUDE_CODE_VERSION=2.1.296"
+        assert fx.run("check-image", STUB_IMAGE_ENV=without).returncode == 2
+        (fx.stack / ".env").write_text(fx.env_text() + "ISTOTA_IMAGE=istota:v0-cc\n")
+        result = fx.run("check-image", STUB_IMAGE_ENV=without,
+                        STUB_CC_IMAGES="istota:v0-cc", STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
