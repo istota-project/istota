@@ -4,7 +4,7 @@
   // on a plain `config` object via an `onChange(patch)` callback. File checks
   // are advisory and never write the draft.
   import { onDestroy } from 'svelte';
-  import { checkBriefingPath, getBriefingPathSuggestions } from '$lib/api';
+  import { checkBriefingPath, getBriefingPathSuggestions, type EmailAccount } from '$lib/api';
   import { AutocompleteInput, Button, Input, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsField } from '$lib/components/settings';
 
@@ -18,6 +18,7 @@
     userId?: string;
     fileOptions?: string[];
     calendarOptions?: SelectOption[];
+    emailAccounts?: EmailAccount[];
     ownerFixed?: boolean;
   }
 
@@ -31,8 +32,24 @@
     userId = '',
     fileOptions = [],
     calendarOptions = [],
+    emailAccounts = [],
     ownerFixed = false,
   }: Props = $props();
+
+  // Until the account list loads, the bot address stands in: it is the default
+  // the server reads when the config names no account.
+  const accountOptions = $derived<SelectOption[]>(
+    emailAccounts.length
+      ? emailAccounts.map((account) => ({
+          value: account.id,
+          label: account.address ? `${account.label} (${account.address})` : account.label,
+          disabled: !account.available,
+        }))
+      : [{ value: 'bot', label: 'Your bot address' }],
+  );
+  const selectedAccount = $derived(
+    emailAccounts.find((account) => account.id === ((config.account as string) || 'bot')),
+  );
 
   let pathSuggestions = $state<string[]>([]);
   let pathStatus = $state<'' | 'checking' | 'ok' | 'missing'>('');
@@ -293,6 +310,31 @@
       min="1"
       value={(config.lookback_hours as number) ?? ''}
       placeholder="default"
+      oninput={(e) => patchNumber('lookback_hours', (e.target as HTMLInputElement).value)}
+    />
+  </SettingsField>
+{:else if kind === 'my_email'}
+  <SettingsField
+    label="Account"
+    warning={selectedAccount && !selectedAccount.available ? selectedAccount.reason : undefined}
+  >
+    <Select
+      value={(config.account as string) || 'bot'}
+      options={accountOptions}
+      onValueChange={(v) => onChange({ account: v })}
+      ariaLabel="Email account"
+      fullWidth
+    />
+    {#each emailAccounts.filter((account) => !account.available && account !== selectedAccount) as account (account.id)}
+      <p class="caption">{account.label}: {account.reason}</p>
+    {/each}
+  </SettingsField>
+  <SettingsField label="Lookback (hours)" hint="Leave blank to read the past 24 hours.">
+    <input
+      type="number"
+      min="1"
+      value={(config.lookback_hours as number) ?? ''}
+      placeholder="24"
       oninput={(e) => patchNumber('lookback_hours', (e.target as HTMLInputElement).value)}
     />
   </SettingsField>

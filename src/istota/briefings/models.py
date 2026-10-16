@@ -33,6 +33,9 @@ SOURCE_KINDS = (
     "todos",
     "reminders",
     "notes",
+    # The user's own mail from one connected account. Personal only: it is in
+    # neither GROUP_SOURCE_KINDS nor ALLOWED_SHARED_SOURCE_KINDS.
+    "my_email",
     # Curated shared content read from the shared_kv store. `shared_block` is a
     # module-owned shared block (namespace "briefing_shared_blocks", key = block
     # name). It can be synthesis or structured — the block's render_mode decides,
@@ -61,9 +64,17 @@ STRUCTURED_KINDS = ("markets", "calendar")
 
 
 # Draft definitions only; runtime pickers supply feed, site, file and shared names.
+# A starting directive for templates that need one. Source config stays empty:
+# each resolver supplies its own defaults.
+_TEMPLATE_DIRECTIVES = {
+    "my_email": (
+        "List the five most pressing action items from my email in the past "
+        "24 hours, as bullet points. Name who is asking and by when."
+    ),
+}
 BLOCK_TEMPLATES = [
     {"id": template_id, "label": label, "description": description, "block": {
-        "title": label, "directive": "", "render_mode": mode,
+        "title": label, "directive": _TEMPLATE_DIRECTIVES.get(template_id, ""), "render_mode": mode,
         "options": {"presentation": {"width": "auto"}},
         "sources": [{"kind": kind, "config": {}, "enabled": True}] if kind else [],
     }}
@@ -71,6 +82,7 @@ BLOCK_TEMPLATES = [
         ("feeds", "News from feeds", "Choose a feed subscription or category.", "rss", "synthesis"),
         ("websites", "News from websites", "Choose a site preset or enter a URL.", "browse", "synthesis"),
         ("newsletters", "Newsletters", "Summarize newsletters from your email sources.", "email", "synthesis"),
+        ("my_email", "My email", "Action items from an inbox you connected.", "my_email", "synthesis"),
         ("calendar", "Calendar", "Show your upcoming calendar events.", "calendar", "structured"),
         ("markets", "Markets", "Show the current market summary.", "markets", "structured"),
         ("tasks", "Tasks", "Choose a file containing your tasks.", "todos", "synthesis"),

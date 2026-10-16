@@ -474,8 +474,8 @@ class TestAtomicBlockWrites:
     def test_catalog_contains_editable_defaults_without_user_selections(self, client):
         config = client.get("/istota/api/briefings/config").json()
         catalog = config["block_templates"]
-        assert [t["label"] for t in catalog] == ["News from feeds", "News from websites", "Newsletters", "Calendar", "Markets", "Tasks", "Notes", "Reminder", "Shared content", "Custom"]
-        assert len({t["id"] for t in catalog}) == 10
+        assert [t["label"] for t in catalog] == ["News from feeds", "News from websites", "Newsletters", "My email", "Calendar", "Markets", "Tasks", "Notes", "Reminder", "Shared content", "Custom"]
+        assert len({t["id"] for t in catalog}) == 11
         for template in catalog:
             assert template["description"]
             block = template["block"]
