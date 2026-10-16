@@ -19,7 +19,7 @@ import os
 import sys
 
 from istota.skills._cli import emit as _output, parse_and_resolve, run_skill_cli
-from istota.skills._hostpath import READ, host_path
+from istota.skills._hostpath import READ, WRITE, host_path
 
 
 def _unwrap_inner_error(raw: str) -> str:
@@ -718,6 +718,51 @@ def cmd_work_remove(args):
     _output(_run(["work", "remove", str(args.entry_id)]))
 
 
+def cmd_work_export(args):
+    """Export work entries and invoices, read-only.
+
+    Calls :mod:`istota.money.work_export` directly rather than through the
+    Click tree, since what it prints with no ``--out`` is the export, not an
+    envelope ``_run`` could parse. ``--out`` is a host path resolved at parse
+    (``WRITE``), so ``args.out`` already *is* the resolved path, and the write
+    goes through ``write_resolved`` so a link planted after the check is not
+    followed.
+    """
+    from pathlib import Path
+
+    from istota.money import work_export
+    from istota.money.work import WorkStoreBlocked, bind_db_path
+    from istota.sandbox.host_paths import write_resolved
+
+    _user_id, _cfg, user_ctx, err = _resolve_context()
+    if err:
+        _output(err)
+        return
+    if user_ctx.data_dir is None:
+        _output({"status": "error", "error": "No data_dir configured"})
+        return
+    bind_db_path(user_ctx.data_dir, user_ctx.db_path)
+    try:
+        export = work_export.collect(user_ctx.data_dir, year=args.year)
+    except WorkStoreBlocked as exc:
+        _output({"status": "error", "error": str(exc)})
+        return
+    text = work_export.render(export, args.format)
+    if not args.out:
+        sys.stdout.write(text)
+        return
+    out = Path(args.out)
+    try:
+        write_resolved(out, text.encode("utf-8"))
+    except OSError as exc:
+        _output({"status": "error", "error": f"could not write {out}: {exc.strerror or exc}"})
+        return
+    _output({
+        "status": "ok", "path": str(out), "format": args.format, "year": args.year,
+        "entries": len(export.entries), "invoices": len(export.invoices),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Portfolio commands
 # ---------------------------------------------------------------------------
@@ -1111,6 +1156,15 @@ def build_parser():
     p_wr = work_sub.add_parser("remove", help="Remove work entry")
     p_wr.add_argument("entry_id", type=int, help="Entry ID")
 
+    p_we = work_sub.add_parser(
+        "export", help="Export work entries and invoices (prints to stdout if no --out)",
+    )
+    p_we.add_argument("--format", choices=["csv", "json"], default="csv",
+                      help="csv for a spreadsheet, json for a complete copy")
+    p_we.add_argument("--year", type=int, help="Only entries dated in this year")
+    host_path(p_we, "--out", "-o", mode=WRITE, default=None,
+              help="Workspace path to write the export to")
+
     # --- Portfolio commands (nested subparser) ---
     p_pf = sub.add_parser("portfolio", help="Portfolio positions snapshots")
     pf_sub = p_pf.add_subparsers(dest="portfolio_command")
@@ -1225,6 +1279,7 @@ def commands() -> dict:
         "work add": cmd_work_add,
         "work update": cmd_work_update,
         "work remove": cmd_work_remove,
+        "work export": cmd_work_export,
         "portfolio import": cmd_portfolio_import,
         "portfolio snapshots": cmd_portfolio_snapshots,
         "portfolio summary": cmd_portfolio_summary,

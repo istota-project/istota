@@ -19,7 +19,7 @@ import threading
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.routing import APIRoute
@@ -1296,6 +1296,36 @@ async def api_work_list(
         rows = [r for r in rows if r["paid_date"]]
 
     return {"status": "ok", "entries": rows, "totals": totals}
+
+
+@router.get("/work/export")
+async def api_work_export(
+    format: str = "csv",
+    year: int | None = Query(default=None, ge=1, le=9999),
+    user_ctx: UserContext = Depends(get_user_config),
+):
+    """Download work entries and invoices as CSV or JSON (``money.work_export``)."""
+    from istota.money import work_export
+
+    if format not in work_export.EXPORT_FORMATS:
+        return JSONResponse(
+            {"status": "error", "error": "unknown format — expected csv or json"},
+            status_code=400,
+        )
+    data_dir = user_ctx.data_dir
+    if data_dir:
+        export = work_export.collect(data_dir, year=year)
+    else:
+        export = work_export.WorkExport(Path("."), [], [], year)
+    return Response(
+        work_export.render(export, format),
+        media_type=work_export.MEDIA_TYPES[format],
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="{work_export.filename(format, year)}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/work")

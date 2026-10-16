@@ -429,6 +429,11 @@ def _untag(value):
     return value
 
 
+def tagged_extra(extra: dict) -> dict:
+    """``extra`` as plain JSON, dates tagged the way the store keeps them."""
+    return _tag(extra or {})
+
+
 def _encode_extra(extra: dict) -> str:
     return json.dumps(_tag(extra or {}), sort_keys=True, ensure_ascii=False)
 
@@ -1217,6 +1222,21 @@ def list_invoices(
     """Every invoice record, by number."""
     with _reading(data_dir, conn) as c:
         return read_invoices(c, client=client, include_voided=include_voided)
+
+
+def read_snapshot(
+    data_dir: Path, *, conn: sqlite3.Connection | None = None,
+) -> tuple[list[WorkEntry], list[InvoiceRecord]]:
+    """Every entry and every invoice, read in one transaction so they agree."""
+    with _reading(data_dir, conn) as c:
+        own = not c.in_transaction
+        if own:
+            c.execute("BEGIN")
+        try:
+            return read_entries(c), read_invoices(c)
+        finally:
+            if own:
+                c.rollback()
 
 
 def get_invoice_numbers(data_dir: Path) -> list[str]:
