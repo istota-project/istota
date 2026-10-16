@@ -14,6 +14,7 @@
  */
 
 import type { EmailNoteParts, MailDiscuss, ReceivedMail } from '../api';
+import type { ShareObservation } from '../location/shareMap';
 
 export interface ToolEntry {
   id: string; // tool_call_id (or synthesized t<n> / h<n>)
@@ -294,6 +295,9 @@ export interface ChatMessage {
   receivedMail?: ReceivedMail;
   // An email note's parts (ISSUE-644), as sent.
   emailNote?: EmailNoteParts;
+  // Assistant rows only: the location shares the answer carries a map of,
+  // validated from the server's `location_shares` by the chat store.
+  locationShares?: LocationShareCardData[];
 
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
   // User rows this client originated, only. Absent means settled — which every
@@ -855,4 +859,49 @@ export function applyEvent(m: ChatMessage, kind: string, payload: Record<string,
       if (!m.text) m.text = answerText(m);
       break;
   }
+}
+
+/** One location share card: the observation `ShareMap` draws, and its labels. */
+export interface LocationShareCardData {
+  cardId: number;
+  ownerLabel: string;
+  mapUrl: string;
+  observation: ShareObservation;
+}
+
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** Only a web link opens from the card; anything else is not a map link. */
+export function isWebUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
+/**
+ * One element of the server's `location_shares` as a card, or null when a
+ * field the map or its label needs is missing or out of shape.
+ */
+export function locationShareCard(raw: unknown): LocationShareCardData | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (r.precision !== 'exact' && r.precision !== 'area') return null;
+  if (!isFiniteNumber(r.lat) || !isFiniteNumber(r.lon)) return null;
+  if (typeof r.map_url !== 'string' || !isWebUrl(r.map_url)) return null;
+  if (typeof r.owner_user_id !== 'string' || !r.owner_user_id) return null;
+  if (typeof r.observed_at !== 'string') return null;
+  const ownerLabel =
+    typeof r.owner_label === 'string' && r.owner_label ? r.owner_label : r.owner_user_id;
+  return {
+    cardId: isFiniteNumber(r.card_id) ? r.card_id : 0,
+    ownerLabel,
+    mapUrl: r.map_url,
+    observation: {
+      precision: r.precision,
+      lat: r.lat,
+      lon: r.lon,
+      accuracy_m: isFiniteNumber(r.accuracy_m) ? r.accuracy_m : null,
+      observed_at: r.observed_at,
+      freshness: typeof r.freshness === 'string' ? r.freshness : '',
+      owner_user_id: r.owner_user_id,
+    },
+  };
 }
