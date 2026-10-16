@@ -1,6 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { BriefingBlock, BriefingBlockSave, BriefingSourceDraft } from '$lib/api';
+  import type {
+    BriefingBlock,
+    BriefingBlockSave,
+    BriefingSourceDraft,
+    EmailAccount,
+  } from '$lib/api';
   import { Trash2 } from '@lucide/svelte';
   import {
     Button,
@@ -32,6 +37,7 @@
     userId?: string;
     fileOptions?: string[];
     calendarOptions?: SelectOption[];
+    emailAccounts?: EmailAccount[];
     onSave: (payload: BriefingBlockSave) => Promise<void>;
     onCancel: () => void;
   }
@@ -48,6 +54,7 @@
     userId = '',
     fileOptions = [],
     calendarOptions = [],
+    emailAccounts = [],
     onSave,
     onCancel,
   }: Props = $props();
@@ -265,6 +272,7 @@
               {userId}
               {fileOptions}
               {calendarOptions}
+              {emailAccounts}
             />
           </div>
         </div>

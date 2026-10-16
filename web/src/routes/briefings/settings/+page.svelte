@@ -14,6 +14,7 @@
     getBrowsePresets,
     getFeedOptions,
     getSharedBlockOptions,
+    getEmailAccounts,
     type BriefingBlock,
     type BriefingConfigResponse,
     type BriefingRoomOption,
@@ -21,6 +22,7 @@
     type BrowsePreset,
     type FeedOptions,
     type SharedBlockOption,
+    type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
   import { ConfirmDialog, EmptyState, KebabMenu, type KebabItem } from '$lib/components/ui';
@@ -70,6 +72,7 @@
   let presets = $state<BrowsePreset[]>([]);
   let feedOptions = $state<FeedOptions | null>(null);
   let sharedBlockOptions = $state<SharedBlockOption[]>([]);
+  let emailAccounts = $state<EmailAccount[]>([]);
   let targets = $state<BriefingTarget[]>([]);
   let channels = $state<string[]>(['in_app']);
   let deploymentTimezone = $state('UTC');
@@ -184,6 +187,9 @@
         getSharedBlockOptions()
           .then((r) => (sharedBlockOptions = r.options))
           .catch(() => (sharedBlockOptions = [])),
+        getEmailAccounts()
+          .then((r) => (emailAccounts = r.accounts))
+          .catch(() => (emailAccounts = [])),
         getProfile()
           .then((r) => {
             emailHtml = r.profile?.briefing_email_html !== false;
@@ -409,6 +415,7 @@
         {rssOptions}
         sharedBlockOptions={sharedBlockSelectOptions}
         feedsAvailable={!!feedOptions?.available && rssOptions.length > 0}
+        {emailAccounts}
         {outputs}
         {rooms}
         editBlockId={params.get('name') === personalName

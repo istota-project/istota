@@ -54,6 +54,7 @@ await fillApiDouble(api, {
   })),
   getBriefingPathSuggestions: vi.fn(async () => ({ paths: [] })),
   getSharedBlockOptions: vi.fn(async () => ({ options: [] })),
+  getEmailAccounts: vi.fn(async () => ({ accounts: [] })),
   getProfile: vi.fn(async () => ({ profile: { briefing_email_html: true, managed: [] } })),
   getSharedBlocks: vi.fn(async () => ({
     shared_blocks: [block(answers.queue.length > 1 ? answers.queue.shift()! : answers.queue[0])],
