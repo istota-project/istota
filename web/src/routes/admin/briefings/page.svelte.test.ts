@@ -109,6 +109,12 @@ it('lists both kinds with schedule, delivery and one state badge each', async ()
   expect(within(team).getByText('Running')).toBeTruthy();
 });
 
+it('lays out as a full-width card pane like the other admin panes', async () => {
+  render(Page);
+  const table = await personalTable();
+  expect(table.closest('.admin-page')?.classList.contains('card-pane')).toBe(true);
+});
+
 it('filters both lists by owner, group and title', async () => {
   render(Page);
   await personalTable();

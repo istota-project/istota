@@ -211,7 +211,7 @@
   );
 </script>
 
-<div class="settings admin-page">
+<div class="settings admin-page card-pane">
   {#if personal === null && !loadError}
     <PageLoading label="Loading briefings…" />
   {:else if personal === null}
@@ -332,8 +332,14 @@
 
 <style>
   .filter-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
     margin-bottom: var(--space-4);
-    max-width: 24rem;
+    max-width: 36rem;
+  }
+  .filter-row :global(.ui-input) {
+    flex: 1;
   }
   .cell-main {
     overflow-wrap: anywhere;
