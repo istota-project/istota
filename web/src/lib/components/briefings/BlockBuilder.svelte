@@ -11,6 +11,19 @@
     type KebabItem,
     type SelectOption,
   } from '$lib/components/ui';
+  import {
+    Bell,
+    CalendarDays,
+    Globe,
+    ListChecks,
+    Mail,
+    NotebookPen,
+    Plus,
+    Rss,
+    Share2,
+    TrendingUp,
+    type LucideIcon,
+  } from '@lucide/svelte';
   import BlockEditor from './BlockEditor.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
   import { sourceKindLabel } from './settings/briefingSettings';
@@ -58,6 +71,7 @@
   let error = $state('');
   let deleteError = $state('');
   let announcement = $state('');
+  const uid = $props.id();
   const filtered = $derived(
     templates.filter((template) =>
       `${template.label} ${template.description}`
@@ -65,6 +79,36 @@
         .includes(search.trim().toLowerCase()),
     ),
   );
+
+  // Presentation only: a template id the client does not know lands in "More" with a plain icon.
+  const PRESET_ICONS: Record<string, LucideIcon> = {
+    feeds: Rss,
+    websites: Globe,
+    newsletters: Mail,
+    calendar: CalendarDays,
+    markets: TrendingUp,
+    tasks: ListChecks,
+    notes: NotebookPen,
+    reminder: Bell,
+    shared: Share2,
+    custom: Plus,
+  };
+  const PRESET_GROUPS: { label: string; ids: string[] }[] = [
+    { label: 'News', ids: ['feeds', 'websites', 'newsletters', 'markets'] },
+    { label: 'Your day', ids: ['calendar', 'tasks', 'reminder', 'notes'] },
+  ];
+  const groupedPresets = $derived.by(() => {
+    const groups = PRESET_GROUPS.map((group) => ({
+      label: group.label,
+      items: group.ids.flatMap((id) => filtered.filter((template) => template.id === id)),
+    }));
+    const known = new Set(PRESET_GROUPS.flatMap((group) => group.ids));
+    groups.push({
+      label: 'More',
+      items: filtered.filter((template) => !known.has(template.id)),
+    });
+    return groups.filter((group) => group.items.length);
+  });
 
   function blockPayload(block: BriefingBlock, copy = false): BriefingBlockSave {
     return JSON.parse(
@@ -338,7 +382,7 @@
   <Modal
     open={true}
     title="Add block"
-    width="600px"
+    width="640px"
     onOpenChange={(next) => {
       picking = next;
     }}
@@ -349,19 +393,39 @@
       aria-label="Search presets"
       placeholder="Search presets"
     />
-    <ul class="preset-list">
-      {#each filtered as template (template.id)}
-        <li>
-          <Button
-            variant="secondary"
-            onclick={() => choose(template)}
-            disabled={!!unavailable(template)}>{template.label}</Button
-          >
-          <p class="caption">{template.description}</p>
-          {#if unavailable(template)}<p class="caption">{unavailable(template)}</p>{/if}
-        </li>
-      {/each}
-    </ul>
+    {#each groupedPresets as group (group.label)}
+      <section class="preset-group" aria-labelledby={`${uid}-group-${group.label}`}>
+        <h3 class="micro-label" id={`${uid}-group-${group.label}`}>{group.label}</h3>
+        <ul class="preset-grid">
+          {#each group.items as template (template.id)}
+            {@const reason = unavailable(template)}
+            {@const PresetIcon = PRESET_ICONS[template.id] ?? Plus}
+            <li>
+              <button
+                type="button"
+                class="preset"
+                onclick={() => choose(template)}
+                disabled={!!reason}
+                aria-labelledby={`${uid}-${template.id}-label`}
+                aria-describedby={`${uid}-${template.id}-desc`}
+              >
+                <span class="preset-icon" aria-hidden="true"><PresetIcon size={18} /></span>
+                <span class="preset-text">
+                  <span class="preset-label" id={`${uid}-${template.id}-label`}
+                    >{template.label}</span
+                  >
+                  <span
+                    class="caption preset-desc"
+                    class:unavailable={!!reason}
+                    id={`${uid}-${template.id}-desc`}>{reason || template.description}</span
+                  >
+                </span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/each}
     {#if !filtered.length}<EmptyState size="sm">No matching presets.</EmptyState>{/if}
     {#snippet footer()}<Button
         variant="secondary"
@@ -438,8 +502,7 @@
     justify-content: flex-start;
     gap: var(--space-2);
   }
-  .block-list,
-  .preset-list {
+  .block-list {
     list-style: none;
     padding: 0;
     margin: 0;
@@ -468,7 +531,82 @@
   p {
     margin: var(--space-1) 0;
   }
-  .preset-list {
-    margin-top: var(--space-3);
+  .preset-group {
+    margin-top: var(--space-4);
+  }
+  .preset-group h3 {
+    margin: 0 0 var(--space-2);
+  }
+  .preset-grid {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+    gap: var(--space-2);
+  }
+  .preset-grid li {
+    display: flex;
+  }
+  .preset {
+    flex: 1;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    font: inherit;
+    line-height: 1.4;
+    text-align: left;
+    color: var(--text-primary);
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
+    cursor: pointer;
+    transition:
+      border-color var(--transition-fast),
+      background var(--transition-fast);
+  }
+  .preset:hover:not(:disabled) {
+    border-color: var(--border-hover);
+    background: var(--surface-raised);
+  }
+  .preset:disabled {
+    cursor: not-allowed;
+  }
+  .preset:disabled .preset-icon,
+  .preset:disabled .preset-label {
+    opacity: 0.5;
+  }
+  .preset-icon {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: var(--radius-md);
+    background: var(--surface-badge);
+    color: var(--text-secondary);
+  }
+  .preset-text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .preset-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+  /* Two lines reserved and no more, so every tile is one height across groups and widths. */
+  .preset-desc {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    min-height: 2lh;
+  }
+  .preset-desc.unavailable {
+    color: var(--status-warn-fg);
   }
 </style>

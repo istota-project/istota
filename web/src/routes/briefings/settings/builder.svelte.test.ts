@@ -561,8 +561,12 @@ describe('briefing block builder', () => {
     await mount();
     await fireEvent.click(screen.getByRole('button', { name: 'Add block' }));
     const picker = await screen.findByRole('dialog', { name: 'Add block' });
-    expect(within(picker).getByRole('button', { name: 'News from feeds' })).toBeDisabled();
-    expect(picker).toHaveTextContent('Enable Feeds and subscribe to a feed first');
+    const feeds = within(picker).getByRole('button', { name: 'News from feeds' });
+    expect(feeds).toBeDisabled();
+    expect(feeds).toHaveAccessibleDescription('Enable Feeds and subscribe to a feed first.');
+    expect(within(picker).getByRole('button', { name: 'Calendar' })).toHaveAccessibleDescription(
+      'Your connected calendars.',
+    );
     await fireEvent.click(within(picker).getByRole('button', { name: 'Custom' }));
     const editor = await screen.findByRole('dialog', { name: 'New block' });
     await fireEvent.click(within(editor).getByRole('button', { name: 'Save block' }));
