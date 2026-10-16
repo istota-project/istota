@@ -516,7 +516,7 @@ def test_deleting_a_definition_revokes_its_grants_and_closes_its_requests(env):
         open_row = conn.execute(requests, (str(requested["id"]),)).fetchone()
         assert open_row is not None
         for definition in (approved, requested):
-            store.delete_definition(conn, definition["id"], admin_id="admin")
+            store.delete_definition(conn, definition["id"], actor_id="admin")
         assert conn.execute("SELECT COUNT(*) FROM group_briefing_source_grants WHERE definition_id=? "
                             "AND revoked_at IS NULL", (approved["id"],)).fetchone()[0] == 0
         assert conn.execute(requests, (str(requested["id"]),)).fetchone() is None

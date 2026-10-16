@@ -47,7 +47,7 @@ def seeded(configured, monkeypatch):
                                        actor_id="admin", expected_revision=0, is_admin=True)
         gone = store.save_definition(conn, config, "family", payload(name="gone", channel="in_app"),
                                      actor_id="alice", expected_revision=0)
-        store.delete_definition(conn, gone["id"], admin_id="admin")
+        store.delete_definition(conn, gone["id"], actor_id="admin")
     return {"alice": alice, "ghost": ghost, "family": family, "common": common, "everyone": everyone}
 
 

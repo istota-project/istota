@@ -224,7 +224,7 @@ def _group_delete_check(conn, config, actor, definition_id, confirm):
 
 def _group_delete(conn, config, actor, definition_id):
     definition = _definition(conn, definition_id)
-    group_store.delete_definition(conn, definition_id, admin_id=actor)
+    group_store.delete_definition(conn, definition_id, actor_id=actor)
     _log("delete", "group", definition_id, definition["group_id"], actor)
     _group_notify(conn, config, actor, definition, _groups(conn), "delete")
     return {"ok": True, "deleted": True, "id": definition_id}

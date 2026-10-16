@@ -6640,6 +6640,15 @@ export function saveGroupBriefing(
     body: JSON.stringify(payload),
   });
 }
+/** An owner deletes a disabled definition; an enabled one is refused with
+ *  `disable_first`, a stale `revision` with `revision_conflict`. */
+export function deleteGroupBriefing(
+  group: string,
+  name: string,
+  revision: number,
+): Promise<{ ok: true; deleted: true; id: number }> {
+  return groupRequest(groupBriefingPath(group, name), 'DELETE', { revision });
+}
 export function getBriefingAudience(group: string, name: string): Promise<BriefingAudience> {
   return apiFetch(groupBriefingPath(group, name) + '/audience');
 }

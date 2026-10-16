@@ -501,3 +501,33 @@ it('reports a refused enable while held as a failed action, not lost access', as
   expect(screen.queryByText('You can no longer edit this briefing')).toBeNull();
   clearNotices();
 });
+
+it('lets an owner delete a disabled draft after confirming', async () => {
+  api.deleteGroupBriefing.mockResolvedValue({ ok: true, deleted: true, id: 7 });
+  await openEditor();
+  await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Delete briefing' });
+  expect(
+    within(dialog).getByText(/delete News\? It stops for every member of Research/),
+  ).toBeTruthy();
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+  await waitFor(() => expect(api.deleteGroupBriefing).toHaveBeenCalledWith('research', 'news', 1));
+});
+
+it('offers no delete on an enabled briefing until it is turned off', async () => {
+  saved = { ...definition(), enabled: true };
+  await openEditor();
+  await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+  const item = await screen.findByRole('menuitem', { name: 'Delete (turn off first)' });
+  expect(item).toHaveAttribute('aria-disabled', 'true');
+  expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull();
+});
+
+it('offers no delete when the definition says the caller cannot author', async () => {
+  caps = { author_briefings: false, generate_briefings: false };
+  await openEditor();
+  await fireEvent.keyDown(screen.getByLabelText('Briefing actions'), { key: 'Enter' });
+  await screen.findByRole('menuitem', { name: 'Duplicate to a group' });
+  expect(screen.queryByRole('menuitem', { name: /^Delete/ })).toBeNull();
+});

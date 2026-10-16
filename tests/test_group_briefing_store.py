@@ -594,7 +594,7 @@ def test_delete_stops_work_renames_keeps_history_and_frees_the_name(env):
     from istota.briefings import group_store as store
     with db.get_db(env.db_path) as conn:
         definition, run, queued = _published_with_queued(conn, env)
-        assert store.delete_definition(conn, definition["id"], admin_id="admin") is None
+        assert store.delete_definition(conn, definition["id"], actor_id="admin") is None
         deleted = store.get_definition(conn, definition["id"])
         assert deleted["deleted_at"] and deleted["deleted_by"] == "admin"
         assert deleted["name"] == f"deleted-{definition['id']}-daily" and deleted["title"] == "Daily news"
@@ -616,7 +616,7 @@ def test_delete_truncates_the_renamed_name_to_the_name_limit(env):
     from istota.briefings import group_store as store
     with db.get_db(env.db_path) as conn:
         definition = define(conn, env, name="n" * 100, enabled=False)
-        store.delete_definition(conn, definition["id"], admin_id="admin")
+        store.delete_definition(conn, definition["id"], actor_id="admin")
         name = store.get_definition(conn, definition["id"])["name"]
         assert len(name) == 100 and name.startswith(f"deleted-{definition['id']}-n")
 
@@ -625,11 +625,11 @@ def test_a_deleted_definition_refuses_authoring_runs_and_admin_actions(env):
     from istota.briefings import group_store as store
     with db.get_db(env.db_path) as conn:
         definition = define(conn, env)
-        store.delete_definition(conn, definition["id"], admin_id="admin")
+        store.delete_definition(conn, definition["id"], actor_id="admin")
         deleted = store.get_definition(conn, definition["id"])
         for action in (
-            lambda: store.delete_definition(conn, definition["id"], admin_id="admin"),
-            lambda: store.delete_definition(conn, 9999, admin_id="admin"),
+            lambda: store.delete_definition(conn, definition["id"], actor_id="admin"),
+            lambda: store.delete_definition(conn, 9999, actor_id="admin"),
             lambda: store.enqueue_run(conn, env, definition["id"], due_at=NOW, now=NOW),
             lambda: enqueue(conn, env, definition, mode="preview"),
             lambda: store.save_definition(conn, env, "team", payload(name=deleted["name"], enabled=False),
@@ -653,10 +653,10 @@ def test_delete_refuses_a_definition_under_an_unfinished_migration(env, state):
                      "VALUES (?, ?, ?, '{}')", ("default:daily", definition["id"], state))
         conn.commit()
         if state in ("cutover", "rolled_back"):
-            store.delete_definition(conn, definition["id"], admin_id="admin")
+            store.delete_definition(conn, definition["id"], actor_id="admin")
             assert store.get_definition(conn, definition["id"])["deleted_at"]
             return
         with pytest.raises(GroupError) as exc:
-            store.delete_definition(conn, definition["id"], admin_id="admin")
+            store.delete_definition(conn, definition["id"], actor_id="admin")
         assert (exc.value.status_code, exc.value.code) == (409, "migration_pending")
         assert store.get_definition(conn, definition["id"]) == definition
