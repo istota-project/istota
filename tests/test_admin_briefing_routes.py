@@ -95,6 +95,17 @@ class TestTheList:
         assert "PRIVATE COMPONENT" not in response.text
         assert "Write a short edition" not in response.text
 
+    async def test_last_run_is_marked_utc(self, admin, configured):
+        # SQLite stamps a naive UTC string; the browser reads a zoneless value as
+        # local time, so an evening run west of UTC rendered as "just now".
+        with db.get_db(configured._config.db_path) as conn:
+            db.set_briefing_last_run(conn, "alice", "weekly")
+            stored = db.get_briefing_last_run(conn, "alice", "weekly")
+        body = (await admin.get(ROOT)).json()
+        personal = {row["name"]: row for row in body["personal"]}
+        assert personal["weekly"]["last_run_at"] == stored.replace(" ", "T") + "Z"
+        assert personal["old"]["last_run_at"] is None
+
     async def test_a_non_admin_is_refused_every_route(self, client, configured, seeded):
         session(client, configured, "alice")
         alice_id, daily_id = seeded["alice"].id, seeded["family"]["id"]
