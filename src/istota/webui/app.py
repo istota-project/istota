@@ -16570,43 +16570,7 @@ async def api_map_basemap(user: dict = Depends(_require_api_auth)):
     """
     from . import map_basemap
 
-    # `getattr` rather than attribute access, matching `check_basemap`: a Config
-    # with `web` unset would otherwise raise here and 500, which is the blank
-    # rectangle this endpoint promises never to produce.
-    web_cfg = getattr(_config, "web", None) if _config else None
-    cfg = getattr(web_cfg, "map", None)
-    user_key = ""
-    if _config is not None:
-        try:
-            from istota.credentials import store as secrets_store
-
-            # Stripped once, at the read, so `select_provider` and the
-            # `api_key=` below cannot disagree about whether this user has a
-            # key. They used to: one tested `.strip()` and the other bare
-            # truthiness, so a stored "  " selected the configured provider
-            # while overriding its working key with whitespace.
-            user_key = (
-                secrets_store.get_secret(
-                    _config.db_path, user["username"], "carto", "api_key"
-                )
-                or ""
-            ).strip()
-        except Exception:  # noqa: BLE001 - a map must render without the store
-            logger.warning("basemap: could not read the stored carto key", exc_info=True)
-            user_key = ""
-
-    if cfg is None:
-        return map_basemap.resolve_basemap().as_dict()
-
-    provider = map_basemap.select_provider(cfg.provider, user_api_key=user_key)
-    spec = map_basemap.resolve_basemap(
-        provider=provider,
-        api_key=user_key or cfg.api_key,
-        dark_style=cfg.dark_style,
-        light_style=cfg.light_style,
-        attribution=cfg.attribution,
-    )
-    return spec.as_dict()
+    return map_basemap.basemap_for_user(_config, user["username"]).as_dict()
 
 
 @api_router.get("/location/settings-info")

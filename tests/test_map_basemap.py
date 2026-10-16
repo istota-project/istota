@@ -220,3 +220,80 @@ class TestBasemapSpecDirectly:
         assert payload["dark"] == "d"
         assert payload["light"] == "l"
         assert payload["attribution"] == "a"
+
+
+class TestBasemapForUser:
+    """`basemap_for_user`: deployment config and a user's stored key, resolved once.
+
+    The web endpoint and the PNG renderer both read it, so a user's map looks
+    the same in their browser and in a snapshot posted on their behalf.
+    """
+
+    @pytest.fixture
+    def config(self, monkeypatch, tmp_path):
+        from dataclasses import replace
+
+        from istota import db
+        from istota.config import Config, WebMapConfig
+
+        db_path = tmp_path / "basemap.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        cfg = Config()
+        cfg.db_path = db_path
+
+        def with_map(**kwargs):
+            cfg.web = replace(cfg.web, map=WebMapConfig(**kwargs))
+            return cfg
+
+        cfg.with_map = with_map  # type: ignore[attr-defined]
+        return cfg
+
+    def test_the_default_deployment_resolves_the_keyless_provider(self, config):
+        from istota.webui.map_basemap import basemap_for_user
+
+        spec = basemap_for_user(config, "alice")
+        assert spec.provider == "openfreemap"
+        assert spec.needs_key is False
+
+    def test_a_stored_key_selects_carto_for_that_user_only(self, config):
+        from istota.credentials import store as secrets_store
+        from istota.webui.map_basemap import basemap_for_user
+
+        secrets_store.set_secret(config.db_path, "alice", "carto", "api_key", "alicekey")
+        alice = basemap_for_user(config, "alice")
+        bob = basemap_for_user(config, "bob")
+        assert alice.provider == "carto"
+        assert "api_key=alicekey" in alice.light
+        assert bob.provider == "openfreemap"
+        assert "alicekey" not in bob.light
+
+    def test_the_deployment_key_applies_when_the_user_has_none(self, config):
+        from istota.webui.map_basemap import basemap_for_user
+
+        config.with_map(provider="carto", api_key="deploykey")
+        spec = basemap_for_user(config, "alice")
+        assert "api_key=deploykey" in spec.light
+
+    def test_a_broken_store_still_resolves_a_usable_basemap(self, config, monkeypatch):
+        import istota.credentials.store as store
+        from istota.webui.map_basemap import basemap_for_user
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("db is gone")
+
+        monkeypatch.setattr(store, "get_secret", _boom)
+        assert basemap_for_user(config, "alice").provider == "openfreemap"
+
+    def test_a_config_with_no_web_section_resolves_the_default(self):
+        from types import SimpleNamespace
+
+        from istota.webui.map_basemap import basemap_for_user
+
+        spec = basemap_for_user(SimpleNamespace(db_path=None), "alice")
+        assert spec.provider == "openfreemap"
+
+    def test_no_config_resolves_the_default(self):
+        from istota.webui.map_basemap import basemap_for_user
+
+        assert basemap_for_user(None, "alice").provider == "openfreemap"
