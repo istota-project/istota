@@ -20,7 +20,8 @@ than importing the tier modules, so a witness in an artifact tier is counted
 without that tier's fixtures being loaded.
 
 Rows 1 to 20 are that spec's. The local-VM spec (a Lima VM on the Mac running
-the same stack) adds its own as `L1` onward, held the same way.
+the same stack) adds its own as `L1` onward, held the same way, and the Mac app
+spec its `M` rows, under that spec's own numbers.
 
 Every row is in exactly one of three states: witnessed (some test carries the
 decorator for it), pending (named in `PENDING` with the stage that will close
@@ -64,6 +65,8 @@ ROWS: dict[int | str, str] = {
     "L2": "no container reaches a host loopback service unless its port is allowed",
     "L3": "only the workspace folder, and in developer mode the read-only checkout, crosses from the Mac",
     "L4": "the Mac shims run as uid 10001 with no capabilities",
+    # The Mac app spec's rows, numbered as that spec numbers them.
+    "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
 }
 
 NOT_WITNESSED: dict[int, str] = {

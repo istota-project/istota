@@ -571,6 +571,8 @@ istota-stack update                          # the newest signed release (vX.Y.Z
 istota-stack update TAG                      # verify a signed release tag, build it, switch to it
 istota-stack update --unsigned TAG           # any tag, without the signature check, for this run
 istota-stack update --unsigned latest        # the tip of main, recorded as main-<12 hex>
+istota-stack update TAG --bundle FILE        # the same signed release, its tag from a bundle, no fetch from origin
+istota-stack trust-signer KEY                # print the key's fingerprint and make it the release key
 istota-stack latest-tag                      # the name `update --unsigned latest` would install; changes nothing
 istota-stack rollback [--force]              # back to the previous tag, if its image can run the database
 istota-stack setup [istota setup flags]      # the terminal wizard (first install, or --force to change it)
@@ -596,9 +598,9 @@ istota-stack stage [--daemon] PATH | unstage PATH   # hand a file from the Mac t
 istota-stack help
 ```
 
-`update` refuses a branch, a bare commit, a lightweight or unsigned tag, and a signature the release key in `allowed_signers` does not accept; `--unsigned` drops only the signature checks. A failed build leaves the previous tag running. `rollback` asks the previous image whether it can run the database first, and `--force` goes back to a release from before the state directory, onto the old state volume. Both reprovision the host when the release changed what `provision.sh` installs.
+`update` refuses a branch, a bare commit, a lightweight or unsigned tag, and a signature the release key in `allowed_signers` does not accept; `--unsigned` drops only the signature checks. `--bundle` takes the one tag from a git bundle (the Mac app's release) instead of fetching from origin, never over a tag the checkout already has, and is refused with `--unsigned`. No update changes `allowed_signers`: `trust-signer` is the only way the release key changes, and it writes `RELEASE_SIGNING_KEY` in `host.env` with it. A failed build leaves the previous tag running. `rollback` asks the previous image whether it can run the database first, and `--force` goes back to a release from before the state directory, onto the old state volume. Both reprovision the host when the release changed what `provision.sh` installs.
 
-Every verb that writes (`update`, `rollback`, `setup`, `apply`, `put-files`, `import-bare-metal`, `restore`, `import-standalone`, `retire-bare-metal`, `localize-workspace`, `up`, `down`, `host-env KEY=VALUE`) takes one lock. A second one waits up to ten minutes, then names the verb holding it. `setup --web` never waits, and `config-apply` exits quietly when another verb holds the lock. `setup-cancel` takes no lock, since the setup it ends holds it.
+Every verb that writes (`update`, `rollback`, `setup`, `apply`, `put-files`, `import-bare-metal`, `restore`, `import-standalone`, `retire-bare-metal`, `localize-workspace`, `up`, `down`, `host-env KEY=VALUE`, `trust-signer`) takes one lock. A second one waits up to ten minutes, then names the verb holding it. `setup --web` never waits, and `config-apply` exits quietly when another verb holds the lock. `setup-cancel` takes no lock, since the setup it ends holds it.
 
 `setup --force` and `setup --web --force` first copy `.env`, `host.env` and `rclone.conf` into `/srv/app/istota/backups/setup-<time>/`, keeping the newest ten. `setup --web --force` then copies the config and the secrets aside, pauses the browser watchdog timer and stops the stack before it prints the address. A finished run installs the new files and starts the stack and the timer again. A run that does not finish (Ctrl-C, `setup-cancel`, an idle hour) puts the previous config and secrets back and starts the stack on them. `--local` publishes the page on `127.0.0.1:<LOCAL_FORWARD_PORT>` from `host.env`, 8080 when that is empty. `restore` and `import-standalone` are for a stack that was never set up, and all three imports refuse while any container of the stack is running.
 

@@ -66,9 +66,16 @@ class TestTheMatrix:
 
     def test_the_local_vm_rows_are_l_rows_without_gaps(self):
         """The local-VM spec's rows, `L1` onward, each added with its witness."""
-        local = [row for row in parity.ROWS if not isinstance(row, int)]
+        local = [row for row in parity.ROWS if isinstance(row, str) and row.startswith("L")]
         assert local and all(re.fullmatch(r"L[1-9]\d*", row) for row in local), local
         assert sorted(int(row[1:]) for row in local) == list(range(1, len(local) + 1))
+
+    def test_the_mac_app_rows_are_m_rows(self):
+        """The Mac app spec's rows keep that spec's numbers (M1, M5 onward), so
+        they have gaps; each is added with its witness."""
+        named = [row for row in parity.ROWS if isinstance(row, str)]
+        mac = [row for row in named if not row.startswith("L")]
+        assert all(re.fullmatch(r"M[1-9]\d*", row) for row in mac), mac
 
     def test_row_14_alone_is_not_witnessed_by_design(self):
         assert set(parity.NOT_WITNESSED) == {14}

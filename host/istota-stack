@@ -8,6 +8,12 @@
 #                               the same for any tag, signed or not, on request
 #   istota-stack update --unsigned latest
 #                               the tip of main, recorded as main-<commit>
+#   istota-stack update <tag> --bundle FILE
+#                               the same signed release, its tag taken from a git bundle
+#                               (the Mac app's release) rather than fetched from origin
+#   istota-stack trust-signer KEY
+#                               print the fingerprint of KEY, one line of an SSH public
+#                               key, and make it the one key releases are verified against
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
 #   istota-stack rollback       back to the previous tag, if its image can run the database;
 #                               reprovisions the host as update does
@@ -94,6 +100,11 @@
 # of origin's main and records it as main-<first 12 hex of the commit>, which
 # names that commit for good, so rollback and the image tags work as for a tag.
 # A main-<hex> name resolves only to a commit of main, never to any commit.
+#
+# `update <tag> --bundle FILE` changes only where the tag comes from: the one
+# tag is fetched out of the bundle, never over an existing tag of that name,
+# and verified as any release is. It refuses --unsigned. `trust-signer` is the
+# one way the release key changes, and no update writes allowed_signers.
 set -euo pipefail
 # A hardened host (umask 027) would check the tree out root-only, and the
 # image builds copy those modes in, out of uid 10001's reach.
@@ -665,21 +676,48 @@ latest_name() {
 
 # --- commands ----------------------------------------------------------------
 
+# The release's tag from a git bundle, in place of origin: that one ref and
+# nothing else. Without a `+` git will not move a tag the checkout already has,
+# so a bundle cannot repoint a name an earlier update or a rollback trusts.
+fetch_release_bundle() {
+    local bundle="$1" tag="$2"
+    case "$bundle" in /*) ;; *) bundle="${PWD}/${bundle}" ;; esac
+    [ -f "$bundle" ] || die "${bundle} is not a file; nothing was changed."
+    verified_git fetch --quiet --no-tags "$bundle" "refs/tags/${tag}:refs/tags/${tag}" \
+        || die "could not take ${tag} from ${bundle} (no such tag in it, or a different ${tag} is already here); nothing was changed."
+}
+
 cmd_update() {
-    local unsigned=""
-    if [ "${1:-}" = "--unsigned" ]; then unsigned=1; shift; fi
-    local newest=""
-    if [ "$#" -eq 0 ] && [ -z "$unsigned" ]; then
+    local unsigned="" bundle="" tag="" tags=0 newest=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --unsigned) unsigned=1 ;;
+            --bundle)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                bundle="$2"
+                shift ;;
+            *) tag="$1"; tags=$((tags + 1)) ;;
+        esac
+        shift
+    done
+    if [ -n "$bundle" ] && [ -n "$unsigned" ]; then
+        refuse_tag "--bundle installs only a signed release; --unsigned is refused with it."
+    fi
+    if [ "$tags" -eq 0 ] && [ -z "$unsigned" ] && [ -z "$bundle" ]; then
         newest=1
-    elif [ "$#" -ne 1 ]; then
+    elif [ "$tags" -ne 1 ]; then
         usage >&2; exit 64
     fi
-    local tag="${1:-}" object before
+    local object before
     [ -n "$newest" ] || check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
-    verified_git fetch --quiet --tags origin \
-        "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
-        || die "git fetch failed; nothing was changed."
+    if [ -n "$bundle" ]; then
+        fetch_release_bundle "$bundle" "$tag"
+    else
+        verified_git fetch --quiet --tags origin \
+            "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
+            || die "git fetch failed; nothing was changed."
+    fi
     if [ -n "$newest" ]; then
         tag="$(verified_git tag --list | newest_release_tag)" \
             || die "origin has no release tag (vX.Y.Z); \`istota-stack update <tag>\` names one. Nothing was changed."
@@ -2178,6 +2216,27 @@ cmd_host_env() {
     done
 }
 
+# The release key, replaced: the only way it changes on an existing install,
+# since no update writes it. Printed first, so the caller can show what it is
+# about to trust. host.env is written too, or provision.sh puts the old key back.
+cmd_trust_signer() {
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local key="$1" fingerprint previous
+    # A bare key line: a leading option (cert-authority, namespaces=...) would
+    # widen what allowed_signers trusts.
+    if ! [[ "$key" =~ ^(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+)\ [A-Za-z0-9+/]+=*(\ [^\"]*)?$ ]]; then
+        die "trust-signer takes one line of an SSH public key; allowed_signers is unchanged."
+    fi
+    fingerprint="$(printf '%s\n' "$key" | ssh-keygen -l -f - 2>/dev/null)" \
+        || die "that is not an SSH public key ssh-keygen can read; allowed_signers is unchanged."
+    previous="$(awk '{ $1 = ""; $2 = ""; print }' "$ALLOWED_SIGNERS" 2>/dev/null \
+        | ssh-keygen -l -f - 2>/dev/null || true)"
+    echo "release key: ${fingerprint}"
+    [ -z "$previous" ] || echo "replacing:   ${previous}"
+    cmd_host_env "RELEASE_SIGNING_KEY=${key}"
+    log "releases are verified against this key from now on"
+}
+
 # Move a path the Mac CLI copied into the VM into a fresh directory under
 # staging/, 0700, so the verb it is for reads it from a place no other account
 # can change. A plan stays root's (apply copies it on for 10001); an export is
@@ -2578,7 +2637,7 @@ main() {
             fi ;;
         # Holds the update's lock through descriptor 9 or refuses; never waits.
         update-from-checkout) ;;
-        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down)
+        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down|trust-signer)
             take_stack_lock "$command" ;;
         # Setting a key writes host.env, which setup and restore write too;
         # reading one is a read. stage and unstage take none: each makes or
@@ -2611,6 +2670,7 @@ main() {
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;
         host-env) cmd_host_env "$@" ;;
+        trust-signer) cmd_trust_signer "$@" ;;
         stage) cmd_stage "$@" ;;
         unstage) cmd_unstage "$@" ;;
         -h|--help|help) usage ;;
