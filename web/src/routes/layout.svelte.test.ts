@@ -430,6 +430,39 @@ describe('the setup route', () => {
   });
 });
 
+describe('the map snapshot route', () => {
+  // The page the browser service captures for a location share's PNG runs in
+  // a fresh, cookie-free context: no session to load and nothing to poll.
+  const snapshotChild = createRawSnippet(() => ({ render: () => '<p>snapshot page</p>' }));
+
+  it.each(['/map-snapshot', '/map-snapshot/'])(
+    'renders %s bare, with no identity request and no shell',
+    async (path) => {
+      page.url = new URL(`http://localhost${path}`);
+      getMe.mockResolvedValue(person());
+
+      render(Layout, { children: snapshotChild });
+
+      expect(await screen.findByText('snapshot page')).toBeInTheDocument();
+      expect(screen.queryByRole('navigation')).toBeNull();
+      expect(getMe).not.toHaveBeenCalled();
+      expect(startConnectivity).not.toHaveBeenCalled();
+      expect(startNotificationPoll).not.toHaveBeenCalled();
+      expect(startNavUnreadPoll).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still gates a route that merely starts with the same letters', async () => {
+    page.url = new URL('http://localhost/map-snapshots/');
+    getMe.mockResolvedValue(person());
+
+    render(Layout, { children: snapshotChild });
+
+    expect(await screen.findByText('Alice')).toBeInTheDocument();
+    expect(getMe).toHaveBeenCalled();
+  });
+});
+
 it.each([true, false, undefined])(
   'shows Groups only with its navigation capability (%s)',
   async (visible) => {
