@@ -651,6 +651,15 @@ export function invoicePdfUrl(invoice_number: string): string {
   return `${base}/api/money/invoices/${encodeURIComponent(invoice_number)}/pdf`;
 }
 
+export type WorkExportFormat = 'csv' | 'json';
+
+/** Download URL for the work log export: CSV per entry, or the complete JSON record. */
+export function workExportUrl(format: WorkExportFormat, year?: string): string {
+  const q = new URLSearchParams({ format });
+  if (year) q.set('year', year);
+  return `${base}/api/money/work/export?${q.toString()}`;
+}
+
 /** Work entries — the input side of invoicing. */
 export interface WorkEntryRow {
   /** Stable id. Empty until the backfill runs; such a row isn't editable. */

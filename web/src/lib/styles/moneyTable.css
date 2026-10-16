@@ -221,6 +221,8 @@
 /* Column label that sorts. Sits in .money-table-header, so it has to shed the
    button defaults and inherit the label type. */
 .money-sortable {
+  display: inline-flex;
+  align-items: center;
   background: none;
   border: none;
   color: var(--text-dim);
@@ -234,18 +236,21 @@
   text-align: left;
 }
 
-.money-sortable:hover {
+.money-sortable:hover,
+.money-sortable.is-sorted {
   color: var(--text-muted);
 }
 
+/* The arrow slot: an up/down pair at rest, the direction once sorted. Dim
+   until it is the sort, so the header reads which column is in charge. */
 .money-sort-arrow {
-  font-size: var(--text-2xs);
-  vertical-align: middle;
+  display: inline-flex;
   margin-left: 0.15rem;
   opacity: 0.5;
 }
 
-.money-sortable:hover .money-sort-arrow {
+.money-sortable:hover .money-sort-arrow,
+.money-sortable.is-sorted .money-sort-arrow {
   opacity: 1;
 }
 
