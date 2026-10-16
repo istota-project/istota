@@ -256,8 +256,10 @@ def validate_shared_block_payload(payload: dict) -> dict:
     }
 
 
+# `email` is the shared newsletter pool: unowned mail only, read under no user's
+# identity, so it is public to the installation rather than personal.
 GROUP_SOURCE_KINDS = frozenset({
-    "browse", "markets", "group_memory", "group_file", "shared_block",
+    "browse", "markets", "email", "group_memory", "group_file", "shared_block",
     "personal_file", "personal_calendar",
 })
 GROUP_CHANNELS = ("in_app", "email", "talk", "ntfy")
@@ -273,6 +275,21 @@ def normalize_text_file_reference(raw):
             or not path.lower().endswith((".txt", ".md", ".markdown"))):
         raise ValueError("select one relative text file")
     return path
+
+
+def normalize_group_email_config(config):
+    if set(config) - {"mode", "senders", "lookback_hours"}:
+        raise ValueError("unknown newsletter source setting")
+    if config.get("mode", "shared") not in ("shared", "senders"):
+        raise ValueError("newsletter mode must be shared or senders")
+    senders = config.get("senders", [])
+    if (not isinstance(senders, list) or len(senders) > 100
+            or not all(isinstance(s, str) and 0 < len(s) <= 200 for s in senders)):
+        raise ValueError("newsletter senders must be a list of patterns")
+    hours = config.get("lookback_hours", 12)
+    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not 0 < hours <= 24 * 30:
+        raise ValueError("newsletter lookback must be between 0 and 720 hours")
+    return dict(config)
 
 
 def normalize_group_resource_config(kind, config):
@@ -351,6 +368,8 @@ def _group_sources(raw, seen):
             config = normalize_contribution_config(kind, config, allow_pending=True)
         elif kind in ("group_memory", "group_file"):
             config = normalize_group_resource_config(kind, config)
+        elif kind == "email":
+            config = normalize_group_email_config(config)
         sources.append({"id": source_id, "kind": kind, "config": config})
     return sources
 
