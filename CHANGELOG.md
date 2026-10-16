@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The admin Status page lays its cards out in columns that pack by height, like Groups, instead of one long column. The status banner and the Users table keep the full width.
 - `[users.X.briefings]` in `config.toml` is retired. Each entry is imported once into the briefings database, and the config reports the block until it is removed; a briefing deleted in the settings page no longer comes back on restart. Every personal briefing is now editable by its owner, with no "Set by your administrator" lock.
 
 - **The work log and invoices moved into the money database.** Each invoice now has a record with the total it was issued at, split by income account, so a later rate change no longer alters past invoices, `invoice paid` books exactly that total (manual items included, where a manual-only invoice used to be refused as having no billable items), and generating, voiding and paying each happen in one step that cannot be left half done. An invoice is paid as a whole; payment is no longer recorded per work entry. See `docs/features/money.md`.
