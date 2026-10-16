@@ -1,0 +1,114 @@
+# mac-desktop-app Stage 1 (b)/(d): a VM from the appliance disk. What Stage 5's
+# appliance mode in host/lima/istota.yaml is expected to look like, cut down to
+# what the measurements need. boot-appliance.sh fills in @IMAGE@ and @DIGEST@.
+#
+# No `base:`: the image is the local appliance file, and `_images/debian-13`
+# would add its own download beside it.
+minimumLimaVersion: 2.0.0
+
+images:
+  - location: "@IMAGE@"
+    arch: aarch64
+    digest: "@DIGEST@"
+
+vmType: vz
+cpus: 4
+memory: 4GiB
+disk: 40GiB
+
+vmOpts:
+  vz:
+    rosetta:
+      enabled: true
+      binfmt: true
+
+containerd:
+  system: false
+  user: false
+
+param:
+  RELEASE_SIGNING_KEY: ""
+  WORKSPACE: ""
+  # 1 drops every new outbound connection before provision runs.
+  OFFLINE: "1"
+  # 1 skips `apt-get update` the way Stage 2's offline rule would.
+  OFFLINE_RULE: "0"
+
+mounts:
+  - location: "{{.Param.WORKSPACE}}"
+    mountPoint: /srv/mount/host-folder
+    writable: true
+
+mountType: virtiofs
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -uo pipefail
+      exec > >(tee -a /var/tmp/spike-provision.log) 2>&1
+      STACK=/srv/app/istota
+      echo "[spike] boot $(date +%s.%N)"
+      # What the generalize step's finish unit left, then gone.
+      cat /var/tmp/spike-finish.log 2>/dev/null; rm -f /var/tmp/spike-finish.log
+      echo "[spike] users with a home: $(awk -F: '$6 ~ /^\/home\// { print $1 }' /etc/passwd | tr '\n' ' ')"
+      if [ -e "${STACK}/.lima-bootstrapped" ]; then exit 0; fi
+
+      if [ "${PARAM_OFFLINE}" = 1 ]; then
+          # The guest agent and Lima's ssh are inbound or vsock; replies pass.
+          iptables -I OUTPUT 1 -o lo -j ACCEPT
+          iptables -I OUTPUT 2 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          iptables -I OUTPUT 3 -j LOG --log-prefix "spike-out-drop: " --log-level 4
+          iptables -I OUTPUT 4 -j REJECT
+          ip6tables -I OUTPUT 1 -o lo -j ACCEPT
+          ip6tables -I OUTPUT 2 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          ip6tables -I OUTPUT 3 -j REJECT
+          echo "[spike] outbound blocked"
+      fi
+
+      # Every apt-get and curl the provision makes, recorded.
+      for tool in apt-get curl; do
+          real="$(command -v "$tool")"
+          cat > "/usr/local/sbin/${tool}" <<EOF
+      #!/bin/bash
+      echo "\$(date +%s.%N) ${tool} \$*" >> /var/tmp/spike-calls.log
+      if [ "${tool}" = apt-get ] && [ "\${SPIKE_OFFLINE_RULE:-0}" = 1 ] && [ "\${1:-}" = update ]; then
+          echo "\$(date +%s.%N) ${tool} update skipped (offline rule)" >> /var/tmp/spike-calls.log
+          exit 0
+      fi
+      exec ${real} "\$@"
+      EOF
+          chmod 0755 "/usr/local/sbin/${tool}"
+      done
+
+      # What the Mac CLI writes with `istota-stack host-env` after start.
+      install -d -m 0755 "$STACK"
+      cat > "${STACK}/host.env" <<EOF
+      RELEASE_SIGNING_KEY=${PARAM_RELEASE_SIGNING_KEY}
+      STORAGE=host-folder
+      INGRESS=local
+      HOST_LOOPBACK_BLOCK=1
+      HOST_GATEWAY_ADDR=192.168.5.2
+      LOCAL_FORWARD_PORT=18481
+      EOF
+
+      t0="$(date +%s.%N)"
+      PATH="/usr/local/sbin:$PATH" SPIKE_OFFLINE_RULE="${PARAM_OFFLINE_RULE}" \
+          "${STACK}/src/host/provision.sh"
+      rc=$?
+      echo "[spike] provision.sh exit ${rc} in $(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }') s (offline=${PARAM_OFFLINE} rule=${PARAM_OFFLINE_RULE})"
+      echo "[spike] apt-get update runs: $(grep -c ' apt-get update' /var/tmp/spike-calls.log)"
+      [ "$rc" -ne 0 ] || touch "${STACK}/.lima-bootstrapped"
+      exit 0
+
+probes:
+  - script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      timeout 600s bash -c "until grep -q 'provision.sh exit' /var/tmp/spike-provision.log; do sleep 1; done"
+
+portForwards:
+  - guestIP: 127.0.0.1
+    guestPort: 18481
+    hostIP: 127.0.0.1
+    hostPort: 18481
