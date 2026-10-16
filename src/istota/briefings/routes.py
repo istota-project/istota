@@ -129,7 +129,6 @@ def _map_archive(row: ArchivedBriefing, *, with_body: bool = True) -> dict:
     }
     if with_body:
         out["body_md"] = row.body_md
-    out["preview"] = edition_preview(row.body_md, row.document)
     return out
 
 
@@ -187,7 +186,10 @@ def get_archive(
         total = bdb.count_archive(conn, briefing_name=briefing_name)
         names = bdb.list_briefing_names(conn)
     return {
-        "items": [_map_archive(r) for r in rows],
+        "items": [
+            {**_map_archive(r), "preview": edition_preview(r.body_md, r.document)}
+            for r in rows
+        ],
         "total": total,
         "briefing_names": names,
     }
