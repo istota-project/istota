@@ -195,6 +195,38 @@ describe('workspace file viewer through the host', () => {
     expect(screen.getByRole('heading', { name: 'Hello' })).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
+  it('draws the header actions as named icons, with the view toggle reporting its state', async () => {
+    preview.mockResolvedValue(text('note.md', '# Hello'));
+    open('/note.md');
+    await screen.findByRole('heading', { name: 'Hello' });
+    const rendered = screen.getByRole('button', { name: 'Rendered' });
+    const source = screen.getByRole('button', { name: 'Source' });
+    const download = screen.getByRole('link', { name: 'Download' });
+    for (const control of [rendered, source, download]) {
+      expect(control.textContent?.trim()).toBe('');
+      expect(control.querySelector('svg')).not.toBeNull();
+      expect(control).toHaveAttribute('title', control.getAttribute('aria-label'));
+    }
+    expect(rendered).toHaveAttribute('aria-pressed', 'true');
+    expect(source).toHaveAttribute('aria-pressed', 'false');
+    await fireEvent.click(source);
+    expect(rendered).toHaveAttribute('aria-pressed', 'false');
+    expect(source).toHaveAttribute('aria-pressed', 'true');
+  });
+  it('keeps the size and time on one line and the full timestamp on hover', async () => {
+    preview.mockResolvedValue(text());
+    open();
+    const time = await waitFor(() => {
+      const found = document.querySelector('.ui-viewer-metadata time');
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(time).toHaveAttribute('datetime', '2026-01-01T00:00:00Z');
+    expect(time.getAttribute('title')).toMatch(/\b20\d\d\b/);
+    expect(document.querySelector('.ui-viewer-metadata .metadata-verb')).toHaveTextContent(
+      'modified',
+    );
+  });
   it('shows HTML as escaped source', async () => {
     preview.mockResolvedValue(text('note.html', '<script>alert(1)</script>'));
     open('/note.html');

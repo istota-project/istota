@@ -101,14 +101,7 @@ describe('settings surface', () => {
  * carry the tier, the focus ring and the disabled state. Each exemption states
  * why the element is not a control.
  */
-const RAW_BUTTON_OK = new Map([
-  [
-    'routes/briefings/settings/+page.svelte: block-name',
-    'a table-row disclosure toggle, not a control: it wraps the row title and ' +
-      'its chevron, and styling it as a button would make the row look clickable ' +
-      'twice over',
-  ],
-]);
+const RAW_BUTTON_OK = new Map<string, string>([]);
 
 describe('settings controls go through the primitives', () => {
   it('renders no raw <button>', () => {

@@ -20,6 +20,16 @@
     type?: 'button' | 'submit';
     title?: string;
     disabled?: boolean;
+    /**
+     * Renders a real `<a>` with the same look, for an action that is a link
+     * (a download, an external page) — a button calling `window.open` loses
+     * the native `download` attribute and middle-click. A disabled one renders
+     * as a disabled button, since a link has no disabled state.
+     */
+    href?: string;
+    download?: string;
+    target?: string;
+    rel?: string;
     onclick?: (e: MouseEvent) => void;
     children: Snippet;
   }
@@ -34,24 +44,45 @@
     type = 'button',
     title,
     disabled,
+    href,
+    download,
+    target,
+    rel,
     onclick,
     children,
   }: Props = $props();
 </script>
 
-<button
-  class="icon-btn icon-btn-{size} {className}"
-  class:danger
-  class:active
-  {type}
-  {title}
-  {disabled}
-  {onclick}
-  aria-label={label}
-  aria-pressed={pressed}
->
-  {@render children()}
-</button>
+{#if href && !disabled}
+  <a
+    class="icon-btn icon-btn-{size} {className}"
+    class:danger
+    class:active
+    {href}
+    {download}
+    {target}
+    {rel}
+    {title}
+    {onclick}
+    aria-label={label}
+  >
+    {@render children()}
+  </a>
+{:else}
+  <button
+    class="icon-btn icon-btn-{size} {className}"
+    class:danger
+    class:active
+    {type}
+    {title}
+    {disabled}
+    {onclick}
+    aria-label={label}
+    aria-pressed={pressed}
+  >
+    {@render children()}
+  </button>
+{/if}
 
 <style>
   .icon-btn {
@@ -73,6 +104,10 @@
     transition:
       color var(--transition-fast),
       background var(--transition-fast);
+  }
+
+  a.icon-btn {
+    text-decoration: none;
   }
 
   .icon-btn:hover:not(:disabled),
