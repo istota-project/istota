@@ -529,7 +529,7 @@ fi
 # and nothing else.
 signing_key="$(host_env RELEASE_SIGNING_KEY)"
 if [ -n "$signing_key" ]; then
-    changed_file "${STACK}/allowed_signers" "releases namespaces=\"git\" ${signing_key}" || true
+    changed_file "${STACK}/allowed_signers" "releases namespaces=\"git,istota-images\" ${signing_key}" || true
 elif [ ! -s "${STACK}/allowed_signers" ]; then
     log "no RELEASE_SIGNING_KEY in ${HOST_ENV} yet: istota-stack update refuses every tag until there is one, except with --unsigned."
 fi

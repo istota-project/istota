@@ -183,7 +183,7 @@ class TestTrustSigner:
         result = fx.run("trust-signer", pubkey)
         assert result.returncode == 0, result.stdout + result.stderr
         assert _fingerprint(fx.other_key.with_suffix(".pub")) in result.stdout
-        assert (fx.stack / "allowed_signers").read_text() == f'releases namespaces="git" {pubkey}\n'
+        assert (fx.stack / "allowed_signers").read_text() == f'releases namespaces="git,istota-images" {pubkey}\n'
         host_env = (fx.stack / "host.env").read_text().splitlines()
         assert f"RELEASE_SIGNING_KEY={pubkey}" in host_env, "provision.sh would put the old key back"
         assert "INGRESS=local" in host_env and "CLAUDE_CODE_VERSION=2.1.296" in host_env

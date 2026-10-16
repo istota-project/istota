@@ -67,6 +67,7 @@ ROWS: dict[int | str, str] = {
     "L4": "the Mac shims run as uid 10001 with no capabilities",
     # The Mac app spec's rows, numbered as that spec numbers them.
     "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
+    "M10": "the stack runs only images a manifest signed by the pinned key names",
 }
 
 NOT_WITNESSED: dict[int, str] = {

@@ -169,6 +169,22 @@ for name in sorted(os.listdir(src)):
         fi ;;
     esac
     exit "$rc" ;;
+  *" load -i "*)
+    # A docker save archive: STUB_LOAD_IDS is what it holds, "ref=id" pairs
+    # (an empty ref is an untagged image), and the IDs stay for inspect below.
+    for pair in ${STUB_LOAD_IDS:-}; do
+      if [ -n "${pair%%=*}" ]; then echo "Loaded image: ${pair%%=*}"; else echo "Loaded image ID: ${pair#*=}"; fi
+      echo "$pair" >> "$STUB_CALLS.ids"
+    done
+    exit "${STUB_LOAD_RC:-0}" ;;
+  *" image inspect --format {{.Id}} "*)
+    # The ID a ref names: the last load's, else STUB_PRESENT_IDS (before any).
+    ref="${!#}"; found=""
+    for pair in ${STUB_PRESENT_IDS:-} $(cat "$STUB_CALLS.ids" 2>/dev/null); do
+      if [ "${pair%%=*}" = "$ref" ]; then found="${pair#*=}"; fi
+    done
+    [ -n "$found" ] || exit 1
+    echo "$found" ;;
   *" image ls "*) if [ -n "${STUB_IMAGES:-}" ]; then printf "%b" "$STUB_IMAGES"; exit 0; fi; printf 'istota:v0\nistota:v1\nistota:old\nistota-istota:v0\nistota-istota:older\nistota-browser:old\nnginx:alpine\n' ;;
   *" image tag "*) touch "${STUB_CALLS}.tagged" ;;
   *" image inspect istota:"*)
@@ -283,7 +299,7 @@ def fx(tmp_path) -> Fixture:
     subprocess.run(["git", "clone", "-q", str(origin), str(stack / "src")], check=True, env=env)
     (stack / "src" / "docker").mkdir()
     pubkey = (release_key.with_suffix(".pub")).read_text().strip()
-    (stack / "allowed_signers").write_text(f'releases@example.com namespaces="git" {pubkey}\n')
+    (stack / "allowed_signers").write_text(f'releases@example.com namespaces="git,istota-images" {pubkey}\n')
     (stack / ".env").write_text("COMPOSE_PROFILES=\nISTOTA_TAG=v0\nISTOTA_PREVIOUS_TAG=\n")
     (stack / "host.env").write_text("INGRESS=local\nCLAUDE_CODE_VERSION=2.1.296\n")
     (stack / "config").mkdir()
@@ -2475,7 +2491,7 @@ class TestHostEnv:
         result = fx.run("host-env", f"RELEASE_SIGNING_KEY={key}")
         assert result.returncode == 0, result.stderr
         assert f"RELEASE_SIGNING_KEY={key}\n" in (fx.stack / "host.env").read_text()
-        assert signers.read_text() == f'releases namespaces="git" {key}\n'
+        assert signers.read_text() == f'releases namespaces="git,istota-images" {key}\n'
         assert signers.stat().st_mode & 0o777 == 0o644
 
     def test_other_keys_leave_allowed_signers_alone(self, fx):

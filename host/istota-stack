@@ -11,6 +11,10 @@
 #   istota-stack update <tag> --bundle FILE
 #                               the same signed release, its tag taken from a git bundle
 #                               (the Mac app's release) rather than fetched from origin
+#   istota-stack update <tag> --images DIR [--bundle FILE]
+#                               the same signed release, its images loaded from DIR's
+#                               images-<tag>.tar under a manifest the release key signed,
+#                               rather than built
 #   istota-stack trust-signer KEY
 #                               print the fingerprint of KEY, one line of an SSH public
 #                               key, and make it the one key releases are verified against
@@ -105,6 +109,13 @@
 # tag is fetched out of the bundle, never over an existing tag of that name,
 # and verified as any release is. It refuses --unsigned. `trust-signer` is the
 # one way the release key changes, and no update writes allowed_signers.
+#
+# `update <tag> --images DIR` changes only where the images come from. After the
+# tag is verified, DIR's images-<tag>.json must carry a good SSH signature in the
+# istota-images namespace against the same allowed_signers, name the tag and the
+# archive's SHA-256, and every image `docker load` reports must be one it names,
+# at the ID it names. A refusal after the load puts back what the load replaced.
+# Nothing is built. It refuses --unsigned.
 set -euo pipefail
 # A hardened host (umask 027) would check the tree out root-only, and the
 # image builds copy those modes in, out of uid 10001's reach.
@@ -145,6 +156,11 @@ APPARMOR_SYSFS="${ISTOTA_APPARMOR_SYSFS:-/sys/kernel/security/apparmor}"
 APPARMOR_DIR="${ISTOTA_APPARMOR_DIR:-/etc/apparmor.d}"
 # A scratch directory a command removes on exit.
 staging=""
+# Set once `update --images` has loaded and checked the release's images, so
+# the update builds none of them.
+images_loaded=""
+# The SSH signature namespace of an images manifest, beside git's for tags.
+IMAGES_NAMESPACE=istota-images
 # Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
 # refused the database (rollback), 64 usage, 65 a tag refused.
 EXIT_REFUSED_TAG=65
@@ -687,14 +703,179 @@ fetch_release_bundle() {
         || die "could not take ${tag} from ${bundle} (no such tag in it, or a different ${tag} is already here); nothing was changed."
 }
 
+# --- release images ----------------------------------------------------------
+
+refuse_images() { echo "[istota-stack] REFUSE: $*" >&2; exit "$EXIT_REFUSED_TAG"; }
+
+# Whether some line of $3 has $2, exactly, as its field $1.
+has_field() {
+    awk -v n="$1" -v want="$2" '$n == want { found = 1 } END { exit !found }' <<<"$3"
+}
+
+# Whether the manifest's signature is good in the istota-images namespace for a
+# principal allowed_signers trusts in it: the file and key tags are verified
+# with, so `trust-signer` changes both together.
+images_manifest_signed() {
+    local manifest="$1" signature="$2" principal principals
+    principals="$(ssh-keygen -Y find-principals -f "$ALLOWED_SIGNERS" -s "$signature" 2>/dev/null)" || return 1
+    while IFS= read -r principal; do
+        [ -n "$principal" ] || continue
+        if ssh-keygen -Y verify -f "$ALLOWED_SIGNERS" -I "$principal" -n "$IMAGES_NAMESPACE" \
+                -s "$signature" < "$manifest" >/dev/null 2>&1; then
+            return 0
+        fi
+    done <<<"$principals"
+    return 1
+}
+
+# The manifest's images as "<ref> <id>" lines, once it names this tag and the
+# archive's digest; otherwise "REFUSE <why>" and a non-zero exit. Read only
+# after the signature is good. Canonical JSON only (sorted keys, no whitespace),
+# the form scripts/sign-images-manifest.sh writes, so no second parser can read
+# one signed document another way. An istota image is named for this tag:
+# another tag's are what rollback runs.
+images_manifest_entries() {
+    python3 -I - "$1" "$2" "$3" <<'PY'
+import hashlib, json, re, sys
+
+manifest, tag, archive = sys.argv[1:4]
+
+
+def refuse(why):
+    print(f"REFUSE {why}")
+    sys.exit(2)
+
+
+with open(manifest, encoding="utf-8") as f:
+    text = f.read()
+try:
+    doc = json.loads(text)
+except ValueError:
+    refuse(f"{manifest} is not JSON")
+if not isinstance(doc, dict) or json.dumps(doc, sort_keys=True, separators=(",", ":")) != text:
+    refuse(f"{manifest} is not canonical JSON (sorted keys, no whitespace)")
+if doc.get("tag") != tag:
+    refuse(f"{manifest} is the manifest of {doc.get('tag')!r}, not {tag}")
+expected = doc.get("archive_sha256")
+if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+    refuse(f"{manifest} names no archive SHA-256")
+images = doc.get("images")
+if not isinstance(images, list) or not images:
+    refuse(f"{manifest} names no images")
+seen = set()
+for entry in images:
+    if not isinstance(entry, dict) or set(entry) != {"ref", "id"}:
+        refuse(f"{manifest} has an image entry that is not a ref and an id")
+    ref, image_id = entry["ref"], entry["id"]
+    if not isinstance(ref, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]{1,128}", ref):
+        refuse(f"{manifest} names an image by something other than name:tag: {ref!r}")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        refuse(f"{manifest} gives {ref} no sha256 image ID")
+    name, _, ref_tag = ref.rpartition(":")
+    if (name == "istota" or name.startswith("istota-")) and ref_tag != tag:
+        refuse(f"{manifest} names {ref}, an istota image of a tag other than {tag}")
+    if ref in seen:
+        refuse(f"{manifest} names {ref} twice")
+    seen.add(ref)
+digest = hashlib.sha256()
+with open(archive, "rb") as f:
+    for block in iter(lambda: f.read(1 << 20), b""):
+        digest.update(block)
+if digest.hexdigest() != expected:
+    refuse(f"the SHA-256 of {archive} is {digest.hexdigest()}, and the manifest names {expected}")
+for entry in images:
+    print(entry["ref"], entry["id"])
+PY
+}
+
+# Put back what a refused load replaced: each ref the manifest names on the ID
+# it had before, or removed when it had none, and any other image the load
+# reported removed. $1 is "<ref> <previous id, or ->" lines, $2 the load's output.
+put_back_images() {
+    local priors="$1" output="$2" ref prior current line
+    while read -r ref prior; do
+        [ -n "$ref" ] || continue
+        current="$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)"
+        if [ "$prior" = "-" ]; then
+            [ -z "$current" ] || docker image rm "$ref" >/dev/null 2>&1 || log "WARNING: could not remove ${ref}"
+        elif [ "$current" != "$prior" ]; then
+            docker image tag "$prior" "$ref" || log "WARNING: could not put ${ref} back on ${prior}"
+        fi
+    done <<<"$priors"
+    while IFS= read -r line; do
+        case "$line" in
+            "Loaded image: "*) ref="${line#Loaded image: }" ;;
+            "Loaded image ID: "*) ref="${line#Loaded image ID: }" ;;
+            *) continue ;;
+        esac
+        has_field 1 "$ref" "$priors" && continue
+        docker image rm "$ref" >/dev/null 2>&1 || log "WARNING: could not remove ${ref}"
+    done <<<"$output"
+}
+
+# `update --images`: the release's images from DIR, under a manifest the release
+# key signed, in place of a build. Every check before the load changes nothing;
+# one that fails after it puts back what the load replaced.
+load_release_images() {
+    local dir="$1" tag="$2" archive manifest signature entries priors="" output ref id prior line wrong=""
+    case "$dir" in /*) ;; *) dir="${PWD}/${dir}" ;; esac
+    archive="${dir}/images-${tag}.tar"
+    manifest="${dir}/images-${tag}.json"
+    signature="${manifest}.sig"
+    [ -f "$archive" ] && [ -f "$manifest" ] \
+        || die "${dir} does not hold images-${tag}.tar and images-${tag}.json; nothing was changed."
+    [ -f "$signature" ] || refuse_images "${manifest} is not signed (no ${signature}); nothing was changed."
+    if ! images_manifest_signed "$manifest" "$signature"; then
+        refuse_images "${manifest} is not signed by the key in ${ALLOWED_SIGNERS} for ${IMAGES_NAMESPACE} (its line must name namespaces=\"git,${IMAGES_NAMESPACE}\", as provision.sh writes it); nothing was changed."
+    fi
+    if ! entries="$(images_manifest_entries "$manifest" "$tag" "$archive")"; then
+        refuse_images "${entries#REFUSE }; nothing was changed."
+    fi
+
+    while read -r ref id; do
+        prior="$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)"
+        priors+="${ref} ${prior:--}"$'\n'
+    done <<<"$entries"
+    log "loading the images of ${tag} from ${archive}"
+    if ! output="$(docker load -i "$archive")"; then
+        put_back_images "$priors" "$output"
+        die "docker load of ${archive} failed; .env, the checkout and the running stack are unchanged."
+    fi
+    # Every image the archive held is one the manifest names, and every name
+    # the manifest gives is on the ID it gives.
+    while IFS= read -r line; do
+        case "$line" in
+            "Loaded image: "*)
+                ref="${line#Loaded image: }"
+                has_field 1 "$ref" "$priors" || wrong="${ref} is in the archive and not in the manifest" ;;
+            "Loaded image ID: "*)
+                id="${line#Loaded image ID: }"
+                has_field 2 "$id" "$entries" || wrong="the archive holds ${id}, which the manifest does not name" ;;
+        esac
+    done <<<"$output"
+    while read -r ref id; do
+        [ "$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)" = "$id" ] \
+            || wrong="${ref} did not load as ${id}"
+    done <<<"$entries"
+    if [ -n "$wrong" ]; then
+        put_back_images "$priors" "$output"
+        refuse_images "${wrong}; the loaded images were removed, and .env, the checkout and the running stack are unchanged."
+    fi
+    log "the images of ${tag} loaded, and match the signed manifest"
+}
+
 cmd_update() {
-    local unsigned="" bundle="" tag="" tags=0 newest=""
+    local unsigned="" bundle="" images="" tag="" tags=0 newest=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --unsigned) unsigned=1 ;;
             --bundle)
                 [ "$#" -ge 2 ] || { usage >&2; exit 64; }
                 bundle="$2"
+                shift ;;
+            --images)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                images="$2"
                 shift ;;
             *) tag="$1"; tags=$((tags + 1)) ;;
         esac
@@ -703,7 +884,10 @@ cmd_update() {
     if [ -n "$bundle" ] && [ -n "$unsigned" ]; then
         refuse_tag "--bundle installs only a signed release; --unsigned is refused with it."
     fi
-    if [ "$tags" -eq 0 ] && [ -z "$unsigned" ] && [ -z "$bundle" ]; then
+    if [ -n "$images" ] && [ -n "$unsigned" ]; then
+        refuse_tag "--images loads only a signed release's images; --unsigned is refused with it."
+    fi
+    if [ "$tags" -eq 0 ] && [ -z "$unsigned" ] && [ -z "$bundle" ] && [ -z "$images" ]; then
         newest=1
     elif [ "$tags" -ne 1 ]; then
         usage >&2; exit 64
@@ -742,6 +926,10 @@ cmd_update() {
         fi
         exit "$EXIT_REFUSED_TAG"
     fi
+    if [ -n "$images" ]; then
+        load_release_images "$images" "$tag"
+        images_loaded=1
+    fi
     before="$(verified_git rev-parse HEAD)"
     prune_build_artifacts
     trap cleanup_update EXIT
@@ -764,9 +952,14 @@ hand_update_to_release() {
     local tag="$1" unsigned="$2" before="$3" commit="$4" script="${SRC}/host/istota-stack"
     [ -z "${ISTOTA_STACK_UPDATE_HANDOFF:-}" ] || return 0
     [ -x "$script" ] && grep -q 'ISTOTA_STACK_UPDATE_HANDOFF' "$script" || return 0
+    # One that does not know ISTOTA_STACK_IMAGES_LOADED would build the images.
+    if [ -n "$images_loaded" ] && ! grep -q 'ISTOTA_STACK_IMAGES_LOADED' "$script"; then
+        return 0
+    fi
     log "handing the update to ${tag}'s own istota-stack"
     trap - EXIT
     exec env ISTOTA_STACK_UPDATE_HANDOFF=1 ISTOTA_STACK_LOCK_INHERITED=1 \
+        ISTOTA_STACK_IMAGES_LOADED="$images_loaded" \
         "$BASH" "$script" update-from-checkout "$tag" "$unsigned" "$before" "$commit"
 }
 
@@ -781,6 +974,7 @@ cmd_update_from_checkout() {
     check_tag_name "$tag"
     [ "$(verified_git rev-parse HEAD)" = "$commit" ] \
         || die "the checkout is not the commit the update verified; nothing was changed."
+    images_loaded="${ISTOTA_STACK_IMAGES_LOADED:-}"
     trap cleanup_update EXIT
     update_from_checkout "$tag" "$unsigned" "$before"
 }
@@ -789,8 +983,13 @@ update_from_checkout() {
     local tag="$1" unsigned="$2" before="$3" current current_unsigned previous previous_unsigned up_rc=0
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
-    log "building ${tag}"
-    if ! build_images "$tag" || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
+    if [ -n "$images_loaded" ]; then
+        log "${tag}'s images came from its signed archive; building only the devbox images"
+    else
+        log "building ${tag}"
+    fi
+    if { [ -z "$images_loaded" ] && ! build_images "$tag"; } \
+            || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
         verified_git checkout --quiet --detach "$before" || true
         die "building ${tag} failed; .env, the checkout and the running stack are unchanged."
     fi
@@ -2210,7 +2409,7 @@ cmd_host_env() {
     # signed tag before provision.sh runs.
     for pair in "$@"; do
         if [ "${pair%%=*}" = RELEASE_SIGNING_KEY ] && [ -n "${pair#*=}" ]; then
-            printf 'releases namespaces="git" %s\n' "${pair#*=}" > "$ALLOWED_SIGNERS"
+            printf 'releases namespaces="git,istota-images" %s\n' "${pair#*=}" > "$ALLOWED_SIGNERS"
             chmod 0644 "$ALLOWED_SIGNERS"
         fi
     done

@@ -1692,7 +1692,7 @@ class TestTheLimaTemplate:
         assert script.index("git clone --quiet --no-checkout") < verify < checkout < provision
         # Nothing from the clone runs before the verification.
         assert script.count("${SRC}/") == 2
-        assert script.index("printf 'releases namespaces=\"git\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"") < verify
+        assert script.index("printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"") < verify
 
     def test_a_release_is_bootstrapped_once(self, doc):
         """After the first provision `istota-stack update` owns the checkout;
@@ -1781,6 +1781,28 @@ class TestTheProjectReleaseKey:
             capture_output=True, text=True, check=True,
         )
         assert RELEASE_KEY_FINGERPRINT in result.stdout
+
+
+class TestEveryAllowedSignersWriterTrustsTheKeyForImages:
+    """`update --images` verifies the images manifest with `ssh-keygen -Y
+    verify -n istota-images` against the same allowed_signers line tags are
+    verified with, so every writer of that line names both namespaces, in the
+    same bytes. provision.sh writes through `changed_file`, so a host's
+    `namespaces="git"` line is replaced on its next provision."""
+
+    WRITERS = {
+        "host/provision.sh": 'changed_file "${STACK}/allowed_signers" "releases namespaces=\\"git,istota-images\\" ${signing_key}"',
+        "host/istota-stack": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"${pair#*=}\" > \"$ALLOWED_SIGNERS\"",
+        "host/lima/istota.yaml": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"",
+        "host/cloud-init.yaml": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$key\" > \"$ALLOWED_SIGNERS\"",
+        "install.sh": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"",
+    }
+
+    @pytest.mark.parametrize("path", sorted(WRITERS))
+    def test_the_writer_names_both_namespaces(self, path):
+        text = (REPO / path).read_text()
+        assert self.WRITERS[path] in text
+        assert 'namespaces=\\"git\\"' not in text and "namespaces=\"git\" " not in text
 
 
 class TestNewestReleaseTag:
