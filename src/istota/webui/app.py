@@ -3954,6 +3954,28 @@ def _admin_job_view(conn: sqlite3.Connection, job_id: int) -> dict | None:
     return next((job for job in section["jobs"] if job["id"] == job_id), None)
 
 
+def _notify_job_owner(conn: sqlite3.Connection, job, admin: str, action: str) -> None:
+    """Tell the job's owner, never an admin acting on their own job; a failure is logged only.
+
+    Handed to the daemon in the caller's transaction, since this process holds
+    no WhatsApp bridge (ISSUE-702).
+    """
+    from istota.notifications.resolvers import admin_cron_change
+    from istota.notifications.store import hand_to_daemon
+
+    if job.user_id == admin or job.user_id not in _config.users:
+        return
+    profile = _config.users.get(admin)
+    try:
+        hand_to_daemon(conn, [admin_cron_change.write(
+            conn, job.user_id, admin_name=(profile.display_name if profile else "") or "An administrator",
+            action=action, job_id=job.id, job_name=job.name,
+        )])
+    except Exception:
+        logger.warning("admin_cron notification not written user=%s job_id=%s action=%s",
+                       job.user_id, job.id, action)
+
+
 def _log_admin_job(action: str, job, admin: str, **extra) -> None:
     # No job name: the log is read more widely than the admin pane.
     tail = "".join(f" {key}={value}" for key, value in extra.items())
@@ -3978,6 +4000,7 @@ async def _admin_set_job_enabled(job_id: int, enabled: bool, admin: str) -> JSON
             if job is None:
                 return None
             outcome = set_job_enabled(_config, conn, job, enabled, by="web")
+            _notify_job_owner(conn, job, admin, "enable" if enabled else "disable")
             _log_admin_job("enable" if enabled else "disable", job, admin, outcome=outcome)
             return {"outcome": outcome, "job": _admin_job_view(conn, job_id)}
     result = await asyncio.to_thread(write)
@@ -4034,6 +4057,7 @@ async def admin_delete_scheduled_job(job_id: int, request: Request, user: dict =
             if current is not None:
                 cron_job_source.resolve_for_job(conn, current.user_id, current.id, by="web")
                 _db.delete_scheduled_job(conn, current.id)
+            _notify_job_owner(conn, job, user["username"], "delete")
     await asyncio.to_thread(delete)
     _log_admin_job("delete", job, user["username"])
     return JSONResponse({"deleted": True, "id": job_id}, headers=_NO_STORE)

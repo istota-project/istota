@@ -128,6 +128,46 @@ async def _delete(client, setup, name, **body):
     return await client.request("DELETE", f"{BASE}/{job.id}", json=body, headers=ORIGIN)
 
 
+def _notices(setup, user_id):
+    with db.get_db(setup["config"].db_path) as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM notifications WHERE source = 'admin_cron_change' AND user_id = ? ORDER BY id",
+            (user_id,),
+        )]
+
+
+class TestOwnerIsTold:
+    async def test_disable_and_enable_tell_the_owner(self, alice, setup):
+        job = _job(setup, "digest")
+        await alice.post(f"{BASE}/{job.id}/disable", headers=ORIGIN)
+        await alice.post(f"{BASE}/{job.id}/enable", headers=ORIGIN)
+        notices = _notices(setup, "bob")
+        assert [n["dedup_key"] for n in notices] == [f"job:{job.id}:disable", f"job:{job.id}:enable"]
+        assert "Alice" in notices[0]["body"] and "digest" in notices[0]["body"]
+        assert _notices(setup, "alice") == []
+
+    async def test_a_delete_tells_the_owner(self, alice, setup):
+        job = _job(setup, "digest")
+        response = await _delete(alice, setup, "digest", confirm="digest")
+        assert response.status_code == 200, response.text
+        assert [n["dedup_key"] for n in _notices(setup, "bob")] == [f"job:{job.id}:delete"]
+
+    async def test_a_refused_delete_tells_nobody(self, alice, setup):
+        await _delete(alice, setup, "digest", confirm="digest", step_up={})
+        assert _notices(setup, "bob") == []
+
+    async def test_an_admin_is_not_told_about_their_own_job(self, alice, setup):
+        with db.get_db(setup["config"].db_path) as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (user_id, name, cron_expression, prompt) "
+                "VALUES ('alice', 'mine', '0 1 * * *', 'p')",
+            )
+            job_id = db.get_scheduled_job_by_name(conn, "alice", "mine").id
+        response = await alice.post(f"{BASE}/{job_id}/disable", headers=ORIGIN)
+        assert response.status_code == 200, response.text
+        assert _notices(setup, "alice") == []
+
+
 class TestList:
     async def test_lists_every_job_with_both_state_columns(self, alice, setup):
         response = await alice.get(BASE)
