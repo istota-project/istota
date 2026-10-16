@@ -6088,6 +6088,24 @@ const handlers: MockHandler[] = [
     url === '/istota/api/admin/stats'
       ? { ...mockAdminStats, subscription: mockSubscriptionState() }
       : undefined,
+  ({ url, method }) => {
+    if (url === '/istota/api/admin/scheduled-jobs' && method === 'GET')
+      return mockAdminStats.scheduler;
+    const match = url.match(/^\/istota\/api\/admin\/scheduled-jobs\/(\d+)(?:\/(enable|disable))?$/);
+    if (!match) return undefined;
+    const job = mockAdminStats.scheduler.jobs.find((j) => j.id === Number(match[1]));
+    if (!job) return undefined;
+    if (method === 'POST' && match[2]) {
+      job.enabled = match[2] === 'enable';
+      if (job.enabled) job.auto_disabled_at = null;
+      return { outcome: job.name.startsWith('_module.') ? 'module' : 'file', job };
+    }
+    if (method === 'DELETE') {
+      mockAdminStats.scheduler.jobs = mockAdminStats.scheduler.jobs.filter((j) => j !== job);
+      return { deleted: true, id: job.id };
+    }
+    return undefined;
+  },
 
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),

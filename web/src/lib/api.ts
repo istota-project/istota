@@ -498,6 +498,36 @@ export async function getAdminStats(): Promise<AdminStats> {
   return apiFetch<AdminStats>('/admin/stats');
 }
 
+export interface AdminScheduledJobs {
+  jobs_total: number;
+  jobs_active: number;
+  jobs_paused: number;
+  jobs: AdminStatsJob[];
+}
+
+/** Where a disable or enable landed. `db_only` means CRON.md could not be
+ *  rewritten, so the next sync puts the job back as the file says. */
+export type AdminJobOutcome = 'file' | 'db_only' | 'module';
+
+export function getAdminScheduledJobs(): Promise<AdminScheduledJobs> {
+  return apiFetch<AdminScheduledJobs>('/admin/scheduled-jobs');
+}
+
+export function setAdminScheduledJobEnabled(
+  id: number,
+  enabled: boolean,
+): Promise<{ outcome: AdminJobOutcome; job: AdminStatsJob | null }> {
+  return groupRequest(`/admin/scheduled-jobs/${id}/${enabled ? 'enable' : 'disable'}`, 'POST');
+}
+
+export function deleteAdminScheduledJob(
+  id: number,
+  confirm: string,
+  step_up: StepUpProof,
+): Promise<{ deleted: boolean; id: number }> {
+  return groupRequest(`/admin/scheduled-jobs/${id}`, 'DELETE', { confirm, step_up });
+}
+
 // ---- Admin logs + configuration (ISSUE-203) ----
 
 export interface AdminLogSource {
@@ -5434,7 +5464,8 @@ export type StepUpAction =
   | 'backup_recipient'
   | 'history_restore'
   | 'history_purge'
-  | 'admin_config_change';
+  | 'admin_config_change'
+  | 'admin_cron_delete';
 /** How the server confirms a sensitive action: a mailed code, or the
  *  account password where the install cannot mail one. The server decides. */
 export type StepUpMethod = 'email' | 'password';

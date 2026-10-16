@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Scheduled jobs in the admin pane.** Every user's scheduled jobs now have their own page in the admin sidebar instead of a card on Status. An admin can disable, enable or delete a user's job from there, and the change is written to that user's CRON.md so it sticks. Deleting asks for the job's name and a confirmation code. Module pollers can be disabled but not deleted.
 - Settings → Preferences can show unread counts beside Chat, Briefings and Feeds, including in the navigation menu. The choice is saved to your account and starts off.
 - Briefings remembers which editions you have read and lets you mark the whole archive or one briefing’s editions as read from the header. Existing archive entries start as read when upgrading.
 

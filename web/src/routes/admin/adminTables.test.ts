@@ -26,12 +26,7 @@ import { join } from 'node:path';
  * widths the table declares and check it still has room left for the column it
  * left unsized.
  *
- * Only the users table. The scheduler table next to it leaves *four* columns
- * unsized at desktop and one at ≤640px, so "the remainder goes to the unsized
- * column" is not its model, and a check written as if it were passes on
- * arithmetic that describes nothing. It is also bounded by its container rather
- * than by a `min-width` it declares, which is a second model again. Neither is
- * this table's shape; guarding them properly is its own piece of work.
+ * Only the users table, the one table left on this page.
  */
 
 const source = readFileSync(join(process.cwd(), 'src/routes/admin/+page.svelte'), 'utf8');
