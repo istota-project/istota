@@ -209,3 +209,42 @@ class TestThroughLoadConfig:
         assert user_briefings.import_from_user_configs(config.db_path, config.users) == 0
         cfgmod._apply_user_briefings(config)
         assert config.users["alice"].briefings == []
+
+
+class TestBlocksSeededAtBoot:
+    """Removing the retired block from config.toml after the boot loses nothing."""
+
+    _BLOCKS = [{"title": "News", "sources": [{"kind": "rss", "config": {"url": "https://example.com/feed"}}]}]
+
+    def _config(self, tmp_path, db_path, *seeds):
+        return Config(db_path=db_path, workspace_path=tmp_path / "mount",
+                      users={"alice": _user(*seeds)})
+
+    def _titles(self, config, name):
+        from istota.briefings import db as bdb
+        from istota.briefings import ensure_initialised, resolve_for_user
+        ctx = resolve_for_user("alice", config)
+        ensure_initialised(ctx, app_config=config)
+        with bdb.connect(ctx.db_path) as conn:
+            return [b.title for b in bdb.list_blocks(conn, name, with_sources=False)]
+
+    def test_blocks_survive_the_toml_block_being_removed(self, tmp_path, db_path):
+        from istota.briefings import seed_retired_config_blocks
+        config = self._config(tmp_path, db_path, _seed(blocks=self._BLOCKS),
+                              _seed(name="draft", cron="", blocks=self._BLOCKS))
+        user_briefings.import_from_user_configs(config.db_path, config.users)
+        seed_retired_config_blocks(config)
+
+        # The operator removes [[users.alice.briefings]]; the next load has no seeds.
+        removed = self._config(tmp_path, db_path)
+        cfgmod._apply_user_briefings(removed)
+        assert self._titles(removed, "morning") == ["News"]
+        assert self._titles(removed, "draft") == ["News"]  # imported disabled, still seeded
+
+    def test_a_deleted_row_is_not_seeded(self, tmp_path, db_path):
+        from istota.briefings import seed_retired_config_blocks
+        config = self._config(tmp_path, db_path, _seed(blocks=self._BLOCKS))
+        user_briefings.import_from_user_configs(config.db_path, config.users)
+        assert user_briefings.delete_briefing(db_path, "alice", "morning")
+        seed_retired_config_blocks(config)
+        assert self._titles(self._config(tmp_path, db_path), "morning") == []

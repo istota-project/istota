@@ -11124,6 +11124,15 @@ def run_daemon(
     except Exception as e:  # noqa: BLE001
         logger.warning("user_briefings migration skipped: %s", e)
 
+    # The retired TOML's blocks go into the module DBs now rather than on first
+    # touch, so removing the block from config.toml after this boot loses nothing.
+    try:
+        from .briefings import seed_retired_config_blocks  # noqa: PLC0415
+
+        seed_retired_config_blocks(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("briefing config block seeding skipped: %s", e)
+
     # admin-shared-briefing-blocks: seed shared_block_configs from config
     # (DEFAULT_SHARED_BLOCKS / [[briefing_shared_blocks]]) on first run — seed-once,
     # DB-wins thereafter — then re-apply the overlay so in-memory config reflects
