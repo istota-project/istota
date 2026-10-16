@@ -14,7 +14,7 @@ describe('masonry placement', () => {
   it('packs different heights into the shortest column without shrinking content', () => {
     expect(layoutMasonry([card(100), card(200), card(90)], 2, 16)).toEqual([
       { column: 0, span: 1, top: 0, height: 100 },
-      { column: 1, span: 1, top: 0, height: 200 },
+      { column: 1, span: 1, top: 0, height: 216 },
       { column: 0, span: 1, top: 116, height: 100 },
     ]);
   });
@@ -71,6 +71,20 @@ describe('masonry placement', () => {
     );
     expect(placed[1].height).toBe(100);
     expect(placed[2].height).toBe(100);
+  });
+  it('snaps a card to a neighbor bottom within a step even when they start at different tops', () => {
+    const groups = (rooms: number) =>
+      layoutMasonry([card(650, 'wide'), card(396), card(rooms), card(264)], 3, 24);
+    const bottom = (p: { top: number; height: number }) => p.top + p.height;
+
+    const shorter = groups(220);
+    expect(bottom(shorter[2])).toBe(bottom(shorter[0]));
+    expect(shorter[0].height).toBe(650);
+
+    const longer = groups(250);
+    expect(bottom(longer[0])).toBe(bottom(longer[2]));
+    expect(longer[2].height).toBe(250);
+    expect(longer[3].top).toBe(bottom(longer[0]) + 24);
   });
   it('handles an empty edition', () => {
     expect(layoutMasonry([], 2, 16)).toEqual([]);
@@ -136,8 +150,60 @@ it('remeasures intrinsic content and responds to column changes without height f
   expect(disconnect).toHaveBeenCalledOnce();
 });
 
-it('keeps the runtime masonry row rules in the compiled edition CSS', () => {
-  const filename = 'src/lib/components/briefings/BriefingEdition.svelte';
+it('measures a card without a content wrapper itself, after clearing its snapped height', () => {
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  let frame: FrameRequestCallback | undefined;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frame = callback;
+    return 1;
+  });
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  const flush = () => {
+    const callback = frame;
+    frame = undefined;
+    callback?.(0);
+  };
+  const grid = document.createElement('div');
+  grid.style.gridTemplateColumns = '200px 200px';
+  grid.style.columnGap = '16px';
+  const intrinsic = [180, 196];
+  for (let i = 0; i < 2; i++) {
+    const card = document.createElement('section');
+    card.style.padding = '16px';
+    // A snapped min-height would read back as the card's height; the action
+    // must clear it before measuring, or a card could never shrink.
+    card.getBoundingClientRect = () =>
+      ({ height: Math.max(intrinsic[i], parseFloat(card.style.minHeight) || 0) }) as DOMRect;
+    grid.append(card);
+  }
+  document.body.append(grid);
+  const action = masonry(grid);
+  flush();
+  const cards = [...grid.children] as HTMLElement[];
+  // Padding is already inside the card's own box, so it is not added again.
+  expect(cards[0].style.minHeight).toBe('200px');
+  intrinsic[0] = 60;
+  intrinsic[1] = 60;
+  cards[0].append(document.createTextNode('changed'));
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      flush();
+      expect(cards[0].style.minHeight).toBe('100px');
+      action.destroy();
+      grid.remove();
+      resolve();
+    });
+  });
+});
+
+it('keeps the runtime masonry row rules in the compiled card grid CSS', () => {
+  const filename = 'src/lib/components/ui/CardGrid.svelte';
   const source = readFileSync(filename, 'utf8');
   const result = compile(source, { filename, generate: 'client', css: 'external' });
   expect(result.css?.code).toMatch(/grid-auto-rows:\s*1px/);

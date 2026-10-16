@@ -70,16 +70,6 @@
     background: var(--surface-card);
   }
 
-  .briefing-block[data-width='full'] {
-    grid-column: 1 / -1;
-  }
-
-  @container briefing-edition (min-width: 40rem) {
-    .briefing-block[data-width='wide'] {
-      grid-column: span 2;
-    }
-  }
-
   [data-masonry-content] {
     display: flow-root;
   }

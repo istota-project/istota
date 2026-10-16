@@ -45,7 +45,7 @@
   });
 </script>
 
-<div class="settings admin-page">
+<div class="settings admin-page card-pane">
   {#if loading}
     <PageLoading label="Loading browsers…" />
   {:else if failed || report?.status === 'unavailable'}

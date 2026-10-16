@@ -90,7 +90,7 @@
   onMount(() => load());
 </script>
 
-<div class="settings health-page">
+<div class="settings health-page card-pane">
   <!-- The whole-pane error is for the *initial* load only. Once a report
        exists, a failed re-run reports inline above the toolbar: the exclusive
        branch would otherwise unmount the report and both buttons, so a

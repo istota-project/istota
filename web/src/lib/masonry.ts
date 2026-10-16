@@ -32,14 +32,42 @@ export function layoutMasonry(
     return { column, top };
   }
 
+  // A card with nothing below it yet. Its bottom is an edge a later row may snap
+  // to, since grid rounding alone leaves cards that start at different tops
+  // ending a few pixels apart.
+  function isOpen(item: MasonryPlacement) {
+    for (let c = item.column; c < item.column + item.span; c++)
+      if (bottoms[c] !== item.top + item.height + gap) return false;
+    return true;
+  }
+
   function settle() {
+    const edges = placed.filter((item) => !pending.includes(item) && isOpen(item));
+    const top = pending[0]?.top ?? 0;
     const sorted = [...pending].sort((a, b) => a.height - b.height);
     for (let start = 0; start < sorted.length;) {
       let end = start + 1;
       while (end < sorted.length && sorted[end].height - sorted[start].height <= heightStep) end++;
-      const height = Math.ceil(sorted[end - 1].height / heightStep) * heightStep;
-      for (let i = start; i < end; i++) sorted[i].height = height;
+      const need = top + sorted[end - 1].height;
+      const above = edges
+        .map((item) => item.top + item.height)
+        .filter((edge) => edge >= need && edge - need <= heightStep);
+      let bottom = top + Math.ceil(sorted[end - 1].height / heightStep) * heightStep;
+      const below = edges
+        .map((item) => item.top + item.height)
+        .filter((edge) => edge < need && need - edge <= heightStep);
+      if (above.length) bottom = Math.min(...above);
+      else if (below.some((edge) => bottom - edge > heightStep)) bottom = need;
+      for (const item of edges) {
+        const edge = item.top + item.height;
+        if (edge < bottom && bottom - edge <= heightStep) item.height = bottom - item.top;
+      }
+      for (let i = start; i < end; i++) sorted[i].height = bottom - top;
       start = end;
+    }
+    for (const item of edges) {
+      for (let c = item.column; c < item.column + item.span; c++)
+        bottoms[c] = item.top + item.height + gap;
     }
     for (const item of pending) {
       for (let c = item.column; c < item.column + item.span; c++)
@@ -78,7 +106,10 @@ export function layoutMasonry(
 }
 
 // CSS owns the responsive columns. Measure the inner content so a snapped card's
-// extra space never becomes its intrinsic height on the next resize.
+// extra space never becomes its intrinsic height on the next resize. A card with
+// no `[data-masonry-content]` is measured itself, with its snapped height cleared
+// first; a shrink inside it moves no observed box, so DOM changes anywhere in the
+// grid also schedule a layout.
 export function masonry(node: HTMLElement) {
   if (typeof ResizeObserver === 'undefined') return { destroy() {} };
   let frame = 0;
@@ -96,7 +127,9 @@ export function masonry(node: HTMLElement) {
   function observe() {
     resize.disconnect();
     resize.observe(node);
-    for (const content of node.querySelectorAll('[data-masonry-content]')) resize.observe(content);
+    for (const card of node.children) {
+      resize.observe(card.querySelector('[data-masonry-content]') ?? card);
+    }
   }
 
   function layout() {
@@ -111,25 +144,26 @@ export function masonry(node: HTMLElement) {
       card.style.gridColumnEnd = '';
       card.style.gridRowStart = '';
       card.style.gridRowEnd = '';
+      card.style.minHeight = '';
     }
     const style = getComputedStyle(node);
     const tracks = style.gridTemplateColumns.trim().split(/\s+/);
     if (!tracks.length || tracks.some((track) => !/^\d+(\.\d+)?px$/.test(track))) return;
     const gap = Math.round(parseFloat(style.columnGap) || 0);
     const items = cards.map((card): MasonryItem => {
+      const declared = card.dataset.width;
+      const width = declared === 'wide' || declared === 'full' ? declared : 'auto';
       const content = card.querySelector<HTMLElement>('[data-masonry-content]');
+      if (!content) {
+        return { height: card.getBoundingClientRect().height, width };
+      }
       const box = getComputedStyle(card);
       const inset = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth'].reduce(
         (sum, property) =>
           sum + (parseFloat(box[property as keyof CSSStyleDeclaration] as string) || 0),
         0,
       );
-      const width = card.dataset.width;
-      return {
-        height:
-          (content?.getBoundingClientRect().height ?? card.getBoundingClientRect().height) + inset,
-        width: width === 'wide' || width === 'full' ? width : 'auto',
-      };
+      return { height: content.getBoundingClientRect().height + inset, width };
     });
     const placed = layoutMasonry(items, tracks.length, gap);
     node.dataset.masonry = 'true';
@@ -145,7 +179,7 @@ export function masonry(node: HTMLElement) {
   }
 
   observe();
-  mutations.observe(node, { childList: true });
+  mutations.observe(node, { childList: true, subtree: true, characterData: true });
   schedule();
   return {
     destroy() {

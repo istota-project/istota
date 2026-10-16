@@ -166,7 +166,7 @@
   );
 </script>
 
-<div class="settings admin-page">
+<div class="settings admin-page card-pane">
   {#if !view && !error}
     <PageLoading label="Loading users…" />
   {:else if !view}

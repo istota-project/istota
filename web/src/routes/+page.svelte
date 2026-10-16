@@ -77,10 +77,13 @@
     <ShellHeader title="Dashboard" />
   {/snippet}
 
-  <div class="dashboard">
+  <div class="dashboard card-pane">
     <!-- One grid, so the tiles flow around the welcome card: it takes the first
        three tracks and whatever fits beside it fills out the row. -->
-    <div class="feature-grid card-grid" style="--card-min: 200px; --card-gap: 1rem;">
+    <div
+      class="feature-grid card-grid"
+      style="--card-min: 200px; --card-gap: var(--card-pane-pad);"
+    >
       <section class="welcome-card" class:pending={timeZone === null}>
         <img class="welcome-sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
         <div class="welcome-text">
@@ -146,20 +149,6 @@
 </AppShell>
 
 <style>
-  /* The shell is edge to edge, so the page carries the padding `.app-content`
-	   used to give it. The horizontal safe-area insets stay on the shell around
-	   this, and the bottom one on its scroll pane, so plain values are right
-	   here. */
-  .dashboard {
-    padding: var(--space-6);
-  }
-
-  @media (max-width: 640px) {
-    .dashboard {
-      padding: var(--space-4) var(--space-3);
-    }
-  }
-
   .welcome-card {
     grid-column: 1 / -1;
     display: flex;
@@ -174,8 +163,8 @@
     border-radius: var(--radius-card);
     padding: 1.25rem;
   }
-  /* Three tracks exist from ~760px up (200px min + 1rem gap against the 1.5rem
-	   page padding, with room for a scrollbar), so the span can't spill into an
+  /* Three tracks exist from ~740px up (200px min + 1rem gap against the 1rem
+	   pane padding, with room for a scrollbar), so the span can't spill into an
 	   implicit fourth column. Below it the card is the full row, like every
 	   other card on a phone. Set at 769px, the mobile breakpoint's complement,
 	   rather than the 760px it was derived at — a one-off value that close to

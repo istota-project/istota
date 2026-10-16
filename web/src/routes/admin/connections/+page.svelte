@@ -656,7 +656,7 @@
   });
 </script>
 
-<div class="settings connections-page">
+<div class="settings connections-page card-pane">
   {#if loading && !connections}
     <PageLoading label="Loading connections…" />
   {:else if error && !connections}

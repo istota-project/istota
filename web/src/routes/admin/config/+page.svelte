@@ -266,7 +266,7 @@
   onMount(load);
 </script>
 
-<div class="settings config-page">
+<div class="settings config-page card-pane">
   {#if loading && !view}
     <PageLoading />
   {:else if error && !view}

@@ -78,8 +78,10 @@ async function edit() {
 it('opens the notebook on the overview and saves through the shared editor with the audience charter', async () => {
   render(Groups);
   await screen.findByText('Shared plans');
-  expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Groups');
-  expect(screen.queryByRole('heading', { name: 'Team' })).toBeNull();
+  // The header names the selected group, the way chat names its room, and the
+  // body repeats no group heading of its own.
+  expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Team');
+  expect(screen.getAllByRole('heading', { name: 'Team' })).toHaveLength(1);
   expect(screen.getByText(/current and future group members/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Source' })).toBeNull();
   expect(screen.queryByRole('link', { name: 'Briefings' })).toBeNull();

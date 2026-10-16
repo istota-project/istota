@@ -37,12 +37,11 @@ const taxesLayout = readFileSync(
 const adminLayout = readFileSync(join(process.cwd(), 'src/routes/admin/+layout.svelte'), 'utf8');
 
 /**
- * The three admin pages. They are the one module that reaches the shared cap
- * without `.content-frame`: each wears the settings shell (`class="settings
+ * The three admin pages. Each wears the settings shell (`class="settings
  * admin-page"`) for its .card / .section-header / .grid primitives, and used
  * to widen that shell's 980px form column by hand — all three landing on the
- * same 1100px with nothing saying they had to agree. The width is one rule in
- * the admin layout now, and it reads the token.
+ * same 1100px with nothing saying they had to agree. Each is a `.card-pane`
+ * now, and takes that class's one cap.
  */
 const adminPages = (
   [
@@ -65,7 +64,6 @@ const adopters = [
   ['money/portfolio/+layout.svelte', portfolioLayout],
   ['money/reports/+layout.svelte', reportsLayout],
   ['money/taxes/+layout.svelte', taxesLayout],
-  ['admin/+layout.svelte', adminLayout],
 ] as const;
 
 /**
@@ -189,12 +187,11 @@ describe('adopters', () => {
     expect(markup.indexOf('content-frame', bodyAt)).toBeGreaterThan(bodyAt);
   });
 
-  it('admin reaches the cap once, in its layout', () => {
-    // Not via .content-frame: admin's pages are the settings shell, and the
-    // cap is a widening of that shell's form column rather than a column of
-    // its own. What matters is the same thing the frame exists for — one
-    // answer, read from the token.
-    expect(adminLayout).toContain('max-width: var(--content-max)');
+  it('admin takes its width from .card-pane, not a rule of its own', () => {
+    expect(adminLayout).not.toMatch(/max-width/);
+    for (const [name, wrapper, source] of adminPages) {
+      expect(source, name).toContain(`class="settings ${wrapper} card-pane"`);
+    }
   });
 
   for (const [name, wrapper, source] of adminPages) {
