@@ -1217,7 +1217,8 @@ def _owned_running_task(conn, *, actor_user_id: str, task_id: int):
     return task
 
 
-def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: str, text: str):
+def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: str, text: str,
+            attachment: dict | None = None):
     existing = conn.execute(
         "SELECT * FROM whatsapp_skill_requests WHERE requester_user_id=? AND origin_task_id=? "
         "AND request_key=?", (actor_user_id, task_id, request_key),
@@ -1226,7 +1227,34 @@ def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: s
         return None
     if existing["content_hash"] != text_hash(json.dumps([kind, actor_user_id, text], ensure_ascii=True)):
         raise RequestError("request_conflict")
+    if json.loads(existing["destination"] or "{}").get(LOCATION_SHARE_KEY) != attachment:
+        raise RequestError("request_conflict")
     return _question_response(conn, existing)
+
+
+# A held post's map, in its destination: the observation the released row's card draws.
+LOCATION_SHARE_KEY = "location_share"
+
+
+def _map_preview_line(observation: dict) -> str:
+    """The preview's line naming the map a post carries.
+
+    The approval digest is the preview's hash, so carrying a hash of the
+    observation's canonical form here binds the map to the approval the way
+    the text is bound; `_claim` recomputes it from the frozen observation.
+    """
+    canonical = json.dumps(observation, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return f"A map of this location is posted with it (map {text_hash(canonical)[:16]})."
+
+
+def _check_location_attachment(attachment, *, actor_user_id: str, text: str) -> None:
+    from istota.location.sharing import CARD_OBSERVATION_KEYS
+
+    if (not isinstance(attachment, dict) or set(attachment) != CARD_OBSERVATION_KEYS
+            or attachment["owner_user_id"] != actor_user_id
+            or not isinstance(attachment["map_url"], str) or not attachment["map_url"]
+            or attachment["map_url"] not in text):
+        raise RequestError("invalid_attachment")
 
 
 def _fingerprint(*parts) -> str:
@@ -1416,7 +1444,8 @@ def _post_target(conn, task, user_id: str, room: str | None) -> str:
 
 def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
                    request_key: str, text: str, room: str | None = None,
-                   request_context: dict | None = None, require_confirmation: bool = False) -> dict:
+                   request_context: dict | None = None, require_confirmation: bool = False,
+                   attachment: dict | None = None) -> dict:
     """A private-room task asks to post ``text`` into a shared room, as the bot.
 
     From the member's own private room only, never from a shared room
@@ -1428,13 +1457,21 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
     turn, with the recipient test swapped for "the text is the member's own
     words, verbatim in their prompt". Host services can disable that exception
     with ``require_confirmation`` and bind retry options in ``request_context``.
+
+    ``attachment`` is a location share's map: the member's own observation,
+    whose `map_url` the text carries. It is frozen into the destination, named
+    in the preview so the approval binds it, and drawn as the released row's
+    card. A post without one is held exactly as before.
     """
     from istota.relay import relays as message_relays
 
     _validate_input(request_key, text)
+    if attachment is not None:
+        _check_location_attachment(attachment, actor_user_id=actor_user_id, text=text)
     task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
     replay = _replay(conn, actor_user_id=actor_user_id, task_id=task_id,
-                     request_key=request_key, kind="room_post", text=text)
+                     request_key=request_key, kind="room_post", text=text,
+                     attachment=attachment)
     if replay is not None:
         return replay
     if task.parent_task_id or task.command or task.skill or task.scheduled_job_id:
@@ -1456,9 +1493,11 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
                 raise RequestError("invalid_rendering")
         from istota.confirmations import flatten
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
+        map_line = f"{_map_preview_line(attachment)}\n" if attachment is not None else ""
         preview = (f"Post this in {destination['label']} as {bot}?\n"
                    "Only the message below is posted, exactly as written. "
-                   "Sending must start within 10 minutes of approval.\n\n"
+                   "Sending must start within 10 minutes of approval.\n"
+                   f"{map_line}\n"
                    f"Message:\n{text}")
         # From a phone room the preview goes out by text, and must arrive whole.
         check_preview_fits(config, origin, preview)
@@ -1469,7 +1508,8 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
             binding_fingerprint=destination["fingerprint"], preview=preview,
             origin=origin,
             destination={**{key: destination[key] for key in ("kind", "room_token", "talk_ref", "label")},
-                         **({"request_context": request_context} if request_context is not None else {})},
+                         **({"request_context": request_context} if request_context is not None else {}),
+                         **({LOCATION_SHARE_KEY: attachment} if attachment is not None else {})},
         )
         if row["state"] == "held" and not require_confirmation and _clean_turn(conn, config, task, actor_user_id, post_text=text):
             _queue_question(conn, request_id=row["id"], relay_id=None,
@@ -1521,6 +1561,11 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 if (not row["approved_at"] or row["approved_digest"] != row["preview_digest"]
                         or text_hash(row["preview"] or "") != row["approved_digest"]):
                     raise RequestError("request_unavailable")
+                share = destination.get(LOCATION_SHARE_KEY)
+                if share is not None and (
+                        not isinstance(share, dict)
+                        or _map_preview_line(share) not in (row["preview"] or "")):
+                    raise RequestError("request_unavailable")
                 current = _post_destination(conn, destination.get("room_token") or "", user)
                 if current["fingerprint"] != row["binding_fingerprint"]:
                     raise RequestError("destination_changed")
@@ -1532,11 +1577,23 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 # room moved on while it waited for approval (ISSUE-641),
                 # judged now rather than when it was proposed.
                 quoted = quoted_trigger(conn, answers, parent) if answers is not None else None
+                cards = []
+                if share is not None:
+                    from istota.location.sharing import record_post_card
+                    cards.append(record_post_card(
+                        conn, request_id=request_id, task_id=row["origin_task_id"],
+                        actor_user_id=user, room_token=parent, observation=share))
+                # The card rides the row's own INSERT, as on a final answer:
+                # the room stream cursors on `messages.id`.
                 message_id = db.add_message(
                     conn, parent, role="assistant", body=body, origin_surface="web",
                     delivery_reference=reference, task_id=answers,
                     reply_to_message_id=quoted.message_id if quoted else None,
+                    location_shares=cards or None,
                 )
+                if cards:
+                    from istota.location.sharing import mark_location_cards_attached
+                    mark_location_cards_attached(conn, [card["card_id"] for card in cards], message_id)
                 quoted_ids = quoted.external_ids if quoted else {}
                 claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
                              reference=reference, whatsapp_group=whatsapp_group,

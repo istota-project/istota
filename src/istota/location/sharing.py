@@ -70,23 +70,49 @@ def _owner_label(config, owner_user_id):
     return flatten((user.display_name if user else "") or owner_user_id)
 
 
-def _record_card(conn, config, *, task_id, actor_user_id, room_token, snapshot, grant_id=None):
-    """Record a map card for one share result, on the caller's transaction.
+# Every key of a card's stored observation: a message's card element minus `card_id`.
+CARD_OBSERVATION_KEYS = frozenset(("owner_user_id", "owner_label") + _CARD_FIELDS)
 
-    It holds the projection the text already discloses and nothing else. It
-    reaches a room only if the task's answer carries its `map_url`
-    (`location_cards_for_answer`).
-    """
+
+def _card_observation(config, snapshot):
+    """The projection a card draws, which the text already discloses, and nothing else."""
     observation = {"owner_user_id": snapshot["owner_user_id"],
                    "owner_label": _owner_label(config, snapshot["owner_user_id"])}
     observation.update({key: snapshot[key] for key in _CARD_FIELDS})
-    conn.execute(
+    return observation
+
+
+def _insert_card(conn, *, task_id, actor_user_id, room_token, observation,
+                 grant_id=None, request_id=None):
+    return conn.execute(
         "INSERT INTO location_share_cards "
-        "(task_id, owner_user_id, actor_user_id, room_token, grant_id, observation, map_url) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (task_id, snapshot["owner_user_id"], actor_user_id, room_token, grant_id,
-         json.dumps(observation), snapshot["map_url"]),
-    )
+        "(task_id, request_id, owner_user_id, actor_user_id, room_token, grant_id, "
+        " observation, map_url) VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+        (task_id, request_id, observation["owner_user_id"], actor_user_id, room_token,
+         grant_id, json.dumps(observation), observation["map_url"]),
+    ).fetchone()[0]
+
+
+def _record_card(conn, config, *, task_id, actor_user_id, room_token, snapshot, grant_id=None):
+    """Record a map card for one share result, on the caller's transaction.
+
+    It reaches a room only if the task's answer carries its `map_url`
+    (`location_cards_for_answer`).
+    """
+    _insert_card(conn, task_id=task_id, actor_user_id=actor_user_id, room_token=room_token,
+                 observation=_card_observation(config, snapshot), grant_id=grant_id)
+
+
+def record_post_card(conn, *, request_id, task_id, actor_user_id, room_token, observation):
+    """Record a released location post's card, on `_claim`'s transaction.
+
+    The observation is the one frozen into the held request and bound by its
+    approved preview. Returns the message's card element.
+    """
+    card_id = _insert_card(conn, task_id=task_id, actor_user_id=actor_user_id,
+                           room_token=room_token, observation=observation,
+                           request_id=request_id)
+    return {"card_id": card_id, **observation}
 
 
 def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key,
@@ -153,6 +179,7 @@ def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key
         conn, config, actor_user_id=actor_user_id, task_id=task_id,
         request_key=request_key, room=target, text=_snapshot_text(snapshot),
         request_context=context, require_confirmation=True,
+        attachment=_card_observation(config, snapshot) if map_card else None,
     )
 
 
