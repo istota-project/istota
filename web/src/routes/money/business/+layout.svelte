@@ -21,11 +21,6 @@
       label: 'Invoices',
       active: isActive('/money/business/invoices'),
     },
-    {
-      href: `${base}/money/business/clients`,
-      label: 'Clients',
-      active: isActive('/money/business/clients'),
-    },
   ]);
 </script>
 

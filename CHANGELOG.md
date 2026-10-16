@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Clients are now edited in money Settings → Invoicing, beside entities and services, and the Business section is Work and Invoices. Clients are listed as a table there, and the old Clients address redirects to the new page.
 - The Add block dialog in briefing settings shows each preset as a card with an icon, grouped into News, Your day and More. The whole card is clickable, and a preset that cannot be used yet says why in place of its description.
 - The admin Status page lays its cards out in rows of three instead of one long column. It opens on an installation card with the bot's name, health, version, storage (which also says whether it runs in the Mac's Lima VM), users, scheduled jobs, database and backups, which replaces the separate Storage card. Cards that would sit alone in a row widen to fill it.
 - `[users.X.briefings]` in `config.toml` is retired. Each entry is imported once into the briefings database, and the config reports the block until it is removed; a briefing deleted in the settings page no longer comes back on restart. Every personal briefing is now editable by its owner, with no "Set by your administrator" lock.
