@@ -139,6 +139,15 @@ istota money work migrate -u USER         # run it
 
 `money.db` is one of the per-user module databases the scheduled database backup snapshots, daily by default, so the work log and invoice records are backed up with everything else in it. The snapshots go to dated directories under `Backups/db/snapshots/` in the workspace (or `[scheduler] db_backup_dir`), the newest seven are kept by default (`db_backup_retention`), and `db_restore` puts one back. See [Database](../architecture/database.md).
 
+### Exporting
+
+A backup is for recovery. To read the work log in a spreadsheet or keep a copy outside the database, export it: `istota money work export -u USER [--format csv|json] [--year YYYY] [--out PATH]`, the same verb through the money skill, or the download menu on the Work and Invoices pages. The export only reads.
+
+- **CSV** has one row per work entry, with its invoice number, that invoice's status (open or paid), issue and paid dates, and any voided invoices that also covered the entry. A text cell that a spreadsheet would read as a formula is written with a leading `'`.
+- **JSON** holds every entry and every invoice, voided ones included with their stored totals, income split, void reason, replacements and the entries they covered. It is complete enough to rebuild the store.
+
+`--year` keeps the entries dated in that year and the invoices that cover them. On the Work page the download follows the year filter. Without `--out` the export goes to stdout.
+
 ## Taxes
 
 A quarterly estimated-tax calculator at `/money/taxes` — the one page in the module that computes a number you send to a government, which shapes how it is built.

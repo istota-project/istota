@@ -29,11 +29,15 @@
     PageLoading,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
+  import SortHeader from '$lib/components/money/SortHeader.svelte';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
   import { notifyError } from '$lib/stores/notices';
+  import { loadSort, nextSort, saveSort, sortRows, type TableSort } from '$lib/money/tableSort';
+  import { workExportItems } from '$lib/money/workExport';
+  import { Download } from '@lucide/svelte';
 
   let entries: WorkEntryRow[] = $state([]);
   let totals: WorkTotals = $state({
@@ -53,7 +57,11 @@
   let statusFilter: WorkStatusFilter = $state('uninvoiced');
   let clientFilter = $state('');
   let periodFilter = $state('');
-  let sortAsc = $state(false);
+  type SortKey = 'date' | 'invoice';
+  const SORT_STORAGE = 'money.work.sort';
+  let sort: TableSort<SortKey> = $state(
+    loadSort<SortKey>(SORT_STORAGE, ['date', 'invoice'], { key: 'date', descending: true }),
+  );
 
   // uid of the entry currently running an action (disables its menu items).
   let busyUid = $state('');
@@ -288,17 +296,18 @@
     ];
   }
 
-  const sorted = $derived.by(() => {
-    const copy = [...entries];
-    copy.sort((a, b) => {
-      const cmp = a.date.localeCompare(b.date);
-      return sortAsc ? cmp : -cmp;
-    });
-    return copy;
-  });
+  // The display index breaks ties: it is the store's own order within a day.
+  const sorted = $derived(
+    sortRows(entries, sort.descending, (e) =>
+      sort.key === 'invoice'
+        ? [e.invoice, e.date, String(e.index ?? '')]
+        : [e.date, String(e.index ?? '')],
+    ),
+  );
 
-  function toggleSort() {
-    sortAsc = !sortAsc;
+  function sortBy(key: SortKey) {
+    sort = nextSort(sort, key);
+    saveSort(SORT_STORAGE, sort);
   }
 
   function statusOf(entry: WorkEntryRow): 'draft' | 'posted' | 'paid' {
@@ -391,6 +400,11 @@
           widthChars={4}
         />
         <Button variant="primary" onclick={openAdd}>Add entry</Button>
+        <KebabMenu
+          items={workExportItems(periodFilter || undefined)}
+          icon={Download}
+          ariaLabel="Download work log"
+        />
       </div>
     </div>
   {/if}
@@ -405,17 +419,24 @@
     <div class="money-table">
       <div class="money-table-header">
         <span class="work-index">#</span>
-        <button
-          class="work-date money-sortable"
-          onclick={toggleSort}
-          type="button"
-          title="Sort by date"
-        >
-          Date <span class="money-sort-arrow">{sortAsc ? '▲' : '▼'}</span>
-        </button>
+        <SortHeader
+          label="Date"
+          class="work-date"
+          active={sort.key === 'date'}
+          descending={sort.descending}
+          onclick={() => sortBy('date')}
+        />
         <span class="work-client">Client</span>
         <span class="work-service">Service</span>
         <span class="work-qty">Qty</span>
+        <SortHeader
+          label="Invoice"
+          name="invoice number"
+          class="work-invoice"
+          active={sort.key === 'invoice'}
+          descending={sort.descending}
+          onclick={() => sortBy('invoice')}
+        />
         <span class="work-status money-status">Status</span>
         <span class="work-amount money-amount">Amount</span>
         <span class="money-kebab-spacer"></span>
@@ -435,6 +456,7 @@
             {/if}
           </span>
           <span class="work-qty">{formatQty(entry)}</span>
+          <span class="work-invoice">{entry.invoice || '—'}</span>
           <span
             class="work-status money-status"
             class:status-paid={statusOf(entry) === 'paid'}
@@ -541,8 +563,13 @@
     min-width: 1.75rem;
   }
 
+  /* Global so it places the SortHeader too; the colour stays on the cell, or
+     it would outrank the header's own sorted and hover colours. */
   .work-date {
     color: var(--text-dim);
+  }
+
+  .work-content :global(.work-date) {
     white-space: nowrap;
     flex-shrink: 0;
     font-size: var(--text-xs);
@@ -583,6 +610,16 @@
     text-align: right;
   }
 
+  /* Fixed slot, so an uninvoiced row's dash keeps Status in line. */
+  .work-content :global(.work-invoice) {
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 6.5rem;
+  }
+
   /* Fits the longest label ("uninvoiced") in caps — if the chip outgrows the
      slot it starts shifting the Amount column per row again. */
   .work-status {
@@ -602,10 +639,11 @@
 
   @media (max-width: 640px) {
     .work-index,
-    .work-qty {
+    .work-qty,
+    .work-content :global(.work-invoice) {
       display: none;
     }
-    .work-date {
+    .work-content :global(.work-date) {
       min-width: 4.5rem;
     }
     .work-client {

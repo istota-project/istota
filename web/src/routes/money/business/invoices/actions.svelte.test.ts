@@ -436,3 +436,34 @@ describe('the manual invoice dialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 });
+
+describe('sorting', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    listed = [
+      invoiceRow({ date: '2026-09-01' }),
+      { ...PAID, date: '2026-08-01' },
+      { ...VOIDED, date: '2026-10-01' },
+    ];
+  });
+
+  function numbers(): string[] {
+    return [...document.querySelectorAll('.money-table-row .inv-number')].map(
+      (el) => el.textContent?.trim() ?? '',
+    );
+  }
+
+  it('sorts by date by default and by invoice number on request', async () => {
+    render(Page);
+    await screen.findByText('INV-000011');
+    expect(numbers()).toEqual(['INV-000009', 'INV-000010', 'INV-000011']);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by invoice number' }));
+    expect(numbers()).toEqual(['INV-000011', 'INV-000010', 'INV-000009']);
+    await fireEvent.click(screen.getByRole('button', { name: /Sorted by invoice number/ }));
+    expect(numbers()).toEqual(['INV-000009', 'INV-000010', 'INV-000011']);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by date' }));
+    expect(numbers()).toEqual(['INV-000009', 'INV-000010', 'INV-000011']);
+  });
+});

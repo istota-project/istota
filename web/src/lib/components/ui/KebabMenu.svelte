@@ -24,9 +24,12 @@
   interface Props {
     items: KebabItem[];
     ariaLabel?: string;
+    // The trigger's glyph. The kebab stays the default for row and card
+    // actions; a menu holding one kind of action (Download) names it.
+    icon?: typeof MoreVertical;
   }
 
-  let { items, ariaLabel = 'Actions' }: Props = $props();
+  let { items, ariaLabel = 'Actions', icon: Icon = MoreVertical }: Props = $props();
   let trigger: HTMLButtonElement | null = $state(null);
 </script>
 
@@ -37,7 +40,7 @@
     aria-label={ariaLabel}
     onclick={(e) => e.stopPropagation()}
   >
-    <MoreVertical size={15} />
+    <Icon size={15} />
   </DropdownMenu.Trigger>
   <DropdownMenu.Portal>
     <DropdownMenu.Content class="ui-kebab-content" sideOffset={4} align="end">
