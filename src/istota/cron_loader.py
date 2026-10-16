@@ -1640,3 +1640,50 @@ def _remove_job_locked(config, user_id: str, job_name: str) -> bool:
         return False
     logger.info("Removed job '%s' from CRON.md for user %s", job_name, user_id)
     return True
+
+
+def set_job_enabled(config, conn, job, enabled: bool, *, by: str) -> str:
+    """Switch one job on or off: the verb behind `!cron enable|disable` and the admin pane.
+
+    CRON.md first and the row second, since the sync reads the file back on
+    every tick. Returns ``"module"`` for a `_module.*` row, which is in nobody's
+    CRON.md and whose table row is the only authority (ISSUE-392); ``"file"``
+    when CRON.md now says so; ``"db_only"`` when it does not (no file, no such
+    job in it, or a refused write), where the next sync reverts the row.
+    """
+    from istota.notifications.resolvers import cron_job as cron_job_source  # noqa: PLC0415
+
+    if job.name.startswith(_MODULE_JOB_PREFIX):
+        outcome = "module"
+    elif update_job_enabled_in_cron_md(config, job.user_id, job.name, enabled):
+        outcome = "file"
+    else:
+        outcome = "db_only"
+    if enabled:
+        db.enable_scheduled_job(conn, job.id)
+    else:
+        db.disable_scheduled_job(conn, job.id)
+    # Closed on disable too: the inbox row an earlier suspension raised would
+    # otherwise keep asking the user to re-enable a job switched off on purpose.
+    cron_job_source.resolve_for_job(conn, job.user_id, job.id, by=by)
+    return outcome
+
+
+def remove_job_definition(config, user_id: str, job_name: str) -> bool:
+    """Take a job out of CRON.md so the sync will not re-create its row.
+
+    True when the file no longer names the job: it was removed, or it was never
+    there (no workspace, no file, a row the file does not carry). False when the
+    file still names it or exists and cannot be read, which is when deleting the
+    row would be undone by the next sync. Must not be called inside a write
+    transaction: the write lands on the mount (ISSUE-387).
+    """
+    if not config.has_workspace or remove_job_from_cron_md(config, user_id, job_name):
+        return True
+    doc = load_cron_document(config, user_id)
+    if doc is not None:
+        return all(job.name != job_name for job in doc.jobs)
+    from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
+
+    config_dir = resolve_user_config_dir(config, user_id)
+    return config_dir is None or not os.path.lexists(config_dir / "CRON.md")

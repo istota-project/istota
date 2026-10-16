@@ -2440,83 +2440,48 @@ async def cmd_memory(ctx: CommandContext):
 @command("cron", "List/enable/disable scheduled jobs: `!cron`, `!cron enable <name>`, `!cron disable <name>`")
 async def cmd_cron(ctx: CommandContext):
     config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
-    from .cron_loader import _MODULE_JOB_PREFIX, update_job_enabled_in_cron_md
+    from .cron_loader import set_job_enabled
 
     parts = args.strip().split(maxsplit=1)
     subcmd = parts[0].lower() if parts else ""
     job_name = parts[1].strip() if len(parts) > 1 else ""
 
-    # A `_module.*` row is seeded by its module and appears in nobody's
-    # CRON.md, so the file write below is not merely a no-op for it — it
-    # returns False and drops the user into the fallback branch, whose whole
-    # message is that the change is DB-only and may not persist. For a module
-    # row the DB is the only authority there is, and the change does persist
-    # (ISSUE-392), so that note is the opposite of true. Skip the file.
-    is_module_job = job_name.startswith(_MODULE_JOB_PREFIX)
+    # The "db_only" note names three causes because the user cannot tell them
+    # apart from here: no CRON.md at all, no such job in it, or a refused write
+    # on the rclone mount (ISSUE-369). Where there is a file, the next sync
+    # tick reads it unchanged and reverts the row.
+    db_only_note = (
+        " Note: CRON.md was not updated (no file, no such job in it, or the write was "
+        "refused) — change is DB-only and may not persist."
+    )
 
     if subcmd == "enable" and job_name:
         job = db.get_scheduled_job_by_name(conn, user_id, job_name)
         if not job:
             return f"No scheduled job named '{job_name}' found."
-        # Write to CRON.md (source of truth); DB updated on next sync
-        from istota.notifications.resolvers import cron_job as cron_job_source
-
-        if is_module_job:
-            db.enable_scheduled_job(conn, job.id)
-            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
+        outcome = set_job_enabled(config, conn, job, True, by=ctx.surface)
+        if outcome == "module":
             return (
                 f"Enabled module job '{job_name}' (failure count reset; "
                 "any scheduler suspension lifted)."
             )
-        if update_job_enabled_in_cron_md(config, user_id, job_name, True):
-            db.enable_scheduled_job(conn, job.id)
-            # The suspension this lifts is the inbox row's close predicate, so
-            # the row would go `stale` on the next panel read either way.
-            # Closing it here makes it `resolved` by the surface that ended the
-            # condition.
-            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
+        if outcome == "file":
             return (
                 f"Enabled scheduled job '{job_name}' (failure count reset; "
                 "any scheduler suspension lifted)."
             )
-        # Fallback: CRON.md does not say what we asked it to. Three causes,
-        # and the message names all three because the user cannot tell them
-        # apart from here — no CRON.md at all (the case this branch was
-        # written for), no such job in it, or a refused write. That last one
-        # is why the wording changed: the mount is rclone-backed, so a failed
-        # write is a real case, and until ISSUE-369 the writer swallowed it
-        # and reported success here. Update the DB alone and say the change
-        # may not persist, which where there is a file it will not: the next
-        # sync tick reads the unchanged file and reverts it.
-        db.enable_scheduled_job(conn, job.id)
-        cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
-        return f"Enabled scheduled job '{job_name}' (failure count reset). Note: CRON.md was not updated (no file, no such job in it, or the write was refused) — change is DB-only and may not persist."
+        return f"Enabled scheduled job '{job_name}' (failure count reset).{db_only_note}"
 
     if subcmd == "disable" and job_name:
         job = db.get_scheduled_job_by_name(conn, user_id, job_name)
         if not job:
             return f"No scheduled job named '{job_name}' found."
-        # Write to CRON.md (source of truth); DB updated on next sync
-        from istota.notifications.resolvers import cron_job as cron_job_source
-
-        # Closed here too, and `disable` is the case the resolver cannot cover:
-        # disabling by hand writes the user's column and leaves the scheduler's
-        # `auto_disabled_at` where it was, so an inbox row raised by an earlier
-        # suspension would keep telling the user to re-enable a job they have
-        # just switched off on purpose — forever, since object-backed rows are
-        # never age-swept.
-        if is_module_job:
-            db.disable_scheduled_job(conn, job.id)
-            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
+        outcome = set_job_enabled(config, conn, job, False, by=ctx.surface)
+        if outcome == "module":
             return f"Disabled module job '{job_name}'."
-        if update_job_enabled_in_cron_md(config, user_id, job_name, False):
-            db.disable_scheduled_job(conn, job.id)
-            cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
+        if outcome == "file":
             return f"Disabled scheduled job '{job_name}'."
-        # Fallback: the same three causes as the enable branch above.
-        db.disable_scheduled_job(conn, job.id)
-        cron_job_source.resolve_for_job(conn, user_id, job.id, by=ctx.surface)
-        return f"Disabled scheduled job '{job_name}'. Note: CRON.md was not updated (no file, no such job in it, or the write was refused) — change is DB-only and may not persist."
+        return f"Disabled scheduled job '{job_name}'.{db_only_note}"
 
     # Default: list all jobs
     refusal = _private_only(ctx, "your scheduled jobs")
