@@ -652,7 +652,7 @@ def test_delete_refuses_a_definition_under_an_unfinished_migration(env, state):
         conn.execute("INSERT INTO group_briefing_migrations (legacy_key, definition_id, state, data_json) "
                      "VALUES (?, ?, ?, '{}')", ("default:daily", definition["id"], state))
         conn.commit()
-        if state == "cutover":
+        if state in ("cutover", "rolled_back"):
             store.delete_definition(conn, definition["id"], admin_id="admin")
             assert store.get_definition(conn, definition["id"])["deleted_at"]
             return

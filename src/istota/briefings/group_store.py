@@ -255,12 +255,13 @@ def clear_hold(conn, config, definition_id):
 def require_no_pending_migration(conn, definition_id):
     """Refuse a delete while a migration still acts on the definition.
 
-    ``rollback_default`` and a re-review read it, so only ``cutover`` is
-    finished. The admin route asks this before it spends a step-up code.
+    Only ``cutover`` and ``rolled_back`` are settled; every migration step
+    refuses a deleted definition afterwards. The admin route asks this
+    before it spends a step-up code.
     """
     migration = conn.execute("SELECT state FROM group_briefing_migrations WHERE definition_id = ?",
                              (definition_id,)).fetchone()
-    if migration is not None and migration["state"] != "cutover":
+    if migration is not None and migration["state"] not in ("cutover", "rolled_back"):
         raise GroupError(409, "migration_pending", "Finish or roll back the briefing's migration first")
 
 

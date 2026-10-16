@@ -131,8 +131,8 @@
     }
     if (e instanceof GroupApiError && e.code === 'migration_pending') {
       notifyError(
-        'This briefing came from a migration that is not cut over. Finish it with ' +
-          'istota briefings migrate cutover on the host, then delete it.',
+        'This briefing came from a migration that is still under review. Cut it over or ' +
+          'roll it back with istota briefings migrate on the host, then delete it.',
       );
       return;
     }

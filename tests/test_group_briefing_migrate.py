@@ -116,6 +116,30 @@ def test_cutover_cancels_queued_cached_config_and_rollback(tmp_path, monkeypatch
         assert [tuple(row) for row in content.execute("SELECT * FROM briefing_archive")] == archive_before
 
 
+def test_a_rolled_back_definition_deletes_and_a_reimport_starts_fresh(tmp_path, monkeypatch):
+    from istota.briefings import group_migrate as migration
+    config, result, _, _ = imported(tmp_path, monkeypatch)
+    with db.get_db(config.db_path) as conn:
+        migration.review_default(conn, config, "daily", actor_id="alice", expected_revision=1, timezone="UTC", dispositions={})
+        migration.cutover_default(conn, config, "daily", actor_id="alice", expected_revision=1)
+        migration.rollback_default(conn, config, "daily", actor_id="alice", expected_revision=2)
+        store.delete_definition(conn, result["definition_id"], admin_id="alice")
+        for step in (
+            lambda: migration.review_default(conn, config, "daily", actor_id="alice", expected_revision=4,
+                                             timezone="UTC", dispositions={}),
+            lambda: migration.cutover_default(conn, config, "daily", actor_id="alice", expected_revision=4),
+        ):
+            with pytest.raises(GroupError, match="migration_definition_deleted"):
+                step()
+        assert store.get_definition(conn, result["definition_id"])["deleted_at"]
+        report = migration.migration_report(conn, config, "daily")[0]
+        assert report["definition_id"] is None
+        again = migration.import_default(conn, config, "daily", actor_id="alice", timezone="UTC")
+        assert again["definition_id"] not in (None, result["definition_id"])
+        fresh = store.get_definition(conn, again["definition_id"])
+        assert not fresh["enabled"] and not fresh["deleted_at"] and fresh["name"] == "daily"
+
+
 def test_running_legacy_task_refuses_cutover_without_partial_changes(tmp_path, monkeypatch):
     from istota.briefings import group_migrate as migration
     config, result, _, _ = imported(tmp_path, monkeypatch)

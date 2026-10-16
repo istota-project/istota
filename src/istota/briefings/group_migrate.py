@@ -175,8 +175,8 @@ def migration_report(conn, config, name=None):
                                "proposed": "retire" if unchanged and attributable else "mute" if current is None else "unresolved",
                                "enabled": current["schedule"]["enabled"] if current else False,
                                "timezone": config.resolve_user_timezone(user, conn=conn), "current": current})
-        definition = store.get_definition(conn, record["definition_id"]) if record["definition_id"] else None
-        records.append({"name": name, "state": record["state"], "definition_id": record["definition_id"],
+        definition = _live_definition(conn, record)
+        records.append({"name": name, "state": record["state"], "definition_id": definition["id"] if definition else None,
                         "definition_name": definition["name"] if definition else None,
                         "revision": definition["revision"] if definition else None,
                         "timezone": definition["timezone"] if definition else None,
@@ -185,11 +185,21 @@ def migration_report(conn, config, name=None):
     return records
 
 
+def _live_definition(conn, record):
+    """The record's definition, or None once an administrator deleted it."""
+    if not record or not record["definition_id"]:
+        return None
+    definition = store.get_definition(conn, record["definition_id"])
+    return None if definition is None or definition["deleted_at"] else definition
+
+
 def _owned(conn, config, name, actor_id, expected_revision=None, *, key=None):
     record = _record(conn, key or "default:" + name)
     if not record or not record["definition_id"]:
         _error("migration_import_required")
-    definition = store.get_definition(conn, record["definition_id"])
+    definition = _live_definition(conn, record)
+    if definition is None:
+        _error("migration_definition_deleted")
     store._require_author(conn, config, definition["group_id"], actor_id, operator_is_admin(conn, config, actor_id))
     if expected_revision is not None and definition["revision"] != expected_revision:
         _error("revision_conflict")
@@ -202,7 +212,7 @@ def import_default(conn, config, name, *, actor_id, timezone):
         store._require_author(conn, config, group["group_id"], actor_id, operator_is_admin(conn, config, actor_id))
         key = "default:" + name
         record = _record(conn, key)
-        if record and record["definition_id"]:
+        if _live_definition(conn, record):
             return migration_report(conn, config, name)[0]
         if not record:
             legacy = next((item for item in config.default_briefings if item.name == name), None)
