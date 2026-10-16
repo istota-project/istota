@@ -3703,7 +3703,9 @@ def cmd_devbox_compose_file(args) -> int:
     """
     from istota.devbox import compose_file
 
-    config = load_config(Path(args.config) if args.config else None)
+    # `istota-stack` runs this on a new image before `istota init` has upgraded
+    # the database, so it reads only the file; the overlays may refuse there.
+    config = load_config(Path(args.config) if args.config else None, apply_db_overlays=False)
     try:
         text = compose_file.render_devbox_compose(config, args.state_dir)
         repos = compose_file.repos_dirs_to_create(config)
@@ -5862,7 +5864,8 @@ def main():
 
     # Load config and setup logging (except for init/setup/apply, which don't need — or
     # may pre-date — a config file).
-    if args.command not in ("init", "setup", "apply", "snapshot", "migrate"):
+    pre_init = args.command == "devbox" and getattr(args, "devbox_action", None) == "compose-file"
+    if args.command not in ("init", "setup", "apply", "snapshot", "migrate") and not pre_init:
         config = load_config(Path(args.config) if args.config else None)
         setup_logging(config, verbose=args.verbose)
 

@@ -287,3 +287,34 @@ class TestTheWizardPlacesTheSocketsWhereTheRenderAcceptsThem:
         config.developer.container.exec_socket_dir = dev["container"]["exec_socket_dir"]
         config.developer.repos_dir = dev["repos_dir"]
         assert compose_file.render_devbox_compose(config)
+
+
+def test_the_cli_renders_against_a_database_init_has_not_upgraded(tmp_path, monkeypatch, capsys):
+    """`istota-stack update` runs this on the new image before `istota init`;
+    a pre-init database with `default_briefings` must not stop the build."""
+    from istota import cli, db
+    from istota.config import load_config
+    from istota.lib import toml_write
+
+    monkeypatch.setenv("ISTOTA_ADMINS_FILE", str(tmp_path / "admins"))
+    database = tmp_path / "framework.db"
+    db.init_db(database)
+    with db.get_db(database) as conn:
+        conn.execute("DROP TABLE group_briefing_migrations")
+    path = tmp_path / "config.toml"
+    path.write_text(toml_write.dumps({
+        "db_path": str(database),
+        "default_briefings": [{"name": "daily", "cron": "0 7 * * *", "output": "email"}],
+        "developer": {"enabled": True, "repos_dir": str(tmp_path / "repos")},
+        "devbox": {"enabled": True, "users": ["alice"]},
+    }))
+    with pytest.raises(ValueError, match="requires istota init"):
+        load_config(path)
+    monkeypatch.setattr(compose_file, "repos_dirs_to_create", lambda config: [])
+    monkeypatch.setattr(compose_file, "render_devbox_compose",
+                        lambda config, state_dir: f"# users {config.devbox.users}\n")
+    monkeypatch.setattr("sys.argv", ["istota", "-c", str(path), "devbox", "compose-file"])
+
+    cli.main()
+
+    assert capsys.readouterr().out == "# users ['alice']\n"
