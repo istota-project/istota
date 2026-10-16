@@ -201,3 +201,18 @@ describe('the admin users table counts job runs apart', () => {
     expect(summary.textContent?.replace(/\s+/g, ' ')).toContain('auto 2 · jobs 288');
   });
 });
+
+describe('the status page lays its cards out as a masonry wall', () => {
+  it('puts every card straight into the grid, with the banner and Users at full width', async () => {
+    const { container } = await show([member('bob', 'Bob')]);
+    const grid = container.querySelector('.card-grid-tracks.masonry') as HTMLElement;
+    expect(grid).toBeTruthy();
+    // Masonry places and measures only the grid's own children.
+    const cards = Array.from(grid.children);
+    expect(cards.length).toBeGreaterThan(3);
+    expect(cards.every((c) => c.classList.contains('card'))).toBe(true);
+    expect(grid.querySelector(':scope > .system-banner')?.getAttribute('data-width')).toBe('full');
+    const users = cards.find((c) => c.querySelector('.users-grid'));
+    expect(users?.getAttribute('data-width')).toBe('full');
+  });
+});
