@@ -29,12 +29,14 @@ describe('CardGrid', () => {
     expect(tracksOf(container).dataset.columns).toBe('5');
   });
 
-  it('leaves placement to CSS when masonry is off', () => {
-    const raf = vi.fn();
-    vi.stubGlobal('requestAnimationFrame', raf);
+  it('leaves placement to CSS when masonry is off and no card asks to fill', () => {
+    vi.stubGlobal('requestAnimationFrame', (run: FrameRequestCallback) => (run(0), 1));
     const { container } = render(CardGrid, { children: cards });
-    expect(tracksOf(container).classList.contains('masonry')).toBe(false);
-    expect(raf).not.toHaveBeenCalled();
+    const tracks = tracksOf(container);
+    expect(tracks.classList.contains('masonry')).toBe(false);
+    for (const card of tracks.children) {
+      expect((card as HTMLElement).style.gridColumn).toBe('');
+    }
   });
 
   it('sets the minimum ratio only when one is given', () => {

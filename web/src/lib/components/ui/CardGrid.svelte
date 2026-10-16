@@ -5,6 +5,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { masonry as masonryLayout } from '$lib/masonry';
+  import { cardFill } from '$lib/cardFill';
 
   interface Props {
     /** The most columns the grid grows to; it steps down to one as its container narrows. */
@@ -26,8 +27,9 @@
   }: Props = $props();
 
   // Fixed at mount: the pages that use it never switch modes on a live grid.
+  // Masonry places every card itself, so `data-fill` applies only without it.
   function layout(node: HTMLElement, enabled: boolean) {
-    return enabled ? masonryLayout(node) : {};
+    return enabled ? masonryLayout(node) : cardFill(node);
   }
 </script>
 
