@@ -86,6 +86,17 @@ class TestArchive:
         assert "document" not in listed
         assert listed["body_md"] == document_to_markdown(document)
 
+    def test_preview_is_on_list_rows_only(self, ctx, client):
+        with bdb.connect(ctx.db_path) as conn:
+            aid = bdb.insert_archive(
+                conn, briefing_name="morning", subject="Edition", body_md="The first words",
+            )
+            conn.commit()
+        listed = client.get("/istota/api/briefings/archive").json()["items"][0]
+        assert listed["preview"] == "The first words"
+        detail = client.get(f"/istota/api/briefings/archive/{aid}").json()
+        assert "preview" not in detail
+
     @pytest.mark.parametrize("stored", [None, "{", '{"version": 99}', '{"version": 1}'])
     def test_detail_keeps_legacy_body_when_document_is_unreadable(self, ctx, client, stored):
         with bdb.connect(ctx.db_path) as conn:
