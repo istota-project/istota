@@ -100,6 +100,7 @@ beforeEach(() => {
     block_templates: [],
   });
   api.getSharedBlockOptions.mockResolvedValue({ options: [] });
+  api.getEmailAccounts.mockResolvedValue({ accounts: [] });
   api.getProfile.mockResolvedValue({ profile: { briefing_email_html: true } });
   api.getBriefingArchive.mockResolvedValue({ items: [], total: 0, briefing_names: [] });
   api.getGroupEditions.mockResolvedValue({ items: [], total: 0 });

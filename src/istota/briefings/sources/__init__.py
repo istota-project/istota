@@ -130,11 +130,12 @@ def gather_sources(sources, gather_one):
 
 def _load_resolvers() -> dict:
     """Import the resolver callables lazily (avoids import cycles at module load)."""
-    from istota.briefings.sources import browse, builtins, email, kv, rss
+    from istota.briefings.sources import browse, builtins, email, kv, my_email, rss
 
     return {
         "rss": rss.resolve,
         "email": email.resolve,
+        "my_email": my_email.resolve,
         "browse": browse.resolve,
         "markets": builtins.resolve_markets,
         "calendar": builtins.resolve_calendar,

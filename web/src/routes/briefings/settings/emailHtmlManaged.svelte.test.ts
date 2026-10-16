@@ -29,6 +29,7 @@ await fillApiDouble(api, {
   })),
   getBriefingPathSuggestions: vi.fn(async () => ({ paths: [] })),
   getSharedBlockOptions: vi.fn(async () => ({ options: [] })),
+  getEmailAccounts: vi.fn(async () => ({ accounts: [] })),
   getProfile: vi.fn(async () => ({
     profile: { briefing_email_html: true, managed: managed.value },
   })),

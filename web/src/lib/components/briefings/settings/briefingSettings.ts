@@ -17,6 +17,7 @@ export function channelLabel(channel: string): string {
 export const SOURCE_KIND_LABELS: Record<string, string> = {
   rss: 'RSS feed',
   email: 'Newsletters',
+  my_email: 'My email',
   browse: 'Web page',
   markets: 'Markets',
   calendar: 'Calendar',
