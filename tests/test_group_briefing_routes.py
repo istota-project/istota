@@ -235,6 +235,7 @@ async def test_editor_defaults_and_own_resources_only(client, configured, tmp_pa
     assert targets["source_scopes"]["personal_file"] == "Personal contribution"
     assert targets["source_scopes"]["group_memory"] == "Current group"
     assert targets["source_scopes"]["shared_block"] == "Installation-shared"
+    assert targets["source_scopes"]["email"] == "Installation-shared"
     assert targets["source_scopes"]["browse"] == "Public"
     url = BASE + "/groups/family/briefing-resources"
     response = await client.get(url + "?owner_id=bob")

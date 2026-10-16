@@ -382,13 +382,20 @@ it('lists personal-only sources a group copy cannot keep', async () => {
                 config: { url: 'https://example.com' },
                 enabled: true,
               },
+              {
+                id: 4,
+                position: 3,
+                kind: 'email',
+                config: { mode: 'shared', lookback_hours: 12 },
+                enabled: true,
+              },
             ],
           },
         ],
       },
     ],
     schedule_names: ['morning'],
-    source_kinds: ['calendar', 'markets', 'browse'],
+    source_kinds: ['calendar', 'markets', 'browse', 'email'],
     structured_kinds: [],
     block_templates: [],
   });
@@ -399,11 +406,13 @@ it('lists personal-only sources a group copy cannot keep', async () => {
   const dialog = await screen.findByRole('dialog', { name: 'Duplicate to a group' });
   expect(within(dialog).getByText('Day: calendar')).toBeInTheDocument();
   expect(within(dialog).getByText('Day: markets (switched off)')).toBeInTheDocument();
+  expect(within(dialog).queryByText(/: email/)).not.toBeInTheDocument();
   await fireEvent.click(within(dialog).getByRole('button', { name: 'Create copy' }));
   await waitFor(() => expect(api.saveGroupBriefing).toHaveBeenCalledTimes(1));
   const payload = api.saveGroupBriefing.mock.calls[0][1];
   expect(payload.generation.blocks[0].sources.map((s: { kind: string }) => s.kind)).toEqual([
     'browse',
+    'email',
   ]);
 });
 

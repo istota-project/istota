@@ -104,7 +104,7 @@ def _targets(conn, config, actor):
             "timezone": config.briefings.shared_block_timezone,
             "source_scopes": {kind: ("Personal contribution" if kind.startswith("personal_") else
                                      "Current group" if kind.startswith("group_") else
-                                     "Installation-shared" if kind == "shared_block" else "Public")
+                                     "Installation-shared" if kind in ("shared_block", "email") else "Public")
                               for kind in sorted(GROUP_SOURCE_KINDS)}}
 
 

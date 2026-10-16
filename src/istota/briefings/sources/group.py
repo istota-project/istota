@@ -82,11 +82,14 @@ def _resolve_stored(source, ctx, conn, definition):
         if ctx.config.get_user(BRIEFINGS_IDENTITY) is not None:
             return _failed(kind, "refused", "briefing_browser_identity_refused")
         return browse.resolve(config, replace(public_ctx, user_id=BRIEFINGS_IDENTITY))
-    if kind not in ("shared_block", "markets"):
+    if kind not in ("shared_block", "markets", "email"):
         return _failed(kind, "refused", "source_kind_refused")
     try:
         if kind == "shared_block":
             result = kv.resolve_shared_block(config, public_ctx)
+        elif kind == "email":
+            from istota.briefings.sources import email
+            result = email.resolve(config, public_ctx)
         else:
             result = builtins.resolve_markets(config, public_ctx, allow_browser=False)
     except Exception:
