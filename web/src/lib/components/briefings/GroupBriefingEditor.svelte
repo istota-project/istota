@@ -478,6 +478,16 @@
     return `${label}’s`;
   }
 
+  // What the page's Delete acts on: the saved definition, not unsaved edits.
+  export function deletion(): { revision: number; title: string; enabled: boolean } | null {
+    if (!author || !saved || saved.deleted) return null;
+    return {
+      revision: saved.revision,
+      title: saved.title || derivedTitle(name),
+      enabled: saved.enabled,
+    };
+  }
+
   export function duplicateSource(): DuplicateSource {
     return {
       name,

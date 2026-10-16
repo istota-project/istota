@@ -265,12 +265,14 @@ def require_no_pending_migration(conn, definition_id):
         raise GroupError(409, "migration_pending", "Finish or roll back the briefing's migration first")
 
 
-def delete_definition(conn, definition_id, *, admin_id):
-    """Soft-delete a definition for an administrator.
+def delete_definition(conn, definition_id, *, actor_id, expected_revision=None, draft_only=False):
+    """Soft-delete a definition, for an administrator or a group owner.
 
     Published editions stay readable to members, so the row stays and only
     leaves authoring: unsent work stops as on a hold, source approvals are
-    revoked, and the name is freed for the group by renaming the row.
+    revoked, and the name is freed for the group by renaming the row. An
+    owner's delete passes ``draft_only`` and its editor's revision, so it
+    removes only a disabled definition, and only the one they last saw.
     """
     from istota.briefings.source_grants import revoke_definition_grants
     from istota.notifications.resolvers.group_briefing import close_approvals
@@ -278,6 +280,10 @@ def delete_definition(conn, definition_id, *, admin_id):
         current = get_definition(conn, definition_id)
         if current is None or current["deleted_at"]:
             raise GroupError(404, "definition_not_found", "Briefing not found")
+        if expected_revision is not None and expected_revision != current["revision"]:
+            raise GroupError(409, "revision_conflict", "Briefing changed; reload before deleting")
+        if draft_only and current["enabled"]:
+            raise GroupError(409, "disable_first", "Turn the briefing off before deleting it")
         require_no_pending_migration(conn, definition_id)
         stop_definition_work(conn, definition_id, "definition_deleted")
         revoke_definition_grants(conn, definition_id)
@@ -290,7 +296,7 @@ def delete_definition(conn, definition_id, *, admin_id):
             suffix += 1
         conn.execute("UPDATE group_briefing_configs SET deleted_at = ?, deleted_by = ?, enabled = 0, name = ?, "
                      "revision = revision + 1, updated_at = datetime('now') WHERE id = ?",
-                     (_timestamp(), admin_id, name, definition_id))
+                     (_timestamp(), actor_id, name, definition_id))
 
 
 def get_run(conn, run_id):

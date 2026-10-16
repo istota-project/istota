@@ -123,7 +123,7 @@ def test_a_rolled_back_definition_deletes_and_a_reimport_starts_fresh(tmp_path, 
         migration.review_default(conn, config, "daily", actor_id="alice", expected_revision=1, timezone="UTC", dispositions={})
         migration.cutover_default(conn, config, "daily", actor_id="alice", expected_revision=1)
         migration.rollback_default(conn, config, "daily", actor_id="alice", expected_revision=2)
-        store.delete_definition(conn, result["definition_id"], admin_id="alice")
+        store.delete_definition(conn, result["definition_id"], actor_id="alice")
         for step in (
             lambda: migration.review_default(conn, config, "daily", actor_id="alice", expected_revision=4,
                                              timezone="UTC", dispositions={}),

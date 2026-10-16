@@ -168,6 +168,12 @@ def _save(conn, config, actor, group_id, payload, name=None):
     return _definition_view(config, definition, caps)
 
 
+def _delete(conn, config, actor, group_id, name, revision):
+    _, definition = _access(conn, config, actor, group_id, name, author=True)
+    store.delete_definition(conn, definition["id"], actor_id=actor, expected_revision=revision, draft_only=True)
+    return {"ok": True, "deleted": True, "id": definition["id"]}
+
+
 def _runs(conn, config, actor, group_id, name, *, limit=20, offset=0, payload=None):
     caps, definition = _access(conn, config, actor, group_id, name, author=payload is not None,
                                deleted_ok=payload is None)
@@ -317,6 +323,13 @@ async def save_definition(group_id: str, request: Request, name: str = None, use
                           _csrf: None = Depends(verify_origin)):
     payload = await _payload(request, DEFINITION_FIELDS, {"revision", "name", "generation", "generation_mode"})
     return await _run(request, user, _save, group_id, payload, name)
+
+
+@router.delete("/groups/{group_id}/briefings/{name}")
+async def delete_definition(group_id: str, name: str, request: Request, user: dict = Depends(require_auth),
+                            _csrf: None = Depends(verify_origin)):
+    payload = await _payload(request, {"revision": (int,)}, {"revision"})
+    return await _run(request, user, _delete, group_id, name, payload["revision"])
 
 
 @router.get("/groups/{group_id}/briefings/{name}/audience")

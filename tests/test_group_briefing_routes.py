@@ -395,7 +395,7 @@ async def test_a_deleted_definition_leaves_authoring_and_keeps_its_editions(clie
     definition, run = await publish(client, configured)
     assert (await client.get(ROOT + "/daily")).json()["deleted"] is False
     with db.get_db(configured._config.db_path) as conn:
-        store.delete_definition(conn, definition["id"], admin_id="admin")
+        store.delete_definition(conn, definition["id"], actor_id="admin")
     renamed = f"deleted-{definition['id']}-daily"
     assert (await client.get(ROOT)).json()["items"] == []
     assert (await client.get(ROOT + "/daily")).status_code == 404
@@ -422,3 +422,37 @@ async def test_a_deleted_definition_leaves_authoring_and_keeps_its_editions(clie
         assert response.status_code == 404, (method, path, response.text)
     recreated = await create(client)
     assert recreated["name"] == "daily" and recreated["id"] != definition["id"]
+
+
+async def test_an_owner_deletes_a_disabled_draft(client, configured):
+    draft = await create(client)
+    stale = await client.request("DELETE", ROOT + "/daily", json={"revision": draft["revision"] + 1})
+    assert stale.status_code == 409 and stale.json()["error"] == "revision_conflict"
+    assert (await client.request("DELETE", ROOT + "/daily", json={"revision": draft["revision"]},
+                                 headers={"origin": "https://other.example.com"})).status_code == 403
+    session(client, configured, "bob")
+    member = await client.request("DELETE", ROOT + "/daily", json={"revision": draft["revision"]})
+    assert member.status_code == 403
+    session(client, configured, "alice")
+    deleted = await client.request("DELETE", ROOT + "/daily", json={"revision": draft["revision"]})
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {"ok": True, "deleted": True, "id": draft["id"]}
+    assert (await client.get(ROOT)).json()["items"] == []
+    assert (await client.get(ROOT + "/daily")).status_code == 404
+    with db.get_db(configured._config.db_path) as conn:
+        row = store.get_definition(conn, draft["id"])
+    assert row["deleted_by"] == "alice" and row["name"] == f"deleted-{draft['id']}-daily"
+    assert (await create(client))["id"] != draft["id"]
+
+
+async def test_an_owner_cannot_delete_an_enabled_briefing(client, configured):
+    definition, _ = await publish(client, configured)
+    current = (await client.get(ROOT + "/daily")).json()
+    refused = await client.request("DELETE", ROOT + "/daily", json={"revision": current["revision"]})
+    assert refused.status_code == 409 and refused.json()["error"] == "disable_first"
+    assert (await client.get(ROOT + "/daily")).json()["id"] == definition["id"]
+    off = await client.put(ROOT + "/daily", json={**payload(enabled=False, channel="in_app"),
+                                                  "revision": current["revision"]})
+    assert off.status_code == 200
+    again = await client.request("DELETE", ROOT + "/daily", json={"revision": off.json()["revision"]})
+    assert again.status_code == 200

@@ -8,6 +8,7 @@
     getBriefings,
     upsertBriefing,
     deleteBriefing,
+    deleteGroupBriefing,
     getBriefingConfig,
     getBriefingTargets,
     putBriefingBlock,
@@ -215,6 +216,7 @@
   let groupEditor = $state<GroupBriefingEditor | null>(null);
   let duplicating = $state<{ from: DuplicateSource; exclude: string } | null>(null);
   let confirmDelete = $state<UserBriefingRow | null>(null);
+  let confirmGroupDelete = $state<{ revision: number; title: string } | null>(null);
   let busy = $state(false);
 
   function personalDuplicateSource(row: UserBriefingRow): DuplicateSource {
@@ -301,9 +303,25 @@
     }
   }
 
+  async function performGroupDelete() {
+    const target = confirmGroupDelete;
+    confirmGroupDelete = null;
+    if (!target || busy) return;
+    busy = true;
+    try {
+      await deleteGroupBriefing(groupId, groupName, target.revision);
+      briefingsRefreshNonce.update((n) => n + 1);
+      await goto(`${base}/briefings/settings/`, { replaceState: true });
+    } catch (e) {
+      notifyError((e as Error).message || 'Could not delete the briefing.');
+    } finally {
+      busy = false;
+    }
+  }
+
   const menu = $derived.by((): KebabItem[] => {
-    if (groupId && groupTarget?.capabilities.author_briefings)
-      return [
+    if (groupId && groupTarget?.capabilities.author_briefings) {
+      const items: KebabItem[] = [
         {
           label: 'Duplicate to a group',
           onSelect: () => {
@@ -312,6 +330,17 @@
           },
         },
       ];
+      // The server deletes only a disabled definition, so say so up front.
+      const target = groupEditor?.deletion();
+      if (target)
+        items.push({
+          label: target.enabled ? 'Delete (turn off first)' : 'Delete',
+          danger: true,
+          disabled: busy || target.enabled,
+          onSelect: () => (confirmGroupDelete = target),
+        });
+      return items;
+    }
     if (personalName && schedule?.id !== undefined) {
       const row = schedule;
       return [
@@ -453,5 +482,17 @@
     confirmLabel="Delete"
     onConfirm={performDelete}
     onCancel={() => (confirmDelete = null)}
+  />
+{/if}
+
+{#if confirmGroupDelete}
+  <ConfirmDialog
+    open={true}
+    title="Delete briefing"
+    message={`Are you sure you want to delete ${confirmGroupDelete.title}? It stops for every member of ${groupTarget?.label ?? 'the group'}, and any unsaved changes are lost. Editions already published stay readable.`}
+    confirmLabel="Delete"
+    confirmVariant="danger"
+    onConfirm={performGroupDelete}
+    onCancel={() => (confirmGroupDelete = null)}
   />
 {/if}
