@@ -269,7 +269,7 @@
 	   to make the chip *text* align with surrounding content. */
   --chip-padding-x: 0.5rem;
   /* Gap between sibling chips/nav-links in a flex row. */
-  --chip-gap: 0.1rem;
+  --chip-gap: var(--space-2);
 
   /* How wide a dashboard's content column is allowed to get before it stops
 	   growing and centres instead. A cap rather than a preference: a stat grid
