@@ -63,6 +63,7 @@ describe('theme parity', () => {
     // this file exists to prevent — a categorical palette is exactly the kind
     // of token somebody defines in dark and never gives a light value.
     '--room-color-',
+    '--category-',
   ];
   const isColorToken = (name: string) =>
     COLOR_PREFIXES.some((p) => name.startsWith(p)) &&
