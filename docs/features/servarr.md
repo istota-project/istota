@@ -87,6 +87,8 @@ The rest of `[servarr]` goes in the plan like any other config table. See [decla
 
 Admin > Connections has a Servarr card. It lists each configured app with its URL, whether a key is set, and the result of the daemon's last `servarr.connection` check, which asks each app for its version with its key. A table missing its `url` or `api_key`, a URL with a user name or password in it, and plain HTTP to a host not in `private_hosts` show as setup incomplete. Check now runs the check again. `istota doctor --only servarr.connection` gives the same results from a terminal. The web interface never calls an arr app and never shows a key.
 
+Edit on the card changes each app's URL and key, `private_hosts`, the requesters and the add defaults. The key field starts empty and an empty field keeps the stored key; Replace key opens it. The change goes through the same review, confirmation and host applier as the Configuration page, and Istota restarts to load it. The card is read-only where the Configuration page is: on an install with no config applier, and where a plan manages `config.toml` (an Ansible-managed install). Ownership is recorded for the whole of `config.toml`, not per section, so on a managed install `[servarr]` is changed in the settings plan and the keys in its secrets.
+
 ## Network
 
 The skill's CLI runs host-side, outside the task's sandbox, and connects to the apps from the daemon's network. **Do not add the arr ports to `[security.network] extra_hosts`.** Without an entry the sandbox has no route to the apps, so the skill's verbs are the only way a task reaches them. With a route and a copy of a key, the tier table stops being the limit.
