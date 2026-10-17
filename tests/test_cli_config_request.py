@@ -54,7 +54,7 @@ class Install:
         return hashlib.sha256(self.config_path.read_bytes()).hexdigest()
 
     def submit(self, change_set: dict) -> int:
-        async def run_check(document):
+        async def run_check(document, **kwargs):
             return CheckResult()
 
         found = asyncio.run(edits.preview(
@@ -161,6 +161,19 @@ class TestTake:
         assert "would write istota_email_imap_password" in result.stdout
         assert "would write config/admins" in result.stdout
         assert NEW_IMAP not in result.stdout + result.stderr
+
+    def test_a_servarr_key_goes_to_its_secrets_file_and_not_the_plan(self, install):
+        arr_key = "arr-key-for-the-file"
+        install.submit({
+            "ops": [{"op": "set", "path": ["servarr", "apps", "radarr", "url"], "value": "https://radarr.example.org"}],
+            "secrets": {"istota_servarr_radarr_api_key": arr_key},
+        })
+        assert install.run("config-request", "take", "--out", str(install.out)).returncode == 0
+        plan = (install.out / "plan.json").read_text()
+        assert arr_key not in plan
+        assert json.loads(plan)["config"]["servarr"]["apps"]["radarr"] == {"url": "https://radarr.example.org"}
+        files = json.loads((install.out / "files.json").read_text())
+        assert files["secrets"] == {"istota_servarr_radarr_api_key": arr_key}
 
     def test_a_request_changing_no_file_names_nothing(self, install):
         install.submit({"ops": [{"op": "set", "path": ["email", "imap_host"], "value": "imap.example.org"}]})

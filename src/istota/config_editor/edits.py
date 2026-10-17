@@ -648,13 +648,14 @@ async def preview(
     *,
     config: Any,
     acting_admin: str,
-    run_check: Callable[[dict], Awaitable[Any]],
+    run_check: Callable[..., Awaitable[Any]],
     environ: Mapping[str, str] | None = None,
 ) -> Preview:
     """What `change_set` would make of `current_text`, the live `config.toml`.
 
     `run_check` validates the new document in a child process
-    (`config_editor.check.run_check`); a unit test passes a fake. Raises
+    (`config_editor.check.run_check`), given the new file credentials as
+    `environ`; a unit test passes a fake. Raises
     `ChangeError` for a change set that cannot be read. The base digest, the
     step-up, the confirmations and managed resources are the route's to check.
     """
@@ -718,7 +719,9 @@ async def preview(
         and path not in paths_by_name.values()
     ]
 
-    problems = problems_of(await run_check(new))
+    # A new file credential reaches the check as the variable its file becomes.
+    overlay = {name.upper(): value for name, value in file_secrets.items()}
+    problems = problems_of(await run_check(new, environ=overlay))
     for problem in problems:
         path = tuple(problem.get("path") or ())
         problem["pre_existing"] = bool(path) and not any(_related(path, item) for item in changed)

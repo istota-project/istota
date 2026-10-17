@@ -157,6 +157,20 @@ class TestRunCheck:
         result = await check.run_check({"bot_name": "fed"}, command=_fake(script))
         assert result.error == "fed"
 
+    async def test_environ_is_laid_over_the_inherited_environment(self, monkeypatch):
+        """A new file credential reaches the check as the variable its file
+        becomes, the way the restarted process will read it."""
+        monkeypatch.setenv("ISTOTA_CHECK_INHERITED", "kept")
+        script = (
+            "import sys, json, os; sys.stdin.read();"
+            "print(json.dumps({'problems': [], 'error': "
+            "os.environ.get('ISTOTA_CHECK_INHERITED', '') + '|' + os.environ.get('ISTOTA_CHECK_NEW', '')}))"
+        )
+        result = await check.run_check(
+            {}, command=_fake(script), environ={"ISTOTA_CHECK_NEW": "laid-over"},
+        )
+        assert result.error == "kept|laid-over"
+
     async def test_a_reply_that_is_not_json_is_a_blocking_error(self, caplog):
         result = await check.run_check(
             {"bot_name": "SECRET-STDIN"}, command=_fake("import sys; sys.stdin.read(); print('nope')"),

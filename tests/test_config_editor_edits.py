@@ -184,7 +184,7 @@ class TestCheckChoices:
 def _fake_check(result: CheckResult):
     seen: list[dict] = []
 
-    async def run_check(document: dict) -> CheckResult:
+    async def run_check(document: dict, **kwargs) -> CheckResult:
         seen.append(document)
         return result
 
@@ -287,6 +287,34 @@ class TestPreview:
         assert found.secret_names == ["istota_email_imap_password"]
         assert found.changed
         assert "imap-secret-9" not in repr(found.as_json()) + found.document_toml
+
+    def test_the_check_reads_new_file_credentials_as_their_variables(self):
+        environs: list[dict] = []
+
+        async def run_check(document: dict, **kwargs) -> CheckResult:
+            environs.append(kwargs.get("environ"))
+            return CheckResult()
+
+        asyncio.run(edits.preview(
+            CURRENT,
+            {"secrets": {"istota_servarr_radarr_api_key": "arr-key-1", "istota_email_imap_password": ""}},
+            config=Config(admin_users={"alice"}), acting_admin="alice", run_check=run_check, environ={},
+        ))
+        assert environs == [{"ISTOTA_SERVARR_RADARR_API_KEY": "arr-key-1", "ISTOTA_EMAIL_IMAP_PASSWORD": ""}]
+
+    def test_a_servarr_key_is_a_file_credential(self):
+        found, seen = _preview(CURRENT, {
+            "ops": [{"op": "set", "path": ["servarr", "apps", "radarr", "url"], "value": "http://192.0.2.10:7878"}],
+            "secrets": {"istota_servarr_radarr_api_key": "arr-key-2"},
+        })
+        assert not found.blocked, found.errors
+        assert found.file_secrets == {"istota_servarr_radarr_api_key": "arr-key-2"}
+        assert seen[-1]["servarr"]["apps"]["radarr"] == {"url": "http://192.0.2.10:7878"}
+        assert "arr-key-2" not in found.document_toml
+
+    def test_a_servarr_key_by_its_label_is_refused(self):
+        with pytest.raises(ChangeError):
+            _preview(CURRENT, {"secrets": {"servarr.apps.radarr.api_key": "arr-key-3"}})
 
     @pytest.mark.parametrize("secrets", [
         {"istota_email_imap_password": None},

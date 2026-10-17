@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Mapping
 from urllib.parse import urlsplit
 
 import tomli
@@ -309,6 +309,15 @@ SERVARR_DEFAULT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def servarr_key_variable(app: str) -> str:
+    """The variable an arr app's API key arrives in: `ISTOTA_SERVARR_<APP>_API_KEY`.
+
+    Lowercased, it is the stack secrets file `istota-secrets` exports it from
+    (`setup_wizard.SECRET_NAMES`). It wins over an inline `api_key`.
+    """
+    return f"ISTOTA_SERVARR_{app.upper()}_API_KEY"
+
+
 @dataclass
 class ServarrApp:
     """One arr app of the install-wide connection: where it is and its key.
@@ -340,8 +349,8 @@ class ServarrConfig:
 
     ``incomplete_apps``: set by the loader, never from the file. The names of
     ``[servarr.apps.<app>]`` tables the loader dropped for a missing ``url`` or
-    ``api_key``, so doctor and the admin card can say so; the skill never
-    reads it.
+    API key (from ``servarr_key_variable(app)`` or an inline ``api_key``), so
+    doctor and the admin card can say so; the skill never reads it.
     """
     apps: dict[str, ServarrApp] = field(default_factory=dict)
     requesters: list[str] = field(default_factory=list)
@@ -4351,9 +4360,10 @@ def _servarr_apps(raw: object, key: str) -> object:
 
     The generic walk passes a dict field through as raw dicts, so without this
     `apps["radarr"]` would be a plain dict and the key would show in its repr.
-    An entry with no `url` or no `api_key` is dropped with a warning naming the
-    missing field, never the value. Unknown app names are kept here and warned
-    about by `_validate_servarr`, which owns that judgement.
+    A missing `url` or `api_key` is mapped to "" here and judged by
+    `_settle_servarr_apps`, after the environment is read, since the key
+    normally arrives from a stack secrets file. Unknown app names are kept
+    here and warned about by `_validate_servarr`, which owns that judgement.
     """
     if not isinstance(raw, dict):
         # No value in the message: an `[[servarr.apps]]` array carries api_keys.
@@ -4381,34 +4391,51 @@ def _servarr_apps(raw: object, key: str) -> object:
             )
         url = table.get("url")
         api_key = table.get("api_key")
-        missing = [
-            field_name for field_name, value in (("url", url), ("api_key", api_key))
-            if not isinstance(value, str) or not value.strip()
-        ]
-        if missing:
-            report_problem(
-                "discarded", path,
-                "[config] [servarr.apps.%s] needs a non-empty %s; ignoring the app",
-                name, " and ".join(missing),
-            )
-            continue
-        apps[str(name)] = ServarrApp(url=url.strip(), api_key=api_key.strip())
+        apps[str(name)] = ServarrApp(
+            url=url.strip() if isinstance(url, str) else "",
+            api_key=api_key.strip() if isinstance(api_key, str) else "",
+        )
     return apps
 
 
-def _record_incomplete_servarr_apps(data: dict, config: Config) -> None:
-    """Name each `[servarr.apps.<app>]` table the `servarr.apps` hook dropped.
+def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str]) -> None:
+    """Give each app its key from the environment, then drop the incomplete.
 
-    The hook is the one judge of a usable table; this only records what it
-    left out, so doctor and the admin card can report it as incomplete.
+    The variable wins over an inline `api_key`, as every file credential's
+    does. An app with no URL is discarded, since nothing else can supply one;
+    an app with no key is left out with a warning, not discarded, because a
+    process checking a plan may not have the secrets file the key is in yet.
+    Every dropped table, and any raw table the hook refused, is recorded in
+    `incomplete_apps`. Messages name the app and the file, never a value.
     """
+    apps = config.servarr.apps
+    for name, app in apps.items():
+        value = environ.get(servarr_key_variable(name), "").strip()
+        if value:
+            app.api_key = value
+    for name in list(apps):
+        app = apps[name]
+        path = ("servarr", "apps", name)
+        if not app.url:
+            report_problem(
+                "discarded", path,
+                "[config] [servarr.apps.%s] needs a non-empty url; ignoring the app", name,
+            )
+        elif not app.api_key:
+            report_problem(
+                "warning", path,
+                "[config] [servarr.apps.%s] has no API key: set the stack secret %s "
+                "(the variable %s); the app is ignored until then",
+                name, servarr_key_variable(name).lower(), servarr_key_variable(name),
+            )
+        else:
+            continue
+        del apps[name]
     section = data.get("servarr")
     raw = section.get("apps") if isinstance(section, dict) else None
-    if not isinstance(raw, dict):
-        return
-    config.servarr.incomplete_apps = [
-        str(name) for name in raw if str(name) not in config.servarr.apps
-    ]
+    config.servarr.incomplete_apps = (
+        [str(name) for name in raw if str(name) not in apps] if isinstance(raw, dict) else []
+    )
 
 
 def _forge_cli_list(raw: object, key: str) -> object:
@@ -4649,7 +4676,8 @@ SECRET_ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
 )
 """``(env var, section, field)``: credentials the environment sets over the file.
 
-``ISTOTA_BRAIN_NATIVE_API_KEY`` is read beside this table, not in it.
+``ISTOTA_BRAIN_NATIVE_API_KEY`` and ``servarr_key_variable(app)`` are read
+beside this table, not in it.
 """
 
 
@@ -4712,7 +4740,6 @@ def _map_document(data: dict, config: Config) -> list[str]:
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
     _migrate_workspace_fields(data, config, old_mount_spelling=old_mount_spelling)
-    _record_incomplete_servarr_apps(data, config)
     if config.workspace_path is None:
         config.workspace_path = config.workspace_mount_path
     _apply_renamed_keys(data, config)
@@ -4777,6 +4804,7 @@ def config_from_document(data: dict) -> Config:
     # still the one it means to write.
     data = copy.deepcopy(data)
     _map_document(data, config)
+    _settle_servarr_apps(data, config, {})
     _map_users(data, config)
     return config
 
@@ -5109,6 +5137,9 @@ def load_config(
     _native_key = os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY")
     if _native_key:
         config.brain.native.api_key = _native_key
+    # The arr keys are keyed by app, so they don't fit the table either; and an
+    # app is only judged complete once its key could have come from here.
+    _settle_servarr_apps(data, config, os.environ)
 
     _apply_default_log_file(config, data)
 

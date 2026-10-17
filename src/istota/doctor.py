@@ -8015,8 +8015,8 @@ _SERVARR_WARN_REASONS = frozenset({"connection_failed", "host_refused"})
 def _servarr_remedy(app: str, reason: str, http_status) -> str:
     where = f"[servarr.apps.{app}] url"
     if reason == "unauthorized":
-        return (f"The key in [servarr.apps.{app}] is wrong or was rotated; copy it again "
-                f"from {app}'s Settings > General > Security.")
+        return (f"The API key for {app} (the stack secret istota_servarr_{app}_api_key) is "
+                f"wrong or was rotated; copy it again from {app}'s Settings > General > Security.")
     if reason == "connection_failed":
         return (f"{app} may be down, or a firewall between this host and it is dropping the "
                 f"connection, such as a Docker host's DOCKER-USER allowlist.")
@@ -8059,9 +8059,10 @@ def check_servarr_connection(
         connection = servarr.apps.get(app)
         if connection is None:
             results.append(CheckResult(
-                name, FAIL, f"[servarr.apps.{app}] has no url or no api_key, so the skill "
+                name, FAIL, f"[servarr.apps.{app}] has no url or no API key, so the skill "
                             f"ignores it",
-                remedy=f"Set both url and api_key in [servarr.apps.{app}], or remove the table.",
+                remedy=(f"Set url in [servarr.apps.{app}] and the key in the stack secret "
+                        f"istota_servarr_{app}_api_key, or remove the table."),
                 scope=DEPLOYMENT,
             ))
             continue
