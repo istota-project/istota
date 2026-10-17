@@ -48,8 +48,10 @@ describe('the field doc', () => {
   it('puts Reset on the control row', () => {
     const { container } = mount(configField({ in_file: true }));
     const reset = screen.getByRole('button', { name: 'Reset' });
-    expect(reset.closest('.field-row.inline-meta')).toBe(container.querySelector('.field-row'));
-    expect(container.querySelector('.field-row .field.inline')).not.toBeNull();
+    const row = container.querySelector('.config-row');
+    expect(reset.closest('.config-row')).toBe(row);
+    expect(row!.querySelector(':scope > .field.inline')).not.toBeNull();
+    expect(row!.querySelector(':scope > .field')!.contains(reset)).toBe(false);
   });
 
   it('puts the default mark inside the control, not in the row beside it', () => {

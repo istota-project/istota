@@ -73,10 +73,9 @@
 
 {#snippet fieldLabel()}
   <span class="field-label"
-    >{label}{#if badge}<Badge size="sm">{badge}</Badge>{/if}{@render labelMark?.()}<HintPopover
-      text={hint}
-      label="About {label}"
-    /></span
+    >{label}<HintPopover text={hint} label="About {label}" />{#if badge}<Badge size="sm"
+        >{badge}</Badge
+      >{/if}{@render labelMark?.()}</span
   >
 {/snippet}
 

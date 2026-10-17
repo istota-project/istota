@@ -3,6 +3,7 @@
   import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
   import { Badge, Button, Chip, Field, Input, Select, TextArea } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
+  import FieldRow from './FieldRow.svelte';
   import TableEditor from './TableEditor.svelte';
   import { displayValue, formatValue, opFor, parseList, parseNumber } from './changeSet';
   import { credentialStatus } from './credentialStatus';
@@ -38,7 +39,10 @@
   let showMeta = $derived(editable && field.editor !== 'readonly' && field.editor !== 'secret');
   let shown = $derived(displayValue(field, op));
   let status = $derived(credentialStatus(field.set, secretSource));
-  let editableSecret = $derived(kind === 'secret' && !!field.credential);
+  /** A credential shown but not editable here: no file to write, or read-only. */
+  let shownSecret = $derived(
+    !(kind === 'secret' && field.credential) && (field.secret || field.editor === 'secret'),
+  );
   let pendingSet = $derived(op?.op === 'set' || op?.op === 'set_toml');
   let pendingUnset = $derived(op?.op === 'unset');
   let numericList = $derived(
@@ -148,6 +152,10 @@
   }
 </script>
 
+{#snippet statusMark()}
+  <Badge size="sm" variant={status.variant}>{status.label}</Badge>
+{/snippet}
+
 {#snippet lockMark()}
   <span class="lock-mark" role="img" aria-label="Needs confirmation" title="Needs confirmation"
     ><Lock size={13} aria-hidden="true" /></span
@@ -163,12 +171,13 @@
 {/snippet}
 
 <div class="config-field" class:pending={!!op || secretPending !== undefined} title={field.key}>
-  <div class="field-row" class:inline-meta={(showMeta && kind !== 'table') || editableSecret}>
+  <FieldRow>
     {#if kind === 'secret' && field.credential}
       <ConfigSecretField
         label={field.name}
         configured={field.set}
         {hint}
+        {status}
         inline
         pending={secretPending}
         onChange={(value) => onSecret(field.credential!.name, value)}
@@ -259,26 +268,26 @@
       <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
         <span class="config-value dim">Removed from config.toml.</span>
       </Field>
+    {:else if shownSecret}
+      <!-- Its status beside the label, as an editable credential's is; the
+           control column says why it cannot be edited here. -->
+      <Field
+        label={field.name}
+        {hint}
+        {badge}
+        labelMark={statusMark}
+        inline
+        error={problem}
+        labelled={false}
+      >
+        <span class="config-value dim">{field.read_only_reason || '—'}</span>
+      </Field>
     {:else}
       <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
-        {#if field.secret || field.editor === 'secret'}
-          <span class="value-badge">
-            <Badge size="sm" variant={status.variant}>{status.label}</Badge>
-          </span>
-        {:else}
-          <span class="config-value" class:dim={formatValue(field.value) === '—'}
-            >{formatValue(field.value)}</span
-          >
-        {/if}
-      </Field>
-    {/if}
-
-    {#if editableSecret}
-      <div class="field-meta control-row">
-        <span class="changed-badge"
-          ><Badge size="sm" variant={status.variant}>{status.label}</Badge></span
+        <span class="config-value" class:dim={formatValue(field.value) === '—'}
+          >{formatValue(field.value)}</span
         >
-      </div>
+      </Field>
     {/if}
 
     {#if showMeta}
@@ -301,14 +310,14 @@
         {/if}
       </div>
     {/if}
-  </div>
+  </FieldRow>
 
   <!-- A text control shows the default as its placeholder; the others need
        it said. -->
   {#if showMeta && pendingUnset && !textKind}
     <p class="caption field-note">Will reset to the default: {formatValue(field.default)}</p>
   {/if}
-  {#if editable && field.read_only_reason}
+  {#if editable && field.read_only_reason && !shownSecret}
     <p class="caption field-note">{field.read_only_reason}</p>
   {/if}
 </div>
@@ -321,22 +330,6 @@
 
   .config-field:last-child {
     border-bottom: none;
-  }
-
-  /* The meta row (default note, Undo, Reset) sits on the control's line and
-     wraps under it when the row is too narrow. */
-  .field-row.inline-meta {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    /* The gap SecretField leaves before its Clear, so a button beside a field
-       sits the same distance from it whichever component draws it. */
-    column-gap: var(--space-2);
-    row-gap: var(--space-1);
-  }
-
-  .inline-meta > :global(.field) {
-    flex: 0 1 calc(var(--field-label-width) + var(--space-3) + 24rem);
   }
 
   /* Fills the rest of the row so the badge can sit at its far end. */
@@ -364,7 +357,6 @@
   /* Every control-column item that is not itself a control takes the
      control's height as a floor, centred in it, so it lines up with the
      label and the meta buttons as an input would. */
-  .value-badge,
   .choices,
   .config-value {
     display: flex;
@@ -372,15 +364,10 @@
     min-height: var(--control-height-lg);
   }
 
-  .value-badge {
-    justify-self: start;
-    align-self: flex-start;
-  }
-
   @media (min-width: 641px) {
     /* The control's line, and top-aligned with it, so the buttons sit level
        with the control however tall the label or an error makes the field. */
-    .inline-meta > .field-meta {
+    .field-meta {
       min-height: var(--control-height-lg);
       align-self: flex-start;
     }

@@ -2,6 +2,7 @@
   import Field from '../ui/Field.svelte';
   import Input from '../ui/Input.svelte';
   import Button from '../ui/Button.svelte';
+  import type { Snippet } from 'svelte';
 
   interface Props {
     label: string;
@@ -18,6 +19,8 @@
     required?: boolean;
     onValueChange: (next: string) => void;
     onRequestClear?: () => void;
+    /** Passed to `Field`: a small mark after the label. */
+    labelMark?: Snippet;
   }
 
   let {
@@ -32,6 +35,7 @@
     required = false,
     onValueChange,
     onRequestClear,
+    labelMark,
   }: Props = $props();
 
   let showClear = $derived(configured && !!onRequestClear);
@@ -50,7 +54,7 @@
   no button there is nothing to steal the association, and clicking the caption
   should focus the input as it does in every other field.
 -->
-<Field {label} {hint} {inline} {error} labelled={!showClear}>
+<Field {label} {hint} {inline} {error} {labelMark} labelled={!showClear}>
   <div class="secret-row">
     <Input
       {type}
@@ -60,7 +64,7 @@
       invalid={!!error}
       autocomplete="new-password"
       placeholder={configured ? '•••••••• stored, type to replace' : 'Enter value'}
-      aria-label={showClear ? label : undefined}
+      aria-label={showClear || labelMark ? label : undefined}
       oninput={(e: Event) => onValueChange((e.currentTarget as HTMLInputElement).value)}
     />
     {#if showClear}

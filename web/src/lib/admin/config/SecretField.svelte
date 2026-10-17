@@ -10,7 +10,8 @@
     /** What the admin typed, `""` for a pending clear, undefined for unchanged. */
     pending: string | undefined;
     readOnlyReason?: string | null;
-    /** Where the value is held, shown in place of the input when read-only. */
+    /** Where the value is held: beside the label, or in place of the input
+     *  when read-only. Set / Not set when absent. */
     status?: CredentialStatus;
     hint?: string;
     /** Passed to `Field`: the label in a column beside the control. */
@@ -33,6 +34,10 @@
   let shownStatus = $derived(status ?? credentialStatus(configured));
 </script>
 
+{#snippet statusMark()}
+  <Badge size="sm" variant={shownStatus.variant}>{shownStatus.label}</Badge>
+{/snippet}
+
 <!--
   Set, replace or clear one credential. Never prefilled: the input holds only
   what the admin typed in this session, and a stored value is shown as a state
@@ -40,13 +45,13 @@
   other, so it goes through the review dialog rather than happening on click.
 -->
 {#if readOnlyReason}
-  <Field {label} {hint} {inline} labelled={false}>
+  <Field {label} {hint} {inline} labelMark={statusMark} labelled={false}>
     <div class="secret-state">
-      <Badge size="sm" variant={shownStatus.variant}>{shownStatus.label}</Badge>
+      <span class="muted">{readOnlyReason}</span>
     </div>
   </Field>
 {:else if pending === ''}
-  <Field {label} {hint} {inline} labelled={false}>
+  <Field {label} {hint} {inline} labelMark={statusMark} labelled={false}>
     <div class="secret-state">
       <span class="muted">Will be cleared.</span>
       <Button variant="secondary" size="sm" onclick={() => onChange(null)}>Undo</Button>
@@ -61,6 +66,7 @@
     {hint}
     {inline}
     {configured}
+    labelMark={statusMark}
     value={pending ?? ''}
     onValueChange={(next) => onChange(next === '' ? null : next)}
   />

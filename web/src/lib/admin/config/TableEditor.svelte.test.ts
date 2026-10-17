@@ -69,7 +69,8 @@ describe('the table editor', () => {
       toml: '',
     });
     const { onOp, textarea } = mount(blocks);
-    expect(screen.getByText(/shipped default blocks apply/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText('About briefing_shared_blocks'));
+    expect(await screen.findByText(/shipped default blocks apply/)).toBeInTheDocument();
     await fireEvent.input(textarea, { target: { value: 'briefing_shared_blocks = []\n' } });
     expect(onOp).toHaveBeenLastCalledWith(
       { op: 'set_toml', path: ['briefing_shared_blocks'], toml: 'briefing_shared_blocks = []\n' },
@@ -77,7 +78,7 @@ describe('the table editor', () => {
     );
   });
 
-  it('explains the credential sentinel when the table holds one', () => {
+  it('explains the credential sentinel when the table holds one', async () => {
     mount(
       configField({
         path: ['brain', 'native', 'extra_headers'],
@@ -86,6 +87,13 @@ describe('the table editor', () => {
         toml: '[extra_headers]\nx-tenant = "<unchanged>"\n',
       }),
     );
-    expect(screen.getByText(/stands for a stored credential/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText('About extra_headers'));
+    expect(await screen.findByText(/stands for a stored credential/)).toBeInTheDocument();
+  });
+
+  it('keeps its notes out of the row, behind the label hint', () => {
+    mount(configField({ path: ['servarr', 'defaults'], editor: 'table' }));
+    expect(screen.queryByText(/defines defaults and nothing else/)).toBeNull();
+    expect(document.querySelector('p.caption')).toBeNull();
   });
 });

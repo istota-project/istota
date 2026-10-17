@@ -17,11 +17,12 @@
     type ConfigResource,
     type ServarrApp,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyWarning } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
+  import FieldRow from '$lib/admin/config/FieldRow.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
   import HistoryList from '$lib/admin/config/HistoryList.svelte';
   import RawEditor from '$lib/admin/config/RawEditor.svelte';
@@ -691,19 +692,17 @@
   {@const status = credentialStatus(secret.set, secret.source)}
   <div class="standalone-field">
     {#if editable && !secret.read_only_reason}
-      <div class="standalone-row">
+      <FieldRow>
         <ConfigSecretField
           label={secret.name}
           hint={secret.label}
           inline
           configured={secret.set}
+          {status}
           pending={draft.secrets[secret.name]}
           onChange={(value) => setSecret(secret.name, value)}
         />
-        <span class="standalone-badge"
-          ><Badge size="sm" variant={status.variant}>{status.label}</Badge></span
-        >
-      </div>
+      </FieldRow>
     {:else}
       <ConfigSecretField
         label={secret.name}
@@ -751,27 +750,6 @@
 
   .standalone-field:last-child {
     border-bottom: none;
-  }
-
-  /* On the input's line: the row is top-aligned, as a section's own
-     credential field is, so a label that wraps does not move it. */
-  .standalone-badge {
-    display: flex;
-    align-items: center;
-    min-height: var(--control-height-lg);
-    margin-inline-start: auto;
-  }
-
-  .standalone-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    column-gap: var(--space-2);
-    row-gap: var(--space-1);
-  }
-
-  .standalone-row > :global(.field) {
-    flex: 0 1 calc(var(--field-label-width) + var(--space-3) + 24rem);
   }
 
   .problem-list {

@@ -665,7 +665,7 @@ describe('credential status', () => {
     expect(within(fieldRow('smtp_password')).getByText('Not set')).toBeInTheDocument();
     expect(within(fieldRow('auth_token')).getByText('In config.toml')).toBeInTheDocument();
     expect(within(fieldRow('api_key')).getByText('Set outside the stack')).toBeInTheDocument();
-    const standalone = screen.getByText('anthropic_api_key').closest('.standalone-row');
+    const standalone = screen.getByText('anthropic_api_key').closest('.standalone-field');
     expect(within(standalone as HTMLElement).getByText('Set')).toBeInTheDocument();
   });
 
