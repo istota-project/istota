@@ -229,9 +229,10 @@ describe('navigation preference through the root identity', () => {
       expect(screen.getByLabelText('Confirmed navigation preference')).toHaveTextContent('true'),
     );
     expect(startNavUnreadPoll).toHaveBeenCalledWith('alice');
-    expect(await screen.findByRole('link', { name: 'Chat, 4 unread messages' })).toHaveTextContent(
-      '4',
-    );
+    // The inline mark draws no digits; the count is in the link's name.
+    expect(
+      await screen.findByRole('link', { name: 'Chat, 4 unread messages' }),
+    ).toBeInTheDocument();
     expect(updateProfile).toHaveBeenCalledExactlyOnceWith({ show_nav_unread_badges: true });
     expect(getMe).toHaveBeenCalledTimes(3);
     view.unmount();
