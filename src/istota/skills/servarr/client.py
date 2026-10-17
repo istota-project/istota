@@ -193,16 +193,25 @@ def plain_http_refused(scheme: str, host: str, private: frozenset) -> bool:
 def config_problem(app: str, base_url: str, private_hosts) -> str:
     """What stops `app`'s configured URL before any request, or "".
 
-    The checks guard 2 makes before resolving anything, for doctor and the
-    admin card. The text names the config key, never a credential.
+    The checks guard 2 makes before resolving anything, an IP literal's
+    address included, for doctor and the admin card. The text names the config key, never a credential.
     """
     problem = url_problem(base_url)
     if problem:
         return f"[servarr.apps.{app}] url {problem}"
     parts = urlsplit(base_url)
-    if plain_http_refused(parts.scheme.lower(), parts.hostname, private_set(private_hosts)):
+    private = private_set(private_hosts)
+    if plain_http_refused(parts.scheme.lower(), parts.hostname, private):
         return (f"[servarr.apps.{app}] url is plain HTTP to {parts.hostname}, which is not "
                 f"in [servarr] private_hosts")
+    host = parts.hostname.lower().rstrip(".")
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None and host not in private and not ip_is_public(literal):
+        return (f"[servarr.apps.{app}] url is {host}, a private address, which is not in "
+                f"[servarr] private_hosts")
     return ""
 
 

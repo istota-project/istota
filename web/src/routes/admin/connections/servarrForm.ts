@@ -37,6 +37,22 @@ export const DEFAULT_FIELDS: Record<ServarrApp, string[]> = {
   prowlarr: [],
 };
 
+/** Each app's name as the app spells it. */
+export const APP_LABELS: Record<ServarrApp, string> = {
+  sonarr: 'Sonarr',
+  radarr: 'Radarr',
+  lidarr: 'Lidarr',
+  prowlarr: 'Prowlarr',
+};
+
+/** Each app's own default port, for the URL field's example. */
+export const DEFAULT_PORTS: Record<ServarrApp, number> = {
+  sonarr: 8989,
+  radarr: 7878,
+  lidarr: 8686,
+  prowlarr: 9696,
+};
+
 export interface ServarrAppForm {
   /** Whether the app has a `[servarr.apps.<app>]` table. */
   enabled: boolean;
@@ -156,8 +172,110 @@ function normalHost(host: string): string {
     .replace(/\.$/, '');
 }
 
+/**
+ * Whether an IP literal is certainly not public. Only ranges that are never
+ * routable are named, so a miss leaves the call to doctor and the skill
+ * (`net_guard.ip_is_public`) rather than refusing a public address here.
+ */
+function privateAddress(host: string): boolean {
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+  if (!host.includes(':')) return false;
+  return host === '::1' || /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]?:/.test(host);
+}
+
+/** A name with no dot, or under a suffix only a local network answers for. */
+function localName(host: string): boolean {
+  if (host.includes(':') || /^[\d.]+$/.test(host)) return false;
+  return !host.includes('.') || /\.(local|lan|home|internal|localdomain|home\.arpa)$/.test(host);
+}
+
+/**
+ * The host as typed, the way the skill's `urlsplit(...).hostname` reads it:
+ * no userinfo or port, brackets dropped, lowercased, no trailing dot. The
+ * browser's own hostname is canonicalised (`[fd00:0::5]`, `10.1`, punycode)
+ * and would never match the exact entry the skill compares against.
+ */
+function typedHost(url: string): string {
+  const authority = url
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+    .split(/[/?#]/, 1)[0];
+  const hostPort = authority.slice(authority.lastIndexOf('@') + 1);
+  const host = hostPort.startsWith('[')
+    ? hostPort.slice(1, hostPort.indexOf(']'))
+    : hostPort.replace(/:\d*$/, '');
+  return host.toLowerCase().replace(/\.$/, '');
+}
+
+export interface PrivateHostNeed {
+  host: string;
+  /** True when the skill refuses the URL without it; false when it likely will. */
+  required: boolean;
+  message: string;
+}
+
+/**
+ * The host a URL needs in `private_hosts`, or null. Plain HTTP and a private
+ * IP literal are refused without it, as the skill's guard 2 refuses them; a
+ * local-looking name only probably resolves to a private address, so it is a
+ * warning rather than a refusal.
+ */
+export function privateHostNeed(url: string, privateHostsText: string): PrivateHostNeed | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  const host = typedHost(url);
+  if (!host) return null;
+  if (new Set(hostList(privateHostsText).map(normalHost)).has(host)) return null;
+  if (parsed.protocol === 'http:') {
+    return {
+      host,
+      required: true,
+      message: `Plain HTTP goes only to a host in the private hosts, and ${host} is not in the private hosts. Add it there or use https://.`,
+    };
+  }
+  if (privateAddress(host)) {
+    return {
+      host,
+      required: true,
+      message: `${host} is a private address, which the skill reaches only when it is in the private hosts.`,
+    };
+  }
+  if (localName(host)) {
+    return {
+      host,
+      required: false,
+      message: `${host} looks like a local name. If it resolves to a private address, add it to the private hosts.`,
+    };
+  }
+  return null;
+}
+
+/** `form` with `host` added to its private hosts, once. */
+export function withPrivateHost(form: ServarrForm, host: string): string {
+  const hosts = hostList(form.privateHosts);
+  if (hosts.map(normalHost).includes(normalHost(host))) return form.privateHosts;
+  return [...hosts, host].join('\n');
+}
+
 /** What is wrong with the URL, mirroring the skill's checks before a request. */
-function urlProblem(url: string, privateHosts: string[]): string | null {
+function urlProblem(url: string, privateHostsText: string): string | null {
   const text = url.trim();
   if (!text) return 'Enter the URL of the app.';
   let parsed: URL;
@@ -177,26 +295,17 @@ function urlProblem(url: string, privateHosts: string[]): string | null {
   if (parsed.search || parsed.hash || text.includes('?') || text.includes('#')) {
     return 'The URL must not carry a query or fragment.';
   }
-  if (parsed.protocol === 'http:') {
-    const allowed = new Set(privateHosts.map(normalHost));
-    if (!allowed.has(normalHost(parsed.hostname))) {
-      return (
-        `Plain HTTP goes only to a host in the private hosts, and ${parsed.hostname} is not ` +
-        'in the private hosts. Add it there or use https://.'
-      );
-    }
-  }
-  return null;
+  const need = privateHostNeed(text, privateHostsText);
+  return need?.required ? need.message : null;
 }
 
 /** Problems keyed by `<app>.url` or `<app>.key`; empty when the form can be reviewed. */
 export function formProblems(form: ServarrForm): Record<string, string> {
   const problems: Record<string, string> = {};
-  const privateHosts = hostList(form.privateHosts);
   for (const name of SERVARR_APPS) {
     const app = form.apps[name];
     if (!app.enabled) continue;
-    const problem = urlProblem(app.url, privateHosts);
+    const problem = urlProblem(app.url, form.privateHosts);
     if (problem) problems[`${name}.url`] = problem;
     if (app.keySet !== true && app.key === '') {
       problems[`${name}.key`] = app.keyReadOnly

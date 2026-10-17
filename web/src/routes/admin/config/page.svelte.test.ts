@@ -33,6 +33,13 @@ afterEach(() => {
 });
 
 describe('banners', () => {
+  it('points [servarr] at the Servarr card, which has the guided form (ISSUE-767)', async () => {
+    mount(configView([configField({ path: ['servarr', 'requesters'], value: [] })]));
+    const pointer = await screen.findByText(/The Servarr card in Connections has a form/);
+    const link = within(pointer).getByRole('link', { name: 'Open Connections' });
+    expect(link.getAttribute('href')).toBe('/admin/connections');
+  });
+
   it('says why the page is read-only when there is no applier', async () => {
     mount(
       configView([imapHost], {

@@ -10,11 +10,13 @@ import type {
 import { buildChangeSet } from '$lib/admin/config/changeSet';
 import {
   formProblems,
+  privateHostNeed,
   rebaseForm,
   servarrDraft,
   servarrForm,
   servarrReadOnlyReason,
   viewPrivateHosts,
+  withPrivateHost,
   type ServarrForm,
 } from './servarrForm';
 
@@ -220,6 +222,20 @@ describe('formProblems', () => {
     expect(formProblems(edited)).toEqual({});
   });
 
+  it('refuses HTTPS to a private IP literal not in the private hosts, as guard 2 does', () => {
+    const edited = form();
+    edited.apps.radarr.url = 'https://10.1.2.3:7878';
+    expect(formProblems(edited)['radarr.url']).toMatch(/private address/);
+    edited.privateHosts = '10.1.2.3';
+    expect(formProblems(edited)).toEqual({});
+  });
+
+  it('only warns about a local-looking name, which may resolve publicly', () => {
+    const edited = form();
+    edited.apps.radarr.url = 'https://nas.local:7878';
+    expect(formProblems(edited)).toEqual({});
+  });
+
   it('asks for a key for an app with none stored', () => {
     const edited = form();
     edited.apps.sonarr = { ...edited.apps.sonarr, enabled: true, url: 'http://192.0.2.10:8989' };
@@ -239,6 +255,50 @@ describe('formProblems', () => {
     const edited = form();
     edited.apps.radarr = { ...edited.apps.radarr, enabled: false, url: 'nonsense' };
     expect(formProblems(edited)).toEqual({});
+  });
+});
+
+describe('privateHostNeed', () => {
+  it('requires the host for plain HTTP and a private IP literal', () => {
+    for (const [url, host] of [
+      ['http://arr.example.com:7878', 'arr.example.com'],
+      ['https://192.168.1.10:8989', '192.168.1.10'],
+      ['https://172.20.0.4', '172.20.0.4'],
+      ['https://127.0.0.1:9696', '127.0.0.1'],
+      ['https://[fd00::5]:7878', 'fd00::5'],
+    ]) {
+      expect(privateHostNeed(url, ''), url).toMatchObject({ host, required: true });
+    }
+  });
+
+  it('warns, without requiring, for a name only a local network answers for', () => {
+    for (const url of ['https://sonarr:8989', 'https://nas.lan', 'https://box.home.arpa']) {
+      expect(privateHostNeed(url, ''), url).toMatchObject({ required: false });
+    }
+  });
+
+  it('names the host as typed, which is what the skill compares', () => {
+    expect(privateHostNeed('http://[fd00:0:0:0:0:0:0:5]:7878', '')?.host).toBe(
+      'fd00:0:0:0:0:0:0:5',
+    );
+    expect(privateHostNeed('http://user@NAS.lan.:8989/', '')?.host).toBe('nas.lan');
+    expect(privateHostNeed('http://[fd00:0:0:0:0:0:0:5]:7878', 'fd00::5')).not.toBeNull();
+  });
+
+  it('needs nothing for a public HTTPS host, a listed host or an unparseable URL', () => {
+    expect(privateHostNeed('https://arr.example.com', '')).toBeNull();
+    expect(privateHostNeed('https://172.32.0.1', '')).toBeNull();
+    expect(privateHostNeed('http://Arr.Example.com:7878', 'arr.example.com.')).toBeNull();
+    expect(privateHostNeed('not a url', '')).toBeNull();
+  });
+});
+
+describe('withPrivateHost', () => {
+  it('appends a host once', () => {
+    const edited = form();
+    expect(withPrivateHost(edited, '10.0.0.9')).toBe('192.0.2.10\n10.0.0.9');
+    edited.privateHosts = '192.0.2.10\n10.0.0.9';
+    expect(withPrivateHost(edited, '10.0.0.9')).toBe('192.0.2.10\n10.0.0.9');
   });
 });
 
