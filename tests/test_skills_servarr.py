@@ -279,7 +279,8 @@ class TestDescribe:
             "value": "/data/library/content/Films", "source": "only_option",
         }
         assert defaults["minimum_availability"] == {"value": "announced", "source": "config"}
-        assert defaults["monitor"] == {"value": "all", "source": "default"}
+        # A film is always added monitored, so radarr has no monitor default.
+        assert "monitor" not in defaults
         assert "metadata_profile" not in defaults
 
     def test_stale_and_ambiguous_defaults_are_reported_not_raised(self, arr):

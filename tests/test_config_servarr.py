@@ -158,6 +158,13 @@ class TestValidation:
         assert _messages(problems, "servarr", "defaults", "sonarr", "minimum_availability")
         assert not _messages(problems, "servarr", "defaults", "sonarr", "quality_profile")
 
+    def test_a_radarr_monitor_default_warns(self, tmp_path):
+        _, problems = _load(tmp_path, """
+            [servarr.defaults.radarr]
+            monitor = "all"
+        """)
+        assert _messages(problems, "servarr", "defaults", "radarr", "monitor")
+
     def test_a_requester_who_is_not_a_configured_user_warns(self, tmp_path):
         _, problems = _load(tmp_path, """
             [servarr]

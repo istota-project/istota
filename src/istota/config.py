@@ -302,7 +302,8 @@ SERVARR_APPS = ("sonarr", "radarr", "lidarr", "prowlarr")
 SERVARR_RESERVED_APPS = ("bazarr",)
 SERVARR_DEFAULT_FIELDS: dict[str, tuple[str, ...]] = {
     "sonarr": ("quality_profile", "root_folder", "monitor"),
-    "radarr": ("quality_profile", "root_folder", "minimum_availability", "monitor"),
+    # Films are always added monitored, so radarr takes no `monitor` default.
+    "radarr": ("quality_profile", "root_folder", "minimum_availability"),
     "lidarr": ("quality_profile", "root_folder", "metadata_profile", "monitor"),
     "prowlarr": (),
 }

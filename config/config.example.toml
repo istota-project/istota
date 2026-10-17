@@ -1227,10 +1227,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # api_key = ""                    # Settings > General > API Key in the app
 #
 # [servarr.defaults.radarr]       # sonarr: quality_profile, root_folder, monitor
-# quality_profile = "HD - 720p/1080p"   # lidarr adds metadata_profile
+# quality_profile = "HD - 720p/1080p"   # lidarr: those three plus metadata_profile
 # root_folder = "/data/media/films"
-# minimum_availability = "released"
-# monitor = "all"
+# minimum_availability = "released"     # radarr only: tba, announced, inCinemas, released
 
 # ============================================================================
 # ntfy Push Notifications
