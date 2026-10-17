@@ -703,11 +703,9 @@
       <div class="banner info">{notice}</div>
     {/if}
 
-    <!-- Two columns, packed by masonry rather than in rows: a card's height
-         follows how many apps or services it lists, so the four differ a
-         lot, and in rows the shorter card of a pair carried a block of empty
-         space down to its footer. -->
-    <CardGrid columns={2} masonry>
+    <!-- Two columns in plain rows: the cards in a row share a height, so
+         their footers line up. Masonry was tried and read as jumbled. -->
+    <CardGrid columns={2}>
       {#if nextcloud}
         <NextcloudCard connection={nextcloud} onchecked={() => load({ quiet: true })} />
       {/if}
