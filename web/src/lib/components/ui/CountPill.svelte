@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Asterisk } from '@lucide/svelte';
+
   /**
    * A numeric badge, capped at `99+`.
    *
@@ -26,9 +28,15 @@
      * and a copy would drift on the next sizing change.
      */
     tone?: 'accent' | 'muted';
+    /**
+     * `pill` sits in the row's flow. `mark` is the inline app nav's: a small
+     * unread glyph, no digits, taken out of flow past the end of the parent,
+     * which must be positioned, so it appearing or clearing moves no link.
+     */
+    shape?: 'pill' | 'mark';
   }
 
-  let { count, title, tone = 'accent' }: Props = $props();
+  let { count, title, tone = 'accent', shape = 'pill' }: Props = $props();
 
   const shown = $derived(count > 99 ? '99+' : String(count));
 </script>
@@ -45,7 +53,11 @@
   its button's own `aria-label`, which overrides descendant content entirely.
 -->
 {#if count > 0}
-  <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
+  {#if shape === 'mark'}
+    <span class="count-pill mark" {title}><Asterisk size="100%" strokeWidth={3.5} /></span>
+  {:else}
+    <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
+  {/if}
 {/if}
 
 <style>
@@ -69,5 +81,19 @@
   .count-pill.muted {
     background: var(--surface-badge);
     color: var(--text-muted);
+  }
+  /* The count itself is in the owning link's accessible name and title. */
+  .count-pill.mark {
+    position: absolute;
+    left: calc(100% - 1px);
+    top: 2px;
+    min-width: 0;
+    width: 0.7em;
+    height: 0.7em;
+    padding: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--accent-amber);
+    pointer-events: none;
   }
 </style>

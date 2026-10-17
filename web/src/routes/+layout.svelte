@@ -463,7 +463,7 @@
         aria-label={chatLabel}
         title={chatLabel}
       >
-        Chat<CountPill count={chatCount ?? 0} title={chatLabel} />
+        Chat<CountPill count={chatCount ?? 0} title={chatLabel} shape="mark" />
       </a>
       {#if user.features.workspace}
         <a href="{base}/files" class:active={isActive('/files')}>Files</a>
@@ -478,7 +478,7 @@
           aria-label={briefingsLabel}
           title={briefingsLabel}
         >
-          Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} />
+          Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} shape="mark" />
         </a>
       {/if}
       {#if user.features.feeds}
@@ -488,7 +488,7 @@
           aria-label={feedsLabel}
           title={feedsLabel}
         >
-          Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} />
+          Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} shape="mark" />
         </a>
       {/if}
       {#if user.features.location}
