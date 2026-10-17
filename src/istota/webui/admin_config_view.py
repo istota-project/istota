@@ -29,8 +29,11 @@ whose name does not match the patterns fails those tests rather than shipping.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from istota.config import Config
@@ -552,6 +555,20 @@ def _secret_source(
     return "none"
 
 
+def _admin_candidates(config: "Config") -> list[str]:
+    """Who may be picked as an admin: every user with a live sign-in identity,
+    the rule `edits.check_admins` holds a submitted list to. Empty when the
+    table cannot be read; the editor then still shows the current admins."""
+    from istota.webui import auth as web_auth
+
+    try:
+        identities = web_auth.list_identities(config.db_path)
+    except Exception as exc:
+        logger.warning("admin candidates unavailable: %s", type(exc).__name__)
+        return []
+    return [identity.user_id for identity in identities if not identity.disabled]
+
+
 def _secret_files(config: "Config", ctx: dict) -> list[dict]:
     """One entry per stack secrets file: whether it is set, where from, and
     never its value."""
@@ -686,6 +703,7 @@ def build_config_view(
         "secrets": _secret_files(config, ctx),
         "admins": {
             "users": sorted(str(user) for user in (getattr(config, "admin_users", None) or ())),
+            "candidates": _admin_candidates(config),
             "read_only_reason": ctx["managed_reasons"]["admins"],
         },
     }

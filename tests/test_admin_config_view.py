@@ -911,3 +911,24 @@ class TestManaged:
             assert payload["managed"][resource]["managed"] is True
             assert payload["managed"][resource]["source"] == "unreadable"
         assert "istota-stack apply" in _field(payload, "bot_name")["read_only_reason"]
+
+
+def test_admin_candidates_are_the_users_with_a_live_sign_in_identity(tmp_path):
+    from istota import db
+    from istota.webui import auth
+
+    db_path = tmp_path / "istota.db"
+    db.init_db(db_path)
+    auth.upsert_identity(db_path, "alice", "alice@example.com", create_profile=True)
+    auth.upsert_identity(db_path, "bob", "bob@example.com", create_profile=True)
+    auth.upsert_identity(db_path, "carol", "carol@example.com", create_profile=True)
+    auth.set_disabled(db_path, "carol", True)
+    cfg = Config()
+    cfg.db_path = db_path
+    assert view.build_config_view(cfg)["admins"]["candidates"] == ["alice", "bob"]
+
+
+def test_admin_candidates_are_empty_when_the_table_cannot_be_read(tmp_path):
+    cfg = Config()
+    cfg.db_path = tmp_path / "missing" / "istota.db"
+    assert view.build_config_view(cfg)["admins"]["candidates"] == []

@@ -561,6 +561,7 @@
         <header class="section-header"><h2>Admins</h2></header>
         <AdminsEditor
           users={view.admins.users}
+          candidates={view.admins.candidates ?? []}
           pending={draft.admins}
           {self}
           {editable}

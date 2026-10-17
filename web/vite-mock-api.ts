@@ -4271,7 +4271,11 @@ function mockAdminConfig() {
         risky: false,
       })),
     ],
-    admins: { users: [...state.admins], read_only_reason: null },
+    admins: {
+      users: [...state.admins],
+      candidates: ['alice', 'bob', 'carol', 'dave'],
+      read_only_reason: null,
+    },
   };
 }
 

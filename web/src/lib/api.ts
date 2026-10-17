@@ -741,7 +741,8 @@ export interface AdminConfigView {
   raw_toml: string | null;
   /** One entry per deployment secrets file, never a value. */
   secrets: ConfigSecretFile[];
-  admins: { users: string[]; read_only_reason: string | null };
+  /** `candidates`: every user with a live sign-in identity, who may be picked. */
+  admins: { users: string[]; candidates?: string[]; read_only_reason: string | null };
 }
 
 export type ConfigOp =
