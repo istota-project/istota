@@ -57,6 +57,7 @@ SHARED = "sr-shared"
 OUTSIDER = "sr-outsider"
 GUEST = "sr-guest"
 PRIVATE = "sr-private"
+REQUEST_MARK = "[e2e:shared-room-probe]"
 
 #: The seed. Idempotent, because the stack is shared for the session and each
 #: test reseeds what it needs.
@@ -94,7 +95,7 @@ with db.get_db(config.db_path) as conn:
     )
     if len(sys.argv) > 1 and sys.argv[1] == "guest-task":
         out["task_id"] = db.create_task(
-            conn, user_id="testuser", source_type="cli", prompt="guest probe",
+            conn, user_id="testuser", source_type="cli", prompt={f"{REQUEST_MARK} guest probe"!r},
             conversation_token={GUEST!r}, guest_participant_id=pid, audience="mixed",
         )
 print(json.dumps(out))
@@ -157,10 +158,14 @@ echo "other_group=$(present {GROUPS}/other)"
 echo "${{M}}_END"
 """
 
-SCRIPT = [
-    {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": PROBE}}]},
-    {"text": "I looked around"},
-]
+# A background memory task must not consume the probe's model responses.
+SCRIPT = [{
+    "when": REQUEST_MARK,
+    "turns": [
+        {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": PROBE}}]},
+        {"text": "I looked around"},
+    ],
+}]
 
 
 def _seed(stack, *args: str) -> dict:
@@ -175,7 +180,7 @@ def _task(stack, token: str, source_type: str) -> int:
     """A task in ``token``: ``web`` is a member's turn, ``cli`` one nobody
     asked in the room."""
     result = stack.exec(
-        ["uv", "run", "istota", "-c", CONFIG, "task", "probe the room",
+        ["uv", "run", "istota", "-c", CONFIG, "task", f"{REQUEST_MARK} probe the room",
          "-u", USER, "--source-type", source_type, "-t", token],
         timeout=120,
     )
