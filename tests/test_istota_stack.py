@@ -2909,6 +2909,39 @@ class TestConfigApply:
         assert list(fx.secrets.iterdir()) == []
         assert "build" in (fx.root / "docker-calls.output-8").read_text()
 
+    def _desktop(self, fx):
+        host = fx.stack / "host.env"
+        host.write_text(host.read_text() + "ISTOTA_DESKTOP_APP=1\n")
+
+    def test_the_apps_vm_gets_the_claude_code_layer_not_a_build(self, ca):
+        """The release's image came from its archive: a build from source
+        would replace it. The layer goes on top, as setup's does."""
+        fx = ca
+        self._desktop(fx)
+        self._queue(fx, 11, claude_code=True)
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2",
+                        STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0", STUB_IMAGE_ENV_CC=CC_ENV)
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(call.startswith("compose ") and " build " in f"{call} " for call in calls), calls
+        layer = self._index(calls, "build --build-arg CLAUDE_CODE_VERSION=2.1.296 -t istota:v0-cc")
+        assert layer < self._index(calls, "istota apply -f /plan/plan.json --backup 10"), calls
+        assert any("config-request finish --id 11 --status applied" in call for call in calls), calls
+        assert "ISTOTA_IMAGE=istota:v0-cc\n" in fx.env_text()
+
+    def test_on_the_apps_vm_a_failed_layer_writes_nothing(self, ca):
+        fx = ca
+        self._desktop(fx)
+        self._queue(fx, 12, secrets={"istota_email_imap_password": "pw-12"}, claude_code=True)
+        result = fx.run("config-apply", STUB_DRY_RC="2", STUB_APPLY_RC="2", STUB_BUILD_FAIL="istota:v0-cc",
+                        STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        assert not any(call.startswith("compose ") and " build " in f"{call} " for call in calls), calls
+        assert any("config-request finish --id 12 --status refused" in call for call in calls), calls
+        assert not any("--backup" in call for call in calls), calls
+        assert list(fx.secrets.iterdir()) == []
+
     def test_a_failure_after_put_files_wrote_restarts(self, ca):
         fx = ca
         self._queue(fx, 9, secrets={"istota_email_imap_password": "pw-9"})

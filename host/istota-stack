@@ -539,17 +539,31 @@ PY
 # `down` nor `--remove-orphans` stops its container. One-off containers (setup,
 # apply) are left alone.
 stack_up() {
-    local active id service
+    local active id service tag missing up_args=(up -d --remove-orphans)
     ensure_data_dir
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     # Rendered by the script that starts the stack, so it names this script's
     # /data: one an older istota-stack rendered names a volume nothing mounts.
     if [ -s "$DEVBOX_COMPOSE" ]; then
-        render_devbox_compose "$(env_get "$ENV_FILE" ISTOTA_TAG)" \
+        render_devbox_compose "$tag" \
             || die "the devbox compose file could not be rendered; the stack was not started."
     fi
-    # Explicit: a caller on the left of `||` runs this with set -e off.
-    compose up -d --remove-orphans || return $?
     active="$(compose config --services)"
+    # The app's images came from a release archive: an `up` that built one
+    # would fetch from the network (Chrome, for the browser's), which a VM
+    # with none fails half-way. What a local layer has not made yet waits
+    # for run_local_layers, which starts it.
+    if desktop_app; then
+        up_args+=(--no-build)
+        missing="$(missing_service_images "$tag")"
+        if [ -n "$missing" ]; then
+            log "no image for $(echo "$missing" | tr '\n' ' ')on ${tag} yet (\`istota-stack local-layers\` makes it); starting the rest"
+            # shellcheck disable=SC2207
+            up_args+=($(grep -vxF -f <(printf '%s\n' "$missing") <<<"$active" || true))
+        fi
+    fi
+    # Explicit: a caller on the left of `||` runs this with set -e off.
+    compose "${up_args[@]}" || return $?
     docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
             --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
         [ -n "$id" ] || continue
@@ -1023,7 +1037,7 @@ build_chrome_layer() {
 # wanted layer is not ready. update calls it on the left of ||, where set -e
 # is off, so each step checks its own status.
 run_local_layers() {
-    local tag="$1" layer rc=0 before after
+    local tag="$1" layer rc=0 before after browser_built=""
     before="$(env_get "$ENV_FILE" ISTOTA_IMAGE)"
     install -d -m 0700 "$LOCAL_LAYERS_DIR"
     for layer in $LOCAL_LAYER_NAMES; do
@@ -1043,6 +1057,7 @@ run_local_layers() {
         layer_state_set "$layer" building "$tag"
         if "build_${layer//-/_}_layer" "$tag" "${LOCAL_LAYERS_DIR}/${layer}.log"; then
             if [ "$layer" = claude-code ]; then env_set "ISTOTA_IMAGE=$(cc_image "$tag")"; fi
+            if [ "$layer" = chrome ]; then browser_built=1; fi
             layer_state_set "$layer" ready "$tag"
             log "the ${layer} layer is ready"
         else
@@ -1052,9 +1067,14 @@ run_local_layers() {
         fi
     done
     after="$(env_get "$ENV_FILE" ISTOTA_IMAGE)"
-    if [ "$after" != "$before" ] && [ -f "${CONFIG_DIR}/config.toml" ] \
+    # A new image for daemon and web, or the browser's, which stack_up leaves
+    # down on the app's VM until its layer exists.
+    if [ -n "$browser_built" ] && ! compose config --services 2>/dev/null | grep -qx browser; then
+        browser_built=""
+    fi
+    if { [ "$after" != "$before" ] || [ -n "$browser_built" ]; } && [ -f "${CONFIG_DIR}/config.toml" ] \
             && [ -n "$(compose ps -q "$(main_service)" 2>/dev/null)" ]; then
-        log "recreating daemon and web on ${after:-${IMAGE}:${tag}}"
+        log "bringing the stack up on ${after:-${IMAGE}:${tag}} with the layers built"
         stack_up || { log "the stack did not come up on ${after:-${IMAGE}:${tag}}"; rc=1; }
     fi
     if [ -z "$after" ] && [ -n "$before" ]; then
@@ -1799,6 +1819,17 @@ setup_did_not_finish() {
     exit "$rc"
 }
 
+# The app VM's answer to image_lacks_what_config_needs: the local layers on the
+# release's archived image, never a build from source, which would replace it.
+# A failed layer is reported and left to `local-layers`; prints what the image
+# still lacks for the config (config.toml, or the path given), if anything.
+layers_for_what_config_needs() {
+    local tag="$1" config="${2:-}"
+    run_local_layers "$tag" >&2 \
+        || log "WARNING: a local layer did not build; \`istota-stack local-layers --status\` says why, and \`istota-stack local-layers\` tries again." >&2
+    image_lacks_what_config_needs "$tag" ${config:+"$config"}
+}
+
 # A rebuild for what the new config needs and the tag's images lack: Claude
 # Code, which only a build of every image adds, or the images of a profile the
 # setup turned on (the browser), built alone. On the desktop app the images
@@ -1812,8 +1843,7 @@ build_what_setup_needs() {
     if desktop_app; then
         [ -n "$lacking$missing" ] || return 0
         log "${lacking:-the setup turned on what the release left out}: building the local layers for ${tag}"
-        run_local_layers "$tag" \
-            || log "WARNING: a local layer did not build; \`istota-stack local-layers --status\` says why, and \`istota-stack local-layers\` tries again."
+        layers_for_what_config_needs "$tag" >/dev/null
         return 0
     fi
     if [ -n "$lacking" ]; then
@@ -2904,12 +2934,21 @@ config_apply_one() (
     if [ "$(cat "${dir}/claude-code")" = 1 ] && [ -n "$tag" ]; then
         lacking="$(image_lacks_what_config_needs "$tag" "${dir}/plan.json")"
         if [ -n "$lacking" ]; then
-            echo "${lacking}: building ${tag} with Claude Code" >> "$out"
             log "config-apply: request ${id}: building ${tag}"
             oneshot "$service" istota config-request mark --id "$id" --status building >/dev/null \
                 || log "config-apply: request ${id} was not marked building"
             rc=0
-            INSTALL_CLAUDE_CODE=1 build_images "$tag" >> "$out" 2>&1 || rc=$?
+            if desktop_app; then
+                echo "${lacking}: building the local layers for ${tag}" >> "$out"
+                lacking="$(layers_for_what_config_needs "$tag" "${dir}/plan.json" 2>> "$out")"
+                if [ -n "$lacking" ]; then
+                    echo "$lacking" >> "$out"
+                    rc=1
+                fi
+            else
+                echo "${lacking}: building ${tag} with Claude Code" >> "$out"
+                INSTALL_CLAUDE_CODE=1 build_images "$tag" >> "$out" 2>&1 || rc=$?
+            fi
             if [ "$rc" -ne 0 ]; then
                 tail -n 40 "$out" > "${out}.tail" && mv "${out}.tail" "$out"
                 echo "the build failed (exit ${rc}); nothing was written" >> "$out"

@@ -274,6 +274,49 @@ class TestUpdateFromTheImagesArchive:
         assert any(" up -d " in f"{c} " for c in calls[layers[-1]:]), "not recreated on the layer"
         assert "ISTOTA_IMAGE=istota:v1-cc\n" in fx.env_text()
 
+    @staticmethod
+    def _desktop_with_browser(fx: Fixture) -> dict:
+        host = fx.stack / "host.env"
+        host.write_text(host.read_text() + "ISTOTA_DESKTOP_APP=1\n")
+        return {"STUB_SERVICES": "daemon\nweb\nnginx\nbrowser\n", "STUB_MISSING_IMAGES": "istota-browser:v1"}
+
+    @staticmethod
+    def _ups(calls: list[str]) -> list[str]:
+        return [c for c in calls if c.startswith("compose ") and " up " in f" {c} "]
+
+    def test_the_app_never_builds_a_missing_image_on_up(self, fx):
+        """Only istota-browser-base is in the archive. A compose `up` would
+        build the whole browser image (a Chrome download) and fail offline
+        with .env already on the new tag; the app's VM starts what it has,
+        and the browser once its layer exists."""
+        bundle = _signed_release(fx)
+        release = _release_images(fx, "v1", key=fx.release_key)
+        result = fx.run("update", "v1", "--bundle", str(bundle), "--images", str(release),
+                        STUB_LOAD_IDS=_load_ids(_images("v1")), STUB_BUILD_FAIL="istota-browser:v1",
+                        **self._desktop_with_browser(fx))
+        assert result.returncode == 0, result.stdout + result.stderr
+        ups = self._ups(fx.docker_calls())
+        assert ups, fx.docker_calls()
+        for up in ups:
+            assert "--no-build" in up.split(), up
+            assert "browser" not in up.split(), up
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+
+    def test_the_browser_comes_up_once_its_layer_is_built(self, fx):
+        bundle = _signed_release(fx)
+        release = _release_images(fx, "v1", key=fx.release_key)
+        result = fx.run("update", "v1", "--bundle", str(bundle), "--images", str(release),
+                        STUB_LOAD_IDS=_load_ids(_images("v1")), STUB_BUILD_FAIL="istota:v1-cc",
+                        **self._desktop_with_browser(fx))
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = fx.docker_calls()
+        chrome = next(i for i, c in enumerate(calls) if c.startswith("build ") and "istota-browser:v1" in c)
+        later = self._ups(calls[chrome:])
+        assert later, "nothing started the browser after its layer"
+        assert all("--no-build" in up.split() for up in later)
+        assert "browser" in later[-1].split() or not any(
+            s in later[-1].split() for s in ("daemon", "web", "nginx")), later[-1]
+
     def test_a_layer_that_fails_does_not_fail_the_update(self, fx):
         bundle = _signed_release(fx)
         release = _release_images(fx, "v1", key=fx.release_key)
