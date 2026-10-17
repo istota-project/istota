@@ -1545,3 +1545,18 @@ timezone = "America/Los_Angeles"
 #
 # Email notifications are sent automatically if the user has email_addresses
 # configured and email is enabled.
+
+# iOS push notifications. Install the push extra and place an APNs signing key
+# on the server, owned by the service user with mode 0600. Check metadata with
+# `istota doctor --only push.credentials`; send with `istota push test --user U`.
+# ISTOTA_APNS_KEY_PATH overrides the file path for container deployments.
+# [push]
+# enabled = false
+# apns_key_path = "/etc/istota/apns/AuthKey_XXXXXXXXXX.p8"
+# apns_key_id = "XXXXXXXXXX"
+# apns_team_id = "XXXXXXXXXX"
+# apns_topic = "com.cynium.istota"
+# dispatch_interval_seconds = 5
+# chat_delay_seconds = 15
+# max_age_seconds = 300
+# alert_batch_limit = 200

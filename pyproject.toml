@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+push = ["h2>=4.1"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -157,6 +158,7 @@ all = [
     "istota[sms]",
     "istota[whatsapp]",
     "istota[vault]",
+    "istota[push]",
 ]
 # What the test suite needs: `all` minus the two heavy ML extras. Not a
 # deployment shape — nobody should install `istota[test]` to run the bot; it
@@ -189,6 +191,7 @@ test = [
     "istota[sms]",
     "istota[whatsapp]",
     "istota[vault]",
+    "istota[push]",
 ]
 sms = [
     "telnyx[webhooks]>=4.178.0",

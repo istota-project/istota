@@ -3354,6 +3354,44 @@ def cmd_calendar_discover(args):
         sys.exit(1)
 
 
+def cmd_push_test(args):
+    """Send an operator-requested alert to each registered device."""
+    from istota.push import apns, devices
+    from istota.notifications import store as notification_store
+
+    config = load_config(Path(args.config) if args.config else None)
+    if not config.push.enabled:
+        print("Push notifications are disabled; enable [push] first.", file=sys.stderr)
+        return 1
+    try:
+        with db.get_db(config.db_path) as conn:
+            registered = devices.devices_for_user(conn, args.user)
+            if not registered:
+                print("No push devices registered for this user.", file=sys.stderr)
+                return 1
+            badge = notification_store.counts(conn, args.user)["open"]
+            user = config.users.get(args.user)
+            if user is None or user.push_chat_alerts != "off":
+                badge += db.total_unread_messages(conn, args.user, "web")
+        payload = {
+            "aps": {"alert": {"title": "Istota push test", "body": args.message},
+                    "badge": badge, "sound": "default"},
+            "istota": {"kind": "notification", "link": "/chat"},
+        }
+        failed = False
+        for device in registered:
+            result = apns.send(config.push, device, payload, collapse_id="test", expiration=0)
+            with db.get_db(config.db_path) as conn:
+                devices.record_result(conn, device["id"], result)
+            label = "accepted by APNs" if result.success else f"failed: {result.status} {result.reason}"
+            print(f"Device {device['id']} (...{device['token'][-6:]}, {device['environment']}): {label}")
+            failed = failed or not result.success
+        return int(failed)
+    except Exception as exc:
+        print(f"Push test failed ({type(exc).__name__}).", file=sys.stderr)
+        return 1
+
+
 def cmd_calendar_test(args):
     """Test calendar access."""
     from datetime import datetime, timedelta
@@ -4997,6 +5035,12 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    push_parser = subparsers.add_parser("push", help="iOS push diagnostics")
+    push_commands = push_parser.add_subparsers(dest="push_action", required=True)
+    push_test = push_commands.add_parser("test", help="Send a test alert to a user's registered devices")
+    push_test.add_argument("--user", required=True)
+    push_test.add_argument("--message", default="Push notifications are connected.")
+
     # apply
     apply_parser = subparsers.add_parser(
         "apply",
@@ -5909,6 +5953,7 @@ def main():
         setup_logging(config, verbose=args.verbose)
 
     commands = {
+        "push": cmd_push_test,
         "apply": cmd_apply,
         "snapshot": cmd_snapshot,
         "migrate": cmd_migrate,

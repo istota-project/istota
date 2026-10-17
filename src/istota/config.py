@@ -2320,6 +2320,21 @@ class ExperimentalConfig:
 
 
 @dataclass
+class PushConfig:
+    """Deployment APNs credential and push dispatch cadence."""
+
+    enabled: bool = False
+    apns_key_path: str = ""
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_topic: str = "com.cynium.istota"
+    dispatch_interval_seconds: int = 5
+    chat_delay_seconds: int = 15
+    max_age_seconds: int = 300
+    alert_batch_limit: int = 200
+
+
+@dataclass
 class Config:
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
@@ -2364,6 +2379,7 @@ class Config:
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    push: PushConfig = field(default_factory=PushConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
@@ -4818,6 +4834,7 @@ ENV_OVERRIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ISTOTA_WEB_TOKEN_STORAGE", ("web", "token_storage")),
     # Web auth-mode override. Same validation as the TOML parse.
     ("ISTOTA_WEB_AUTH", ("web", "auth")),
+    ("ISTOTA_APNS_KEY_PATH", ("push", "apns_key_path")),
 )
 """``(env var, path)``: non-secret settings the environment sets over the file.
 
@@ -4827,6 +4844,7 @@ overrides, not an override of the file.
 """
 
 _ENV_OVERRIDE_PARSERS: dict[str, Callable[[str], object]] = {
+    "ISTOTA_APNS_KEY_PATH": lambda raw: raw.strip() or _KEEP,
     "ISTOTA_WEB_TOKEN_STORAGE": _token_storage_from_env,
     "ISTOTA_WEB_AUTH": lambda raw: normalize_auth_methods(raw, kind="warning") or _KEEP,
 }

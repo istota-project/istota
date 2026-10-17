@@ -2,6 +2,11 @@
 
 import logging
 import sqlite3
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from istota.push.apns import ApnsResult
 
 from istota.db import iso_utc_now
 
@@ -96,3 +101,35 @@ def any_devices(conn: sqlite3.Connection) -> bool:
     except Exception as exc:
         logger.warning("Push device lookup failed: %s", type(exc).__name__)
         return False
+
+
+def record_result(conn: sqlite3.Connection, device_id: int, result: "ApnsResult") -> None:
+    """Apply a response to the registration that was actually sent to APNs."""
+    try:
+        if result.reason in {"BadTopic", "InvalidProviderToken"}:
+            return  # Deployment mistakes must not change device state.
+        generation = result.device_created_at
+        guard = "id = ? AND (? IS NULL OR created_at = ?)"
+        params = (device_id, generation, generation)
+        if result.status == 400 and result.reason in {"BadDeviceToken", "DeviceTokenNotForTopic"}:
+            conn.execute(f"DELETE FROM push_devices WHERE {guard}", params)
+        elif result.status == 410 and result.reason == "Unregistered":
+            if result.timestamp is not None:
+                invalidated = datetime.fromtimestamp(result.timestamp / 1000, timezone.utc).isoformat()
+                conn.execute(
+                    f"DELETE FROM push_devices WHERE {guard} AND julianday(created_at) <= julianday(?)",
+                    (*params, invalidated),
+                )
+        elif result.success:
+            conn.execute(
+                f"UPDATE push_devices SET last_seen_at = ?, last_error = NULL, "
+                f"last_badge = COALESCE(?, last_badge) WHERE {guard}",
+                (iso_utc_now(), result.badge, *params),
+            )
+        else:
+            conn.execute(
+                f"UPDATE push_devices SET last_error = ? WHERE {guard}",
+                (f"{result.status} {result.reason}".strip(), *params),
+            )
+    except Exception as exc:
+        logger.warning("Push result recording failed: %s", type(exc).__name__)
