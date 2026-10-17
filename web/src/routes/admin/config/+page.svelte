@@ -164,6 +164,9 @@
   /** What the current file holds that the loader ignores or only warns about:
    *  unknown and retired keys, a credential also set inline. */
   let fileWarnings = $derived(view ? view.problems.filter((p) => !p.blocking) : []);
+  /** A credential held only inline sits with the plain-text count, not the warnings. */
+  let moveWarnings = $derived(fileWarnings.filter((p) => p.action === 'move'));
+  let otherWarnings = $derived(fileWarnings.filter((p) => p.action !== 'move'));
 
   let rawLockedReason = $derived(
     configManaged
@@ -219,6 +222,36 @@
         ? `a plan (${view.managed.secrets.source ?? 'unknown'}) manages the deployment credentials`
         : null,
   );
+
+  let managedConfig = $derived(managedResources.find((e) => e.resource === 'config') ?? null);
+  let plainTextCount = $derived(Math.max(inlineSecrets.length, moveWarnings.length));
+
+  function plural(n: number, one: string, many: string): string {
+    return n === 1 ? `1 ${one}` : `${n} ${many}`;
+  }
+
+  /** Everything this page has to say about config.toml, as one banner: its
+   *  title lists each part, its colour is the most serious one. */
+  let fileNotice = $derived.by(() => {
+    if (!view) return null;
+    const blocking = editable ? blockingProblems.length : 0;
+    const comments = editable && view.has_comments;
+    const parts: string[] = [];
+    if (blocking) parts.push(plural(blocking, 'problem to fix first', 'problems to fix first'));
+    if (plainTextCount) {
+      parts.push(plural(plainTextCount, 'credential in plain text', 'credentials in plain text'));
+    }
+    if (otherWarnings.length) parts.push(plural(otherWarnings.length, 'warning', 'warnings'));
+    if (managedConfig) parts.push(`managed by ${managedConfig.source ?? 'a plan'}`);
+    if (comments) parts.push('comments are not kept');
+    if (!parts.length) return null;
+    const variant: 'danger' | 'warn' | 'info' = blocking
+      ? 'danger'
+      : plainTextCount || otherWarnings.length || managedConfig
+        ? 'warn'
+        : 'info';
+    return { title: `config.toml: ${parts.join(', ')}`, variant };
+  });
 
   function matches(field: AdminConfigField, needle: string): boolean {
     return (
@@ -449,81 +482,99 @@
       </NoticeBanner>
     {/if}
 
-    {#each managedResources as entry (entry.resource)}
+    {#each managedResources.filter((e) => e.resource !== 'config') as entry (entry.resource)}
       <NoticeBanner
         title="{RESOURCE_LABELS[entry.resource]} is managed by {entry.source ?? 'a plan'}"
         variant="warn"
         collapsed={false}
       >
-        {#if entry.source === 'unreadable'}
-          <p>
-            config/managed.json cannot be read, so everything reads as managed. Re-run
-            <code>istota-stack apply</code> on the host with the intended <code>[meta]</code> to repair
-            it.
-          </p>
-        {:else}
-          <p>
-            It is read-only here: the next run of {entry.source ?? 'that plan'} would revert a change
-            made from this page. Change it there, or remove it from that source to hand it to the web.
-          </p>
-        {/if}
+        {@render managedDetail(entry.source)}
       </NoticeBanner>
     {/each}
 
-    {#if editable && view.has_comments}
-      <NoticeBanner title="config.toml has comments" variant="info">
-        <p>
-          Applying a change rewrites the file in Istota's own layout, so its comments and formatting
-          are not kept. The host keeps the previous file as
-          <code>config/config.toml.bak.&lt;timestamp&gt;</code>.
-        </p>
-      </NoticeBanner>
-    {/if}
-
-    {#if editable && blockingProblems.length}
+    {#if fileNotice}
       <NoticeBanner
-        title="config.toml has problems to fix first"
-        variant="danger"
-        collapsed={false}
+        title={fileNotice.title}
+        variant={fileNotice.variant}
+        collapsed={fileNotice.variant === 'info'}
       >
-        <p>The host refuses a file with these, so the next change has to fix them too.</p>
-        <ul class="problem-list">
-          {#each blockingProblems as problem, i (i)}
-            <li>
-              {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
-              {problem.message}
-            </li>
-          {/each}
-        </ul>
-      </NoticeBanner>
-    {/if}
-
-    {#if inlineSecrets.length}
-      <NoticeBanner
-        title={inlineSecrets.length === 1
-          ? '1 credential is stored in config.toml in plain text'
-          : `${inlineSecrets.length} credentials are stored in config.toml in plain text`}
-        variant="warn"
-        collapsed={false}
-      >
-        <p>
-          They work, but anyone who can read config.toml can read them. Moving one to its secret
-          file is done by the host, so the value never reaches this page.
-        </p>
-        {#if unmovableCount}
-          <p>
-            {unmovableCount === inlineSecrets.length
-              ? 'None of them can'
-              : `${unmovableCount} of them cannot`} be moved from here{unmovableReason
-              ? `, because ${unmovableReason}`
-              : ''}.
-          </p>
+        {#if editable && blockingProblems.length}
+          <div class="notice-part">
+            <p class="notice-part-title">Problems to fix first</p>
+            <p>The host refuses a file with these, so the next change has to fix them too.</p>
+            <ul class="problem-list">
+              {#each blockingProblems as problem, i (i)}
+                <li>
+                  {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
+                  {problem.message}
+                </li>
+              {/each}
+            </ul>
+          </div>
         {/if}
-        {#if movableLabels.length}
-          <div class="banner-actions">
-            <Button variant="secondary" size="sm" disabled={!formEditable} onclick={toggleMoveAll}
-              >{allMovesPending ? 'Keep all in config.toml' : 'Move all to secret files'}</Button
-            >
+
+        {#if plainTextCount}
+          <div class="notice-part">
+            <p class="notice-part-title">
+              {plainTextCount === 1
+                ? '1 credential is stored in config.toml in plain text'
+                : `${plainTextCount} credentials are stored in config.toml in plain text`}
+            </p>
+            <p>
+              They work, but anyone who can read config.toml can read them. Moving one to its secret
+              file is done by the host, so the value never reaches this page.
+            </p>
+            {#if unmovableCount}
+              <p>
+                {unmovableCount === inlineSecrets.length
+                  ? 'None of them can'
+                  : `${unmovableCount} of them cannot`} be moved from here{unmovableReason
+                  ? `, because ${unmovableReason}`
+                  : ''}.
+              </p>
+            {/if}
+            {@render warningRows(moveWarnings)}
+            {#if movableLabels.length > 1 || (movableLabels.length === 1 && !moveWarnings.length)}
+              <div class="banner-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={!formEditable}
+                  onclick={toggleMoveAll}
+                  >{allMovesPending
+                    ? 'Keep all in config.toml'
+                    : 'Move all to secret files'}</Button
+                >
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        {#if otherWarnings.length}
+          <div class="notice-part">
+            <p class="notice-part-title">
+              {otherWarnings.length === 1 ? '1 warning' : `${otherWarnings.length} warnings`}
+            </p>
+            <p>Istota loads the file with these. A key it ignores is kept until it is removed.</p>
+            {@render warningRows(otherWarnings)}
+          </div>
+        {/if}
+
+        {#if managedConfig}
+          <div class="notice-part">
+            <p class="notice-part-title">Managed by {managedConfig.source ?? 'a plan'}</p>
+            {@render managedDetail(managedConfig.source)}
+          </div>
+        {/if}
+
+        {#if editable && view.has_comments}
+          <div class="notice-part">
+            <p class="notice-part-title">Comments are not kept</p>
+            <p>
+              Applying a change rewrites the file in Istota's own layout, so its comments and
+              formatting are not kept. The host keeps the previous file as
+              <code>config/config.toml.bak.&lt;timestamp&gt;</code>.
+            </p>
           </div>
         {/if}
       </NoticeBanner>
@@ -570,42 +621,6 @@
           onChange={(admins) => (draft = withAdmins(draft, admins))}
         />
       </section>
-
-      {#if fileWarnings.length}
-        <section class="card">
-          <header class="section-header"><h2>Warnings about config.toml</h2></header>
-          <p class="caption">
-            Istota loads the file with these. A key it ignores is kept until it is removed.
-          </p>
-          <ul class="warning-list">
-            {#each fileWarnings as problem, i (i)}
-              <li class="warning-row">
-                <span>
-                  {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
-                  {problem.message}
-                </span>
-                {#if editable && problem.action === 'unset'}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={!formEditable}
-                    onclick={() => toggleRemoval(problem)}
-                    >{removalPending(problem) ? 'Keep' : 'Remove'}</Button
-                  >
-                {:else if editable && problem.action === 'move'}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={!formEditable}
-                    onclick={() => toggleMove(problem)}
-                    >{movePending(problem) ? 'Keep in config.toml' : 'Move to secret file'}</Button
-                  >
-                {/if}
-              </li>
-            {/each}
-          </ul>
-        </section>
-      {/if}
 
       {#if orphanSecrets.length}
         <section class="card">
@@ -686,6 +701,52 @@
   {/if}
 </div>
 
+{#snippet managedDetail(source: string | null)}
+  {#if source === 'unreadable'}
+    <p>
+      config/managed.json cannot be read, so everything reads as managed. Re-run
+      <code>istota-stack apply</code> on the host with the intended <code>[meta]</code> to repair it.
+    </p>
+  {:else}
+    <p>
+      It is read-only here: the next run of {source ?? 'that plan'} would revert a change made from this
+      page. Change it there, or remove it from that source to hand it to the web.
+    </p>
+  {/if}
+{/snippet}
+
+{#snippet warningRows(problems: ConfigProblem[])}
+  {#if problems.length}
+    <ul class="warning-list">
+      {#each problems as problem, i (i)}
+        <li class="warning-row">
+          <span>
+            {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
+            {problem.message}
+          </span>
+          {#if editable && problem.action === 'unset'}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!formEditable}
+              onclick={() => toggleRemoval(problem)}
+              >{removalPending(problem) ? 'Keep' : 'Remove'}</Button
+            >
+          {:else if editable && problem.action === 'move'}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!formEditable}
+              onclick={() => toggleMove(problem)}
+              >{movePending(problem) ? 'Keep in config.toml' : 'Move to secret file'}</Button
+            >
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
+
 <!-- A secret file no config key reads, laid out as a section's own credential
      field: the name in the label column, the status at the row's far end. -->
 {#snippet standaloneSecret(secret: ConfigSecretFile)}
@@ -750,6 +811,18 @@
 
   .standalone-field:last-child {
     border-bottom: none;
+  }
+
+  /* One banner holds every part; each part opens with its own title line. */
+  .notice-part + .notice-part {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .notice-part-title {
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .problem-list {

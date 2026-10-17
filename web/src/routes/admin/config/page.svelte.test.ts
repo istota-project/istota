@@ -90,8 +90,46 @@ describe('banners', () => {
         ],
       }),
     );
-    expect(await screen.findByText('config.toml has problems to fix first')).toBeInTheDocument();
+    expect(await screen.findByText('config.toml: 1 problem to fix first')).toBeInTheDocument();
     expect(screen.getByText('scheduler.talk_poll_timeout')).toBeInTheDocument();
+  });
+
+  it('says everything about config.toml in one banner, coloured by the worst part', async () => {
+    const view = configView([imapHost, credentialField(twilioPath, true)], {
+      has_comments: true,
+      secrets: [fileSecret(twilioPath, { set: true, source: 'inline' })],
+      problems: [
+        { kind: 'discarded', path: ['a'], message: 'must be positive', blocking: true },
+        moveProblem(twilioPath),
+        {
+          kind: 'unknown',
+          path: ['web', 'x'],
+          message: 'is ignored',
+          blocking: false,
+          action: 'unset',
+        },
+      ],
+    });
+    view.managed.config = { managed: true, source: 'ansible', at: null };
+    mount(view);
+    const title =
+      'config.toml: 1 problem to fix first, 1 credential in plain text, 1 warning, ' +
+      'managed by ansible, comments are not kept';
+    expect(await screen.findByText(title)).toBeInTheDocument();
+    expect(document.querySelectorAll('.notice-banner')).toHaveLength(1);
+    expect(document.querySelector('.notice-banner')).toHaveClass('notice-danger');
+    expect(screen.queryByText('config.toml is managed by ansible')).toBeNull();
+    expect(screen.getByText('Move to secret file')).toBeInTheDocument();
+    expect(screen.getByText('Remove')).toBeInTheDocument();
+  });
+
+  it('starts collapsed when the comments are all it has to say', async () => {
+    mount(configView([imapHost], { has_comments: true }));
+    const title = await screen.findByText('config.toml: comments are not kept');
+    expect(title.closest('.notice-banner')).toHaveClass('notice-info');
+    expect(screen.queryByText(/Istota's own layout/)).toBeNull();
+    await fireEvent.click(title);
+    expect(screen.getByText(/Istota's own layout/)).toBeInTheDocument();
   });
 });
 
@@ -215,11 +253,6 @@ describe('the change set', () => {
 });
 
 describe('the current file', () => {
-  it('warns that applying drops the comments', async () => {
-    mount(configView([imapHost], { has_comments: true }));
-    expect(await screen.findByText('config.toml has comments')).toBeInTheDocument();
-  });
-
   it('removes an unknown key and a credential also set inline', async () => {
     mount(
       configView([imapHost], {
@@ -242,7 +275,7 @@ describe('the current file', () => {
         ],
       }),
     );
-    expect(await screen.findByText('Warnings about config.toml')).toBeInTheDocument();
+    expect(await screen.findByText('config.toml: 3 warnings')).toBeInTheDocument();
     expect(screen.getByText(/inside a list/)).toBeInTheDocument();
     const removes = screen.getAllByRole('button', { name: 'Remove' });
     expect(removes).toHaveLength(2);
