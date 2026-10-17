@@ -144,9 +144,11 @@ fn layers_line(layers: &[Layer], running: bool) -> String {
     format!("Background installs: {}", parts.join(", "))
 }
 
-/// The menu-bar icon: the logo as a template, or tinted red when unhealthy.
+/// The menu-bar icon: the octopus as a template, or tinted red when unhealthy.
+/// Its own asset, not the app icon: a template draws only alpha, so the app
+/// icon's opaque square would show as a filled block.
 fn tray_icon(alert: bool) -> Image<'static> {
-    let base = Image::from_bytes(include_bytes!("../icons/32x32.png")).expect("the bundled icon decodes");
+    let base = Image::from_bytes(include_bytes!("../icons/tray@2x.png")).expect("the bundled icon decodes");
     if !alert {
         return base.to_owned();
     }
@@ -1049,6 +1051,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tray_icon_is_a_shape_on_transparency() {
+        for alert in [false, true] {
+            let icon = tray_icon(alert);
+            let (w, rgba) = (icon.width() as usize, icon.rgba());
+            let alpha = |x: usize, y: usize| rgba[(y * w + x) * 4 + 3];
+            assert_eq!(alpha(0, 0), 0, "a corner is transparent");
+            assert_eq!(alpha(w / 2, w / 4), 255, "the head is opaque");
+        }
+    }
 
     #[test]
     fn the_menu_names_each_background_install() {
