@@ -4081,6 +4081,21 @@ def _migrate_whatsapp_flat(data: dict) -> None:
         block["provider"] = "whatsapp_cloud"
 
 
+def legacy_spellings(path: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """The older paths :func:`normalize_legacy_document` reads as ``path``.
+
+    A writer removing ``path`` removes these too, or the loader would read the
+    old spelling back into it.
+    """
+    path = tuple(path)
+    if (
+        len(path) == 3 and path[:2] == ("whatsapp", "cloud")
+        and path[2] in _LEGACY_FLAT_WHATSAPP_KEYS
+    ):
+        return [("whatsapp", path[2])]
+    return []
+
+
 def normalize_legacy_document(data: dict) -> None:
     """Every rewrite :func:`load_config` applies before the dataclass walk.
 

@@ -456,6 +456,55 @@ class TestFileCredentialProblems:
         assert actions == {("caldav", "password"): "unset"}
 
 
+FLAT_TOKEN = "FLAT-WHATSAPP-TOKEN-SENTINEL"
+FLAT_LABEL = "whatsapp.cloud.access_token"
+WITH_FLAT = CURRENT + f'\n[whatsapp]\nenabled = false\naccess_token = "{FLAT_TOKEN}"\n'
+
+
+class TestLegacyFlatWhatsapp:
+    """`load_config` reads a flat `[whatsapp] access_token` as
+    `[whatsapp.cloud] access_token`, so it is held inline all the same."""
+
+    def test_it_is_inline(self):
+        document = {"whatsapp": {"access_token": FLAT_TOKEN}}
+        assert edits.inline_file_credentials(document) == [
+            (("whatsapp", "cloud", "access_token"), "istota_whatsapp_access_token"),
+        ]
+        assert document == {"whatsapp": {"access_token": FLAT_TOKEN}}
+
+    def test_it_is_a_move_and_an_unset_beside_a_set_file(self):
+        document = {"whatsapp": {"access_token": FLAT_TOKEN}}
+        moves = edits.file_credential_problems(document, {})
+        assert [(p["path"], p["action"]) for p in moves] == [(FLAT_LABEL.split("."), "move")]
+        unsets = edits.file_credential_problems(document, {"ISTOTA_WHATSAPP_ACCESS_TOKEN": "f"})
+        assert [(p["path"], p["action"]) for p in unsets] == [(FLAT_LABEL.split("."), "unset")]
+        assert FLAT_TOKEN not in repr(moves) + repr(unsets)
+
+    def test_a_move_removes_the_flat_key(self):
+        found, seen = _preview(WITH_FLAT, {"move_to_file": [FLAT_LABEL]})
+        assert not found.blocked, found.errors
+        assert seen[0]["whatsapp"] == {"enabled": False}
+        assert found.moves == [{"label": FLAT_LABEL, "file": "istota_whatsapp_access_token"}]
+        assert FLAT_TOKEN not in repr(found.as_json()) + found.document_toml + repr(seen)
+        assert [p["path"] for p in found.warnings] == [["brain", "native", "extra_headers"]]
+
+    def test_an_unset_of_the_nested_label_removes_the_flat_key(self):
+        found, seen = _preview(
+            WITH_FLAT, {"ops": [{"op": "unset", "path": FLAT_LABEL.split(".")}]},
+        )
+        assert not found.blocked, found.errors
+        assert seen[0]["whatsapp"] == {"enabled": False}
+        assert FLAT_TOKEN not in repr(found.as_json()) + found.document_toml + repr(seen)
+
+    def test_a_raw_edit_cannot_write_the_flat_key_inline(self):
+        found, _ = _preview(CURRENT, {"raw": WITH_FLAT})
+        assert any("istota_whatsapp_access_token" in error for error in found.errors), found.errors
+
+    def test_a_stale_flat_key_left_alone_is_not_an_error(self):
+        found, _ = _preview(WITH_FLAT, {"ops": [{"op": "set", "path": ["email", "imap_host"], "value": "x"}]})
+        assert found.errors == []
+
+
 MOVED_TOKEN = "move-me-token-6d2a"
 WITH_TOKEN = CURRENT + f'\n[sms.twilio]\nauth_token = "{MOVED_TOKEN}"\n'
 

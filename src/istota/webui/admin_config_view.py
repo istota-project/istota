@@ -438,15 +438,18 @@ def _file_problems(
     """
     import os
 
-    from istota.config_editor.edits import file_credential_problems
+    from istota.config_editor.edits import file_credential_problems, normalized
 
     found = _problems(check)
     if document is None:
         return found
     found += file_credential_problems(document, os.environ)
+    read = normalized(document)
     for problem in found:
         path = tuple(problem.get("path") or ())
-        held = bool(path) and not config_managed and _lookup(document, path)[0]
+        held = bool(path) and not config_managed and (
+            _lookup(document, path)[0] or _lookup(read, path)[0]
+        )
         if problem.get("action") == "move":
             if held and not secrets_managed:
                 continue
@@ -544,7 +547,7 @@ def _secret_source(
     if os.environ.get(name.upper(), "").strip():
         return "environment"
     if path is not None and document is not None:
-        present, value = secrets.lookup(document, path)
+        present, value = secrets.lookup(edits.normalized(document), path)
         if present and edits._holds_value(value):
             return "inline"
     return "none"

@@ -88,10 +88,11 @@ def _moved_secrets(moves: list[str], current: dict, file_secrets: dict[str, str]
     A path that holds no value now (another change emptied it) refuses the
     request rather than writing an empty file over nothing.
     """
-    from istota.config_editor.edits import inline_file_credentials
+    from istota.config_editor.edits import inline_file_credentials, normalized
     from istota.config_editor.reference import INSTALLATION_CREDENTIALS
 
     held = dict(inline_file_credentials(current))
+    current = normalized(current)
     found: dict[str, str] = {}
     for label in moves:
         name = INSTALLATION_CREDENTIALS.get(label) if isinstance(label, str) else None
@@ -116,7 +117,7 @@ def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
     None when it does not parse, which refuses the request. A moved
     credential's value comes from `current` too, and is dropped from the plan.
     """
-    from istota.config_editor.edits import UNREADABLE_CONFIG, _unset_at
+    from istota.config_editor.edits import UNREADABLE_CONFIG, _unset_everywhere
     from istota.setup_wizard import SECRET_NAMES
 
     if current is None:
@@ -134,7 +135,7 @@ def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
     moves = list(getattr(taken, "moves", None) or [])
     moved = _moved_secrets(moves, current, file_secrets)
     for label in moves:
-        _unset_at(document, tuple(label.split(".")))
+        _unset_everywhere(document, tuple(label.split(".")))
     file_secrets = {**moved, **file_secrets}
     plan = {
         "meta": {"managed": False, "source": "web", "request": int(taken.id)},

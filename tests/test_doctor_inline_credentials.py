@@ -77,3 +77,11 @@ def test_a_missing_file_warns(tmp_path):
     result = doctor.check_inline_credentials(_config(tmp_path, None), probe=False)
     assert result.status == doctor.WARN
     assert "FileNotFoundError" in result.detail
+
+
+def test_a_legacy_flat_whatsapp_credential_is_found(tmp_path):
+    config = _config(tmp_path, '[whatsapp]\naccess_token = "FLAT-WHATSAPP-SENTINEL"\n')
+    result = doctor.check_inline_credentials(config, probe=False)
+    assert result.status == doctor.WARN
+    assert "whatsapp.cloud.access_token (istota_whatsapp_access_token)" in result.detail
+    assert "FLAT-WHATSAPP-SENTINEL" not in _serialized(result)

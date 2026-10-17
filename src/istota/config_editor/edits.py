@@ -184,6 +184,29 @@ def _unset_at(document: dict, path: tuple[str, ...]) -> None:
         del trail[depth - 1][path[depth - 1]]
 
 
+def _unset_everywhere(document: dict, path: tuple[str, ...]) -> None:
+    """Remove `path` and every older spelling `load_config` would read as it."""
+    from istota.config import legacy_spellings
+
+    _unset_at(document, path)
+    for older in legacy_spellings(path):
+        _unset_at(document, older)
+
+
+def normalized(document: dict) -> dict:
+    """A copy of `document` with the loader's legacy rewrites applied, so a
+    credential is found where `load_config` reads it, whatever its spelling."""
+    from istota.config import normalize_legacy_document
+
+    found = copy.deepcopy(document)
+    try:
+        normalize_legacy_document(found)
+    except ValueError:
+        # The mount-path rename refuses a conflict; the WhatsApp rewrite ran first.
+        pass
+    return found
+
+
 def _snippet_value(path: tuple[str, ...], snippet: Any) -> Any:
     """What a `set_toml` snippet defines for the last segment of `path`.
 
@@ -220,7 +243,7 @@ def apply_ops(document: dict, ops: Any) -> dict:
             _check_value(op["value"])
             _set_at(new, path, copy.deepcopy(op["value"]))
         elif kind == "unset":
-            _unset_at(new, path)
+            _unset_everywhere(new, path)
         elif kind == "set_toml":
             _set_at(new, path, _snippet_value(path, op.get("toml")))
         else:
@@ -401,6 +424,7 @@ def check_file_credentials(new: dict, current: dict) -> list[str]:
     """
     from istota.config_editor import schema
 
+    new, current = normalized(new), normalized(current)
     errors = []
     for path, name in schema.file_credentials().items():
         found, _ = secrets.lookup(new, path)
@@ -552,6 +576,7 @@ def inline_file_credentials(document: dict) -> list[tuple[tuple[str, ...], str]]
     inline, with the file's name. Never the value itself."""
     from istota.config_editor import schema
 
+    document = normalized(document)
     found = []
     for path, name in schema.file_credentials().items():
         present, value = secrets.lookup(document, path)
@@ -569,6 +594,7 @@ def file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict
     """
     from istota.config_editor import schema
 
+    new = normalized(new)
     found = []
     for path, name in schema.file_credentials().items():
         present, value = secrets.lookup(new, path)
@@ -762,11 +788,12 @@ async def preview(
             _set_at(new, path, value)
     admins = _read_admins(change_set.get("admins"))
     errors: list[str] = []
+    base_read = normalized(base)
     for label, name in moves.items():
         if name in file_secrets or label in inline_given:
             raise ChangeError(f"{label} is both moved and replaced; send one of the two")
         path = tuple(label.split("."))
-        present, value = secrets.lookup(base, path)
+        present, value = secrets.lookup(base_read, path)
         if not present or not _holds_value(value):
             errors.append(f"{label} holds no value in config.toml to move")
         elif environ.get(name.upper(), "").strip():
@@ -774,7 +801,7 @@ async def preview(
                 f"{label} is already set in {name}, which wins over config.toml; "
                 "remove the copy in config.toml rather than moving it over the file"
             )
-        _unset_at(new, path)
+        _unset_everywhere(new, path)
 
     paths_by_name = {name: path for path, name in schema.file_credentials().items()}
     errors += check_read_only(new, base, environ)

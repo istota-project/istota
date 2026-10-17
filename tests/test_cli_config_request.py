@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,8 @@ from istota import db, user_profiles
 from istota.apply import CheckResult
 from istota.config import Config
 from istota.config_editor import edits, handoff, requests
+from istota.config_editor.secrets import SENTINEL
+from istota.lib import toml_write
 from istota.webui import auth as web_auth
 
 REPO = Path(__file__).resolve().parents[1]
@@ -264,6 +267,31 @@ class TestMove:
         # finish keeps no line of the host's output holding the moved value.
         kept = handoff.redact_output(f"ok\nwrote {MOVED_TOKEN}\n", install.out)
         assert MOVED_TOKEN not in kept and "ok" in kept
+
+    def test_a_flat_whatsapp_credential_moves_and_leaves_no_copy(self, install):
+        install.config_path.write_text(
+            install.config_path.read_text()
+            + f'\n[whatsapp]\nenabled = false\naccess_token = "{MOVED_TOKEN}"\n'
+        )
+        taken = self._taken(install, {"move_to_file": ["whatsapp.cloud.access_token"]})
+        current = tomllib.loads(install.config_path.read_text())
+        plan, files, _ = handoff.build(taken, current)
+        assert MOVED_TOKEN not in json.dumps(plan)
+        assert plan["config"]["whatsapp"] == {"enabled": False}
+        assert files["secrets"] == {"istota_whatsapp_access_token": MOVED_TOKEN}
+
+    def test_the_build_removes_a_flat_copy_the_stored_document_still_holds(self, install):
+        install.config_path.write_text(
+            install.config_path.read_text()
+            + f'\n[whatsapp]\nenabled = false\naccess_token = "{MOVED_TOKEN}"\n'
+        )
+        taken = self._taken(install, {"move_to_file": ["whatsapp.cloud.access_token"]})
+        current = tomllib.loads(install.config_path.read_text())
+        stored = tomllib.loads(taken.document_toml)
+        stored["whatsapp"]["access_token"] = SENTINEL
+        stale = dataclasses.replace(taken, document_toml=toml_write.dumps(stored))
+        plan, _, _ = handoff.build(stale, current)
+        assert MOVED_TOKEN not in json.dumps(plan)
 
     def _taken(self, install, change_set):
         install.submit(change_set)

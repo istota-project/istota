@@ -739,6 +739,20 @@ class TestSecretSources:
         assert entry["read_only_reason"] is None
         assert "INLINE-TWILIO-SENTINEL" not in str(payload)
 
+    def test_a_legacy_flat_whatsapp_credential_is_inline(self, tmp_path, secret_env):
+        cfg = Config()
+        cfg.whatsapp.cloud.access_token = "FLAT-WHATSAPP-SENTINEL"
+        payload = view.build_config_view(
+            cfg, document='[whatsapp]\naccess_token = "FLAT-WHATSAPP-SENTINEL"\n',
+            secrets_dir=tmp_path,
+        )
+        entry = next(e for e in payload["secrets"] if e["name"] == "istota_whatsapp_access_token")
+        assert entry["source"] == "inline"
+        assert entry["set"] is True
+        moves = [p for p in payload["problems"] if p.get("action") == "move"]
+        assert [p["path"] for p in moves] == [["whatsapp", "cloud", "access_token"]]
+        assert "FLAT-WHATSAPP-SENTINEL" not in str(payload)
+
     def test_file_wins_over_an_inline_copy(self, tmp_path, monkeypatch, secret_env):
         (tmp_path / self.TWILIO).write_text("x")
         monkeypatch.setenv(self.TWILIO.upper(), "x")
