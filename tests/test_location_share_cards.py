@@ -102,6 +102,7 @@ def test_migration_adds_column_and_table_to_an_old_database_repeatedly(tmp_path)
     db.init_db(path)
     with sqlite3.connect(path) as conn:
         conn.execute("DROP TRIGGER location_share_card_task_deleted")
+        conn.execute("DROP TRIGGER location_share_card_room_deleted")
         conn.execute("DROP TABLE location_share_cards")
         conn.execute("ALTER TABLE messages DROP COLUMN location_shares")
         assert "location_shares" not in _columns(conn, "messages")
@@ -114,6 +115,8 @@ def test_migration_adds_column_and_table_to_an_old_database_repeatedly(tmp_path)
                 "image_surface", "created_at", "attached_at"} <= _columns(conn, "location_share_cards")
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' "
                             "AND name='location_share_card_task_deleted'").fetchone()
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                            "AND name='location_share_card_room_deleted'").fetchone()
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(location_share_cards)")}
         assert {"idx_location_share_cards_task", "idx_location_share_cards_request"} <= indexes
 
@@ -389,7 +392,8 @@ def test_cleanup_sweeps_unattached_cards_older_than_seven_days(env):
                    "map_url": "https://www.openstreetmap.org/?mlat=1.0&mlon=2.0"}
     ids = {}
     with db.get_db(config.db_path) as conn:
-        for name, age_days, message_id in (("old_loose", 8, None), ("old_attached", 30, 7),
+        kept = db.add_message(conn, room, role="assistant", body="here", origin_surface="web")
+        for name, age_days, message_id in (("old_loose", 8, None), ("old_attached", 30, kept),
                                            ("recent_loose", 6, None)):
             ids[name] = sharing._insert_card(conn, task_id=None, actor_user_id="alice",
                                              room_token=room, observation=observation)
@@ -397,3 +401,27 @@ def test_cleanup_sweeps_unattached_cards_older_than_seven_days(env):
                          "message_id=? WHERE id=?", (f"-{age_days} days", message_id, ids[name]))
     run_cleanup_checks(config)
     assert {card["id"] for card in _cards(config)} == {ids["old_attached"], ids["recent_loose"]}
+
+
+def test_deleting_the_room_deletes_its_attached_cards(env):
+    config, room = env
+    ident = _turn(config, room, "alice", "share my location here")
+    _run(config, ident, lambda task_id: f"Here: {_share(config, task_id)['snapshot']['map_url']}")
+    (card,) = _cards(config)
+    assert card["message_id"] is not None
+    with db.get_db(config.db_path) as conn:
+        room_id = conn.execute("SELECT id FROM web_chat_rooms WHERE token=? AND user_id='alice'",
+                               (room,)).fetchone()[0]
+        assert db.delete_web_chat_room(conn, room_id, "alice")
+    assert _cards(config) == []
+
+
+def test_cleanup_sweeps_cards_whose_message_is_gone(env):
+    config, room = env
+    ident = _turn(config, room, "alice", "share my location here")
+    _run(config, ident, lambda task_id: f"Here: {_share(config, task_id)['snapshot']['map_url']}")
+    (card,) = _cards(config)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("DELETE FROM messages WHERE id=?", (card["message_id"],))
+        assert sharing.prune_unattached_cards(conn) == 1
+    assert _cards(config) == []

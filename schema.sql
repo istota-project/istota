@@ -2154,6 +2154,14 @@ BEFORE DELETE ON tasks
 BEGIN
     UPDATE location_share_cards SET task_id=NULL WHERE task_id=OLD.id;
 END;
+-- A card holds a projected position, so it goes with its room. A separate
+-- trigger rather than a line in location_share_room_deleted, whose body an
+-- upgraded database keeps (CREATE TRIGGER IF NOT EXISTS).
+CREATE TRIGGER IF NOT EXISTS location_share_card_room_deleted
+BEFORE DELETE ON rooms
+BEGIN
+    DELETE FROM location_share_cards WHERE room_token=OLD.token;
+END;
 
 -- A recipient's block on one asker. Asking is open by default between users of
 -- one installation (ISSUE-566); db._migrate_relay_blocks keeps a copy of this

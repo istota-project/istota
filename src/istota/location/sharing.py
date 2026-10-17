@@ -140,10 +140,13 @@ UNATTACHED_CARD_RETENTION_DAYS = 7
 
 
 def prune_unattached_cards(conn, retention_days=UNATTACHED_CARD_RETENTION_DAYS):
-    """Delete map cards no message took that are older than ``retention_days``."""
+    """Delete map cards no message took that are older than ``retention_days``,
+    and every card whose message has since been deleted."""
     return conn.execute(
-        "DELETE FROM location_share_cards WHERE message_id IS NULL "
-        "AND created_at < datetime('now', '-' || ? || ' days')",
+        "DELETE FROM location_share_cards WHERE (message_id IS NULL "
+        "AND created_at < datetime('now', '-' || ? || ' days')) "
+        "OR (message_id IS NOT NULL AND NOT EXISTS "
+        "(SELECT 1 FROM messages WHERE messages.id = location_share_cards.message_id))",
         (retention_days,),
     ).rowcount
 
