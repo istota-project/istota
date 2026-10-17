@@ -52,8 +52,7 @@
      carry read as one family. */
   .location-share-card {
     width: 100%;
-    /* design-lint-allow: the card's fixed map size from the spec, not a spacing step. */
-    max-width: 360px;
+    max-width: var(--chat-body-max);
     padding: var(--space-2);
     background: var(--surface-reading-card);
     border-left: 2px solid var(--border-hover);
@@ -83,10 +82,16 @@
   .location-share-link:hover {
     text-decoration: underline;
   }
+  /* The map's height follows the card's width, taller on a phone. */
   .location-share-frame {
-    height: 200px;
+    aspect-ratio: 2 / 1;
     margin-top: var(--space-2);
     overflow: hidden;
     border-radius: var(--radius-sm);
+  }
+  @media (max-width: 768px) {
+    .location-share-frame {
+      aspect-ratio: 4 / 3;
+    }
   }
 </style>

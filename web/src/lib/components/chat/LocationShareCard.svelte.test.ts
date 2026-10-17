@@ -5,6 +5,9 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import type { ApiDouble } from '$lib/test/apiDouble';
 import type { LocationShareCardData } from '$lib/stores/segments';
 
@@ -154,5 +157,30 @@ describe('LocationShareCard', () => {
     const bad = { ...share(), mapUrl: 'javascript:alert(1)' };
     const { container } = render(LocationShareCard, { share: bad });
     expect(container.querySelector('a')).toBeNull();
+  });
+});
+
+describe('LocationShareCard geometry', () => {
+  const style =
+    readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), 'LocationShareCard.svelte'),
+      'utf8',
+    ).match(/<style>([\s\S]*)<\/style>/)?.[1] ?? '';
+  const body = (selector: string, media = '') => {
+    const scope = media ? (style.split(media)[1] ?? '') : style.split('@media')[0];
+    return scope.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+  };
+
+  it('spans the chat body width', () => {
+    expect(body('.location-share-card')).toMatch(/max-width:\s*var\(--chat-body-max\);/);
+  });
+
+  it('sizes the map by aspect ratio: 2:1 on desktop, 4:3 on a phone', () => {
+    const frame = body('.location-share-frame');
+    expect(frame).toMatch(/aspect-ratio:\s*2\s*\/\s*1;/);
+    expect(frame).not.toMatch(/(^|[;\s])height:/);
+    expect(body('.location-share-frame', '@media (max-width: 768px)')).toMatch(
+      /aspect-ratio:\s*4\s*\/\s*3;/,
+    );
   });
 });
