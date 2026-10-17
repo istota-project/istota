@@ -15,6 +15,8 @@
     hint?: string;
     /** Passed to `Field`: the label in a column beside the control. */
     inline?: boolean;
+    /** Offer Clear for a stored value. */
+    clearable?: boolean;
     /** The new value, `""` to clear, or null to leave the credential as it is. */
     onChange: (value: string | null) => void;
   }
@@ -27,6 +29,7 @@
     status,
     hint,
     inline = false,
+    clearable = true,
     onChange,
   }: Props = $props();
 
@@ -60,7 +63,7 @@
     {configured}
     value={pending ?? ''}
     onValueChange={(next) => onChange(next === '' ? null : next)}
-    onRequestClear={() => onChange('')}
+    onRequestClear={clearable ? () => onChange('') : undefined}
   />
 {/if}
 

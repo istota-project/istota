@@ -1,16 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import {
-    getAdminConfig,
-    getAdminUsers,
-    type AdminConfigView,
-    type AdminServarrApp,
-    type AdminServarrConnection,
-    type ConfigChangeSet,
-  } from '$lib/api';
-  import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
-  import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
-  import { buildChangeSet, changeCount } from '$lib/admin/config/changeSet';
+  import type { AdminServarrApp, AdminServarrConnection } from '$lib/api';
   import { Badge, Button, EmptyState, NoticeBanner } from '$lib/components/ui';
   import { formatRelative } from '$lib/dateFormat';
   import { waitForDoctorRun } from '$lib/doctorRun';
@@ -18,20 +8,10 @@
   import { Clapperboard } from '@lucide/svelte';
   import CheckResult from './CheckResult.svelte';
   import ConnectionCard from './ConnectionCard.svelte';
-  import ServarrEditForm from './ServarrEditForm.svelte';
-  import {
-    formProblems,
-    rebaseForm,
-    servarrDraft,
-    servarrForm,
-    servarrReadOnlyReason,
-    viewPrivateHosts,
-    type ServarrForm,
-  } from './servarrForm';
 
   interface Props {
     connection: AdminServarrConnection;
-    /** Re-read `/admin/connections`: after a check run, and after a change. */
+    /** Re-read `/admin/connections` after a check run. */
     onchecked: () => Promise<void> | void;
   }
 
@@ -40,23 +20,8 @@
   let checking = $state(false);
   let unanswered = $state(false);
 
-  // Editing goes through the config editor's own change set, review, step-up
-  // and request flow; the card adds no endpoint of its own.
-  let opening = $state(false);
-  let configView = $state<AdminConfigView | null>(null);
-  let readOnly = $state<string | null>(null);
-  let initial = $state<ServarrForm | null>(null);
-  let form = $state<ServarrForm | null>(null);
-  let users = $state<string[]>([]);
-  let problems = $state<Record<string, string>>({});
-  let changeSet = $state<ConfigChangeSet | null>(null);
-  let requestId = $state<number | null>(null);
-  let notice = $state('');
-
-  let draft = $derived(form && initial ? servarrDraft(form, initial) : null);
-  /** Nothing stops the editor opening: no change in flight, no known refusal. */
-  let canEdit = $derived(requestId === null && readOnly === null);
-  let pendingCount = $derived(draft ? changeCount(draft) : 0);
+  /** The card shows status; `[servarr]` is edited in Configuration. */
+  const configureHref = `${base}/admin/config?section=servarr`;
 
   const STATUS = {
     disabled: { variant: 'neutral', label: 'Disabled' },
@@ -120,81 +85,6 @@
       checking = false;
     }
   }
-
-  function closeEditor() {
-    form = null;
-    initial = null;
-    problems = {};
-    changeSet = null;
-  }
-
-  /** The editable state of config.toml, or a reason it cannot be changed here. */
-  async function loadConfig(): Promise<AdminConfigView> {
-    const view = await getAdminConfig();
-    configView = view;
-    readOnly = servarrReadOnlyReason(view);
-    return view;
-  }
-
-  async function openEditor() {
-    if (opening) return;
-    opening = true;
-    notice = '';
-    try {
-      const [view, listed] = await Promise.all([loadConfig(), getAdminUsers().catch(() => null)]);
-      users = listed ? listed.users.map((user) => user.user_id) : [];
-      if (readOnly) return;
-      const start = servarrForm(connection, viewPrivateHosts(view), view.secrets);
-      initial = start;
-      form = structuredClone(start);
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'The configuration could not be loaded');
-    } finally {
-      opening = false;
-    }
-  }
-
-  function review() {
-    if (!form || !draft || !configView?.document_digest) return;
-    problems = formProblems(form);
-    if (Object.keys(problems).length) return;
-    changeSet = buildChangeSet(draft, configView.document_digest);
-  }
-
-  /** config.toml changed under the card: reload, keep what the admin changed. */
-  async function onConflict() {
-    changeSet = null;
-    const edited = form ? $state.snapshot(form) : null;
-    const before = initial ? $state.snapshot(initial) : null;
-    let view: AdminConfigView;
-    try {
-      view = await loadConfig();
-      if (readOnly || !edited || !before) closeEditor();
-      await onchecked();
-    } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'The configuration could not be reloaded');
-      return;
-    }
-    if (!form || !edited || !before) return;
-    const after = servarrForm(connection, viewPrivateHosts(view), view.secrets);
-    initial = after;
-    form = rebaseForm(edited, before, after);
-    notice =
-      'config.toml changed on the host since this form was opened. The form now shows the new ' +
-      'values, and your changes are kept. Review them again.';
-  }
-
-  function onSubmitted(id: number) {
-    closeEditor();
-    notice = '';
-    requestId = id;
-  }
-
-  function onRequestOpen(id: number) {
-    closeEditor();
-    notice = 'Another change is already waiting for the host. It is shown below.';
-    requestId = id;
-  }
 </script>
 
 <ConnectionCard
@@ -204,19 +94,9 @@
   icon={Clapperboard}
   {badge}
 >
-  <!-- The form comes first: it is how an install with no apps gets one. -->
-  {#if form}
-    <!-- The editor takes the read view's place rather than stacking under a
-         copy of what it edits. -->
-    <div class="wide">
-      <ServarrEditForm bind:form bind:problems {users} />
-    </div>
-  {:else if connection.status === 'disabled'}
+  {#if connection.status === 'disabled'}
     <div class="wide" data-testid="servarr-empty">
-      <EmptyState
-        actionLabel={canEdit ? 'Add apps' : undefined}
-        onaction={canEdit ? openEditor : undefined}
-      >
+      <EmptyState actionLabel="Add apps" actionHref={configureHref}>
         No arr apps are connected. Add Sonarr, Radarr, Lidarr or Prowlarr so the servarr skill can
         search for and request media.
       </EmptyState>
@@ -305,41 +185,8 @@
     {/if}
   {/if}
 
-  {#if readOnly}
-    <div class="wide">
-      <NoticeBanner title="Not changed from here" variant="info" collapsed={false}>
-        <p>{readOnly}</p>
-      </NoticeBanner>
-    </div>
-  {/if}
-
-  {#if notice}
-    <p class="banner warn wide" role="status">{notice}</p>
-  {/if}
-
-  {#if requestId !== null}
-    <div class="wide">
-      {#key requestId}
-        <RequestProgress
-          {requestId}
-          onApplied={() => void onchecked()}
-          onDismiss={() => {
-            requestId = null;
-            notice = '';
-            void onchecked();
-          }}
-        />
-      {/key}
-    </div>
-  {/if}
-
   {#snippet meta()}
-    {#if form}
-      <p class="caption">
-        Changes go through the same review, confirmation and host applier as the Configuration page,
-        and Istota restarts to load them. A new key is sealed until the host writes it.
-      </p>
-    {:else if connection.status !== 'disabled'}
+    {#if connection.status !== 'disabled'}
       {#if stale}
         <span class="stale">the daemon's last report is old</span>
       {/if}
@@ -351,48 +198,20 @@
   {/snippet}
 
   {#snippet actions()}
-    {#if form}
-      <Button
-        variant="secondary"
-        onclick={() => {
-          closeEditor();
-          notice = '';
-        }}>Cancel</Button
+    <Button
+      variant="secondary"
+      href="https://istota.cynium.com/docs/features/servarr/"
+      target="_blank"
+      rel="noopener noreferrer">Setup guide</Button
+    >
+    <Button variant="secondary" href={configureHref}>Configure</Button>
+    {#if connection.apps.length > 0}
+      <Button variant="secondary" onclick={checkNow} loading={checking} loadingLabel="Checking…"
+        >Check now</Button
       >
-      <Button variant="primary" onclick={review} disabled={pendingCount === 0}
-        >Review changes</Button
-      >
-    {:else}
-      <Button
-        variant="secondary"
-        href="https://istota.cynium.com/docs/features/servarr/"
-        target="_blank"
-        rel="noopener noreferrer">Setup guide</Button
-      >
-      <Button variant="secondary" href={`${base}/admin/config?section=servarr`}>Configure</Button>
-      {#if canEdit && connection.status !== 'disabled'}
-        <Button variant="secondary" onclick={openEditor} loading={opening} loadingLabel="Loading…"
-          >Edit</Button
-        >
-      {/if}
-      {#if connection.apps.length > 0}
-        <Button variant="secondary" onclick={checkNow} loading={checking} loadingLabel="Checking…"
-          >Check now</Button
-        >
-      {/if}
     {/if}
   {/snippet}
 </ConnectionCard>
-
-{#if changeSet}
-  <ReviewDialog
-    {changeSet}
-    onClose={() => (changeSet = null)}
-    {onSubmitted}
-    {onConflict}
-    {onRequestOpen}
-  />
-{/if}
 
 <style>
   .caption {

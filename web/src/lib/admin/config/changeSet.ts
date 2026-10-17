@@ -66,6 +66,16 @@ export function withMove(draft: ConfigDraft, label: string, move: boolean): Conf
   return { ...draft, move_to_file: move ? [...others, label] : others };
 }
 
+/** `base` with `extra`'s ops and credentials laid over it: a part of the page
+ *  that keeps its own form contributes its change this way. */
+export function mergeDrafts(base: ConfigDraft, extra: ConfigDraft): ConfigDraft {
+  return {
+    ...base,
+    ops: { ...base.ops, ...extra.ops },
+    secrets: { ...base.secrets, ...extra.secrets },
+  };
+}
+
 export function withAdmins(draft: ConfigDraft, admins: string[] | null): ConfigDraft {
   return { ...draft, admins: admins ? [...admins] : null };
 }

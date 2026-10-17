@@ -10,7 +10,9 @@ import {
   configView,
 } from '$lib/test/adminConfig';
 import type {
+  AdminConfigField,
   AdminConfigView,
+  AdminServarrConnection,
   ConfigProblem,
   ConfigRequest,
   ConfigSecretFile,
@@ -45,13 +47,6 @@ afterEach(() => {
 });
 
 describe('banners', () => {
-  it('points [servarr] at the Servarr card, which has the guided form (ISSUE-767)', async () => {
-    mount(configView([configField({ path: ['servarr', 'requesters'], value: [] })]));
-    const pointer = await screen.findByText(/The Servarr card in Connections has a form/);
-    const link = within(pointer).getByRole('link', { name: 'Open Connections' });
-    expect(link.getAttribute('href')).toBe('/admin/connections');
-  });
-
   it('says why the page is read-only when there is no applier', async () => {
     mount(
       configView([imapHost], {
@@ -762,5 +757,227 @@ describe('credentials held in config.toml', () => {
         move_to_file: ['email.smtp_password'],
       }),
     );
+  });
+});
+
+describe('the [servarr] apps editor', () => {
+  const RADARR_FILE = 'istota_servarr_radarr_api_key';
+
+  function servarrConnection(over: Partial<AdminServarrConnection> = {}): AdminServarrConnection {
+    return {
+      id: 'servarr',
+      label: 'Servarr',
+      status: 'configured',
+      apps: [
+        {
+          app: 'radarr',
+          url: 'http://10.0.0.5:7878',
+          api_key_set: true,
+          incomplete: false,
+          problem: null,
+          check: null,
+        },
+      ],
+      missing: ['sonarr', 'lidarr', 'prowlarr'],
+      requesters: [],
+      defaults: {},
+      ...over,
+    };
+  }
+
+  const NO_APPS: Partial<AdminServarrConnection> = {
+    status: 'disabled',
+    apps: [],
+    missing: ['sonarr', 'radarr', 'lidarr', 'prowlarr'],
+  };
+
+  function keyFiles(readOnlyReason: string | null = null): ConfigSecretFile[] {
+    return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) =>
+      configSecret({
+        name: `istota_servarr_${name}_api_key`,
+        label: `servarr.apps.${name}.api_key`,
+        config_key: `servarr.apps.${name}.api_key`,
+        set: name === 'radarr',
+        source: name === 'radarr' ? 'file' : 'none',
+        read_only_reason: readOnlyReason,
+      }),
+    );
+  }
+
+  function servarrFields(appsOver: Partial<AdminConfigField> = {}) {
+    return [
+      configField({
+        path: ['servarr', 'apps'],
+        type: 'dict',
+        editor: 'table',
+        value: { radarr: null },
+        in_file: true,
+        ...appsOver,
+      }),
+      configField({
+        path: ['servarr', 'private_hosts'],
+        type: 'list',
+        editor: 'list',
+        value: ['10.0.0.5'],
+        default: [],
+        in_file: true,
+      }),
+    ];
+  }
+
+  function mountServarr(
+    over: Partial<AdminServarrConnection> = {},
+    viewOver: Partial<AdminConfigView> = {},
+    appsOver: Partial<AdminConfigField> = {},
+  ) {
+    api.getAdminConnections.mockResolvedValue({ connections: [servarrConnection(over)] });
+    mount(configView([imapHost, ...servarrFields(appsOver)], { secrets: keyFiles(), ...viewOver }));
+  }
+
+  async function block(app: string) {
+    return within(await screen.findByTestId(`servarr-app-${app}`));
+  }
+
+  async function review() {
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
+    return api.previewConfigChange.mock.calls.at(-1)?.[0];
+  }
+
+  it('shows a block per app with its URL and key status, and no pointer to Connections', async () => {
+    mountServarr();
+    const radarr = await block('radarr');
+    expect(radarr.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7878');
+    expect(radarr.getByLabelText<HTMLInputElement>(/^API key/).value).toBe('');
+    expect(radarr.getByText('Set')).toBeInTheDocument();
+    expect((await block('sonarr')).getByText('Not connected.')).toBeInTheDocument();
+    expect(screen.queryByText(/card in Connections has a form/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Open Connections' })).toBeNull();
+  });
+
+  it('sends a changed URL as an op and a new key under its file name', async () => {
+    mountServarr();
+    const radarr = await block('radarr');
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.5:7879' },
+    });
+    await fireEvent.input(radarr.getByLabelText(/^API key/), {
+      target: { value: 'fixture-arr-key-9' },
+    });
+    expect(screen.getByText('2 changes')).toBeInTheDocument();
+    const sent = await review();
+    expect(sent.ops).toEqual([
+      { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://10.0.0.5:7879' },
+    ]);
+    expect(sent.secrets).toEqual({ [RADARR_FILE]: 'fixture-arr-key-9' });
+  });
+
+  it('removes the table of an app turned off and clears its key file', async () => {
+    mountServarr();
+    await fireEvent.click((await block('radarr')).getByLabelText('Connected'));
+    const sent = await review();
+    expect(sent.ops).toEqual([{ op: 'unset', path: ['servarr', 'apps', 'radarr'] }]);
+    expect(sent.secrets).toEqual({ [RADARR_FILE]: '' });
+  });
+
+  it('adds a first app on an install with none (ISSUE-767)', async () => {
+    mountServarr(NO_APPS);
+    const sonarr = await block('sonarr');
+    await fireEvent.click(sonarr.getByLabelText('Connected'));
+    const url = sonarr.getByLabelText<HTMLInputElement>(/^URL/);
+    expect(url.placeholder).toBe('http://192.168.1.10:8989');
+    await fireEvent.input(url, { target: { value: 'https://sonarr.example.com' } });
+    await fireEvent.input(sonarr.getByLabelText(/^API key/), {
+      target: { value: 'fixture-arr-key-1' },
+    });
+    const sent = await review();
+    expect(sent.ops).toEqual([
+      {
+        op: 'set',
+        path: ['servarr', 'apps', 'sonarr', 'url'],
+        value: 'https://sonarr.example.com',
+      },
+    ]);
+    expect(sent.secrets).toEqual({ istota_servarr_sonarr_api_key: 'fixture-arr-key-1' });
+  });
+
+  it('refuses plain HTTP to a host not in the private hosts before any preview', async () => {
+    mountServarr();
+    const radarr = await block('radarr');
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.9:7878' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+    expect(radarr.getAllByText(/not in the private hosts/).length).toBeGreaterThan(0);
+
+    await fireEvent.click(radarr.getByRole('button', { name: 'Add 10.0.0.9 to private hosts' }));
+    expect(radarr.queryByText(/not in the private hosts/)).toBeNull();
+    const sent = await review();
+    expect(sent.ops).toContainEqual({
+      op: 'set',
+      path: ['servarr', 'private_hosts'],
+      value: ['10.0.0.5', '10.0.0.9'],
+    });
+  });
+
+  it('shows a read-only key with its reason and no input', async () => {
+    const reason = 'Managed by ansible. Change it there.';
+    mountServarr({}, { secrets: keyFiles(reason) });
+    const radarr = await block('radarr');
+    expect(radarr.getByText(reason)).toBeInTheDocument();
+    expect(radarr.getByText('Set')).toBeInTheDocument();
+    expect(radarr.queryByLabelText(/^API key/)).toBeNull();
+  });
+
+  it('is read-only with the reason when a plan manages config.toml', async () => {
+    const reason = 'config.toml is managed by ansible.';
+    mountServarr({}, {}, { editor: 'readonly', read_only_reason: reason });
+    const radarr = await block('radarr');
+    expect(radarr.getByText('http://10.0.0.5:7878')).toBeInTheDocument();
+    expect(radarr.queryByLabelText(/^URL/)).toBeNull();
+    expect(radarr.queryByLabelText('Connected')).toBeNull();
+    expect(screen.getAllByText(reason).length).toBeGreaterThan(0);
+  });
+
+  it('keeps the app edits when config.toml changed underneath', async () => {
+    mountServarr();
+    const radarr = await block('radarr');
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.5:7879' },
+    });
+    api.previewConfigChange.mockRejectedValueOnce(
+      new api.ConfigChangeError('changed', 409, 'config_changed', { digest: 'digest-2' }),
+    );
+    api.getAdminConfig.mockResolvedValue(
+      configView([imapHost, ...servarrFields()], {
+        secrets: keyFiles(),
+        document_digest: 'digest-2',
+      }),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    expect(await screen.findByText(/your changes are kept/)).toBeInTheDocument();
+    expect((await block('radarr')).getByLabelText<HTMLInputElement>(/^URL/).value).toBe(
+      'http://10.0.0.5:7879',
+    );
+    const sent = await review();
+    expect(sent).toMatchObject({
+      base_digest: 'digest-2',
+      ops: [
+        { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://10.0.0.5:7879' },
+      ],
+    });
+  });
+
+  it('discards the app edits with the rest of the change', async () => {
+    mountServarr();
+    const radarr = await block('radarr');
+    await fireEvent.input(radarr.getByLabelText(/^URL/), {
+      target: { value: 'http://10.0.0.5:7879' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(radarr.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7878');
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
   });
 });

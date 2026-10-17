@@ -1,41 +1,24 @@
 /**
- * The servarr card's edit form, as plain data.
+ * The Configuration page's `[servarr.apps]` editor, as plain data.
  *
- * The card edits `[servarr]` only by building a config-editor change set
- * (`$lib/admin/config/changeSet`) and handing it to the shared review, step-up
- * and request flow, as the Configuration page does. Plain fields become `set`
- * and `unset` ops by path. An API key is a file credential, so a new one goes
- * in the change set's `secrets` under its secrets file's name, the name the
- * view's `secrets` entry carries, exactly as the Configuration page sends one:
- * never in an op, and the host applier writes the file. A stored key never
- * reaches the browser: the form only knows whether one is set.
+ * One block per app: its URL is a `set` op on `servarr.apps.<app>.url`, and
+ * its API key is a file credential, so a new one goes in the change set's
+ * `secrets` under the file name the view's `secrets` entry carries, never in
+ * an op; the host applier writes the file. A stored key never reaches the
+ * browser: the form only knows whether one is set. The rest of `[servarr]`
+ * (requesters, private hosts, add defaults) is ordinary fields.
  */
 import type {
-  AdminConfigView,
   AdminServarrConnection,
   ConfigOp,
   ConfigSecretFile,
+  ConfigSecretSource,
   ServarrApp,
 } from '$lib/api';
-import {
-  emptyDraft,
-  parseList,
-  sameValue,
-  withOp,
-  withSecret,
-  type ConfigDraft,
-} from '$lib/admin/config/changeSet';
+import { emptyDraft, sameValue, withOp, withSecret, type ConfigDraft } from './changeSet';
 
 /** The known apps, in the order the skill visits them (`SERVARR_APPS`). */
 export const SERVARR_APPS: ServarrApp[] = ['sonarr', 'radarr', 'lidarr', 'prowlarr'];
-
-/** The add defaults each app takes (`SERVARR_DEFAULT_FIELDS` in config.py). */
-export const DEFAULT_FIELDS: Record<ServarrApp, string[]> = {
-  sonarr: ['quality_profile', 'root_folder', 'monitor'],
-  radarr: ['quality_profile', 'root_folder', 'minimum_availability'],
-  lidarr: ['quality_profile', 'root_folder', 'metadata_profile', 'monitor'],
-  prowlarr: [],
-};
 
 /** Each app's name as the app spells it. */
 export const APP_LABELS: Record<ServarrApp, string> = {
@@ -66,19 +49,13 @@ export interface ServarrAppForm {
   /** The key's secrets file, from the view's `secrets` entry; null when the
    *  view lists none. */
   keyFile: string | null;
+  /** Where that file's value is held, for the status badge. */
+  keySource: ConfigSecretSource | null;
   /** Why the key cannot be changed here (that entry's `read_only_reason`), or null. */
   keyReadOnly: string | null;
 }
 
-export interface ServarrForm {
-  apps: Record<ServarrApp, ServarrAppForm>;
-  requesters: string[];
-  /** `[servarr] private_hosts`, one per line as typed. */
-  privateHosts: string;
-  defaults: Record<ServarrApp, Record<string, string>>;
-}
-
-const BASE = ['servarr'];
+export type ServarrAppsForm = Record<ServarrApp, ServarrAppForm>;
 
 const NO_KEY_FILE = 'This install has no secrets file for this key, so it is set on the host.';
 
@@ -87,13 +64,11 @@ function keyEntry(secrets: ConfigSecretFile[], app: ServarrApp): ConfigSecretFil
   return secrets.find((entry) => entry.config_key === `servarr.apps.${app}.api_key`);
 }
 
-export function servarrForm(
+export function servarrAppsForm(
   connection: AdminServarrConnection,
-  privateHosts: string[],
   secrets: ConfigSecretFile[],
-): ServarrForm {
-  const apps = {} as Record<ServarrApp, ServarrAppForm>;
-  const defaults = {} as Record<ServarrApp, Record<string, string>>;
+): ServarrAppsForm {
+  const apps = {} as ServarrAppsForm;
   for (const name of SERVARR_APPS) {
     const stored = connection.apps.find((entry) => entry.app === name);
     const file = keyEntry(secrets, name);
@@ -104,65 +79,11 @@ export function servarrForm(
       keySet: stored ? stored.api_key_set : false,
       incomplete: stored?.incomplete ?? false,
       keyFile: file?.name ?? null,
+      keySource: file?.source ?? null,
       keyReadOnly: file ? file.read_only_reason : NO_KEY_FILE,
     };
-    const configured = connection.defaults[name] ?? {};
-    defaults[name] = Object.fromEntries(
-      DEFAULT_FIELDS[name].map((field) => [field, configured[field] ?? '']),
-    );
   }
-  return {
-    apps,
-    requesters: [...connection.requesters],
-    privateHosts: privateHosts.join('\n'),
-    defaults,
-  };
-}
-
-/** `[servarr] private_hosts` as the Configuration view loaded it. */
-export function viewPrivateHosts(view: AdminConfigView): string[] {
-  const section = view.sections.find((item) => item.key === 'servarr');
-  const field = section?.fields.find((item) => item.name === 'private_hosts');
-  return Array.isArray(field?.value) ? field.value.map((item) => String(item)) : [];
-}
-
-/** The fields the card writes; a reason on any of them makes it read-only. */
-const CARD_FIELDS = new Set(['apps', 'requesters', 'private_hosts', 'defaults']);
-
-/**
- * Why the card cannot change `[servarr]`, or null when it can.
- *
- * Ownership is per resource, not per section (`applier.read_managed`), so
- * `[servarr]` is managed exactly when the whole config is.
- */
-export function servarrReadOnlyReason(view: AdminConfigView): string | null {
-  if (!view.applier.available) return view.applier.reason;
-  if (!view.editable) {
-    return 'This process has no config.toml to change, so the connection is changed on the host.';
-  }
-  const managed = view.managed.config;
-  if (managed.managed) {
-    if (managed.source === 'unreadable') {
-      return (
-        'config/managed.json cannot be read, so all of config.toml reads as managed. ' +
-        'Re-run istota-stack apply on the host with the intended [meta] to repair it.'
-      );
-    }
-    return (
-      `config.toml is managed by ${managed.source ?? 'a plan'}, so [servarr] is changed in its ` +
-      'settings plan, with the API keys in its secrets files. Its next run would revert a ' +
-      'change made here.'
-    );
-  }
-  const section = view.sections.find((item) => item.key === 'servarr');
-  for (const field of section?.fields ?? []) {
-    if (CARD_FIELDS.has(field.name) && field.read_only_reason) return field.read_only_reason;
-  }
-  return null;
-}
-
-function hostList(text: string): string[] {
-  return parseList(text, false) as string[];
+  return apps;
 }
 
 function normalHost(host: string): string {
@@ -232,7 +153,7 @@ export interface PrivateHostNeed {
  * local-looking name only probably resolves to a private address, so it is a
  * warning rather than a refusal.
  */
-export function privateHostNeed(url: string, privateHostsText: string): PrivateHostNeed | null {
+export function privateHostNeed(url: string, privateHosts: string[]): PrivateHostNeed | null {
   let parsed: URL;
   try {
     parsed = new URL(url.trim());
@@ -242,7 +163,7 @@ export function privateHostNeed(url: string, privateHostsText: string): PrivateH
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
   const host = typedHost(url);
   if (!host) return null;
-  if (new Set(hostList(privateHostsText).map(normalHost)).has(host)) return null;
+  if (new Set(privateHosts.map(normalHost)).has(host)) return null;
   if (parsed.protocol === 'http:') {
     return {
       host,
@@ -267,15 +188,14 @@ export function privateHostNeed(url: string, privateHostsText: string): PrivateH
   return null;
 }
 
-/** `form` with `host` added to its private hosts, once. */
-export function withPrivateHost(form: ServarrForm, host: string): string {
-  const hosts = hostList(form.privateHosts);
-  if (hosts.map(normalHost).includes(normalHost(host))) return form.privateHosts;
-  return [...hosts, host].join('\n');
+/** `privateHosts` with `host` added, once. */
+export function withPrivateHost(privateHosts: string[], host: string): string[] {
+  if (privateHosts.map(normalHost).includes(normalHost(host))) return privateHosts;
+  return [...privateHosts, host];
 }
 
 /** What is wrong with the URL, mirroring the skill's checks before a request. */
-function urlProblem(url: string, privateHostsText: string): string | null {
+function urlProblem(url: string, privateHosts: string[]): string | null {
   const text = url.trim();
   if (!text) return 'Enter the URL of the app.';
   let parsed: URL;
@@ -295,17 +215,26 @@ function urlProblem(url: string, privateHostsText: string): string | null {
   if (parsed.search || parsed.hash || text.includes('?') || text.includes('#')) {
     return 'The URL must not carry a query or fragment.';
   }
-  const need = privateHostNeed(text, privateHostsText);
+  const need = privateHostNeed(text, privateHosts);
   return need?.required ? need.message : null;
 }
 
-/** Problems keyed by `<app>.url` or `<app>.key`; empty when the form can be reviewed. */
-export function formProblems(form: ServarrForm): Record<string, string> {
+/**
+ * Problems keyed by `<app>.url` or `<app>.key` for the apps this change
+ * touches; empty when it can be reviewed. An app left as it was is not
+ * judged, so a stored problem doctor already reports does not block an
+ * unrelated change.
+ */
+export function appProblems(
+  form: ServarrAppsForm,
+  initial: ServarrAppsForm,
+  privateHosts: string[],
+): Record<string, string> {
   const problems: Record<string, string> = {};
   for (const name of SERVARR_APPS) {
-    const app = form.apps[name];
-    if (!app.enabled) continue;
-    const problem = urlProblem(app.url, form.privateHosts);
+    const app = form[name];
+    if (!app.enabled || sameValue(app, initial[name])) continue;
+    const problem = urlProblem(app.url, privateHosts);
     if (problem) problems[`${name}.url`] = problem;
     if (app.keySet !== true && app.key === '') {
       problems[`${name}.key`] = app.keyReadOnly
@@ -319,16 +248,15 @@ export function formProblems(form: ServarrForm): Record<string, string> {
 }
 
 /** The change `form` makes to what `initial` was built from. */
-export function servarrDraft(form: ServarrForm, initial: ServarrForm): ConfigDraft {
+export function servarrAppsDraft(form: ServarrAppsForm, initial: ServarrAppsForm): ConfigDraft {
   let draft = emptyDraft();
   const op = (next: ConfigOp) => {
     draft = withOp(draft, next);
   };
-
   for (const name of SERVARR_APPS) {
-    const app = form.apps[name];
-    const before = initial.apps[name];
-    const path = [...BASE, 'apps', name];
+    const app = form[name];
+    const before = initial[name];
+    const path = ['servarr', 'apps', name];
     const keyFile = app.keyReadOnly ? null : app.keyFile;
     if (!app.enabled) {
       if (before.enabled) {
@@ -344,32 +272,6 @@ export function servarrDraft(form: ServarrForm, initial: ServarrForm): ConfigDra
     }
     if (keyFile && app.key !== '') draft = withSecret(draft, keyFile, app.key);
   }
-
-  if (!sameValue([...form.requesters].sort(), [...initial.requesters].sort())) {
-    op(
-      form.requesters.length
-        ? { op: 'set', path: [...BASE, 'requesters'], value: [...form.requesters] }
-        : { op: 'unset', path: [...BASE, 'requesters'] },
-    );
-  }
-
-  const hosts = hostList(form.privateHosts);
-  if (!sameValue(hosts, hostList(initial.privateHosts))) {
-    op(
-      hosts.length
-        ? { op: 'set', path: [...BASE, 'private_hosts'], value: hosts }
-        : { op: 'unset', path: [...BASE, 'private_hosts'] },
-    );
-  }
-
-  for (const name of SERVARR_APPS) {
-    for (const field of DEFAULT_FIELDS[name]) {
-      const value = (form.defaults[name][field] ?? '').trim();
-      if (value === (initial.defaults[name][field] ?? '')) continue;
-      const path = [...BASE, 'defaults', name, field];
-      op(value ? { op: 'set', path, value } : { op: 'unset', path });
-    }
-  }
   return draft;
 }
 
@@ -378,41 +280,26 @@ function pick<T>(edited: T, before: T, after: T): T {
 }
 
 /**
- * `form` moved onto `after`, the values of a config.toml that changed under
- * the card: what the admin changed from `before` is kept, the rest is read
- * from the new file, so a review does not revert somebody else's change.
+ * `form` moved onto `after`, built from a config that changed under the page:
+ * what the admin changed from `before` is kept, the rest is read from the new
+ * values, so a review does not revert somebody else's change.
  */
-export function rebaseForm(
-  form: ServarrForm,
-  before: ServarrForm,
-  after: ServarrForm,
-): ServarrForm {
-  const apps = {} as Record<ServarrApp, ServarrAppForm>;
-  const defaults = {} as Record<ServarrApp, Record<string, string>>;
+export function rebaseApps(
+  form: ServarrAppsForm,
+  before: ServarrAppsForm,
+  after: ServarrAppsForm,
+): ServarrAppsForm {
+  const apps = {} as ServarrAppsForm;
   for (const name of SERVARR_APPS) {
-    const edited = form.apps[name];
-    const was = before.apps[name];
-    const now = after.apps[name];
+    const edited = form[name];
+    const was = before[name];
+    const now = after[name];
     apps[name] = {
+      ...now,
       enabled: pick(edited.enabled, was.enabled, now.enabled),
       url: pick(edited.url, was.url, now.url),
       key: edited.key,
-      keySet: now.keySet,
-      incomplete: now.incomplete,
-      keyFile: now.keyFile,
-      keyReadOnly: now.keyReadOnly,
     };
-    defaults[name] = Object.fromEntries(
-      DEFAULT_FIELDS[name].map((field) => [
-        field,
-        pick(form.defaults[name][field], before.defaults[name][field], after.defaults[name][field]),
-      ]),
-    );
   }
-  return {
-    apps,
-    requesters: pick(form.requesters, before.requesters, after.requesters),
-    privateHosts: pick(form.privateHosts, before.privateHosts, after.privateHosts),
-    defaults,
-  };
+  return apps;
 }
