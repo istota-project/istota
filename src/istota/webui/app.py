@@ -1129,6 +1129,37 @@ async def _auth_error(headline: str, detail: str, status_code: int) -> HTMLRespo
     )
 
 
+# The largest of the sign-in forms is set-password: two passwords at
+# `web_auth`'s 1024-byte cap, percent-encoded to at most 3 KiB each, plus a
+# link token and a CSRF token. These forms are read with no session (ISSUE-777),
+# and nginx caps their locations at twice this.
+_AUTH_FORM_BODY_LIMIT = 16 * 1024
+
+
+async def _read_auth_form(request: Request):
+    """The posted sign-in form, or the page refusing it, as ``(form, refusal)``.
+
+    The body is read through `read_bounded_body` before anything parses it,
+    and Starlette's parser is then handed only those bytes.
+    """
+    try:
+        raw = await read_bounded_body(request, _AUTH_FORM_BODY_LIMIT)
+    except BodyError as exc:
+        if exc.status == 413:
+            return None, await _auth_error("This form is too large", "Reload and try again.", 413)
+        return None, await _auth_error("This form was interrupted", "Reload and try again.", 400)
+    replayed = False
+
+    async def receive():
+        nonlocal replayed
+        if replayed:
+            return {"type": "http.disconnect"}
+        replayed = True
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    return await Request(request.scope, receive).form(), None
+
+
 @auth_router.get("/login")
 async def login(request: Request):
     request.session.pop(_POST_LOGIN_KEY, None)
@@ -1155,7 +1186,9 @@ async def login_email(request: Request):
     started = time.monotonic()
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "login", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     email = form.get("email", "")
@@ -1280,7 +1313,9 @@ async def set_password_page(request: Request):
 async def set_password_submit(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     token = form.get("token", "")
     record = await _peek_auth_link(token)
     if record is None:
@@ -1361,7 +1396,9 @@ def _send_sign_in_code(config, request_id: str):
 async def sign_in_code_request(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "sign-in-code-request", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     email = form.get("email", "")
@@ -1400,7 +1437,9 @@ async def sign_in_code_page(request: Request):
 async def sign_in_code_submit(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "sign-in-code", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     pending = _pending_sign_in(request)
@@ -1457,7 +1496,9 @@ async def local_login_page(request: Request):
 async def local_login_submit(request: Request):
     if not _config.web.has_method("local_code"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "local-login", form.get("csrf_token")):
         return await _auth_error("This form expired", "Open Istota from the app again.", 403)
     try:
@@ -1523,7 +1564,9 @@ async def reset_page(request: Request):
 async def reset_submit(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "reset", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     response = await _auth_form(

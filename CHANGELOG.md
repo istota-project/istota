@@ -82,6 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The sign-in forms no longer accept large bodies from a client with no session (ISSUE-777). The web app stops reading a form past 16 KiB and answers 413 before parsing it, and the stack's nginx caps the sign-in paths at 32k instead of the 512M upload limit.
+
 - A subscribed feed can no longer run script in the web app through a link (ISSUE-774). Entry links, a feed's site link and attached file links are kept only when they are `http` or `https`, both when a feed is polled and when the reader shows entries already stored, so a `javascript:` link in an older entry shows as plain text.
 
 - Immunization history now fits phone screens, with the vaccine above its date and available details instead of a sideways-scrolling table. Each phone entry takes at most two lines, with notes hidden and long text truncated. Empty fields no longer show dashes, row menus line up on desktop, and the heading and filter stack on smaller screens.
