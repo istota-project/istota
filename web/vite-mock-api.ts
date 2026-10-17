@@ -7321,7 +7321,7 @@ const handlers: MockHandler[] = [
           enabled: true,
           chat: mockChatRooms.reduce((n, r) => n + mockUnreadCount(r.token), 0),
           briefings: 3,
-          feeds: 66,
+          feeds: 128,
         }
       : undefined,
   avatarsHandler,
