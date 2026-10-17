@@ -31,7 +31,11 @@ onto a new VM and anything else there is somebody's work. What a first run
 wrote is the same bytes on a second, so only the database refusal stops it.
 
 `secrets/` is never in the backups (the local-VM spec's decision): the
-deployment's credentials are entered again afterwards.
+deployment's credentials are entered again afterwards. The one exception is
+the web session signing key, which no backup holds and `web` cannot start
+without: with `--vm-dir` and the stack's `secrets/` mounted at
+`<vm-dir>/secrets`, an empty one is minted, as `istota setup` does. A new key
+only signs everyone out.
 
 Exit 0 restored, 1 refused with nothing written, 2 partial.
 """
@@ -145,6 +149,24 @@ def _task_count(db_path: Path) -> int:
     return count(db_path)
 
 
+SESSION_SECRET_NAME = "istota_web_session_secret_key"
+
+
+def _mint_session_secret(secrets_dir: Path, out) -> None:
+    if not secrets_dir.is_dir():
+        out(f"no {secrets_dir}: the web session key is left for istota-stack put-files")
+        return
+    import secrets
+
+    from istota.setup_wizard import _read_secret_file, _write_secret_file
+
+    path = secrets_dir / SESSION_SECRET_NAME
+    if _read_secret_file(path):
+        return
+    _write_secret_file(path, secrets.token_hex(32))
+    out(f"wrote a new web session key to {path}")
+
+
 def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
             date: str | None, force: bool, load, out, vm_dir: Path | None = None) -> int:
     from istota.apply import write_private
@@ -221,6 +243,7 @@ def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
         for name, text in env_files.items():
             write_private(vm_dir / name, text)
             out(f"handed back {name} of {env_date}")
+        _mint_session_secret(vm_dir / "secrets", out)
 
     failed = 0
     installed = config_dir / "config.toml"
