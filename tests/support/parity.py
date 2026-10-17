@@ -20,11 +20,13 @@ than importing the tier modules, so a witness in an artifact tier is counted
 without that tier's fixtures being loaded.
 
 Rows 1 to 20 are that spec's. The local-VM spec (a Lima VM on the Mac running
-the same stack) adds its own as `L1` onward, held the same way.
+the same stack) adds its own as `L1` onward, held the same way, and the Mac app
+spec its `M` rows, under that spec's own numbers.
 
-Every row is in exactly one of three states: witnessed (some test carries the
-decorator for it), pending (named in `PENDING` with the stage that will close
-it), or not witnessed by design (`NOT_WITNESSED`, row 14 only). `PENDING` may
+Every row is in exactly one of four states: witnessed (some test carries the
+decorator for it), witnessed in the Mac app's repository (`WITNESSED_IN_ISTOTA_MAC`,
+below), pending (named in `PENDING` with the stage that will close it), or not
+witnessed by design (`NOT_WITNESSED`, row 14 only). `PENDING` may
 only shrink: it must stay a subset of `PENDING_AT_STAGE_1`, so a row added to
 the matrix later has to arrive with its witness, and a witnessed row has to be
 taken out of `PENDING`. Witnessed is not closed: a row is closed when its
@@ -62,12 +64,32 @@ ROWS: dict[int | str, str] = {
     # The local-VM spec's rows, each added with its witness.
     "L1": "the daemon never writes into a workspace that is not the user's folder",
     "L2": "no container reaches a host loopback service unless its port is allowed",
-    "L3": "only the workspace folder, and in developer mode the read-only checkout, crosses from the Mac",
+    "L3": "only the workspace folder, and read-only the checkout in developer mode or the releases directory in appliance mode, crosses from the Mac",
     "L4": "the Mac shims run as uid 10001 with no capabilities",
+    # The Mac app spec's rows, numbered as that spec numbers them.
+    "M1": "only the Mac user who owns the app logs in to the local install without a password",
+    "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
+    "M6": "brain keys and the master key never sit in an argv or a file under the app's state",
+    "M7": "no release artifact contains Claude Code or Google Chrome",
+    "M9": "web UI content cannot call into the Mac app",
+    "M10": "the stack runs only images a manifest signed by the pinned key names",
+    "M11": "the first launch of an appliance VM makes no network request",
 }
 
 NOT_WITNESSED: dict[int, str] = {
     14: "rootful dockerd inside a dedicated VM; parity with bare metal plus a container, closed by the rootless-podman spec",
+}
+
+# The Mac app's rows whose witnesses moved with the app into its own
+# repository, istota-mac, which pins an istota release. That repository copies
+# these rows' text and holds the copy to this registry at its pinned tag, and
+# holds this dict to the rows it witnesses, so a row is added here first. Row
+# L3's appliance half is witnessed there too; its other half is witnessed here.
+WITNESSED_IN_ISTOTA_MAC: dict[str, str] = {
+    "M6": "tests/desktop/test_first_run.py (desktop tier), control scripts/test-desktop.sh --control m6",
+    "M7": "tests/test_release_mac.py (default suite)",
+    "M9": "tests/desktop/test_confinement.py (desktop tier), control scripts/test-desktop.sh --control m9",
+    "M11": "tests/vm/test_appliance.py (vm tier, appliance mode), control appliance-without-offline-rule",
 }
 
 # Empty since Stage 7: the last pending rows are witnessed by the vm tier.

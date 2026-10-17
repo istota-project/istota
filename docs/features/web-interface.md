@@ -216,6 +216,7 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 | `/istota/auth/sign-in-code` | Enter the code (GET/POST) |
 | `/istota/auth/reset` | Request a password-reset link (GET/POST) |
 | `/istota/auth/set-password` | Enrolment or reset form (GET/POST) |
+| `/istota/auth/local` | The Mac app's one-use login code, read from the URL fragment (GET/POST; `local_code` only) |
 | `/istota/api/account/password` | Change password and end every session (POST) |
 | `/istota/api/admin/users` | List or create profiles and email identities |
 | `/istota/api/admin/users/{user_id}` | One user's settings (GET, PATCH); remove an email identity (DELETE); action suffixes: invite, reset, disable, logout-all (POST) |

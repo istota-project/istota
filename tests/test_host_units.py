@@ -651,6 +651,168 @@ class TestChangedFile:
         assert path.read_text() == "x = 1\n"
         assert path.stat().st_mode & 0o777 == 0o644
 
+
+def _provision_function(name: str) -> str:
+    match = re.search(rf"^{name}\(\) \{{.*?^\}}", PROVISION.read_text(), re.M | re.S)
+    assert match, f"provision.sh defines {name}"
+    return match.group(0)
+
+
+class TestTheOfflineRule:
+    """apt-get update runs only when a package the run installs is missing (the
+    Mac app spec, Stage 2). The appliance disk has every package already, so its
+    first boot makes no network request; Stage 1 measured today's unconditional
+    update spending about 174 s on DNS retries there."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, tmp_path, calls_script: str, installed: dict[str, str]):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        calls = tmp_path / "calls"
+        calls.touch()
+        status = "\n".join(f'  {name}) echo "{state}"; exit 0 ;;' for name, state in installed.items())
+        _stub(bindir, "dpkg-query", (
+            '[ "$1" = -W ] || exit 2\n'
+            '[ "$2" = "-f=\\${db:Status-Status}" ] || exit 2\n'
+            f'case "$3" in\n{status}\n  *) echo "dpkg-query: no packages found matching $3" >&2; exit 1 ;;\nesac\n'
+        ))
+        _stub(bindir, "apt-get", f'echo "apt-get $*" >> {calls}\n')
+        script = (
+            "set -euo pipefail\napt_lists_fresh=\"\"\n"
+            f"{_provision_function('package_installed')}\n"
+            f"{_provision_function('apt_install')}\n"
+            f"{calls_script}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=30,
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"},
+        )
+        assert result.returncode == 0, result.stderr
+        return calls.read_text().splitlines()
+
+    def test_with_everything_installed_apt_is_never_called(self, tmp_path):
+        calls = self._run(tmp_path, "apt_install curl git\napt_install docker-ce",
+                          {"curl": "installed", "git": "installed", "docker-ce": "installed"})
+        assert calls == []
+
+    def test_a_missing_package_updates_once_and_installs_only_what_is_missing(self, tmp_path):
+        calls = self._run(tmp_path, "apt_install curl git\napt_install docker-ce certbot",
+                          {"curl": "installed", "docker-ce": "installed"})
+        assert calls == [
+            "apt-get update -qq",
+            "apt-get install -y -qq --no-install-recommends git",
+            "apt-get install -y -qq --no-install-recommends certbot",
+        ]
+
+    def test_a_removed_package_with_its_config_left_is_missing(self, tmp_path):
+        calls = self._run(tmp_path, "apt_install fuse3", {"fuse3": "config-files"})
+        assert calls == ["apt-get update -qq", "apt-get install -y -qq --no-install-recommends fuse3"]
+
+    def test_a_new_apt_source_updates_again_before_the_next_install(self, tmp_path):
+        calls = self._run(tmp_path, 'apt_install git\napt_lists_fresh=""\napt_install docker-ce', {})
+        assert calls.count("apt-get update -qq") == 2
+
+    def test_every_install_and_update_goes_through_the_rule(self):
+        body = "\n".join(line for line in self.TEXT.replace(_provision_function("apt_install"), "").splitlines()
+                         if not line.lstrip().startswith("#"))
+        assert "apt-get update" not in body
+        assert not re.search(r"apt-get[^\n]*\binstall\b", body)
+        docker = self.TEXT.split("if [ ! -f /etc/apt/sources.list.d/docker.sources ]; then", 1)
+        assert len(docker) == 2, "Docker's apt source is added only when it is absent"
+        block = docker[1].split("\nfi\n", 1)[0]
+        assert "download.docker.com/linux/debian/gpg" in block
+        assert 'apt_lists_fresh=""' in block, "lists from before the source was added would miss Docker's packages"
+        assert self.TEXT.count("download.docker.com/linux/debian/gpg") == 1
+
+
+class TestTheAptSnapshot:
+    """APT_SNAPSHOT pins Debian's archives to snapshot.debian.org at one moment,
+    through apt 3's own `APT::Snapshot`, so a release build's packages keep their
+    source available. Release builds only; unset on servers and on a user's VM."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def _run(self, tmp_path, value: str, conf: Path):
+        script = (
+            "set -euo pipefail\n"
+            'log() { echo "$*"; }\n'
+            f"{_provision_function('changed_file')}\n"
+            f"{_provision_function('use_apt_snapshot')}\n"
+            'use_apt_snapshot "$1" "$2"\n'
+        )
+        result = subprocess.run(["bash", "-c", script, "_", value, str(conf)],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return result
+
+    def test_a_snapshot_id_pins_apt(self, tmp_path):
+        conf = tmp_path / "apt.conf.d" / "50istota-snapshot"
+        result = self._run(tmp_path, "20261016T000000Z", conf)
+        assert conf.read_text() == 'APT::Snapshot "20261016T000000Z";\nAcquire::Check-Valid-Until "false";\n'
+        assert "20261016T000000Z" in result.stdout
+
+    def test_unset_removes_the_pin(self, tmp_path):
+        conf = tmp_path / "50istota-snapshot"
+        conf.write_text('APT::Snapshot "20261016T000000Z";\n')
+        self._run(tmp_path, "", conf)
+        assert not conf.exists()
+
+    @pytest.mark.parametrize("value", ["latest", "2026-10-16", '20261016T000000Z";\nAPT::Get::AllowUnauthenticated "true'])
+    def test_anything_but_a_snapshot_id_is_a_warning_and_changes_nothing(self, tmp_path, value):
+        conf = tmp_path / "50istota-snapshot"
+        result = self._run(tmp_path, value, conf)
+        assert "WARNING" in result.stdout
+        assert not conf.exists()
+
+    def test_provision_reads_it_from_host_env_before_any_install(self):
+        call = self.TEXT.index('use_apt_snapshot "$(host_env APT_SNAPSHOT)" /etc/apt/apt.conf.d/50istota-snapshot')
+        assert call < self.TEXT.index("\napt_install ")
+
+
+class TestUnattendedUpgrades:
+    """The local VM's root disk is never replaced and nobody runs its provision
+    by hand, so Debian's security updates reach it through unattended-upgrades.
+    The Debian 13 cloud image already ships the package, so on the appliance
+    this installs nothing and stays offline; the file makes sure it runs."""
+
+    TEXT = PROVISION.read_text() if PROVISION.exists() else ""
+
+    def test_the_local_vm_installs_and_enables_it(self):
+        block = self.TEXT.split('if [ "$(host_env INGRESS)" = "local" ]; then', 1)
+        assert len(block) == 2, "provision.sh has no INGRESS=local branch"
+        branch = block[1].split("\nfi\n", 1)[0]
+        assert re.search(r"^\s+apt_install unattended-upgrades$", branch, re.M)
+        assert "/etc/apt/apt.conf.d/20auto-upgrades" in branch
+        assert 'APT::Periodic::Update-Package-Lists "1";' in branch
+        assert 'APT::Periodic::Unattended-Upgrade "1";' in branch
+
+    def test_only_there(self):
+        assert self.TEXT.count("apt_install unattended-upgrades") == 1
+        assert self.TEXT.count("20auto-upgrades") == 1
+        assert self.TEXT.count("Unattended-Upgrade::Origins-Pattern") == 1
+
+    # Docker's dists/trixie/Release, as fetched 2026-10-16: no Codename field,
+    # so a pattern on n= (Debian's default form) would match nothing.
+    DOCKER_RELEASE = {"o": "Docker", "l": "Docker CE", "a": "trixie", "c": "stable"}
+
+    def test_docker_engine_and_runc_are_upgraded_there_too(self):
+        """The offline rule installs Docker once and never upgrades it, and
+        Debian's default patterns name only Debian's own origins."""
+        branch = self.TEXT.split('if [ "$(host_env INGRESS)" = "local" ]; then', 1)[1].split("\nfi\n", 1)[0]
+        block = re.search(r"Unattended-Upgrade::Origins-Pattern \{\n(.*?)\n\};", branch, re.S)
+        assert block, "no Origins-Pattern drop-in on the local VM"
+        patterns = re.findall(r'"([^"]+)";', block.group(1))
+        assert patterns
+
+        def matches(pattern: str) -> bool:
+            fields = dict(part.split("=", 1) for part in pattern.split(","))
+            fields = {k: v.replace("${distro_codename}", "trixie") for k, v in fields.items()}
+            return all(self.DOCKER_RELEASE.get(k) == v for k, v in fields.items())
+
+        assert any(matches(p) for p in patterns), patterns
+
+
 class TestUpstreamRclone:
     """The mount runs rclone.org's own build, pinned, never Debian's package (#694).
 
@@ -1498,7 +1660,27 @@ class TestTheLimaTemplate:
         assert doc["mounts"] == [
             {"location": "{{.Param.ISTOTA_REPO}}", "mountPoint": "/mnt/istota-repo", "writable": False},
             {"location": "{{.Param.WORKSPACE}}", "mountPoint": "/srv/mount/host-folder", "writable": True},
+            # Appliance mode: the release root, which only the VM's update reads.
+            {"location": "{{.Param.RELEASE_DIR}}", "mountPoint": "/mnt/istota-release", "writable": False},
         ]
+
+    def test_every_create_it_documents_drops_the_mounts_it_does_not_use(self):
+        """A Lima mount cannot be empty, so each source drops the others':
+        a create that kept the release mount with no RELEASE_DIR is refused."""
+        text = (HOST / "lima" / "istota.yaml").read_text()
+        header = text.split("minimumLimaVersion:", 1)[0]
+        creates = header.split("limactl create")[1:]
+        assert len(creates) == 3, "the release, appliance and checkout examples"
+        drops = {mount: ["del(.mounts[]" in c and f'.mountPoint == "{mount}"' in c for c in creates]
+                 for mount in ("/mnt/istota-repo", "/mnt/istota-release", "/srv/mount/host-folder")}
+        release, appliance, checkout = range(3)
+        assert drops["/mnt/istota-repo"][release] and drops["/mnt/istota-release"][release]
+        assert drops["/mnt/istota-repo"][appliance] and not drops["/mnt/istota-release"][appliance]
+        assert drops["/mnt/istota-release"][checkout]
+
+    def test_the_vm_tier_drops_the_release_mount_too(self):
+        lima = (REPO / "tests" / "vm" / "lima.py").read_text()
+        assert "/mnt/istota-release" in lima
 
     def test_the_workspace_mount_is_where_the_host_folder_storage_reads_it(self, doc):
         workspace = doc["mounts"][1]["mountPoint"]
@@ -1522,11 +1704,51 @@ class TestTheLimaTemplate:
         """Lima refuses a declared param nothing reads, and a mount a caller
         drops at create stops reading its location param."""
         script = self._script(doc)
-        assert set(doc["param"]) == {"ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO_URL", "ISTOTA_REPO", "WORKSPACE"}
+        assert set(doc["param"]) == {
+            "ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO_URL", "ISTOTA_REPO", "WORKSPACE",
+            "IMAGE", "RELEASE_DIR",
+        }
         for name in doc["param"]:
             assert f"PARAM_{name}" in script, name
         assert doc["param"]["ISTOTA_REPO_URL"] == "https://github.com/istota-project/istota.git"
-        assert all(doc["param"][name] == "" for name in ("ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO", "WORKSPACE"))
+        assert all(doc["param"][name] == "" for name in (
+            "ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO", "WORKSPACE", "IMAGE", "RELEASE_DIR"))
+
+    @staticmethod
+    def _appliance(script: str) -> str:
+        start = script.index('if [ -n "$APPLIANCE" ]; then\n    bundle=')
+        return script[start:script.index("elif ", start)]
+
+    def test_an_appliance_installs_the_bundles_verified_tag(self, doc):
+        """Appliance mode: no clone and no network. The tag comes from the
+        bundle in the read-only release mount into the disk's own checkout,
+        and is verified before anything from it runs, as a release's is."""
+        script = self._script(doc)
+        appliance = self._appliance(script)
+        assert 'bundle="/mnt/istota-release/${TAG}/istota-${TAG}.bundle"' in appliance
+        assert 'verified_git fetch --quiet "$bundle" "refs/tags/${TAG}:refs/tags/${TAG}"' in appliance
+        assert "origin" not in appliance and "clone" not in appliance
+        fetch = script.index('verified_git fetch --quiet "$bundle"')
+        assert fetch < script.index('object="$(verify_release_tag "$TAG")"') < script.index('"${SRC}/host/provision.sh"')
+
+    def test_an_appliance_asks_apt_for_nothing(self, doc):
+        """The disk already has git; `apt-get update` offline spends minutes
+        on DNS retries (Stage 1)."""
+        script = self._script(doc)
+        apt = script.index("apt-get update")
+        guard = script.rindex('if [ -z "$APPLIANCE" ]; then', 0, apt)
+        assert script[guard:apt].count("\n") == 1
+
+    def test_an_appliance_and_a_checkout_are_not_both_taken(self, doc):
+        script = self._script(doc)
+        checkout = script[script.index('if [ -n "${PARAM_ISTOTA_REPO:-}" ]; then'):script.index("STACK=/srv/app/istota")]
+        assert '${PARAM_IMAGE:-}${PARAM_RELEASE_DIR:-}' in checkout
+        assert checkout.index("${PARAM_IMAGE:-}") < checkout.index("exec ")
+
+    def test_an_appliance_needs_its_release_directory(self, doc):
+        script = self._script(doc)
+        release = script[script.index("STACK=/srv/app/istota"):]
+        assert 'if [ -n "$APPLIANCE" ] && [ -z "${PARAM_RELEASE_DIR:-}" ]; then' in release
 
     def test_a_checkout_provisions_from_the_read_only_mount(self, doc):
         script = self._script(doc)
@@ -1551,7 +1773,7 @@ class TestTheLimaTemplate:
         assert script.index("git clone --quiet --no-checkout") < verify < checkout < provision
         # Nothing from the clone runs before the verification.
         assert script.count("${SRC}/") == 2
-        assert script.index("printf 'releases namespaces=\"git\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"") < verify
+        assert script.index("printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"") < verify
 
     def test_a_release_is_bootstrapped_once(self, doc):
         """After the first provision `istota-stack update` owns the checkout;
@@ -1567,6 +1789,103 @@ class TestTheLimaTemplate:
         path.write_text(self._script(doc))
         result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
+class TestTheTemplatesApplianceProvision:
+    """The template's provision script run in appliance mode, against a fake
+    stack directory and release mount: the disk's checkout, a git bundle of
+    a signed tag, and a provision.sh that only records it ran."""
+
+    TAG = "v1.0.0"
+
+    @staticmethod
+    def _keygen(path: Path) -> str:
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "releases", "-f", str(path)],
+                       check=True, capture_output=True)
+        return Path(f"{path}.pub").read_text().strip()
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> None:
+        env = {"PATH": os.environ["PATH"], "HOME": str(cwd), "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_AUTHOR_NAME": "r", "GIT_AUTHOR_EMAIL": "r@example.invalid",
+               "GIT_COMMITTER_NAME": "r", "GIT_COMMITTER_EMAIL": "r@example.invalid"}
+        subprocess.run(["git", "-c", "init.defaultBranch=main", *args], cwd=cwd, env=env,
+                       check=True, capture_output=True)
+
+    def _world(self, tmp_path: Path, signing_key: Path) -> dict:
+        origin = tmp_path / "origin"
+        (origin / "host").mkdir(parents=True)
+        self._git(origin, "init", "-q")
+        provision = origin / "host" / "provision.sh"
+        provision.write_text('#!/bin/bash\necho "provision ran from $(git -C "$(dirname "$0")" describe --tags)" > "$PROVISION_MARK"\n')
+        provision.chmod(0o755)
+        self._git(origin, "add", "-A")
+        self._git(origin, "commit", "-q", "-m", "release")
+        stack = tmp_path / "srv"
+        stack.mkdir()
+        # The disk's checkout, made before the tag: the bundle brings it.
+        self._git(tmp_path, "clone", "-q", "--no-checkout", str(origin), str(stack / "src"))
+        self._git(origin, "-c", "gpg.format=ssh", "-c", f"user.signingkey={signing_key}",
+                  "tag", "-s", "-m", self.TAG, self.TAG)
+        release = tmp_path / "release"
+        (release / self.TAG).mkdir(parents=True)
+        self._git(origin, "bundle", "create", "-q", str(release / self.TAG / f"istota-{self.TAG}.bundle"),
+                  f"refs/tags/{self.TAG}")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "apt-get").write_text(f'#!/bin/sh\necho "apt-get $*" >> {tmp_path}/apt-calls\nexit 1\n')
+        (bindir / "apt-get").chmod(0o755)
+        return {"stack": stack, "release": release, "bin": bindir, "mark": tmp_path / "provisioned"}
+
+    def _run(self, tmp_path: Path, world: dict, key: str) -> subprocess.CompletedProcess:
+        doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
+        (entry,) = doc["provision"]
+        script = (entry["script"].replace("/srv/app/istota", str(world["stack"]))
+                  .replace("/mnt/istota-release", str(world["release"])))
+        path = tmp_path / "lima-provision.sh"
+        path.write_text(script)
+        env = {
+            "PATH": f"{world['bin']}:{os.environ['PATH']}", "HOME": str(tmp_path),
+            "PROVISION_MARK": str(world["mark"]),
+            "PARAM_ISTOTA_TAG": self.TAG, "PARAM_RELEASE_SIGNING_KEY": key,
+            "PARAM_ISTOTA_REPO_URL": "https://github.com/istota-project/istota.git",
+            "PARAM_ISTOTA_REPO": "", "PARAM_WORKSPACE": str(tmp_path / "ws"),
+            "PARAM_IMAGE": "/Users/someone/Library/istota-appliance.raw",
+            "PARAM_RELEASE_DIR": "/Users/someone/Library/release",
+        }
+        return subprocess.run(["bash", str(path)], env=env, capture_output=True, text=True, timeout=60)
+
+    def test_the_bundles_signed_tag_is_provisioned_offline(self, tmp_path):
+        key = tmp_path / "release_key"
+        public = self._keygen(key)
+        world = self._world(tmp_path, key)
+        result = self._run(tmp_path, world, public)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert world["mark"].read_text() == f"provision ran from {self.TAG}\n"
+        assert not (tmp_path / "apt-calls").exists()
+        assert (world["stack"] / ".lima-bootstrapped").exists()
+        assert f"RELEASE_SIGNING_KEY={public}\n" in (world["stack"] / "host.env").read_text()
+
+    def test_a_tag_signed_by_another_key_is_refused(self, tmp_path):
+        key, other = tmp_path / "release_key", tmp_path / "other_key"
+        public = self._keygen(key)
+        self._keygen(other)
+        world = self._world(tmp_path, other)
+        result = self._run(tmp_path, world, public)
+        assert result.returncode == 65, result.stdout + result.stderr
+        assert "not signed by the key" in result.stderr
+        assert not world["mark"].exists()
+        assert not (world["stack"] / ".lima-bootstrapped").exists()
+
+    def test_a_missing_bundle_is_refused(self, tmp_path):
+        key = tmp_path / "release_key"
+        public = self._keygen(key)
+        world = self._world(tmp_path, key)
+        (world["release"] / self.TAG / f"istota-{self.TAG}.bundle").unlink()
+        result = self._run(tmp_path, world, public)
+        assert result.returncode != 0
+        assert not world["mark"].exists()
 
 
 RELEASE_KEY_FILE = HOST / "release-signing-key.pub"
@@ -1640,6 +1959,28 @@ class TestTheProjectReleaseKey:
             capture_output=True, text=True, check=True,
         )
         assert RELEASE_KEY_FINGERPRINT in result.stdout
+
+
+class TestEveryAllowedSignersWriterTrustsTheKeyForImages:
+    """`update --images` verifies the images manifest with `ssh-keygen -Y
+    verify -n istota-images` against the same allowed_signers line tags are
+    verified with, so every writer of that line names both namespaces, in the
+    same bytes. provision.sh writes through `changed_file`, so a host's
+    `namespaces="git"` line is replaced on its next provision."""
+
+    WRITERS = {
+        "host/provision.sh": 'changed_file "${STACK}/allowed_signers" "releases namespaces=\\"git,istota-images\\" ${signing_key}"',
+        "host/istota-stack": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"${pair#*=}\" > \"$ALLOWED_SIGNERS\"",
+        "host/lima/istota.yaml": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"",
+        "host/cloud-init.yaml": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$key\" > \"$ALLOWED_SIGNERS\"",
+        "install.sh": "printf 'releases namespaces=\"git,istota-images\" %s\\n' \"$SIGNING_KEY\" > \"$ALLOWED_SIGNERS\"",
+    }
+
+    @pytest.mark.parametrize("path", sorted(WRITERS))
+    def test_the_writer_names_both_namespaces(self, path):
+        text = (REPO / path).read_text()
+        assert self.WRITERS[path] in text
+        assert 'namespaces=\\"git\\"' not in text and "namespaces=\"git\" " not in text
 
 
 class TestNewestReleaseTag:

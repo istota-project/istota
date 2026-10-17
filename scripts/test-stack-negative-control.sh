@@ -7,6 +7,8 @@
 #   scripts/test-stack-negative-control.sh            # both row 13 controls
 #   scripts/test-stack-negative-control.sh skip-verify
 #   scripts/test-stack-negative-control.sh user-keyring
+#   scripts/test-stack-negative-control.sh bundle-skip-verify   # row M5, update --bundle
+#   scripts/test-stack-negative-control.sh images-skip-signature   # row M10, update --images
 #   scripts/test-stack-negative-control.sh no-drop    # row 5's wrapper half, image tier
 #   scripts/test-stack-negative-control.sh rollback   # the upgrade tier's rollback case
 #   scripts/test-stack-negative-control.sh setup-web  # the five setup --web controls
@@ -44,6 +46,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 ROW13=tests/test_istota_stack.py::TestARefusedTagChangesNothing
+BUNDLE_TESTS=tests/test_istota_stack_bundle.py
+IMAGES_TESTS=tests/test_istota_stack_images.py
+IMAGES_M10="${IMAGES_TESTS}::TestOnlyImagesTheSignedManifestNamesLoad"
 STACK_TESTS=tests/test_istota_stack.py
 MAC_SCRIPT=host/mac/istota-stack
 MAC_PURGE=tests/test_mac_istota_stack.py::TestDestroyPurge
@@ -156,6 +161,41 @@ git -C "$SRC" \
         -c gpg.format=ssh \')"
     run_row13 user-keyring "$copy" \
         "${ROW13}::test_another_key_in_the_users_own_git_config_is_not_trusted"
+}
+
+bundle_skip_verify() {
+    # Row M5: a tag taken from a bundle installed without verify_release_tag.
+    # Exactly the three signature witnesses go red; the bundle's other refusals
+    # (no such tag, a tag already here, --unsigned) come before the check.
+    local copy output="$work/bundle-skip-verify.out"
+    copy="$(mutate bundle-skip-verify '    if [ -n "$unsigned" ]; then
+        object="$(resolve_unsigned_tag "$tag")"
+=>
+    if [ -n "$unsigned" ] || [ -n "$bundle" ]; then
+        object="$(resolve_unsigned_tag "$tag")"')"
+    ISTOTA_STACK_SCRIPT="$copy" uv run pytest "$BUNDLE_TESTS" -q --no-header -rfE -p no:randomly -n0 --color=no \
+        > "$output" 2>&1 || true
+    require_exactly_red bundle-skip-verify "$output" \
+        "${BUNDLE_TESTS}::TestABundledTagIsVerified::test_an_unsigned_tag_is_refused" \
+        "${BUNDLE_TESTS}::TestABundledTagIsVerified::test_a_lightweight_tag_is_refused" \
+        "${BUNDLE_TESTS}::TestABundledTagIsVerified::test_a_tag_signed_by_another_key_is_refused"
+}
+
+images_skip_signature() {
+    # Row M10: an images manifest loaded without its signature checked. Exactly
+    # the four signature witnesses go red; a missing .sig is refused before the
+    # check, and the tag, digest and ID refusals do not depend on it.
+    local copy output="$work/images-skip-signature.out"
+    copy="$(mutate images-skip-signature '    if ! images_manifest_signed "$manifest" "$signature"; then
+=>
+    if false; then')"
+    ISTOTA_STACK_SCRIPT="$copy" uv run pytest "$IMAGES_TESTS" -q --no-header -rfE -p no:randomly -n0 --color=no \
+        > "$output" 2>&1 || true
+    require_exactly_red images-skip-signature "$output" \
+        "${IMAGES_M10}::test_a_manifest_signed_by_another_key_is_refused" \
+        "${IMAGES_M10}::test_a_signature_that_is_not_one_is_refused" \
+        "${IMAGES_M10}::test_the_release_keys_git_signature_is_not_an_images_signature" \
+        "${IMAGES_M10}::test_a_key_trusted_for_git_alone_does_not_sign_images"
 }
 
 setup_unmarked() {
@@ -327,6 +367,8 @@ case "$mode" in
     rollback) rollback ;;
     skip-verify) skip_verify ;;
     user-keyring) user_keyring ;;
+    bundle-skip-verify) bundle_skip_verify ;;
+    images-skip-signature) images_skip_signature ;;
     no-drop) no_drop ;;
     setup-web) setup_unmarked; setup_mint_in_staging; setup_no_lock; setup_no_restore; setup_server_in_foreground ;;
     setup-unmarked) setup_unmarked ;;

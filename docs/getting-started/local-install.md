@@ -42,6 +42,8 @@ The installer refuses to run as root, on anything but an Apple silicon Mac, or w
 | `--adopt` | off | use a folder that already holds files |
 | `--terminal-setup` | off | answer the setup questions in the terminal rather than in the browser ([setting up](#setting-up)) |
 | `--no-setup` | off | stop before the setup questions |
+| `--appliance DIR` | off | make the VM from an unpacked release, `<releases>/<tag>/`, with no network: its disk, checked against its signed manifest and unpacked with `zstd`, then its bundle and images archive, which the VM reads from `<releases>` mounted read-only. `update --appliance DIR` installs a later release from the same `<releases>` |
+| `--web-setup-in-app` | off | print the setup page's address as `ISTOTA_SETUP_URL=<url>` once it answers, and open no browser (the Mac app) |
 
 The scripts the installer downloads come from `main`, as with any `curl | bash` installer, and are used only to run `create`. Once the VM has verified the tag, `create` replaces them with the copies from the verified checkout, and every later `istota-stack update` does the same. From then on the Mac scripts are covered by the tag's signature.
 

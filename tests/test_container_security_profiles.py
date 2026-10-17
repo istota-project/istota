@@ -220,12 +220,31 @@ class TestTheSessionCookie:
         environment = _service(SHIPPED_COMPOSE, "web")["environment"]
         assert environment["ISTOTA_WEB_INSECURE_COOKIES"] == "${ISTOTA_WEB_INSECURE_COOKIES:-0}"
 
-    @pytest.mark.parametrize("ingress", ["local", "proxied", "direct"])
-    def test_the_wizard_writes_secure_for_every_ingress(self, ingress):
+    @pytest.mark.parametrize("ingress,hostname", [("proxied", "bot.example.test"), ("direct", "bot.example.test")])
+    def test_the_wizard_writes_secure_for_an_ingress_that_leaves_the_machine(self, ingress, hostname):
         from istota.setup_wizard import ContainerAnswers, stack_env_values
 
-        answers = ContainerAnswers(user_id="alice", ingress=ingress, hostname="localhost:8080")
+        answers = ContainerAnswers(user_id="alice", ingress=ingress, hostname=hostname)
         assert stack_env_values(answers)["ISTOTA_WEB_INSECURE_COOKIES"] == "0"
+
+    def test_the_wizard_writes_insecure_for_local_ingress(self):
+        """`local` is plain http on loopback, where Secure protects nothing and
+        WKWebView (the Mac app's window) and Safari drop the cookie."""
+        from istota.setup_wizard import ContainerAnswers, stack_env_values
+
+        answers = ContainerAnswers(user_id="alice", ingress="local", hostname="localhost:8080")
+        assert stack_env_values(answers)["ISTOTA_WEB_INSECURE_COOKIES"] == "1"
+
+    def test_a_move_off_local_ingress_writes_secure_again(self):
+        from istota.setup_wizard import ContainerAnswers, render_stack_env
+
+        local = render_stack_env(ContainerAnswers(user_id="alice", ingress="local", hostname="localhost:8080"))
+        assert "ISTOTA_WEB_INSECURE_COOKIES=1\n" in local
+        proxied = ContainerAnswers(user_id="alice", ingress="proxied", hostname="bot.example.test",
+                                   upstream_proxy="192.0.2.10", listen_addr="10.0.0.5", listen_port=8080)
+        moved = render_stack_env(proxied, existing=local)
+        assert "ISTOTA_WEB_INSECURE_COOKIES=0\n" in moved
+        assert "ISTOTA_WEB_INSECURE_COOKIES=1" not in moved
 
 
 class TestTheRunContract:

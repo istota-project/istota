@@ -27,6 +27,9 @@
 #   APT_MIRROR           a Debian mirror (http(s)://host/.../debian) in place of
 #                        deb.debian.org, for this host's apt and the images'
 #                        builds; removing it goes back to deb.debian.org
+#   APT_SNAPSHOT         a snapshot.debian.org id (YYYYMMDDTHHMMSSZ) this host's
+#                        apt reads Debian's archives at; set by release builds
+#                        only, so the source of what they ship stays available
 #   ACME_EMAIL, ACME_SERVER   optional, for certbot in direct mode
 #   RCLONE_REMOTE        the rclone remote name in /srv/app/istota/rclone.conf
 #   ZRAM_ENABLED         0 to leave swap alone
@@ -39,6 +42,14 @@
 #   LOCAL_FORWARD_PORT   the Mac port Lima forwards to this VM, written by the
 #                        Mac's istota-stack and empty on a server; setup
 #                        publishes nginx and its setup page on it
+#   ISTOTA_LOCAL_LAYERS  the layers `istota-stack local-layers` builds on a
+#                        release's loaded images, separated by spaces or commas
+#                        (claude-code, chrome); all of them when absent, none
+#                        when empty. A server builds neither and never reads it
+#   ISTOTA_DESKTOP_APP   1 on a VM the Mac's `istota-stack create --appliance`
+#                        made, whose images are a release's: a setup or
+#                        check-image adds what they lack as local layers rather
+#                        than rebuilding them. Empty on a server
 set -euo pipefail
 # The checkout it clones is what the images are built from: under a hardened
 # umask (027) it would be root-only, and out of uid 10001's reach in them.
@@ -163,7 +174,28 @@ export DEBIAN_FRONTEND=noninteractive
 # --- Packages and Docker Engine ----------------------------------------------
 # Docker's own apt repository, not Debian's docker.io: the compose plugin and a
 # current Engine come from there, as in the role.
-apt_install() { apt-get install -y -qq --no-install-recommends "$@" >/dev/null; }
+#
+# The offline rule: apt-get update runs only when a package this run installs
+# is missing, and an installed one is left at its version. The Mac app's
+# appliance disk has every package already, so its first boot makes no network
+# request (row M11). Updates to what is installed come from unattended-upgrades
+# on the local VM (below), or the operator's own apt on a server.
+apt_lists_fresh=""
+package_installed() {
+    [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ]
+}
+apt_install() {
+    local package missing=()
+    for package in "$@"; do
+        package_installed "$package" || missing+=("$package")
+    done
+    [ "${#missing[@]}" -gt 0 ] || return 0
+    if [ -z "$apt_lists_fresh" ]; then
+        apt-get update -qq
+        apt_lists_fresh=1
+    fi
+    apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null
+}
 
 # istota-stack carries the same check for the build arg; tests hold the two equal.
 valid_apt_mirror() {
@@ -199,6 +231,30 @@ use_apt_mirror() {
     else
         log "apt uses deb.debian.org again"
         rm -f "$state"
+    fi
+}
+
+# APT_SNAPSHOT: apt 3's own snapshot support, so a release build installs what
+# snapshot.debian.org held at that moment and the source of every package it
+# ships can still be fetched. Snapshot Release files are past their Valid-Until,
+# hence the second line; both go when the key does, so a user's VM made from
+# such a disk reads the live archives again on its first provision.
+use_apt_snapshot() {
+    local snapshot="$1" conf="$2"
+    if [ -z "$snapshot" ]; then
+        if [ -e "$conf" ]; then
+            rm -f "$conf"
+            log "apt reads Debian's live archives again"
+        fi
+        return 0
+    fi
+    if ! [[ "$snapshot" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+        log "WARNING: APT_SNAPSHOT '${snapshot}' is not a snapshot id (YYYYMMDDTHHMMSSZ); apt is left as it was."
+        return 0
+    fi
+    if changed_file "$conf" "APT::Snapshot \"${snapshot}\";
+Acquire::Check-Valid-Until \"false\";"; then
+        log "apt reads Debian's archives at snapshot ${snapshot}"
     fi
 }
 
@@ -308,7 +364,7 @@ wait_for_mount_uploads() {
 }
 
 use_apt_mirror "$(host_env APT_MIRROR)" "${STACK}/.apt-mirror" ""
-apt-get update -qq
+use_apt_snapshot "$(host_env APT_SNAPSHOT)" /etc/apt/apt.conf.d/50istota-snapshot
 apt_install ca-certificates curl git python3 iptables apparmor apparmor-utils openssl
 
 if [ ! -f /etc/apt/sources.list.d/docker.sources ]; then
@@ -323,7 +379,8 @@ Components: stable
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 EOF
-    apt-get update -qq
+    # Lists read before the source existed know none of Docker's packages.
+    apt_lists_fresh=""
 fi
 chmod 0644 /etc/apt/sources.list.d/docker.sources
 apt_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
@@ -360,6 +417,25 @@ systemctl enable --now docker.service >/dev/null
 if [ -n "$daemon_json_changed" ]; then
     log "docker: userland-proxy off, restarting dockerd"
     systemctl restart docker.service
+fi
+
+# --- Security updates on the local VM ----------------------------------------
+# A local VM keeps the disk it was made with and nobody re-runs this by hand, so
+# Debian's security updates reach it through unattended-upgrades. The Debian 13
+# cloud image ships the package, so this installs nothing there (and stays
+# offline); the file is what makes it run. A server's apt is its operator's.
+if [ "$(host_env INGRESS)" = "local" ]; then
+    apt_install unattended-upgrades
+    changed_file /etc/apt/apt.conf.d/20auto-upgrades 'APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";' || true
+    # Docker Engine and containerd.io (runc) too: apt_install never upgrades
+    # them, and Debian's patterns name only Debian. Docker's Release file has
+    # Origin, Label and Suite but no Codename, so the suite is what matches.
+    # ${distro_codename} is unattended-upgrades' own variable, not the shell's.
+    # shellcheck disable=SC2016
+    changed_file /etc/apt/apt.conf.d/51istota-docker-upgrades 'Unattended-Upgrade::Origins-Pattern {
+        "o=Docker,l=Docker CE,a=${distro_codename},c=stable";
+};' || true
 fi
 
 # --- Kernel settings ---------------------------------------------------------
@@ -469,7 +545,7 @@ fi
 # and nothing else.
 signing_key="$(host_env RELEASE_SIGNING_KEY)"
 if [ -n "$signing_key" ]; then
-    changed_file "${STACK}/allowed_signers" "releases namespaces=\"git\" ${signing_key}" || true
+    changed_file "${STACK}/allowed_signers" "releases namespaces=\"git,istota-images\" ${signing_key}" || true
 elif [ ! -s "${STACK}/allowed_signers" ]; then
     log "no RELEASE_SIGNING_KEY in ${HOST_ENV} yet: istota-stack update refuses every tag until there is one, except with --unsigned."
 fi

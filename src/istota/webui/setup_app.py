@@ -175,6 +175,9 @@ class SetupState:
     #: host.env's LOCAL_FORWARD_PORT at start, 0 off the local VM; every
     #: draft-to-answers call carries it (`_answers_for`).
     forwarded_port: int = 0
+    #: host.env's ISTOTA_DESKTOP_APP at start: the Mac app's VM, whose setup
+    #: adds the app's login codes (`ContainerAnswers.web_auth`).
+    desktop_app: bool = False
     #: A re-run (`--force`): `prior` is what the stack's files said at start,
     #: the base of every draft-to-answers call, and `existing_user` its user.
     rerun: bool = False
@@ -529,6 +532,7 @@ def _answers_for(state: SetupState, draft: dict) -> setup_wizard.ContainerAnswer
 
 def _on_this_machine(state: SetupState, a: setup_wizard.ContainerAnswers) -> None:
     a.forwarded_port = state.forwarded_port
+    a.desktop_app = state.desktop_app
     # The OAuth pair was registered with the prior Nextcloud and no screen
     # asks it, so another Nextcloud turns Nextcloud login off, as the
     # terminal does for a client id with no secret.
@@ -759,6 +763,7 @@ def create_setup_app(
     state = SetupState(
         code=code, local=local, data_dir=data_dir, vm_dir=Path(vm_dir), clock=clock,
         forwarded_port=setup_wizard.forwarded_port(Path(vm_dir)), check_seconds=check_seconds,
+        desktop_app=setup_wizard.desktop_app(Path(vm_dir)),
         rerun=rerun, prior=prior, existing_user=prior.user_id if prior is not None else "",
     )
     if prior is not None:
@@ -1063,8 +1068,7 @@ def _failed(step: str, exc: BaseException) -> FinishError:
 
 def db_path_under(data_dir: Path) -> Path:
     """The stack's database path, under ``data_dir`` rather than ``/data``."""
-    relative = Path(setup_wizard.CONTAINER_DB_PATH).relative_to(setup_wizard.CONTAINER_DATA_DIR)
-    return Path(data_dir) / relative
+    return setup_wizard.container_db_path(data_dir)
 
 
 def login_url(a: setup_wizard.ContainerAnswers) -> str:

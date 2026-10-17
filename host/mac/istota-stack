@@ -2,17 +2,22 @@
 # istota-stack on the Mac: the local VM's command. Run as yourself, never sudo.
 #
 #   istota-stack create [--workspace DIR] [--port N] [--cpus N] [--memory GIB] [--disk GIB]
-#                       ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]) [--adopt]
-#                       [--terminal-setup | --no-setup]
+#                       ([--tag TAG] [--signing-key KEY] | --repo DIR [--tag TAG]
+#                        | --appliance DIR [--signing-key KEY]) [--adopt]
+#                       [--terminal-setup | --no-setup | --web-setup-in-app]
 #                               make the workspace folder and the VM, then set up the
 #                               stack in it in the browser, opened once the page
 #                               answers; a re-run continues where one stopped;
 #                               --terminal-setup asks the setup questions here instead,
-#                               --no-setup stops before them. A release is the newest
-#                               one unless --tag names it, verified against the
-#                               project's key unless --signing-key gives one.
-#                               A new VM's size defaults from this Mac's CPUs, memory
-#                               and free disk, and is asked on a terminal
+#                               --no-setup stops before them, --web-setup-in-app prints
+#                               the page's address as ISTOTA_SETUP_URL=<url> and opens
+#                               nothing. A release is the newest one unless --tag
+#                               names it, verified against the project's key unless
+#                               --signing-key gives one. --appliance DIR is an unpacked
+#                               release (<releases>/<tag>/): the VM boots its disk and
+#                               installs it from <releases>, mounted read-only, with
+#                               no network. A new VM's size defaults from this Mac's
+#                               CPUs, memory and free disk, and is asked on a terminal
 #   istota-stack start          start the VM
 #   istota-stack stop           stop the stack, then the VM
 #   istota-stack status         the VM, the deployed tag, the containers, the folder
@@ -29,6 +34,9 @@
 #                               the previous setup is put back
 #   istota-stack update [tag]   the VM's `update` (no tag: the newest release), then
 #                               these scripts from its checkout
+#   istota-stack update --appliance DIR
+#                               a VM made with --appliance: the release in DIR, which
+#                               is in the releases directory the VM mounts
 #   istota-stack destroy [--force] [--purge]
 #                               delete the VM; the folder and the Keychain key stay;
 #                               --purge deletes them too, with the saved settings
@@ -69,8 +77,9 @@
 # -i` reads its command from stdin. The file-based login keychain is not one
 # iCloud syncs.
 #
-# Exit codes: a forwarded verb's own; 64 usage, 69 no usable limactl, 78 a
-# refusal of the folder, the port, the machine or the Keychain.
+# Exit codes: a forwarded verb's own; 64 usage, 65 a release directory whose
+# signed manifest does not vouch for its disk, 69 no usable limactl (or zstd),
+# 78 a refusal of the folder, the port, the machine or the Keychain.
 #
 # macOS ships bash 3.2: no associative arrays, and an empty array is expanded
 # with ${a[@]+"${a[@]}"}.
@@ -99,7 +108,10 @@ MARKER=.istota-workspace
 HOST_GATEWAY_ADDR=192.168.5.2
 DEFAULT_PORT=8080
 STOP_TIMEOUT="${ISTOTA_STOP_TIMEOUT:-60}"
+# Where an appliance VM sees the directory of unpacked releases, read-only.
+RELEASE_MOUNT=/mnt/istota-release
 EX_USAGE=64
+EX_DATAERR=65
 EX_UNAVAILABLE=69
 EX_CONFIG=78
 
@@ -329,7 +341,7 @@ is_state_file() {
         $1 == "WORKSPACE" { workspace = 1; next }
         $1 == "PORT" || $1 == "TAG" || $1 == "REPO" || $1 == "SIGNING_KEY" { next }
         $1 == "DEPLOYED_TAG" || $1 == "DEPLOYED_UNSIGNED" { next }
-        $1 == "CPUS" || $1 == "MEMORY" || $1 == "DISK" { next }
+        $1 == "CPUS" || $1 == "MEMORY" || $1 == "DISK" || $1 == "APPLIANCE" { next }
         { other = 1 }
         END { exit !(workspace && !other) }
     ' "$1"
@@ -523,6 +535,131 @@ newest_remote_release_tag() {
     printf '%s\n' "$tag"
 }
 
+# --- a release directory -----------------------------------------------------
+
+# An unpacked release, <releases>/<tag>/: the appliance disk, the git bundle,
+# the images archive and its manifest with the manifest's signature. The VM
+# mounts <releases> read-only, so a later release beside this one reaches it
+# with no new mount.
+appliance_files() {
+    local tag="$1"
+    printf '%s\n' "istota-${tag}.bundle" "istota-appliance-${tag}.raw.zst" \
+        "images-${tag}.tar" "images-${tag}.json" "images-${tag}.json.sig"
+}
+
+# A release directory's path resolved, its tag from its name, every file
+# there; refuses before anything else happens. Into RELEASE_PATH and RELEASE_TAG.
+RELEASE_PATH="" RELEASE_TAG=""
+check_release_dir() {
+    local dir="$1" name files
+    [ -d "$dir" ] || fail "$EX_CONFIG" "${dir} is not a release directory: there is no such directory."
+    RELEASE_PATH="$(cd "$dir" && pwd -P)"
+    RELEASE_TAG="$(basename "$RELEASE_PATH")"
+    case "$RELEASE_TAG" in
+        ""|-*|*[!A-Za-z0-9._-]*|*..*) usage_error "a release directory is named for its tag; '${RELEASE_TAG}' is not a tag name." ;;
+    esac
+    files="$(appliance_files "$RELEASE_TAG")"
+    for name in $files; do
+        # The disk is read only to make a new VM; an update needs the rest.
+        [ "$name" != "istota-appliance-${RELEASE_TAG}.raw.zst" ] || [ -z "${2:-}" ] || continue
+        [ -f "${RELEASE_PATH}/${name}" ] \
+            || fail "$EX_CONFIG" "${RELEASE_PATH} is not a whole release: it has no ${name}. Nothing was changed."
+    done
+}
+
+# The directory the VM mounts read-only is the one above the release: never
+# the root, the home or a parent of it, or anything holding ~/.lima or ~/.ssh.
+refuse_release_root() {
+    local root="$1" home lima_home
+    home="$(cd "$HOME" && pwd -P)"
+    lima_home="$(resolve_dir "${LIMA_HOME:-${HOME}/.lima}")"
+    if [ "$root" = / ] || within "$home" "$root" || within "$lima_home" "$root" \
+            || within "${home}/.ssh" "$root" || within "$root" "${home}/.ssh"; then
+        fail "$EX_CONFIG" "the VM would mount ${root}, the directory above the release, which would share your home, ~/.lima or ~/.ssh with it. Keep each release in a directory of releases of its own, such as ~/Library/Application Support/Istota/release/<tag>."
+    fi
+}
+
+# create's --appliance (or the recorded one): the release directory checked,
+# its tag the source's, and a deployed release newer than it refused, since
+# its database is migrated past what this release's image reads.
+appliance_settings() {
+    local tag_option="$1" deployed newest
+    check_release_dir "$CREATE_APPLIANCE"
+    CREATE_APPLIANCE="$RELEASE_PATH"
+    if [ -n "$tag_option" ] && [ "$tag_option" != "$RELEASE_TAG" ]; then
+        usage_error "--tag ${tag_option} is not the release in ${CREATE_APPLIANCE} (${RELEASE_TAG})."
+    fi
+    CREATE_TAG="$RELEASE_TAG"
+    refuse_release_root "$(dirname "$CREATE_APPLIANCE")"
+    deployed="$(state_get DEPLOYED_TAG)"
+    if [ -n "$deployed" ] && [ "$deployed" != "$CREATE_TAG" ] && [ -z "$(state_get DEPLOYED_UNSIGNED)" ]; then
+        newest="$(printf '%s\n' "$deployed" "$CREATE_TAG" | newest_release_tag || true)"
+        if [ "$newest" = "$deployed" ]; then
+            fail "$EX_CONFIG" "the stack last ran ${deployed}, newer than ${CREATE_TAG} in ${CREATE_APPLIANCE}; its database may not open on ${CREATE_TAG}. Give the release directory of ${deployed} or a later one. Nothing was changed."
+        fi
+    fi
+}
+
+# The release's manifest checked here, before its disk is booted: signed by
+# the key the VM will trust for this release, for this tag, naming the digest
+# of this disk. The VM checks the same manifest again for the images; nothing
+# else can check the disk it boots from.
+verify_appliance() {
+    local dir="$1" tag="$2" key="$3" manifest signers verified named digest actual
+    manifest="${dir}/images-${tag}.json"
+    command -v ssh-keygen >/dev/null 2>&1 || fail "$EX_UNAVAILABLE" "no ssh-keygen to check the release's signature with."
+    signers="$(mktemp "${TMPDIR:-/tmp}/istota-signers.XXXXXX")"
+    printf 'releases namespaces="istota-images" %s\n' "$key" > "$signers"
+    verified=0
+    ssh-keygen -Y verify -f "$signers" -I releases -n istota-images -s "${manifest}.sig" \
+        < "$manifest" >/dev/null 2>&1 || verified=$?
+    rm -f "$signers"
+    [ "$verified" -eq 0 ] \
+        || fail "$EX_DATAERR" "${manifest} is not signed by the release key (${key%% *} ...). Nothing was changed."
+    # Canonical JSON (sorted keys, no whitespace), so each field is one match.
+    named="$(sed -n 's/.*"tag":"\([^"]*\)".*/\1/p' "$manifest")"
+    [ "$named" = "$tag" ] \
+        || fail "$EX_DATAERR" "${manifest} is the manifest of '${named}', not ${tag}. Nothing was changed."
+    digest="$(sed -n 's/.*"appliance_sha256":"\([0-9a-f]\{64\}\)".*/\1/p' "$manifest")"
+    [ -n "$digest" ] || fail "$EX_DATAERR" "${manifest} names no appliance disk. Nothing was changed."
+    actual="$(shasum -a 256 "${dir}/istota-appliance-${tag}.raw.zst" | cut -d' ' -f1)"
+    [ "$actual" = "$digest" ] \
+        || fail "$EX_DATAERR" "${dir}/istota-appliance-${tag}.raw.zst is not the disk the signed manifest names. Nothing was changed."
+    log "the release ${tag} is signed by the release key, and its disk is the one it names"
+}
+
+# Where the appliance disk is unpacked for Lima, which copies it into the
+# instance; an underscore keeps it out of `limactl list`.
+appliance_staging() {
+    printf '%s\n' "${LIMA_HOME:-${HOME}/.lima}/_istota-appliance"
+}
+
+# The disk unpacked sparse: given the .zst, Lima writes the whole virtual size
+# out (40 GiB for 1.6 of data, measured), and zstd keeps the holes.
+unpack_appliance() {
+    local dir="$1" tag="$2" raw="$3"
+    mkdir -p "$(dirname "$raw")"
+    rm -f "$raw"
+    log "unpacking the appliance disk of ${tag}"
+    if ! zstd -d -q -f --sparse --long=31 "${dir}/istota-appliance-${tag}.raw.zst" -o "$raw"; then
+        rm -f "$raw"
+        fail 1 "could not unpack ${dir}/istota-appliance-${tag}.raw.zst. Nothing was made."
+    fi
+}
+
+# The VM's disk no smaller than the appliance's: Lima grows a raw disk to
+# `--disk` but refuses to shrink one ("disk shrinking is not supported").
+raise_disk_to_image() {
+    local bytes gib
+    bytes="$(ls -ln "$1" | awk '{ print $5 }')"
+    case "$bytes" in ""|*[!0-9]*) return 0 ;; esac
+    gib=$(( (bytes + 1073741823) / 1073741824 ))
+    if [ "$CREATE_DISK" -lt "$gib" ]; then
+        log "the appliance disk is ${gib} GiB and Lima cannot shrink one: the VM's disk is ${gib} GiB, not ${CREATE_DISK}."
+        CREATE_DISK="$gib"
+    fi
+}
+
 # --- the scripts and the key -------------------------------------------------
 
 template_path() {
@@ -686,15 +823,16 @@ enrolment() {
 # the VM, so `restore` asks it before the old VM goes.
 CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_DISK="" CREATE_TAG="" CREATE_REPO=""
 CREATE_KEY="" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE="" CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN=""
-CREATE_TERMINAL_SETUP=""
+CREATE_TERMINAL_SETUP="" CREATE_APPLIANCE="" CREATE_IN_APP=""
 
 create_settings() {
     CREATE_FOLDER="" CREATE_PORT="" CREATE_CPUS="" CREATE_MEMORY="" CREATE_DISK="" CREATE_TAG="" CREATE_REPO=""
     CREATE_KEY="${RELEASE_SIGNING_KEY:-}" CREATE_ADOPT="" CREATE_SETUP=1 CREATE_SOURCE=""
-    CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN="" CREATE_TERMINAL_SETUP=""
+    CREATE_TAG_GIVEN="" CREATE_SOURCE_GIVEN="" CREATE_TERMINAL_SETUP="" CREATE_APPLIANCE="" CREATE_IN_APP=""
+    local tag_option=""
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key)
+            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key|--appliance)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 case "$1" in
                     --workspace) CREATE_FOLDER="$2" ;;
@@ -702,17 +840,22 @@ create_settings() {
                     --cpus) CREATE_CPUS="$2" ;;
                     --memory) CREATE_MEMORY="$2" ;;
                     --disk) CREATE_DISK="$2" ;;
-                    --tag) CREATE_TAG="$2"; CREATE_TAG_GIVEN=1; CREATE_SOURCE_GIVEN=1 ;;
+                    --tag) CREATE_TAG="$2"; tag_option="$2"; CREATE_TAG_GIVEN=1; CREATE_SOURCE_GIVEN=1 ;;
                     --repo) CREATE_REPO="$2"; CREATE_SOURCE_GIVEN=1 ;;
                     --signing-key) CREATE_KEY="$2" ;;
+                    --appliance) CREATE_APPLIANCE="$2"; CREATE_TAG_GIVEN=1; CREATE_SOURCE_GIVEN=1 ;;
                 esac
                 shift 2 ;;
             --adopt) CREATE_ADOPT=1; shift ;;
             --no-setup) CREATE_SETUP=""; shift ;;
             --terminal-setup) CREATE_TERMINAL_SETUP=1; shift ;;
+            --web-setup-in-app) CREATE_IN_APP=1; shift ;;
             *) usage_error "create takes no '$1'" ;;
         esac
     done
+    if [ -n "$CREATE_APPLIANCE" ] && [ -n "$CREATE_REPO" ]; then
+        usage_error "give --appliance or --repo, not both"
+    fi
 
     # A re-run takes what the first run was given.
     [ -n "$CREATE_FOLDER" ] || CREATE_FOLDER="$(workspace_or_default)"
@@ -724,8 +867,13 @@ create_settings() {
     if [ -z "$CREATE_SOURCE_GIVEN" ]; then
         CREATE_TAG="$(state_get TAG)"
         CREATE_REPO="$(state_get REPO)"
+        CREATE_APPLIANCE="$(state_get APPLIANCE)"
     fi
     [ -n "$CREATE_KEY" ] || CREATE_KEY="$(state_get SIGNING_KEY)"
+    if [ -n "$CREATE_APPLIANCE" ]; then
+        # The release directory names its tag; nothing is looked up.
+        appliance_settings "$tag_option"
+    fi
     # Nothing given and nothing recorded: the newest release.
     if [ -z "$CREATE_REPO" ] && [ -z "$CREATE_TAG" ]; then
         if [ -n "$(state_get DEPLOYED_TAG)" ] && [ -z "$(state_get DEPLOYED_UNSIGNED)" ]; then
@@ -753,7 +901,10 @@ create_settings() {
     fi
     case "$CREATE_KEY" in *$'\n'*) usage_error "the signing key is one line of an SSH public key" ;; esac
 
-    if [ -n "$CREATE_REPO" ]; then
+    if [ -n "$CREATE_APPLIANCE" ]; then
+        CREATE_SOURCE=appliance
+        [ -n "$CREATE_KEY" ] || CREATE_KEY="$DEFAULT_SIGNING_KEY"
+    elif [ -n "$CREATE_REPO" ]; then
         CREATE_SOURCE=checkout
         [ -z "$CREATE_TAG" ] || check_tag_name "$CREATE_TAG"
         [ -f "${CREATE_REPO}/host/lima/istota.yaml" ] || usage_error "${CREATE_REPO} is not an istota checkout"
@@ -773,11 +924,16 @@ create_template() {
     fi
 }
 
-# What making a new VM needs beyond the options' form: the template.
+# What making a new VM needs beyond the options' form: the template, and for
+# an appliance zstd and a release that verifies.
 require_new_vm_inputs() {
     local template
     template="$(create_template)"
     [ -f "$template" ] || fail 1 "no Lima template at ${template}; run install.sh --local again."
+    [ "$CREATE_SOURCE" = appliance ] || return 0
+    command -v zstd >/dev/null 2>&1 \
+        || fail "$EX_UNAVAILABLE" "zstd is not installed, and the appliance disk is compressed with it: \`brew install zstd\`, then run this again."
+    verify_appliance "$CREATE_APPLIANCE" "$CREATE_TAG" "$CREATE_KEY"
 }
 
 cmd_create() {
@@ -789,6 +945,13 @@ cmd_create() {
     require_mac
     folder="$(resolve_dir "$folder")"
     refuse_location "$folder"
+    local appliance="$CREATE_APPLIANCE" releases=""
+    if [ -n "$appliance" ]; then
+        releases="$(dirname "$appliance")"
+        if within "$folder" "$releases" || within "$releases" "$folder"; then
+            fail "$EX_CONFIG" "${folder} and the releases directory ${releases} overlap; the VM mounts one writable and the other read-only. Choose a folder of its own, such as ~/Istota."
+        fi
+    fi
     require_limactl
 
     local status
@@ -800,26 +963,45 @@ cmd_create() {
     fi
     prepare_folder "$folder" "$adopt"
     # The signing key is public; kept so a re-run or a restore can make the VM again.
-    state_set "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}" "SIGNING_KEY=${key}"
+    state_set "WORKSPACE=${folder}" "PORT=${port}" "TAG=${tag}" "REPO=${repo}" "SIGNING_KEY=${key}" \
+        "APPLIANCE=${appliance}"
 
     if [ -z "$status" ]; then
-        local template expression args
+        local template expression args raw="" rc=0
         template="$(create_template)"
         expression=".portForwards[0].guestPort = ${port} | .portForwards[0].hostPort = ${port}"
         args=(create --tty=false "--name=${INSTANCE}")
-        args+=(--cpus "$CREATE_CPUS" --memory "$CREATE_MEMORY" --disk "$CREATE_DISK")
         args+=("--param=WORKSPACE=${folder}")
+        # The template names every mount, and Lima refuses one with no location:
+        # each source drops the ones it does not share.
         if [ "$source" = checkout ]; then
+            expression="${expression} | del(.mounts[] | select(.mountPoint == \"${RELEASE_MOUNT}\"))"
             args+=("--param=ISTOTA_REPO=${repo}")
-        else
-            # The template names both mounts; a release has no checkout to share.
+        elif [ "$source" = appliance ]; then
+            raw="$(appliance_staging)/istota-appliance-${tag}.raw"
+            case "$raw" in *[\"\\]*|*$'\n'*) fail "$EX_CONFIG" "LIMA_HOME holds a quote, a backslash or a newline: ${raw}" ;; esac
+            unpack_appliance "$appliance" "$tag" "$raw"
+            raise_disk_to_image "$raw"
+            # The disk alone: `base:` would add Debian's downloads after it, which
+            # Lima tries when one fails. `--set` runs after the bases are merged.
+            expression="${expression} | .images = [{\"location\": \"${raw}\", \"arch\": \"aarch64\"}]"
             expression="${expression} | del(.mounts[] | select(.mountPoint == \"/mnt/istota-repo\"))"
+            args+=("--param=IMAGE=${raw}" "--param=RELEASE_DIR=${releases}")
+            args+=("--param=ISTOTA_TAG=${tag}" "--param=RELEASE_SIGNING_KEY=${key}")
+        else
+            # A release is cloned: no checkout and no release directory to share.
+            expression="${expression} | del(.mounts[] | select(.mountPoint == \"/mnt/istota-repo\"))"
+            expression="${expression} | del(.mounts[] | select(.mountPoint == \"${RELEASE_MOUNT}\"))"
             args+=("--param=ISTOTA_TAG=${tag}" "--param=RELEASE_SIGNING_KEY=${key}")
             # The template's own default otherwise, which is REPO_URL's.
             [ -z "${ISTOTA_REPO_URL:-}" ] || args+=("--param=ISTOTA_REPO_URL=${REPO_URL}")
         fi
+        args+=(--cpus "$CREATE_CPUS" --memory "$CREATE_MEMORY" --disk "$CREATE_DISK")
         args+=(--set "$expression" "$template")
-        run_step "create the VM" "limactl create --name=${INSTANCE} ..." limactl "${args[@]}"
+        # Lima copies the disk into the instance; the unpacked one goes either way.
+        ( run_step "create the VM" "limactl create --name=${INSTANCE} ..." limactl "${args[@]}" ) || rc=$?
+        [ -z "$raw" ] || rm -f "$raw"
+        [ "$rc" -eq 0 ] || exit "$rc"
         state_set "CPUS=${CREATE_CPUS}" "MEMORY=${CREATE_MEMORY}" "DISK=${CREATE_DISK}"
         status=Stopped
     fi
@@ -829,9 +1011,12 @@ cmd_create() {
 
     local host_env=(STORAGE=host-folder INGRESS=local HOST_LOOPBACK_BLOCK=1 "HOST_GATEWAY_ADDR=${HOST_GATEWAY_ADDR}"
         "LOCAL_FORWARD_PORT=${port}")
+    # An appliance's images come from the release, built without Claude Code
+    # and Chrome; the VM adds those as local layers rather than rebuilding.
+    [ "$source" != appliance ] || host_env+=(ISTOTA_DESKTOP_APP=1)
     # Only a new VM takes the key from the template; an existing one may have
     # none. A recorded key stays, so a VM trusting a fork's key keeps it.
-    if [ "$source" = release ]; then
+    if [ "$source" = release ] || [ "$source" = appliance ]; then
         local recorded_key
         recorded_key="$(vm_stack host-env RELEASE_SIGNING_KEY </dev/null)" || fail 1 "could not read the VM's host.env."
         [ -n "$recorded_key" ] || host_env+=("RELEASE_SIGNING_KEY=${key}")
@@ -845,7 +1030,11 @@ cmd_create() {
     probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
     deployed="$(probe_value "$probe" tag)"
     [ -n "$CREATE_SOURCE_GIVEN" ] || recorded="$(state_get DEPLOYED_TAG)"
-    if [ -n "$recorded" ]; then
+    if [ "$source" = appliance ]; then
+        # The release directory's own tag, from the mount; create_settings
+        # refused a newer one deployed.
+        target="$tag"
+    elif [ -n "$recorded" ]; then
         if [ "$source" = checkout ] || [ -n "$(state_get DEPLOYED_UNSIGNED)" ]; then update+=(--unsigned); fi
         target="$recorded"
     elif [ "$source" = checkout ]; then
@@ -855,6 +1044,9 @@ cmd_create() {
         target="$tag"
     fi
     update+=("$target")
+    if [ "$source" = appliance ]; then
+        update+=(--bundle "${RELEASE_MOUNT}/${tag}/istota-${tag}.bundle" --images "${RELEASE_MOUNT}/${tag}")
+    fi
     if [ -z "$deployed" ] || { [ -n "$CREATE_TAG_GIVEN" ] && [ "$deployed" != "$tag" ]; }; then
         run_step "build ${target}" "istota-stack ${update[*]}" vm_stack "${update[@]}" </dev/null
         probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
@@ -904,11 +1096,16 @@ cmd_create() {
 }
 
 # The first build ran before config.toml existed: a config that needs Claude
-# Code gets its rebuild of the deployed tag now.
+# Code gets its rebuild of the deployed tag now. An appliance's images came
+# from its release, so Claude Code is the local layer on top of them, which
+# needs the network; a failure leaves the stack on the release's image.
 rebuild_if_lacking() {
     local probe deployed image_rc=0
     vm_stack check-image </dev/null || image_rc=$?
-    if [ "$image_rc" -eq 2 ]; then
+    if [ "$image_rc" -eq 2 ] && [ -n "$(state_get APPLIANCE)" ]; then
+        vm_stack local-layers </dev/null \
+            || log "WARNING: a local layer did not build; \`istota-stack local-layers --status\` says why, and \`istota-stack local-layers\` tries again."
+    elif [ "$image_rc" -eq 2 ]; then
         probe="$(vm sh -c "$VM_PROBE" </dev/null)" || fail 1 "could not read the VM's state."
         deployed="$(probe_value "$probe" tag)"
         local rebuild=(update)
@@ -917,6 +1114,20 @@ rebuild_if_lacking() {
         run_step "rebuild ${deployed}" "istota-stack ${rebuild[*]}" vm_stack "${rebuild[@]}" </dev/null
     elif [ "$image_rc" -ne 0 ]; then
         fail "$image_rc" "step 'check the image' failed: \`istota-stack check-image\` (exit ${image_rc})"
+    fi
+}
+
+# A VM made from an appliance is the Mac app's. One a restore or an import
+# filled holds another install's config and env files, made without the app:
+# the VM's `setup --desktop-app` adds what a new app install has (its login
+# codes, ISTOTA_DESKTOP_APP, the local cookie setting). A refusal leaves the
+# install with its own sign-in, which still works.
+become_the_apps() {
+    [ -n "$(state_get APPLIANCE)" ] || return 0
+    local rc=0
+    vm_stack setup --desktop-app </dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "WARNING: \`istota-stack setup --desktop-app\` failed (exit ${rc}); this install keeps its own sign-in, and the app opens its login page."
     fi
 }
 
@@ -951,7 +1162,12 @@ watch_setup_page() {
     while :; do
         answer="$(curl -fsS --max-time 5 "${base}/istota/api/setup/state" 2>/dev/null)" || answer=""
         if printf '%s' "$answer" | grep -Eq '"phase": *"locked"'; then
-            open "$url" || true
+            # The app shows the page in its own window: one line it reads.
+            if [ -n "$CREATE_IN_APP" ]; then
+                printf 'ISTOTA_SETUP_URL=%s\n' "$url"
+            else
+                open "$url" || true
+            fi
             return 0
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
@@ -977,8 +1193,9 @@ web_setup() {
     local out pid rc arg interrupted watcher="" args=()
     for arg in "$@"; do [ "$arg" = --local ] || args+=("$arg"); done
     out="$(mktemp "${TMPDIR:-/tmp}/istota-setup.XXXXXX")"
-    # Only a terminal has a browser to open; the address is printed either way.
-    if [ -t 1 ]; then
+    # Only a terminal has a browser to open, and the app reads the address
+    # line on a pipe; the VM's own lines carry the address either way.
+    if [ -t 1 ] || [ -n "$CREATE_IN_APP" ]; then
         watch_setup_page "$out" &
         watcher=$!
     fi
@@ -1149,9 +1366,25 @@ cmd_host_port() {
 }
 
 cmd_update() {
-    local rc=0 probe
+    local rc=0 probe appliance="" recorded update
+    if [ "${1:-}" = --appliance ]; then
+        [ "$#" -eq 2 ] || usage_error "update --appliance takes one release directory and nothing else"
+        recorded="$(state_get APPLIANCE)"
+        [ -n "$recorded" ] \
+            || fail "$EX_CONFIG" "${INSTANCE} was not made from a release directory, so it mounts none: \`istota-stack update <tag>\` updates it."
+        check_release_dir "$2" without-disk
+        appliance="$RELEASE_PATH"
+        # The VM sees only the releases directory it was made with.
+        [ "$(dirname "$appliance")" = "$(dirname "$recorded")" ] \
+            || fail "$EX_CONFIG" "${INSTANCE} mounts $(dirname "$recorded"), and ${appliance} is not in it. Unpack the release there."
+        update=(update "$RELEASE_TAG" --bundle "${RELEASE_MOUNT}/${RELEASE_TAG}/istota-${RELEASE_TAG}.bundle"
+            --images "${RELEASE_MOUNT}/${RELEASE_TAG}")
+        set -- "${update[@]:1}"
+    fi
     vm_stack update "$@" || rc=$?
     [ "$rc" -eq 0 ] || exit "$rc"
+    # A later create or restore makes the VM from the release now installed.
+    [ -z "$appliance" ] || state_set "APPLIANCE=${appliance}"
     if probe="$(vm sh -c "$VM_PROBE" </dev/null)"; then
         record_deployed "$probe"
     else
@@ -1319,7 +1552,7 @@ cmd_restore() {
                 [ "$#" -ge 2 ] || usage_error "--date needs a value"
                 date="$2"; shift 2 ;;
             --force) force=1; shift ;;
-            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key)
+            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key|--appliance)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 [ "$1" != --workspace ] || folder="$2"
                 create_args+=("$1" "$2"); shift 2 ;;
@@ -1372,6 +1605,7 @@ cmd_restore() {
     printf '%s\n' "$key" | run_step "restore the backups" "istota-stack ${restore[*]}" vm_stack "${restore[@]}"
     # The backup's host.env may predate the key, or name an older VM's port.
     write_forward_port
+    become_the_apps
     rebuild_if_lacking
     run_step "start the stack" "systemctl enable --now istota-stack" \
         vm systemctl enable --now istota-stack </dev/null
@@ -1608,7 +1842,7 @@ cmd_import_standalone() {
                 if [ "$1" = --from ]; then from="$2"; else config="$2"; fi
                 shift 2 ;;
             --dry-run) dry=1; shift ;;
-            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key)
+            --workspace|--port|--cpus|--memory|--disk|--tag|--repo|--signing-key|--appliance)
                 [ "$#" -ge 2 ] || usage_error "$1 needs a value"
                 [ "$1" != --workspace ] || folder="$2"
                 create_args+=("$1" "$2"); shift 2 ;;
@@ -1685,6 +1919,7 @@ cmd_import_standalone() {
 
     # The import installed the old install's host.env over the one create wrote.
     write_forward_port
+    become_the_apps
     log "copying the files of ${from} into ${folder}"
     copy_workspace "$from" "$folder"
     run_step "start the stack" "systemctl enable --now istota-stack" \

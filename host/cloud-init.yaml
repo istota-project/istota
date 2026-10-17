@@ -115,7 +115,7 @@ write_files:
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
       key="$(sed -n 's/^RELEASE_SIGNING_KEY=//p' /srv/app/istota/host.env)"
       # The file provision.sh writes from host.env, in the same form.
-      printf 'releases namespaces="git" %s\n' "$key" > "$ALLOWED_SIGNERS"
+      printf 'releases namespaces="git,istota-images" %s\n' "$key" > "$ALLOWED_SIGNERS"
       chmod 0644 "$ALLOWED_SIGNERS"
       git clone --quiet --no-checkout "$REPO_URL" "$SRC"
       if [ -z "$TAG" ]; then

@@ -58,6 +58,10 @@ REPO_MOUNT = "/mnt/istota-repo"
 #: The template mounts the checkout and the Mac workspace folder; a Lima mount
 #: cannot be optional, so the tier's VM drops the workspace at create and
 #: shares a folder in only for the host-folder mode (`share_host_folder`).
+#: The release directory is the appliance's (istota-mac's
+#: `tests/vm/test_appliance.py`, which loads this module from the istota tag it
+#: pins); every other VM drops it, since Lima refuses a mount with no location.
+DROP_RELEASE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/mnt/istota-release"))'
 DROP_WORKSPACE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))'
 
 #: The first admin every mode's setup names, and the devbox users.
@@ -304,7 +308,8 @@ def ensure_vm(release: Release) -> Vm:
     entry = vm.info()
     if entry is None:
         argv = ["limactl", "create", "--tty=false", f"--name={vm.name}",
-                f"--param=ISTOTA_REPO={release.repo}", f"--set={DROP_WORKSPACE_MOUNT}"]
+                f"--param=ISTOTA_REPO={release.repo}", f"--set={DROP_WORKSPACE_MOUNT}",
+                f"--set={DROP_RELEASE_MOUNT}"]
         memory = os.environ.get("ISTOTA_VM_MEMORY", "").strip()
         if memory:
             argv.append(f"--set=.memory = {json.dumps(memory)}")
@@ -711,7 +716,8 @@ def template_mounts(release: Release, folder: Path, *, extra_base: str = "") -> 
         template = _workdir() / "istota-control.yaml"
         template.write_text(text.replace(base, f"{base}  - {extra_base}\n"))
     argv = ["limactl", "create", "--tty=false", f"--name={name}",
-            f"--param=ISTOTA_REPO={release.repo}", f"--param=WORKSPACE={folder}", str(template)]
+            f"--param=ISTOTA_REPO={release.repo}", f"--param=WORKSPACE={folder}",
+            f"--set={DROP_RELEASE_MOUNT}", str(template)]
     _run_host(["limactl", "delete", "--force", name], check=False)
     try:
         _run_host(argv, timeout=300)

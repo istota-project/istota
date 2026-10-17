@@ -1,4 +1,5 @@
-"""Every security parity row is witnessed, pending, or excluded by design.
+"""Every security parity row is witnessed, witnessed in istota-mac, pending,
+or excluded by design.
 
 `tests/support/parity.py` holds the matrix's rows and the decorator a witness
 carries. This file walks `tests/` for that decorator with `ast` rather than
@@ -66,9 +67,16 @@ class TestTheMatrix:
 
     def test_the_local_vm_rows_are_l_rows_without_gaps(self):
         """The local-VM spec's rows, `L1` onward, each added with its witness."""
-        local = [row for row in parity.ROWS if not isinstance(row, int)]
+        local = [row for row in parity.ROWS if isinstance(row, str) and row.startswith("L")]
         assert local and all(re.fullmatch(r"L[1-9]\d*", row) for row in local), local
         assert sorted(int(row[1:]) for row in local) == list(range(1, len(local) + 1))
+
+    def test_the_mac_app_rows_are_m_rows(self):
+        """The Mac app spec's rows keep that spec's numbers (M1, M5 onward), so
+        they have gaps; each is added with its witness."""
+        named = [row for row in parity.ROWS if isinstance(row, str)]
+        mac = [row for row in named if not row.startswith("L")]
+        assert all(re.fullmatch(r"M[1-9]\d*", row) for row in mac), mac
 
     def test_row_14_alone_is_not_witnessed_by_design(self):
         assert set(parity.NOT_WITNESSED) == {14}
@@ -79,8 +87,19 @@ class TestEveryRowHasAWitness:
         unaccounted = [
             row for row in parity.ROWS
             if row not in witnesses and row not in parity.PENDING and row not in parity.NOT_WITNESSED
+            and row not in parity.WITNESSED_IN_ISTOTA_MAC
         ]
         assert unaccounted == [], f"rows with no witness and no pending stage: {unaccounted}"
+
+    def test_a_row_witnessed_in_istota_mac_is_a_mac_app_row_with_no_witness_here(self, witnesses):
+        """istota-mac holds this dict to its own witnesses; here a row in it
+        must be a known M row, not pending, and not also witnessed in this tree,
+        where the moved witness would otherwise be counted twice."""
+        for row, where in parity.WITNESSED_IN_ISTOTA_MAC.items():
+            assert row in parity.ROWS and re.fullmatch(r"M[1-9]\d*", row), row
+            assert row not in witnesses, f"row {row} is witnessed here and listed as istota-mac's"
+            assert row not in parity.PENDING and row not in parity.NOT_WITNESSED
+            assert where.startswith("tests/"), (row, where)
 
     def test_a_witnessed_row_is_no_longer_pending(self, witnesses):
         both = sorted(set(witnesses) & set(parity.PENDING))
