@@ -23,20 +23,53 @@ def test_binding_single_use_and_epoch(db_path, identity):
     assert auth.redeem_step_up(db_path, request_id, "alice", "export", "session-a", code) == "dead"
 
 def test_expiry_replacement_and_mail_budget(db_path, identity):
-    policy = replace(identity, mail_link_max_email=2)
+    policy = replace(identity, step_up_mail_max=2)
     old, old_code = auth.start_step_up(db_path, policy, "alice", "export", "session-a")
     request_id, code = auth.start_step_up(db_path, policy, "alice", "export", "session-a")
     assert auth.redeem_step_up(db_path, old, "alice", "export", "session-a", old_code) == "dead"
-    assert auth.start_step_up(db_path, policy, "alice", "export", "session-a") is None
+    with pytest.raises(auth.StepUpMailBudgetSpent):
+        auth.start_step_up(db_path, policy, "alice", "export", "session-a")
     with db.get_db(db_path) as conn:
         conn.execute("UPDATE web_auth_step_ups SET expires_at=datetime('now', '-1 second')")
     assert auth.redeem_step_up(db_path, request_id, "alice", "export", "session-a", code) == "dead"
     assert auth.prune_step_ups(db_path) == 2
     assert auth.start_step_up(db_path, policy, "bob", "export", "session-a") is None
 
+def test_a_confirmation_code_has_its_own_budget_apart_from_sign_in_mail(db_path, identity):
+    """A signed-in user's codes go to their own address, so they are not charged
+    against the public forms' per-address budget, and do not spend it."""
+    policy = replace(identity, mail_link_max_email=3, step_up_mail_max=5)
+    for _ in range(3):
+        assert auth.issue_mail_link_if_allowed(db_path, policy, "alice@example.com", "reset") is not None
+    assert auth.issue_mail_link_if_allowed(db_path, policy, "alice@example.com", "reset") is None
+    for _ in range(5):
+        assert auth.start_step_up(db_path, policy, "alice", "admin_config_change", "session-a") is not None
+    assert auth.attempts_in_window(db_path, "mail_link", "alice@example.com", 3600) == 3
+
+
+def test_a_spent_code_budget_says_when_it_frees_up(db_path, identity):
+    policy = replace(identity, step_up_mail_max=1)
+    assert auth.start_step_up(db_path, policy, "alice", "admin_config_change", "session-a") is not None
+    with pytest.raises(auth.StepUpMailBudgetSpent) as spent:
+        auth.start_step_up(db_path, policy, "alice", "admin_config_change", "session-a")
+    assert 3500 < spent.value.retry_after_seconds <= 3600
+    with db.get_db(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM web_auth_step_ups WHERE used_at IS NULL").fetchone()[0] == 1
+        conn.execute("UPDATE web_auth_attempts SET at=datetime('now', '-3601 seconds') WHERE kind='step_up_mail'")
+    assert auth.start_step_up(db_path, policy, "alice", "admin_config_change", "session-a") is not None
+
+
+def test_the_code_budget_is_per_user(db_path, identity):
+    policy = replace(identity, step_up_mail_max=1)
+    user_profiles.ensure_profile(db_path, "bob", display_name="Bob")
+    auth.upsert_identity(db_path, "bob", "bob@example.com")
+    assert auth.start_step_up(db_path, policy, "alice", "export", "session-a") is not None
+    assert auth.start_step_up(db_path, policy, "bob", "export", "session-b") is not None
+
+
 def test_failed_codes_are_capped_and_lock_is_audited_once(db_path, identity):
     from istota.credentials import audit
-    policy = replace(identity, mail_link_max_email=100)
+    policy = replace(identity, step_up_mail_max=100)
     for batch in range(4):
         request_id, code = auth.start_step_up(db_path, policy, "alice", "export", "session-a")
         wrong = "000000" if code != "000000" else "111111"

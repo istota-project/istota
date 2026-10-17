@@ -5584,14 +5584,19 @@ export type StepUpAction =
   | 'admin_config_change'
   | 'admin_briefing_delete'
   | 'admin_cron_delete';
-/** How the server confirms a sensitive action: a mailed code, or the
- *  account password where the install cannot mail one. The server decides. */
+/** How a sensitive action is confirmed: the account password, or a mailed
+ *  code. `methods` is every one the account has, the server's default first;
+ *  `method` is the one this request opened. */
 export type StepUpMethod = 'email' | 'password';
 export type StepUpProof =
   { request_id: string; code: string } | { request_id: string; password: string };
-export type StepUpStart =
-  | { method: 'email'; request_id: string; expires_at: string; email_hint: string }
-  | { method: 'password'; request_id: string; expires_at: string };
+export interface StepUpStart {
+  method: StepUpMethod;
+  methods?: StepUpMethod[];
+  request_id: string;
+  expires_at: string;
+  email_hint?: string;
+}
 export interface CredentialHistory {
   id: number;
   name: string;
@@ -5609,8 +5614,14 @@ export interface CredentialActivityRow {
   detail: Record<string, string | number | boolean | null> | null;
 }
 
-export function startStepUp(action: StepUpAction, name?: string): Promise<StepUpStart> {
-  return credentialWrite('', 'POST', { action, name }, '/settings/step-up');
+/** Opens a confirmation. With no `method` the server picks its default and
+ *  mails nothing unless a code is the only way; `'email'` mails a code. */
+export function startStepUp(
+  action: StepUpAction,
+  name?: string,
+  method?: StepUpMethod,
+): Promise<StepUpStart> {
+  return credentialWrite('', 'POST', { action, name, method }, '/settings/step-up');
 }
 export function showRecoveryCodes(
   name: string,

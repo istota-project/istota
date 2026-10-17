@@ -23,13 +23,13 @@ the web API as the page does:
 
 Sign-in: `istota auth add` and `set-password --password-stdin` give the
 setup's admin an email identity, and the password form signs in. Step-up: the
-local mode has no mail, so `webui.app._step_up_method` confirms with the
-account password, and the proof is the request id and the password the case
+local mode has no mail, so `webui.app._step_up_methods` offers the account
+password alone, and the proof is the request id and the password the case
 signed in with. The case asserts that method, so a mode that gains mail is
 noticed rather than silently switching paths. The mailed-code path is kept for
-that case: it reads the row's `code_hash` (sha256 of `request_id:code`,
-`webui.auth._code_digest`) and finds the six digits offline, clearing the
-address's mail budget first. The session cookie is `Secure`, which httpx keeps
+that case: it asks for the code by name, reads the row's `code_hash` (sha256 of
+`request_id:code`, `webui.auth._code_digest`) and finds the six digits offline,
+clearing the confirmation-code budget first. The session cookie is `Secure`, which httpx keeps
 off plain http, so it is carried by hand.
 
 The key is put back with `istota-stack apply` at the end, if it moved.
@@ -190,9 +190,11 @@ def _sign_in(vm: lima.Vm, web: WebSession) -> None:
 
 def _step_up(vm: lima.Vm, web: WebSession, *, method: str = "password") -> dict:
     """A redeemable step-up proof: the password, or a mailed code read back from the row's digest."""
+    payload = {"action": "admin_config_change"}
     if method == "email":
-        _db_write(vm, "DELETE FROM web_auth_attempts WHERE kind = 'mail_link' AND key = ?", EMAIL)
-    response = web.post(f"{API}/settings/step-up", json={"action": "admin_config_change"})
+        _db_write(vm, "DELETE FROM web_auth_attempts WHERE kind = 'step_up_mail'")
+        payload["method"] = "email"
+    response = web.post(f"{API}/settings/step-up", json=payload)
     assert response.status_code == 200, response.text[:2000]
     issued = response.json()
     assert issued["method"] == method, issued

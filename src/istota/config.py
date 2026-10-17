@@ -1440,6 +1440,9 @@ class WebConfig:
     auth_throttle_max_ip: int = 30
     trusted_proxy_hops: int = 0
     auth_mail_link_max_email: int = 3
+    # Confirmation codes a signed-in user may be mailed per hour, apart from
+    # the public forms' per-address budget above.
+    auth_step_up_mail_max: int = 20
     # `oauth2_provider` is the user-facing NC URL — what the browser hits to
     # authorize. `oauth2_token_endpoint` and `oauth2_userinfo_endpoint` are
     # server-to-server; in Docker they typically point at the internal

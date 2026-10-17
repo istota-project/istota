@@ -66,13 +66,17 @@ async def test_reveal_on_nextcloud_needs_identity_and_step_up(signed_client, con
     assert response.json()["detail"] == "step_up_unavailable"
 
 async def test_request_masks_address_and_sends_only_to_identity(signed_client, config, mail):
-    for _ in range(config.web.auth_mail_link_max_email + 1):
+    config.web.auth_step_up_mail_max = 2
+    for _ in range(2):
         response = await signed_client.post("/istota/api/settings/step-up", json={"action": "export"}, headers=ORIGIN)
         assert response.status_code == 200
-        assert set(response.json()) == {"method", "request_id", "expires_at", "email_hint"}
+        assert set(response.json()) == {"method", "methods", "request_id", "expires_at", "email_hint"}
         assert response.json()["email_hint"] == "a•••@example.com"
         assert "alice@example.com" not in response.text
-    assert len(mail) == config.web.auth_mail_link_max_email
+    refused = await signed_client.post("/istota/api/settings/step-up", json={"action": "export"}, headers=ORIGIN)
+    assert refused.status_code == 429 and refused.json()["reason"] == "mail_budget"
+    assert "alice@example.com" not in refused.text
+    assert len(mail) == 2
     assert all(args[1] == "alice@example.com" for args in mail)
     assert (await signed_client.post("/istota/api/settings/step-up", json={"action": "export"})).status_code == 403
 
@@ -100,7 +104,9 @@ async def test_generated_retirement_restores_the_whole_batch_from_a_member(signe
     assert store.get_secret(config.db_path, "alice", "vault_entries", "generated_example") == "SENTINEL-7f3a-password"
 
 
-async def test_step_up_mail_work_is_deferred_until_after_response(signed_client, config, mail, monkeypatch):
+async def test_step_up_mail_is_sent_after_the_response(signed_client, config, mail, monkeypatch):
+    """The code is minted in the request, so a spent budget can be said; only
+    the mail waits, and a spent public mail budget does not stop it."""
     import istota.webui.app as mod
     tasks = []
     class Deferred:
@@ -116,8 +122,8 @@ async def test_step_up_mail_work_is_deferred_until_after_response(signed_client,
                     conn.execute("INSERT INTO web_auth_attempts (kind, key) VALUES ('mail_link', 'alice@example.com')")
         response = await signed_client.post("/istota/api/settings/step-up", json={"action": "export"}, headers=ORIGIN)
         assert response.status_code == 200
-        assert set(response.json()) == {"method", "request_id", "expires_at", "email_hint"}
+        assert set(response.json()) == {"method", "methods", "request_id", "expires_at", "email_hint"}
         assert not mail
         with db.get_db(config.db_path) as conn:
-            assert conn.execute("SELECT count(*) FROM web_auth_step_ups").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM web_auth_step_ups WHERE used_at IS NULL").fetchone()[0] == 1
     assert len(tasks) == 2
