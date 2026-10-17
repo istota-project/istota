@@ -87,11 +87,13 @@
             <ConfigSecretField
               label="API key"
               configured={app.keySet === true}
-              pending={app.key === '' ? undefined : app.key}
+              pending={app.clearKey ? '' : app.key === '' ? undefined : app.key}
               hint={`In ${label}, under Settings → General → Security.`}
               inline
-              clearable={false}
-              onChange={(value) => (form[name].key = value ?? '')}
+              onChange={(value) => {
+                form[name].clearKey = value === '';
+                form[name].key = value ?? '';
+              }}
             />
             <Badge size="sm" variant={status.variant}>{status.label}</Badge>
           {:else}

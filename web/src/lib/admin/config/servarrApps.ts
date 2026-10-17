@@ -42,6 +42,8 @@ export interface ServarrAppForm {
   url: string;
   /** A new key typed in this session; `""` keeps the stored one. */
   key: string;
+  /** Clear the stored key, as Clear does on any other credential field. */
+  clearKey: boolean;
   /** Whether a key is stored now; null for a table the loader dropped. */
   keySet: boolean | null;
   /** The stored table is missing its url or key, so neither is known. */
@@ -76,6 +78,7 @@ export function servarrAppsForm(
       enabled: !!stored,
       url: stored?.url ?? '',
       key: '',
+      clearKey: false,
       keySet: stored ? stored.api_key_set : false,
       incomplete: stored?.incomplete ?? false,
       keyFile: file?.name ?? null,
@@ -270,7 +273,8 @@ export function servarrAppsDraft(form: ServarrAppsForm, initial: ServarrAppsForm
     if (!before.enabled || before.incomplete || url !== before.url) {
       op({ op: 'set', path: [...path, 'url'], value: url });
     }
-    if (keyFile && app.key !== '') draft = withSecret(draft, keyFile, app.key);
+    if (keyFile && app.clearKey) draft = withSecret(draft, keyFile, '');
+    else if (keyFile && app.key !== '') draft = withSecret(draft, keyFile, app.key);
   }
   return draft;
 }
@@ -299,6 +303,7 @@ export function rebaseApps(
       enabled: pick(edited.enabled, was.enabled, now.enabled),
       url: pick(edited.url, was.url, now.url),
       key: edited.key,
+      clearKey: edited.clearKey,
     };
   }
   return apps;
