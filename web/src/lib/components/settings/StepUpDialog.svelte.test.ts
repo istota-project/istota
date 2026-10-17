@@ -187,3 +187,30 @@ it('says when codes are used up and keeps the password usable', async () => {
     }),
   );
 });
+
+it('drops an expired code when no new one can be sent', async () => {
+  vi.mocked(startStepUp)
+    .mockResolvedValueOnce({
+      method: 'email',
+      methods: ['email'],
+      request_id: 'request-9',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    })
+    .mockRejectedValueOnce(
+      Object.assign(new Error('Too many confirmation codes requested. Try again in 5 minutes.'), {
+        reason: 'mail_budget',
+      }),
+    );
+  const submit = vi
+    .fn()
+    .mockRejectedValue(Object.assign(new Error('That code has expired.'), { reason: 'dead' }));
+  render(StepUpDialog, { action: 'export', onConfirm: submit, onCancel: vi.fn() });
+  await fireEvent.input(await screen.findByLabelText('Confirmation code'), {
+    target: { value: '123456' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await screen.findByText('Too many confirmation codes requested. Try again in 5 minutes.');
+  expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
+  expect(submit).toHaveBeenCalledTimes(1);
+});

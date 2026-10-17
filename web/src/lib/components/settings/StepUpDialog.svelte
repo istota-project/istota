@@ -79,7 +79,12 @@
       if (!active) return;
       error = (e as Error).message;
       password = '';
-      if ((e as Error & { reason?: string }).reason === 'dead') await begin(method || undefined);
+      if ((e as Error & { reason?: string }).reason === 'dead') {
+        // Known dead: a refused restart must not leave it to be resubmitted.
+        requestId = '';
+        code = '';
+        await begin(method || undefined);
+      }
     } finally {
       busy = false;
     }
