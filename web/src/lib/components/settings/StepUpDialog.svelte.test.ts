@@ -100,3 +100,90 @@ it('offers a retry when starting the confirmation fails', async () => {
   expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   expect(screen.queryByText('Istota could not be reached.')).toBeNull();
 });
+
+it('offers the password first and mails a code only when asked', async () => {
+  vi.mocked(startStepUp)
+    .mockResolvedValueOnce({
+      method: 'password',
+      methods: ['password', 'email'],
+      request_id: 'request-4',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    })
+    .mockResolvedValueOnce({
+      method: 'email',
+      methods: ['password', 'email'],
+      request_id: 'request-5',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    });
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(StepUpDialog, { action: 'admin_config_change', onConfirm: submit, onCancel: vi.fn() });
+  await screen.findByText('Confirm with your account password.');
+  expect(screen.queryByText(/Mail isn't set up/)).toBeNull();
+  expect(startStepUp).toHaveBeenCalledWith('admin_config_change', undefined);
+  await fireEvent.click(screen.getByRole('button', { name: 'Email me a code instead' }));
+  await screen.findByLabelText('Confirmation code');
+  expect(startStepUp).toHaveBeenLastCalledWith('admin_config_change', undefined, 'email');
+  await screen.findByText(/a•••@example.com/);
+  await fireEvent.input(screen.getByLabelText('Confirmation code'), {
+    target: { value: '123456' },
+  });
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await waitFor(() =>
+    expect(submit).toHaveBeenLastCalledWith({ request_id: 'request-5', code: '123456' }),
+  );
+});
+
+it('goes back to the password from a mailed code', async () => {
+  vi.mocked(startStepUp)
+    .mockResolvedValueOnce({
+      method: 'email',
+      methods: ['password', 'email'],
+      request_id: 'request-6',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    })
+    .mockResolvedValueOnce({
+      method: 'password',
+      methods: ['password', 'email'],
+      request_id: 'request-7',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    });
+  render(StepUpDialog, { action: 'export', onConfirm: vi.fn(), onCancel: vi.fn() });
+  await screen.findByLabelText('Confirmation code');
+  await fireEvent.click(screen.getByRole('button', { name: 'Use my password instead' }));
+  expect(await screen.findByLabelText('Account password')).toBeInTheDocument();
+  expect(startStepUp).toHaveBeenLastCalledWith('export', undefined, 'password');
+});
+
+it('says when codes are used up and keeps the password usable', async () => {
+  vi.mocked(startStepUp)
+    .mockResolvedValueOnce({
+      method: 'password',
+      methods: ['password', 'email'],
+      request_id: 'request-8',
+      expires_at: 'later',
+      email_hint: 'a•••@example.com',
+    })
+    .mockRejectedValueOnce(
+      Object.assign(new Error('Too many confirmation codes requested. Try again in 12 minutes.'), {
+        reason: 'mail_budget',
+      }),
+    );
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(StepUpDialog, { action: 'admin_config_change', onConfirm: submit, onCancel: vi.fn() });
+  await screen.findByText('Confirm with your account password.');
+  await fireEvent.click(screen.getByRole('button', { name: 'Email me a code instead' }));
+  await screen.findByText('Too many confirmation codes requested. Try again in 12 minutes.');
+  const field = screen.getByLabelText('Account password') as HTMLInputElement;
+  await fireEvent.input(field, { target: { value: 'the passphrase' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await waitFor(() =>
+    expect(submit).toHaveBeenLastCalledWith({
+      request_id: 'request-8',
+      password: 'the passphrase',
+    }),
+  );
+});

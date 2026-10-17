@@ -4756,8 +4756,12 @@ function adminConnectionsHandler({ url, method }: MockReq): unknown | undefined 
 
 function configEditorHandler({ url, method, body }: MockReq): unknown | undefined {
   if (url === '/istota/api/settings/step-up' && method === 'POST') {
+    // The password first, a code when asked, as the server answers an
+    // account that has both.
+    const asked = (body as { method?: string } | null)?.method;
     return {
-      method: 'email',
+      method: asked === 'email' ? 'email' : 'password',
+      methods: ['password', 'email'],
       request_id: 'mock-step-up',
       email_hint: 's•••@example.com',
       expires_at: mockIso(Date.now() + 600_000),

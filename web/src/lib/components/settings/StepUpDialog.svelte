@@ -18,6 +18,7 @@
   } = $props();
   let requestId = $state('');
   let method = $state<StepUpMethod | ''>('');
+  let methods = $state<StepUpMethod[]>([]);
   let hint = $state('');
   let code = $state('');
   let password = $state('');
@@ -25,19 +26,22 @@
   let busy = $state(false);
   let active = true;
 
-  async function requestCode() {
+  // A refused start keeps whatever request is already open: a spent code
+  // budget leaves the password request live, and it can still confirm.
+  async function begin(requested?: StepUpMethod) {
     busy = true;
-    code = '';
-    password = '';
-    requestId = '';
     try {
-      const result = await startStepUp(action, name);
+      const result = requested
+        ? await startStepUp(action, name, requested)
+        : await startStepUp(action, name);
       if (!active) return;
       requestId = result.request_id;
-      // The server picks the method: a mailed code, or the account password
-      // where the install cannot mail one.
       method = result.method;
-      hint = result.method === 'email' ? result.email_hint : '';
+      methods = result.methods ?? [result.method];
+      hint = result.email_hint ?? '';
+      code = '';
+      password = '';
+      error = '';
     } catch (e) {
       error =
         (e as Error).message === 'step_up_unavailable'
@@ -47,6 +51,14 @@
       busy = false;
     }
   }
+
+  let alternative = $derived(
+    method === 'password' && methods.includes('email')
+      ? { method: 'email' as const, label: 'Email me a code instead' }
+      : method === 'email' && methods.includes('password')
+        ? { method: 'password' as const, label: 'Use my password instead' }
+        : null,
+  );
 
   let ready = $derived(
     !!requestId && (method === 'password' ? password.length > 0 : /^[0-9]{6}$/.test(code)),
@@ -67,14 +79,14 @@
       if (!active) return;
       error = (e as Error).message;
       password = '';
-      if ((e as Error & { reason?: string }).reason === 'dead') await requestCode();
+      if ((e as Error & { reason?: string }).reason === 'dead') await begin(method || undefined);
     } finally {
       busy = false;
     }
   }
 
   onMount(() => {
-    void requestCode();
+    void begin();
     return () => {
       active = false;
       code = '';
@@ -92,7 +104,11 @@
   }}
 >
   {#if method === 'password'}
-    <p>Mail isn't set up on this install, so confirm with your password.</p>
+    {#if methods.includes('email')}
+      <p>Confirm with your account password.</p>
+    {:else}
+      <p>Mail isn't set up on this install, so confirm with your password.</p>
+    {/if}
   {:else if hint}<p>A confirmation code was requested for {hint}.</p>{/if}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
   {#if method === 'password'}
@@ -111,17 +127,29 @@
       <Input bind:value={code} inputmode="numeric" autocomplete="one-time-code" maxlength={6} />
     </Field>
   {/if}
+  {#if alternative}
+    <div class="alternative">
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={busy}
+        onclick={() => alternative && begin(alternative.method)}>{alternative.label}</Button
+      >
+    </div>
+  {/if}
   {#snippet footer()}
     <Button variant="secondary" onclick={onCancel}>Cancel</Button>
     {#if method === 'email'}
-      <Button variant="secondary" disabled={busy} onclick={requestCode}>Send new code</Button>
+      <Button variant="secondary" disabled={busy} onclick={() => begin('email')}
+        >Send new code</Button
+      >
     {:else if !requestId && !busy}
       <!-- No live request (the start failed, or no method yet): the only way on. -->
       <Button
         variant="secondary"
         onclick={() => {
           error = '';
-          void requestCode();
+          void begin();
         }}>Try again</Button
       >
     {/if}
@@ -134,3 +162,9 @@
     >
   {/snippet}
 </Modal>
+
+<style>
+  .alternative {
+    margin-top: var(--space-2);
+  }
+</style>
