@@ -321,6 +321,7 @@
       <input
         type="text"
         class="filter-input"
+        aria-label="Filter by vaccine name"
         placeholder="Filter by vaccine name"
         bind:value={nameFilter}
         onchange={load}
@@ -330,7 +331,7 @@
       <EmptyState size="sm">No immunizations recorded yet.</EmptyState>
     {:else}
       <div class="table-scroll">
-        <table class="grid">
+        <table class="grid" aria-label="Immunization history">
           <thead>
             <tr>
               <th>Date</th>
@@ -344,9 +345,16 @@
           </thead>
           <tbody>
             {#each history as i (i.id)}
+              {@const details = [i.product_name, i.dose_label, i.facility]
+                .filter((value) => value?.trim())
+                .join(' · ')}
               <tr>
-                <td>{formatDate(i.date_given)}</td>
-                <td>
+                <td class="date">
+                  <time datetime={i.date_given}>{formatDate(i.date_given)}</time>{#if details}<span
+                      class="mobile-details">{` · ${details}`}</span
+                    >{/if}
+                </td>
+                <td class="vaccine">
                   <a
                     class="link"
                     href="{base}/health/immunizations/vaccine?name={encodeURIComponent(i.name)}"
@@ -354,22 +362,24 @@
                     {i.name}
                   </a>
                 </td>
-                <td>{i.product_name || '—'}</td>
-                <td>{i.dose_label || '—'}</td>
-                <td>{i.facility || '—'}</td>
-                <td class="notes">{i.notes || '—'}</td>
+                <td class="detail">{i.product_name || ''}</td>
+                <td class="detail">{i.dose_label || ''}</td>
+                <td class="detail">{i.facility || ''}</td>
+                <td class="notes">{i.notes || ''}</td>
                 <td class="row-actions">
-                  <KebabMenu
-                    ariaLabel="Immunization actions"
-                    items={[
-                      { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
-                      {
-                        label: 'Delete',
-                        danger: true,
-                        onSelect: () => (deleteTargetId = i.id),
-                      },
-                    ]}
-                  />
+                  <div class="row-actions-inner">
+                    <KebabMenu
+                      ariaLabel="Immunization actions"
+                      items={[
+                        { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
+                        {
+                          label: 'Delete',
+                          danger: true,
+                          onSelect: () => (deleteTargetId = i.id),
+                        },
+                      ]}
+                    />
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -434,6 +444,7 @@
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
+    line-height: 1.4;
     font-size: var(--text-sm);
     box-sizing: border-box;
     min-width: 0;
@@ -522,10 +533,14 @@
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
+    line-height: 1.4;
     font-size: var(--text-sm);
     max-width: 240px;
   }
 
+  .mobile-details {
+    display: none;
+  }
   td.notes {
     max-width: 260px;
     overflow: hidden;
@@ -538,7 +553,7 @@
     text-align: right;
     white-space: nowrap;
   }
-  td.row-actions {
+  .row-actions-inner {
     display: flex;
     justify-content: flex-end;
     gap: var(--space-1);
@@ -551,5 +566,84 @@
   a.link:hover {
     color: var(--accent-hover);
     border-bottom-color: var(--text-muted);
+  }
+
+  @media (max-width: 768px) {
+    .header,
+    .history-head {
+      flex-direction: column;
+      align-items: stretch;
+      gap: var(--space-2);
+    }
+    .header {
+      margin-bottom: var(--space-3);
+    }
+    .actions {
+      flex-wrap: wrap;
+    }
+    .filter-input {
+      width: 100%;
+      max-width: none;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+  }
+
+  @media (max-width: 639px) {
+    .history table.grid,
+    .history tbody {
+      display: block;
+    }
+    .history thead {
+      display: none;
+    }
+    .history tbody tr {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: var(--space-1) 0;
+      padding: var(--space-3) 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .history table.grid tbody td {
+      display: block;
+      min-width: 0;
+      max-width: 100%;
+      padding: 0;
+      border: 0;
+      overflow-wrap: anywhere;
+    }
+    .history table.grid tbody td.vaccine {
+      order: -2;
+      flex: 1 1 calc(100% - var(--touch-comfort));
+      padding-right: var(--space-2);
+      font-size: var(--text-base);
+    }
+    .history table.grid tbody td.row-actions {
+      order: -1;
+      flex: 0 0 var(--touch-comfort);
+      align-self: flex-start;
+    }
+    .history .row-actions-inner {
+      min-height: var(--touch-min);
+      align-items: center;
+    }
+    .history table.grid tbody td.vaccine,
+    .history table.grid tbody td.date {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history td.date {
+      flex-basis: 100%;
+      color: var(--text-muted);
+    }
+    .mobile-details {
+      display: inline;
+    }
+    .history table.grid tbody td.detail,
+    .history table.grid tbody td.notes {
+      display: none;
+    }
   }
 </style>
