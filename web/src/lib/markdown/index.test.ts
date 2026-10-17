@@ -103,7 +103,7 @@ describe.each([
     it('draws an <img> for the chat-files endpoint', () => {
       const html = renderMarkdown(`![Doppler radar](${png})`);
       expect(html).toContain('<img');
-      expect(html).toContain('class="md-image"');
+      expect(html).toContain('class="md-image embed"');
       expect(html).toContain(`src="${png}"`);
       expect(html).toContain('alt="Doppler radar"');
       // Off the critical path: a transcript can hold many of these, and the
@@ -196,7 +196,7 @@ describe.each([
       // apart. This one renders the real builder's own output.
       const html = renderMarkdown(`![radar](${chatFileUrl('/Users/u/istota/radar.png')})`);
       expect(html).toContain('<img');
-      expect(html).toContain('class="md-image"');
+      expect(html).toContain('class="md-image embed"');
     });
 
     it('renders an empty destination as its alt text, not an empty link', () => {
@@ -247,7 +247,7 @@ describe.each([
       // an admitted image onto the degrade-to-a-link branch.
       const html = renderMarkdown(`![radar](${png}#w=800&h=600)`);
       expect(html).toContain('<img');
-      expect(html).toContain('class="md-image"');
+      expect(html).toContain('class="md-image embed"');
       expect(html).toContain(
         'src="/istota/api/chat/files?path=%2FUsers%2Fu%2Fx.png#w=800&amp;h=600"',
       );
@@ -261,26 +261,26 @@ describe.each([
 
     /**
      * The ratio is not a duplicate of the two attributes — it is what lets the
-     * stylesheet state the 50vh cap as a bound on WIDTH. As a `max-height` the
+     * stylesheet state the height cap as a bound on WIDTH. As a `max-height` the
      * cap clamps the height of an element whose width the attributes have made
      * specified, and the width does not follow: the picture stretches, measured
      * at x1.23 on a 4:3 capture and x9.68 on a tall one with correct hints.
      */
     it('emits the ratio the width cap is derived from', () => {
       const html = renderMarkdown(`![radar](${png}#w=1439&h=812)`);
-      expect(html).toContain('style="--md-img-ratio:1.772167"');
+      expect(html).toContain('style="--embed-ratio:1.772167"');
     });
 
     it('emits a ratio a tall image can be capped by', () => {
       // 0.2 rather than something that rounds to zero, which would be a
       // `max-width: 0` and an invisible image.
       const html = renderMarkdown(`![tall](${png}#w=800&h=4000)`);
-      expect(html).toContain('style="--md-img-ratio:0.200000"');
+      expect(html).toContain('style="--embed-ratio:0.200000"');
     });
 
     it('emits no ratio without a usable hint, so the cap stays inert', () => {
       for (const frag of ['', '#w=1439', '#w=0&h=812']) {
-        expect(renderMarkdown(`![radar](${png}${frag})`)).not.toContain('--md-img-ratio');
+        expect(renderMarkdown(`![radar](${png}${frag})`)).not.toContain('--embed-ratio');
       }
     });
 
@@ -289,7 +289,7 @@ describe.each([
       // are already validated integers, so this pins that the quotient of the
       // most extreme admissible pair is still inert text.
       const html = renderMarkdown(`![x](${png}#w=1&h=20000)`);
-      const ratio = html.match(/--md-img-ratio:([^"]*)"/)?.[1] ?? '';
+      const ratio = html.match(/--embed-ratio:([^"]*)"/)?.[1] ?? '';
       expect(ratio).toMatch(/^[0-9]+\.[0-9]+$/);
       expect(Number(ratio)).toBeGreaterThan(0);
     });
@@ -345,7 +345,7 @@ describe.each([
 
     it('still draws and still sizes the image', () => {
       expect(linked()).toContain('<img');
-      expect(linked()).toContain('class="md-image md-image-linked"');
+      expect(linked()).toContain('class="md-image embed md-image-linked"');
     });
 
     it('withholds the lightbox affordance, so the anchor is the only control', () => {
