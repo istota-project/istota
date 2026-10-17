@@ -388,6 +388,41 @@ class TestTheStackFilesComeBack:
         assert (vm_dir / "stack.env").read_text() == STACK_ENV
         assert DATE in out
 
+    def test_an_empty_web_session_secret_is_minted(self, world, vm_dir):
+        """`ensure_secret_files` leaves every secret empty on the new VM, and
+        `web` will not start without a session signing key. No backup holds
+        one, and a new key only signs everyone out."""
+        secrets_dir = vm_dir / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "istota_web_session_secret_key").write_text("")
+        (secrets_dir / "istota_nextcloud_app_password").write_text("")
+        world.back_up()
+        world.lose_the_vm()
+        rc, out, err = world.restore("--vm-dir", str(vm_dir))
+        assert rc == 0, out + err
+        secret = secrets_dir / "istota_web_session_secret_key"
+        assert re.fullmatch(r"[0-9a-f]{64}", secret.read_text())
+        assert secret.stat().st_mode & 0o777 == 0o400
+        assert (secrets_dir / "istota_nextcloud_app_password").read_text() == ""
+
+    def test_a_web_session_secret_already_there_is_kept(self, world, vm_dir):
+        secrets_dir = vm_dir / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "istota_web_session_secret_key").write_text("kept-" * 8)
+        world.back_up()
+        world.lose_the_vm()
+        rc, out, err = world.restore("--vm-dir", str(vm_dir))
+        assert rc == 0, out + err
+        assert (secrets_dir / "istota_web_session_secret_key").read_text() == "kept-" * 8
+
+    def test_a_refused_restore_mints_nothing(self, world, vm_dir):
+        secrets_dir = vm_dir / "secrets"
+        secrets_dir.mkdir()
+        (secrets_dir / "istota_web_session_secret_key").write_text("")
+        rc, _, err = world.restore("--vm-dir", str(vm_dir))
+        assert rc == 1, err
+        assert (secrets_dir / "istota_web_session_secret_key").read_text() == ""
+
     def test_with_no_copy_at_all_nothing_is_handed_back(self, world, vm_dir):
         world.back_up()
         world.lose_the_vm()

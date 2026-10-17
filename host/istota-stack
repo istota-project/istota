@@ -2259,7 +2259,9 @@ cmd_restore() {
     trap 'rm -rf "${staging:-}"' EXIT
     staging="$(mktemp -d "${STACK}/.restore.XXXXXX")"
     if [ "$(id -u)" -eq 0 ]; then chown "$ISTOTA_UID:$ISTOTA_UID" "$staging"; fi
-    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/vm" \
+    # secrets/ goes in for the web session key, which no backup holds and web
+    # cannot start without; the module mints it only where it is empty.
+    ISTOTA_CONFIG_READ_ONLY=false oneshot -v "${staging}:/vm" -v "${SECRETS_DIR}:/vm/secrets" \
         "$(main_service)" istota migrate restore-workspace --vm-dir /vm "$@" || rc=$?
     # 1 is a refusal with nothing written; 2 is partial, with the config in place.
     [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || exit "$rc"
