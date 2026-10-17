@@ -3,9 +3,10 @@
 ``web_app`` and the first-run setup server both need them, and the setup
 server must run with no config, so it cannot import ``web_app`` (which loads
 config at import). Each app keeps its own policy around these: ``web_app``
-compares the origin with ``[site] hostname`` and skips the check in no-auth
-mode; the setup server compares it with the request's own ``Host``. The
-``Host`` check is ``web_app``'s alone, on an install with local login codes.
+compares the origin with ``[site] hostname``, or in no-auth mode with the
+loopback names; the setup server compares it with the request's own ``Host``.
+The ``Host`` check is ``web_app``'s alone, on an install with local login
+codes or no-auth.
 
 Stdlib only at import; Starlette's ``ClientDisconnect`` is imported where it
 is caught.

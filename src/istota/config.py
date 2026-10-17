@@ -1355,9 +1355,23 @@ def local_login_hosts(hostname: str) -> frozenset[str]:
         return frozenset()
     if not (port.isascii() and port.isdigit()) or port.startswith("0") or not 0 < int(port) < 65536:
         return frozenset()
-    hosts = {f"localhost:{port}", f"127.0.0.1:{port}"}
-    if port == "80":
-        hosts |= {"localhost", "127.0.0.1"}
+    return _loopback_hosts(int(port), ("localhost", "127.0.0.1"))
+
+
+def no_auth_hosts(port: int) -> frozenset[str]:
+    """The ``Host`` values an ``auth = "none"`` listener answers at.
+
+    The ``local_code`` rule applied to the port ``istota serve`` bound, with
+    ``[::1]`` added because serve may bind it. There is no ``[site] hostname``
+    to derive from: a development config names none.
+    """
+    return _loopback_hosts(port, ("localhost", "127.0.0.1", "[::1]"))
+
+
+def _loopback_hosts(port: int, names: tuple[str, ...]) -> frozenset[str]:
+    hosts = {f"{name}:{port}" for name in names}
+    if port == 80:
+        hosts |= set(names)
     return frozenset(hosts)
 
 WEB_TOKEN_STORAGE_MODES = ("ephemeral", "encrypted")

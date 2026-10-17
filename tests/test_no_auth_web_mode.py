@@ -296,13 +296,18 @@ class TestLoopbackGuard:
 class TestNoAuthWebMode:
     @pytest.fixture
     def app(self, tmp_path):
+        from istota import db
+
         cfg = _no_auth_config(tmp_path)
+        # /api/me reads the user's profile, which needs the schema that
+        # `istota init` creates before `istota serve` ever runs.
+        db.init_db(cfg.db_path)
         return _patch_app(cfg)
 
     @pytest.fixture
     async def client(self, app):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://localhost") as c:
+        async with AsyncClient(transport=transport, base_url="http://localhost:8766") as c:
             yield c
 
     async def test_api_me_no_session_returns_local_admin(self, client):
@@ -336,6 +341,108 @@ class TestNoAuthWebMode:
 
         user = mod._require_api_auth(_FakeReq())
         assert user["username"] == "alice"
+
+
+@_needs_web_deps
+class TestNoAuthHostAndOrigin:
+    """ISSUE-778: no-auth answers only at its loopback names, and a browser
+    POST from another site is refused, against DNS rebinding and CSRF."""
+
+    @pytest.fixture
+    def app(self, tmp_path):
+        from istota import db
+
+        cfg = _no_auth_config(tmp_path)
+        db.init_db(cfg.db_path)
+        return _patch_app(cfg)
+
+    def _client(self, app, host):
+        return AsyncClient(transport=ASGITransport(app=app), base_url=f"http://{host}")
+
+    def _room_count(self, app, name):
+        from istota import db
+
+        with db.get_db(app.state.istota_config.db_path) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM web_chat_rooms WHERE name = ?", (name,)
+            ).fetchone()[0]
+
+    @pytest.mark.parametrize("host", [
+        "evil.example", "evil.example:8766", "localhost:9999",
+        "127.0.0.2:8766", "localhost.evil.example:8766",
+    ])
+    async def test_a_foreign_host_is_refused_on_api_me(self, app, host):
+        async with self._client(app, host) as client:
+            resp = await client.get("/istota/api/me")
+        assert resp.status_code == 403
+        assert "alice" not in resp.text
+
+    async def test_a_foreign_host_is_refused_on_a_post(self, app):
+        async with self._client(app, "evil.example:8766") as client:
+            resp = await client.post(
+                "/istota/api/chat/rooms", json={"name": "planted"},
+                headers={"origin": "http://evil.example:8766"},
+            )
+        assert resp.status_code == 403
+        assert self._room_count(app, "planted") == 0
+
+    @pytest.mark.parametrize("headers", [
+        {"origin": "http://evil.example"},
+        {"origin": "null"},
+        {"referer": "http://evil.example/page"},
+    ])
+    async def test_a_foreign_origin_is_refused_on_a_post(self, app, headers):
+        async with self._client(app, "localhost:8766") as client:
+            resp = await client.post(
+                "/istota/api/chat/rooms", json={"name": "planted"}, headers=headers,
+            )
+        assert resp.status_code == 403
+        assert self._room_count(app, "planted") == 0
+
+    @pytest.mark.parametrize("host,origin", [
+        ("localhost:8766", "http://localhost:8766"),
+        ("127.0.0.1:8766", "http://127.0.0.1:8766"),
+        ("[::1]:8766", "http://[::1]:8766"),
+        # The Vite dev server proxies the API with changeOrigin, so the Host
+        # is the app's while the page's Origin is the dev server's.
+        ("localhost:8766", "http://localhost:5173"),
+    ])
+    async def test_loopback_host_and_origin_work(self, app, host, origin):
+        async with self._client(app, host) as client:
+            me = await client.get("/istota/api/me")
+            assert me.status_code == 200
+            assert me.json()["username"] == "alice"
+            resp = await client.post(
+                "/istota/api/chat/rooms", json={"name": "mine"},
+                headers={"origin": origin},
+            )
+        assert resp.status_code == 200, resp.text
+
+    async def test_a_post_with_no_origin_still_works(self, app):
+        # curl and scripts send neither header; a browser POST always sends Origin.
+        async with self._client(app, "localhost:8766") as client:
+            resp = await client.post("/istota/api/chat/rooms", json={"name": "mine"})
+        assert resp.status_code == 200, resp.text
+
+    async def test_the_port_is_the_one_serve_bound(self, app):
+        app.state.local_no_auth_port = 9123
+        try:
+            async with self._client(app, "localhost:9123") as client:
+                assert (await client.get("/istota/api/me")).status_code == 200
+            async with self._client(app, "localhost:8766") as client:
+                assert (await client.get("/istota/api/me")).status_code == 403
+        finally:
+            app.state.local_no_auth_port = None
+
+    def test_a_websocket_with_a_foreign_host_is_closed(self, app):
+        from starlette.testclient import TestClient
+        from starlette.websockets import WebSocketDisconnect
+
+        client = TestClient(app, base_url="http://evil.example:8766")
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/istota/api/anything"):
+                pass
+        assert exc.value.code == 1008
 
 
 @_needs_web_deps

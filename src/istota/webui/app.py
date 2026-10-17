@@ -71,7 +71,7 @@ from istota.lib.filenames import filename_parts
 from istota.brain import make_brain
 from .chat_files import ChatFileError, open_chat_file
 from .fd_response import fd_file_response
-from istota.config import Config, load_config, local_login_hosts, refresh_user_profiles_if_changed
+from istota.config import Config, load_config, local_login_hosts, no_auth_hosts, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.lib.workspace_marker import storage_mode
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
@@ -278,11 +278,28 @@ app.add_middleware(
 )
 
 
-class _LocalLoginHostGuard:
-    """On an install with local login codes, answer only at its loopback names.
+def _trusted_loopback_hosts(config: Config) -> frozenset[str] | None:
+    """The ``Host`` values a loopback-only install answers at, or None for any.
 
+    ``local_code`` derives them from ``[site] hostname``; no-auth from the
+    port ``istota serve`` bound, which ``--port`` can make differ from
+    ``[web] port``.
+    """
+    if config.web.has_method("local_code"):
+        return local_login_hosts(config.site.hostname)
+    if config.web.has_method("none"):
+        port = getattr(app.state, "local_no_auth_port", None) or config.web.port
+        return no_auth_hosts(port)
+    return None
+
+
+class _LocalLoginHostGuard:
+    """On a loopback-only install, answer only at its loopback names.
+
+    That is an install with local login codes, or no-auth on a checkout.
     Against DNS rebinding: a page on another name resolving to 127.0.0.1 would
-    otherwise reach the login code route and the API with its own ``Host``.
+    otherwise reach the login code route and the API with its own ``Host``,
+    and in no-auth mode the API as the local administrator (ISSUE-778).
     Pure ASGI rather than ``@app.middleware``, which would wrap every
     streamed response.
     """
@@ -292,11 +309,13 @@ class _LocalLoginHostGuard:
 
     async def __call__(self, scope, receive, send) -> None:
         config = _config
-        if (scope["type"] in ("http", "websocket") and config is not None
-                and config.web.has_method("local_code")):
+        allowed = None
+        if scope["type"] in ("http", "websocket") and config is not None:
+            allowed = _trusted_loopback_hosts(config)
+        if allowed is not None:
             from starlette.datastructures import Headers
 
-            if host_refusal(Headers(scope=scope), local_login_hosts(config.site.hostname)):
+            if host_refusal(Headers(scope=scope), allowed):
                 if scope["type"] == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
                 else:
@@ -326,6 +345,7 @@ async def _root_redirect() -> RedirectResponse:
 # ============================================================================
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0"})
+_NO_AUTH_ORIGIN_HOSTS = ("localhost", "127.0.0.1", "[::1]")
 
 
 def is_loopback_host(host: str) -> bool:
@@ -501,12 +521,17 @@ def _require_admin(user: dict = Depends(_require_api_auth)) -> dict:
 def _verify_origin(request: Request) -> None:
     """Check Origin/Referer header against configured hostname for CSRF protection.
 
-    No-op in no-auth mode: the loopback-only bind (enforced at startup) means
-    there is no cross-site attacker, and requiring an Origin header would 403
-    tools/curl calls with none.
+    In no-auth mode a page on any site can still POST to the loopback port, so
+    an Origin or Referer must name a loopback host (ISSUE-778). The port is not
+    compared, which admits the Vite dev server. A request carrying neither is
+    let through: curl sends none, and a browser POST always sends Origin.
     """
     if _no_auth_mode():
-        return
+        if not (request.headers.get("origin") or request.headers.get("referer")):
+            return
+        if any(origin_refusal(request.headers, name) is None for name in _NO_AUTH_ORIGIN_HOSTS):
+            return
+        raise _ForbiddenException("origin mismatch")
     if not (request.headers.get("origin") or request.headers.get("referer")):
         raise _ForbiddenException("missing origin")
     if not _config or not _config.site.hostname:
