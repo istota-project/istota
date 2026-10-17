@@ -33,6 +33,12 @@ libc = "0.2"
 # The negative control for row M9: the web UI in a stock Tauri webview, which
 # carries Tauri's IPC globals. Built only by `scripts/test-desktop.sh --control m9`.
 m9-negative-control = []
+# The negative control for row M6: the master key written to the Keychain with
+# it on an argv (testhooks.rs). Built only by `scripts/test-desktop.sh --control m6`.
+m6-negative-control = ["desktop-test-hooks"]
+# The desktop tier's hooks (testhooks.rs): a first run started from the
+# environment. Built only by scripts/test-desktop.sh; no release build has it.
+desktop-test-hooks = []
 
 [profile.release]
 codegen-units = 1

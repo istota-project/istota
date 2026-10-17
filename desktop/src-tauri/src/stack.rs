@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
-use crate::paths::{Paths, INSTANCE};
+use crate::paths::{Paths, CLI_INSTALL_INSTANCE};
 
 /// Which script owns a verb: the Mac CLI itself, or the VM's `istota-stack`,
 /// which the Mac CLI forwards every verb it does not handle to.
@@ -179,9 +179,9 @@ impl Call<'_> {
     /// What the call reads on stdin. `destroy`, and `restore` over an
     /// existing VM, ask for the instance's name before deleting it; the app
     /// asked its own confirmation first and answers for the user.
-    pub fn stdin(&self) -> Option<String> {
+    pub fn stdin(&self, instance: &str) -> Option<String> {
         match self {
-            Call::Destroy | Call::Restore { .. } => Some(format!("{INSTANCE}\n")),
+            Call::Destroy | Call::Restore { .. } => Some(format!("{instance}\n")),
             _ => None,
         }
     }
@@ -232,7 +232,7 @@ pub fn environment(paths: &Paths) -> Vec<(String, String)> {
         ("PATH".to_string(), paths.search_path()),
         ("LIMA_HOME".to_string(), paths.lima_home().display().to_string()),
         ("XDG_CONFIG_HOME".to_string(), paths.cli_config_home().display().to_string()),
-        ("ISTOTA_LIMA_INSTANCE".to_string(), INSTANCE.to_string()),
+        ("ISTOTA_LIMA_INSTANCE".to_string(), paths.instance.clone()),
         ("ISTOTA_MAC_BIN_DIR".to_string(), paths.cli_bin_dir().display().to_string()),
     ];
     for key in ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG"] {
@@ -294,7 +294,7 @@ fn cli_install_environment(home: &Path, search_path: &str) -> Vec<(String, Strin
         ("PATH".to_string(), search_path.to_string()),
         ("HOME".to_string(), home.display().to_string()),
         ("LIMA_HOME".to_string(), home.join(".lima").display().to_string()),
-        ("ISTOTA_LIMA_INSTANCE".to_string(), INSTANCE.to_string()),
+        ("ISTOTA_LIMA_INSTANCE".to_string(), CLI_INSTALL_INSTANCE.to_string()),
     ];
     for key in ["USER", "LOGNAME", "TMPDIR", "LANG"] {
         if let Some(value) = std::env::var_os(key) {
@@ -492,9 +492,9 @@ mod tests {
             ["restore", "--date", "2026-10-01", "--appliance", "/s/release/v1.0.0", "--workspace", "/Users/a/Istota"]
         );
         assert_eq!(call.display(), "istota-stack restore --date … --appliance … --workspace …");
-        assert_eq!(call.stdin().as_deref(), Some("istota\n"));
-        assert_eq!(Call::Destroy.stdin().as_deref(), Some("istota\n"));
-        assert_eq!(Call::Start.stdin(), None);
+        assert_eq!(call.stdin("istota").as_deref(), Some("istota\n"));
+        assert_eq!(Call::Destroy.stdin("istota-d9").as_deref(), Some("istota-d9\n"));
+        assert_eq!(Call::Start.stdin("istota"), None);
         assert_eq!(Call::HostEnvSet(LOCAL_LAYERS, "").argv(), ["host-env", "ISTOTA_LOCAL_LAYERS="]);
     }
 
@@ -572,5 +572,19 @@ mod tests {
         assert_eq!(get("ISTOTA_MAC_BIN_DIR").as_deref(), Some("/s/bin"));
         assert!(get("PATH").unwrap().starts_with("/A/Contents/Resources/bin:"));
         assert_eq!(get("XDG_DATA_HOME"), None);
+    }
+
+    #[test]
+    fn another_instance_reaches_the_cli_but_not_the_command_line_install() {
+        let paths = Paths::new("/s".into(), "/A/Contents/Resources".into()).with_instance("istota-d9".into());
+        let env = environment(&paths);
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        assert_eq!(get("ISTOTA_LIMA_INSTANCE").as_deref(), Some("istota-d9"));
+        let stop = cli_install_stop(&paths, Path::new("/nonexistent-home"));
+        let instance = stop
+            .get_envs()
+            .find(|(k, _)| *k == "ISTOTA_LIMA_INSTANCE")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(instance.as_deref(), Some("istota"));
     }
 }

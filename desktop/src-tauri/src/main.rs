@@ -16,6 +16,7 @@ mod paths;
 mod profiles;
 mod settings;
 mod stack;
+mod testhooks;
 mod vm;
 mod watch;
 mod web;
@@ -275,6 +276,12 @@ fn on_vm_state(app: &AppHandle, state: &VmState) {
     }
     // The web setup is the first-run form: it opens in the app's own window.
     if let VmState::Setup { url } = state {
+        // The tier answers the setup itself: the page would spend its one-use code.
+        if testhooks::first_run_folder().is_some() {
+            web::open_externally(url);
+            publish(app);
+            return;
+        }
         match Url::parse(url) {
             Ok(url) => open_web_window(app, LOCAL_WINDOW, "Istota setup", url),
             Err(err) => (shared.log)(&format!("the setup address did not parse: {err}")),
@@ -394,7 +401,7 @@ fn shared_workspace_refusal(shared: &Shared, folder: &Path) -> Result<(), String
         return Ok(());
     }
     let listed = stack::run(stack::cli_install_list(&shared.paths, &shared.home), |_| {});
-    let running = listed.ok() && vm::parse_list(&listed.stdout) == vm::Listed::Running;
+    let running = listed.ok() && vm::parse_list(&listed.stdout, paths::CLI_INSTALL_INSTANCE) == vm::Listed::Running;
     if firstrun::shares_a_running_workspace(&cli_folder, folder, running) {
         return Err(firstrun::SHARED_WORKSPACE.into());
     }
@@ -475,9 +482,11 @@ fn make_local(app: &AppHandle, job: Job, folder: &Path, date: Option<String>) ->
             Some("Your command-line Istota is stopped and left as it was. Once Istota works here, delete it with `istota-stack destroy` in Terminal.".into()),
         );
     }
+    #[cfg(feature = "m6-negative-control")]
+    testhooks::put_the_master_key_on_an_argv(&shared.paths.instance, &*shared.log);
     start_layers(app);
     open_local(app)?;
-    if first && !lifecycle::launch_at_login_enabled() {
+    if first && !lifecycle::launch_at_login_enabled() && testhooks::first_run_folder().is_none() {
         offer_launch_at_login(app);
     }
     Ok(())
@@ -921,7 +930,7 @@ fn locate_folder(app: AppHandle) {
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     let handle = app.handle().clone();
-    let paths = Paths::new(Paths::default_state_dir(), app.path().resource_dir()?);
+    let paths = Paths::new(Paths::default_state_dir(), app.path().resource_dir()?).with_instance(Paths::default_instance()?);
     paths.ensure()?;
     let log_path = paths.app_log();
     let log: Log = Arc::new(move |line: &str| logs::append(&log_path, line));
@@ -983,6 +992,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             let state = shared.supervisor.adopt_or_start(ready);
+            if let (VmState::Absent, Some(folder)) = (&state, testhooks::first_run_folder()) {
+                (shared.log)("first run started by ISTOTA_DESKTOP_FIRST_RUN_FOLDER (desktop-test-hooks)");
+                return make_local(app, Job::Create, &folder, None);
+            }
             if matches!(state, VmState::Running) {
                 // A layer that failed for want of a network is tried again now.
                 start_layers(app);

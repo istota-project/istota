@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-use crate::paths::{Paths, INSTANCE};
+use crate::paths::Paths;
 use crate::stack::{self, Call, Outcome};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -176,12 +176,12 @@ pub fn next(state: &VmState, event: Event) -> VmState {
 
 /// The instance `limactl list --json` reports for the app's VM. It prints one
 /// JSON object per instance and nothing when there are none.
-pub fn parse_list(stdout: &str) -> Listed {
+pub fn parse_list(stdout: &str, instance: &str) -> Listed {
     for line in stdout.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if value.get("name").and_then(|n| n.as_str()) != Some(INSTANCE) {
+        if value.get("name").and_then(|n| n.as_str()) != Some(instance) {
             continue;
         }
         return match value.get("status").and_then(|s| s.as_str()).unwrap_or("") {
@@ -266,7 +266,7 @@ impl Supervisor {
     ) -> Outcome {
         let command = stack::command(&self.paths, call);
         (self.lines)(&format!("$ {}", call.display()));
-        let outcome = stack::run_with(command, call.stdin(), on_spawn, |line| {
+        let outcome = stack::run_with(command, call.stdin(&self.paths.instance), on_spawn, |line| {
             if log_output {
                 (self.lines)(line);
             }
@@ -294,7 +294,7 @@ impl Supervisor {
                 tail: outcome.tail,
             }));
         }
-        self.apply(Event::Listed(parse_list(&outcome.stdout)))
+        self.apply(Event::Listed(parse_list(&outcome.stdout, &self.paths.instance)))
     }
 
     /// What the app does at launch: adopt a running VM, start a stopped one.
@@ -332,7 +332,7 @@ impl Supervisor {
         *self.making.lock().unwrap() = None;
         if self.cancelled.swap(false, Ordering::SeqCst) && !outcome.ok() {
             let listed = stack::run(stack::limactl_list(&self.paths), |_| {});
-            if listed.ok() && parse_list(&listed.stdout) == Listed::Running {
+            if listed.ok() && parse_list(&listed.stdout, &self.paths.instance) == Listed::Running {
                 self.call(&Call::Stop, true, |_| {});
             }
             return self.apply(Event::Cancelled(call.step().to_string()));
@@ -512,9 +512,11 @@ mod tests {
             r#"{"name":"other","status":"Running"}"#, "\n",
             r#"{"name":"istota","status":"Stopped","dir":"/x"}"#, "\n",
         );
-        assert_eq!(parse_list(out), Listed::Stopped);
-        assert_eq!(parse_list(""), Listed::None);
-        assert_eq!(parse_list(r#"{"name":"istota","status":"Broken"}"#), Listed::Other("Broken".into()));
+        assert_eq!(parse_list(out, "istota"), Listed::Stopped);
+        assert_eq!(parse_list(out, "istota-d9"), Listed::None);
+        assert_eq!(parse_list(r#"{"name":"istota-d9","status":"Running"}"#, "istota-d9"), Listed::Running);
+        assert_eq!(parse_list("", "istota"), Listed::None);
+        assert_eq!(parse_list(r#"{"name":"istota","status":"Broken"}"#, "istota"), Listed::Other("Broken".into()));
     }
 
     /// A fake Mac CLI and limactl: each records its argv and the environment

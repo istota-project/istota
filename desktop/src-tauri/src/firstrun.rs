@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::logs::redact_line;
-use crate::paths::{env_file_value, Paths, INSTANCE};
+use crate::paths::{env_file_value, Paths, CLI_INSTALL_INSTANCE};
 use crate::stack::{self, TAIL_LINES};
 use crate::vm;
 
@@ -69,7 +69,7 @@ pub struct Offers {
 }
 
 pub fn offers(home: &Path) -> Offers {
-    let cli_install = home.join(".lima").join(INSTANCE).is_dir();
+    let cli_install = home.join(".lima").join(CLI_INSTALL_INSTANCE).is_dir();
     Offers {
         cli_install,
         standalone: !cli_install && home.join(".istota").is_dir(),
@@ -80,7 +80,7 @@ pub fn offers(home: &Path) -> Offers {
 /// The folder the command-line install's state file names, as its
 /// `workspace_or_default` reads it.
 pub fn cli_install_workspace(home: &Path) -> PathBuf {
-    std::fs::read_to_string(home.join(".config/istota-stack").join(format!("{INSTANCE}.env")))
+    std::fs::read_to_string(home.join(".config/istota-stack").join(format!("{CLI_INSTALL_INSTANCE}.env")))
         .ok()
         .and_then(|text| env_file_value(&text, "WORKSPACE"))
         .map(PathBuf::from)
@@ -98,7 +98,7 @@ pub fn shares_a_running_workspace(cli_workspace: &Path, ours: &Path, cli_running
 /// It is listed and stopped in `~/.lima`, and nothing else is done to it.
 pub fn stop_cli_install(paths: &Paths, home: &Path, log: &dyn Fn(&str)) -> Result<(), String> {
     let listed = stack::run(stack::cli_install_list(paths, home), |_| {});
-    if !(listed.ok() && vm::parse_list(&listed.stdout) == vm::Listed::Running) {
+    if !(listed.ok() && vm::parse_list(&listed.stdout, CLI_INSTALL_INSTANCE) == vm::Listed::Running) {
         return Ok(());
     }
     log("$ istota-stack stop (the command-line install)");
