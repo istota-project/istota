@@ -57,6 +57,11 @@ def _clock() -> float:
     return time.monotonic()
 
 
+def _sleep(seconds: float) -> None:
+    """The run's wait between polls. Tests replace this."""
+    time.sleep(seconds)
+
+
 # --------------------------------------------------------------------------- #
 # Parser
 # --------------------------------------------------------------------------- #
@@ -197,7 +202,7 @@ def _verb(verb: str):
         config = ctx["config"]
         clock = _clock
         run = Run(config=config, tier=tier, user_id=ctx["user_id"],
-                  deadline=run_deadline(config, clock), clock=clock,
+                  deadline=run_deadline(config, clock), clock=clock, sleep=_sleep,
                   transport=_transport(), resolve=_resolver())
         try:
             return handler(run, args)

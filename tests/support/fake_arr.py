@@ -31,6 +31,11 @@ def fixture(name: str):
     return json.loads((FIXTURES / name).read_text())
 
 
+def api_path(request: httpx.Request) -> str:
+    """A recorded request's path below the API prefix: ``album/monitor``."""
+    return _API_PREFIX.sub("", request.url.path)
+
+
 def url(app: str) -> str:
     return f"http://{HOST}:{PORTS[app]}"
 

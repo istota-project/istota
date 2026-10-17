@@ -9,6 +9,7 @@ returns nothing at all.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -42,6 +43,7 @@ class Run:
     user_id: str
     deadline: float
     clock: Callable[[], float]
+    sleep: Callable[[float], None] = time.sleep
     transport: object = None
     resolve: Callable | None = None
     clients: dict[str, ArrClient] = field(default_factory=dict)
