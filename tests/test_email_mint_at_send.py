@@ -79,10 +79,10 @@ def deferred(tmp_path, monkeypatch, task):
 
 
 def _send(config, task, deferred, *, to, cc=None, subject="Saturday",
-          body="Are you free on Saturday?"):
+          body="Are you free on Saturday?", html=False):
     """`email send` in the sandbox, then the scheduler's replay of its file."""
     args = SimpleNamespace(to=to, subject=subject, body=body, body_file=None,
-                           html=False, cc=cc, bcc=None, attach=None, reply_to=None)
+                           html=html, cc=cc, bcc=None, attach=None, reply_to=None)
     with patch("istota.skills.email.send_email", return_value=SENT):
         assert cmd_send(args)["status"] == "ok"
     _process_deferred_sent_emails(config, task, deferred)
@@ -282,6 +282,100 @@ class TestEveryRecordingPoint:
         assert _people(config, token) == {ANA: "guest"}
         assert _rows(config, "SELECT conversation_token FROM sent_emails") == [
             {"conversation_token": token}]
+
+
+_HTML = ('<p><strong>This week</strong></p>'
+         '<p>Read <a href="https://example.com/list">the list</a>.</p>')
+
+
+class TestAnHtmlMailIsRecordedAsItsText:
+    """A mail sent as HTML lands in its room as the text part a plain-text
+    reader sees, never as markup (ISSUE-770)."""
+
+    def _assert_text(self, body):
+        assert "<" not in body
+        assert "This week" in body
+        assert "[the list](https://example.com/list)" in body
+
+    def test_email_send_html(self, config, task, deferred):
+        _send(config, task, deferred, to=ANA, body=_HTML, html=True)
+
+        rows = _messages(config, _room(config))
+        assert len(rows) == 1
+        self._assert_text(rows[0]["body"])
+
+    def test_a_released_html_draft(self, config, task):
+        with db.get_db(config.db_path) as conn:
+            draft_id = drafts.hold(
+                conn, user_id=HOST, task_id=task.id, room_token="web-carol",
+                to_addrs=[ANA], cc_addrs=[], bcc_addrs=[],
+                subject="Saturday", body=_HTML, html=True,
+                in_reply_to=None, references=None, attachments=[],
+                origin_target=None, hold_reason="untrusted_recipient",
+            )
+        with patch("istota.skills.email.send_email", return_value=SENT):
+            drafts.release(config, draft_id)
+
+        rows = _messages(config, _room(config))
+        assert len(rows) == 1
+        self._assert_text(rows[0]["body"])
+
+    def test_a_held_html_reply_released_on_a_thread(self, config):
+        """The held card's row is the text, and release must not put the
+        draft's HTML on the card as what was mailed."""
+        from istota.skills.email import plain_part
+
+        task_ids = _poll(config, sender=ANA, to=("bot+carol@test.com",),
+                         message_id="<a8@ext.example>", subject="Question")
+        token = _room(config, "<a8@ext.example>")
+        with db.get_db(config.db_path) as conn:
+            draft_id = drafts.hold(
+                conn, user_id=HOST, task_id=task_ids[0], room_token=token,
+                to_addrs=[ANA], cc_addrs=[], bcc_addrs=[],
+                subject="Re: Question", body=_HTML, html=True,
+                in_reply_to="<a8@ext.example>", references="<a8@ext.example>",
+                attachments=[], origin_target=None, hold_reason="untrusted_recipient",
+            )
+            row = db.add_message(conn, token, role="assistant",
+                                 body=plain_part(_HTML, content_type="html"),
+                                 origin_surface="email", task_id=task_ids[0])
+            db.set_outgoing_mail(conn, row, {"to": [ANA], "cc": [], "subject": "Re: Question",
+                                             "state": "held", "draft_id": draft_id})
+        with patch("istota.skills.email.send_email", return_value="<re-8@test.com>"):
+            drafts.release(config, draft_id)
+
+        card = [m for m in _messages(config, token) if m["role"] == "assistant"][0]
+        assert card["outgoing_mail"]["state"] == "sent"
+        assert "body" not in card["outgoing_mail"]
+
+    @pytest.mark.asyncio
+    async def test_an_html_answer_on_a_thread(self, config):
+        """`email output --html`: the thread's row and its mail card."""
+        from istota.transport.email.outbound import (
+            composed_mail_body, deliver_email_result,
+        )
+
+        task_ids = _poll(config, sender=ANA, to=("bot+carol@test.com",),
+                         message_id="<a9@ext.example>", subject="Question")
+        with db.get_db(config.db_path) as conn:
+            asked = db.get_task(conn, task_ids[0])
+        result = json.dumps({"subject": "", "body": _HTML, "format": "html"})
+        token = _room(config, "<a9@ext.example>")
+        # What the scheduler stores as the thread's row before the send.
+        stored = composed_mail_body(config, asked, result)
+        self._assert_text(stored)
+        with db.get_db(config.db_path) as conn:
+            db.add_message(conn, token, role="assistant", body=stored,
+                           origin_surface="email", task_id=asked.id)
+        with patch("istota.transport.email.outbound.reply_to_email",
+                   return_value="<re-9@test.com>"):
+            assert await deliver_email_result(config, asked, result)
+
+        answer = [m for m in _messages(config, token) if m["role"] == "assistant"]
+        assert len(answer) == 1
+        self._assert_text(answer[0]["body"])
+        assert answer[0]["outgoing_mail"]["state"] == "sent"
+        assert "body" not in answer[0]["outgoing_mail"]
 
 
 class TestRegisteringIsBounded:

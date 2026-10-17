@@ -800,7 +800,11 @@ class TestTheRealSendPath:
     def test_the_html_flag_produces_an_html_part(self, conn, config):
         draft_id = _hold(conn, body="<p>Hi</p>", html=True)
         sent = self._sent(config, draft_id)
-        assert sent["msg"].get_content_type() == "text/html"
+        # With a text part derived from it (ISSUE-770).
+        assert sent["msg"].get_content_type() == "multipart/alternative"
+        plain, rich = sent["msg"].iter_parts()
+        assert rich.get_content().strip() == "<p>Hi</p>"
+        assert plain.get_content().strip() == "Hi"
 
     def test_a_plain_draft_stays_plain(self, conn, config):
         draft_id = _hold(conn)

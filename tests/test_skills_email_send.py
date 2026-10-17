@@ -477,10 +477,36 @@ class TestMultipartAlternative:
         ))
         assert msg.get_content_type() == "text/plain"
 
-    def test_html_content_type_still_sends_single_part_html(self, econf):
-        """The existing single-part HTML path (``content_type='html'``) is intact."""
+    def test_an_html_body_is_sent_with_a_derived_text_part(self, econf):
+        """``content_type='html'`` alone used to send one text/html part, with
+        nothing for a plain-text reader or the thread room card (ISSUE-770)."""
         msg = _capture_sent(lambda: send_email(
-            to="a@out.com", subject="S", body="<p>x</p>", config=econf,
+            to="a@out.com", subject="S", body=_HTML, config=econf,
             content_type="html",
         ))
-        assert msg.get_content_type() == "text/html"
+        assert msg.get_content_type() == "multipart/alternative"
+        plain, rich = list(msg.iter_parts())
+        assert plain.get_content_type() == "text/plain"
+        assert rich.get_content_type() == "text/html"
+        assert rich.get_content().strip() == _HTML
+        text = plain.get_content()
+        assert "<" not in text
+        assert "[the list](https://example.com/list)" in text
+        assert "Books & films" in text
+
+    def test_a_reply_with_an_html_body_is_sent_with_a_derived_text_part(self, econf):
+        from istota.skills.email import reply_to_email
+        msg = _capture_sent(lambda: reply_to_email(
+            to_addr="a@out.com", subject="Orig", body=_HTML, config=econf,
+            in_reply_to="<orig@x>", content_type="html",
+        ))
+        assert msg.get_content_type() == "multipart/alternative"
+        types = [p.get_content_type() for p in msg.iter_parts()]
+        assert types == ["text/plain", "text/html"]
+        assert "<" not in list(msg.iter_parts())[0].get_content()
+
+
+_HTML = (
+    '<p><strong>Books &amp; films</strong></p>'
+    '<p>See <a href="https://example.com/list">the list</a>.</p>'
+)
