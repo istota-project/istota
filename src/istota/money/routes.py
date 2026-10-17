@@ -13,15 +13,16 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import threading
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
@@ -29,6 +30,7 @@ from istota.money.cli import UserContext
 from istota.money.config_store import FILING_STATUSES
 from istota.money.core.tax_data import load_tax_rates
 from istota.money.work import WorkStoreBlocked
+from istota.webui.fd_response import fd_file_response
 from istota.webui.router_stubs import require_auth, verify_origin
 
 logger = logging.getLogger(__name__)
@@ -399,11 +401,14 @@ async def api_clients(user_ctx: UserContext = Depends(get_user_config)):
     return {"status": "ok", "clients": clients}
 
 
+_DEFAULT_INVOICE_OUTPUT = "invoices/generated"
+
+
 def _invoice_output_dir(data_dir: Path, config) -> Path:
     """Where the invoice PDFs are: the config's ``invoice_output`` under ``data_dir``."""
     if config is not None and getattr(config, "invoice_output", None):
         return data_dir / config.invoice_output
-    return data_dir / "invoices" / "generated"
+    return data_dir / _DEFAULT_INVOICE_OUTPUT
 
 
 def _invoice_pdf_flags(records, output_dir: Path) -> dict[str, bool]:
@@ -732,17 +737,17 @@ async def api_invoice_pdf(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """Stream the generated PDF for an invoice, or 404 if not on disk."""
-    from istota.money.core.invoicing import find_invoice_pdf
-
     data_dir = user_ctx.data_dir
     if not data_dir:
         return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
 
     # Prefer the invoicing config's output dir; fall back to the conventional
     # location. config.invoice_output defaults to "invoices/generated".
-    invoice_output_dir = _invoice_output_dir(data_dir, None)
+    invoice_output = _DEFAULT_INVOICE_OUTPUT
     try:
-        invoice_output_dir = _invoice_output_dir(data_dir, _load_invoicing_config(user_ctx))
+        config = _load_invoicing_config(user_ctx)
+        if config is not None and getattr(config, "invoice_output", None):
+            invoice_output = config.invoice_output
     except Exception:
         # Fall back to the default location, but make the miss visible — a
         # custom invoice_output we couldn't read would otherwise 404 silently.
@@ -752,15 +757,70 @@ async def api_invoice_pdf(
             exc_info=True,
         )
 
-    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
-    if pdf is None:
+    opened = await asyncio.to_thread(
+        _open_invoice_pdf, Path(data_dir), invoice_output, invoice_number,
+    )
+    if opened is None:
         return JSONResponse({"status": "error", "error": "pdf not found"}, status_code=404)
 
-    return FileResponse(
-        path=str(pdf),
-        media_type="application/pdf",
-        filename=pdf.name,
-    )
+    fd, name = opened
+    return fd_file_response(fd, filename=name, media_type="application/pdf")
+
+
+def _open_invoice_pdf(
+    data_dir: Path, invoice_output: str, invoice_number: str,
+) -> tuple[int, str] | None:
+    """An fd on the invoice's PDF below ``data_dir``, and its name, or None.
+
+    ``find_invoice_pdf``'s lookup (the first ``Invoice-<n:06d>-*.pdf`` in the
+    sorted year folders), walked without following a link: the output tree is
+    in the user's workspace, which a task can write (ISSUE-775). Every
+    directory below ``data_dir`` is opened ``O_NOFOLLOW``, so an absolute or
+    ``..`` ``invoice_output`` is refused, and the leaf must be a regular file.
+    The caller owns the fd.
+    """
+    from istota.money.core.invoicing import parse_invoice_number
+    from istota.sandbox.attachment_source import open_regular_at
+    from istota.skills._loader import open_overlay_dir
+
+    number = parse_invoice_number(invoice_number)
+    if number is None:
+        return None
+    prefix = f"Invoice-{number:06d}-"
+    out_fd = open_overlay_dir(data_dir, *PurePosixPath(invoice_output).parts)
+    if out_fd is None:
+        return None
+    try:
+        try:
+            with os.scandir(out_fd) as scan:
+                years = sorted(e.name for e in scan if e.is_dir(follow_symlinks=False))
+        except OSError:
+            return None
+        for year in years:
+            try:
+                year_fd = os.open(
+                    year, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=out_fd,
+                )
+            except OSError:
+                continue
+            try:
+                with os.scandir(year_fd) as scan:
+                    names = sorted(
+                        e.name for e in scan
+                        if e.name.startswith(prefix) and e.name.endswith(".pdf")
+                        and e.is_file(follow_symlinks=False)
+                    )
+                for name in names:
+                    fd = open_regular_at(year_fd, name)
+                    if fd is not None:
+                        return fd, name
+            except OSError:
+                continue
+            finally:
+                os.close(year_fd)
+    finally:
+        os.close(out_fd)
+    return None
 
 
 async def _json_object_body(request: Request, *, empty_ok: bool) -> dict | None:

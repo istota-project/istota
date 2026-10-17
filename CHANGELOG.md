@@ -107,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The heartbeat examples no longer show a `[checks.config]` table or a `source` field on task-deadline checks. Neither was ever read, so a self-check's `execution_test` written that way had no effect, and a file copied from them could not be exported by `istota snapshot`. Put a check's settings directly under its `[[checks]]` entry.
 - A timed location share or a card purchase asked for in a WhatsApp group no longer fails with `invalid_preview` when you have a private WhatsApp chat with the bot. The approval now reaches that chat as expected.
 - Files uses your assistant's own name in the robot icon's tooltips, the "How … reaches your files" panel and its notes, instead of always saying "Istota".
+- Downloading an invoice PDF from the web app no longer follows a link placed in the invoice folder (ISSUE-775). A link there could serve a file from outside your workspace, including the web app's own keys. The PDF is now read only from a real file inside the invoice folder, and an invoice folder setting that points outside the money folder is refused.
 
 ## [0.46.0] - 2026-10-14
 

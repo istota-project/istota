@@ -186,6 +186,78 @@ class TestInvoicePdf:
         assert resp.headers["content-type"] == "application/pdf"
         assert resp.content.startswith(b"%PDF")
 
+    def test_download_serves_the_bytes_and_headers(self, make_client, tmp_path):
+        pdf = self._make_pdf(tmp_path)
+        resp = make_client().get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 200
+        assert resp.content == b"%PDF-1.4 fake"
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.headers["content-length"] == str(len(b"%PDF-1.4 fake"))
+        assert resp.headers["content-disposition"] == f'attachment; filename="{pdf.name}"'
+        assert resp.headers["last-modified"]
+        assert resp.headers["etag"]
+
+
+class TestInvoicePdfConfinement:
+    """The PDF route opens the file below ``data_dir`` and follows no link.
+
+    The output tree is in the user's workspace, which a task can write, so a
+    link planted there would otherwise hand the web process's own files to
+    the browser.
+    """
+
+    SECRET = b"outside-sentinel-not-an-invoice"
+
+    @pytest.fixture
+    def outside(self, tmp_path_factory) -> Path:
+        out = tmp_path_factory.mktemp("outside")
+        (out / "secret").write_bytes(self.SECRET)
+        year = out / "2026"
+        year.mkdir()
+        (year / "Invoice-000001-04_15_2026.pdf").write_bytes(self.SECRET)
+        return out
+
+    def _refused(self, client: TestClient) -> None:
+        resp = client.get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 404
+        assert self.SECRET not in resp.content
+
+    def test_symlink_leaf_is_refused(self, make_client, tmp_path, outside):
+        year_dir = tmp_path / "invoices" / "generated" / "2026"
+        year_dir.mkdir(parents=True)
+        (year_dir / "Invoice-000001-04_15_2026.pdf").symlink_to(outside / "secret")
+        self._refused(make_client())
+
+    def test_symlinked_year_directory_is_refused(self, make_client, tmp_path, outside):
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / "2026").symlink_to(outside / "2026", target_is_directory=True)
+        self._refused(make_client())
+
+    def test_symlinked_output_directory_is_refused(self, make_client, tmp_path, outside):
+        (tmp_path / "invoices").mkdir()
+        (tmp_path / "invoices" / "generated").symlink_to(outside, target_is_directory=True)
+        self._refused(make_client())
+
+    def test_absolute_invoice_output_is_refused(self, make_client, tmp_path, outside):
+        cfg = _write_invoicing_config(tmp_path, str(outside))
+        self._refused(make_client(invoicing_config_path=cfg))
+
+    def test_parent_escape_in_invoice_output_is_refused(self, make_client, tmp_path, outside):
+        # tmp_path and `outside` share pytest's base temp dir.
+        assert outside.parent == tmp_path.parent
+        cfg = _write_invoicing_config(tmp_path, f"../{outside.name}")
+        self._refused(make_client(invoicing_config_path=cfg))
+
+    def test_a_real_pdf_beside_a_link_still_downloads(self, make_client, tmp_path, outside):
+        year_dir = tmp_path / "invoices" / "generated" / "2026"
+        year_dir.mkdir(parents=True)
+        (year_dir / "Invoice-000001-01_01_2026.pdf").symlink_to(outside / "secret")
+        (year_dir / "Invoice-000001-04_15_2026.pdf").write_bytes(b"%PDF-1.4 real")
+        resp = make_client().get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 200
+        assert resp.content == b"%PDF-1.4 real"
+
 
 class TestInvoicePaymentMatches:
     def test_lists_live_reviews_and_sync_dates_with_one_match_read(self, make_client, tmp_path, monkeypatch):
