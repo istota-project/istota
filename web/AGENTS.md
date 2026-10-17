@@ -1,5 +1,9 @@
 # Web UI design language
 
+This guide applies to both Claude Code and Codex. Read it from disk in bounded sections through the end before UI work; the automatically injected copy may be truncated. From a root-level session, load it explicitly before planning the change.
+
+Read the shared project memory as directed by the root `AGENTS.md`, especially `feedback_web_alerts_follow_chat.md`. Out-of-band action failures use the existing notice drawer through `notifyError` / `notifyWarning`; lasting conditions use `NoticeBanner`. Field errors and failed sends stay beside their field or message. The detailed rules below govern each case.
+
 Rules for building and changing the SvelteKit frontend in `web/`. Read this before adding a page, a component, or a color.
 
 This file is the single source for the frontend design language — the inventory, the rules, and the reasoning behind each. `.claude/rules/web-ui.md` is its backend counterpart: the route and endpoint map, the admin Logs and Configuration panes, and the settings/module-services split. It does not restate anything here. When the two disagree with the tree, the source files win and both docs are stale.
