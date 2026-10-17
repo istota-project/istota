@@ -1,6 +1,7 @@
 """Explicit owner location disclosures through existing room authority and posts."""
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -666,11 +667,27 @@ def _card_grant_readable(conn, config, card, observation, now):
     return _readable_location_grant(conn, config, grant, terms, now)
 
 
+#: What continues a URL past a match: a character that could be part of it,
+#: or a dot followed by one (a dot alone ends a sentence).
+_URL_CONTINUES = re.compile(r"[0-9A-Za-z/&=?#%_~+\-]|\.[0-9A-Za-z]")
+
+
+def _carries_link(body, url):
+    """Whether ``body`` holds ``url`` whole, not as the prefix of a longer link."""
+    start = body.find(url)
+    while start != -1:
+        end = start + len(url)
+        if not _URL_CONTINUES.match(body, end):
+            return True
+        start = body.find(url, start + 1)
+    return False
+
+
 def location_cards_for_answer(conn, config, *, task_id, room_token, body):
     """The cards a task's answer carries, and their ids, for the row about to be stored.
 
     A card goes with the answer only when the answer has its `map_url`
-    verbatim, which is the deterministic sign the model shared it, and only
+    verbatim and whole (not the prefix of a longer link), which is the deterministic sign the model shared it, and only
     into the room it was recorded for. A granted read's card is dropped when
     the grant no longer reads. One card per link, in recording order, at most
     `MAX_CARDS_PER_MESSAGE`.
@@ -687,7 +704,8 @@ def location_cards_for_answer(conn, config, *, task_id, room_token, body):
     for card in rows:
         if len(shares) >= MAX_CARDS_PER_MESSAGE:
             break
-        if card["room_token"] != room or card["map_url"] in seen or card["map_url"] not in body:
+        if (card["room_token"] != room or card["map_url"] in seen
+                or not _carries_link(body, card["map_url"])):
             continue
         try:
             observation = json.loads(card["observation"])

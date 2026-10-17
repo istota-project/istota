@@ -425,3 +425,21 @@ def test_cleanup_sweeps_cards_whose_message_is_gone(env):
         conn.execute("DELETE FROM messages WHERE id=?", (card["message_id"],))
         assert sharing.prune_unattached_cards(conn) == 1
     assert _cards(config) == []
+
+
+def test_a_link_is_matched_whole_not_as_the_prefix_of_a_longer_one(env):
+    config, room = env
+    ident = _turn(config, room, "bob", "where is everyone?")
+    short = "https://www.openstreetmap.org/#map=12/52.52/13.4"
+    longer = "https://www.openstreetmap.org/#map=12/52.52/13.41"
+    with db.get_db(config.db_path) as conn:
+        ids = [sharing._insert_card(conn, task_id=ident, actor_user_id="bob", room_token=room,
+                                    observation={"owner_user_id": "alice", "map_url": url})
+               for url in (short, longer)]
+        for body, expected in ((f"Alice: {longer}", [ids[1]]),
+                               (f"Alice: [map]({longer}).", [ids[1]]),
+                               (f"Alice: {short}. And {longer}", ids),
+                               (f"Alice: {short}0", [])):
+            _, card_ids = sharing.location_cards_for_answer(
+                conn, config, task_id=ident, room_token=room, body=body)
+            assert card_ids == expected, body
