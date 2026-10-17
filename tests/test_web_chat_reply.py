@@ -605,3 +605,62 @@ class TestReadPaths:
         rows = [m for m in resp.json()["messages"] if m["role"] == "user"]
         assert rows
         assert all("reply_to" not in m for m in rows)
+
+
+class TestCitedAuthor:
+    """A citation names who wrote the parent, by the rule a turn's own header
+    uses (#764). Labelling a `user` parent with the viewer's name was right
+    only in a private room; in a shared one it put another member's words in
+    the reader's mouth."""
+
+    def _reply_to(self, token, **author):
+        parent = None
+        with db.get_db(_db_path()) as conn:
+            parent = db.add_message(
+                conn, token, role="user", body="Eruption is blah",
+                origin_surface="whatsapp", **author,
+            )
+            db.add_message(
+                conn, token, role="assistant", body="Fair.",
+                origin_surface="whatsapp", reply_to_message_id=parent,
+            )
+        return parent
+
+    async def _cited(self, client, cookies, url, parent):
+        resp = await client.get(url, cookies=cookies)
+        return next(
+            m["reply_to"] for m in resp.json()["messages"]
+            if m.get("reply_to", {}).get("msg_id") == parent
+        )
+
+    async def test_a_guest_parent_is_named_in_room_history(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent = self._reply_to(room["token"], author_label="Carol")
+
+        cited = await self._cited(
+            chat_client, cookies,
+            f"/istota/api/chat/rooms/{room['id']}/messages", parent,
+        )
+        assert cited["author"] == "Carol"
+        assert cited["role"] == "user"
+
+    async def test_a_member_parent_is_named_in_the_aggregate_view(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        parent = self._reply_to(room["token"], author_user_id="bob")
+
+        cited = await self._cited(
+            chat_client, cookies, "/istota/api/chat/messages?view=all", parent,
+        )
+        assert cited["author"] == "Bob"
+
+    async def test_only_another_writers_parent_carries_an_author(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        url = f"/istota/api/chat/rooms/{room['id']}/messages"
+        own = self._reply_to(room["token"], author_user_id="alice")
+        theirs = self._reply_to(room["token"], author_user_id="bob")
+
+        assert "author" not in await self._cited(chat_client, cookies, url, own)
+        assert (await self._cited(chat_client, cookies, url, theirs))["author"] == "Bob"

@@ -184,6 +184,8 @@ export interface MessageReply {
   msgId: number;
   role?: 'user' | 'assistant' | 'system';
   excerpt?: string;
+  /** Who wrote a `user` parent, when that is not the viewer (#764). */
+  author?: string;
   /**
    * Absent counts as live, so the composer can stage a citation without
    * asserting anything about a state only the server knows. Reply is only ever

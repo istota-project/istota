@@ -186,6 +186,27 @@ describe('citation quote block', () => {
     expect(container.querySelector('.reply-quote')?.classList.contains('deleted')).toBe(false);
   });
 
+  it('names another member as the author of a turn they wrote (#764)', () => {
+    const { container } = render(Message, {
+      ...base,
+      userName: 'Alice',
+      message: userMsg({
+        role: 'assistant',
+        replyTo: { msgId: 22, role: 'user', excerpt: 'Eruption is blah', author: 'Carol' },
+      }),
+    });
+    expect(container.querySelector('.reply-quote-author')?.textContent).toBe('Carol');
+  });
+
+  it("names the viewer for a user parent with no author, the viewer's own", () => {
+    const { container } = render(Message, {
+      ...base,
+      userName: 'Alice',
+      message: userMsg({ replyTo: { msgId: 22, role: 'user', excerpt: 'mine' } }),
+    });
+    expect(container.querySelector('.reply-quote-author')?.textContent).toBe('Alice');
+  });
+
   it('renders nothing for a turn that cites nothing', () => {
     const { container } = render(Message, { ...base, message: userMsg() });
     expect(container.querySelector('.reply-quote')).toBeNull();

@@ -7231,7 +7231,10 @@ _CROSS_ROOM_COLUMNS = (
     # a long answer would otherwise carry that whole answer a second time.
     # The literal must track `web_app._REPLY_EXCERPT_CHARS`, which the dict
     # builder still slices at — shorten this and that slice quietly no-ops.
-    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body, "
+    # Who wrote the parent, for the citation's author label (#764).
+    "  p.author_user_id AS reply_author_user_id, "
+    "  p.author_label AS reply_author_label "
 )
 _CROSS_ROOM_FROM = (
     "FROM messages m "

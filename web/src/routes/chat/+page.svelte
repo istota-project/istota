@@ -453,6 +453,7 @@
     return {
       msgId,
       role: m.role,
+      ...(m.role === 'user' && m.author ? { author: m.author } : {}),
       // Capped to what the server would send back, so the chip and the
       // reloaded quote are the same text rather than diverging for the life of
       // the session.

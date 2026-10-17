@@ -81,7 +81,7 @@ describe('sendQueue', () => {
       entry('have a look', {
         cid: 9,
         attachments: [attachment()],
-        replyTo: { msgId: 7, role: 'assistant', excerpt: 'earlier' },
+        replyTo: { msgId: 7, role: 'user', excerpt: 'earlier', author: 'Carol' },
         replyToMsgId: 7,
         idempotencyKey: 'abc-123',
         held: true,
@@ -91,7 +91,7 @@ describe('sendQueue', () => {
     const [back] = readQueue('u:room:t1');
     expect(back.cid).toBe(9);
     expect(back.attachments).toEqual([attachment()]);
-    expect(back.replyTo).toEqual({ msgId: 7, role: 'assistant', excerpt: 'earlier' });
+    expect(back.replyTo).toEqual({ msgId: 7, role: 'user', excerpt: 'earlier', author: 'Carol' });
     expect(back.replyToMsgId).toBe(7);
     expect(back.idempotencyKey).toBe('abc-123');
     expect(back.held).toBe(true);
