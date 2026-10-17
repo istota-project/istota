@@ -179,7 +179,7 @@ src/istota/
 │   ├── talk_media.py     # Retention for Talk attachments fetched into `Channels/<token>/media/` on a local workspace → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
-├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
+├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications, talk_files (a local file copied into a Talk conversation's folder for a share)
 │   ├── talk.py, ocs.py   # The Talk client and the OCS envelope leaf
 │   ├── user_metadata.py  # NC user metadata
 │   └── compat.py         # The None-returning variants four best-effort daemon paths depend on
