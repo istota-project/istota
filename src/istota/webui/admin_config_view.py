@@ -519,7 +519,16 @@ def _env_override_reason(variable: str) -> str:
 
 
 def _file_holds_value(secrets_dir: Path, name: str) -> bool:
-    """Whether the stack's secret file `name` is non-empty, by its size alone."""
+    """Whether the stack's secret file `name` supplies a value, without reading it.
+
+    `istota-secrets` exports `$(cat file)`, which strips trailing newlines, and
+    skips an empty result, so a non-empty file counts only when its variable
+    is set too: a file holding only newlines exports nothing.
+    """
+    import os
+
+    if not os.environ.get(name.upper(), "").strip():
+        return False
     try:
         return (secrets_dir / name).stat().st_size > 0
     except OSError:
@@ -531,12 +540,12 @@ def _secret_source(
 ) -> str:
     """Where the credential in secret file `name` comes from, without reading it.
 
-    `file` when `/run/secrets/<name>` is non-empty. `environment` when it is
-    not and the variable is set anyway: `istota-secrets` exports every
-    non-empty file as the uppercase variable in this process too, so a set
-    variable over an empty file came from outside the stack. `inline` when
-    neither holds it and `config.toml` has a value at `path`; `none` otherwise.
-    The file is checked with `stat` for its size and never opened.
+    `file` when `/run/secrets/<name>` is non-empty and the uppercase variable
+    is set: `istota-secrets` exports each file with a value as that variable,
+    in this process too. `environment` when the variable is set over an empty
+    file, so it came from outside the stack. `inline` when neither holds it
+    and `config.toml` has a value at `path`; `none` otherwise. The file is
+    checked with `stat` for its size and never opened.
     """
     import os
 

@@ -775,6 +775,14 @@ class TestSecretSources:
         )
         assert managed[self.TWILIO]["movable"] is False
 
+    def test_a_newline_only_file_is_not_the_source(self, tmp_path, secret_env):
+        # `istota-secrets` exports `$(cat file)`, which strips the newline and
+        # skips the empty result, so the inline value is the one in use.
+        (tmp_path / self.TWILIO).write_text("\n\n")
+        entries = _secret_entries(Config(), tmp_path, document=self.INLINE_DOCUMENT)
+        assert entries[self.TWILIO]["source"] == "inline"
+        assert entries[self.TWILIO]["movable"] is True
+
     def test_file_wins_over_an_inline_copy(self, tmp_path, monkeypatch, secret_env):
         (tmp_path / self.TWILIO).write_text("x")
         monkeypatch.setenv(self.TWILIO.upper(), "x")
