@@ -83,11 +83,11 @@
   }
   .count-pill.superscript {
     position: absolute;
-    left: 100%;
-    top: 0;
+    left: calc(100% - 1px);
+    top: 1px;
     min-width: 0;
     height: auto;
-    padding: 0 0 0 0.1em;
+    padding: 0;
     border-radius: 0;
     background: none;
     color: var(--accent-amber);
