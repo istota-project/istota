@@ -10496,7 +10496,17 @@ const handlers: MockHandler[] = [
       { document_id: 1, entity_type: 'diagnosis', entity_id: 1 },
       { document_id: 2, entity_type: 'immunization', entity_id: 1 },
     ];
-    let nextDocumentId = 3;
+    documents.push({
+      id: 3,
+      filename: 'specialist-consultation-follow-up-and-care-instructions.pdf',
+      original_filename: 'Specialist consultation — follow-up and care instructions.pdf',
+      mime: 'application/pdf',
+      byte_size: 245760,
+      source: 'manual',
+      notes: 'Bring this summary to the next appointment.',
+      created_at: iso(2),
+    });
+    let nextDocumentId = 4;
 
     // The extract routes hand off to the daemon and return an id; the client
     // polls /extract-requests/{id}. The mock answers at once.
@@ -10539,9 +10549,27 @@ const handlers: MockHandler[] = [
       return id;
     };
 
+    function linksForDocument(id: number) {
+      return documentLinks
+        .filter((link) => link.document_id === id)
+        .map((link) => {
+          let label = `${link.entity_type} ${link.entity_id}`;
+          if (link.entity_type === 'encounter') {
+            const record = encounters.find((row) => row.id === link.entity_id);
+            if (record)
+              label = `${record.encounter_date} · ${record.reason || record.encounter_type}`;
+          } else if (link.entity_type === 'diagnosis') {
+            label = diagnoses.find((row) => row.id === link.entity_id)?.name ?? label;
+          } else {
+            label = immunizations.find((row) => row.id === link.entity_id)?.name ?? label;
+          }
+          return { ...link, label };
+        });
+    }
     const documentDict = (d: MockDocument) => ({
       ...d,
       url: `/istota/api/health/documents/${d.id}/file`,
+      links: linksForDocument(d.id),
     });
     const documentsFor = (entityType: string, entityId: number) =>
       documentLinks
@@ -11293,10 +11321,11 @@ const handlers: MockHandler[] = [
       if (fileMatch && method === 'GET') {
         const doc = documents.find((d) => d.id === Number(fileMatch[1]));
         if (!doc) return { error: 'document not found', __status: 404 };
-        // A one-page PDF, so the dev browser has something real to open.
+        // Use the same decodable fixtures as the workspace file viewer.
         return {
-          __raw: '%PDF-1.4\n% mock document\n',
+          __raw: viewerFixture(doc.mime === 'application/pdf' ? 'document.pdf' : 'image.jpg'),
           __contentType: doc.mime,
+          __disposition: 'attachment',
         };
       }
       const linkMatch = url.match(
@@ -11339,9 +11368,7 @@ const handlers: MockHandler[] = [
       if (docMatch && method === 'GET') {
         const doc = documents.find((d) => d.id === Number(docMatch[1]));
         if (!doc) return { error: 'document not found', __status: 404 };
-        const links = documentLinks
-          .filter((l) => l.document_id === doc.id)
-          .map((l) => ({ ...l, label: `${l.entity_type} ${l.entity_id}` }));
+        const links = linksForDocument(doc.id);
         return { document: documentDict(doc), links };
       }
       if (docMatch && method === 'DELETE') {

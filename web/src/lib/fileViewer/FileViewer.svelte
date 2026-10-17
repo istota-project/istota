@@ -140,7 +140,7 @@
   <div class="file-content">
     {#if direct}
       {#if missing}
-        <p role="alert">No PDF for this invoice</p>
+        <p role="alert">This file is no longer available.</p>
       {:else}
         <PdfPreview
           url={direct.url}
