@@ -196,6 +196,10 @@ for ref in "${refs[@]}"; do
 done > "${out}/image-ids.txt"
 docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "istota:${tag}" \
     | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p' > "${out}/claude-code-version.txt"
+# The schema the image stamps (db.SCHEMA_VERSION), for the manifest: the Mac
+# app refuses to move a newer install's backups onto this release.
+sed -n 's/^SCHEMA_VERSION = \([0-9][0-9]*\)$/\1/p' "${src}/src/istota/db.py" > "${out}/schema-version.txt"
+[ -s "${out}/schema-version.txt" ] || { echo "no SCHEMA_VERSION in ${src}/src/istota/db.py" >&2; exit 1; }
 docker save -o "${out}/images-${tag}.tar" "${refs[@]}"
 dpkg-query -W -f='${Package} ${Version}\n' | sort > "${out}/disk-packages.txt"
 # Every path on the disk but Docker's, which generalize empties.
@@ -248,6 +252,7 @@ step scan "$t"
 # shellcheck disable=SC2046
 "${HERE}/sign-images-manifest.sh" --tag "$tag" --archive "${work}/images-${tag}.tar" --key "$key" \
     --appliance "${raw}.zst" --claude-code-version "$(cat "${work}/claude-code-version.txt")" \
+    --schema-version "$(cat "${work}/schema-version.txt")" \
     $(cat "${work}/image-ids.txt") >/dev/null
 
 mkdir -p "$release"

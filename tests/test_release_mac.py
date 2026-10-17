@@ -283,6 +283,17 @@ needs_git_and_ssh = pytest.mark.skipif(
     shutil.which("ssh-keygen") is None or shutil.which("git") is None, reason="needs ssh-keygen and git")
 
 
+def test_the_builder_reads_the_schema_the_image_stamps():
+    """The manifest's schema_version comes from db.py's own line, by the
+    builder's sed; a reworded line would sign a manifest with none."""
+    expr = re.search(r"sed -n '(s/\^SCHEMA_VERSION[^']*)' \"\$\{src\}/src/istota/db.py\"", BUILD.read_text())
+    assert expr, "build-appliance.sh no longer reads SCHEMA_VERSION from db.py"
+    out = subprocess.run(["sed", "-n", expr.group(1), str(REPO / "src" / "istota" / "db.py")],
+                         capture_output=True, text=True, check=True).stdout
+    from istota import db
+    assert out == f"{db.SCHEMA_VERSION}\n"
+
+
 class TestTheBuilderRefusesBeforeAnyVm:
     def test_the_default_lima_home_is_refused(self, tmp_path):
         result = build("--tag", "v9.9.9", "--key", str(tmp_path / "k"),

@@ -28,6 +28,8 @@ On this Mac the app signs you in with a one-use code it asks the VM for, so ther
 
 The app keeps its VM apart from the command-line install's: its own Lima directory under `~/Library/Application Support/Istota`, and its own state. Moving stops the command-line install's VM, then makes the app's VM from the backups in its folder and the master key in your login Keychain, as `istota-stack restore` does. The old VM is left stopped, not deleted.
 
+The app refuses the move, and leaves the command-line install running, when that install is newer than the release the app carries: its backups are at a database schema the app's release cannot open, or it runs a newer release. Update the app first, then move.
+
 The moved install becomes the app's: login codes are added to its sign-in methods, and it gets the same settings a new app install has. Anything the old setup did not write is kept. Credentials stored only in the old VM's secret files (the model's key, mail and Nextcloud passwords) are not in the backups, so enter them again in the web UI's settings.
 
 Once Istota works in the app, delete the old VM in Terminal with the command-line install's own `istota-stack destroy`. Without `--purge` that leaves the folder, which the app now uses.

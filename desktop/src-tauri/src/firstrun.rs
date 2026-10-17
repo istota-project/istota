@@ -115,6 +115,74 @@ pub fn stop_cli_install(paths: &Paths, home: &Path, log: &dyn Fn(&str)) -> Resul
     }
 }
 
+/// Why the command-line install cannot move onto the release this app
+/// carries, read before its VM is stopped. The backup's schema stamp against
+/// the one the release's signed manifest names is what decides: an older
+/// image refuses a database a newer release stamped. A signed tag newer than
+/// the app's covers a release whose manifest names no schema. The VM's
+/// restore refuses the same database again; this only keeps the old install
+/// running when the move cannot work.
+pub fn move_refusal(home: &Path, release: &Path) -> Option<String> {
+    let tag = release.file_name()?.to_string_lossy().into_owned();
+    let state = std::fs::read_to_string(home.join(".config/istota-stack").join(format!("{CLI_INSTALL_INSTANCE}.env")))
+        .unwrap_or_default();
+    let deployed = env_file_value(&state, "DEPLOYED_TAG");
+    if let (Some(deployed), None) = (&deployed, env_file_value(&state, "DEPLOYED_UNSIGNED")) {
+        if let (Some(ours), Some(theirs)) = (release_version(&tag), release_version(deployed)) {
+            if theirs > ours {
+                return Some(format!(
+                    "Your command-line Istota runs {deployed}, newer than the release this app carries ({tag}), \
+                     which cannot open its database. Update the app, or keep using the command-line install. Nothing was changed."
+                ));
+            }
+        }
+    }
+    let known = release_schema(release, &tag)?;
+    let found = newest_backup_schema(&cli_install_workspace(home))?;
+    (found > known).then(|| {
+        format!(
+            "Your command-line Istota's newest backup is at database schema {found}, from a newer release than \
+             the one this app carries ({tag}, schema {known}), which cannot open it. Update the app, or keep using \
+             the command-line install. Nothing was changed."
+        )
+    })
+}
+
+/// `vX.Y.Z` as numbers; None for any other name (`main-<hex>`).
+fn release_version(tag: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = tag.strip_prefix('v')?.split('.').map(|p| p.parse::<u64>().ok());
+    let version = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(version)
+}
+
+/// The `schema_version` the release's images manifest names.
+fn release_schema(release: &Path, tag: &str) -> Option<u64> {
+    let text = std::fs::read_to_string(release.join(format!("images-{tag}.json"))).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?.get("schema_version")?.as_u64()
+}
+
+/// `PRAGMA user_version` of the framework snapshot a restore takes: the
+/// newest dated directory under the workspace's `Backups/db/snapshots` that
+/// holds one, read from the SQLite header (bytes 60 to 63, big-endian).
+fn newest_backup_schema(workspace: &Path) -> Option<u64> {
+    let root = workspace.join("Backups/db/snapshots");
+    let mut dates: Vec<PathBuf> = std::fs::read_dir(&root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| valid_date(&entry.file_name().to_string_lossy()))
+        .map(|entry| entry.path())
+        .collect();
+    dates.sort();
+    dates.iter().rev().find_map(|dir| {
+        let mut header = [0u8; 100];
+        let mut file = std::fs::File::open(dir.join("framework/istota.db")).ok()?;
+        std::io::Read::read_exact(&mut file, &mut header).ok()?;
+        header.starts_with(b"SQLite format 3\0").then(|| {
+            u64::from(u32::from_be_bytes([header[60], header[61], header[62], header[63]]))
+        })
+    })
+}
+
 pub const SHARED_WORKSPACE: &str = "Your command-line Istota is running on the same folder. Stop it first (`istota-stack stop` in Terminal): two copies of Istota on one folder corrupt each other's view of it.";
 
 /// The release bundled in the app, `Contents/Resources/release/<tag>/`: its
@@ -414,6 +482,57 @@ mod tests {
         stage_release("v1.2.3", &source, &root).unwrap();
         assert_eq!(std::fs::read_to_string(staged.join("images-v1.2.3.json")).unwrap(), "{}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A CLI install's home: its state file and a framework snapshot stamped
+    /// `schema`, and the bundled release's manifest naming `release_schema`.
+    fn move_world(name: &str, state: &str, schema: Option<u32>, release_schema: Option<u32>) -> (PathBuf, PathBuf) {
+        let home = scratch(name);
+        let state_dir = home.join(".config/istota-stack");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let workspace = home.join("Istota");
+        std::fs::write(state_dir.join("istota.env"), format!("WORKSPACE={}\n{state}", workspace.display())).unwrap();
+        if let Some(schema) = schema {
+            for (date, stamp) in [("2026-10-01", 0), ("2026-10-09", schema)] {
+                let dir = workspace.join("Backups/db/snapshots").join(date).join("framework");
+                std::fs::create_dir_all(&dir).unwrap();
+                let mut header = b"SQLite format 3\0".to_vec();
+                header.resize(100, 0);
+                header[60..64].copy_from_slice(&stamp.to_be_bytes());
+                std::fs::write(dir.join("istota.db"), header).unwrap();
+            }
+        }
+        let release = home.join("release/v1.2.3");
+        std::fs::create_dir_all(&release).unwrap();
+        let manifest = match release_schema {
+            Some(n) => format!("{{\"schema_version\":{n},\"tag\":\"v1.2.3\"}}"),
+            None => "{\"tag\":\"v1.2.3\"}".to_string(),
+        };
+        std::fs::write(release.join("images-v1.2.3.json"), manifest).unwrap();
+        (home, release)
+    }
+
+    #[test]
+    fn a_move_from_a_newer_install_is_refused_before_anything_stops() {
+        // The backup's stamp against the release's: what actually breaks.
+        let (home, release) = move_world("move-schema", "DEPLOYED_TAG=main-0123456789ab\nDEPLOYED_UNSIGNED=1\n", Some(2), Some(1));
+        let refusal = move_refusal(&home, &release).expect("a newer schema moved onto an older release");
+        assert!(refusal.contains("schema 2") && refusal.contains("v1.2.3"), "{refusal}");
+        let (home, release) = move_world("move-same", "", Some(1), Some(1));
+        assert_eq!(move_refusal(&home, &release), None);
+        // A release from before the manifest named its schema: the tag alone.
+        let (home, release) = move_world("move-noschema", "", Some(9), None);
+        assert_eq!(move_refusal(&home, &release), None);
+
+        // A signed release newer than the app's.
+        let (home, release) = move_world("move-tag", "DEPLOYED_TAG=v1.10.0\n", None, Some(1));
+        let refusal = move_refusal(&home, &release).expect("v1.10.0 onto v1.2.3");
+        assert!(refusal.contains("v1.10.0"), "{refusal}");
+        let (home, release) = move_world("move-older", "DEPLOYED_TAG=v1.2.0\n", None, Some(1));
+        assert_eq!(move_refusal(&home, &release), None);
+        let (home, release) = move_world("move-unsigned", "DEPLOYED_TAG=v9.0.0\nDEPLOYED_UNSIGNED=1\n", None, Some(1));
+        assert_eq!(move_refusal(&home, &release), None, "an unsigned tag's name orders nothing");
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

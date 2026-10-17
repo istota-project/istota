@@ -393,7 +393,7 @@ class TestTheSigningHelper:
     def test_its_manifest_is_canonical_and_installs(self, fx):
         bundle = _signed_release(fx)
         pairs = [f"{e['ref']}={e['id']}" for e in _images("v1")]
-        signed = self._sign(fx, "v1", *pairs, "--claude-code-version", "2.1.296")
+        signed = self._sign(fx, "v1", *pairs, "--claude-code-version", "2.1.296", "--schema-version", "3")
         assert signed.returncode == 0, signed.stdout + signed.stderr
         directory = fx.root / "built" / "v1"
         text = (directory / "images-v1.json").read_text()
@@ -403,6 +403,8 @@ class TestTheSigningHelper:
         assert doc["archive_sha256"] == hashlib.sha256(ARCHIVE).hexdigest()
         assert doc["images"] == _images("v1")
         assert doc["claude_code_version"] == "2.1.296"
+        # What the Mac app compares a backup's stamp with before a move.
+        assert doc["schema_version"] == 3
         result = fx.run("update", "v1", "--bundle", str(bundle), "--images", str(directory),
                         STUB_LOAD_IDS=_load_ids(_images("v1")))
         assert result.returncode == 0, result.stdout + result.stderr
@@ -411,6 +413,13 @@ class TestTheSigningHelper:
     @pytest.mark.parametrize("pair", ["istota:v1", "istota:v1=sha256:short", "=sha256:" + "1" * 64])
     def test_it_refuses_a_malformed_image(self, fx, pair):
         result = self._sign(fx, "v1", pair)
+        assert result.returncode != 0
+        assert not (fx.root / "built" / "v1" / "images-v1.json.sig").exists()
+
+    @pytest.mark.parametrize("value", ["three", "-1", "03", "1.0"])
+    def test_it_refuses_a_schema_version_that_is_not_one(self, fx, value):
+        pairs = [f"{e['ref']}={e['id']}" for e in _images("v1")]
+        result = self._sign(fx, "v1", *pairs, "--schema-version", value)
         assert result.returncode != 0
         assert not (fx.root / "built" / "v1" / "images-v1.json.sig").exists()
 

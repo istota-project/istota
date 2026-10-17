@@ -194,6 +194,17 @@ def restore(workspace: Path, config_dir: Path, data_dir: Path, key: str, *,
     if planned["status"] != "would_restore":
         when = f"of {date} " if date else ""
         raise Refusal(f"no framework database snapshot {when}to restore ({planned['status']})")
+    # The schema stamp `istota init` refuses on: a backup from a newer release
+    # (a command-line install moved into an older Mac app) would leave a stack
+    # whose daemon cannot start.
+    from istota import db
+
+    too_new = db.check_schema_version(Path(planned["src"]))
+    if too_new is not None:
+        raise Refusal(
+            f"the framework snapshot of {planned['date']} is at schema {too_new.found}, written by a "
+            f"newer istota than this one (schema {too_new.known}); restore it with that release or a later one"
+        )
 
     # --- writes ---
     if current_key is None:

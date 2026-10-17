@@ -479,6 +479,11 @@ fn make_local(app: &AppHandle, job: Job, folder: &Path, date: Option<String>) ->
     }
     let release = staged_release(&shared)?;
     if job == Job::Move {
+        // Before anything stops: a newer install's data on this older release
+        // would leave neither running.
+        if let Some(refusal) = firstrun::move_refusal(&shared.home, &release) {
+            return Err(refusal);
+        }
         stop_cli_install(&shared)?;
     }
     // From here the job has a progress screen; a refusal above leaves the
