@@ -202,6 +202,16 @@ class TestTheBundle:
         assert pins["MACOSX_DEPLOYMENT_TARGET"] == "14.0"
 
 
+class TestTheAppCapability:
+    def test_it_grants_each_command_build_rs_lists_once(self):
+        src_tauri = REPO / "desktop" / "src-tauri"
+        commands = re.findall(r'^\s+"([a-z_]+)",$', (src_tauri / "build.rs").read_text(), re.M)
+        permissions = json.loads((src_tauri / "capabilities" / "app.json").read_text())["permissions"]
+        granted = [p for p in permissions if p.startswith("allow-")]
+        assert len(granted) == len(set(granted)), "a permission is listed twice"
+        assert sorted(granted) == sorted("allow-" + c.replace("_", "-") for c in commands)
+
+
 TEST_FEATURES = ("desktop-test-hooks", "m6-negative-control", "m9-negative-control", "stores-negative-control")
 
 

@@ -30,13 +30,6 @@
     "allow-remove-profile",
     "allow-cli-tools-info",
     "allow-install-cli-tools",
-    "allow-remove-cli-tools",
-    "allow-profiles-info",
-    "allow-add-profile",
-    "allow-select-profile",
-    "allow-remove-profile",
-    "allow-cli-tools-info",
-    "allow-install-cli-tools",
     "allow-remove-cli-tools"
   ]
 }
