@@ -2245,12 +2245,9 @@ class TestInvoiceFilesStayInTheUsersTree:
         assert not output["pdf_path"]
 
     def test_create_writes_nothing_into_the_other_users_tree(self, runner, world, monkeypatch):
-        import sys
-        import types
+        from tests.support import weasyprint_stub
 
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        weasyprint_stub.install(monkeypatch)
         obj, data_dir, victim = world
         output = self._run(runner, obj, "invoice", "create", "acme", "-s", "dev", "-q", "1")
         assert output["status"] == "error", output
@@ -2258,12 +2255,9 @@ class TestInvoiceFilesStayInTheUsersTree:
 
     @staticmethod
     def _stub_weasyprint(monkeypatch):
-        import sys
-        import types
+        from tests.support import weasyprint_stub
 
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        weasyprint_stub.install(monkeypatch)
 
     def test_generate_writes_nothing_into_the_other_users_tree(self, runner, world, monkeypatch):
         from datetime import date

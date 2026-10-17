@@ -604,6 +604,25 @@ class TestMigrateRejectionIsRemembered:
             _migrate.ensure_initialised(ctx)
 
 
+class TestMigrateRefusesAnOutsideInvoiceOutput:
+    """ISSUE-775: a task can plant `config/invoicing.toml` for a user with no
+    invoicing rows, so the one-time import applies the settings page's rule."""
+
+    @pytest.mark.parametrize("value", ["/srv/elsewhere", "../elsewhere"])
+    def test_the_file_is_refused_and_remembered(self, tmp_path, caplog, value):
+        import logging
+
+        ctx = _make_ctx(tmp_path)
+        _write_workspace_config(
+            tmp_path, "invoicing.toml", f'invoice_output = "{value}"\n{INVOICING_TOML}',
+        )
+        with caplog.at_level(logging.WARNING):
+            _migrate.ensure_initialised(ctx)
+        assert not config_store.has_invoicing_data(ctx.db_path)
+        assert config_store.load_invoicing(ctx.db_path).invoice_output != value
+        assert any("money_legacy_rejected" in r.getMessage() for r in caplog.records)
+
+
 class TestMigrateDoesNotClobberStoredConfig:
     def test_a_hand_set_global_mapping_survives_a_legacy_import(self, tmp_path):
         """The importer replaces the global maps wholesale, so a mapping set

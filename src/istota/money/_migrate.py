@@ -202,6 +202,9 @@ def _rename_imported(path: Path) -> Path:
 
 
 def _import_invoicing(db_path: Path, data: dict) -> dict:
+    # A task can plant this file for a user with no invoicing rows (ISSUE-775).
+    if "invoice_output" in data:
+        config_store.check_invoicing_scalars({"invoice_output": data["invoice_output"]})
     cfg = config_store.invoicing_config_from_toml_dict(data)
     config_store.save_invoicing(db_path, cfg, replace_collections=True)
     return {
@@ -288,7 +291,7 @@ def _migrate_section(ctx: UserContext, section: str) -> dict | None:
 
         try:
             summary = _IMPORTERS[section](db_path, parsed)
-        except config_store.InvalidAccountError as exc:
+        except (config_store.InvalidAccountError, config_store.InvalidInvoiceOutputError) as exc:
             # Content the importer refuses, same class as an unparseable file.
             # `ensure_initialised` runs on every money call, so raising here
             # would take the module down for that user until the file was fixed.

@@ -711,12 +711,9 @@ class TestGenerateRoute:
     ):
         """ISSUE-775: generation passes the user root, so the PDF goes through
         the no-follow walk even when the output folder is outside ``accounting_path``."""
-        import sys
-        import types
+        from tests.support import weasyprint_stub
 
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        weasyprint_stub.install(monkeypatch)
         outside = tmp_path_factory.mktemp("outside")
         cfg = _write_invoicing_config(tmp_path, "invoices/generated")
         cfg.write_text(cfg.read_text().replace('accounting_path = "."', 'accounting_path = "books"'))
@@ -1015,12 +1012,9 @@ class TestCreateRoute:
     ):
         """ISSUE-775: the PDF is published through a no-follow walk from the
         user root, even when the output folder is outside ``accounting_path``."""
-        import sys
-        import types
+        from tests.support import weasyprint_stub
 
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        weasyprint_stub.install(monkeypatch)
         outside = tmp_path_factory.mktemp("outside")
         cfg = _write_invoicing_config(tmp_path, "invoices/generated")
         cfg.write_text(cfg.read_text().replace('accounting_path = "."', 'accounting_path = "books"'))

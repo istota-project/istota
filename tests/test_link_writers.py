@@ -514,14 +514,12 @@ async def _room_name(ctx, token):
 
 class TestInvoicePdfWalk:
     def test_a_linked_invoice_folder_gets_no_pdf(self, tmp_path, outside, monkeypatch):
-        import sys
-        import types
 
         from istota.money.core.invoicing import generate_invoice_pdf
 
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF-1.4 x")
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        from tests.support import weasyprint_stub
+
+        weasyprint_stub.install(monkeypatch, render=lambda string: b"%PDF-1.4 x")
         data = tmp_path / "money"
         (data / "invoices").mkdir(parents=True)
         (data / "invoices" / "generated").symlink_to(outside, target_is_directory=True)
@@ -533,14 +531,12 @@ class TestInvoicePdfWalk:
         assert list(outside.iterdir()) == []
 
     def test_an_ordinary_invoice_is_written(self, tmp_path, monkeypatch):
-        import sys
-        import types
 
         from istota.money.core.invoicing import generate_invoice_pdf
 
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF-1.4 x")
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        from tests.support import weasyprint_stub
+
+        weasyprint_stub.install(monkeypatch, render=lambda string: b"%PDF-1.4 x")
         data = tmp_path / "money"
         pdf = data / "invoices" / "generated" / "2026" / "INV-1.pdf"
 

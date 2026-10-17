@@ -12,7 +12,6 @@ import base64
 import errno
 import html
 import logging
-import mimetypes
 import os
 import re
 import secrets
@@ -147,6 +146,19 @@ class LogoImage:
     mime_type: str
 
 
+def _raster_logo(data: bytes | None) -> LogoImage | None:
+    """``data`` as a logo when its first bytes are a raster, typed from those bytes.
+
+    Anything else is refused, SVG above all: WeasyPrint falls back to SVG when
+    Pillow cannot decode an image, and an SVG's ``<image href>`` is a URL the
+    renderer fetches (ISSUE-775). The name is never consulted.
+    """
+    from istota.lib.image_sniff import sniff_raster  # noqa: PLC0415
+
+    mime_type = sniff_raster(data) if data else None
+    return LogoImage(data, mime_type) if mime_type else None
+
+
 def _resolve_logo(
     accounting_path: Path, logo: str, user_root: Path | None = None,
 ) -> Path | LogoImage | None:
@@ -175,10 +187,10 @@ def _resolve_logo(
             data = read_file_below(
                 user_root, accounting_path.joinpath(*pure.parts), max_bytes=LOGO_MAX_BYTES,
             )
-        if not data:
-            logger.warning("invoice_logo_unreadable logo=%r — ignored", logo)
-            return None
-        return LogoImage(data, mimetypes.guess_type(logo)[0] or "image/png")
+        image = _raster_logo(data)
+        if image is None:
+            logger.warning("invoice_logo_unreadable_or_not_raster logo=%r — ignored", logo)
+        return image
     candidate = accounting_path / logo
     try:
         root = accounting_path.resolve()
@@ -847,20 +859,24 @@ def update_invoice_number(config_path: Path, new_number: int) -> None:
 # =============================================================================
 
 
-def _embed_logo(logo_path: Path | LogoImage) -> str:
-    if isinstance(logo_path, LogoImage):
-        mime_type, raw = logo_path.mime_type, logo_path.data
-    else:
-        mime_type = mimetypes.guess_type(str(logo_path))[0] or "image/png"
-        raw = logo_path.read_bytes()
-    data = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime_type};base64,{data}"
+def _logo_image(logo_path: Path | LogoImage | None) -> LogoImage | None:
+    """The logo to embed: already read, or read here from a resolved path.
+
+    A path comes only from ``_resolve_logo`` with no user root; its bytes take
+    the same raster check as the walked read.
+    """
+    if logo_path is None or isinstance(logo_path, LogoImage):
+        return logo_path
+    try:
+        data = logo_path.read_bytes()
+    except OSError:
+        return None
+    return _raster_logo(data)
 
 
-def _has_logo(logo_path: Path | LogoImage | None) -> bool:
-    if isinstance(logo_path, LogoImage):
-        return True
-    return bool(logo_path) and logo_path.exists()
+def _embed_logo(logo: LogoImage) -> str:
+    data = base64.b64encode(logo.data).decode("ascii")
+    return f"data:{logo.mime_type};base64,{data}"
 
 
 def generate_invoice_html(invoice: Invoice, logo_path: Path | LogoImage | None = None) -> str:
@@ -872,6 +888,7 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | LogoImage | None =
     rendered PDF, and a stray tag is enough to restyle it.
     """
     esc = html.escape
+    logo = _logo_image(logo_path)
     company_name = esc(invoice.company.name)
     company_address = esc(invoice.company.address)
     client_name = esc(invoice.client.name)
@@ -945,7 +962,7 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | LogoImage | None =
 <body>
     <div class="header">
         <div>
-            {f'<img class="company-logo" src="{_embed_logo(logo_path)}" alt="{company_name}">' if _has_logo(logo_path) else f'<div class="company-name">{company_name}</div>'}
+            {f'<img class="company-logo" src="{_embed_logo(logo)}" alt="{company_name}">' if logo is not None else f'<div class="company-name">{company_name}</div>'}
             <div style="white-space: pre-line; color: #666; margin-top: 4px;">{company_address}</div>
         </div>
         <div class="invoice-meta">
@@ -998,6 +1015,35 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | LogoImage | None =
 </html>"""
 
 
+class _DataOnlyFetcher:
+    """A WeasyPrint URL fetcher that answers ``data:`` URLs and refuses the rest.
+
+    The document is built from text the user typed and a logo from their
+    workspace, and WeasyPrint's default fetcher opens any URL it is handed —
+    ``file:`` and ``http:`` included, from the host-side process, outside the
+    task proxy. An SVG reaches it through an ``<image href>`` (ISSUE-775).
+    The scheme is checked here before the delegate sees the URL, and the
+    delegate is itself a ``URLFetcher`` limited to ``data``.
+    """
+
+    _fail_on_errors = False
+
+    def __init__(self, delegate):
+        self._delegate = delegate
+
+    def __call__(self, url: str):
+        scheme = url.split(":", 1)[0].strip().lower() if ":" in url else ""
+        if scheme != "data":
+            raise ValueError(f"invoice rendering fetches only data: URLs, not {scheme or 'a relative'!r} ones")
+        return self._delegate(url)
+
+
+def _data_only_url_fetcher() -> _DataOnlyFetcher:
+    from weasyprint import URLFetcher
+
+    return _DataOnlyFetcher(URLFetcher(allowed_protocols={"data"}, allow_redirects=False))
+
+
 def generate_invoice_pdf(
     html: str, output_path: Path, *, root: Path | None = None, user_root: Path | None = None,
 ) -> None:
@@ -1020,7 +1066,7 @@ def generate_invoice_pdf(
 
     from istota.workspace.writes import open_or_create_dir_below, publish_new  # noqa: PLC0415
 
-    pdf = HTML(string=html).write_pdf()
+    pdf = HTML(string=html, url_fetcher=_data_only_url_fetcher()).write_pdf()
     if user_root is not None:
         from istota.money.invoice_files import open_dir_for_write  # noqa: PLC0415
 
