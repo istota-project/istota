@@ -805,24 +805,31 @@ def _own_parked_confirmation(conn, user_id: str, token: str):
 def private_chat_resolution(conn, user_id: str, token: str | None = None):
     """What a bare answer in ``user_id``'s own WhatsApp chat lands on.
 
-    A question asked in this chat first (`_own_parked_confirmation`), then
-    one a shared room parked here privately, by the rule web and Talk use
-    (`confirmations.resolve_parked_here`): one resolves, several are
-    ambiguous. Never `resolve`'s Path C. ``token`` is the chat's room as
-    `_dispatch_inbound` resolves it.
+    The question asked in this chat (`_own_parked_confirmation`) and those a
+    shared room parked here privately (`confirmations.resolve_parked_here`,
+    the rule web and Talk use) are counted together: one resolves, several
+    are ambiguous and approve nothing, since each was told `Reply YES or NO`
+    when it was the only one waiting. Never `resolve`'s Path C. ``token`` is
+    the chat's room as `_dispatch_inbound` resolves it.
     """
     from ..routing import private_phone_room
 
     if token is None:
         surface_ref = whatsapp_conversation_token(user_id)
         token = db.resolve_room_token(conn, "whatsapp", surface_ref) or surface_ref
+    waiting = []
     own = _own_parked_confirmation(conn, user_id, token)
     if own is not None:
-        return confirmations.Resolution(task=own)
+        waiting.append(own)
     room = private_phone_room(conn, "whatsapp", user_id)
-    if room is None:
-        return confirmations.Resolution()
-    return confirmations.resolve_parked_here(conn, room, user_id)
+    if room is not None:
+        here = confirmations.resolve_parked_here(conn, room, user_id)
+        for task in here.ambiguous or ((here.task,) if here.task else ()):
+            if all(task.id != seen.id for seen in waiting):
+                waiting.append(task)
+    if len(waiting) > 1:
+        return confirmations.Resolution(ambiguous=tuple(waiting))
+    return confirmations.Resolution(task=waiting[0] if waiting else None)
 
 
 def _confirmation_tokens(conn, token: str) -> list[str]:

@@ -3022,7 +3022,9 @@ def run_task_inline(
     return success, result
 
 
-def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> str:
+def _whatsapp_confirmation_body(
+    config: Config, result: str, task_id: int, *, bare: bool = True,
+) -> str:
     """A confirmation question plus the sentence that says how to answer it.
 
     The question is trimmed to fit and the sentence is appended after, so a
@@ -3040,6 +3042,9 @@ def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> st
     The renderer is asked to apply it rather than the arithmetic being
     repeated here: `render_whatsapp` is what knows the truncation suffix and
     how not to cut a combining sequence in half.
+
+    ``bare=False`` names `!confirm <id>` instead, for a question a bare answer
+    would not reach because another already waits in the chat.
     """
     from .transport.whatsapp.outbound import (
         confirmation_body_budget,
@@ -3047,7 +3052,8 @@ def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> st
     )
 
     budget = confirmation_body_budget(config)
-    tail = f"\n\nTask #{task_id}. Reply YES or NO."
+    tail = (f"\n\nTask #{task_id}. Reply YES or NO." if bare else
+            f"\n\nTask #{task_id}. Reply !confirm {task_id} yes or !confirm {task_id} no")
     question = render_whatsapp(result, limit=max(1, budget - len(tail)))
     return f"{question}{tail}"
 
@@ -4057,8 +4063,11 @@ def process_one_task(
                         (f"confirm:{task_id}:yes", "Yes"),
                         (f"confirm:{task_id}:no", "No"),
                     )
+                    from istota.transport.whatsapp.webhook import private_chat_resolution
+                    _reached = private_chat_resolution(conn, task.user_id).task
                     post_whatsapp_message = _whatsapp_confirmation_body(
                         config, result, task_id,
+                        bare=_reached is not None and _reached.id == task_id,
                     )
 
                 # The durable record of the question, written on this connection

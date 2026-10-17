@@ -860,7 +860,9 @@ class TestABareAnswerInThePrivateChat:
 
         assert _task(group, first).status == "pending"
 
-    def test_a_question_asked_in_this_chat_itself_comes_first(self, group):
+    def test_a_question_of_this_chat_beside_a_shared_one_is_ambiguous(self, group):
+        """The shared question was told `Reply YES or NO` first; a bare YES
+        must not approve the chat's own question in its place."""
         mine = _private_chat(group)
         parked = _park_privately(group)
         with db.get_db(group.db_path) as conn:
@@ -870,9 +872,22 @@ class TestABareAnswerInThePrivateChat:
 
         (result,) = _apply(group, _private_text("yes"))
 
+        assert result.disposition == "confirmation_ambiguous"
+        assert f"#{own}" in result.response_text and f"#{parked}" in result.response_text
+        assert _task(group, own).status == "pending_confirmation"
+        assert _task(group, parked).status == "pending_confirmation"
+
+    def test_a_lone_question_of_this_chat_is_answered(self, group):
+        mine = _private_chat(group)
+        with db.get_db(group.db_path) as conn:
+            own = db.create_task(conn, user_id="alice", source_type="whatsapp",
+                                 prompt="delete it", conversation_token=mine)
+            db.set_task_confirmation(conn, own, "May I delete it?")
+
+        (result,) = _apply(group, _private_text("yes"))
+
         assert result.disposition == "confirmation_answer"
         assert _task(group, own).status == "pending"
-        assert _task(group, parked).status == "pending_confirmation"
 
     def test_with_no_private_chat_a_bare_yes_is_an_ordinary_turn(self, group):
         """The question went to the bell; the first text mints the chat and
@@ -911,6 +926,45 @@ class TestTheConfirmationBodyNamesAnAnswerThatWorks:
             resolution = private_chat_resolution(conn, "alice")
         assert resolution.task is None
         assert {t.id for t in resolution.ambiguous} == {first, second}
+
+    @pytest.mark.parametrize("shared_waiting", [False, True])
+    def test_a_question_of_this_chat_names_the_id_while_a_shared_one_waits(
+        self, group, sent, monkeypatch, shared_waiting,
+    ):
+        from istota.scheduler import process_one_task
+
+        mine = _private_chat(group)
+        if shared_waiting:
+            _park_privately(group)
+        with db.get_db(group.db_path) as conn:
+            own = db.create_task(conn, user_id="alice", source_type="whatsapp",
+                                 prompt="delete it", conversation_token=mine,
+                                 output_target="whatsapp")
+        monkeypatch.setattr("istota.scheduler.execute_task", lambda *a, **k: (
+            True, "I need your confirmation before deleting the file.", None, None))
+
+        assert process_one_task(group, user_id="alice") == (own, True)
+
+        assert _task(group, own).status == "pending_confirmation"
+        (request,) = [r for r in sent if r.buttons]
+        tail = (f"Task #{own}. Reply !confirm {own} yes or !confirm {own} no"
+                if shared_waiting else f"Task #{own}. Reply YES or NO.")
+        assert request.text.endswith(tail)
+
+    def test_a_shared_question_after_one_of_this_chat_gets_the_id_form(self, group):
+        from istota.transport.whatsapp.webhook import private_chat_resolution
+
+        mine = _private_chat(group)
+        with db.get_db(group.db_path) as conn:
+            own = db.create_task(conn, user_id="alice", source_type="whatsapp",
+                                 prompt="delete it", conversation_token=mine)
+            db.set_task_confirmation(conn, own, "May I delete it?")
+            assert private_chat_resolution(conn, "alice").task.id == own
+        shared = _park_privately(group)
+        with db.get_db(group.db_path) as conn:
+            resolution = private_chat_resolution(conn, "alice")
+        assert resolution.task is None
+        assert {t.id for t in resolution.ambiguous} == {own, shared}
 
 
 class TestTheClassifierReachesTheGroup:
