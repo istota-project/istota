@@ -692,27 +692,53 @@ class TestMonitorExisting:
         assert _writes_in_order(arr) == [("PUT", "movie/editor")]
         assert envelope["searching"] is False and envelope["monitored_now"] is True
 
-    def test_a_show_gets_the_monitor_mode_then_the_tag_then_a_search(self, arr):
+    def test_a_show_gets_the_tag_then_the_monitor_mode_then_a_search(self, arr):
         self._show(arr)
         code, envelope = run("add", "--kind", "show", "--tvdb", "324570", "--monitor",
                              "lastSeason")
         assert code == 0, envelope
-        assert _writes_in_order(arr) == [("POST", "seasonpass"), ("PUT", "series/editor"),
+        assert _writes_in_order(arr) == [("PUT", "series/editor"), ("POST", "seasonpass"),
                                          ("POST", "command")]
+        assert _body(arr.sent("sonarr", "series/editor")[0]) == {
+            "seriesIds": [5], "tags": [1], "applyTags": "add"}
         assert _body(arr.sent("sonarr", "seasonpass")[0]) == {
             "series": [{"id": 5, "monitored": True}],
             "monitoringOptions": {"monitor": "lastSeason"}}
-        assert _body(arr.sent("sonarr", "series/editor")[0]) == {
-            "seriesIds": [5], "tags": [1], "applyTags": "add"}
         assert _body(arr.sent("sonarr", "command")[0]) == {"name": "SeriesSearch",
                                                            "seriesId": 5}
         assert envelope["monitored_now"] is True and envelope["monitor"] == "lastSeason"
+
+    @pytest.mark.parametrize("mode", ["all", "future"])
+    def test_an_all_or_future_mode_also_monitors_new_seasons(self, arr, mode):
+        self._show(arr)
+        run("add", "--kind", "show", "--tvdb", "324570", "--monitor", mode)
+        assert _body(arr.sent("sonarr", "series/editor")[0])["monitorNewItems"] == "all"
 
     def test_monitor_none_on_an_unmonitored_show_writes_nothing(self, arr):
         self._show(arr)
         code, envelope = run("add", "--kind", "show", "--tvdb", "324570", "--monitor", "none")
         assert code == 1 and envelope["reason"] == "invalid_arguments"
         assert _writes(arr) == []
+
+    def test_a_failed_season_pass_leaves_it_unmonitored_and_a_repeat_finishes_it(
+            self, arr, monkeypatch):
+        self._show(arr)
+        arr.json("sonarr", "tag", [{"id": 5, "label": "req-bob"}])
+        monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+        arr.on("sonarr", "POST", "seasonpass",
+               httpx.Response(500, json={"message": "boom"}),
+               httpx.Response(202, json={}))
+        code, envelope = run("add", "--kind", "show", "--tvdb", "324570")
+        assert code == 1
+        assert "partial" not in envelope
+        assert "running the same add again finishes the request" in envelope["error"]
+        assert _writes_in_order(arr) == [("PUT", "series/editor"), ("POST", "seasonpass")]
+        # The lookup still answers unmonitored, so the same add goes round again.
+        code, envelope = run("add", "--kind", "show", "--tvdb", "324570")
+        assert code == 0, envelope
+        assert envelope["monitored_now"] is True and envelope["tag"] == "req-bob"
+        assert _writes_in_order(arr)[2:] == [
+            ("PUT", "series/editor"), ("POST", "seasonpass"), ("POST", "command")]
 
     def test_a_failed_search_says_it_is_monitored_and_names_search_now(self, arr):
         self._film(arr)
@@ -723,6 +749,30 @@ class TestMonitorExisting:
         assert envelope["search_sent"] is False
         assert "search-now --kind film --library-id 12" in envelope["error"]
 
+    def test_an_unknown_search_outcome_does_not_claim_none_was_sent(self, arr):
+        self._film(arr)
+        arr.on("radarr", "POST", "command", httpx.ReadTimeout("no answer"))
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603")
+        assert code == 1 and envelope["reason"] == "outcome_unknown"
+        assert envelope["partial"] is True and envelope["search_sent"] is None
+        assert "may or may not have been sent" in envelope["error"]
+
+    @pytest.mark.parametrize("flag, value", [("--profile", "ultra-hd"),
+                                             ("--root", "/data/library/content/Films")])
+    def test_profile_and_root_are_refused_rather_than_ignored(self, arr, flag, value):
+        self._film(arr)
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603", flag, value)
+        assert code == 1 and envelope["reason"] == "invalid_arguments"
+        assert _writes(arr) == []
+
+    def test_a_bad_minimum_availability_does_not_block_a_request_that_never_sends_it(
+            self, arr):
+        self._film(arr)
+        arr.config.servarr.defaults["radarr"]["minimum_availability"] = "whenever"
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603")
+        assert code == 0, envelope
+        assert "minimum_availability" not in envelope
+
     def test_a_requester_can_then_search_now_their_request(self, arr, monkeypatch):
         self._film(arr)
         arr.json("radarr", "tag", [{"id": 5, "label": "req-bob"}])
@@ -730,6 +780,12 @@ class TestMonitorExisting:
         code, envelope = run("add", "--kind", "film", "--tmdb", "603")
         assert code == 0, envelope
         assert _body(arr.sent("radarr", "movie/editor")[0])["tags"] == [5]
+        # What the app holds after the editor write, read back by search-now.
+        arr.json("radarr", "movie/12", dict(fixture("movie_lookup_library.json")[0],
+                                            monitored=True, tags=[5]))
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "12")
+        assert code == 0, envelope
+        assert envelope["command"] == "MoviesSearch"
 
 
 class TestReqTags:
@@ -1052,6 +1108,16 @@ class TestAddAlbum:
         assert envelope["partial"] is True and envelope["artist_added"] is False
         assert envelope["album_monitored"] is True and envelope["search_sent"] is False
         assert envelope["album_library_id"] == 21
+
+    def test_an_unknown_search_outcome_after_monitoring_is_not_called_unsent(self, arr):
+        _music_ready(arr)
+        arr.json("lidarr", "album/lookup", fixture("album_library.json"))
+        arr.json("lidarr", "album", fixture("album_library.json"))
+        arr.on("lidarr", "POST", "command", httpx.ReadTimeout("no answer"))
+        code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
+        assert code == 1 and envelope["reason"] == "outcome_unknown"
+        assert envelope["album_monitored"] is True and envelope["search_sent"] is None
+        assert "may or may not have been sent" in envelope["error"]
 
     def test_a_monitored_album_is_already_present(self, arr):
         _music_ready(arr)

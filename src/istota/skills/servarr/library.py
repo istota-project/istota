@@ -6,8 +6,9 @@ Films (radarr), shows (sonarr), and artists and albums (lidarr).
 monitored item already in the library is ``already_present``, a successful
 answer with ``added: false``, and is never retagged. A film or show in the
 library but unmonitored is a stack holding something nobody asked for, so the
-add requests it in place (`_monitor_existing`): monitored, given the caller's
-tag beside any it has, and searched. A new item gets the caller's
+add requests it in place (`_monitor_existing`): given the caller's tag beside
+any it has, monitored, and searched. ``--profile`` and ``--root`` are refused
+there, since a request keeps the item's own settings. A new item gets the caller's
 ``req-<user>`` tag, created if the app lacks it, so `requests` can answer
 "what did I ask for". A film, show or artist add is one ``POST``; an ending
 after it was sent is ``outcome_unknown`` with the `search` that tells whether
@@ -17,7 +18,7 @@ it applied. An artist add is a whole discography, so it is gated: without
 **An album add is up to three writes.** Lidarr holds albums under artists. For
 an artist already in the library, the album is monitored (``PUT album/monitor``)
 and searched (``AlbumSearch``); nothing is tagged, because tags live on the
-artist and an existing item is never retagged. For a new artist, the artist is
+artist and a monitored existing artist is never retagged. For a new artist, the artist is
 added with ``monitor: none``, then ``album?foreignAlbumId=`` is polled until the
 artist's refresh lists the album, bounded by `ALBUM_POLL_SECONDS` and the run's
 deadline, then the album is monitored and searched. A step that fails after
@@ -712,13 +713,13 @@ def _add_video(run: Run, args, kind: str, ident: int) -> dict:
     lookup_hint = f"search --kind {kind} --{ID_FLAGS[kind]} {ident}"
     item = _single_lookup(client, kind, ident)
     library_id = _positive_id(item.get("id"))
-    if library_id is not None and item.get("monitored") is True:
-        return _already_present(client, kind, item)
+    if library_id is not None:
+        if item.get("monitored") is True:
+            return _already_present(client, kind, item)
+        return _monitor_existing(run, args, client, kind, item, library_id)
 
     defaults = _app_defaults(run, app)
     settings = _add_settings(app, kind, args, defaults)
-    if library_id is not None:
-        return _monitor_existing(run, args, client, kind, item, library_id, settings)
     listed = _resolve_listed(client, args, defaults)
     profile, root = listed["quality_profile"], listed["root_folder"]
     label = req_tag(run.user_id)
@@ -753,17 +754,37 @@ def _add_video(run: Run, args, kind: str, ident: int) -> dict:
     return out
 
 
+#: Show monitor modes that also mean seasons announced later; an add sends
+#: the lookup's ``monitorNewItems: all``, so the in-place request sets it too.
+_NEW_SEASON_MODES = frozenset({"all", "future"})
+
+
 def _monitor_existing(run: Run, args, client: ArrClient, kind: str, item: dict,
-                      library_id: int, settings: dict) -> dict:
-    """A film or show in the library but unmonitored: monitor it, add the
-    caller's tag beside any it has, and search. Each write is safe to repeat,
-    and a repeat after the monitor landed is ``already_present``."""
+                      library_id: int) -> dict:
+    """A film or show in the library but unmonitored: tag it as the caller's
+    request, monitor it, and search.
+
+    The tag is written first, or with the monitor in one write for a film,
+    because the monitor is what turns a repeat into ``already_present``: a
+    failure before it leaves the item unmonitored, and the same add finishes
+    the request. Only the search can fail after it, and `search-now` passes
+    for an item carrying the caller's tag.
+    """
     app = client.app
     lookup_hint = f"search --kind {kind} --{ID_FLAGS[kind]} {item.get(APPS[app].id_field)}"
-    if kind == "show" and settings["monitor"] == "none":
-        raise _invalid("This show is in the library but unmonitored; --monitor none would "
-                       "leave it that way. Pick the episodes to monitor, or leave --monitor "
-                       "out for the stack's default.")
+    for flag in ("profile", "root"):
+        if getattr(args, flag, None):
+            raise _invalid(f"--{flag} applies to a new item. This {kind} is already in the "
+                           f"library, unmonitored, and a request keeps its own settings; "
+                           f"run the add without --{flag}.")
+    mode = None
+    if kind == "show":
+        mode = args.monitor or _enum_default(app, "monitor", _app_defaults(run, app),
+                                             SERIES_MONITOR_MODES)
+        if mode == "none":
+            raise _invalid("This show is in the library but unmonitored; --monitor none would "
+                           "leave it that way. Pick the episodes to monitor, or leave --monitor "
+                           "out for the stack's default.")
     label = req_tag(run.user_id)
     tag_id = ensure_tag(client, label)
     if kind == "film":
@@ -771,50 +792,71 @@ def _monitor_existing(run: Run, args, client: ArrClient, kind: str, item: dict,
                        json={"movieIds": [library_id], "monitored": True, "tags": [tag_id],
                              "applyTags": "add"})
     else:
+        editor = {"seriesIds": [library_id], "tags": [tag_id], "applyTags": "add"}
+        if mode in _NEW_SEASON_MODES:
+            editor["monitorNewItems"] = "all"
+        client.request("PUT", "series/editor", lookup=lookup_hint, json=editor)
         # The series flag alone leaves every episode unmonitored; seasonpass
         # applies the monitor mode to the episodes as an add would.
-        client.request("POST", "seasonpass", lookup=lookup_hint,
-                       json={"series": [{"id": library_id, "monitored": True}],
-                             "monitoringOptions": {"monitor": settings["monitor"]}})
         try:
-            client.request("PUT", "series/editor", lookup=lookup_hint,
-                           json={"seriesIds": [library_id], "tags": [tag_id],
-                                 "applyTags": "add"})
+            client.request("POST", "seasonpass", lookup=lookup_hint,
+                           json={"series": [{"id": library_id, "monitored": True}],
+                                 "monitoringOptions": {"monitor": mode}})
         except ServarrError as exc:
-            raise _monitored_partial(exc, kind, library_id, "it was not tagged as your "
-                                     "request and no search was sent") from None
+            if exc.reason == "outcome_unknown":
+                raise
+            raise ServarrError(
+                f"{exc} The show carries this user's request tag but is not monitored yet; "
+                f"running the same add again finishes the request.",
+                exc.reason, **exc.extra,
+            ) from None
 
     command_id = None
     if not args.no_search:
-        body = ({"name": "MoviesSearch", "movieIds": [library_id]} if kind == "film"
-                else {"name": "SeriesSearch", "seriesId": library_id})
+        body = search_command(kind, library_id)
         try:
             command = client.request("POST", "command", json=body)
         except ServarrError as exc:
-            raise _monitored_partial(exc, kind, library_id, "no search was sent") from None
+            raise _monitored_partial(exc, kind, library_id) from None
         command_id = number(command.get("id")) if isinstance(command, dict) else None
 
-    other = settings if kind == "show" else {}
-    return {
+    out = {
         "status": "ok", "app": app, "kind": kind, "added": False, "already_present": True,
         "monitored_now": True, "library_id": library_id,
         "title": _text(item.get("title")), "year": number(item.get("year")),
         "tag": label, "searching": not args.no_search, "search_command_id": command_id,
-        **other,
         "note": "It was in the library unmonitored; it is now monitored and tagged as this "
                 "user's request.",
     }
+    if mode is not None:
+        out["monitor"] = mode
+    return out
 
 
-def _monitored_partial(exc: ServarrError, kind: str, library_id: int,
-                       missing: str) -> ServarrError:
+def _monitored_partial(exc: ServarrError, kind: str, library_id: int) -> ServarrError:
+    """The search failed after the item was tagged and monitored."""
+    unknown = exc.reason == "outcome_unknown"
     extra = {k: v for k, v in exc.extra.items() if k != "app"}
-    extra.update(partial=True, monitored_now=True, search_sent=False, library_id=library_id)
+    extra.update(partial=True, monitored_now=True, search_sent=None if unknown else False,
+                 library_id=library_id)
+    sent = "the search may or may not have been sent" if unknown else "no search was sent"
     return ServarrError(
-        f"{exc} The request is partly done: the {kind} is now monitored, but {missing}. "
-        f"search-now --kind {kind} --library-id {library_id} searches at once.",
+        f"{exc} The request is partly done: the {kind} is now monitored and tagged as this "
+        f"user's request, but {sent}. search-now --kind {kind} --library-id {library_id} "
+        f"searches at once.",
         exc.reason, app=KIND_APP[kind], **extra,
     )
+
+
+def search_command(kind: str, item_id: int) -> dict:
+    """The app command that searches for one library item."""
+    if kind == "film":
+        return {"name": "MoviesSearch", "movieIds": [item_id]}
+    if kind == "show":
+        return {"name": "SeriesSearch", "seriesId": item_id}
+    if kind == "album":
+        return {"name": "AlbumSearch", "albumIds": [item_id]}
+    return {"name": "ArtistSearch", "artistId": item_id}
 
 
 # -- artists -------------------------------------------------------------------
@@ -930,7 +972,10 @@ def _partial(exc: ServarrError, progress: dict) -> ServarrError:
         done.append("the artist was added to lidarr with no albums monitored")
     if progress.get("album_monitored"):
         done.append("the album is monitored")
-    if not progress.get("search_sent"):
+    if exc.reason == "outcome_unknown" and progress.get("album_monitored"):
+        done.append("the search may or may not have been sent")
+        progress = {**progress, "search_sent": None}
+    elif not progress.get("search_sent"):
         done.append("no search was sent")
     if progress.get("album_monitored"):
         album_id = progress.get("album_library_id")
@@ -971,7 +1016,7 @@ def _add_album(run: Run, args, ident: str) -> dict:
 
     Every check and read happens before the first write. A new artist is added
     unmonitored (``monitor: none``) and tagged; an artist already in the
-    library is not tagged (an existing item is never retagged), so such an
+    library is not tagged (a monitored existing artist is never retagged), so such an
     album does not show in `requests`, and the envelope says so.
     """
     client = run.client("lidarr")
@@ -1050,7 +1095,7 @@ def _add_album(run: Run, args, ident: str) -> dict:
     if not args.no_search:
         try:
             command = client.request("POST", "command",
-                                     json={"name": "AlbumSearch", "albumIds": [album_id]})
+                                     json=search_command("album", album_id))
         except ServarrError as exc:
             raise _partial(exc, {**progress, "album_library_id": album_id}) from None
         progress["search_sent"] = True

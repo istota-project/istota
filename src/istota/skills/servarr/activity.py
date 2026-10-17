@@ -31,7 +31,7 @@ from .apps import APP_ORDER, KIND_APP
 from .client import ArrClient, ServarrError, as_rows, fence, library_id, number, selector
 from .library import (
     ID_FLAGS, _id_for, _invalid, _positive_id, _stats, _tags, _text, limit_of, req_tag,
-    requesters_in, tag_id_in,
+    requesters_in, search_command, tag_id_in,
 )
 from .run import Run, media_apps, walk_apps
 
@@ -565,16 +565,6 @@ def cmd_wanted(run: Run, args) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def _search_command(kind: str, item_id: int) -> dict:
-    if kind == "film":
-        return {"name": "MoviesSearch", "movieIds": [item_id]}
-    if kind == "show":
-        return {"name": "SeriesSearch", "seriesId": item_id}
-    if kind == "album":
-        return {"name": "AlbumSearch", "albumIds": [item_id]}
-    return {"name": "ArtistSearch", "artistId": item_id}
-
-
 def _check_owner(run: Run, client: ArrClient, kind: str, item: dict) -> None:
     """A requester's search is refused unless the item carries their tag. An
     album's tags live on its artist."""
@@ -610,7 +600,7 @@ def cmd_search_now(run: Run, args) -> dict:
             f"nothing. Nothing was sent; it has to be monitored in {client.app} first.",
             "not_monitored", app=client.app, library_id=library,
         )
-    body = _search_command(kind, library)
+    body = search_command(kind, library)
     command = client.request("POST", "command", json=body,
                              lookup=f"why --kind {kind} --library-id {library}")
     command = command if isinstance(command, dict) else {}
