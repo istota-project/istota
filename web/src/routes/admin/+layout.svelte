@@ -6,6 +6,7 @@
   import {
     Activity,
     CalendarClock,
+    KeyRound,
     Monitor,
     Newspaper,
     Plug,
@@ -31,6 +32,7 @@
     { href: '/jobs', label: 'Scheduled jobs', icon: CalendarClock },
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
+    { href: '/secrets', label: 'Secrets', icon: KeyRound },
     { href: '/connections', label: 'Connections', icon: Plug },
     { href: '/browsers', label: 'Browsers', icon: Monitor },
     { href: '/logs', label: 'Logs', icon: ScrollText },
