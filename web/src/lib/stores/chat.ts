@@ -227,7 +227,13 @@ function replyCitation(raw: ReplyCitation | undefined): MessageReply | undefined
   if (!raw) return undefined;
   return raw.deleted
     ? { msgId: raw.msg_id, deleted: true }
-    : { msgId: raw.msg_id, role: raw.role, excerpt: raw.excerpt, deleted: false };
+    : {
+        msgId: raw.msg_id,
+        role: raw.role,
+        excerpt: raw.excerpt,
+        ...(raw.author ? { author: raw.author } : {}),
+        deleted: false,
+      };
 }
 
 function randomAckVerb(): string {

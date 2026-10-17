@@ -3424,6 +3424,8 @@ export interface ReplyCitation {
   msg_id: number;
   role?: 'user' | 'assistant' | 'system';
   excerpt?: string;
+  // Who wrote a `user` parent, when that is not the viewer (#764).
+  author?: string;
   deleted: boolean;
 }
 

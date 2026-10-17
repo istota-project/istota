@@ -119,7 +119,7 @@ Chat selection URLs are written by `createUrlSelection` in `routes/chat/+page.sv
 - **Not `reply_to_talk_id`**: canonical and Talk ids collide silently in a bound room. `record_inbound` takes `reply_to_canonical_id` beside surface-native `reply_to_message_id`; do not merge them. `_ensure_reply_parent_in_history` tries `db.get_reply_parent_task_by_message_id` first.
 - **The snapshot is server-derived** (1000 chars from `messages.body`); a client quote would be forgeable. Unknown or foreign parent → 404, no task.
 - `build_prompt` renders the snapshot as a request blockquote always; `_ensure_reply_parent_in_history` force-includes the parent turn. Snapshot-only: system rows, retention-deleted, unfinished turns.
-- `reply_to` (`{msg_id, role, excerpt, deleted}`) from all three producers via a live `LEFT JOIN`; excerpt 200 chars, same as the chip; `buildHistoryMessage` is the one builder.
+- `reply_to` (`{msg_id, role, excerpt, author?, deleted}`) from all three producers via a live `LEFT JOIN`; excerpt 200 chars, same as the chip; `buildHistoryMessage` is the one builder. `author` names a `user` parent by `webui.app._author_name`, the rule a turn's own header uses, and is absent for the viewer's own row, which the quote labels with the viewer's name (#764).
 - **`reply_target_gone`**: the row is removed and text returns to the composer, the one exception to ISSUE-200, since Retry cannot work.
 - Talk: a web reply uses `db.get_message_external_id`; inbound maps via room-scoped `db.find_message_by_external_id`.
 - Client: no Reply in aggregate panes; Escape clears the chip after the popover declines; `replyTo` rides the draft; `!commands` clear it.

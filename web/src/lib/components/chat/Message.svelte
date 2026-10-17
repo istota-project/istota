@@ -469,7 +469,11 @@
   const cited = $derived(message.replyTo);
   const citedDeleted = $derived(!!cited?.deleted);
   const citedLabel = $derived(
-    cited?.role === 'user' ? userName : cited?.role === 'assistant' ? botName : '',
+    cited?.role === 'user'
+      ? (cited.author ?? userName)
+      : cited?.role === 'assistant'
+        ? botName
+        : '',
   );
   const citedClickable = $derived(!!cited && !citedDeleted && !!onJumpToMessage);
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------

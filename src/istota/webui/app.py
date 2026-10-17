@@ -8373,7 +8373,9 @@ _SPINE_COLUMNS = (
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
-    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body, "
+    "  p.author_user_id AS reply_author_user_id, "
+    "  p.author_label AS reply_author_label "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
     # The cited parent, joined live rather than snapshotted. The one edit to a
@@ -8475,7 +8477,18 @@ _AUX_COLUMNS = (
 _AUX_ROOM_SCOPE = _db.TASK_ROOM_SCOPE_SQL
 
 
-def _row_reply_to(row) -> dict | None:
+def _author_name(author_label, author_user_id, viewer: str | None) -> str | None:
+    """Who wrote a `role='user'` row, as the reader should see it, or None for
+    the reader's own row. A turn's header and a citation of it share this, so
+    the two cannot name one row differently (#764)."""
+    if author_label:
+        return author_label
+    if author_user_id and author_user_id != viewer:
+        return _display_name_for(author_user_id)
+    return None
+
+
+def _row_reply_to(row, viewer: str | None) -> dict | None:
     """The rendered citation for a history row, or None when it isn't a reply.
 
     Two shapes, and the client distinguishes them on `deleted`: a live parent
@@ -8492,12 +8505,19 @@ def _row_reply_to(row) -> dict | None:
         return None
     if row["reply_role"] is None:
         return {"msg_id": parent_id, "deleted": True}
-    return {
+    cited = {
         "msg_id": parent_id,
         "role": row["reply_role"],
         "excerpt": (row["reply_body"] or "")[:_REPLY_EXCERPT_CHARS],
         "deleted": False,
     }
+    if row["reply_role"] == "user" and "reply_author_user_id" in keys:
+        author = _author_name(
+            row["reply_author_label"], row["reply_author_user_id"], viewer,
+        )
+        if author is not None:
+            cited["author"] = author
+    return cited
 
 
 def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
@@ -8684,10 +8704,10 @@ def _user_row_display(
     except (IndexError, KeyError):
         return out  # a producer that predates the columns (the dev mock)
 
-    if author_label:
-        out["author"] = author_label
-    elif author_user_id and author_user_id != viewer:
-        out["author"] = _display_name_for(author_user_id)
+    author = _author_name(author_label, author_user_id, viewer)
+    if author is not None:
+        out["author"] = author
+    if not author_label and author_user_id and author_user_id != viewer:
         # The label names the writer; this is the writer, as the avatar
         # endpoint keys them. It rides only in this branch, which is the label
         # rule restated rather than a second one: an `author_label` is an
@@ -9016,7 +9036,7 @@ def _chat_room_messages(
         else:  # assistant — a stored assistant row is by definition a completed turn
             d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
             _decorate_outgoing_mail(d, mail_view)
-        cited = _row_reply_to(r)
+        cited = _row_reply_to(r, username)
         if cited is not None:
             d["reply_to"] = cited
         about = _about_room_field(r["about_room_token"], about_names)
@@ -11150,7 +11170,7 @@ def _cross_room_message_dict(
             d["task_id"] = parked_task
         _apply_noted(d, (noted or {}).get(r["msg_id"]))
         d.update((note_parts or {}).get(r["msg_id"], {}))
-    cited = _row_reply_to(r)
+    cited = _row_reply_to(r, username)
     if cited is not None:
         d["reply_to"] = cited
     about = _about_room_field(
