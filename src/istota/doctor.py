@@ -8032,6 +8032,129 @@ def check_nextcloud_connection(config: "Config", probe: bool) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
+# servarr.connection
+#
+# One result per configured arr app, through the skill's own `ArrClient`, so
+# the check and the skill cannot disagree about what is reachable. Details are
+# built from reason codes and status codes, never from the app's own text.
+# ---------------------------------------------------------------------------
+
+SERVARR_CHECK_NAME = "servarr.connection"
+
+_SERVARR_LOG_REMEDY = "See the servarr_connection_check line in the daemon log."
+_SERVARR_WARN_REASONS = frozenset({"connection_failed", "host_refused"})
+
+
+def _servarr_remedy(app: str, reason: str, http_status) -> str:
+    where = f"[servarr.apps.{app}] url"
+    if reason == "unauthorized":
+        return (f"The key in [servarr.apps.{app}] is wrong or was rotated; copy it again "
+                f"from {app}'s Settings > General > Security.")
+    if reason == "connection_failed":
+        return (f"{app} may be down, or a firewall between this host and it is dropping the "
+                f"connection, such as a Docker host's DOCKER-USER allowlist.")
+    if reason == "host_refused":
+        return (f"{app}'s host resolves to a private address. List it in [servarr] "
+                f"private_hosts if that is the app.")
+    if reason == "redirect_refused":
+        return f"{where} answers with a redirect; set it to the address {app} serves on."
+    if reason in ("not_found", "bad_response", "response_too_large"):
+        return f"{where} does not answer like {app}; check it points at the app and its URL base."
+    if reason == "api_error" and isinstance(http_status, int) and http_status >= 500:
+        return f"{app} answered with a server error; check its own logs."
+    return _SERVARR_LOG_REMEDY
+
+
+def check_servarr_connection(
+    config: "Config", probe: bool, *, transport=None, resolve=None,
+) -> list[CheckResult]:
+    """Does each configured arr app answer `system/status` with its key.
+
+    Config problems FAIL with no request; under ``probe=False`` the rest
+    SKIP. One ``GET`` per app, never retried. An app that is down WARNs, since
+    that is not an istota misconfiguration; a wrong key or an app older than
+    the skill supports FAILs. ``transport`` and ``resolve`` are test seams.
+    """
+    from istota.config import SERVARR_APPS
+    from istota.skills.servarr.apps import display_url
+    from istota.skills.servarr.client import ArrClient, ServarrError, config_problem
+
+    servarr = config.servarr
+    apps = [app for app in SERVARR_APPS
+            if app in servarr.apps or app in servarr.incomplete_apps]
+    if not apps:
+        return [CheckResult(SERVARR_CHECK_NAME, SKIP, "no [servarr.apps] configured",
+                            scope=DEPLOYMENT)]
+
+    results: list[CheckResult] = []
+    for app in apps:
+        name = f"{SERVARR_CHECK_NAME}.{app}"
+        connection = servarr.apps.get(app)
+        if connection is None:
+            results.append(CheckResult(
+                name, FAIL, f"[servarr.apps.{app}] has no url or no api_key, so the skill "
+                            f"ignores it",
+                remedy=f"Set both url and api_key in [servarr.apps.{app}], or remove the table.",
+                scope=DEPLOYMENT,
+            ))
+            continue
+        problem = config_problem(app, connection.url, servarr.private_hosts)
+        if problem:
+            results.append(CheckResult(
+                name, FAIL, problem,
+                remedy=(f"Set [servarr.apps.{app}] url to the app's address, such as "
+                        f"https://{app}.example.com, with no user name, password or query; "
+                        f"plain HTTP needs its host in [servarr] private_hosts."),
+                scope=DEPLOYMENT,
+            ))
+            continue
+        shown = display_url(connection.url)
+        if not probe:
+            results.append(CheckResult(
+                name, SKIP,
+                f"{app} at {shown}: not asked (probe disabled)", scope=DEPLOYMENT,
+            ))
+            continue
+
+        client = ArrClient(app=app, base_url=connection.url, api_key=connection.api_key,
+                           private_hosts=servarr.private_hosts, transport=transport,
+                           resolve=resolve)
+        try:
+            client.system_status(retry=False)
+        except ServarrError as exc:
+            http_status = exc.extra.get("http_status")
+            logger.warning("servarr_connection_check app=%s reason=%s http_status=%s",
+                           app, exc.reason, http_status)
+            if exc.reason == "unsupported_version":
+                detail = (f"{app} at {shown}: version {exc.extra.get('version')} is older "
+                          f"than {exc.extra.get('minimum')}")
+                remedy = (f"Upgrade {app} to version {exc.extra.get('minimum')} or newer; "
+                          f"the skill's requests assume it.")
+            else:
+                detail = f"{app} at {shown}: {exc.reason}"
+                if http_status is not None:
+                    detail += f" (HTTP {http_status})"
+                remedy = _servarr_remedy(app, exc.reason, http_status)
+            warn = exc.reason in _SERVARR_WARN_REASONS or (
+                exc.reason == "api_error" and isinstance(http_status, int) and http_status >= 500
+            )
+            results.append(CheckResult(name, WARN if warn else FAIL, detail, remedy=remedy,
+                                       scope=DEPLOYMENT))
+            continue
+        except Exception as exc:  # noqa: BLE001 — a check never raises
+            logger.warning("servarr_connection_check app=%s reason=error class=%s",
+                           app, type(exc).__name__)
+            results.append(CheckResult(name, FAIL, f"{app} at {shown}: unexpected error",
+                                       remedy=_SERVARR_LOG_REMEDY, scope=DEPLOYMENT))
+            continue
+        finally:
+            client.close()
+        results.append(CheckResult(name, OK, f"{app} {client.version} at {shown}",
+                                   scope=DEPLOYMENT))
+    return results
+
+
+# ---------------------------------------------------------------------------
 # The registry
 # ---------------------------------------------------------------------------
 
@@ -9903,6 +10026,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("talk.signaling_auth", check_signaling_auth),
     ("talk.signaling_watchers", check_signaling_watchers),
     ("nextcloud.connection", check_nextcloud_connection),
+    ("servarr.connection", check_servarr_connection),
     ("sms.common", check_sms_common),
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
@@ -10045,6 +10169,8 @@ CHECK_SCOPES: dict[str, str] = {
     "talk.signaling_watchers": DEPLOYMENT,
     # Signs in to the configured Nextcloud: a server and an account.
     "nextcloud.connection": DEPLOYMENT,
+    # Reaches the configured arr apps: an install's own stack.
+    "servarr.connection": DEPLOYMENT,
     "sms.common": DEPLOYMENT,
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,

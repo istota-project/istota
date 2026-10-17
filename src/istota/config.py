@@ -337,6 +337,11 @@ class ServarrConfig:
     ``defaults``: per-app add defaults, keyed by app name, each a table with any
     of quality_profile, root_folder, metadata_profile (lidarr only),
     minimum_availability (radarr only), monitor.
+
+    ``incomplete_apps``: set by the loader, never from the file. The names of
+    ``[servarr.apps.<app>]`` tables the loader dropped for a missing ``url`` or
+    ``api_key``, so doctor and the admin card can say so; the skill never
+    reads it.
     """
     apps: dict[str, ServarrApp] = field(default_factory=dict)
     requesters: list[str] = field(default_factory=list)
@@ -344,6 +349,7 @@ class ServarrConfig:
     defaults: dict[str, dict[str, str]] = field(default_factory=dict)
     lookup_timeout_seconds: int = 30
     release_search_timeout_seconds: int = 120
+    incomplete_apps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3810,6 +3816,8 @@ _NOT_CONFIGURATION = frozenset({
     "_profile_user_ids",
     "_configured_user_ids",
     "_user_registry_complete",
+    # What the `servarr.apps` hook dropped, recorded after the walk.
+    "servarr.incomplete_apps",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -4382,6 +4390,21 @@ def _servarr_apps(raw: object, key: str) -> object:
     return apps
 
 
+def _record_incomplete_servarr_apps(data: dict, config: Config) -> None:
+    """Name each `[servarr.apps.<app>]` table the `servarr.apps` hook dropped.
+
+    The hook is the one judge of a usable table; this only records what it
+    left out, so doctor and the admin card can report it as incomplete.
+    """
+    section = data.get("servarr")
+    raw = section.get("apps") if isinstance(section, dict) else None
+    if not isinstance(raw, dict):
+        return
+    config.servarr.incomplete_apps = [
+        str(name) for name in raw if str(name) not in config.servarr.apps
+    ]
+
+
 def _forge_cli_list(raw: object, key: str) -> object:
     """A forge-CLI policy list, tolerating the bare-string hand-edit."""
     if isinstance(raw, str):
@@ -4683,6 +4706,7 @@ def _map_document(data: dict, config: Config) -> list[str]:
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
     _migrate_workspace_fields(data, config, old_mount_spelling=old_mount_spelling)
+    _record_incomplete_servarr_apps(data, config)
     if config.workspace_path is None:
         config.workspace_path = config.workspace_mount_path
     _apply_renamed_keys(data, config)

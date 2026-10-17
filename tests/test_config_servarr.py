@@ -102,10 +102,34 @@ class TestParsing:
     def test_an_incomplete_app_is_dropped_with_a_warning(self, tmp_path, table):
         config, problems = _load(tmp_path, f"[servarr.apps.radarr]\n{table}\n")
         assert "radarr" not in config.servarr.apps
+        assert config.servarr.incomplete_apps == ["radarr"]
         discarded = [p for p in problems if p["kind"] == "discarded"
                      and p["path"][:3] == ("servarr", "apps", "radarr")]
         assert len(discarded) == 1
         assert KEY not in discarded[0]["message"]
+
+    def test_a_complete_app_is_not_recorded_as_incomplete(self, tmp_path):
+        config, _ = _load(tmp_path, f"""
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+
+            [servarr.apps.sonarr]
+            url = "http://10.0.0.5:8989"
+        """)
+        assert set(config.servarr.apps) == {"radarr"}
+        assert config.servarr.incomplete_apps == ["sonarr"]
+
+    def test_an_app_that_is_not_a_table_is_recorded_as_incomplete(self, tmp_path):
+        config, _ = _load(tmp_path, '[servarr.apps]\nradarr = "http://10.0.0.5:7878"\n')
+        assert config.servarr.apps == {}
+        assert config.servarr.incomplete_apps == ["radarr"]
+
+    def test_incomplete_apps_cannot_be_set_from_the_file(self, tmp_path):
+        config, problems = _load(tmp_path, '[servarr]\nincomplete_apps = ["radarr"]\n')
+        assert config.servarr.incomplete_apps == []
+        assert any(p["kind"] == "unknown" and p["path"] == ("servarr", "incomplete_apps")
+                   for p in problems)
 
     def test_apps_that_is_not_a_table_is_discarded(self, tmp_path):
         config, problems = _load(tmp_path, '[servarr]\napps = "radarr"\n')

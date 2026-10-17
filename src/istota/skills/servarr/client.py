@@ -164,6 +164,48 @@ def _default_port(scheme: str) -> int:
     return 443 if scheme == "https" else 80
 
 
+def private_set(hosts) -> frozenset:
+    """``[servarr] private_hosts`` as the exact, lowercased names guard 2 matches."""
+    return frozenset(str(h).strip().lower().rstrip(".") for h in (hosts or ()) if str(h).strip())
+
+
+def url_problem(base_url: str) -> str:
+    """Why a configured URL can take no request at all, as a phrase, or ""."""
+    try:
+        parts = urlsplit(base_url)
+        parts.port  # raises on an out-of-range or non-numeric port
+    except ValueError:
+        return "is not a valid URL"
+    if (parts.scheme or "").lower() not in ("http", "https") or not parts.hostname:
+        return "must be http(s) with a host"
+    if parts.username is not None or parts.password is not None:
+        return "carries a user name or password; remove it"
+    if parts.query or parts.fragment:
+        return "carries a query or fragment"
+    return ""
+
+
+def plain_http_refused(scheme: str, host: str, private: frozenset) -> bool:
+    """Plain HTTP goes only to a host the operator listed in `private_hosts`."""
+    return scheme == "http" and host.lower().rstrip(".") not in private
+
+
+def config_problem(app: str, base_url: str, private_hosts) -> str:
+    """What stops `app`'s configured URL before any request, or "".
+
+    The checks guard 2 makes before resolving anything, for doctor and the
+    admin card. The text names the config key, never a credential.
+    """
+    problem = url_problem(base_url)
+    if problem:
+        return f"[servarr.apps.{app}] url {problem}"
+    parts = urlsplit(base_url)
+    if plain_http_refused(parts.scheme.lower(), parts.hostname, private_set(private_hosts)):
+        return (f"[servarr.apps.{app}] url is plain HTTP to {parts.hostname}, which is not "
+                f"in [servarr] private_hosts")
+    return ""
+
+
 def _host_header(host: str, port: int, scheme: str) -> str:
     """The Host header, brackets on IPv6, the port only when not the default."""
     name = f"[{host}]" if ":" in host else host
@@ -191,9 +233,7 @@ class ArrClient:
         self._kind = APPS[app]
         self.base_url = base_url
         self._key = api_key or ""
-        self._private = frozenset(
-            str(h).strip().lower().rstrip(".") for h in (private_hosts or ()) if str(h).strip()
-        )
+        self._private = private_set(private_hosts)
         self._resolve = resolve or resolve_host
         self._deadline = deadline
         self._clock = clock
@@ -222,30 +262,19 @@ class ArrClient:
 
     def _target(self) -> tuple[str, str, str, int, str]:
         """``(scheme, netloc, host, port, prefix)`` of the configured URL, checked."""
-        where = f"[servarr.apps.{self.app}] url"
-        try:
-            parts = urlsplit(self.base_url)
-            port = parts.port
-        except ValueError:
-            raise self._error(f"{where} is not a valid URL; nothing was sent.",
-                              "config_invalid") from None
-        scheme = (parts.scheme or "").lower()
-        if scheme not in ("http", "https") or not parts.hostname:
-            raise self._error(f"{where} must be http(s) with a host; nothing was sent.",
+        problem = url_problem(self.base_url)
+        if problem:
+            raise self._error(f"[servarr.apps.{self.app}] url {problem}; nothing was sent.",
                               "config_invalid")
-        if parts.username is not None or parts.password is not None:
-            raise self._error(f"{where} carries a user name or password; remove it. "
-                              f"Nothing was sent.", "config_invalid")
-        if parts.query or parts.fragment:
-            raise self._error(f"{where} carries a query or fragment; nothing was sent.",
-                              "config_invalid")
-        host = parts.hostname
-        return scheme, parts.netloc, host, port or _default_port(scheme), parts.path.rstrip("/")
+        parts = urlsplit(self.base_url)
+        scheme = parts.scheme.lower()
+        return (scheme, parts.netloc, parts.hostname, parts.port or _default_port(scheme),
+                parts.path.rstrip("/"))
 
     def _checked_addresses(self, scheme: str, host: str, port: int) -> list[str]:
         name = host.lower().rstrip(".")
         listed = name in self._private
-        if scheme == "http" and not listed:
+        if plain_http_refused(scheme, name, self._private):
             raise self._error(
                 f"{self.app} is configured over plain HTTP to {name}, which is not in "
                 f"[servarr] private_hosts. Plain HTTP is allowed only to a listed host; "
@@ -303,6 +332,7 @@ class ArrClient:
         kind: str = "local",
         lookup: str | None = None,
         answer_on: tuple[int, ...] = (),
+        retry: bool = True,
     ):
         """One call to ``{base}{api}/{path}``; the parsed JSON body, or None.
 
@@ -313,6 +343,7 @@ class ArrClient:
         whether an ambiguous write applied. `answer_on` names error statuses
         whose JSON body is the answer itself, as prowlarr's ``indexer/testall``
         answers 400 with its per-indexer results when any indexer fails.
+        ``retry=False`` drops guard 4's one retry of a local ``GET``.
         """
         method = method.upper()
         if method not in _METHODS:
@@ -328,11 +359,14 @@ class ArrClient:
         if path != "system/status":
             self._ensure_version()
         return self._send_with_policy(method, path, params, json, kind, lookup,
-                                      frozenset(answer_on))
+                                      frozenset(answer_on), retry)
 
-    def system_status(self) -> dict:
-        """``GET system/status``, with the version check applied to the answer."""
-        data = self.request("GET", "system/status")
+    def system_status(self, *, retry: bool = True) -> dict:
+        """``GET system/status``, with the version check applied to the answer.
+
+        ``retry=False`` sends it once whatever the answer, for doctor's probe.
+        """
+        data = self.request("GET", "system/status", retry=retry)
         self._check_version(data)
         return data
 
@@ -359,12 +393,13 @@ class ArrClient:
             raise self._version_error
         self.version = version
 
-    def _send_with_policy(self, method, path, params, body, kind, lookup, answer_on):
+    def _send_with_policy(self, method, path, params, body, kind, lookup, answer_on,
+                          retry=True):
         scheme, netloc, host, port, prefix = self._target()
         addresses = self._checked_addresses(scheme, host, port)
         url = f"{scheme}://{netloc}{prefix}{self._kind.api}/{path}"
         writes = method != "GET"
-        attempts = 2 if (not writes and kind == "local") else 1
+        attempts = 2 if (retry and not writes and kind == "local") else 1
         attempt = 0
         index = 0
         while True:
