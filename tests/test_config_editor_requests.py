@@ -122,6 +122,56 @@ class TestMoves:
             taken = requests.take(conn, DIGEST)
         assert taken.moves == ["sms.twilio.auth_token"] and taken.secrets == {}
 
+    def test_a_release_without_moves_refuses_the_row(self, db_path):
+        # ISSUE-768: a release from before moves claims a row when its stored
+        # base_digest equals the live digest, and would then write config.toml
+        # without the moved credential and no secret file to hold it.
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **self.MOVE)
+            stored = conn.execute(
+                "SELECT base_digest FROM config_change_requests WHERE id = ?", (request_id,),
+            ).fetchone()["base_digest"]
+            assert stored != DIGEST
+            assert requests.get(conn, request_id)["base_digest"] == DIGEST
+            taken = requests.take(conn, DIGEST)
+        assert taken.id == request_id and taken.base_digest == DIGEST
+
+    def test_a_move_row_from_before_the_marker_is_still_taken(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **self.MOVE)
+            conn.execute(
+                "UPDATE config_change_requests SET base_digest = ? WHERE id = ?", (DIGEST, request_id),
+            )
+            assert requests.take(conn, DIGEST).id == request_id
+
+    def test_init_db_marks_a_pending_move_from_before_the_marker(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **self.MOVE)
+            conn.execute(
+                "UPDATE config_change_requests SET base_digest = ? WHERE id = ?", (DIGEST, request_id),
+            )
+        db.init_db(db_path)
+        db.init_db(db_path)
+        with db.get_db(db_path) as conn:
+            stored = conn.execute(
+                "SELECT base_digest FROM config_change_requests WHERE id = ?", (request_id,),
+            ).fetchone()["base_digest"]
+        assert stored == requests.MOVE_DIGEST_PREFIX + DIGEST
+
+    def test_a_move_against_a_changed_file_is_still_refused(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **self.MOVE)
+            assert requests.take(conn, "b" * 64) is None
+            assert requests.get(conn, request_id)["status"] == "refused"
+
+    def test_a_request_without_a_move_keeps_its_digest_as_given(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn)
+            stored = conn.execute(
+                "SELECT base_digest FROM config_change_requests WHERE id = ?", (request_id,),
+            ).fetchone()["base_digest"]
+        assert stored == DIGEST
+
     def test_a_request_with_no_move_reads_as_none(self, db_path):
         with db.get_db(db_path) as conn:
             request_id = _create(conn)
