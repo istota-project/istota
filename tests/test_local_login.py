@@ -259,11 +259,14 @@ class TestTheConfig:
         path.write_text(f'[web]\nauth = {auth}\n\n[site]\nhostname = "{hostname}"\n')
         return load_config(path)
 
-    @pytest.mark.parametrize("hostname", [HOST, f"127.0.0.1:{PORT}"])
-    def test_a_loopback_hostname_with_a_port_takes_it(self, tmp_path, hostname):
-        assert self._load(tmp_path, hostname).web.auth == ["local_code", "email"]
+    def test_localhost_with_a_port_takes_it(self, tmp_path):
+        assert self._load(tmp_path, HOST).web.auth == ["local_code", "email"]
 
-    @pytest.mark.parametrize("hostname", ["istota.example.com", "localhost", "istota.example.com:8123"])
+    # The app opens http://localhost:<port>, and the origin check compares
+    # that with [site] hostname, so 127.0.0.1 would refuse every POST.
+    @pytest.mark.parametrize(
+        "hostname", ["istota.example.com", "localhost", "istota.example.com:8123", f"127.0.0.1:{PORT}"],
+    )
     def test_any_other_hostname_is_refused(self, tmp_path, hostname):
         with pytest.raises(ValueError, match="local_code"):
             self._load(tmp_path, hostname)
@@ -274,9 +277,10 @@ class TestTheConfig:
     def test_the_hosts_it_answers_at(self):
         from istota.config import local_login_hosts
         assert local_login_hosts(HOST) == frozenset({HOST, f"127.0.0.1:{PORT}"})
-        assert local_login_hosts("127.0.0.1:80") == frozenset(
+        assert local_login_hosts("localhost:80") == frozenset(
             {"localhost:80", "127.0.0.1:80", "localhost", "127.0.0.1"},
         )
+        assert local_login_hosts(f"127.0.0.1:{PORT}") == frozenset()
         assert local_login_hosts("istota.example.com") == frozenset()
         assert local_login_hosts("localhost") == frozenset()
 

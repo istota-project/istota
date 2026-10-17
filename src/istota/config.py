@@ -1248,13 +1248,15 @@ WEB_AUTH_METHODS = ("nextcloud", "email", "local_code", "none")
 def local_login_hosts(hostname: str) -> frozenset[str]:
     """The ``Host`` values a ``local_code`` install answers at, from ``[site] hostname``.
 
-    Only a loopback name with an explicit port qualifies (``localhost:8181``,
-    ``127.0.0.1:8181``), and the install then answers at both names on that
-    port; empty for any other hostname. Port 80 also admits the bare names,
-    which is how a browser sends them.
+    Only ``localhost`` with an explicit port qualifies (``localhost:8181``),
+    the address the Mac app opens: the origin check compares the page's name
+    with this hostname, so ``127.0.0.1:8181`` would refuse every POST from
+    it. The install then answers at both loopback names on that port; empty
+    for any other hostname. Port 80 also admits the bare names, which is how
+    a browser sends them.
     """
     name, sep, port = hostname.strip().lower().rpartition(":")
-    if not sep or name not in ("localhost", "127.0.0.1"):
+    if not sep or name != "localhost":
         return frozenset()
     if not (port.isascii() and port.isdigit()) or port.startswith("0") or not 0 < int(port) < 65536:
         return frozenset()
@@ -5282,8 +5284,8 @@ def _validate_local_login(config: Config) -> None:
     """
     if config.web.has_method("local_code") and not local_login_hosts(config.site.hostname):
         raise ValueError(
-            '[web] auth "local_code" needs [site] hostname to be localhost:<port> or '
-            f"127.0.0.1:<port>, the address the Mac app opens; it is {config.site.hostname!r}"
+            '[web] auth "local_code" needs [site] hostname to be localhost:<port>, '
+            f"the address the Mac app opens; it is {config.site.hostname!r}"
         )
 
 
