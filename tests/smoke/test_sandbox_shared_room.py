@@ -5,14 +5,19 @@ than one human reads binds what their private room does. What is withheld is
 withheld from a guest's turn and from a task nobody asked in the room (here a
 `cli` task, the same rule as a subtask): no `Users/{uid}` bind, a per-task
 temp dir instead of the per-user one (`room-task-<id>`, or `emissary-task-<id>`
-for a guest), and no flat Talk directory. Independently, a `Groups/<id>` bind
-for the groups the task resolves (multiplayer Stages 9, 13, 23).
+for a guest). Independently, a `Groups/<id>` bind for the groups the task
+resolves (multiplayer Stages 9, 13, 23).
+
+The lean stack uses local storage: attachments live under
+`Channels/<token>/media/`, and every turn can read its own room's media, guests
+included. No turn binds the flat `Talk/` directory used on a Nextcloud mount.
+We seed it anyway to prove it stays hidden, alongside the other rooms' media.
 
 The default suite patches `_bwrap_available` and reads argv, so it has never
 run any of that. This tier does. Every scenario reads the same probe from
 inside a task, and the private-room control runs the same probe in the same
-session and requires the opposite answers, so an absence here is the room's
-doing and not a stack that never had the files.
+session and requires the opposite answers for personal paths, so an absence
+there is the room's doing and not a stack that never had the files.
 
 Rooms and tasks are seeded through a Python script run in the container
 against the daemon's own database: there is no CLI that adds a room member or
@@ -52,6 +57,7 @@ SHARED = "sr-shared"
 OUTSIDER = "sr-outsider"
 GUEST = "sr-guest"
 PRIVATE = "sr-private"
+REQUEST_MARK = "[e2e:shared-room-probe]"
 
 #: The seed. Idempotent, because the stack is shared for the session and each
 #: test reseeds what it needs.
@@ -89,7 +95,7 @@ with db.get_db(config.db_path) as conn:
     )
     if len(sys.argv) > 1 and sys.argv[1] == "guest-task":
         out["task_id"] = db.create_task(
-            conn, user_id="testuser", source_type="cli", prompt="guest probe",
+            conn, user_id="testuser", source_type="cli", prompt={f"{REQUEST_MARK} guest probe"!r},
             conversation_token={GUEST!r}, guest_participant_id=pid, audience="mixed",
         )
 print(json.dumps(out))
@@ -109,6 +115,11 @@ mkdir -p {TEMP}/{USER}
 echo 'another task left this' > {TEMP}/{USER}/planted-sibling.txt
 owner=$(stat -c %u:%g {TEMP})
 chown -R "$owner" {USER_DIR} {GROUPS} {WORKSPACE}/Talk {TEMP}/{USER}
+for room in {SHARED} {OUTSIDER} {GUEST} {PRIVATE}; do
+  mkdir -p {WORKSPACE}/Channels/"$room"/media/1
+  echo "$room" > {WORKSPACE}/Channels/"$room"/media/1/attachment.txt
+  chown -R "$owner" {WORKSPACE}/Channels/"$room"
+done
 """
 
 MARK = "SHARED_ROOM_PROBE"
@@ -121,6 +132,9 @@ echo "${{M}}_BEGIN"
 present() {{ if [ -e "$1" ]; then echo yes; else echo no; fi; }}
 echo "user_dir=$(present {USER_DIR})"
 echo "talk_dir=$(present {WORKSPACE}/Talk)"
+echo "room_media=[$(for room in {SHARED} {OUTSIDER} {GUEST} {PRIVATE}; do
+  cat {WORKSPACE}/Channels/"$room"/media/1/attachment.txt 2>/dev/null
+done | tr '\\n' ' ')]"
 echo "deferred=$(basename "${{ISTOTA_DEFERRED_DIR:-unset}}")"
 echo "temp_entries=[$(ls -A {TEMP}/{USER} 2>&1 | tr '\\n' ' ')]"
 echo "config_entries=[$(ls -A {BOT}/config 2>&1 | tr '\\n' ' ')]"
@@ -144,10 +158,14 @@ echo "other_group=$(present {GROUPS}/other)"
 echo "${{M}}_END"
 """
 
-SCRIPT = [
-    {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": PROBE}}]},
-    {"text": "I looked around"},
-]
+# A background memory task must not consume the probe's model responses.
+SCRIPT = [{
+    "when": REQUEST_MARK,
+    "turns": [
+        {"tool_calls": [{"id": "call-1", "name": "Bash", "arguments": {"command": PROBE}}]},
+        {"text": "I looked around"},
+    ],
+}]
 
 
 def _seed(stack, *args: str) -> dict:
@@ -162,7 +180,7 @@ def _task(stack, token: str, source_type: str) -> int:
     """A task in ``token``: ``web`` is a member's turn, ``cli`` one nobody
     asked in the room."""
     result = stack.exec(
-        ["uv", "run", "istota", "-c", CONFIG, "task", "probe the room",
+        ["uv", "run", "istota", "-c", CONFIG, "task", f"{REQUEST_MARK} probe the room",
          "-u", USER, "--source-type", source_type, "-t", token],
         timeout=120,
     )
@@ -207,12 +225,13 @@ class TestAMembersTurnInASharedRoom:
     """The regression for ISSUE-576, in a namespace: nothing is withheld."""
 
     @pytest.mark.script(SCRIPT)
-    def test_the_workspace_talk_and_per_user_temp_are_there(self, shared_rooms):
+    def test_the_workspace_room_media_and_per_user_temp_are_there(self, shared_rooms):
         facts = _observe(shared_rooms, _task(shared_rooms, SHARED, "web"))
         report = _show(facts)
         assert facts["user_dir"] == "yes", report
         assert facts["files_writable"] == "yes", report
-        assert facts["talk_dir"] == "yes", report
+        assert facts["talk_dir"] == "no", report
+        assert facts["room_media"].strip("[] ") == SHARED, report
         assert facts["deferred"] == USER, report
         # Out of the prompt, not out of reach: the files are on disk.
         assert facts["memory_readable"] == "yes", report
@@ -221,6 +240,7 @@ class TestAMembersTurnInASharedRoom:
     def test_a_group_every_reader_is_in_is_bound_and_no_other(self, shared_rooms):
         facts = _observe(shared_rooms, _task(shared_rooms, SHARED, "web"))
         report = _show(facts)
+        assert facts["room_media"].strip("[] ") == SHARED, report
         assert facts["groups_entries"].strip("[] ") == "fam", report
         assert facts["fam_writable"] == "yes", report
         assert facts["other_group"] == "no", report
@@ -228,6 +248,7 @@ class TestAMembersTurnInASharedRoom:
     @pytest.mark.script(SCRIPT)
     def test_a_room_with_a_reader_outside_the_group_binds_no_group(self, shared_rooms):
         facts = _observe(shared_rooms, _task(shared_rooms, OUTSIDER, "web"))
+        assert facts["room_media"].strip("[] ") == OUTSIDER, _show(facts)
         assert facts["user_dir"] == "yes", _show(facts)
         assert "No such file" in facts["groups_entries"], _show(facts)
 
@@ -237,11 +258,12 @@ class TestATaskNobodyAskedInTheRoom:
     member asking in it, so it runs at room-safe reach."""
 
     @pytest.mark.script(SCRIPT)
-    def test_the_workspace_talk_and_per_user_temp_are_not_there(self, shared_rooms):
+    def test_personal_workspace_and_per_user_temp_are_not_there(self, shared_rooms):
         facts = _observe(shared_rooms, _task(shared_rooms, SHARED, "cli"))
         report = _show(facts)
         assert facts["user_dir"] == "no", report
         assert facts["talk_dir"] == "no", report
+        assert facts["room_media"].strip("[] ") == SHARED, report
         assert facts["deferred"] == f"room-task-{facts['_task_id']}", report
         assert "planted-sibling.txt" not in facts["temp_entries"], report
         assert facts["memory_readable"] == "no", report
@@ -255,6 +277,8 @@ class TestAGuestsTurn:
         facts = _observe(shared_rooms, task_id)
         report = _show(facts)
         assert facts["user_dir"] == "no", report
+        assert facts["talk_dir"] == "no", report
+        assert facts["room_media"].strip("[] ") == GUEST, report
         assert facts["deferred"] == f"emissary-task-{task_id}", report
         assert "No such file" in facts["groups_entries"], report
         assert facts["memory_readable"] == "no", report
@@ -263,9 +287,9 @@ class TestAGuestsTurn:
 class TestThePrivateRoomControl:
     """The same probe, in testuser's own room, in the same session.
 
-    Every absence above is equally true of a stack that never had the files or
+    Every personal-path absence above is equally true of a stack that never had the files or
     a task whose sandbox bound none of them. Here the same paths are present
-    and readable.
+    and readable. Flat Talk stays absent on this local workspace.
     """
 
     @pytest.mark.script(SCRIPT)
@@ -273,8 +297,9 @@ class TestThePrivateRoomControl:
         facts = _observe(shared_rooms, _task(shared_rooms, PRIVATE, "cli"))
         report = _show(facts)
         assert facts["user_dir"] == "yes", report
-        assert facts["talk_dir"] == "yes", report
+        assert facts["talk_dir"] == "no", report
         assert facts["memory_readable"] == "yes", report
+        assert facts["room_media"].strip("[] ") == PRIVATE, report
         assert "USER.md" in facts["config_entries"], report
         assert "planted-sibling.txt" in facts["temp_entries"], report
         assert "fam" in facts["groups_entries"] and facts["other_group"] == "yes", report
