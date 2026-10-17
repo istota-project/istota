@@ -10,6 +10,10 @@ paths:
   - "src/istota/webui/map_basemap.py"
   - "src/istota/usage/**"
   - "src/istota/sandbox/net_guard.py"
+  - "src/istota/browser/document_render.py"
+  - "docker/browser/document_render.py"
+  - "web/src/render/**"
+  - "web/vite.render.config.ts"
 ---
 
 # Leaf modules
@@ -179,6 +183,17 @@ Du-style tree measurement and the first-level directory scan beneath it, shared 
 
 stdlib-only leaf: `os`, `pathlib`.
 
+## browser/document_render.py
+
+The daemon's way to turn a piece of the web UI into an image: a render bundle sent to the browser service as a document. The location share map is the first renderer. A chart or a preview is the same mechanism with a new bundle and a new caller. Only PNG output exists; PDF is the expected second output type and is not built.
+
+- **The page never calls istota.** The browser service sits on a network only the daemon joins (parity row 17), so the daemon pushes everything in: the document, a JSON payload and optional assets. The page has no API, no cookie and no callback origin. This rule is not relaxed for a later renderer; one that needs live istota data needs a different mechanism.
+- **The web half.** `web/src/render/<name>/main.ts` is an entry that calls `registerRenderer(fn)` from `web/src/render/host.ts`. That installs `window.istotaRender(payload)` once (a second call answers `busy`), applies the light theme and the app's tokens, and hands `fn` the payload and `[data-render-frame]`, sized from `payload.viewport`. An entry mounts real app components with Svelte's `mount`, so the image looks like the web UI. `web/vite.render.config.ts` builds each entry, one Vite environment per entry because dynamic imports inline only on a single-input build, and inlines it in a `generateBundle` ordered `post`, after Vite has replaced its `__VITE_PRELOAD__` placeholder (inlined earlier, the placeholder is an undefined name and every dynamic import rejects; `renderDocument` refuses a bundle still holding it), into a self-contained `web/build-render/<name>.html`, and writes `manifest.json` with each file's sha256. `npm run build` runs it after the app build. The output is outside `web/build/`, so the web never serves it; the istota image copies it to `/app/web/build-render` and sets `ISTOTA_WEB_RENDER_DIR`, which `webui/static_dir.resolve_render_dir` reads.
+- **The envelope.** `POST /render-document` (`docker/browser/document_render.py`) takes `document` (at most 4 MiB, with a matching `document_sha256`), `payload` (a JSON object, at most 64 KiB, never read by the browser), optional `assets` (`[a-z0-9._/-]` paths, no `..`, an allowlist of image, font, JSON and CSS types, 2 MiB decoded in total), `viewport` (integers 1 to 2000), `output` (`"png"`) and `timeout_ms` (at most 15000). Keys are exact. Validation of what the payload means belongs to the caller: `location/share_maps.py` checks the observation and the basemap.
+- **The render origin.** A fresh, cookie-free context (`chrome.temporary_context`, counted against the user's session capacity, never evicting a session) serves the document at `https://render.istota.invalid/` with a CSP allowing the document's own scripts by a per-render nonce (`with_script_nonce` stamps it on each `<script>` start tag, found by parsing), inline style, `blob:` workers, `data:`/`blob:` images and `https:` connections and images, and the assets at `/assets/<path>`; any other path there is a 404. Every other request must pass the vendored net-guard rule (`docker/browser/lib/istota_net_guard.py`, synced by `scripts/sync-devbox-lib.sh`), and so must every redirect hop before it is fetched: the route never continues a request to Chrome, which would follow a redirect without the route seeing the hop, but fetches it with `route.fetch(max_redirects=0)`, follows a 3xx itself up to `MAX_REDIRECTS` (5) hops for a GET or HEAD, checking each target, and fulfills the page with the final answer. A hop that fails the rule, a longer chain or a redirected request of any other method fails the render with `destination_blocked`; a fetch that fails is a network error for the page. A navigation off the document, a popup or a download fails the render with `destination_blocked`. **Patchright decides two things here** (found in production, where the unrun image tier would have caught both): it injects its init scripts into every document and, when the CSP names no `script-src` nonce, adds one of its own, which makes Chrome ignore `'unsafe-inline'` and block the document's script, so the CSP names the nonce and Patchright reuses it; and it evaluates a `wait_for_function` predicate with `eval` in the page, which the CSP refuses, so readiness is polled with `evaluate` instead. `page.set_content` was rejected: its null origin is refused by some tile servers and gives the CSP no stable base.
+- **Reasons.** The browser answers `bad_request` 400, `capacity` 503, `render_timeout` 504, `destination_blocked` and `render_failed` 502, with the page's own `[a-z_]` reason in `detail`, or `driver_error` when Patchright raised before the page answered (the exception's text is never passed on). `render_document(config, *, actor_user_id, bundle, payload, viewport, timeout_s, assets=None, admission_wait_s=2.0)` never raises: it refuses a malformed bundle name or oversized arguments as `bad_request` before any call, maps a missing or mismatched bundle (logged once per process), a disabled browser and a 404 from an older browser image to `render_unavailable`, and passes `capacity` and `render_timeout` through. Checking the image is the caller's job. Nothing on either side logs the payload, the document or the image.
+- **Adding a renderer** is an entry directory under `web/src/render/` and a caller of `render_document`. Nothing in the browser service changes. `docker/browser/` is vendored from the stealth-browser repository, so a change there lands in both.
+
 ## sandbox/net_guard.py
 
 Whether an address is a routable public one: `ip_is_public`, the blocklist and operator CIDR parsing, lifted out of `session/tools/web_fetch.py` when the `wordpress` skill became the second daemon-network caller fetching a URL somebody else chose. A leaf rather than an import of `web_fetch`, because importing that from a skill pulls in the native tool package (about fifty modules), and `web_fetch` runs in the tool server, which may not import `istota.skills`. `web_fetch` keeps `_ip_is_public` as an import alias. URL validation is not shared: `web_fetch._validate_url` is shaped by `WebFetchPolicy`, while the skill's URL rule is the credential binding (`skills/wordpress/sites.check_bound`). stdlib-only leaf, never raises.
@@ -266,6 +281,10 @@ The strict arm is not redundant and the order matters: a backtick run mentioned 
 Test traps: a fence case whose caller has a `{...}` fallback cannot fail, since the fallback rescues a well-formed fence, so each has a sibling whose prose carries a bracket. The timing fixture is `"```json\n" * N` (many openers, no closer); `"```json\nx" * N` holds one anchored opener and lets a quadratic expression pass.
 
 stdlib-only leaf, never raises.
+
+## lib/url_redact.py
+
+`redact_userinfo(url, *, remove=False)`: a configured URL safe to print, with any user name or password replaced by `[redacted]` (or removed, for a surface that says separately that the value is wrong). Moved out of `doctor.py` when the servarr skill needed the same rule for the URLs its `apps` verb and its doctor check show; importing `doctor` from a skill CLI pulls in its whole graph, and a second stripper had already disagreed with this one on a password holding `/`. An `@` anywhere past the netloc returns nothing of the URL, since that is a credential that ended the netloc early. `doctor` keeps `_redact_userinfo` and `_REDACTED` as import aliases. stdlib-only leaf, never raises.
 
 ## lib/unix_connect.py
 

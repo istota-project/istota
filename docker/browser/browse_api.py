@@ -36,6 +36,7 @@ import chrome
 import pool
 
 import browsing
+import document_render
 import render
 import visual
 import xdotool
@@ -1429,6 +1430,87 @@ def screenshot():
         if created_new:
             _close_session(session_id)
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# Live /render-document contexts per user. Each counts against the same
+# session budget a tab does, and no tab is ever closed to make room for one.
+_document_renders = Counter()
+
+_RENDER_DOCUMENT_STATUS = {
+    "bad_request": 400,
+    "capacity": 503,
+    "render_timeout": 504,
+    "destination_blocked": 502,
+    "render_failed": 502,
+}
+
+
+def _render_document_error(reason, detail=None):
+    body = {"status": "error", "error": reason}
+    if detail:
+        body["detail"] = detail
+    if reason == "capacity":
+        body["retry_after_seconds"] = 30
+    return jsonify(body), _RENDER_DOCUMENT_STATUS.get(reason, 502)
+
+
+def _claim_document_render(user_id):
+    """Count one render against `user_id`'s session budget, or refuse. Evicts nothing."""
+    if MAX_SESSIONS <= 0 or MAX_TOTAL_SESSIONS <= 0:
+        return False
+    if _get_memory_pct() > MEMORY_REJECT_PCT:
+        return False
+    with _sessions_lock:
+        own = _document_renders[user_id] + sum(
+            1 for session in _sessions.values() if session.get("user_id") == user_id)
+        total = len(_sessions) + sum(_document_renders.values())
+        if own >= MAX_SESSIONS or total >= MAX_TOTAL_SESSIONS:
+            return False
+        _document_renders[user_id] += 1
+    return True
+
+
+def _release_document_render(user_id):
+    with _sessions_lock:
+        _document_renders[user_id] -= 1
+        if _document_renders[user_id] <= 0:
+            del _document_renders[user_id]
+
+
+@app.route("/render-document", methods=["POST"])
+def render_document_endpoint():
+    """A document the caller sends, rendered to a PNG, or a JSON error with a stable reason.
+
+    The body is the envelope `document_render.validate_envelope` checks; the
+    payload inside it is never read here. The document is served on the
+    render origin in a fresh, cookie-free context closed before the answer,
+    and every other request the page makes passes the destination guard. Logs
+    carry the reason only.
+    """
+    length = request.content_length
+    if length is None or length > document_render.MAX_REQUEST_BYTES:
+        return _render_document_error("bad_request")
+    envelope, refusal = document_render.validate_envelope(request.get_json(silent=True))
+    if refusal:
+        return _render_document_error(refusal)
+    inst = _request_instance()
+    user_id = inst.user_id
+    if not _claim_document_render(user_id):
+        return _render_document_error("capacity")
+    try:
+        options = document_render.context_options(envelope)
+        with chrome.temporary_context(inst, **options) as context:
+            outcome = document_render.render(context, envelope)
+    except Exception as error:
+        log.warning("render-document failed: %s", type(error).__name__)
+        outcome = document_render.Outcome(None, "render_failed")
+    finally:
+        _release_document_render(user_id)
+    if outcome.reason:
+        log.info("render-document refused: %s%s", outcome.reason,
+                 f" ({outcome.detail})" if outcome.detail else "")
+        return _render_document_error(outcome.reason, outcome.detail)
+    return Response(outcome.data, mimetype="image/png")
 
 
 # Retained across this user's tabs and session closure, like their profile.
@@ -3784,7 +3866,7 @@ def _log_request_start():
     if request.browser_instance is not None:
         _track_request_instance(request.browser_instance)
     page_endpoints = {"browse", "render_page", "extract", "screenshot",
-                      "interact", "evaluate", "challenge"}
+                      "interact", "evaluate", "challenge", "render_document_endpoint"}
     if request.endpoint not in page_endpoints:
         return None
     try:

@@ -1044,8 +1044,6 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
     Unauthenticated, so it names no version: an exact version tells a visitor
     which advisories apply (ISSUE-569). `/admin` carries it instead.
     """
-    from istota.groups.system import ACCOUNT_HISTORY_DISCLOSURE
-    body += f'<p class="muted">{escape(ACCOUNT_HISTORY_DISCLOSURE)}</p>'
     name = escape(bot_name)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -5997,6 +5995,87 @@ def _google_workspace_connection_payload(config: Config) -> dict:
     }
 
 
+def _servarr_connection_payload(config: Config) -> dict:
+    """The arr apps of the install connection, from loaded config and doctor.
+
+    Calls no arr: config problems come from `servarr.connection` run with
+    ``probe=False``, which sends nothing, and each app's live status is the
+    daemon's last `servarr.connection.<app>` row, redacted again with this
+    process's config. Never a key, only whether one is set.
+    """
+    from istota import doctor
+    from istota.config import SERVARR_APPS, SERVARR_DEFAULT_FIELDS
+
+    servarr = config.servarr
+    findings = {r.name: r for r in doctor.check_servarr_connection(config, False)}
+    rows: dict[str, dict] = {}
+    try:
+        report = doctor.read_reports(config)["report"]
+    except Exception as exc:  # noqa: BLE001 - the card still renders without results
+        logger.warning("servarr_connection_report_unread err=%s", type(exc).__name__)
+        report = None
+    if report:
+        prefix = f"{doctor.SERVARR_CHECK_NAME}."
+        for row in report.get("checks") or []:
+            if str(row.get("name", "")).startswith(prefix):
+                rows[row["name"]] = row
+    at = report.get("at") if report else None
+    stale = (_doctor_report_stale_age(at, config.scheduler.doctor_check_interval)
+             is not None)
+
+    apps = []
+    for app in SERVARR_APPS:
+        connection = servarr.apps.get(app)
+        incomplete = connection is None and app in servarr.incomplete_apps
+        if connection is None and not incomplete:
+            continue
+        name = f"{doctor.SERVARR_CHECK_NAME}.{app}"
+        finding = findings.get(name)
+        check = None
+        if name in rows:
+            row = rows[name]
+            [result] = doctor.redact([doctor.CheckResult(
+                row["name"], row["status"], row["detail"], remedy=row.get("remedy", ""),
+                scope=row.get("scope", doctor.DEPLOYMENT),
+            )], config)
+            check = {"status": result.status, "detail": result.detail,
+                     "remedy": result.remedy, "at": at, "stale": stale}
+        apps.append({
+            "app": app,
+            "url": "" if incomplete else doctor._redact_userinfo(connection.url, remove=True),
+            "api_key_set": None if incomplete else bool(connection.api_key),
+            "incomplete": incomplete,
+            "problem": finding.detail if finding and finding.status == doctor.FAIL else None,
+            "check": check,
+        })
+
+    defaults = {}
+    for app in SERVARR_APPS:
+        table = servarr.defaults.get(app)
+        if not isinstance(table, dict):
+            continue
+        kept = {key: value for key, value in table.items()
+                if key in SERVARR_DEFAULT_FIELDS[app] and isinstance(value, str) and value.strip()}
+        if kept:
+            defaults[app] = kept
+
+    if not apps:
+        status = "disabled"
+    elif any(row["problem"] for row in apps):
+        status = "incomplete"
+    else:
+        status = "configured"
+    return {
+        "id": "servarr",
+        "label": "Servarr",
+        "status": status,
+        "apps": apps,
+        "missing": [app for app in SERVARR_APPS if app not in {row["app"] for row in apps}],
+        "requesters": [str(user) for user in servarr.requesters],
+        "defaults": defaults,
+    }
+
+
 def _whatsapp_connection_payload() -> dict:
     """One card's worth of facts about the deployment's WhatsApp link.
 
@@ -6070,7 +6149,8 @@ async def admin_connections(_: dict = Depends(_require_admin)):
     if payload["pairing_supported"] and payload["enabled"]:
         payload["pairing"] = await asyncio.to_thread(_pairing_state_payload)
     google = _google_workspace_connection_payload(config)
-    return {"connections": [nextcloud, payload, google]}
+    servarr = await asyncio.to_thread(_servarr_connection_payload, config)
+    return {"connections": [nextcloud, payload, google, servarr]}
 
 
 @api_router.get("/admin/connections/whatsapp/pairing")
@@ -8143,7 +8223,38 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     mail = _outgoing_mail_field(_row_get(row, "outgoing_mail"))
     if mail is not None:
         out["mail"] = mail
+    shares = _location_shares_field(_row_get(row, "location_shares"))
+    if shares is not None:
+        out["location_shares"] = shares
     return out
+
+
+_LOCATION_SHARE_KEYS = (
+    "card_id", "owner_user_id", "owner_label", "precision", "lat", "lon",
+    "accuracy_m", "observed_at", "freshness", "map_url",
+)
+
+
+def _location_shares_field(raw) -> list[dict] | None:
+    """A row's location share cards as the web card reads them.
+
+    Only the listed keys pass, so anything a later writer adds stays
+    server-side. None for a row with no cards or a record that cannot be read,
+    which then renders as a plain answer.
+    """
+    if not raw:
+        return None
+    try:
+        shares = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    if not isinstance(shares, list):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    out = [{key: share.get(key) for key in _LOCATION_SHARE_KEYS}
+           for share in shares if isinstance(share, dict)]
+    return out or None
 
 
 _MAIL_STATES = frozenset({"sent", "held", "failed", "discarded"})
@@ -8420,11 +8531,13 @@ _SPINE_COLUMNS = (
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
     "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
-    "  m.received_mail AS received_mail, "
+    "  m.received_mail AS received_mail, m.location_shares AS location_shares, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
-    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body, "
+    "  p.author_user_id AS reply_author_user_id, "
+    "  p.author_label AS reply_author_label "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
     # The cited parent, joined live rather than snapshotted. The one edit to a
@@ -8526,7 +8639,18 @@ _AUX_COLUMNS = (
 _AUX_ROOM_SCOPE = _db.TASK_ROOM_SCOPE_SQL
 
 
-def _row_reply_to(row) -> dict | None:
+def _author_name(author_label, author_user_id, viewer: str | None) -> str | None:
+    """Who wrote a `role='user'` row, as the reader should see it, or None for
+    the reader's own row. A turn's header and a citation of it share this, so
+    the two cannot name one row differently (#764)."""
+    if author_label:
+        return author_label
+    if author_user_id and author_user_id != viewer:
+        return _display_name_for(author_user_id)
+    return None
+
+
+def _row_reply_to(row, viewer: str | None) -> dict | None:
     """The rendered citation for a history row, or None when it isn't a reply.
 
     Two shapes, and the client distinguishes them on `deleted`: a live parent
@@ -8543,12 +8667,19 @@ def _row_reply_to(row) -> dict | None:
         return None
     if row["reply_role"] is None:
         return {"msg_id": parent_id, "deleted": True}
-    return {
+    cited = {
         "msg_id": parent_id,
         "role": row["reply_role"],
         "excerpt": (row["reply_body"] or "")[:_REPLY_EXCERPT_CHARS],
         "deleted": False,
     }
+    if row["reply_role"] == "user" and "reply_author_user_id" in keys:
+        author = _author_name(
+            row["reply_author_label"], row["reply_author_user_id"], viewer,
+        )
+        if author is not None:
+            cited["author"] = author
+    return cited
 
 
 def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
@@ -8735,10 +8866,10 @@ def _user_row_display(
     except (IndexError, KeyError):
         return out  # a producer that predates the columns (the dev mock)
 
-    if author_label:
-        out["author"] = author_label
-    elif author_user_id and author_user_id != viewer:
-        out["author"] = _display_name_for(author_user_id)
+    author = _author_name(author_label, author_user_id, viewer)
+    if author is not None:
+        out["author"] = author
+    if not author_label and author_user_id and author_user_id != viewer:
         # The label names the writer; this is the writer, as the avatar
         # endpoint keys them. It rides only in this branch, which is the label
         # rule restated rather than a second one: an `author_label` is an
@@ -9067,7 +9198,7 @@ def _chat_room_messages(
         else:  # assistant — a stored assistant row is by definition a completed turn
             d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
             _decorate_outgoing_mail(d, mail_view)
-        cited = _row_reply_to(r)
+        cited = _row_reply_to(r, username)
         if cited is not None:
             d["reply_to"] = cited
         about = _about_room_field(r["about_room_token"], about_names)
@@ -11201,7 +11332,7 @@ def _cross_room_message_dict(
             d["task_id"] = parked_task
         _apply_noted(d, (noted or {}).get(r["msg_id"]))
         d.update((note_parts or {}).get(r["msg_id"], {}))
-    cited = _row_reply_to(r)
+    cited = _row_reply_to(r, username)
     if cited is not None:
         d["reply_to"] = cited
     about = _about_room_field(
@@ -16619,43 +16750,7 @@ async def api_map_basemap(user: dict = Depends(_require_api_auth)):
     """
     from . import map_basemap
 
-    # `getattr` rather than attribute access, matching `check_basemap`: a Config
-    # with `web` unset would otherwise raise here and 500, which is the blank
-    # rectangle this endpoint promises never to produce.
-    web_cfg = getattr(_config, "web", None) if _config else None
-    cfg = getattr(web_cfg, "map", None)
-    user_key = ""
-    if _config is not None:
-        try:
-            from istota.credentials import store as secrets_store
-
-            # Stripped once, at the read, so `select_provider` and the
-            # `api_key=` below cannot disagree about whether this user has a
-            # key. They used to: one tested `.strip()` and the other bare
-            # truthiness, so a stored "  " selected the configured provider
-            # while overriding its working key with whitespace.
-            user_key = (
-                secrets_store.get_secret(
-                    _config.db_path, user["username"], "carto", "api_key"
-                )
-                or ""
-            ).strip()
-        except Exception:  # noqa: BLE001 - a map must render without the store
-            logger.warning("basemap: could not read the stored carto key", exc_info=True)
-            user_key = ""
-
-    if cfg is None:
-        return map_basemap.resolve_basemap().as_dict()
-
-    provider = map_basemap.select_provider(cfg.provider, user_api_key=user_key)
-    spec = map_basemap.resolve_basemap(
-        provider=provider,
-        api_key=user_key or cfg.api_key,
-        dark_style=cfg.dark_style,
-        light_style=cfg.light_style,
-        attribution=cfg.attribution,
-    )
-    return spec.as_dict()
+    return map_basemap.basemap_for_user(_config, user["username"]).as_dict()
 
 
 @api_router.get("/location/settings-info")

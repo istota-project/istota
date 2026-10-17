@@ -1122,3 +1122,48 @@ class TestDispatch:
 
         assert run.exit_code == 1
         assert run.envelope == {"status": "error", "error": "boom"}
+
+
+class TestWorkExport:
+    """`work export` reads the store directly and writes through `write_resolved`."""
+
+    def _ctx(self, tmp_path, monkeypatch):
+        from istota.money.cli import UserContext
+        from istota.money.work import add_work_entry
+        import istota.skills.money as skill
+
+        data_dir = tmp_path / "money"
+        ctx = UserContext(data_dir=data_dir, db_path=data_dir / "data" / "money.db")
+        add_work_entry(data_dir, "2026-03-01", "acme", "dev", qty=2, description="Work")
+        monkeypatch.setattr(skill, "_resolve_context", lambda: ("alice", None, ctx, None))
+        return skill
+
+    def test_out_writes_the_file(self, tmp_path, monkeypatch, capsys):
+        import argparse
+        import json
+
+        skill = self._ctx(tmp_path, monkeypatch)
+        out = tmp_path / "exports" / "work.json"
+        skill.cmd_work_export(argparse.Namespace(format="json", year=None, out=str(out)))
+        report = json.loads(capsys.readouterr().out)
+        assert report["status"] == "ok"
+        assert report["path"] == str(out)
+        assert report["entries"] == 1
+        assert json.loads(out.read_text())["entries"][0]["description"] == "Work"
+
+    def test_no_out_prints_the_csv(self, tmp_path, monkeypatch, capsys):
+        import argparse
+
+        skill = self._ctx(tmp_path, monkeypatch)
+        skill.cmd_work_export(argparse.Namespace(format="csv", year=2026, out=None))
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].startswith("uid,date,client")
+        assert "Work" in lines[1]
+
+    def test_parser_takes_the_flags(self):
+        from istota.skills.money import build_parser
+
+        args = build_parser().parse_args(
+            ["work", "export", "--format", "json", "--year", "2025"])
+        assert (args.format, args.year, args.out) == ("json", 2025, None)
+        assert "invalid choice" in _argparse_refusal(["work", "export", "--format", "xlsx"])

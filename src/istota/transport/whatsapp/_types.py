@@ -418,6 +418,10 @@ class WhatsAppDeliveryRecord:
     task, notification source or command record already owns the content, and
     the binding is resolved immediately before the send rather than stored.
     `body_chars` and the row's `body_sha256` are what diagnostics get instead.
+
+    `media_staged` is this call's own fact, not the row's: a staged image rode
+    the request `deliver_whatsapp` made. A record read back for a settled row
+    says False.
     """
     logical_key: str
     status: str
@@ -425,3 +429,4 @@ class WhatsAppDeliveryRecord:
     meta_message_id: str | None = None
     error_code: str | None = None
     body_chars: int = 0
+    media_staged: bool = False

@@ -1,0 +1,20 @@
+[
+  {
+    "propertyName": "RootFolderPath",
+    "errorMessage": "Folder '/nope' is not writable by user 'abc'",
+    "attemptedValue": "/nope",
+    "severity": "error",
+    "errorCode": "FolderWritableValidator",
+    "formattedMessageArguments": [],
+    "formattedMessagePlaceholderValues": {}
+  },
+  {
+    "propertyName": "QualityProfileId",
+    "errorMessage": "QualityProfile does not exist",
+    "attemptedValue": 99,
+    "severity": "error",
+    "errorCode": "QualityProfileExistsValidator",
+    "formattedMessageArguments": [],
+    "formattedMessagePlaceholderValues": {}
+  }
+]

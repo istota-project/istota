@@ -166,6 +166,13 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         NOT_A_PATH, note="a path inside an ACF value, such as blocks/0/items",
     ),
 
+    ("servarr", "add", "profile"): Entry(
+        NOT_A_PATH, note="an arr quality profile name; 'profile' holds 'file'",
+    ),
+    ("servarr", "add", "metadata_profile"): Entry(
+        NOT_A_PATH, note="a lidarr metadata profile name; 'profile' holds 'file'",
+    ),
+
     ("health", "import-immunizations", "paste"): Entry(
         NOT_A_PATH,
         note="literal text. `@PATH` used to make it a path and no longer "

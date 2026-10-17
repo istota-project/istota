@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "path": "/data/library/content/Music",
+    "accessible": true,
+    "freeSpace": 1099511627776,
+    "unmappedFolders": []
+  },
+  {
+    "id": 2,
+    "path": "/data/library/content/Music (New)",
+    "accessible": true,
+    "freeSpace": 1099511627776,
+    "unmappedFolders": []
+  }
+]

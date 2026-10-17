@@ -444,6 +444,17 @@ class TestGroupBTheRuntime:
         assert_ok(result, f"{WEB_INDEX} is missing or empty")
         assert int(result.stdout.strip()) > 0
 
+    def test_the_share_map_render_bundle_loads_where_the_daemon_looks(self, istota_image):
+        # Through the daemon's own loader: ISTOTA_WEB_RENDER_DIR, the manifest,
+        # and the digest it holds the file to. A missing COPY or ENV, or a
+        # manifest written before the file changed, all read as no map.
+        result = sh(istota_image, (
+            "python -c \"from istota.browser.document_render import load_bundle; "
+            "import sys; got = load_bundle('share-map'); "
+            "sys.exit(0 if got and 'istotaRender' in got[0] else 1)\""
+        ))
+        assert_ok(result, "the share-map render bundle is missing or not the manifest's")
+
     @pytest.mark.parametrize("module", sorted(EXTRA_WITNESSES))
     def test_the_module_imports(self, istota_image, module):
         # The Dockerfile runs `uv sync --frozen --no-dev --extra all`, so an

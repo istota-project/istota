@@ -5728,6 +5728,26 @@ class TestBasemapEndpoint:
         assert resp.status_code == 200
         assert resp.json()["provider"] == "openfreemap"
 
+    async def test_the_endpoint_answers_with_the_shared_helper(
+        self, tmp_path, client, app, monkeypatch,
+    ):
+        """One resolution path, shared with the PNG renderer: not a copy of it."""
+        from istota.webui import map_basemap
+
+        cfg = self._cfg(tmp_path)
+        _patch_app(cfg)
+        seen = []
+
+        def _helper(config, user_id):
+            seen.append((config, user_id))
+            return map_basemap.resolve_basemap(provider="osm")
+
+        monkeypatch.setattr(map_basemap, "basemap_for_user", _helper)
+        cookies = await self._login_alice(client, app)
+        body = (await client.get("/istota/api/map/basemap", cookies=cookies)).json()
+        assert body["provider"] == "osm"
+        assert seen == [(cfg, "alice")]
+
     async def test_the_carto_service_card_is_offered_on_the_location_module(
         self, tmp_path, client, app,
     ):

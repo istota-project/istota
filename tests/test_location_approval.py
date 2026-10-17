@@ -17,6 +17,8 @@ from istota.relay.requests import RequestError, text_hash
 from istota.rooms import private_replies
 
 NOW = datetime(2026, 3, 8, 12, tzinfo=timezone.utc)
+#: Words only the grant preview carries: where it may and may not appear.
+MARKER = "can ask where you are"
 
 
 @pytest.fixture
@@ -73,8 +75,10 @@ def test_shared_origin_private_preview_owner_digest_and_fixed_expiry(env, privat
     assert task.status == "pending_confirmation"
     assert grant["state"] == "held" and grant["expires_at"] is None
     preview = task.confirmation_prompt
-    assert all(word in preview for word in ("Hiking", "alice", "bob", "exact", "60 minutes", "location-stop"))
-    assert "whole room" in preview and "tracker" in preview
+    assert preview == (
+        "Share your exact location with Hiking for 1 hour?\n\n"
+        "bob can ask where you are until then. You can stop at any time; "
+        "anything already posted stays in the room.")
     with db.get_db(config.db_path) as conn:
         assert confirmations.describe_title(conn, task) == confirmation.LOCATION_SHARE_TITLE
         views, _ = store.list_open(config, conn, "alice")
@@ -85,13 +89,13 @@ def test_shared_origin_private_preview_owner_digest_and_fixed_expiry(env, privat
         if private:
             assert any(preview in row[0] for row in conn.execute("SELECT body FROM messages WHERE room_token=?", (rooms[0],)))
         else:
-            assert "location-stop" in views[0].body
+            assert MARKER in views[0].body
         for row in conn.execute("SELECT body FROM messages WHERE room_token=?", (room,)):
-            assert "location-stop" not in row[0]
+            assert MARKER not in row[0]
         for row in conn.execute("SELECT payload FROM task_events WHERE task_id=?", (task.id,)):
-            assert "location-stop" not in row[0]
-        assert not task.result or "location-stop" not in task.result
-        assert not task.execution_trace or "location-stop" not in task.execution_trace
+            assert MARKER not in row[0]
+        assert not task.result or MARKER not in task.result
+        assert not task.execution_trace or MARKER not in task.execution_trace
         with pytest.raises(RequestError, match="confirmation_unavailable"):
             confirmations.approve(conn, task, config=config, preview_digest="wrong")
         with pytest.raises(RequestError, match="confirmation_unavailable"):
@@ -100,10 +104,10 @@ def test_shared_origin_private_preview_owner_digest_and_fixed_expiry(env, privat
     from istota.webui import app
     monkeypatch.setattr(app, "_config", config)
     for reader in ("alice", "bob"):
-        assert "location-stop" not in json.dumps(app._chat_room_messages(reader, room, 50))
+        assert MARKER not in json.dumps(app._chat_room_messages(reader, room, 50))
         events = app._room_events_batch(reader, 0)["events"]
         shared_events = [event for event in events if event.get("room_token") == room]
-        assert "location-stop" not in json.dumps(shared_events)
+        assert MARKER not in json.dumps(shared_events)
     args = dict(room=rooms[0]) if private else dict(preview_digest=text_hash(preview))
     with pytest.raises(HTTPException) as denied:
         app._chat_confirm_task(task.id, "bob", **args)
@@ -332,9 +336,10 @@ def test_oversized_audience_preview_refuses_without_partial_records(env):
     ident = turn(config, room)
     with db.get_db(config.db_path) as conn:
         conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
+        # Past five readers only three are named, so it takes long names.
         for i in range(100):
-            user = f"room-member-{i}-long-name"
-            config.users[user] = UserConfig()
+            user = f"room-member-{i}"
+            config.users[user] = UserConfig(display_name=f"{i} " + "long-name " * 80)
             db.add_room_member(conn, room, user, acknowledged=True)
         with pytest.raises(RequestError, match="invalid_preview"):
             request(conn, config, ident)
@@ -399,11 +404,11 @@ def test_cancel_during_execution_never_publishes_preview(env, cancel_at, reason)
     with db.get_db(config.db_path) as conn:
         task = db.get_task(conn, ident)
         assert task.status == "cancelled"
-        assert not any("location-stop" in message.body for message in db.get_messages(conn, room))
-        assert not any("location-stop" in row[0] for row in conn.execute(
+        assert not any(MARKER in message.body for message in db.get_messages(conn, room))
+        assert not any(MARKER in row[0] for row in conn.execute(
             "SELECT payload FROM task_events WHERE task_id=?", (ident,),
         ))
-        assert not task.result or "location-stop" not in task.result
+        assert not task.result or MARKER not in task.result
         assert store.list_open(config, conn, "alice") == ([], 0)
 
 
@@ -418,3 +423,40 @@ def test_stop_settles_pending_approval_task_and_notification(env):
         assert stopped.status == "cancelled"
         assert stopped.whatsapp_confirmation_request_id is None
         assert store.list_open(config, conn, "alice") == ([], 0)
+
+
+@pytest.mark.parametrize("seconds,text", [
+    (300, "5 minutes"), (900, "15 minutes"), (3600, "1 hour"), (7200, "2 hours"),
+    (5400, "1 hour 30 minutes"), (3660, "1 hour 1 minute"), (86400, "1 day"),
+    (301, "5 minutes 1 second"),
+])
+def test_a_duration_reads_as_a_span(seconds, text):
+    assert sharing._duration_text(seconds) == text
+
+
+@pytest.mark.parametrize("names,text", [
+    (["Bob"], "Bob"),
+    (["Bob", "Carol"], "Bob and Carol"),
+    (["A", "B", "C"], "A, B and C"),
+    (["A", "B", "C", "D", "E"], "A, B, C, D and E"),
+    (["A", "B", "C", "D", "E", "F", "G"], "A, B, C and 4 others"),
+])
+def test_readers_are_named_then_counted(names, text):
+    assert sharing._reader_list(names) == text
+
+
+def test_the_preview_names_readers_by_display_name_without_the_owner(env):
+    config, room = env
+    config.users["alice"].display_name = "Alice"
+    config.users["bob"].display_name = "Bob"
+    config.users["carol"].display_name = "Carol"
+    with db.get_db(config.db_path) as conn:
+        db.add_web_room_member(conn, room, "carol")
+    ident = turn(config, room)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
+        held = request(conn, config, ident, precision="area", duration_seconds=5400)
+    assert held["preview"] == (
+        "Share your approximate location (about 1 km) with Hiking for 1 hour 30 minutes?\n\n"
+        "Bob and Carol can ask where you are until then. You can stop at any time; "
+        "anything already posted stays in the room.")

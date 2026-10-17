@@ -1,0 +1,35 @@
+{
+  "artistMetadataId": 0,
+  "status": "continuing",
+  "ended": false,
+  "artistName": "Lantern Field",
+  "foreignArtistId": "5b11f4ce-a62d-471e-81fc-a69a8278c7da",
+  "tadbId": 0,
+  "discogsId": 0,
+  "overview": "Lantern Field is a band.",
+  "artistType": "Group",
+  "disambiguation": "",
+  "links": [],
+  "images": [],
+  "path": "/data/library/content/Music (New)/Lantern Field",
+  "qualityProfileId": 1,
+  "metadataProfileId": 1,
+  "monitored": true,
+  "monitorNewItems": "all",
+  "rootFolderPath": null,
+  "folder": "Lantern Field",
+  "genres": [
+    "Shoegaze"
+  ],
+  "cleanName": "lanternfield",
+  "sortName": "lantern field",
+  "tags": [
+    1
+  ],
+  "added": "2026-10-16T12:00:00Z",
+  "ratings": {
+    "votes": 0,
+    "value": 0.0
+  },
+  "id": 7
+}

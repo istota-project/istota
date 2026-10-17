@@ -1,0 +1,77 @@
+[
+  {
+    "artistMetadataId": 0,
+    "status": "continuing",
+    "ended": false,
+    "artistName": "Lantern Field",
+    "foreignArtistId": "5b11f4ce-a62d-471e-81fc-a69a8278c7da",
+    "tadbId": 0,
+    "discogsId": 0,
+    "overview": "Lantern Field is a band.",
+    "artistType": "Group",
+    "disambiguation": "",
+    "links": [],
+    "images": [],
+    "path": null,
+    "qualityProfileId": 0,
+    "metadataProfileId": 0,
+    "monitored": false,
+    "monitorNewItems": "all",
+    "rootFolderPath": null,
+    "folder": "Lantern Field",
+    "genres": [
+      "Shoegaze"
+    ],
+    "cleanName": "lanternfield",
+    "sortName": "lantern field",
+    "tags": [],
+    "added": "0001-01-01T00:00:00Z",
+    "ratings": {
+      "votes": 0,
+      "value": 0.0
+    }
+  },
+  {
+    "artistMetadataId": 0,
+    "status": "continuing",
+    "ended": false,
+    "artistName": "The Quiet Harbour",
+    "foreignArtistId": "8c0d9a1e-2f3b-4c5d-9e6f-7a8b9c0d1e2f",
+    "tadbId": 0,
+    "discogsId": 0,
+    "overview": "The Quiet Harbour is a band.",
+    "artistType": "Group",
+    "disambiguation": "",
+    "links": [],
+    "images": [],
+    "path": "/data/library/content/Music/The Quiet Harbour",
+    "qualityProfileId": 1,
+    "metadataProfileId": 1,
+    "monitored": true,
+    "monitorNewItems": "all",
+    "rootFolderPath": null,
+    "folder": "The Quiet Harbour",
+    "genres": [
+      "Shoegaze"
+    ],
+    "cleanName": "thequietharbour",
+    "sortName": "the quiet harbour",
+    "tags": [
+      1
+    ],
+    "added": "2026-02-01T09:00:00Z",
+    "ratings": {
+      "votes": 0,
+      "value": 0.0
+    },
+    "id": 3,
+    "statistics": {
+      "albumCount": 3,
+      "trackFileCount": 12,
+      "trackCount": 30,
+      "totalTrackCount": 30,
+      "sizeOnDisk": 400000000,
+      "percentOfTracks": 40.0
+    }
+  }
+]

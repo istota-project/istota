@@ -44,6 +44,7 @@
 #   scripts/test-image-negative-control.sh rendered-config
 #   scripts/test-image-negative-control.sh web-setup
 #   scripts/test-image-negative-control.sh devbox
+#   scripts/test-image-negative-control.sh document-render
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -61,7 +62,9 @@
 # old release rendered, against an image whose entrypoint appends to that file.
 # The fifth runs the first-run setup server against an image that takes any
 # setup code. The sixth runs only the devbox half, for a change that touches
-# nothing else.
+# nothing else. The seventh runs the browser image's document render against
+# the built share-map bundle with its `istotaRender` registration removed
+# (needs `web/build-render`).
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -93,6 +96,11 @@ fi
 only_devbox=""
 if [ "$platform" = "devbox" ]; then
     only_devbox=1
+    platform=""
+fi
+only_document_render=""
+if [ "$platform" = "document-render" ]; then
+    only_document_render=1
     platform=""
 fi
 control_tag="istota-test/no-forge:control"
@@ -407,8 +415,50 @@ print(_tag_for(ISTOTA_DOCKERFILE, "", "istota"))
     echo "[control] OK: web-setup turned the wrong-code witness red and Finish still ran."
 }
 
+DOCUMENT_RENDER_TESTS="tests/image/test_browser_image.py"
+
+# The share-map bundle with the name it registers its renderer under changed:
+# the document loads, the service waits for `window.istotaRender`, and the
+# render must go red rather than capture an empty frame.
+document_render_half() {
+    if [ ! -f web/build-render/share-map.html ]; then
+        echo "[control] no render bundle — run \`npm --prefix web run build:render\` first." >&2
+        exit 2
+    fi
+    render_dir="$(mktemp -d)"
+    cp -R web/build-render/. "$render_dir/"
+    if ! grep -q 'istotaRender' "$render_dir/share-map.html"; then
+        rm -rf "$render_dir"
+        echo "[control] FAILED: the share-map bundle names no istotaRender to remove." >&2
+        exit 1
+    fi
+    echo
+    echo "[control] document-render: the share-map bundle with istotaRender unregistered"
+    sed -i.orig 's/istotaRender/istotaRenderGone/g' "$render_dir/share-map.html"
+    rm -f "$render_dir/share-map.html.orig"
+    render_out="$(mktemp)"
+    render_node="${DOCUMENT_RENDER_TESTS}::test_document_render_draws_the_share_map_bundle"
+    set +e
+    ISTOTA_RENDER_BUNDLE_DIR="$render_dir" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly \
+        "$render_node" 2>&1 | tee "$render_out"
+    set -e
+    rm -rf "$render_dir"
+    if ! grep -Fq "FAILED ${render_node}" "$render_out"; then
+        rm -f "$render_out"
+        echo "[control] FAILED: document-render did not turn ${render_node} red."
+        exit 1
+    fi
+    rm -f "$render_out"
+    echo "[control] OK: document-render turned the render witness red without a renderer."
+}
+
 if [ -n "$only_run_contract" ]; then
     run_contract_half
+    exit 0
+fi
+if [ -n "$only_document_render" ]; then
+    document_render_half
     exit 0
 fi
 if [ -n "$only_rendered_config" ]; then
@@ -783,4 +833,5 @@ if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     secrets_half
     rendered_config_half
     web_setup_half
+    document_render_half
 fi

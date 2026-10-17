@@ -29,6 +29,10 @@
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import ManualInvoiceDialog from '$lib/components/money/ManualInvoiceDialog.svelte';
+  import SortHeader from '$lib/components/money/SortHeader.svelte';
+  import { loadSort, nextSort, saveSort, sortRows, type TableSort } from '$lib/money/tableSort';
+  import { workExportItems } from '$lib/money/workExport';
+  import { Download } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { isPlainClick } from '$lib/fileViewer/links';
@@ -39,7 +43,11 @@
   let error = $state('');
   let invoiceCount = $state(0);
   let outstandingCount = $state(0);
-  let sortAsc = $state(false);
+  type SortKey = 'date' | 'number';
+  const SORT_STORAGE = 'money.invoices.sort';
+  let sort: TableSort<SortKey> = $state(
+    loadSort<SortKey>(SORT_STORAGE, ['date', 'number'], { key: 'date', descending: true }),
+  );
   let reviews: InvoicePaymentReview[] = $state([]);
   let reviewsCollapsed = $state(true);
   let busyReview = $state('');
@@ -251,17 +259,16 @@
     loadConfig();
   });
 
-  let sorted = $derived.by(() => {
-    const copy = [...invoices];
-    copy.sort((a, b) => {
-      const cmp = a.date.localeCompare(b.date);
-      return sortAsc ? cmp : -cmp;
-    });
-    return copy;
-  });
+  // Invoices issued the same day fall back to number order.
+  let sorted = $derived(
+    sortRows(invoices, sort.descending, (inv) =>
+      sort.key === 'number' ? [inv.invoice_number] : [inv.date, inv.invoice_number],
+    ),
+  );
 
-  function toggleSort() {
-    sortAsc = !sortAsc;
+  function sortBy(key: SortKey) {
+    sort = nextSort(sort, key);
+    saveSort(SORT_STORAGE, sort);
   }
 
   function displayStatus(status: string): string {
@@ -290,6 +297,7 @@
       <div class="toolbar-actions">
         <Button variant="secondary" onclick={() => (manualOpen = true)}>New manual invoice</Button>
         <Button variant="primary" onclick={() => (generateOpen = true)}>Generate invoices</Button>
+        <KebabMenu items={workExportItems()} icon={Download} ariaLabel="Download work log" />
       </div>
     </div>
   {/if}
@@ -343,16 +351,22 @@
   {:else}
     <div class="money-table">
       <div class="money-table-header">
-        <span class="inv-number">Invoice</span>
+        <SortHeader
+          label="Invoice"
+          name="invoice number"
+          class="inv-number"
+          active={sort.key === 'number'}
+          descending={sort.descending}
+          onclick={() => sortBy('number')}
+        />
         <span class="inv-client">Client</span>
-        <button
-          class="inv-date money-sortable"
-          onclick={toggleSort}
-          type="button"
-          title="Sort by date"
-        >
-          Date <span class="money-sort-arrow">{sortAsc ? '\u25B2' : '\u25BC'}</span>
-        </button>
+        <SortHeader
+          label="Date"
+          class="inv-date"
+          active={sort.key === 'date'}
+          descending={sort.descending}
+          onclick={() => sortBy('date')}
+        />
         <span class="inv-status money-status">Status</span>
         <span class="inv-amount money-amount">Amount</span>
         <span class="money-kebab-spacer"></span>
@@ -518,7 +532,7 @@
   /* Columns only — the toolbar/list/header/row/chip shell is shared, in
      routes/money/+layout.svelte. */
 
-  .inv-number {
+  .invoices-content :global(.inv-number) {
     font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
     font-size: var(--text-xs);
     color: var(--text-muted);
@@ -539,8 +553,13 @@
 
   /* Fixed slot: the client column absorbs the slack, so a variable-width date
      (or status) would slide the whole right side of the row per row. */
+  /* Global so it places the SortHeader too; the colour stays on the cell, or
+     it would outrank the header's own sorted and hover colours. */
   .inv-date {
     color: var(--text-dim);
+  }
+
+  .invoices-content :global(.inv-date) {
     white-space: nowrap;
     flex-shrink: 0;
     font-size: var(--text-xs);
@@ -605,12 +624,12 @@
   }
 
   @media (max-width: 640px) {
-    .inv-date {
+    .invoices-content :global(.inv-date) {
       display: none;
     }
     /* The shared shell hides the status chip at this width, so the invoice
        number carries the status colors instead — same tokens as the chip. */
-    .inv-number {
+    .invoices-content :global(.inv-number) {
       min-width: 5.25rem;
       padding: 0.1rem var(--space-2);
       border-radius: var(--radius-pill);

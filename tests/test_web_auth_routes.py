@@ -92,8 +92,7 @@ async def test_login_choices(client, configured, methods):
         configured._oauth = None
     page = await client.get("/istota/login")
     assert page.status_code == 200
-    assert "Your account joins All users automatically" in page.text
-    assert "including editions published before you joined" in page.text
+    assert "joins All users" not in page.text
     assert ('name="password"' in page.text) == ("email" in methods)
     assert ('action="/istota/auth/sign-in-code/request"' in page.text) == ("email" in methods)
     assert ('href="/istota/login?go=1"' in page.text) == ("nextcloud" in methods)
@@ -440,7 +439,6 @@ async def test_link_get_is_read_only_and_post_rotates_session(client, configured
     set_session(client, configured, {"planted": "old"})
     page = await client.get(route, params={"token": token})
     assert page.status_code == 200
-    assert "Your account joins All users automatically" in page.text
     assert page.headers["cache-control"] == "no-store"
     assert page.headers["referrer-policy"] == "no-referrer"
     assert web_auth.peek_token(path, token) is not None

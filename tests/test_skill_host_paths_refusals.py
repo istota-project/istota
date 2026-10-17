@@ -157,6 +157,11 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.health",
         patch=("istota.skills.health", "cmd_export_csv"),
     ),
+    ("money", "work.export", "out"): Case(
+        argv=lambda p: ["work", "export", "--format", "json", "--out", p],
+        main="istota.skills.money",
+        patch=("istota.skills.money", "cmd_work_export"),
+    ),
     ("email", "send", "attach"): Case(
         argv=lambda p: [
             "send", "--to", "someone@example.com", "--subject", "hi",

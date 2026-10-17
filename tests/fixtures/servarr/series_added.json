@@ -1,0 +1,24 @@
+{
+  "id": 9,
+  "title": "Twin Peaks",
+  "sortTitle": "twin peaks",
+  "status": "ended",
+  "overview": "An FBI agent investigates a murder in a small logging town.",
+  "seasons": [
+    {"seasonNumber": 0, "monitored": false},
+    {"seasonNumber": 1, "monitored": true},
+    {"seasonNumber": 2, "monitored": true}
+  ],
+  "year": 1990,
+  "path": "/data/library/content/Shows/Twin Peaks",
+  "qualityProfileId": 4,
+  "seasonFolder": true,
+  "monitored": true,
+  "tvdbId": 70533,
+  "seriesType": "standard",
+  "rootFolderPath": "/data/library/content/Shows",
+  "tags": [1],
+  "added": "2026-10-16T09:00:00Z",
+  "addOptions": {"monitor": "all", "searchForMissingEpisodes": true, "searchForCutoffUnmetEpisodes": false},
+  "statistics": {"seasonCount": 2, "episodeFileCount": 0, "episodeCount": 0, "totalEpisodeCount": 0, "sizeOnDisk": 0, "percentOfEpisodes": 0}
+}

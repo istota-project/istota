@@ -1239,9 +1239,42 @@ export interface AdminGoogleWorkspaceConnection {
   status: 'disabled' | 'incomplete' | 'configured';
 }
 
-/** Deployment connections in order: Nextcloud, WhatsApp, Google Workspace. */
+export type ServarrApp = 'sonarr' | 'radarr' | 'lidarr' | 'prowlarr';
+
+/** One arr app of the install connection. Never carries the API key. */
+export interface AdminServarrApp {
+  app: ServarrApp;
+  /** The configured URL with any userinfo removed; empty for an incomplete table. */
+  url: string;
+  /** Null for a table the loader dropped, where it is unknown. */
+  api_key_set: boolean | null;
+  /** The table is missing its url or api_key, so the skill ignores it. */
+  incomplete: boolean;
+  /** A config problem doctor reports without a request, or null. */
+  problem: string | null;
+  /** The daemon's last `servarr.connection.<app>` row; null when none is recorded. */
+  check: AdminNextcloudCheck | null;
+}
+
+/** The servarr skill's install-wide connection; configured is no claim the keys work. */
+export interface AdminServarrConnection {
+  id: 'servarr';
+  label: string;
+  status: 'disabled' | 'incomplete' | 'configured';
+  apps: AdminServarrApp[];
+  /** Known apps with no table. */
+  missing: ServarrApp[];
+  requesters: string[];
+  /** The add defaults per app, as configured. */
+  defaults: Partial<Record<ServarrApp, Record<string, string>>>;
+}
+
+/** Deployment connections in order: Nextcloud, WhatsApp, Google Workspace, Servarr. */
 export type AdminConnection =
-  AdminNextcloudConnection | AdminWhatsAppConnection | AdminGoogleWorkspaceConnection;
+  | AdminNextcloudConnection
+  | AdminWhatsAppConnection
+  | AdminGoogleWorkspaceConnection
+  | AdminServarrConnection;
 
 export interface AdminBrowsers {
   status: 'ok' | 'disabled' | 'unavailable';
@@ -3424,6 +3457,8 @@ export interface ReplyCitation {
   msg_id: number;
   role?: 'user' | 'assistant' | 'system';
   excerpt?: string;
+  // Who wrote a `user` parent, when that is not the viewer (#764).
+  author?: string;
   deleted: boolean;
 }
 
@@ -3515,6 +3550,24 @@ export interface ChatHistoryMessage {
   // and the bot's own remark. Absent on a note from before them, which then
   // renders from `text`.
   email_note?: EmailNoteParts;
+  // Assistant rows: the location shares this answer carries a map of, in the
+  // order they were attached. Each is the projected observation the answer's
+  // text already discloses, plus its map link.
+  location_shares?: LocationShare[];
+}
+
+/** One location share card as `_location_shares_field` serializes it. */
+export interface LocationShare {
+  card_id: number;
+  owner_user_id: string;
+  owner_label: string;
+  precision: 'exact' | 'area';
+  lat: number;
+  lon: number;
+  accuracy_m: number | null;
+  observed_at: string;
+  freshness: string;
+  map_url: string;
 }
 
 export interface EmailNoteParts {

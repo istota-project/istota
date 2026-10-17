@@ -412,6 +412,31 @@ def work_list(ctx, client, period, uninvoiced, invoiced):
     })
 
 
+@work.command("export")
+@click.option("--format", "fmt", type=click.Choice(["csv", "json"]), default="csv",
+              show_default=True, help="csv for a spreadsheet, json for a complete copy")
+@click.option("--year", type=click.IntRange(1, 9999), help="Only entries dated in this year")
+@click.option("--out", type=click.Path(dir_okay=False, path_type=Path),
+              help="Write here instead of to stdout")
+@pass_ctx
+def work_export_cmd(ctx, fmt, year, out):
+    """Export work entries and invoices, read-only."""
+    from istota.money import work_export
+
+    data_dir = _require_data_dir(ctx)
+    export = work_export.collect(data_dir, year=year)
+    text = work_export.render(export, fmt)
+    if out is None:
+        click.echo(text, nl=False)
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    _output({
+        "status": "ok", "path": str(out), "format": fmt, "year": year,
+        "entries": len(export.entries), "invoices": len(export.invoices),
+    })
+
+
 @work.command("backfill-ids")
 @pass_ctx
 def work_backfill_ids(ctx):

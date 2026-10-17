@@ -1,0 +1,6 @@
+[
+  {"id": 6, "indexerId": 1, "disabledTill": "2026-10-16T10:00:00Z",
+   "mostRecentFailure": "2026-10-16T09:55:00Z", "initialFailure": "2026-10-16T09:40:00Z"},
+  {"id": 5, "indexerId": 2, "disabledTill": "2026-10-16T14:00:00Z",
+   "mostRecentFailure": "2026-10-16T11:50:00Z", "initialFailure": "2026-10-16T09:00:00Z"}
+]

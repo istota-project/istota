@@ -1,0 +1,14 @@
+[
+  {
+    "source": "IndexerSearchCheck",
+    "type": "warning",
+    "message": "No indexers available with Automatic Search enabled, Radarr will not provide any automatic search results",
+    "wikiUrl": "https://wiki.servarr.com/radarr/system#no-indexers-available-with-automatic-search-enabled"
+  },
+  {
+    "source": "DownloadClientCheck",
+    "type": "error",
+    "message": "Unable to communicate with qBittorrent. Connection refused",
+    "wikiUrl": "https://wiki.servarr.com/radarr/system#unable-to-communicate-with-download-client"
+  }
+]

@@ -45,6 +45,29 @@ class TestStaticDirResolution:
         assert _pick_static_dir("", tmp_path / "repo") == tmp_path / "repo"
 
 
+class TestRenderDirResolution:
+    """The render bundles the daemon sends the browser: the image's ENV, else the checkout."""
+
+    def test_the_env_override_wins(self, tmp_path, monkeypatch):
+        from istota.webui.static_dir import resolve_render_dir
+        monkeypatch.setenv("ISTOTA_WEB_RENDER_DIR", str(tmp_path / "render"))
+        assert resolve_render_dir() == tmp_path / "render"
+
+    def test_the_checkout_beside_the_web_build(self, monkeypatch):
+        from istota.webui.static_dir import resolve_render_dir, resolve_static_dir
+        monkeypatch.delenv("ISTOTA_WEB_RENDER_DIR", raising=False)
+        monkeypatch.delenv("ISTOTA_WEB_STATIC_DIR", raising=False)
+        assert resolve_render_dir() == resolve_static_dir().parent / "build-render"
+        assert resolve_render_dir().parent.name == "web"
+
+    def test_the_static_override_does_not_move_it(self, tmp_path, monkeypatch):
+        from istota.webui.static_dir import resolve_render_dir
+        monkeypatch.delenv("ISTOTA_WEB_RENDER_DIR", raising=False)
+        monkeypatch.setenv("ISTOTA_WEB_STATIC_DIR", str(tmp_path / "static"))
+        assert resolve_render_dir().name == "build-render"
+        assert resolve_render_dir().parent != tmp_path
+
+
 @_needs_web_deps
 class TestStaticCacheControl:
     """Bare StaticFiles sends no Cache-Control, so both asset classes fall to

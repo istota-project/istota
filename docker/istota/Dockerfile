@@ -225,6 +225,10 @@ ENV PATH="/app/.venv/bin:${PATH}"
 
 # SvelteKit static build (from web-builder stage)
 COPY --from=web-builder /app/web/build /app/web/build
+# The render bundles the daemon sends the browser service as documents
+# (web/vite.render.config.ts). Not under web/build, so the web never serves them.
+COPY --from=web-builder /app/web/build-render /app/web/build-render
+ENV ISTOTA_WEB_RENDER_DIR=/app/web/build-render
 
 # `uv run` syncs the project before it runs anything, which on this read-only
 # root means trying to install the dev group into /app/.venv and failing. The
