@@ -4620,6 +4620,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     "developer.review": _review_section,
     # Zero files would make the reviewer text-only by configuration.
     "developer.review.file_budget": _positive_int,
+    "web.auth_step_up_mail_max": _positive_int,
     # Same reason: a zero cap writes an empty tree for a reviewer with tools.
     "developer.review.snapshot_max_bytes": _positive_int,
     "developer.review.snapshot_max_file_bytes": _positive_int,

@@ -81,6 +81,7 @@ BAD_HOOK_VALUES: dict[str, object] = {
     "security.sandbox_ro_paths": "/srv/app",
     "scheduler.email_task_queue": "backgroud",
     "scheduler.talk_poll_timeout": 0,
+    "web.auth_step_up_mail_max": 0,
     "scheduler.talk_poll_wait": -1.0,
     "scheduler.talk_poll_full_sweep_interval": -1,
     "talk.signaling.room_sync_interval": 0,
