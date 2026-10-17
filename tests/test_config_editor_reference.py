@@ -74,6 +74,7 @@ def test_credential_files_is_every_credential_and_its_secrets_file():
         "whatsapp.cloud.app_secret": "",
         "whatsapp.cloud.verify_token": "",
         "brain.native.api_key": "istota_brain_native_api_key",
+        "brain.native.extra_headers": "",
         "servarr.apps.sonarr.api_key": "istota_servarr_sonarr_api_key",
         "servarr.apps.radarr.api_key": "istota_servarr_radarr_api_key",
         "servarr.apps.lidarr.api_key": "istota_servarr_lidarr_api_key",
