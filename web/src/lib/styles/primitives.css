@@ -401,6 +401,36 @@ input[type='week']::-webkit-date-and-time-value {
   flex: 1 0 auto;
 }
 
+/* An embed: anything drawn inside a reading column that is not text — an
+   inline image, a location map, a video, a PDF page. One box for all of them,
+   `--embed-max-width` by `--embed-max-height`, and never wider than the column.
+
+   `--embed-ratio` is the content's width over its height. Where it is known the
+   height cap is stated as a bound on WIDTH, so the box shrinks on both axes and
+   keeps its shape. A `width` attribute (an image's size hint) makes the used
+   width specified, and a `max-height` alone would then clamp the height without
+   the width following, which stretches the picture. With no ratio the `1000`
+   fallback makes that bound inert and `max-height` caps an element whose width
+   is still `auto`, where it is safe.
+
+   An image brings its own shape. Content with none of its own (a map, an
+   iframe) adds `.embed-fixed`, which fills the column up to the cap at
+   `--embed-ratio`, 4:3 unless the call site sets another. */
+.embed {
+  display: block;
+  max-width: min(
+    100%,
+    var(--embed-max-width),
+    calc(var(--embed-max-height) * var(--embed-ratio, 1000))
+  );
+  max-height: var(--embed-max-height);
+}
+.embed-fixed {
+  --embed-ratio: 4 / 3;
+  width: 100%;
+  aspect-ratio: var(--embed-ratio);
+}
+
 /* Brings a raw <input>/<select> into the row — the components resolve the
    channel themselves, but a page's own hand-rolled control does not.
    `:where()` keeps it weightless so a call site's own rules still win.

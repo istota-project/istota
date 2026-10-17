@@ -100,12 +100,13 @@
 /* An inline image in a bot answer (ISSUE-431). Only the chat-files endpoint
    reaches this rule — the renderer draws an <img> for nothing else — so the
    source is a file out of the reader's own workspace at whatever size the task
-   wrote it, commonly a 2000px screenshot. `max-width` is what keeps that inside
-   the transcript column and `height: auto` is what keeps its aspect ratio while
-   it does.
+   wrote it, commonly a 2000px screenshot. Its size comes from `.embed`
+   (primitives.css), the box every embed in a reading column shares; this rule
+   is only how an image looks in it. `height: auto` is what keeps the aspect
+   ratio while the box caps it.
 
-   `display: block` rather than the UA's inline: a lone image in a paragraph as
-   an inline box sits on a text baseline, which reserves descender space under
+   `.embed` draws it `display: block` rather than the UA's inline: a lone image
+   in a paragraph as an inline box sits on a text baseline, which reserves descender space under
    it and reads as a stray gap. `zoom-in` matches the feeds card, the existing
    lightbox trigger in this app.
 
@@ -118,18 +119,15 @@
    collapses with the paragraph's and changes nothing, so it was inert in the
    common case and wrong in exactly the case the reset exists to fix. */
 /* `object-fit: contain` is the invariant, not a fallback and not decoration:
-   the picture is never distorted. The geometry in the cap below is arranged so
+   the picture is never distorted. The geometry in `.embed`'s cap is arranged so
    the box is always the right shape, and this is the floor under it if that
    ever stops being true. A `width`/`height` pair from a `#w=&h=` hint is a
    presentational SIZE, so any later rule clamping the other axis stretches the
-   image rather than scaling it — which is what the cap below used to do (x1.23
+   image rather than scaling it — which is what a `max-height` cap used to do (x1.23
    on an 800x600 capture, x9.68 on an 800x4000 one, with hints that were
    correct). With `contain` the worst a wrong hint costs is empty space inside
-   the border. Kept out of the rule body only because the mobile guard below
-   greps it for the name of the property this paragraph has to mention. */
+   the border. */
 .markdown .md-image {
-  display: block;
-  max-width: 100%;
   height: auto;
   object-fit: contain;
   /* Fills the box the hint reserved, so the space reads as a picture on its
@@ -145,43 +143,6 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: zoom-in;
-}
-/* The second cap, on the other axis. `max-width` alone bounds a WIDE image and
-   does nothing for a tall or square one: a 2000x2000 screenshot scaled to the
-   transcript column is still as tall as the column is wide, which on a desktop
-   is most of the pane, and the turn's text is pushed off the screen by one
-   attachment. Nothing is lost by capping it: the image is already a lightbox
-   trigger, so full size is a click away.
-
-   It is stated as TWO rules, and the order they bind in is the whole point.
-
-   `max-height` alone was correct only while width was `auto` — the CSS2.1
-   §10.4 constraint table re-derives the other side for a replaced element, so
-   a tall image shrank in width and kept its ratio. A `#w=&h=` hint breaks that
-   premise from a direction no rule here can see: the `width` attribute is a
-   presentational SIZE, so the used width is specified, `max-height` clamps the
-   height, and the width does NOT follow. Measured at x1.23 on an 800x600
-   capture and x9.68 on an 800x4000 one, both with a CORRECT hint.
-
-   So where the ratio is known, the cap is expressed as a bound on WIDTH
-   instead — `50vh` worth of height converted through the ratio — which leaves
-   `height: auto` free to follow the ratio and clamps nothing. A tall image
-   still shrinks in width and still stops at 50vh, which is what the cap was
-   always for. `--md-img-ratio` is emitted by `renderMarkdown` beside the two
-   attributes; the `1000` fallback makes the bound inert for an image with no
-   hint, which keeps `max-height` below as that case's cap, where width is
-   `auto` and it was always safe.
-
-   Non-mobile only, on the app's own 768px line. Below it the cap would be
-   inert at best — a phone's transcript column is narrower than half its
-   viewport height, so `max-width` binds first on a square image and this
-   never applies — and on a landscape phone, where it would apply, 50vh is a
-   few hundred pixels and shrinks the image for no gain. */
-@media (min-width: 769px) {
-  .markdown .md-image {
-    max-width: min(100%, calc(50vh * var(--md-img-ratio, 1000)));
-    max-height: 50vh;
-  }
 }
 /* An admitted image the model wrapped in its own link. The anchor is the
    control here, not the image, so the renderer withholds `role="button"` and

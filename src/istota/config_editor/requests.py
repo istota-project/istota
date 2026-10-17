@@ -19,6 +19,12 @@ sentinel at every secret leaf, and every new credential value is in
 `config.toml` to its secret file is in `moves_json` by label alone: the host
 reads its value from the live file, so the web never had one to seal.
 
+A request with a move stores its `base_digest` behind `MOVE_DIGEST_PREFIX`.
+A release from before moves ignores `moves_json`, and taking such a row
+would write `config.toml` without the credential and no secret file to hold
+it; to that release the prefixed digest never matches the live file, so the
+row is refused and nothing is written (ISSUE-768).
+
 A request reaching `applied` or `failed` raises `admin_config_change` for
 every admin before or after it but the actor, handed to the daemon in the same
 transaction.
@@ -42,6 +48,8 @@ RETENTION_DAYS = 180
 STALE_OUTPUT = "the host did not record an outcome"
 DIGEST_OUTPUT = "config.toml changed since this request was made"
 UNSEAL_OUTPUT = "the request's credentials could not be unsealed with this install's key"
+
+MOVE_DIGEST_PREFIX = "moves:"
 
 _PUBLIC_COLUMNS = (
     "id", "status", "admin_id", "base_digest", "document_toml", "admins_json",
@@ -116,7 +124,8 @@ def create(conn: sqlite3.Connection, preview: Any, *, admin_id: str, base_digest
                    moves_json, diff_text, created_at)
                VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                admin_id, base_digest, preview.document_toml, sealed,
+                admin_id, f"{MOVE_DIGEST_PREFIX}{base_digest}" if preview.moves else base_digest,
+                preview.document_toml, sealed,
                 json.dumps(preview.admins) if preview.admins is not None else None,
                 json.dumps(preview.changed_sections),
                 json.dumps(preview.secret_names),
@@ -137,6 +146,7 @@ def _row(conn: sqlite3.Connection, request_id: int) -> sqlite3.Row | None:
 
 def _public(row: sqlite3.Row) -> dict:
     found = {name: row[name] for name in _PUBLIC_COLUMNS}
+    found["base_digest"] = _base_digest(row)
     found["admins"] = json.loads(row["admins_json"]) if row["admins_json"] else None
     found["admins_changed"] = row["admins_json"] is not None
     found["changed_sections"] = json.loads(row["changed_sections_json"])
@@ -149,6 +159,10 @@ def _public(row: sqlite3.Row) -> dict:
 
 def _moves(row: sqlite3.Row) -> list[str]:
     return json.loads(row["moves_json"]) if row["moves_json"] else []
+
+
+def _base_digest(row: sqlite3.Row) -> str:
+    return row["base_digest"].removeprefix(MOVE_DIGEST_PREFIX)
 
 
 def get(conn: sqlite3.Connection, request_id: int) -> dict | None:
@@ -253,7 +267,7 @@ def take(
         ).fetchone()
         if row is None:
             return None
-        if row["base_digest"] != live_digest:
+        if _base_digest(row) != live_digest:
             _close(conn, row, "refused", DIGEST_OUTPUT, current_admins)
             continue
         claimed = _managed_now(row, managed)
@@ -277,7 +291,7 @@ def take(
         return TakenRequest(
             id=row["id"],
             admin_id=row["admin_id"],
-            base_digest=row["base_digest"],
+            base_digest=_base_digest(row),
             document_toml=row["document_toml"],
             secrets=values,
             admins=json.loads(row["admins_json"]) if row["admins_json"] else None,

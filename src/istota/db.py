@@ -400,6 +400,16 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # A config change moving credentials into their secret files. NULL, on
     # every older row, is a request that moves nothing.
     _add_columns(conn, "config_change_requests", {"moves_json": "TEXT"})
+    # ISSUE-768: a pending move from before the digest marker, so a release
+    # without moves refuses it rather than dropping the credential.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='config_change_requests'"
+    ).fetchone():
+        conn.execute(
+            "UPDATE config_change_requests SET base_digest = 'moves:' || base_digest"
+            " WHERE status = 'pending' AND moves_json IS NOT NULL"
+            " AND base_digest NOT LIKE 'moves:%'"
+        )
     # A password step-up where the install cannot mail. Every older row was
     # a mailed code, which the constant default says.
     _add_columns(conn, "web_auth_step_ups", {"method": "TEXT NOT NULL DEFAULT 'email'"})
@@ -7265,6 +7275,19 @@ _CROSS_ROOM_WHERE = (
     "  WHERE d.room_token = m.room_token AND d.user_id = :user) "
     f"AND ({TRANSCRIPT_SURFACE_FILTER} OR m.role = 'system') "
 )
+
+
+def count_starred_messages_by_room(
+    conn: sqlite3.Connection, user_id: str,
+) -> dict[str, int]:
+    """Count stars with the aggregate view's visibility rules, without paging."""
+    rows = conn.execute(
+        "SELECT m.room_token, COUNT(*) AS n "
+        + _CROSS_ROOM_FROM + _CROSS_ROOM_WHERE
+        + "AND s.message_id IS NOT NULL GROUP BY m.room_token",
+        {"user": user_id},
+    ).fetchall()
+    return {row["room_token"]: row["n"] for row in rows}
 
 
 def max_message_id(conn: sqlite3.Connection) -> int:

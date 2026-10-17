@@ -178,6 +178,7 @@
   // the active room is already held at 0 by the store). A hidden thread is
   // left out: the note in the private room is what tells the user about it.
   const unreadTotal = $derived(mainRooms.reduce((n, r) => n + (r.unread_count ?? 0), 0));
+  const starredTotal = $derived(mainRooms.reduce((n, r) => n + (r.starred_count ?? 0), 0));
 
   // Where each held draft's card goes. A draft belongs to the turn that
   // composed it, so it renders under that turn when the turn is on screen —
@@ -1414,6 +1415,7 @@
         >
           <Star size={12} />
           <span class="view-name">Starred</span>
+          <CountPill count={starredTotal} tone="muted" title={`${starredTotal} starred`} />
         </button>
       </div>
 

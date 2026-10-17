@@ -115,11 +115,12 @@ function pixels(raw: string | null): number | null {
  * A `width` attribute is a presentational size, not merely a hint, so it makes
  * the used width SPECIFIED rather than `auto` — and CSS2.1 §10.4 only
  * re-derives the other axis for a replaced element whose width is `auto`. With
- * a plain `max-height: 50vh` in the sheet the height would then clamp and the
+ * a plain `max-height` in the sheet the height would then clamp and the
  * width would not follow, stretching the picture: measured at x1.23 on an
  * ordinary 4:3 capture and x9.68 on a tall one, with a hint that was CORRECT.
- * That is why `markdown.css` states the cap as a bound on width derived from
- * `--md-img-ratio` below, leaving `height: auto` free to follow the ratio, and
+ * That is why `.embed` (primitives.css) states the cap as a bound on width
+ * derived from `--embed-ratio` below, leaving `height: auto` free to follow
+ * the ratio, and
  * why `object-fit: contain` sits underneath as the guarantee: an image is
  * never distorted, whatever the model wrote or a later rule does to the box.
  */
@@ -130,14 +131,14 @@ function sizeAttrs(src: string): string {
   const width = pixels(params.get('w'));
   const height = pixels(params.get('h'));
   if (!width || !height) return '';
-  // `--md-img-ratio` is what lets the stylesheet state the height cap as a
+  // `--embed-ratio` is what lets the stylesheet state the height cap as a
   // bound on WIDTH instead. Both numbers are already validated integers in
   // 1..MAX_DIMENSION, so the quotient is in 0.00005..20000 and six decimal
   // places can neither round it to zero nor produce anything but digits and a
   // dot — nothing here reaches the `{@html}` sink that was not computed from
   // the two integers above.
   const ratio = (width / height).toFixed(6);
-  return ` width="${width}" height="${height}" style="--md-img-ratio:${ratio}"`;
+  return ` width="${width}" height="${height}" style="--embed-ratio:${ratio}"`;
 }
 
 /** Build each presentation with the same escaping, link and image rules. */
@@ -286,7 +287,7 @@ function createRenderer(opts: { breaks: boolean; imageAffordance: boolean; untru
     // nothing to say what was lost.
     const altAttr = md.utils.escapeHtml(alt || 'image');
     const linked = insideLink(tokens, idx);
-    const cls = linked ? 'md-image md-image-linked' : 'md-image';
+    const cls = linked ? 'md-image embed md-image-linked' : 'md-image embed';
     const affordance = linked || !opts.imageAffordance ? '' : ' role="button" tabindex="0"';
     return (
       `<img class="${cls}" src="${href}" alt="${altAttr}"${titleAttr}${sizeAttrs(src)}` +

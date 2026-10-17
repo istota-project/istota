@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Chat sidebar now shows a Starred count beside the existing Unread count, with the same badges as Feeds. It counts all starred messages in listed rooms and updates after starring, unstarring or deleting a message.
 - The Feeds sidebar shows how many entries are unread and how many are starred next to Unread and Starred, and sources with unread entries are in bold. The counts update as you read, star and mark entries read.
-- **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation.
+- **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation. A release from before this refuses a pending move rather than dropping the credential, and `istota-stack rollback` warns about any secret file the older release no longer reads.
 - **Request films, shows and albums from chat.** The new `servarr` skill works with the operator's Sonarr, Radarr, Lidarr and Prowlarr: ask for something, see what is stuck and why, and list your requests. Admins can do everything; listed requesters request with the stack's defaults. Asking for a film or show the library holds unmonitored monitors it, tags it as your request and searches for it. It cannot delete media. Admin > Connections shows each app and whether it answers with its key, and the `[servarr]` section of Admin > Configuration has a block per app for its URL and API key. The API keys are secret files on the stack, like the other deployment credentials, and never sit in `config.toml`. See docs/features/servarr.md.
 - **Export the work log.** `money work export` writes work entries and invoices as CSV, one row per entry for a spreadsheet, or as JSON with every invoice, voided ones included, complete enough to rebuild the store. The Work and Invoices pages have a download menu for both, and the Work page's download follows its year filter.
 - The Work and Invoices tables now sort by invoice number as well as by date, and remember the sort you chose. The Work table gains an Invoice column.
@@ -55,8 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Images and location maps in web chat are drawn at one size, the same however tall the window is, and keep their shape on a phone. Before, an image's size followed the window's height and a map stretched across the whole chat column.
+- The web UI follows your device's light or dark setting until you choose a theme in Preferences. A theme you already chose stays.
 - The Mac app signs you in about two seconds sooner when you open its window, and other quick `istota` commands start faster too, because the command line no longer loads the task, email and calendar machinery for commands that do not use it.
-- Health Documents has equal-height rows, compact source badges beside desktop titles, and a stacked mobile layout. Preview opens PDFs and images in the shared viewer, with a separate Download action.
+- Health Documents has equal-height rows, compact source badges beside desktop titles, and a stacked mobile layout with consistent spacing between titles, metadata and attachments. Attachment chips use distinct colors for visits, conditions and vaccinations, with compact record labels. Preview opens PDFs and images in the shared viewer, with a separate Download action.
 
 - The Briefings archive sidebar marks an unread briefing with the same amber asterisk the navigation uses, after its audience name, instead of a blue dot in its own column. Rows gain the width the column took.
 - **Twilio, WhatsApp Cloud API and native-brain header credentials now have secret files**, so the web UI no longer has to write them into `config.toml` in plain text. A credential already in `config.toml` keeps working, but the health check and the config editor now warn about it, and Move to secret file has the host move it without anyone retyping it.
@@ -88,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A subscribed feed can no longer run script in the web app through a link (ISSUE-774). Entry links, a feed's site link and attached file links are kept only when they are `http` or `https`, both when a feed is polled and when the reader shows entries already stored, so a `javascript:` link in an older entry shows as plain text.
 
+- Opening the Mac app's window no longer flashes a sign-in form between "Signing in…" and the web UI.
 - Immunization history now fits phone screens, with the vaccine above its date and available details instead of a sideways-scrolling table. Each phone entry takes at most two lines, with notes hidden and long text truncated. Empty fields no longer show dashes, row menus line up on desktop, and the heading and filter stack on smaller screens.
 
 - Moving a credential to its secret file no longer leaves its value in the older `config.toml.bak.*` copies or in the daily config copies under `Backups/config/`. Any credential whose secret file holds a value is now removed from those copies. Copying one back on the same stack still loads the credential, because the secret file wins over a value in `config.toml`.

@@ -161,6 +161,17 @@ describe('the Documents view', () => {
     expect(screen.getByText('Visit')).toBeTruthy();
   });
 
+  it('keeps attachment kinds in accessible text and tooltips beside compact labels', async () => {
+    render(Page);
+    const chip = await screen.findByTitle('Visit: 2026-06-29 — visit');
+    expect(chip).toHaveAttribute('data-kind', 'encounter');
+    expect(within(chip).getByText('Visit')).toHaveClass('visually-hidden');
+    expect(within(chip).getByText('2026-06-29 — visit')).toBeVisible();
+    const condition = screen.getByTitle('Condition: Anaemia');
+    expect(condition).toHaveAttribute('data-kind', 'diagnosis');
+    expect(within(condition).getByLabelText('Detach from Anaemia')).toBeEnabled();
+  });
+
   it('shows each document source as a compact badge', async () => {
     render(Page);
     await waitFor(() => expect(screen.getByText('discharge.pdf')).toBeTruthy());

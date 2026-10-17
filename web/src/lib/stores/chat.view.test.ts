@@ -184,6 +184,29 @@ describe('chat store — cross-room views + starring', () => {
     expect(get(s.activeRoomId)).toBe(2);
   });
 
+  it.each(['star', 'unstar', 'delete', 'refresh'] as const)(
+    '%s refreshes the full starred count beyond the loaded messages',
+    async (action) => {
+      api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), starred_count: 120 }] });
+      api.getChatMessagesView.mockResolvedValue({
+        messages: [aggMsg(10, 'one loaded row', { starred: action !== 'star' })],
+        has_more: true,
+        oldest_cursor: null,
+      });
+      const s = await freshSession();
+      await s.init();
+      await s.selectView('all');
+      const cid = get(s.messages)[0].cid;
+      const count = action === 'star' ? 121 : 119;
+      api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), starred_count: count }] });
+      if (action === 'refresh') await s.refreshRooms();
+      else if (action === 'delete') await s.deleteMessage(cid);
+      else await s.toggleStar(cid);
+      expect(get(s.rooms)[0].starred_count).toBe(count);
+      s.teardown();
+    },
+  );
+
   it('toggleStar flips optimistically and calls the API', async () => {
     api.getChatMessagesView.mockResolvedValue({
       messages: [aggMsg(10, 'starrable')],
