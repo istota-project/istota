@@ -1,0 +1,14 @@
+# What desktop/lima/build.sh builds into the app, from pinned source.
+# Lima's release binaries declare macOS 26.0 as their minimum, so the app
+# builds limactl itself with an older deployment target (the Mac app spec,
+# Stage 1). zstd unpacks the appliance disk; macOS ships none.
+#
+# GitHub's archive tarballs are generated on request; their bytes have been
+# stable since 2023, and the digest below is what build.sh checks.
+LIMA_VERSION=2.2.1
+LIMA_SOURCE_URL=https://github.com/lima-vm/lima/archive/refs/tags/v2.2.1.tar.gz
+LIMA_SOURCE_SHA256=d551efb52115ba006c1052d5c929e4d3afac363c78c9cfca6975af1f85c1426a
+ZSTD_VERSION=1.5.7
+ZSTD_SOURCE_URL=https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+ZSTD_SOURCE_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+MACOSX_DEPLOYMENT_TARGET=14.0
