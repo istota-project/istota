@@ -54,7 +54,8 @@ def test_preference_upgrade_preserves_profiles_rooms_and_devices(tmp_path):
         room = db.create_web_chat_room(conn, "alice", "Keep room")
         conn.execute("INSERT INTO push_devices(user_id,token,environment) VALUES('alice',?,'sandbox')", ("ab" * 32,))
         for table, column in (("user_profiles", "push_inbox_categories"), ("web_chat_rooms", "push_notifications"),
-                              ("push_devices", "auth_method"), ("push_devices", "auth_epoch")):
+                              ("push_devices", "auth_method"), ("push_devices", "auth_epoch"),
+                              ("push_devices", "auth_session_id")):
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     for _ in range(2):
         db.init_db(path)
@@ -62,8 +63,8 @@ def test_preference_upgrade_preserves_profiles_rooms_and_devices(tmp_path):
         assert user_profiles.get_profile(path, "alice", conn=conn).push_inbox_categories == {}
         restored = db.get_web_chat_room(conn, room.id)
         assert restored.name == "Keep room" and restored.push_notifications == "default"
-        row = conn.execute("SELECT auth_method,auth_epoch FROM push_devices").fetchone()
-        assert tuple(row) == (None, None)
+        row = conn.execute("SELECT auth_method,auth_epoch,auth_session_id FROM push_devices").fetchone()
+        assert tuple(row) == (None, None, None)
 
 
 def test_legacy_single_handle_rebuild_preserves_override(tmp_path):

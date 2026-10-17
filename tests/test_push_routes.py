@@ -123,3 +123,45 @@ async def test_old_session_logout_cannot_remove_new_registration(client, new_use
     await client.get("/istota/logout", cookies=second.cookies, follow_redirects=False)
     with db.get_db(_db_path()) as conn:
         assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0
+
+
+async def test_logout_after_older_poll_cookie_removes_enrollment(client, monkeypatch):  # noqa: F811
+    import asyncio
+    import threading
+    from istota.webui import app as web
+
+    cookies = await _login(client, "alice")
+    entered, release = threading.Event(), threading.Event()
+    original = web._notification_counts
+
+    def held_count(*args, **kwargs):
+        entered.set()
+        assert release.wait(5), "test did not release count request"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(web, "_notification_counts", held_count)
+    poll = asyncio.create_task(client.get("/istota/api/notifications/count", cookies=cookies))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        registered = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)
+        assert registered.status_code == 200
+    finally:
+        release.set()
+    older_response = await poll
+    assert older_response.status_code == 200
+    response = await client.get("/istota/logout", cookies=older_response.cookies, follow_redirects=False)
+    assert response.status_code == 302
+    with db.get_db(_db_path()) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0
+
+
+async def test_legacy_login_requires_fresh_sign_in_before_enrollment(client):  # noqa: F811
+    from istota.webui import app as web
+    from tests.test_web_auth_routes import set_session
+
+    set_session(client, web, {"user": {"username": "alice"}, "auth": {"method": "nextcloud", "epoch": 0}})
+    response = await client.post(URL, headers=ORIGIN, json=BODY)
+    assert response.status_code == 409
+    assert "Sign out and sign in again" in response.json()["detail"]
+    with db.get_db(_db_path()) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0

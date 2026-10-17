@@ -2673,6 +2673,7 @@ CREATE TABLE IF NOT EXISTS push_devices (
     app_version TEXT NOT NULL DEFAULT '',
     auth_method TEXT,
     auth_epoch INTEGER,
+    auth_session_id TEXT,
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

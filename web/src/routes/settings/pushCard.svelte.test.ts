@@ -47,7 +47,7 @@ const device: PushDevice = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  page.url = new URL(`http://localhost${base}/settings/notifications`);
+  page.url = new URL(`http://localhost${base}/settings/notifications`) as typeof page.url;
   Object.defineProperty(navigator, 'userAgent', { value: 'Mozilla/5.0', configurable: true });
   profile = {
     user_id: 'alice',
@@ -200,13 +200,13 @@ it('keeps edits across sections and saves them together', async () => {
     'aria-current',
     'page',
   );
-  page.url = new URL(`http://localhost${base}/settings/preferences`);
+  page.url = new URL(`http://localhost${base}/settings/preferences`) as typeof page.url;
   await view.rerender({ user: person, component: Preferences, layout: SettingsLayout });
   await fireEvent.click(
     await screen.findByRole('checkbox', { name: /Show unread counts in navigation/ }),
   );
   expect(screen.queryByRole('heading', { name: 'Push notifications' })).toBeNull();
-  page.url = new URL(`http://localhost${base}/settings/notifications`);
+  page.url = new URL(`http://localhost${base}/settings/notifications`) as typeof page.url;
   await view.rerender({ user: person, component: Notifications, layout: SettingsLayout });
   expect(await screen.findByRole('checkbox', { name: 'Approvals' })).not.toBeChecked();
   expect(api.getProfile).toHaveBeenCalledTimes(1);

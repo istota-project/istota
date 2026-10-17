@@ -1752,12 +1752,9 @@ async def callback(request: Request):
 @auth_router.get("/logout")
 async def logout(request: Request):
     user = request.session.get("user")
-    registration = request.session.get("push_registration")
-    if isinstance(user, dict) and isinstance(registration, dict):
-        if isinstance(registration.get("id"), int) and isinstance(registration.get("created_at"), str):
-            await asyncio.to_thread(
-                _push_device_delete, user.get("username"), registration["id"], registration["created_at"],
-            )
+    session_id = request.session.get("session_id")
+    if isinstance(user, dict) and isinstance(session_id, str) and session_id:
+        await asyncio.to_thread(_push_session_delete, user.get("username"), session_id)
     request.session.clear()
     return RedirectResponse(url="/istota/login", status_code=302)
 
@@ -12552,18 +12549,26 @@ def _push_devices_list(username: str) -> dict:
         return {"devices": devices.list_devices(conn, username)}
 
 
-def _push_device_register(username: str, body: dict, auth: dict) -> dict | None:
+def _push_device_register(username: str, body: dict, auth: dict, session_id: str | None) -> dict | None:
     from istota import db
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
         device_id = devices.register_device(
             conn, username, **body, auth_method=auth["method"], auth_epoch=auth["epoch"],
+            auth_session_id=session_id,
         )
         if device_id is None:
             return None
-        row = conn.execute("SELECT created_at FROM push_devices WHERE id = ?", (device_id,)).fetchone()
-        return {"id": device_id, "created_at": row["created_at"]}
+        return {"id": device_id}
+
+
+def _push_session_delete(username: str, session_id: str) -> None:
+    from istota import db
+    from istota.push import devices
+
+    with db.get_db(_config.db_path) as conn:
+        devices.delete_session_devices(conn, username, session_id)
 
 
 def _push_device_delete(username: str, device_id: int, created_at: str | None = None) -> bool:
@@ -12610,10 +12615,12 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
     if not isinstance(version, str) or len(version) > 100 or any(ord(c) < 32 for c in version):
         raise HTTPException(400, "invalid app version")
     auth = await asyncio.to_thread(_session_auth, request)
-    registration = await asyncio.to_thread(_push_device_register, user["username"], body, auth)
+    session_id = request.session.get("session_id")
+    if auth["method"] != "none" and (not isinstance(session_id, str) or not session_id):
+        raise HTTPException(409, "Sign out and sign in again before registering this device.")
+    registration = await asyncio.to_thread(_push_device_register, user["username"], body, auth, session_id)
     if registration is None:
         raise HTTPException(503, "could not register device")
-    request.session["push_registration"] = registration
     return {"id": registration["id"]}
 
 

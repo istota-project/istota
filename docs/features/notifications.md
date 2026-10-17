@@ -145,3 +145,7 @@ One scope note: a draft that was already mid-send at upgrade time is not seeded,
 - [Email](email.md) — the inbound confirmation gate and the outbound approval gate, the two biggest producers
 - [Scheduling](scheduling.md) — cron jobs and the five-failure auto-disable
 - [Database](../architecture/database.md#notifications) — the table
+
+Push enrollment is bound to the login that registered it. Signing out removes that login's device registrations even if an older polling response arrives after registration. Older sessions may ask you to sign out and back in before registering. Local mode without sign-in uses the device Remove button.
+
+A phone that was offline can retain an old badge after you read items elsewhere. Opening the app refreshes it. Push acceptance does not confirm that the phone received the update.

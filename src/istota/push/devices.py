@@ -17,6 +17,7 @@ def register_device(
     conn: sqlite3.Connection, user_id: str, token: str, environment: str,
     platform: str = "ios", app_version: str = "", *,
     auth_method: str | None = None, auth_epoch: int | None = None,
+    auth_session_id: str | None = None,
 ) -> int | None:
     """Move a token to its current account and seed only a new user's watermark."""
     try:
@@ -35,16 +36,17 @@ def register_device(
             now = stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         row = conn.execute(
             """INSERT INTO push_devices
-                (user_id, token, environment, platform, app_version, created_at, updated_at, auth_method, auth_epoch)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, token, environment, platform, app_version, created_at, updated_at, auth_method, auth_epoch, auth_session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(token, environment) DO UPDATE SET
                     user_id = excluded.user_id, platform = excluded.platform,
                     app_version = excluded.app_version, last_badge = -1,
                     auth_method = excluded.auth_method, auth_epoch = excluded.auth_epoch,
+                    auth_session_id = excluded.auth_session_id,
                     last_error = NULL, last_seen_at = NULL,
                     created_at = excluded.created_at, updated_at = excluded.updated_at
                 RETURNING id""",
-            (user_id, token, environment, platform, app_version, now, now, auth_method, auth_epoch),
+            (user_id, token, environment, platform, app_version, now, now, auth_method, auth_epoch, auth_session_id),
         ).fetchone()
         conn.execute(
             """INSERT INTO push_state (user_id, last_pushed_message_id)
@@ -88,6 +90,15 @@ def delete_device(conn: sqlite3.Connection, device_id: int, user_id: str, *, cre
     except Exception as exc:
         logger.warning("Push device removal failed: %s", type(exc).__name__)
         return False
+
+
+def delete_session_devices(conn: sqlite3.Connection, user_id: str, session_id: str) -> None:
+    if not session_id:
+        return
+    conn.execute(
+        "DELETE FROM push_devices WHERE user_id = ? AND auth_session_id = ?",
+        (user_id, session_id),
+    )
 
 
 def registration_authorized(config, device: dict) -> bool:

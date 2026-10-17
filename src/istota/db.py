@@ -9298,7 +9298,7 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
             UNIQUE (token, environment)
         )
     """)
-    _add_columns(conn, "push_devices", {"auth_method": "TEXT", "auth_epoch": "INTEGER"})
+    _add_columns(conn, "push_devices", {"auth_method": "TEXT", "auth_epoch": "INTEGER", "auth_session_id": "TEXT"})
     conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS push_state (
