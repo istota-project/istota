@@ -17,7 +17,7 @@ from pathlib import Path
 from istota import db, user_profiles
 from istota.config import Config
 from istota.notifications import sources, store
-from istota.push import apns, devices
+from istota.push import apns, devices, preferences
 
 logger = logging.getLogger(__name__)
 _ALERT_TITLE_MAX = 80
@@ -107,13 +107,6 @@ def _tick_ceiling(conn, delay_s: int, *, now: float | None = None) -> int:
     ).fetchone()[0])
 
 
-def _badge_for(conn, user_id: str, setting: str) -> int:
-    badge = store.counts(conn, user_id, strict=True)["open"]
-    if setting != "off":
-        badge += db.total_unread_messages(conn, user_id, "web")
-    return badge
-
-
 def _send(config: Config, device: dict, payload: dict, *, collapse_id=None, priority=10):
     # A removal or account switch during an earlier send must apply before the
     # next alert. APNs itself cannot participate in the registration transaction.
@@ -122,7 +115,7 @@ def _send(config: Config, device: dict, payload: dict, *, collapse_id=None, prio
             "SELECT 1 FROM push_devices WHERE id = ? AND user_id = ? AND created_at = ?",
             (device["id"], device["user_id"], device["created_at"]),
         ).fetchone()
-    if current is None:
+    if current is None or not devices.registration_authorized(config, device):
         return
     result = apns.send(config.push, device, payload, collapse_id=collapse_id,
                        priority=priority, expiration=0)
@@ -144,9 +137,11 @@ def _dispatch_user(config: Config, user_id: str, pending: list[dict], ceiling: i
             "SELECT last_pushed_message_id FROM push_state WHERE user_id = ?", (user_id,),
         ).fetchone()
         floor = int(state[0]) if state else ceiling
-        badge = _badge_for(conn, user_id, setting)
-        chat = db.unread_rooms_since(conn, user_id, "web", floor, ceiling) if setting != "off" else []
-        if setting == "alerts":
+        badge = preferences.push_badge_count(conn, user_id, profile=profile or fallback)
+        categories = preferences.stored_inbox_categories(getattr(profile or fallback, "push_inbox_categories", {}))
+        chat = [row for row in db.unread_rooms_since(conn, user_id, "web", floor, ceiling)
+                if preferences.effective_room_mode(setting, row["push_notifications"]) == "alerts"]
+        if chat:
             handles = {}
             for row in chat:
                 if row["room_id"] is None and _timestamp(row["created_at"]) >= now - config.push.max_age_seconds:
@@ -159,8 +154,9 @@ def _dispatch_user(config: Config, user_id: str, pending: list[dict], ceiling: i
     oldest = now - config.push.max_age_seconds
     # Materialize before sending: malformed content must not partly send a user
     # and then repeat its successful alerts on every subsequent tick.
-    alerts = list(_notification_pushes(pending, badge, preview, oldest))
-    if setting == "alerts":
+    enabled = [row for row in pending if categories.get(row["source"], True)]
+    alerts = list(_notification_pushes(enabled, badge, preview, oldest))
+    if chat:
         alerts.extend(_chat_pushes(chat, badge, preview, oldest))
     for device in registered:
         for payload, collapse in alerts:

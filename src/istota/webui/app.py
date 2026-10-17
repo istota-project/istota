@@ -424,30 +424,20 @@ def _session_auth(request: Request) -> dict:
     if not isinstance(auth, dict):
         raise _UnauthorizedException()
     method = auth.get("method") or "nextcloud"
-    if method not in ("nextcloud", "email", "local_code") or not _config.web.has_method(method):
-        raise _UnauthorizedException()
+    # A generationless cookie is the original Nextcloud epoch, never today's.
+    epoch = auth.get("epoch") if auth.get("method") else 0
     try:
-        identity = web_auth.get_identity(_config.db_path, user["username"])
-        epoch = identity.credential_epoch if identity else web_auth.get_retired_epoch(_config.db_path, user["username"])
-        if method in ("email", "local_code") and (
-            identity is None or user_profiles.get_profile(_config.db_path, user["username"]) is None
-        ):
-            raise _UnauthorizedException()
-    except _UnauthorizedException:
-        raise
+        identity = web_auth.validate_session_credential(
+            _config.db_path, user["username"], method, epoch, _config.web,
+        )
+    except ValueError:
+        raise _UnauthorizedException() from None
     except Exception:
         logger.warning("Session credential lookup failed", exc_info=True)
         raise _UnauthorizedException() from None
-    if identity and identity.disabled:
-        raise _UnauthorizedException()
     if not auth.get("method"):
-        # A generationless cookie cannot inherit an identity's current epoch.
-        if epoch != 0:
-            raise _UnauthorizedException()
         auth = {"method": "nextcloud", "epoch": 0}
         request.session["auth"] = auth
-    if auth.get("epoch") != epoch:
-        raise _UnauthorizedException()
     request.state.web_auth_identity = identity
     return auth
 
@@ -1761,6 +1751,13 @@ async def callback(request: Request):
 
 @auth_router.get("/logout")
 async def logout(request: Request):
+    user = request.session.get("user")
+    registration = request.session.get("push_registration")
+    if isinstance(user, dict) and isinstance(registration, dict):
+        if isinstance(registration.get("id"), int) and isinstance(registration.get("created_at"), str):
+            await asyncio.to_thread(
+                _push_device_delete, user.get("username"), registration["id"], registration["created_at"],
+            )
     request.session.clear()
     return RedirectResponse(url="/istota/login", status_code=302)
 
@@ -4565,6 +4562,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 # that never reaches the user's other tab, and the client
                 # merges field by field so it would also be erased there.
                 "color": handle.color,
+                "push_notifications": handle.push_notifications,
                 # Per-user like `color`, and carried for the same reason: a
                 # thread listed or hidden in one tab has to reach the other.
                 "listed": handle.listed,
@@ -6571,6 +6569,7 @@ def _room_to_dict(room) -> dict:
         # Per-user too: an email thread room the viewer chose to show in the
         # main list. The client hides a thread with this false.
         "listed": room.listed,
+        "push_notifications": room.push_notifications,
         "created_at": room.created_at,
         "updated_at": room.updated_at,
     }
@@ -7005,6 +7004,7 @@ def _chat_update_room(
     listed=_UNSET,
     speech_mode=_UNSET,
     disposition=_UNSET,
+    push_notifications=_UNSET,
 ) -> dict | None:
     """Apply a room PATCH. `_UNSET` on a field means its key was absent.
 
@@ -7045,6 +7045,8 @@ def _chat_update_room(
         room = db.get_web_chat_room(conn, room_id)
         if room is None or room.user_id != username:
             return None
+        if push_notifications is not _UNSET and not db.is_room_member(conn, room.token, username):
+            return None
         # Name, model, effort and brain are the room's, not this handle's, so
         # in a shared room they are the host's. Colour and hiding stay per
         # member. Checked before any write, so a refused body changes nothing.
@@ -7078,6 +7080,7 @@ def _chat_update_room(
             conn, room_id, name=name, archived=archived,
             color=("" if color is None else color) if color is not _UNSET else None,
             listed=listed if listed is not _UNSET else None,
+            push_notifications=push_notifications if push_notifications is not _UNSET else None,
         )
         cleared: list[str] = []
         # Keep the unified room registry in sync (the cross-surface room list /
@@ -10417,6 +10420,12 @@ async def chat_update_room(
     # writes the caller's own handle, which is what `room.user_id != username`
     # in `_chat_update_room` already checks, and it changes nothing another
     # member of a shared room can see.
+    push_notifications = _UNSET
+    if "push_notifications" in data:
+        from istota.push.preferences import ROOM_MODES
+        push_notifications = data["push_notifications"]
+        if push_notifications not in ROOM_MODES:
+            return JSONResponse({"error": "invalid push_notifications"}, status_code=400)
     color = _UNSET
     if "color" in data:
         from istota.rooms.colors import is_room_color
@@ -10528,7 +10537,7 @@ async def chat_update_room(
     try:
         updated = await asyncio.to_thread(
             _chat_update_room, user["username"], room_id, name, archived, model,
-            effort, brain, color, guest_reply, listed, speech_mode, disposition,
+            effort, brain, color, guest_reply, listed, speech_mode, disposition, push_notifications,
         )
     except _RoomSettingsRefused as refused:
         return JSONResponse({"error": str(refused)}, status_code=403)
@@ -12497,10 +12506,9 @@ def _notification_counts(username: str) -> dict:
     with db.get_db(_config.db_path) as conn:
         result = notification_store.counts(conn, username)
         profile = user_profiles.get_profile(_config.db_path, username, conn=conn)
-        result["chat_unread"] = (
-            0 if profile and profile.push_chat_alerts == "off"
-            else db.total_unread_messages(conn, username, "web")
-        )
+        from istota.push.preferences import push_badge_count
+        result["chat_unread"] = db.total_unread_messages(conn, username, "web")
+        result["push_badge"] = push_badge_count(conn, username, profile=profile or _config.users.get(username))
         return result
 
 
@@ -12544,20 +12552,32 @@ def _push_devices_list(username: str) -> dict:
         return {"devices": devices.list_devices(conn, username)}
 
 
-def _push_device_register(username: str, body: dict) -> int | None:
+def _push_device_register(username: str, body: dict, auth: dict) -> dict | None:
     from istota import db
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        return devices.register_device(conn, username, **body)
+        device_id = devices.register_device(
+            conn, username, **body, auth_method=auth["method"], auth_epoch=auth["epoch"],
+        )
+        if device_id is None:
+            return None
+        row = conn.execute("SELECT created_at FROM push_devices WHERE id = ?", (device_id,)).fetchone()
+        return {"id": device_id, "created_at": row["created_at"]}
 
 
-def _push_device_delete(username: str, device_id: int) -> bool:
+def _push_device_delete(username: str, device_id: int, created_at: str | None = None) -> bool:
     from istota import db
     from istota.push import devices
 
     with db.get_db(_config.db_path) as conn:
-        return devices.delete_device(conn, device_id, username)
+        return devices.delete_device(conn, device_id, username, created_at=created_at)
+
+
+@api_router.get("/push/categories")
+async def push_categories(user: dict = Depends(_require_api_auth)):
+    from istota.push.preferences import notification_categories
+    return {"categories": notification_categories()}
 
 
 @api_router.get("/push/devices")
@@ -12589,10 +12609,12 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
     version = body.get("app_version", "")
     if not isinstance(version, str) or len(version) > 100 or any(ord(c) < 32 for c in version):
         raise HTTPException(400, "invalid app version")
-    device_id = await asyncio.to_thread(_push_device_register, user["username"], body)
-    if device_id is None:
+    auth = await asyncio.to_thread(_session_auth, request)
+    registration = await asyncio.to_thread(_push_device_register, user["username"], body, auth)
+    if registration is None:
         raise HTTPException(503, "could not register device")
-    return {"id": device_id}
+    request.session["push_registration"] = registration
+    return {"id": registration["id"]}
 
 
 @api_router.delete("/push/devices/{device_id}")
@@ -12607,7 +12629,7 @@ async def push_devices_delete(
 
 @api_router.get("/notifications/count")
 async def notifications_count(user: dict = Depends(_require_api_auth)):
-    """Inbox counts for the bell, plus preference-filtered chat unread for the app badge.
+    """Ordinary inbox/chat counts and the separate preference-filtered app badge.
 
     Plain SQL, no resolvers: the root layout polls this every thirty seconds
     from every route, and a resolver pass on a timer would open per-user module
@@ -15420,6 +15442,7 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "show_nav_unread_badges": {"type": "bool", "strict": True},
     "push_chat_alerts": {"type": "enum", "values": user_profiles.PUSH_CHAT_ALERTS_VALUES},
     "push_preview": {"type": "bool", "strict": True},
+    "push_inbox_categories": {"type": "push_categories"},
     "external_turn_display":  {
         "type": "enum", "values": user_profiles.EXTERNAL_TURN_DISPLAY_VALUES,
     },
@@ -16049,6 +16072,9 @@ def coerce_profile_field(
     if spec is None:
         raise ValueError(f"unknown profile field: {field}")
     t = spec["type"]
+    if t == "push_categories":
+        from istota.push.preferences import validate_inbox_categories
+        return validate_inbox_categories(value)
     if t == "str":
         if value is None:
             return ""
@@ -16285,6 +16311,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "show_nav_unread_badges": profile.show_nav_unread_badges,
         "push_chat_alerts": profile.push_chat_alerts,
         "push_preview": profile.push_preview,
+        "push_inbox_categories": profile.push_inbox_categories,
         "external_turn_display": profile.external_turn_display or "collapsed",
         "relay_delivery": profile.relay_delivery,
         "relay_delivery_options": _relay_delivery_options(user["username"]),
@@ -16309,7 +16336,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
 
 @api_router.put("/settings/profile")
 async def settings_update_profile(
-    payload: dict,
+    request: Request,
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ) -> dict:
@@ -16321,6 +16348,12 @@ async def settings_update_profile(
     from istota import user_profiles
     from fastapi import HTTPException
 
+    try:
+        payload = json.loads(await read_bounded_body(request, 65536))
+    except BodyError as exc:
+        raise HTTPException(exc.status, "invalid profile body") from None
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise HTTPException(400, "invalid JSON") from None
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
 

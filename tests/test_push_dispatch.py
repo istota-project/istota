@@ -4,7 +4,6 @@ import copy
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from unittest.mock import Mock
 
 import pytest
 
@@ -64,7 +63,7 @@ def stamp(epoch):
 
 
 def register(conn, user="alice", token="ab" * 32):
-    return devices.register_device(conn, user, token, "sandbox")
+    return devices.register_device(conn, user, token, "sandbox", auth_method="nextcloud", auth_epoch=0)
 
 
 def message(conn, room, when, body="Reply", role="assistant"):
@@ -160,7 +159,7 @@ def test_read_archived_dismissed_hidden_and_own_turns_do_not_alert(setup):
 
 
 @pytest.mark.parametrize("setting,expected", [("badge", 2), ("off", 1)])
-def test_chat_preferences_preserve_inbox_alerts(setup, setting, expected, monkeypatch):
+def test_chat_preferences_preserve_inbox_alerts(setup, setting, expected):
     config, now, sent = setup
     with db.get_db(config.db_path) as conn:
         register(conn)
@@ -168,8 +167,6 @@ def test_chat_preferences_preserve_inbox_alerts(setup, setting, expected, monkey
         room = db.create_web_chat_room(conn, "alice", "Work")
         message(conn, room, now[0] - 20)
         notification(conn, now[0])
-    if setting == "off":
-        monkeypatch.setattr(db, "unread_rooms_since", Mock(side_effect=AssertionError("chat query when off")))
     dispatch.run_push_dispatch(config)
     assert len(sent) == 1
     assert sent[0][2]["istota"]["kind"] == "notification"
@@ -361,10 +358,9 @@ def test_badge_read_failure_never_publishes_zero(setup, monkeypatch):
     with db.get_db(config.db_path) as conn:
         register(conn)
         notification(conn, now[0])
-    def broken(conn, user_id, *, strict=False):
-        assert strict
+    def broken(conn, user_id, *, profile=None):
         raise sqlite3.OperationalError("busy")
-    monkeypatch.setattr(store, "counts", broken)
+    monkeypatch.setattr(dispatch.preferences, "push_badge_count", broken)
     dispatch.run_push_dispatch(config)
     assert not sent
     with db.get_db(config.db_path) as conn:
@@ -429,3 +425,81 @@ def test_inbox_reaches_each_device_with_saved_preview_preference(setup):
                and s[2]["aps"]["badge"] == 1 for s in sent)
     with db.get_db(config.db_path) as conn:
         assert not store.take_pending_pushes(conn)
+
+
+def test_disabled_category_is_acknowledged_without_replay(setup):
+    from istota import user_profiles
+    config, now, sent = setup
+    user_profiles.ensure_profile(config.db_path, "alice")
+    user_profiles.update_profile(config.db_path, "alice", push_inbox_categories={"confirmation": False})
+    with db.get_db(config.db_path) as conn:
+        register(conn)
+        notification(conn, now[0])
+    dispatch.run_push_dispatch(config)
+    assert [item[2] for item in sent] == [{"aps": {"badge": 0}}]
+    with db.get_db(config.db_path) as conn:
+        assert not store.take_pending_pushes(conn)
+        assert store.counts(conn, "alice")["open"] == 1
+    user_profiles.update_profile(config.db_path, "alice", push_inbox_categories={})
+    dispatch.run_push_dispatch(config)
+    assert sent[-1][2] == {"aps": {"badge": 1}}
+    assert len(sent) == 2
+
+
+def test_enabling_room_does_not_replay_old_messages(setup):
+    config, now, sent = setup
+    with db.get_db(config.db_path) as conn:
+        register(conn)
+        room = db.create_web_chat_room(conn, "alice", "Work")
+        db.update_web_chat_room(conn, room.id, push_notifications="off")
+        message(conn, room, now[0] - 20)
+    dispatch.run_push_dispatch(config)
+    with db.get_db(config.db_path) as conn:
+        db.update_web_chat_room(conn, room.id, push_notifications="alerts")
+    dispatch.run_push_dispatch(config)
+    assert [s[2] for s in sent] == [{"aps": {"badge": 0}}, {"aps": {"badge": 1}}]
+
+
+@pytest.mark.parametrize("revocation", ["legacy", "disabled", "epoch", "deleted", "method"])
+def test_dispatch_refuses_revoked_enrollment(setup, revocation):
+    from istota import user_profiles
+    from istota.webui import auth
+    config, now, sent = setup
+    user_profiles.ensure_profile(config.db_path, "alice")
+    identity = auth.upsert_identity(config.db_path, "alice", "alice@example.com")
+    with db.get_db(config.db_path) as conn:
+        devices.register_device(conn, "alice", "ab" * 32, "sandbox", auth_method="nextcloud", auth_epoch=identity.credential_epoch)
+        notification(conn, now[0])
+        if revocation == "legacy":
+            conn.execute("UPDATE push_devices SET auth_method=NULL, auth_epoch=NULL")
+        elif revocation == "disabled":
+            conn.execute("UPDATE web_auth_identities SET disabled=1")
+        elif revocation == "epoch":
+            conn.execute("UPDATE web_auth_identities SET credential_epoch=credential_epoch+1")
+        elif revocation == "deleted":
+            conn.execute("DELETE FROM user_profiles WHERE user_id='alice'")
+            conn.execute("UPDATE push_devices SET auth_method='email'")
+    if revocation == "method":
+        config.web.auth = ["email"]
+    dispatch.run_push_dispatch(config)
+    assert not sent
+
+
+def test_revocation_during_send_stops_remaining_alerts(setup, monkeypatch):
+    from istota import user_profiles
+    from istota.webui import auth
+    config, now, sent = setup
+    user_profiles.ensure_profile(config.db_path, "alice")
+    identity = auth.upsert_identity(config.db_path, "alice", "alice@example.com")
+    with db.get_db(config.db_path) as conn:
+        devices.register_device(conn, "alice", "ab" * 32, "sandbox", auth_method="nextcloud", auth_epoch=identity.credential_epoch)
+        notification(conn, now[0], key="task:1")
+        notification(conn, now[0], key="task:2")
+    send = apns.send
+    def revoke_after_first(*args, **kwargs):
+        result = send(*args, **kwargs)
+        auth.bump_epoch(config.db_path, "alice")
+        return result
+    monkeypatch.setattr(apns, "send", revoke_after_first)
+    dispatch.run_push_dispatch(config)
+    assert len(sent) == 1

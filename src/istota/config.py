@@ -951,6 +951,7 @@ class UserConfig:
     show_nav_unread_badges: bool = False
     push_chat_alerts: str = "alerts"
     push_preview: bool = True
+    push_inbox_categories: dict[str, bool] = field(default_factory=dict)
     # The KDBX credential vault, operator-set. Empty means this user's vault is
     # whatever their `{bot_dir}/vault/` folder holds, which is the ordinary
     # route and is every user by default; a relative path resolves under
@@ -3161,6 +3162,8 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
 
 def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     """Parse a user data dict (from main config or per-user file) into UserConfig."""
+    from istota.push.preferences import validate_inbox_categories
+
     if "default_briefings" in user_data:
         report_problem("retired", ("users", user_id, "default_briefings"),
                        "default_briefings is migration input only; use All users delivery preferences")
@@ -3264,6 +3267,7 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         show_nav_unread_badges=bool(user_data.get("show_nav_unread_badges", False)),
         push_chat_alerts=str(user_data.get("push_chat_alerts", "alerts")),
         push_preview=bool(user_data.get("push_preview", True)),
+        push_inbox_categories=validate_inbox_categories(user_data.get("push_inbox_categories", {})),
         timezone_follow_location=bool(
             user_data.get("timezone_follow_location", False)
         ),

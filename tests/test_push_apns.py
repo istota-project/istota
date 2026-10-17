@@ -48,7 +48,7 @@ def registry(tmp_path):
     path = tmp_path / "test.db"
     db.init_db(path)
     with db.get_db(path) as conn:
-        devices.register_device(conn, "alice", TOKEN, "sandbox")
+        devices.register_device(conn, "alice", TOKEN, "sandbox", auth_method="nextcloud", auth_epoch=0)
         conn.execute("UPDATE push_devices SET created_at='2026-01-01T00:00:00.000Z', last_error='old'")
     return path
 
@@ -246,7 +246,7 @@ def test_cli_parses_and_sends_each_device_through_real_http_seam(signing, regist
     push, _ = signing
     config = Config(push=push, db_path=registry, users={"alice": UserConfig()})
     with db.get_db(registry) as conn:
-        devices.register_device(conn, "alice", "cd" * 32, "production")
+        devices.register_device(conn, "alice", "cd" * 32, "production", auth_method="nextcloud", auth_epoch=0)
     calls = []
     def respond(request):
         calls.append(request)

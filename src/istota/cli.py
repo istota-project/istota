@@ -3357,7 +3357,7 @@ def cmd_calendar_discover(args):
 def cmd_push_test(args):
     """Send an operator-requested alert to each registered device."""
     from istota.push import apns, devices
-    from istota.notifications import store as notification_store
+    from istota.push.preferences import push_badge_count
 
     config = load_config(Path(args.config) if args.config else None)
     if not config.push.enabled:
@@ -3369,10 +3369,8 @@ def cmd_push_test(args):
             if not registered:
                 print("No push devices registered for this user.", file=sys.stderr)
                 return 1
-            badge = notification_store.counts(conn, args.user)["open"]
-            user = config.users.get(args.user)
-            if user is None or user.push_chat_alerts != "off":
-                badge += db.total_unread_messages(conn, args.user, "web")
+            profile = user_profiles.get_profile(config.db_path, args.user, conn=conn)
+            badge = push_badge_count(conn, args.user, profile=profile or config.users.get(args.user))
         payload = {
             "aps": {"alert": {"title": "Istota push test", "body": args.message},
                     "badge": badge, "sound": "default"},
@@ -3380,6 +3378,10 @@ def cmd_push_test(args):
         }
         failed = False
         for device in registered:
+            if not devices.registration_authorized(config, device):
+                print(f"Device {device['id']}: registration authorization expired; register again")
+                failed = True
+                continue
             result = apns.send(config.push, device, payload, collapse_id="test", expiration=0)
             with db.get_db(config.db_path) as conn:
                 devices.record_result(conn, device["id"], result)

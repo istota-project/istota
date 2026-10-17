@@ -68,7 +68,7 @@ async def test_invalid_registration_is_400(client, patch):  # noqa: F811
     assert response.status_code == 400
 
 
-async def test_chat_off_excludes_chat_from_count(client):  # noqa: F811
+async def test_chat_off_preserves_ordinary_chat_count(client):  # noqa: F811
     from istota import user_profiles
 
     cookies = await _login(client, "alice")
@@ -77,7 +77,9 @@ async def test_chat_off_excludes_chat_from_count(client):  # noqa: F811
     with db.get_db(_db_path()) as conn:
         room = db.register_room(conn, None, "alice", origin="web", name="Work")
         db.add_message(conn, room.token, role="assistant", body="Reply", origin_surface="web")
-    assert (await client.get("/istota/api/notifications/count", cookies=cookies)).json()["chat_unread"] == 0
+    result = (await client.get("/istota/api/notifications/count", cookies=cookies)).json()
+    assert result["chat_unread"] == 1
+    assert result["push_badge"] == 0
 
 
 async def test_bad_and_oversized_bodies(client):  # noqa: F811
@@ -93,3 +95,31 @@ async def test_failed_registration_is_not_reported_as_success(client, monkeypatc
     cookies = await _login(client, "alice")
     monkeypatch.setattr(devices, "register_device", lambda *args, **kwargs: None)
     assert (await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)).status_code == 503
+
+
+async def test_logout_removes_only_session_registration(client):  # noqa: F811
+    cookies = await _login(client, "alice")
+    first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)
+    session = first.cookies
+    other_login = await _login(client, "alice")
+    second = await client.post(URL, cookies=other_login, headers=ORIGIN, json={**BODY, "token": "cd" * 32})
+    response = await client.get("/istota/logout", cookies=session, follow_redirects=False)
+    assert response.status_code == 302
+    with db.get_db(_db_path()) as conn:
+        assert [r[0] for r in conn.execute("SELECT id FROM push_devices")] == [second.json()["id"]]
+
+
+@pytest.mark.parametrize("new_user", ["alice", "bob"])
+async def test_old_session_logout_cannot_remove_new_registration(client, new_user):  # noqa: F811
+    cookies = await _login(client, "alice")
+    first = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)
+    session = first.cookies
+    cookies = await _login(client, new_user)
+    second = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)
+    assert second.json() == first.json()
+    await client.get("/istota/logout", cookies=session, follow_redirects=False)
+    with db.get_db(_db_path()) as conn:
+        assert conn.execute("SELECT user_id FROM push_devices").fetchone()[0] == new_user
+    await client.get("/istota/logout", cookies=second.cookies, follow_redirects=False)
+    with db.get_db(_db_path()) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0

@@ -26,6 +26,7 @@ PROFILE_FIELDS = {
     "max_foreground_workers": int, "max_background_workers": int,
     "briefing_email_html": bool, "timezone_follow_location": bool,
     "show_nav_unread_badges": bool,
+    "push_chat_alerts": str, "push_preview": bool, "push_inbox_categories": dict,
 }
 JOB_FIELDS = {
     "name": str, "cron": str, "prompt": str, "command": str, "prompt_file": str,
@@ -265,6 +266,12 @@ def validate_user_plan(user_id: str, document: dict) -> UserPlan:
         for name, value in profile.items():
             if PROFILE_FIELDS[name] is list:
                 _strings(value, [*profile_path, name])
+            elif name == "push_inbox_categories":
+                from istota.push.preferences import validate_inbox_categories
+                try:
+                    validate_inbox_categories(value)
+                except ValueError:
+                    _fail([*profile_path, name], "expected registered source IDs and booleans")
             elif name == "routing":
                 for purpose, destination in value.items():
                     _type(destination, str, [*profile_path, name, purpose])

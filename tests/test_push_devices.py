@@ -63,3 +63,14 @@ def test_unavailable_store_does_not_raise_or_log_token(caplog):
     assert not devices.delete_device(conn, 1, "alice")
     assert TOKEN not in caplog.text
     conn.close()
+
+
+def test_registration_generation_changes_with_same_clock(conn, monkeypatch):
+    monkeypatch.setattr(devices, "iso_utc_now", lambda: "2026-01-01T00:00:00.000Z")
+    device_id = devices.register_device(conn, "alice", TOKEN, "sandbox")
+    first = devices.devices_for_user(conn, "alice")[0]["created_at"]
+    assert devices.register_device(conn, "alice", TOKEN, "sandbox") == device_id
+    second = devices.devices_for_user(conn, "alice")[0]["created_at"]
+    assert second > first
+    assert not devices.delete_device(conn, device_id, "alice", created_at=first)
+    assert devices.delete_device(conn, device_id, "alice", created_at=second)

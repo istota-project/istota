@@ -2,7 +2,7 @@
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 def register_device(
     conn: sqlite3.Connection, user_id: str, token: str, environment: str,
-    platform: str = "ios", app_version: str = "",
+    platform: str = "ios", app_version: str = "", *,
+    auth_method: str | None = None, auth_epoch: int | None = None,
 ) -> int | None:
     """Move a token to its current account and seed only a new user's watermark."""
     try:
@@ -25,21 +26,25 @@ def register_device(
             conn.execute("BEGIN IMMEDIATE")
         conn.execute("SAVEPOINT register_push_device")
         previous = conn.execute(
-            "SELECT user_id FROM push_devices WHERE token = ? AND environment = ?",
+            "SELECT user_id, created_at FROM push_devices WHERE token = ? AND environment = ?",
             (token, environment),
         ).fetchone()
         now = iso_utc_now()
+        if previous and now <= previous["created_at"]:
+            stamp = datetime.fromisoformat(previous["created_at"].replace("Z", "+00:00")) + timedelta(milliseconds=1)
+            now = stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         row = conn.execute(
             """INSERT INTO push_devices
-                (user_id, token, environment, platform, app_version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (user_id, token, environment, platform, app_version, created_at, updated_at, auth_method, auth_epoch)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(token, environment) DO UPDATE SET
                     user_id = excluded.user_id, platform = excluded.platform,
                     app_version = excluded.app_version, last_badge = -1,
+                    auth_method = excluded.auth_method, auth_epoch = excluded.auth_epoch,
                     last_error = NULL, last_seen_at = NULL,
                     created_at = excluded.created_at, updated_at = excluded.updated_at
                 RETURNING id""",
-            (user_id, token, environment, platform, app_version, now, now),
+            (user_id, token, environment, platform, app_version, now, now, auth_method, auth_epoch),
         ).fetchone()
         conn.execute(
             """INSERT INTO push_state (user_id, last_pushed_message_id)
@@ -74,13 +79,30 @@ def list_devices(conn: sqlite3.Connection, user_id: str) -> list[dict]:
         return []
 
 
-def delete_device(conn: sqlite3.Connection, device_id: int, user_id: str) -> bool:
+def delete_device(conn: sqlite3.Connection, device_id: int, user_id: str, *, created_at: str | None = None) -> bool:
     try:
         return conn.execute(
-            "DELETE FROM push_devices WHERE id = ? AND user_id = ?", (device_id, user_id),
+            "DELETE FROM push_devices WHERE id = ? AND user_id = ? AND (? IS NULL OR created_at = ?)",
+            (device_id, user_id, created_at, created_at),
         ).rowcount > 0
     except Exception as exc:
         logger.warning("Push device removal failed: %s", type(exc).__name__)
+        return False
+
+
+def registration_authorized(config, device: dict) -> bool:
+    """Recheck enrollment authority before every send; legacy rows fail closed."""
+    from istota.webui.auth import validate_session_credential
+
+    method, epoch = device.get("auth_method"), device.get("auth_epoch")
+    if method is None or epoch is None:
+        return False
+    if method == "none":
+        return config.web.has_method("none") and device["user_id"] == config.local_user_id
+    try:
+        validate_session_credential(config.db_path, device["user_id"], method, epoch, config.web)
+        return True
+    except Exception:
         return False
 
 

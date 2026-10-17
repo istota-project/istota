@@ -185,21 +185,21 @@ class TestCount:
         cookies = await _login(client, "alice")
         resp = await client.get("/istota/api/notifications/count", cookies=cookies)
         assert resp.status_code == 200
-        assert resp.json() == {"open": 0, "actionable": 0, "chat_unread": 0}
+        assert resp.json() == {"open": 0, "actionable": 0, "chat_unread": 0, "push_badge": 0}
 
     async def test_counts_open_and_actionable(self, client):
         cookies = await _login(client, "alice")
         _held_task()                       # actionable
         _bare_row(key="a", actionable=False)
         resp = await client.get("/istota/api/notifications/count", cookies=cookies)
-        assert resp.json() == {"open": 2, "actionable": 1, "chat_unread": 0}
+        assert resp.json() == {"open": 2, "actionable": 1, "chat_unread": 0, "push_badge": 2}
 
     async def test_scoped_to_the_session_user(self, client):
         cookies = await _login(client, "bob")
         _held_task(user_id="alice")
         _bare_row(user_id="alice", key="a")
         resp = await client.get("/istota/api/notifications/count", cookies=cookies)
-        assert resp.json() == {"open": 0, "actionable": 0, "chat_unread": 0}
+        assert resp.json() == {"open": 0, "actionable": 0, "chat_unread": 0, "push_badge": 0}
 
     async def test_a_dismissed_row_leaves_the_count(self, client):
         cookies = await _login(client, "alice")

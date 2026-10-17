@@ -922,6 +922,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     show_nav_unread_badges INTEGER NOT NULL DEFAULT 0,
     push_chat_alerts TEXT NOT NULL DEFAULT 'alerts',
     push_preview INTEGER NOT NULL DEFAULT 1,
+    push_inbox_categories TEXT NOT NULL DEFAULT '{}',
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)
     google_scopes TEXT NOT NULL DEFAULT '{}',            -- JSON object: Google service -> off|readonly|full (bounded by the operator's ceiling; {} = unset = the whole ceiling)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1297,6 +1298,7 @@ CREATE TABLE IF NOT EXISTS web_chat_rooms (
     -- hidden. Only an email thread room reads it: those sit in a collapsed
     -- "Email threads" group until listed. Per viewer, like `color`.
     listed      INTEGER NOT NULL DEFAULT 0,
+    push_notifications TEXT NOT NULL DEFAULT 'default',
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (user_id, token)
@@ -2669,6 +2671,8 @@ CREATE TABLE IF NOT EXISTS push_devices (
     token TEXT NOT NULL,
     environment TEXT NOT NULL,
     app_version TEXT NOT NULL DEFAULT '',
+    auth_method TEXT,
+    auth_epoch INTEGER,
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
