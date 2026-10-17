@@ -1242,7 +1242,26 @@ class WebMapConfig:
     attribution: str = ""
 
 
-WEB_AUTH_METHODS = ("nextcloud", "email", "none")
+WEB_AUTH_METHODS = ("nextcloud", "email", "local_code", "none")
+
+
+def local_login_hosts(hostname: str) -> frozenset[str]:
+    """The ``Host`` values a ``local_code`` install answers at, from ``[site] hostname``.
+
+    Only a loopback name with an explicit port qualifies (``localhost:8181``,
+    ``127.0.0.1:8181``), and the install then answers at both names on that
+    port; empty for any other hostname. Port 80 also admits the bare names,
+    which is how a browser sends them.
+    """
+    name, sep, port = hostname.strip().lower().rpartition(":")
+    if not sep or name not in ("localhost", "127.0.0.1"):
+        return frozenset()
+    if not (port.isascii() and port.isdigit()) or port.startswith("0") or not 0 < int(port) < 65536:
+        return frozenset()
+    hosts = {f"localhost:{port}", f"127.0.0.1:{port}"}
+    if port == "80":
+        hosts |= {"localhost", "127.0.0.1"}
+    return frozenset(hosts)
 
 WEB_TOKEN_STORAGE_MODES = ("ephemeral", "encrypted")
 
@@ -5085,6 +5104,7 @@ def load_config(
     _validate_configured_model_references(config)
     _validate_advisor_model(config)
     _validate_nextcloud_workspace(config)
+    _validate_local_login(config)
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
@@ -5249,6 +5269,21 @@ def _validate_nextcloud_workspace(config: Config) -> None:
             "[nextcloud] url is set but no workspace is configured: set "
             "workspace_path to a local directory, or to the mount of the bot's "
             "Nextcloud files together with workspace_mount_path"
+        )
+
+
+def _validate_local_login(config: Config) -> None:
+    """``local_code`` signs in without a password, so it is for the Mac app's VM alone.
+
+    That VM's nginx publishes on the Mac's loopback and its hostname is
+    ``localhost:<port>``; the web app answers only at the names this gives
+    (`local_login_hosts`). The stack's entrypoint also refuses the method
+    under any ingress but ``local``, which a config cannot see.
+    """
+    if config.web.has_method("local_code") and not local_login_hosts(config.site.hostname):
+        raise ValueError(
+            '[web] auth "local_code" needs [site] hostname to be localhost:<port> or '
+            f"127.0.0.1:<port>, the address the Mac app opens; it is {config.site.hostname!r}"
         )
 
 

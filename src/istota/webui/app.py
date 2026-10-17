@@ -70,7 +70,7 @@ from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
 from istota.brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
-from istota.config import Config, load_config, refresh_user_profiles_if_changed
+from istota.config import Config, load_config, local_login_hosts, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.lib.workspace_marker import storage_mode
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
@@ -110,7 +110,7 @@ _UNSET = object()
 # nested `load_config()`. Aliased under the old private names because this
 # module's own call sites and its tests use them. The bundle's cache policy and
 # mount are there too, shared with the first-run setup server.
-from .request_guards import BodyError, origin_refusal, read_bounded_body
+from .request_guards import BodyError, host_refusal, origin_refusal, read_bounded_body
 from .static_dir import (  # noqa: F401 - re-export, see above
     cache_header_statics,
     pick_static_dir as _pick_static_dir,
@@ -278,6 +278,36 @@ app.add_middleware(
 )
 
 
+class _LocalLoginHostGuard:
+    """On an install with local login codes, answer only at its loopback names.
+
+    Against DNS rebinding: a page on another name resolving to 127.0.0.1 would
+    otherwise reach the login code route and the API with its own ``Host``.
+    Pure ASGI rather than ``@app.middleware``, which would wrap every
+    streamed response.
+    """
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send) -> None:
+        config = _config
+        if (scope["type"] in ("http", "websocket") and config is not None
+                and config.web.has_method("local_code")):
+            from starlette.datastructures import Headers
+
+            if host_refusal(Headers(scope=scope), local_login_hosts(config.site.hostname)):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await Response("Unknown host", status_code=403, media_type="text/plain")(scope, receive, send)
+                return
+        await self.inner(scope, receive, send)
+
+
+app.add_middleware(_LocalLoginHostGuard)
+
+
 @app.get("/", include_in_schema=False)
 async def _root_redirect() -> RedirectResponse:
     """Send the bare root to the app.
@@ -395,12 +425,12 @@ def _session_auth(request: Request) -> dict:
     if not isinstance(auth, dict):
         raise _UnauthorizedException()
     method = auth.get("method") or "nextcloud"
-    if method not in ("nextcloud", "email") or not _config.web.has_method(method):
+    if method not in ("nextcloud", "email", "local_code") or not _config.web.has_method(method):
         raise _UnauthorizedException()
     try:
         identity = web_auth.get_identity(_config.db_path, user["username"])
         epoch = identity.credential_epoch if identity else web_auth.get_retired_epoch(_config.db_path, user["username"])
-        if method == "email" and (
+        if method in ("email", "local_code") and (
             identity is None or user_profiles.get_profile(_config.db_path, user["username"]) is None
         ):
             raise _UnauthorizedException()
@@ -1080,6 +1110,8 @@ def _render_login_page(
             'passwordEmail.value = codeEmail.value;});'
             '</script>'
         )
+    if "local_code" in methods and not {"nextcloud", "email"} & set(methods):
+        body += '<p class="tagline">Open Istota from the app on this Mac to sign in.</p>'
     return _render_form_page(bot_name, "Sign in to continue", body, mark)
 
 
@@ -1196,8 +1228,12 @@ async def _peek_auth_link(token: object):
     return record if record and record.purpose in {"enrol", "reset"} else None
 
 
-async def _start_email_session(request: Request, result) -> Response | None:
-    """Mint the session for a verified email credential, or ``None`` if it went stale."""
+async def _start_email_session(request: Request, result, method: str = "email") -> Response | None:
+    """Mint the session for a verified email credential, or ``None`` if it went stale.
+
+    ``method`` is the one the session records, so turning that method off
+    ends the session (`_session_auth`).
+    """
     user_id, email, epoch = result
     try:
         profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, user_id)
@@ -1210,7 +1246,7 @@ async def _start_email_session(request: Request, result) -> Response | None:
         return None
     request.session.clear()
     request.session["user"] = {"username": user_id, "display_name": profile.display_name}
-    request.session["auth"] = {"method": "email", "epoch": epoch}
+    request.session["auth"] = {"method": method, "epoch": epoch}
     request.session["session_id"] = secrets.token_hex(16)
     return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
 
@@ -1390,6 +1426,51 @@ async def sign_in_code_submit(request: Request):
     return await _auth_error(
         "This code has expired",
         "It may have been used, replaced by a newer one, or mistyped too many times. Request a new code.", 400,
+    )
+
+
+# Local login codes (the Mac app). `istota web login-code` mints one inside the
+# VM and the app opens /istota/auth/local#<code>: the fragment never reaches a
+# server log, and the page drops it from history before posting it here.
+_LOCAL_LOGIN_SCRIPT = (
+    'const form = document.getElementById("local-login");'
+    'const code = decodeURIComponent(location.hash.slice(1));'
+    'history.replaceState(null, "", location.pathname);'
+    'if (code) { form.elements.code.value = code; form.submit(); }'
+)
+
+
+@auth_router.get("/auth/local")
+async def local_login_page(request: Request):
+    if not _config.web.has_method("local_code"):
+        raise HTTPException(status_code=404)
+    body = (
+        '<form method="post" action="/istota/auth/local" id="local-login">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "local-login"))}">'
+        '<div class="form-field"><label for="local-code">Login code</label>'
+        '<input id="local-code" type="text" name="code" autocomplete="off" spellcheck="false" required></div>'
+        '<button class="btn btn-primary" type="submit">Sign in</button></form>'
+        f'<script>{_LOCAL_LOGIN_SCRIPT}</script>'
+    )
+    return await _auth_form("Signing in on this Mac", body)
+
+
+@auth_router.post("/auth/local")
+async def local_login_submit(request: Request):
+    if not _config.web.has_method("local_code"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    if not _check_csrf(request, "local-login", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Open Istota from the app again.", 403)
+    try:
+        result = await asyncio.to_thread(web_auth.consume_local_login, _config.db_path, form.get("code"))
+    except Exception:
+        logger.warning("Local login code redemption failed")
+        return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+    response = await _start_email_session(request, result, "local_code") if result is not None else None
+    return response or await _auth_error(
+        "This login code has expired",
+        "A login code works once, for a minute. Open Istota from the app again.", 400,
     )
 
 
@@ -2050,7 +2131,7 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
         "contact": contact,
         "nextcloud_token": nextcloud_token,
         "auth": {"method": method, "email": identity.email if identity else None,
-                 "can_change_password": bool(method == "email" and identity and identity.password_hash)},
+                 "can_change_password": bool(method in ("email", "local_code") and identity and identity.password_hash)},
         # Content hashes for the two identities the client always renders, so
         # it can build an immutable URL for each without a round trip. A third
         # party's hash deliberately does not travel here or per message: the

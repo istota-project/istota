@@ -1446,6 +1446,38 @@ def _auth_issue_link(config, identity, purpose, print_link):
         raise ValueError("Auth email could not be sent; retry or use --print-link")
 
 
+def cmd_web(args):
+    """`istota web login-code`: a one-use login code for the Mac app.
+
+    Prints the code alone, for the app to open `/istota/auth/local#<code>`
+    within a minute. Minting needs a shell in the VM, which is what makes the
+    code its owner's.
+    """
+    from istota.webui import auth as web_auth
+
+    config = load_config(Path(args.config) if args.config else None)
+    db_path = config.db_path
+    try:
+        if not config.web.has_method("local_code"):
+            raise ValueError('[web] auth does not include "local_code"; this install takes no login codes')
+        if not db_path.exists():
+            raise ValueError("DB not found; run `istota init` first")
+        user_id = args.user
+        if not user_id:
+            profiles = sorted(user_profiles.list_profiles(db_path))
+            if len(profiles) != 1:
+                named = ", ".join(profiles) if profiles else "none"
+                raise ValueError(f"name the user with --user (users with a profile: {named})")
+            user_id = profiles[0]
+        print(web_auth.issue_token(db_path, user_id, "local_login", web_auth.LOCAL_LOGIN_TTL_SECONDS))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except sqlite3.Error:
+        print("Error: Auth database operation failed", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_auth(args):
     """Manage web identities separately from profiles and routing addresses."""
     from istota.webui import auth as web_auth
@@ -5400,6 +5432,14 @@ def main():
         auth_mutation = auth_subparsers.add_parser(verb, allow_abbrev=False)
         auth_mutation.add_argument("user_id")
 
+    web_parser = subparsers.add_parser("web", help="The web UI", allow_abbrev=False)
+    web_subparsers = web_parser.add_subparsers(dest="web_action", required=True)
+    web_login_code = web_subparsers.add_parser(
+        "login-code", allow_abbrev=False,
+        help="Print a one-use login code for the Mac app (local_code installs)",
+    )
+    web_login_code.add_argument("--user", help="The user to sign in; needed when more than one has a profile")
+
     user_parser = subparsers.add_parser("user", help="User management")
     user_subparsers = user_parser.add_subparsers(dest="user_action", required=True)
 
@@ -5884,6 +5924,7 @@ def main():
         "briefing": cmd_briefing,
         "secret": cmd_secret,
         "auth": cmd_auth,
+        "web": cmd_web,
         "email": cmd_email,
         "repl": cmd_repl,
         "serve": cmd_serve,

@@ -66,6 +66,7 @@ ROWS: dict[int | str, str] = {
     "L3": "only the workspace folder, and read-only the checkout in developer mode or the releases directory in appliance mode, crosses from the Mac",
     "L4": "the Mac shims run as uid 10001 with no capabilities",
     # The Mac app spec's rows, numbered as that spec numbers them.
+    "M1": "only the Mac user who owns the app logs in to the local install without a password",
     "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
     "M10": "the stack runs only images a manifest signed by the pinned key names",
 }

@@ -100,6 +100,7 @@ istota auth sign-in-code USER                # Fresh code for the user's pending
 istota auth disable USER | enable USER       # Change login availability, revoke sessions
 istota auth logout-all USER                  # Revoke every session for the identity
 istota auth remove USER                      # Remove the login identity; keep profile and data
+istota web login-code [--user USER]          # One-use code for the Mac app's local login (local_code installs)
 ```
 
 Email login for the web UI, enabled by `[web] auth`. A sign-in code works only in the browser that asked for it. See [email login](../features/web-interface.md#email-login).

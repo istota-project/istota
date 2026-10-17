@@ -509,6 +509,10 @@ class ContainerAnswers:
     #: which only the Mac writes), 0 off the local VM. Read, never asked, and
     #: written nowhere: it only holds a `local` hostname to that port.
     forwarded_port: int = 0
+    #: The Mac app's VM (host.env's ISTOTA_DESKTOP_APP=1, which only the Mac
+    #: writes). Read, never asked, written nowhere: under `local` ingress it
+    #: adds the app's login codes to the login methods.
+    desktop_app: bool = False
 
     @property
     def disabled_modules(self) -> list[str]:
@@ -545,9 +549,11 @@ class ContainerAnswers:
     @property
     def web_auth(self) -> list[str]:
         methods = []
+        if self.desktop_app and self.ingress == "local":
+            methods.append("local_code")
         if self.uses_nextcloud and self.oauth_client_id:
             methods.append("nextcloud")
-        if self.email_login or not methods:
+        if self.email_login or methods in ([], ["local_code"]):
             methods.append("email")
         return methods
 
@@ -901,6 +907,14 @@ def forwarded_port(vm_dir: Path | None) -> int:
     return int(value)
 
 
+def desktop_app(vm_dir: Path | None) -> bool:
+    """host.env's ISTOTA_DESKTOP_APP: the Mac app's VM, written by the Mac's
+    ``create --appliance``."""
+    if vm_dir is None or not (vm_dir / "host.env").is_file():
+        return False
+    return _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "ISTOTA_DESKTOP_APP") == "1"
+
+
 class PriorConfigUnreadable(SetupError):
     """The stack's config.toml exists but does not parse."""
 
@@ -1043,6 +1057,7 @@ def prior_answers(data_dir: Path, vm_dir: Path | None) -> ContainerAnswers | Non
     a.hostname = string(table("site"), "hostname", a.hostname)
 
     host_env = _env_file_values(vm_dir / "host.env") if vm_dir is not None else {}
+    a.desktop_app = desktop_app(vm_dir)
     if host_env.get("INGRESS"):
         a.ingress = host_env["INGRESS"]
     elif web.get("trusted_proxy_hops") == INGRESS_HOPS["proxied"]:
@@ -1206,6 +1221,13 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
         refuse(
             "hostname",
             f"This VM's port forward is {a.forwarded_port}; use {local_address(a.forwarded_port)}.",
+        )
+    from .config import local_login_hosts  # noqa: PLC0415 - keep the import graph lean
+
+    if "local_code" in a.web_auth and not local_login_hosts(a.hostname):
+        refuse(
+            "hostname",
+            f"The Mac app opens Istota at localhost:<port>; use {local_address(a.forwarded_port or DEFAULT_LOCAL_PORT)}.",
         )
     if a.ingress == "direct" and a.tls_cert_source == "self-signed":
         refuse(
@@ -1508,7 +1530,7 @@ def _follow(prior_value: str, prior_source: str, new_source: str) -> str:
 
 def collect_container_answers(
     args, *, input_fn, out, getpass_fn, current_storage: str = "",
-    prior: ContainerAnswers | None = None, forwarded_port: int = 0,
+    prior: ContainerAnswers | None = None, forwarded_port: int = 0, on_desktop_app: bool = False,
 ) -> ContainerAnswers:
     """Build ``ContainerAnswers`` from flags and (unless ``--yes``) prompts.
 
@@ -1532,10 +1554,13 @@ def collect_container_answers(
     ``forwarded_port`` is host.env's LOCAL_FORWARD_PORT (``forwarded_port()``):
     with no prior it is the hostname's default, and a ``local`` hostname on
     another port is refused.
+
+    ``on_desktop_app`` is host.env's ISTOTA_DESKTOP_APP (``desktop_app()``).
     """
     interactive = not getattr(args, "yes", False)
     a = dataclasses.replace(prior) if prior is not None else ContainerAnswers()
     a.forwarded_port = forwarded_port
+    a.desktop_app = on_desktop_app
     if prior is None and forwarded_port:
         a.hostname = local_address(forwarded_port)
 
@@ -1907,6 +1932,7 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
     a = collect_container_answers(
         args, input_fn=input_fn, out=out, getpass_fn=getpass_fn,
         current_storage=current_storage(vm_dir), prior=prior, forwarded_port=forwarded_port(vm_dir),
+        on_desktop_app=desktop_app(vm_dir),
     )
     write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out, backup=RERUN_CONFIG_BACKUPS)
 

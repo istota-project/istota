@@ -23,7 +23,9 @@ from istota.db import get_db
 logger = logging.getLogger(__name__)
 _N, _R, _P = 32768, 8, 1
 _MAX_PASSWORD_BYTES = 1024
-_PURPOSES = {"enrol", "reset"}
+_PURPOSES = {"enrol", "reset", "local_login"}
+# A login code the Mac app mints through the VM and spends at once.
+LOCAL_LOGIN_TTL_SECONDS = 60
 # A six-digit code is bound to one client's secret and dies after this many
 # wrong guesses (ISSUE-574). Anyone can open a request for any address, so the
 # per-address daily cap is what bounds a guesser: 20 a day, about 2e-5.
@@ -426,6 +428,24 @@ def consume_and_set_password(db_path: Path, token: str, purpose: str, password: 
                      (encoded, epoch, _timestamp(), row["user_id"]))
         _invalidate_tokens(conn, row["user_id"])
         return row["user_id"], row["email"], epoch
+
+
+def consume_local_login(db_path: Path, token: object) -> tuple[str, str, int] | None:
+    """``(user_id, email, epoch)`` for a live ``local_login`` token, spent in the same
+    transaction that found it; ``None`` for anything else."""
+    if not isinstance(token, str):
+        return None
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _live_token(conn, token, "local_login")
+        if row is None:
+            return None
+        now = _timestamp()
+        used = conn.execute("UPDATE web_auth_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL", (now, row["id"]))
+        if used.rowcount != 1:
+            return None
+        conn.execute("UPDATE web_auth_identities SET last_login_at = ? WHERE user_id = ?", (now, row["user_id"]))
+        return row["user_id"], row["email"], row["credential_epoch"]
 
 
 def _attempts(conn: sqlite3.Connection, kind: str, key: str, window_seconds: int) -> int:
