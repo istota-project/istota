@@ -6,9 +6,9 @@ Overland GPS webhook receiver for location tracking with place detection and vis
 
 Ask “Share my location here” in a web room, Talk group or Baileys WhatsApp group to post one observation. This grants no ongoing access. From a private chat, “Share my location with Hiking” asks for approval of the exact message before posting it. A retry keeps the observation you approved even if your phone has moved.
 
-“Share roughly where I am” shares an approximate area. Exact sharing is the default: a measured point with accuracy and observed time. Area sharing rounds both coordinates to two decimal places before returning them or building the map link, roughly a kilometre north/south and less east/west away from the equator. It omits precise accuracy and saved-place names. This is an approximate area, not an anonymity guarantee. Map links open OpenStreetMap when a recipient chooses to follow them; sharing itself does not fetch a map or reverse-geocode the point.
+“Share roughly where I am” shares an approximate area. Exact sharing is the default: a measured point with accuracy and observed time. Area sharing rounds both coordinates to two decimal places before returning them or building the map link, roughly a kilometre north/south and less east/west away from the equator. It omits precise accuracy and saved-place names. This is an approximate area, not an anonymity guarantee. Map links open OpenStreetMap when a recipient chooses to follow them. Sharing never reverse-geocodes the point.
 
-For continuing access, ask “Let this room see my location for an hour.” You receive a private preview naming the room, readers, precision and duration, either in your private chat or your notifications. Nothing activates until you approve. Durations are 5 minutes through 24 hours, measured from approval; a request for continuing sharing without a duration proposes an hour for you to approve. Only rooms whose readers are known configured users support timed sharing. Email threads do not support either sharing mode.
+For continuing access, ask “Let this room see my location for an hour.” You receive a private preview naming the room, the readers (all of them up to five; with more, three and a count of the rest), precision and duration, either in your private chat or your notifications. Nothing activates until you approve. Durations are 5 minutes through 24 hours, measured from approval; a request for continuing sharing without a duration proposes an hour for you to approve. Only rooms whose readers are known configured users support timed sharing. Email threads do not support either sharing mode.
 
 While your permission is active, a member can ask “Where is Alice?” or “Where is everyone?” in that room. They do not need their own tracker enabled. Answers contain only active sharers, and only the small location projection: no history, saved places, Wi-Fi, battery or visit details. A permission applies to one room, even if several rooms belong to the same group. It starts no tracker and sends no periodic messages.
 
@@ -18,7 +18,20 @@ Ask “What am I sharing?” to list your permissions, or “Stop sharing my loc
 
 Stop prevents later reads. A stop committed before a query's final permission check removes that location from its result. A result that already passed that check may still be delivered. Stop cannot erase earlier messages, screenshots or locations people remember.
 
-The skill commands are `location share [--room ROOM] [--precision exact|area] [--last-known] --request-key KEY`, `location share --for 1h --request-key KEY`, `location sharing` and `location unshare [--room ROOM | --all]`. Room members query with `room location --user USER` or `room locations`, and can always stop through `room location-stop [--all]`. Reads have no room override and never use old transcript answers as current observations.
+The skill commands are `location share [--room ROOM] [--precision exact|area] [--last-known] [--map auto|off] --request-key KEY`, `location share --for 1h --request-key KEY`, `location sharing` and `location unshare [--room ROOM | --all]`. `--map off` applies to one-time shares and is refused with `--for`. Room members query with `room location --user USER [--map auto|off]` or `room locations`, and can always stop through `room location-stop [--all]`. Reads have no room override and never use old transcript answers as current observations.
+
+### Maps
+
+A one-time share comes with a map of the same observation, and so does an answer to “Where is Alice?” about one person. It shows nothing the text does not already say: a pin with its accuracy circle for an exact share, or a shaded square covering the rounded area, with the observed time and the map's attribution. The map is attached only when the answer contains the share's map link unchanged, so an answer that leaves the link out has no map. “Where is everyone?” has none.
+
+- **Web rooms** show the map as a card under the answer that you can pan and zoom. Your browser loads the tiles from the map provider the web UI uses. If the map cannot load, the card shrinks to its text line and link.
+- **Talk rooms** get a 640 × 360 picture shared into the room after the text.
+- **Baileys WhatsApp groups** get the picture with the answer as its caption. One picture goes with each message, so a second map in the same answer is not sent.
+- **SMS, email and the WhatsApp Cloud API** get no map, only the text and link.
+
+A room bound to both Talk and a WhatsApp group gets the picture once, on Talk. The picture is drawn by the browser service from a page Istota sends it, and that page fetches only map tiles; it never calls back into Istota. Without the browser service, or when drawing fails or times out, the text and link go out alone and nothing is retried. An approved post from your private chat says in its preview that a map will be posted with it and draws it from the observation you approved; if Talk or the WhatsApp group then gets no picture, because drawing failed or there is no browser service, your private notice says the map was unavailable. A post into a web-only room needs no picture, since the card is the map. A posted map stays in the room after a timed share ends, like the text.
+
+Say “no map” to share without one. A map card recorded for an answer that never carried its link is deleted after 7 days.
 
 ## Architecture
 

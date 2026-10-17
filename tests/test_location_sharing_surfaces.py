@@ -132,10 +132,10 @@ def test_alice_approves_bob_reads_alice_stops(surface, precision, tmp_path, monk
         task = db.get_task(conn, asked)
         assert task.status == "pending_confirmation"
         preview = task.confirmation_prompt
-        assert "Hiking" in preview and "alice" in preview and "bob" in preview
-        assert conn.execute("SELECT count(*) FROM messages WHERE room_token=? AND body LIKE '%location-stop%'",
+        assert "Hiking" in preview and "Bob can ask where you are" in preview
+        assert conn.execute("SELECT count(*) FROM messages WHERE room_token=? AND body LIKE '%can ask where you are%'",
                             (shared,)).fetchone()[0] == 0
-        assert conn.execute("SELECT count(*) FROM messages WHERE room_token=? AND body LIKE '%location-stop%'",
+        assert conn.execute("SELECT count(*) FROM messages WHERE room_token=? AND body LIKE '%can ask where you are%'",
                             (private,)).fetchone()[0] == 1
     app._chat_confirm_task(asked, "alice", room=private)
     resumed = run(asked, "alice", ["share", "--for", "1h", "--precision", precision,
@@ -173,5 +173,5 @@ def test_alice_approves_bob_reads_alice_stops(surface, precision, tmp_path, monk
         with db.get_db(config.db_path) as conn:
             messages = [m.body for m in db.get_messages(conn, shared)]
     assert any(str(snapshot["lat"]) in text for text in messages)
-    assert all("location-stop" not in text for text in messages)
+    assert all("can ask where you are" not in text for text in messages)
     inbound._participant_cache.clear()

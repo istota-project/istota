@@ -7,6 +7,7 @@ by CDP (see xdotool.navigate), which is what keeps a debugger out of the
 navigation path; the connection is not torn down around it.
 """
 
+from contextlib import contextmanager
 import logging
 import os
 from pathlib import Path
@@ -835,6 +836,28 @@ def get_context(inst, record=True):
     """
     connect_cdp(inst, record=record)
     return inst.pw_context
+
+
+@contextmanager
+def temporary_context(inst, **options):
+    """A fresh browser context on ``inst``'s Chrome, closed on the way out.
+
+    It shares no cookie or storage with the profile's persistent context, so a
+    page drawn in it sees none of the user's sign-ins and leaves nothing behind.
+    The caller bounds how many are open: browse_api counts each against the
+    user's session capacity. Flask-thread-only, like every Patchright call.
+    """
+    _assert_pw_thread(inst, "temporary_context")
+    connect_cdp(inst)
+    context = inst.pw_browser.new_context(**options)
+    try:
+        _install_dialog_guards(context)
+        yield context
+    finally:
+        try:
+            context.close()
+        except Exception as error:
+            log.warning("Could not close a temporary context: %s", type(error).__name__)
 
 
 def get_page_by_index(inst, tab_index):

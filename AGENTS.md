@@ -179,12 +179,13 @@ src/istota/
 │   ├── talk_media.py     # Retention for Talk attachments fetched into `Channels/<token>/media/` on a local workspace → maintenance.md
 │   ├── sandbox_cache_sweeper.py  # Bounds the on-disk package caches the sandbox keeps per user → maintenance.md
 │   └── host_pressure.py  # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
-├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications
+├── nextcloud/            # OCS + WebDAV client: _http (ocs_request/dav_request/OcsError/path scoping), capabilities, shares, users, dav, notifications, talk_files (a local file copied into a Talk conversation's folder for a share)
 │   ├── talk.py, ocs.py   # The Talk client and the OCS envelope leaf
 │   ├── user_metadata.py  # NC user metadata
 │   └── compat.py         # The None-returning variants four best-effort daemon paths depend on
 ├── mail/                 # Email plumbing that is not a transport: support (get_email_config, thread helpers, cleanup), ownership, outbound_policy, drafts
 ├── browser/              # Admission to the single-threaded browser API, and browser profile identity
+│   └── document_render.py  # A web render bundle (`web/src/render/`) sent to the browser's `/render-document`, an image back; the page never calls istota → leaf-modules.md
 ├── lib/                  # Dependency-free leaves; nothing here imports from `istota` → leaf-modules.md
 │   ├── sqlite_util.py    # One SQLite open, each caller's pragma set as parameters; no journal_mode, deliberately → leaf-modules.md
 │   ├── du.py             # Du-style tree measurement and the first-level directory scan → leaf-modules.md

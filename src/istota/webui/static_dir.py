@@ -50,6 +50,20 @@ def resolve_static_dir() -> Path:
     )
 
 
+def resolve_render_dir() -> Path:
+    """Where the render bundles are: the documents the daemon sends the browser service.
+
+    ``ISTOTA_WEB_RENDER_DIR`` (the image sets it to ``/app/web/build-render``),
+    else ``web/build-render`` in the checkout. Read by
+    :mod:`istota.browser.document_render`; never served by the web.
+    """
+    here = Path(__file__).resolve()
+    return pick_static_dir(
+        os.environ.get("ISTOTA_WEB_RENDER_DIR", ""),
+        here.parent.parent.parent.parent / "web" / "build-render",
+    )
+
+
 # SvelteKit emits two classes of asset and they need opposite caching. Bare
 # `StaticFiles` sends neither header, leaving both to heuristic freshness — and
 # an iOS home-screen PWA takes that as licence to pin the app shell more or less

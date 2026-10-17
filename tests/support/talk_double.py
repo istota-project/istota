@@ -367,6 +367,9 @@ class FakeTalkClient:
         # whether it belonged to the post or to the read, and the Talk retry
         # makes both against the same token in one call.
         self.history_failures: dict[str, "Exception | list[Exception | None]"] = {}
+        # The same, for `share_file`, raised after the room check accepted it.
+        self.share_failures: dict[str, "Exception | list[Exception | None]"] = {}
+        self._next_share_id = 0
         # The tokens `create_conversation` minted, in order. Nothing binds
         # them — `_chat_promote_to_talk` writes the binding itself, which is
         # exactly the step the double is there to check, since every later call
@@ -545,6 +548,14 @@ class FakeTalkClient:
         # `ocs.data`, as the real client answers since ISSUE-463 — the envelope
         # is unwrapped inside `TalkClient`, not by `TalkTransport.deliver`.
         return {"id": self._next_message_id}
+
+    async def share_file(self, conversation_token: str, path: str) -> dict:
+        self._check("share_file", conversation_token, {"path": path})
+        failure = self._next_failure(self.share_failures, conversation_token)
+        if failure is not None:
+            raise failure
+        self._next_share_id += 1
+        return {"id": self._next_share_id}
 
     async def edit_message(
         self, conversation_token: str, message_id: int, message: str,

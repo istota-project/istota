@@ -854,6 +854,20 @@ def _record_email_note_step(config, task, decision: str) -> None:
                        task.id, type(exc).__name__)
 
 
+def _location_cards_for_answer(conn, config, task_id: int, room_token: str, body: str):
+    """The map cards an answer carries, or none when they cannot be read.
+
+    A map never decides whether the text is stored.
+    """
+    from .location.sharing import location_cards_for_answer
+    try:
+        return location_cards_for_answer(
+            conn, config, task_id=task_id, room_token=room_token, body=body)
+    except Exception as exc:
+        logger.warning("Task %d: location cards skipped (%s)", task_id, type(exc).__name__)
+        return [], []
+
+
 def _store_room_turn(conn, task, room_token: str | None, body: str) -> int | None:
     """Store a task's delivered result as an assistant spine row in a room's
     canonical transcript — for ANY source type — when the room is web-visible.
@@ -3008,7 +3022,9 @@ def run_task_inline(
     return success, result
 
 
-def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> str:
+def _whatsapp_confirmation_body(
+    config: Config, result: str, task_id: int, *, bare: bool = True,
+) -> str:
     """A confirmation question plus the sentence that says how to answer it.
 
     The question is trimmed to fit and the sentence is appended after, so a
@@ -3026,6 +3042,9 @@ def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> st
     The renderer is asked to apply it rather than the arithmetic being
     repeated here: `render_whatsapp` is what knows the truncation suffix and
     how not to cut a combining sequence in half.
+
+    ``bare=False`` names `!confirm <id>` instead, for a question a bare answer
+    would not reach because another already waits in the chat.
     """
     from .transport.whatsapp.outbound import (
         confirmation_body_budget,
@@ -3033,7 +3052,8 @@ def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> st
     )
 
     budget = confirmation_body_budget(config)
-    tail = f"\n\nTask #{task_id}. Reply YES or NO."
+    tail = (f"\n\nTask #{task_id}. Reply YES or NO." if bare else
+            f"\n\nTask #{task_id}. Reply !confirm {task_id} yes or !confirm {task_id} no")
     question = render_whatsapp(result, limit=max(1, budget - len(tail)))
     return f"{question}{tail}"
 
@@ -3861,6 +3881,9 @@ def process_one_task(
     private_park: "private_replies.PrivateDelivery | None" = None
     # What that row says: the question, or on an email thread the note shape.
     private_park_body = result
+    # Whether a bare YES in the member's WhatsApp chat would reach this park,
+    # so its body asks for one; otherwise it names `!confirm <id>`.
+    private_park_bare = True
     _note_parts = None
     # The body an email thread task mailed, read before delivery consumes it,
     # for the note written after delivery (hidden email threads, section 2).
@@ -3989,6 +4012,10 @@ def process_one_task(
                     # Room or bell alike: the shared room never saw the
                     # question, so the park must not hold it.
                     db.set_task_private_park(conn, task_id)
+                    if private_park.dest is not None and private_park.dest.whatsapp:
+                        from istota.transport.whatsapp.webhook import private_chat_resolution
+                        _reached = private_chat_resolution(conn, task.user_id).task
+                        private_park_bare = _reached is not None and _reached.id == task_id
                     if private_park.dest is None and _talk_leg:
                         post_talk_message = private_replies.SHARED_ROOM_NOTICE
                         shared_room_notice = True
@@ -4036,8 +4063,11 @@ def process_one_task(
                         (f"confirm:{task_id}:yes", "Yes"),
                         (f"confirm:{task_id}:no", "No"),
                     )
+                    from istota.transport.whatsapp.webhook import private_chat_resolution
+                    _reached = private_chat_resolution(conn, task.user_id).task
                     post_whatsapp_message = _whatsapp_confirmation_body(
                         config, result, task_id,
+                        bare=_reached is not None and _reached.id == task_id,
                     )
 
                 # The durable record of the question, written on this connection
@@ -4171,13 +4201,21 @@ def process_one_task(
                     # asked it once the room has moved on (ISSUE-641).
                     from .transport.reply_quote import quoted_trigger
                     _quoted = quoted_trigger(conn, task_id, task.conversation_token)
+                    # Map cards ride the row's own INSERT: the room stream
+                    # cursors on `messages.id`, so a later UPDATE never streams.
+                    _cards, _card_ids = _location_cards_for_answer(
+                        conn, config, task_id, task.conversation_token, result)
                     stored_assistant_msg_id = db.store_turn_message(
                         conn, task.conversation_token, role="assistant",
                         body=result, task_id=task_id,
                         origin_surface=task.source_type,
                         about_room_token=task.about_room_token or None,
                         reply_to_message_id=_quoted.message_id if _quoted else None,
+                        location_shares=_cards or None,
                     )
+                    if stored_assistant_msg_id is not None and _card_ids:
+                        from .location.sharing import mark_location_cards_attached
+                        mark_location_cards_attached(conn, _card_ids, stored_assistant_msg_id)
                     # A retry that re-completes the task finds the row already
                     # stored (store returns None) — recover its id so the star
                     # key still rides the terminal event.
@@ -4908,7 +4946,7 @@ def process_one_task(
         from istota.rooms.private_replies import whatsapp_confirmation_body
         _dest = private_park.dest
         _private_body = (
-            whatsapp_confirmation_body(private_park_body, task.id)
+            whatsapp_confirmation_body(private_park_body, task.id, bare=private_park_bare)
             if _dest is not None and _dest.whatsapp else private_park_body
         )
         private_delivered = run_coro(private_replies.send_private(
@@ -4971,6 +5009,14 @@ def process_one_task(
                         )
         except Exception as e:
             logger.debug("Failed to record talk external_id for task %d: %s", task_id, e)
+
+    # A location share's map, after the text it belongs to has landed. Only
+    # the cards attached to this answer's row, only into their own room.
+    if (response_msg_id and talk_token and success and not dry_run
+            and not is_failure_notify and not shared_room_notice
+            and stored_assistant_msg_id is not None):
+        from .location.map_delivery import deliver_talk_maps
+        deliver_talk_maps(config, message_id=stored_assistant_msg_id, talk_token=talk_token)
 
     # Cache the result so it's immediately available for context building.
     # The result is always posted as its own message, so its real Talk ID is
@@ -5092,6 +5138,19 @@ def process_one_task(
             # Outside the `try`, so an import failure is not swallowed and
             # reported as a delivery failure.
             from .transport.whatsapp._types import REACHED_META
+            from .location.map_delivery import prepare_whatsapp_map, settle_whatsapp_map
+            # A location share's map rides the answer as its image, only on
+            # the task's own result into the room the card was recorded for.
+            whatsapp_map = None
+            if (success and not dry_run and post_whatsapp_reference_id is None
+                    and not is_failure_notify and task.source_type == "whatsapp"
+                    and stored_assistant_msg_id is not None and task.conversation_token):
+                whatsapp_map = prepare_whatsapp_map(
+                    config, message_id=stored_assistant_msg_id,
+                    room_token=task.conversation_token,
+                )
+            whatsapp_record = None
+            whatsapp_raised = False
             try:
                 whatsapp_record = run_coro(whatsapp_transport.send_record(
                     whatsapp_dest.channel or "", post_whatsapp_message, task=task,
@@ -5099,6 +5158,7 @@ def process_one_task(
                         post_whatsapp_reference_id or f"task-result:{task_id}"
                     ),
                     buttons=post_whatsapp_buttons,
+                    generated_image=whatsapp_map.data if whatsapp_map else None,
                 ))
                 whatsapp_undelivered = (
                     whatsapp_record is None
@@ -5110,6 +5170,9 @@ def process_one_task(
                     exc_info=True,
                 )
                 whatsapp_undelivered = True
+                whatsapp_raised = True
+            settle_whatsapp_map(config, whatsapp_map, whatsapp_record,
+                                send_raised=whatsapp_raised)
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"
@@ -8417,6 +8480,10 @@ def run_cleanup_checks(config: Config) -> None:
         deleted_count = db.cleanup_old_tasks(conn, sched.task_retention_days)
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
+        from istota.location.sharing import prune_unattached_cards
+        card_rows = prune_unattached_cards(conn)
+        if card_rows > 0:
+            logger.info("Pruned %d unattached location map card(s)", card_rows)
 
         from istota.briefings.group_store import prune_runs
         prune_runs(conn, retention_days=config.briefings.archive_retention_days)

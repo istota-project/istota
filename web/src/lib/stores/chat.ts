@@ -99,7 +99,9 @@ import {
   isRetryableTurn,
   isClientOnly,
   answerGate,
+  locationShareCard,
   type ChatMessage,
+  type LocationShareCardData,
   type GateOutcome,
   type Segment,
   type ToolEntry,
@@ -2024,6 +2026,7 @@ function createSession(): ChatSession {
         const body = typeof row.text === 'string' ? row.text : null;
         const assistant = row.role === 'assistant';
         const mail = assistant ? rowMail(row) : undefined;
+        const shares = assistant ? rowLocationShares(row) : undefined;
         // An answer that quotes its question (ISSUE-641) carries the citation
         // only on its stored row, which the task stream never saw.
         const cited = replyCitation(row.reply_to);
@@ -2038,6 +2041,7 @@ function createSession(): ChatSession {
             if (body != null && assistant) {
               adoptStoredAnswer(m, body);
               if (mail) m.mail = mail;
+              if (shares) m.locationShares = shares;
             } else if (body != null) {
               m.text = body;
             }
@@ -2792,6 +2796,19 @@ function createSession(): ChatSession {
     };
   }
 
+  // An answer's location share cards. Each element is checked field by field
+  // and one the card could not draw faithfully is dropped, so a malformed
+  // record costs its map and never the answer.
+  function rowLocationShares(m: ChatHistory['messages'][number]): ChatMessage['locationShares'] {
+    if (m.role !== 'assistant' || !Array.isArray(m.location_shares)) return undefined;
+    const cards: LocationShareCardData[] = [];
+    for (const raw of m.location_shares as unknown[]) {
+      const card = locationShareCard(raw);
+      if (card) cards.push(card);
+    }
+    return cards.length ? cards : undefined;
+  }
+
   function buildHistoryMessage(m: ChatHistory['messages'][number]): ChatMessage {
     // Rebuild the ordered segment list from the persisted trace so a finished
     // turn renders the same interleaved layout across reloads. Prefer the
@@ -2847,6 +2864,7 @@ function createSession(): ChatSession {
       // An assistant row's own mail, or (on an email note) the thread row's,
       // which the server attaches under the note.
       mail: rowMail(m),
+      locationShares: rowLocationShares(m),
       receivedMail:
         (m.role === 'user' || (m.role === 'system' && m.email_note)) && m.received_mail
           ? m.received_mail

@@ -8063,7 +8063,38 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     mail = _outgoing_mail_field(_row_get(row, "outgoing_mail"))
     if mail is not None:
         out["mail"] = mail
+    shares = _location_shares_field(_row_get(row, "location_shares"))
+    if shares is not None:
+        out["location_shares"] = shares
     return out
+
+
+_LOCATION_SHARE_KEYS = (
+    "card_id", "owner_user_id", "owner_label", "precision", "lat", "lon",
+    "accuracy_m", "observed_at", "freshness", "map_url",
+)
+
+
+def _location_shares_field(raw) -> list[dict] | None:
+    """A row's location share cards as the web card reads them.
+
+    Only the listed keys pass, so anything a later writer adds stays
+    server-side. None for a row with no cards or a record that cannot be read,
+    which then renders as a plain answer.
+    """
+    if not raw:
+        return None
+    try:
+        shares = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    if not isinstance(shares, list):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    out = [{key: share.get(key) for key in _LOCATION_SHARE_KEYS}
+           for share in shares if isinstance(share, dict)]
+    return out or None
 
 
 _MAIL_STATES = frozenset({"sent", "held", "failed", "discarded"})
@@ -8340,7 +8371,7 @@ _SPINE_COLUMNS = (
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
     "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
-    "  m.received_mail AS received_mail, "
+    "  m.received_mail AS received_mail, m.location_shares AS location_shares, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
@@ -16539,43 +16570,7 @@ async def api_map_basemap(user: dict = Depends(_require_api_auth)):
     """
     from . import map_basemap
 
-    # `getattr` rather than attribute access, matching `check_basemap`: a Config
-    # with `web` unset would otherwise raise here and 500, which is the blank
-    # rectangle this endpoint promises never to produce.
-    web_cfg = getattr(_config, "web", None) if _config else None
-    cfg = getattr(web_cfg, "map", None)
-    user_key = ""
-    if _config is not None:
-        try:
-            from istota.credentials import store as secrets_store
-
-            # Stripped once, at the read, so `select_provider` and the
-            # `api_key=` below cannot disagree about whether this user has a
-            # key. They used to: one tested `.strip()` and the other bare
-            # truthiness, so a stored "  " selected the configured provider
-            # while overriding its working key with whitespace.
-            user_key = (
-                secrets_store.get_secret(
-                    _config.db_path, user["username"], "carto", "api_key"
-                )
-                or ""
-            ).strip()
-        except Exception:  # noqa: BLE001 - a map must render without the store
-            logger.warning("basemap: could not read the stored carto key", exc_info=True)
-            user_key = ""
-
-    if cfg is None:
-        return map_basemap.resolve_basemap().as_dict()
-
-    provider = map_basemap.select_provider(cfg.provider, user_api_key=user_key)
-    spec = map_basemap.resolve_basemap(
-        provider=provider,
-        api_key=user_key or cfg.api_key,
-        dark_style=cfg.dark_style,
-        light_style=cfg.light_style,
-        attribution=cfg.attribution,
-    )
-    return spec.as_dict()
+    return map_basemap.basemap_for_user(_config, user["username"]).as_dict()
 
 
 @api_router.get("/location/settings-info")

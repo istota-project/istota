@@ -579,6 +579,19 @@ class Resolution:
     ambiguous: tuple[db.Task, ...] = ()
 
 
+def resolve_parked_here(conn, room_token: str, user_id: str) -> Resolution:
+    """What a bare answer in a private room resolves among the questions a
+    shared room asked ``user_id`` there: the one, or the ambiguity when
+    there are several. The WhatsApp webhook asks this for the private chat,
+    where `resolve`'s Path C must not run."""
+    from istota.rooms.private_replies import parked_here
+
+    asked_here = parked_here(conn, room_token, user_id)
+    if len(asked_here) > 1:
+        return Resolution(ambiguous=tuple(asked_here))
+    return Resolution(task=asked_here[0] if asked_here else None)
+
+
 def resolve(
     conn,
     user_id: str,
@@ -606,7 +619,7 @@ def resolve(
     if talk_response_id:
         task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
     if task is None and conversation_token:
-        from istota.rooms.private_replies import canonical_token, is_shared_room, parked_here
+        from istota.rooms.private_replies import canonical_token, is_shared_room
 
         room_token = canonical_token(conn, conversation_token)
         # A shared room's questions are asked in its members' private rooms
@@ -617,14 +630,11 @@ def resolve(
         if room_token and is_shared_room(conn, room_token):
             return Resolution(task=task if task is not None and task.user_id == user_id else None)
         task = db.get_pending_confirmation(conn, conversation_token)
-        # A private room also answers what a shared room asked this member
-        # there, when it is the only such question open in it.
         if task is None and room_token:
-            asked_here = parked_here(conn, room_token, user_id)
-            if len(asked_here) > 1:
-                return Resolution(ambiguous=tuple(asked_here))
-            if asked_here:
-                task = asked_here[0]
+            asked_here = resolve_parked_here(conn, room_token, user_id)
+            if asked_here.ambiguous:
+                return asked_here
+            task = asked_here.task
     if task is None:
         open_for_user = pending_for_user(conn, user_id)
         if len(open_for_user) > 1:
@@ -847,12 +857,17 @@ def check_preview_delivery(conn, config, task, preview):
         from istota.transport.whatsapp.outbound import confirmation_body_budget, render_whatsapp
 
         if about:
-            body = private_replies.whatsapp_confirmation_body(preview, task.id)
             # Private delivery adds a bounded room label before this body.
             header_size = len(private_replies.HEADER_PREFIX) + private_replies._LABEL_MAX + 2
-            rendered = render_whatsapp(body, limit=max(1, confirmation_body_budget(config) - header_size))
+            limit = max(1, confirmation_body_budget(config) - header_size)
+            # Which instruction it carries is decided at the send, so both must fit.
+            pairs = []
+            for bare in (True, False):
+                body = private_replies.whatsapp_confirmation_body(preview, task.id, bare=bare)
+                pairs.append((body, render_whatsapp(body, limit=limit)))
         else:
             body = f"{preview}\n\nTask #{task.id}. Reply YES or NO."
-            rendered = _whatsapp_confirmation_body(config, preview, task.id)
-        if not body.startswith(preview) or rendered != body:
-            raise RequestError("invalid_preview")
+            pairs = [(body, _whatsapp_confirmation_body(config, preview, task.id))]
+        for body, rendered in pairs:
+            if not body.startswith(preview) or rendered != body:
+                raise RequestError("invalid_preview")

@@ -820,7 +820,7 @@ async def send_private(config, delivery: PrivateDelivery, *, body: str,
     caller nothing: it has no park bell, so whenever it was not pushed to the
     member (no private room, or a push that reached nobody) this function
     writes and delivers its `private_note` bell row itself. ``body`` is what the surface carries, which may differ from the row (a
-    WhatsApp confirmation names its `!confirm` command). Failures are logged
+    WhatsApp confirmation says how to answer it). Failures are logged
     with the kind and reference, never the body.
     """
     try:
@@ -930,14 +930,16 @@ def pin_plan(config, task, plan: list, *, fallback=None) -> list:
     return kept
 
 
-def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
+def whatsapp_confirmation_body(prompt: str, task_id: int, *, bare: bool = True) -> str:
     """A privately routed question as the member's WhatsApp chat carries it.
 
-    The question is parked against the shared room's task, and a bare YES in
-    that chat answers only a question parked there, so the message names the
+    A bare YES or NO in that chat answers the one question parked there
+    (`transport.whatsapp.webhook.private_chat_resolution`), so the message
+    asks for one. ``bare=False`` is for a question a bare answer would not
+    reach, because another is already waiting in the chat: it names the
     command that answers it by id. The question is trimmed rather than the
-    instruction, leaving room for the ``re: <room>`` header
-    `send_private` puts in front.
+    instruction, leaving room for the ``re: <room>`` header `send_private`
+    puts in front.
 
     The suffix carries no Markdown: the renderer strips backticks, and
     `check_preview_delivery` requires this body to survive rendering unchanged
@@ -945,7 +947,8 @@ def whatsapp_confirmation_body(prompt: str, task_id: int) -> str:
     """
     from istota.transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT, render_whatsapp
 
-    suffix = (f"\n\nTask #{task_id}. Reply !confirm {task_id} yes "
+    suffix = ("\n\nReply YES or NO" if bare else
+              f"\n\nTask #{task_id}. Reply !confirm {task_id} yes "
               f"or !confirm {task_id} no")
     budget = WHATSAPP_TEXT_LIMIT - len(suffix) - len(HEADER_PREFIX) - _LABEL_MAX - 2
     return render_whatsapp(prompt, limit=budget) + suffix
@@ -1217,7 +1220,8 @@ def _owned_running_task(conn, *, actor_user_id: str, task_id: int):
     return task
 
 
-def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: str, text: str):
+def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: str, text: str,
+            attachment: dict | None = None):
     existing = conn.execute(
         "SELECT * FROM whatsapp_skill_requests WHERE requester_user_id=? AND origin_task_id=? "
         "AND request_key=?", (actor_user_id, task_id, request_key),
@@ -1226,7 +1230,49 @@ def _replay(conn, *, actor_user_id: str, task_id: int, request_key: str, kind: s
         return None
     if existing["content_hash"] != text_hash(json.dumps([kind, actor_user_id, text], ensure_ascii=True)):
         raise RequestError("request_conflict")
+    if json.loads(existing["destination"] or "{}").get(LOCATION_SHARE_KEY) != attachment:
+        raise RequestError("request_conflict")
     return _question_response(conn, existing)
+
+
+# A held post's map, in its destination: the observation the released row's card draws.
+LOCATION_SHARE_KEY = "location_share"
+
+
+#: The preview's line saying a post carries a map.
+MAP_PREVIEW_LINE = "A map of this location will be posted with it."
+
+
+def _location_bound(observation, text: str) -> bool:
+    """Whether ``text`` shows ``observation`` whole, so approving it binds the map.
+
+    The approval digest is the preview's hash. The observation is bound when
+    the text carries its own line (`location.sharing.observation_line`: owner,
+    observed time, precision, accuracy, freshness) and its map link, and that
+    link is the one its precision and coordinates make. Checked at hold and
+    again by `_claim` against the approved preview.
+    """
+    from istota.location.logic import share_map_url
+    from istota.location.sharing import observation_line
+
+    if not isinstance(observation, dict):
+        return False
+    try:
+        line = observation_line(observation)
+        url = share_map_url(observation["precision"], observation["lat"], observation["lon"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    lines = text.splitlines()
+    return observation["map_url"] == url and line in lines and url in lines
+
+
+def _check_location_attachment(attachment, *, actor_user_id: str, text: str) -> None:
+    from istota.location.sharing import CARD_OBSERVATION_KEYS
+
+    if (not isinstance(attachment, dict) or set(attachment) != CARD_OBSERVATION_KEYS
+            or attachment["owner_user_id"] != actor_user_id
+            or not _location_bound(attachment, text)):
+        raise RequestError("invalid_attachment")
 
 
 def _fingerprint(*parts) -> str:
@@ -1416,7 +1462,8 @@ def _post_target(conn, task, user_id: str, room: str | None) -> str:
 
 def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
                    request_key: str, text: str, room: str | None = None,
-                   request_context: dict | None = None, require_confirmation: bool = False) -> dict:
+                   request_context: dict | None = None, require_confirmation: bool = False,
+                   attachment: dict | None = None) -> dict:
     """A private-room task asks to post ``text`` into a shared room, as the bot.
 
     From the member's own private room only, never from a shared room
@@ -1428,13 +1475,21 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
     turn, with the recipient test swapped for "the text is the member's own
     words, verbatim in their prompt". Host services can disable that exception
     with ``require_confirmation`` and bind retry options in ``request_context``.
+
+    ``attachment`` is a location share's map: the member's own observation,
+    which the text shows whole (`_location_bound`), so the approval binds it.
+    It is frozen into the destination and drawn as the released row's card.
+    A post without one is held exactly as before.
     """
     from istota.relay import relays as message_relays
 
     _validate_input(request_key, text)
+    if attachment is not None:
+        _check_location_attachment(attachment, actor_user_id=actor_user_id, text=text)
     task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
     replay = _replay(conn, actor_user_id=actor_user_id, task_id=task_id,
-                     request_key=request_key, kind="room_post", text=text)
+                     request_key=request_key, kind="room_post", text=text,
+                     attachment=attachment)
     if replay is not None:
         return replay
     if task.parent_task_id or task.command or task.skill or task.scheduled_job_id:
@@ -1456,9 +1511,11 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
                 raise RequestError("invalid_rendering")
         from istota.confirmations import flatten
         bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
+        map_line = f"{MAP_PREVIEW_LINE}\n" if attachment is not None else ""
         preview = (f"Post this in {destination['label']} as {bot}?\n"
                    "Only the message below is posted, exactly as written. "
-                   "Sending must start within 10 minutes of approval.\n\n"
+                   "Sending must start within 10 minutes of approval.\n"
+                   f"{map_line}\n"
                    f"Message:\n{text}")
         # From a phone room the preview goes out by text, and must arrive whole.
         check_preview_fits(config, origin, preview)
@@ -1469,7 +1526,8 @@ def hold_room_post(conn, config, *, actor_user_id: str, task_id: int,
             binding_fingerprint=destination["fingerprint"], preview=preview,
             origin=origin,
             destination={**{key: destination[key] for key in ("kind", "room_token", "talk_ref", "label")},
-                         **({"request_context": request_context} if request_context is not None else {})},
+                         **({"request_context": request_context} if request_context is not None else {}),
+                         **({LOCATION_SHARE_KEY: attachment} if attachment is not None else {})},
         )
         if row["state"] == "held" and not require_confirmation and _clean_turn(conn, config, task, actor_user_id, post_text=text):
             _queue_question(conn, request_id=row["id"], relay_id=None,
@@ -1521,6 +1579,9 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 if (not row["approved_at"] or row["approved_digest"] != row["preview_digest"]
                         or text_hash(row["preview"] or "") != row["approved_digest"]):
                     raise RequestError("request_unavailable")
+                share = destination.get(LOCATION_SHARE_KEY)
+                if share is not None and not _location_bound(share, row["preview"] or ""):
+                    raise RequestError("request_unavailable")
                 current = _post_destination(conn, destination.get("room_token") or "", user)
                 if current["fingerprint"] != row["binding_fingerprint"]:
                     raise RequestError("destination_changed")
@@ -1532,11 +1593,23 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 # room moved on while it waited for approval (ISSUE-641),
                 # judged now rather than when it was proposed.
                 quoted = quoted_trigger(conn, answers, parent) if answers is not None else None
+                cards = []
+                if share is not None:
+                    from istota.location.sharing import record_post_card
+                    cards.append(record_post_card(
+                        conn, request_id=request_id, task_id=row["origin_task_id"],
+                        actor_user_id=user, room_token=parent, observation=share))
+                # The card rides the row's own INSERT, as on a final answer:
+                # the room stream cursors on `messages.id`.
                 message_id = db.add_message(
                     conn, parent, role="assistant", body=body, origin_surface="web",
                     delivery_reference=reference, task_id=answers,
                     reply_to_message_id=quoted.message_id if quoted else None,
+                    location_shares=cards or None,
                 )
+                if cards:
+                    from istota.location.sharing import mark_location_cards_attached
+                    mark_location_cards_attached(conn, [card["card_id"] for card in cards], message_id)
                 quoted_ids = quoted.external_ids if quoted else {}
                 claim.update(message_id=message_id, talk_ref=current["talk_ref"], parent=parent,
                              reference=reference, whatsapp_group=whatsapp_group,
@@ -1641,7 +1714,10 @@ async def deliver_request(config, row) -> None:
     if claim is None:
         return
     talk_id = None
+    picture_surface = False
     if claim["kind"] == "room_post":
+        from istota.location import map_delivery
+
         if claim["talk_ref"]:
             from istota.transport.talk import TalkTransport
             try:
@@ -1650,19 +1726,64 @@ async def deliver_request(config, row) -> None:
                     reply_to=_talk_id(claim.get("talk_reply_to")))
             except Exception as exc:
                 logger.warning("room post %s: Talk post failed: %s", claim["request_id"], exc)
+            if talk_id is not None:
+                # The approved post's map, drawn now from the observation its
+                # approval bound, after the text it goes with.
+                picture_surface = True
+                await asyncio.to_thread(
+                    map_delivery.deliver_talk_maps, config,
+                    message_id=claim["message_id"], talk_token=claim["talk_ref"])
         if claim["whatsapp_group"]:
             # The group itself (multiplayer D6). Like the Talk half, a failed
             # send does not fail the post: the canonical row is the post, and
             # the ledger row and its alert say what happened to the group.
             from istota.transport.whatsapp.outbound import deliver_whatsapp
+            prepared = await asyncio.to_thread(
+                map_delivery.prepare_whatsapp_map, config,
+                message_id=claim["message_id"], room_token=claim["parent"])
+            record, raised = None, False
             try:
-                await deliver_whatsapp(
+                record = await deliver_whatsapp(
                     config, logical_key=claim["reference"], user_id=claim["user_id"],
                     text=claim["body"], group_room=claim["parent"],
-                    reply_to_message_id=claim.get("whatsapp_reply_to"))
+                    reply_to_message_id=claim.get("whatsapp_reply_to"),
+                    generated_image=prepared.data if prepared else None)
             except Exception as exc:
+                raised = True
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
+            await asyncio.to_thread(
+                map_delivery.settle_whatsapp_map, config, prepared, record, send_raised=raised)
+            picture_surface = True
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
         await send_private(config, claim["delivery"], body=claim["body"])
     await asyncio.to_thread(_settle, config, claim, talk_id)
+    # Web draws the card itself; Talk and a WhatsApp group were promised a
+    # picture, so one that failed or could not be drawn is announced.
+    if picture_surface and await asyncio.to_thread(
+            map_delivery.map_missing, config, message_id=claim["message_id"]):
+        await asyncio.to_thread(_map_unavailable, config, claim)
+
+
+def _map_unavailable(config, claim: dict) -> None:
+    """Tell the owner their approved post went out without its map.
+
+    The one place a missing map is announced, since the approval promised
+    one. The post itself stands. Never raises.
+    """
+    from istota.notifications.resolvers import task_alert
+    from istota.notifications.store import deliver_pending
+
+    request_id = claim["request_id"]
+    try:
+        with db.get_db(config.db_path) as conn:
+            notice = task_alert.write(
+                conn, claim["user_id"], dedup_key=f"private-reply-map:{request_id}",
+                title="Room post map unavailable",
+                body=f"Room post {request_id} was posted; map unavailable.",
+                params={"request_id": request_id, "status": "map_unavailable"},
+            )
+        if notice is not None:
+            deliver_pending(config, [notice])
+    except Exception as exc:
+        logger.warning("room post %s: map notice failed (%s)", request_id, type(exc).__name__)

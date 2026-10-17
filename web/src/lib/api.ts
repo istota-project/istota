@@ -3515,6 +3515,24 @@ export interface ChatHistoryMessage {
   // and the bot's own remark. Absent on a note from before them, which then
   // renders from `text`.
   email_note?: EmailNoteParts;
+  // Assistant rows: the location shares this answer carries a map of, in the
+  // order they were attached. Each is the projected observation the answer's
+  // text already discloses, plus its map link.
+  location_shares?: LocationShare[];
+}
+
+/** One location share card as `_location_shares_field` serializes it. */
+export interface LocationShare {
+  card_id: number;
+  owner_user_id: string;
+  owner_label: string;
+  precision: 'exact' | 'area';
+  lat: number;
+  lon: number;
+  accuracy_m: number | null;
+  observed_at: string;
+  freshness: string;
+  map_url: string;
 }
 
 export interface EmailNoteParts {

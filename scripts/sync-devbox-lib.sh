@@ -25,6 +25,7 @@ sync_pairs=(
     "src/istota/sandbox/forge_cli.py:docker/devbox/lib/istota_forge_cli.py"
     "src/istota/devbox/exec_protocol.py:docker/devbox/lib/istota_devbox_exec_protocol.py"
     "src/istota/sandbox/user_scope.py:docker/browser/lib/istota_user_scope.py"
+    "src/istota/sandbox/net_guard.py:docker/browser/lib/istota_net_guard.py"
 )
 
 changed=0

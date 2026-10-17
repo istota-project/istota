@@ -319,6 +319,40 @@ def test_unrelated_bare_yes_still_confirms(setup):
         assert db.get_task(conn, other).confirmed_at
 
 
+def parked_privately(config):
+    """A shared room's question to bob, parked in his private WhatsApp room."""
+    first = receive(config, event(config, 'hello', quote=None, ident='first'))
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE tasks SET status='completed' WHERE id=?", (first.task_id,))
+        mine = db.get_task(conn, first.task_id).conversation_token
+        shared = db.create_web_chat_room(conn, 'bob', 'Shared').token
+        db.add_web_room_member(conn, shared, 'alice')
+        ident = db.create_task(conn, user_id='bob', prompt='Shared action', source_type='web',
+                               conversation_token=shared)
+        db.set_task_confirmation(conn, ident, 'Approve shared action?')
+        db.set_task_private_park(conn, ident)
+        db.add_message(conn, mine, role='system', body='Approve shared action?',
+                       origin_surface='whatsapp', about_room_token=shared,
+                       delivery_reference=f'private-confirmation:{ident}:abc')
+    return ident
+
+
+def test_a_quoted_yes_answers_the_relay_not_a_question_parked_privately(setup):
+    config = setup[0]
+    relay = question(setup)
+    other = parked_privately(config)
+    result = receive(config, event(config))
+    assert result.disposition == 'relay_answer'
+    with db.get_db(config.db_path) as conn:
+        assert db.get_task(conn, other).status == 'pending_confirmation'
+        assert relays.get_relay(conn, actor_user_id='alice', relay_id=relay)['answer_text'] == '  YES\n'
+    # The same word unquoted is the parked question's answer.
+    result = receive(config, event(config, 'YES', quote=None, ident='answer-2'))
+    assert result.disposition == 'confirmation_answer'
+    with db.get_db(config.db_path) as conn:
+        assert db.get_task(conn, other).confirmed_at
+
+
 @pytest.mark.parametrize('body', ['a' * 144, '界' * 54])
 def test_answer_budget_reserves_attribution_and_sms_encoding(setup, body):
     import json

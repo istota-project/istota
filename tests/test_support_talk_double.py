@@ -968,6 +968,7 @@ SEAM_METHODS = {
     "list_conversations",
     "poll_messages",
     "send_message",
+    "share_file",
 }
 
 # `fetch_messages_since` is the signaling catch-up (see `.claude/rules/transport.md`).
