@@ -76,6 +76,10 @@ def credential_files() -> dict[str, str]:
     # brain.native.api_key is read two levels deep, outside the table.
     if "istota_brain_native_api_key" in setup_wizard.SECRET_NAMES:
         found["brain.native.api_key"] = "istota_brain_native_api_key"
+    # So are the arr keys, one per app under a dict field.
+    for app in config_module.SERVARR_APPS:
+        name = config_module.servarr_key_variable(app).lower()
+        found[f"servarr.apps.{app}.api_key"] = name if name in setup_wizard.SECRET_NAMES else ""
     return found
 
 

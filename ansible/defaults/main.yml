@@ -143,6 +143,10 @@ istota_secret_names:
   - istota_sms_telnyx_public_key
   - istota_sms_telnyx_messaging_profile_id
   - istota_google_workspace_client_secret
+  - istota_servarr_sonarr_api_key
+  - istota_servarr_radarr_api_key
+  - istota_servarr_lidarr_api_key
+  - istota_servarr_prowlarr_api_key
 # name: value, from the vault. A name given here is written exactly, "" included.
 # A name left out is created empty if missing and otherwise left alone, so a
 # file the wizard or the import wrote survives a play that does not manage it.

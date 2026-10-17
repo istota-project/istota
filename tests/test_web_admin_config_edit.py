@@ -29,7 +29,7 @@ from istota.config import Config, SiteConfig, UserConfig, WebConfig
 from istota.config_editor import applier
 from istota.config_editor import requests as config_requests
 from istota.config_editor.check import run_check as _REAL_RUN_CHECK
-from istota.config_editor.secrets import CHANGED, SENTINEL
+from istota.config_editor.secrets import SENTINEL
 from istota.webui import auth as web_auth
 
 pytestmark = pytest.mark.skipif(not _has_web_deps, reason="web dependencies not installed")
@@ -451,12 +451,13 @@ class TestTheRequestAfterwards:
 
 
 ARR_KEY = "never-shown-arr-sentinel"
+ARR_KEY_FILE = "istota_servarr_radarr_api_key"
 ARR_KEY_LABEL = "servarr.apps.radarr.api_key"
 
 
 def _servarr_change(setup) -> dict:
     """What the Admin > Connections servarr card sends: plain fields as ops,
-    the new key as an inline credential by its label, never in an op."""
+    the new key as a file credential by its secrets file's name, never in an op."""
     return {
         "base_digest": _digest(setup),
         "ops": [
@@ -466,39 +467,62 @@ def _servarr_change(setup) -> dict:
             {"op": "set", "path": ["servarr", "defaults", "radarr", "root_folder"], "value": "/data/films"},
         ],
         "raw": None,
-        "secrets": {ARR_KEY_LABEL: ARR_KEY},
+        "secrets": {ARR_KEY_FILE: ARR_KEY},
     }
 
 
 class TestServarrCardChangeSet:
     """The card adds no endpoint: its change set goes through preview and submit."""
 
-    async def test_preview_holds_the_sentinel_and_the_check_accepts_it(self, alice, setup):
-        from istota.config_editor import check
-
+    async def test_preview_keeps_the_key_out_of_the_document(self, alice, setup):
         response = await alice.post(f"{BASE}/preview", json=_servarr_change(setup), headers=ORIGIN)
         assert response.status_code == 200, response.text
         body = response.json()
         assert ARR_KEY not in response.text
         assert body["errors"] == [] and body["problems"]["blocking"] == []
-        assert body["secret_names"] == [ARR_KEY_LABEL]
+        assert body["secret_names"] == [ARR_KEY_FILE]
         assert body["changed_sections"] == ["servarr"]
-        # The diff names a new credential without its value; the stored
-        # document holds the sentinel (the request test below).
-        assert f'+api_key = "{CHANGED}"' in body["diff"]
         assert '+url = "http://192.0.2.10:7878"' in body["diff"]
+        assert not [line for line in body["diff"] if "api_key" in line]
+        # The checked document has no key: it reaches the check as the
+        # variable the secrets file becomes.
+        assert setup["checked"][-1]["servarr"]["apps"]["radarr"] == {"url": "http://192.0.2.10:7878"}
 
-        # The check sees the real key, so `istota apply --check` validates what
-        # would be written; run the real one on that document.
-        checked = setup["checked"][-1]
-        assert checked["servarr"]["apps"]["radarr"] == {"url": "http://192.0.2.10:7878", "api_key": ARR_KEY}
-        result = await _REAL_RUN_CHECK(checked)
-        assert result.error is None
-        blocking = [p for p in check.problems_of(result) if p["blocking"]]
-        assert blocking == []
-        assert not [p for p in result.problems if p["path"][:1] == ["servarr"]], result.problems
+    async def test_the_check_loads_the_new_key_as_its_variable(self, alice, setup, monkeypatch):
+        """The real `istota apply --check`, given what the preview hands it,
+        loads a complete app and reports nothing about the key."""
+        from istota.config_editor import check
 
-    async def test_the_stored_request_has_the_key_sealed(self, alice, setup):
+        seen: list[dict] = []
+
+        async def real_check(document, **kwargs):
+            seen.append(kwargs)
+            return await _REAL_RUN_CHECK(document, **kwargs)
+
+        monkeypatch.setattr(check, "run_check", real_check)
+        response = await alice.post(f"{BASE}/preview", json=_servarr_change(setup), headers=ORIGIN)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["problems"]["blocking"] == []
+        assert not [p for p in body["problems"]["warnings"] if p["path"][:1] == ["servarr"]], body
+        assert seen[-1]["environ"] == {"ISTOTA_SERVARR_RADARR_API_KEY": ARR_KEY}
+
+    async def test_an_inline_label_for_the_key_is_refused(self, alice, setup):
+        body = _servarr_change(setup)
+        body["secrets"] = {ARR_KEY_LABEL: ARR_KEY}
+        response = await alice.post(f"{BASE}/preview", json=body, headers=ORIGIN)
+        assert response.status_code == 400, response.text
+        assert ARR_KEY not in response.text
+
+    async def test_a_key_written_into_the_table_is_refused(self, alice, setup):
+        body = _servarr_change(setup)
+        body["ops"].append({"op": "set", "path": ["servarr", "apps", "radarr", "api_key"], "value": ARR_KEY})
+        body["secrets"] = {}
+        response = await alice.post(f"{BASE}/preview", json=body, headers=ORIGIN)
+        assert ARR_KEY not in response.text
+        assert any(ARR_KEY_FILE in error for error in response.json()["errors"]), response.text
+
+    async def test_the_stored_request_has_the_key_sealed_as_a_file(self, alice, setup):
         from istota.credentials import store
 
         body = _servarr_change(setup)
@@ -513,12 +537,27 @@ class TestServarrCardChangeSet:
             ).fetchone())
         for column, value in row.items():
             assert ARR_KEY not in str(value), column
-        assert f'api_key = "{SENTINEL}"' in row["document_toml"]
-        assert json.loads(store.unseal(row["secrets_sealed"])) == {ARR_KEY_LABEL: ARR_KEY}
+        assert "api_key" not in row["document_toml"]
+        assert json.loads(store.unseal(row["secrets_sealed"])) == {ARR_KEY_FILE: ARR_KEY}
         status = await alice.get(f"{BASE}/requests/{request_id}")
         assert ARR_KEY not in status.text
 
-    async def test_turning_an_app_off_removes_its_table(self, alice, setup):
+    async def test_turning_an_app_off_removes_its_table_and_clears_its_file(self, alice, setup):
+        setup["file"].write_text(
+            CURRENT + '\n[servarr.apps.radarr]\nurl = "http://192.0.2.10:7878"\n',
+            encoding="utf-8",
+        )
+        response = await alice.post(f"{BASE}/preview", json={
+            "base_digest": _digest(setup),
+            "ops": [{"op": "unset", "path": ["servarr", "apps", "radarr"]}],
+            "raw": None,
+            "secrets": {ARR_KEY_FILE: ""},
+        }, headers=ORIGIN)
+        assert response.status_code == 200, response.text
+        assert "servarr" not in setup["checked"][-1]
+        assert response.json()["secret_names"] == [ARR_KEY_FILE]
+
+    async def test_an_inline_key_from_before_is_removed_with_its_table(self, alice, setup):
         setup["file"].write_text(
             CURRENT + '\n[servarr.apps.radarr]\nurl = "http://192.0.2.10:7878"\n'
             f'api_key = "{ARR_KEY}"\n',
@@ -532,8 +571,8 @@ class TestServarrCardChangeSet:
         }, headers=ORIGIN)
         assert response.status_code == 200, response.text
         assert ARR_KEY not in response.text
+        assert response.json()["errors"] == []
         assert "servarr" not in setup["checked"][-1]
-        assert response.json()["secret_names"] == [ARR_KEY_LABEL]
 
 
 async def test_no_credential_value_in_any_response(alice, setup):

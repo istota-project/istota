@@ -5,11 +5,11 @@ import type {
   AdminServarrApp,
   AdminServarrConnection,
   ConfigManagedEntry,
+  ConfigSecretFile,
 } from '$lib/api';
 import { buildChangeSet } from '$lib/admin/config/changeSet';
 import {
   formProblems,
-  keyLabel,
   rebaseForm,
   servarrDraft,
   servarrForm,
@@ -50,8 +50,26 @@ function connection(over: Partial<AdminServarrConnection> = {}): AdminServarrCon
 
 const HOSTS = ['192.0.2.10'];
 
-function form(over: Partial<AdminServarrConnection> = {}): ServarrForm {
-  return servarrForm(connection(over), HOSTS);
+/** The view's secrets entries for the four keys, as the Configuration page has them. */
+function secretFiles(over: Partial<ConfigSecretFile> = {}): ConfigSecretFile[] {
+  return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) => ({
+    name: `istota_servarr_${name}_api_key`,
+    label: `servarr.apps.${name}.api_key`,
+    config_key: `servarr.apps.${name}.api_key`,
+    set: name === 'radarr',
+    read_only_reason: null,
+    risky: false,
+    ...over,
+  }));
+}
+
+const RADARR_FILE = 'istota_servarr_radarr_api_key';
+
+function form(
+  over: Partial<AdminServarrConnection> = {},
+  secrets: ConfigSecretFile[] = secretFiles(),
+): ServarrForm {
+  return servarrForm(connection(over), HOSTS, secrets);
 }
 
 function draftOf(edited: ServarrForm, initial: ServarrForm = form()) {
@@ -96,8 +114,8 @@ describe('servarrDraft', () => {
     const edited = form();
     edited.apps.radarr.key = 'fixture-arr-key-1';
     const changeSet = draftOf(edited);
-    expect(changeSet.secrets).toEqual({ [keyLabel('radarr')]: 'fixture-arr-key-1' });
-    expect(keyLabel('radarr')).toBe('servarr.apps.radarr.api_key');
+    expect(changeSet.secrets).toEqual({ [RADARR_FILE]: 'fixture-arr-key-1' });
+    expect(Object.keys(changeSet.secrets).some((name) => name.includes('.'))).toBe(false);
     expect(JSON.stringify(changeSet.ops)).not.toContain('fixture-arr-key-1');
   });
 
@@ -109,16 +127,36 @@ describe('servarrDraft', () => {
     expect(changeSet.ops).toEqual([
       { op: 'set', path: ['servarr', 'apps', 'sonarr', 'url'], value: 'http://192.0.2.10:8989' },
     ]);
-    expect(changeSet.secrets).toEqual({ [keyLabel('sonarr')]: 'fixture-arr-key-2' });
+    expect(changeSet.secrets).toEqual({ istota_servarr_sonarr_api_key: 'fixture-arr-key-2' });
   });
 
-  it('removes the table of an app turned off, and sends nothing else for it', () => {
+  it('removes the table of an app turned off and clears its key file', () => {
     const edited = form();
     edited.apps.radarr.enabled = false;
     edited.apps.radarr.key = 'typed-then-turned-off';
     const changeSet = draftOf(edited);
     expect(changeSet.ops).toEqual([{ op: 'unset', path: ['servarr', 'apps', 'radarr'] }]);
-    expect(changeSet.secrets).toEqual({});
+    expect(changeSet.secrets).toEqual({ [RADARR_FILE]: '' });
+  });
+
+  it('leaves a read-only key file alone, whatever the form holds', () => {
+    const reason = 'Set by your deployment.';
+    const initial = form({}, secretFiles({ read_only_reason: reason }));
+    expect(initial.apps.radarr.keyReadOnly).toBe(reason);
+    const edited = structuredClone(initial);
+    edited.apps.radarr.key = 'fixture-arr-key-6';
+    expect(draftOf(edited, initial).secrets).toEqual({});
+    edited.apps.radarr.enabled = false;
+    expect(draftOf(edited, initial).secrets).toEqual({});
+  });
+
+  it('treats a key with no secrets file in the view as read-only', () => {
+    const initial = form({}, []);
+    expect(initial.apps.radarr.keyFile).toBeNull();
+    expect(initial.apps.radarr.keyReadOnly).toBeTruthy();
+    const edited = structuredClone(initial);
+    edited.apps.radarr.key = 'fixture-arr-key-7';
+    expect(draftOf(edited, initial).secrets).toEqual({});
   });
 
   it('sets requesters, private hosts and defaults, and unsets what is emptied', () => {
@@ -147,7 +185,7 @@ describe('servarrDraft', () => {
     expect(changeSet.ops).toEqual([
       { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://192.0.2.10:7878' },
     ]);
-    expect(changeSet.secrets).toEqual({ [keyLabel('radarr')]: 'fixture-arr-key-3' });
+    expect(changeSet.secrets).toEqual({ [RADARR_FILE]: 'fixture-arr-key-3' });
   });
 });
 
@@ -190,6 +228,13 @@ describe('formProblems', () => {
     expect(formProblems(edited)).toEqual({});
   });
 
+  it('says why a missing key cannot be entered here when its file is read-only', () => {
+    const reason = 'Set by your deployment.';
+    const edited = form({}, secretFiles({ read_only_reason: reason }));
+    edited.apps.sonarr = { ...edited.apps.sonarr, enabled: true, url: 'http://192.0.2.10:8989' };
+    expect(formProblems(edited)['sonarr.key']).toContain(reason);
+  });
+
   it('ignores an app turned off', () => {
     const edited = form();
     edited.apps.radarr = { ...edited.apps.radarr, enabled: false, url: 'nonsense' };
@@ -206,6 +251,7 @@ describe('rebaseForm', () => {
     const after = servarrForm(
       connection({ requesters: ['bob', 'carol'], defaults: { radarr: { root_folder: '/new' } } }),
       HOSTS,
+      secretFiles(),
     );
     const rebased = rebaseForm(edited, before, after);
     expect(rebased.apps.radarr.key).toBe('fixture-arr-key-5');

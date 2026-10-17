@@ -470,7 +470,8 @@ def _raw_document(redacted: dict | None) -> str | None:
 def _value_at(config: Any, path: tuple[str, ...]) -> Any:
     node = config
     for segment in path:
-        node = getattr(node, segment, None)
+        # `servarr.apps` is a dict field: its keys are path segments too.
+        node = node.get(segment) if isinstance(node, dict) else getattr(node, segment, None)
     return node
 
 

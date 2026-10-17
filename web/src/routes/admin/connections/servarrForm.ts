@@ -4,12 +4,19 @@
  * The card edits `[servarr]` only by building a config-editor change set
  * (`$lib/admin/config/changeSet`) and handing it to the shared review, step-up
  * and request flow, as the Configuration page does. Plain fields become `set`
- * and `unset` ops by path; a new API key goes in the change set's `secrets`
- * under its dotted label, never in an op, so preview moves it out of the
- * document and the request seals it. A stored key never reaches the browser:
- * the form only knows whether one is set.
+ * and `unset` ops by path. An API key is a file credential, so a new one goes
+ * in the change set's `secrets` under its secrets file's name, the name the
+ * view's `secrets` entry carries, exactly as the Configuration page sends one:
+ * never in an op, and the host applier writes the file. A stored key never
+ * reaches the browser: the form only knows whether one is set.
  */
-import type { AdminConfigView, AdminServarrConnection, ConfigOp, ServarrApp } from '$lib/api';
+import type {
+  AdminConfigView,
+  AdminServarrConnection,
+  ConfigOp,
+  ConfigSecretFile,
+  ServarrApp,
+} from '$lib/api';
 import {
   emptyDraft,
   parseList,
@@ -40,6 +47,11 @@ export interface ServarrAppForm {
   keySet: boolean | null;
   /** The stored table is missing its url or key, so neither is known. */
   incomplete: boolean;
+  /** The key's secrets file, from the view's `secrets` entry; null when the
+   *  view lists none. */
+  keyFile: string | null;
+  /** Why the key cannot be changed here (that entry's `read_only_reason`), or null. */
+  keyReadOnly: string | null;
 }
 
 export interface ServarrForm {
@@ -52,25 +64,31 @@ export interface ServarrForm {
 
 const BASE = ['servarr'];
 
-/** The change set's name for an app's key: its dotted label. */
-export function keyLabel(app: ServarrApp): string {
-  return `servarr.apps.${app}.api_key`;
+const NO_KEY_FILE = 'This install has no secrets file for this key, so it is set on the host.';
+
+/** The view's `secrets` entry for an app's key, matched by its config key. */
+function keyEntry(secrets: ConfigSecretFile[], app: ServarrApp): ConfigSecretFile | undefined {
+  return secrets.find((entry) => entry.config_key === `servarr.apps.${app}.api_key`);
 }
 
 export function servarrForm(
   connection: AdminServarrConnection,
   privateHosts: string[],
+  secrets: ConfigSecretFile[],
 ): ServarrForm {
   const apps = {} as Record<ServarrApp, ServarrAppForm>;
   const defaults = {} as Record<ServarrApp, Record<string, string>>;
   for (const name of SERVARR_APPS) {
     const stored = connection.apps.find((entry) => entry.app === name);
+    const file = keyEntry(secrets, name);
     apps[name] = {
       enabled: !!stored,
       url: stored?.url ?? '',
       key: '',
       keySet: stored ? stored.api_key_set : false,
       incomplete: stored?.incomplete ?? false,
+      keyFile: file?.name ?? null,
+      keyReadOnly: file ? file.read_only_reason : NO_KEY_FILE,
     };
     const configured = connection.defaults[name] ?? {};
     defaults[name] = Object.fromEntries(
@@ -116,7 +134,7 @@ export function servarrReadOnlyReason(view: AdminConfigView): string | null {
     }
     return (
       `config.toml is managed by ${managed.source ?? 'a plan'}, so [servarr] is changed in its ` +
-      "settings plan, with the API keys in the plan's secrets. Its next run would revert a " +
+      'settings plan, with the API keys in its secrets files. Its next run would revert a ' +
       'change made here.'
     );
   }
@@ -181,9 +199,11 @@ export function formProblems(form: ServarrForm): Record<string, string> {
     const problem = urlProblem(app.url, privateHosts);
     if (problem) problems[`${name}.url`] = problem;
     if (app.keySet !== true && app.key === '') {
-      problems[`${name}.key`] = app.incomplete
-        ? 'The stored table is incomplete; enter the API key again.'
-        : 'Enter the API key of the app.';
+      problems[`${name}.key`] = app.keyReadOnly
+        ? `The API key is not set and cannot be set here. ${app.keyReadOnly}`
+        : app.incomplete
+          ? 'The stored table is incomplete; enter the API key again.'
+          : 'Enter the API key of the app.';
     }
   }
   return problems;
@@ -200,15 +220,20 @@ export function servarrDraft(form: ServarrForm, initial: ServarrForm): ConfigDra
     const app = form.apps[name];
     const before = initial.apps[name];
     const path = [...BASE, 'apps', name];
+    const keyFile = app.keyReadOnly ? null : app.keyFile;
     if (!app.enabled) {
-      if (before.enabled) op({ op: 'unset', path });
+      if (before.enabled) {
+        op({ op: 'unset', path });
+        // The key outlives its table in a secrets file; clear it with the table.
+        if (keyFile) draft = withSecret(draft, keyFile, '');
+      }
       continue;
     }
     const url = app.url.trim();
     if (!before.enabled || before.incomplete || url !== before.url) {
       op({ op: 'set', path: [...path, 'url'], value: url });
     }
-    if (app.key !== '') draft = withSecret(draft, keyLabel(name), app.key);
+    if (keyFile && app.key !== '') draft = withSecret(draft, keyFile, app.key);
   }
 
   if (!sameValue([...form.requesters].sort(), [...initial.requesters].sort())) {
@@ -265,6 +290,8 @@ export function rebaseForm(
       key: edited.key,
       keySet: now.keySet,
       incomplete: now.incomplete,
+      keyFile: now.keyFile,
+      keyReadOnly: now.keyReadOnly,
     };
     defaults[name] = Object.fromEntries(
       DEFAULT_FIELDS[name].map((field) => [

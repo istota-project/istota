@@ -172,6 +172,10 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_DEVELOPER_GITLAB_TOKEN` | `developer.gitlab_token` |
 | `ISTOTA_DEVELOPER_GITHUB_TOKEN` | `developer.github_token` |
 | `ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET` | `google_workspace.client_secret` |
+| `ISTOTA_SERVARR_SONARR_API_KEY` | `servarr.apps.sonarr.api_key` |
+| `ISTOTA_SERVARR_RADARR_API_KEY` | `servarr.apps.radarr.api_key` |
+| `ISTOTA_SERVARR_LIDARR_API_KEY` | `servarr.apps.lidarr.api_key` |
+| `ISTOTA_SERVARR_PROWLARR_API_KEY` | `servarr.apps.prowlarr.api_key` |
 | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
 | `ISTOTA_BRAIN_NATIVE_API_KEY` | `brain.native.api_key` (native brain provider key; kept out of TOML) |

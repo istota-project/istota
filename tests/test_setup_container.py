@@ -242,11 +242,18 @@ class TestTheSecretFilesMatchCompose:
         `istota-secrets`; every one but the two Claude Code credentials is a
         `load_config` override, and those two are read by the `claude` CLI.
         """
+        from istota.config import SERVARR_APPS, servarr_key_variable
+
         source = (REPO / "src" / "istota" / "config.py").read_text(encoding="utf-8")
+        # Built per app; tests/test_config_servarr.py loads a key from each.
+        servarr = {servarr_key_variable(app) for app in SERVARR_APPS}
         for name in SECRET_NAMES:
             if name in ("anthropic_api_key", "claude_code_oauth_token"):
                 continue
+            if name.upper() in servarr:
+                continue
             assert f'"{name.upper()}"' in source, name
+        assert servarr <= {name.upper() for name in SECRET_NAMES}
 
 
 def _args(tmp_path: Path, **kw):

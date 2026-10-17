@@ -97,6 +97,10 @@ x-istota-secrets: &istota_secrets
   - istota_sms_telnyx_public_key
   - istota_sms_telnyx_messaging_profile_id
   - istota_google_workspace_client_secret
+  - istota_servarr_sonarr_api_key
+  - istota_servarr_radarr_api_key
+  - istota_servarr_lidarr_api_key
+  - istota_servarr_prowlarr_api_key
 
 # Where container output goes. `istota-stack` sets journald on the VM, so
 # it reaches the journal, and whatever ships the journal, with
@@ -610,6 +614,14 @@ secrets:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_sms_telnyx_messaging_profile_id
   istota_google_workspace_client_secret:
     file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_google_workspace_client_secret
+  istota_servarr_sonarr_api_key:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_servarr_sonarr_api_key
+  istota_servarr_radarr_api_key:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_servarr_radarr_api_key
+  istota_servarr_lidarr_api_key:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_servarr_lidarr_api_key
+  istota_servarr_prowlarr_api_key:
+    file: ${ISTOTA_SECRETS_DIR:-./secrets}/istota_servarr_prowlarr_api_key
 
 volumes:
   data:

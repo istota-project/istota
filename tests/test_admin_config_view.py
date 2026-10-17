@@ -529,6 +529,19 @@ class TestTopLevel:
         assert "ANTHROPIC-SENTINEL" not in str(payload)
         assert "IMAP-SENTINEL" not in str(payload)
 
+    def test_a_servarr_key_is_set_from_the_loaded_app(self, no_overrides):
+        from istota.config import ServarrApp
+
+        cfg = Config()
+        cfg.servarr.apps["radarr"] = ServarrApp(url="http://192.0.2.10:7878", api_key="ARR-SENTINEL")
+        payload = view.build_config_view(cfg)
+        entries = {entry["name"]: entry for entry in payload["secrets"]}
+        radarr = entries["istota_servarr_radarr_api_key"]
+        assert radarr["config_key"] == "servarr.apps.radarr.api_key"
+        assert radarr["set"] is True
+        assert entries["istota_servarr_sonarr_api_key"]["set"] is False
+        assert "ARR-SENTINEL" not in str(payload)
+
     def test_admins(self):
         cfg = Config()
         cfg.admin_users = {"zoe", "alice"}

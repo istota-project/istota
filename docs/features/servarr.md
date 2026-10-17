@@ -15,19 +15,15 @@ private_hosts = ["192.168.1.10"]  # hosts allowed a private address and plain HT
 
 [servarr.apps.sonarr]
 url = "http://192.168.1.10:8989"
-api_key = "…"
 
 [servarr.apps.radarr]
 url = "http://192.168.1.10:7878"
-api_key = "…"
 
 [servarr.apps.lidarr]
 url = "http://192.168.1.10:8686"
-api_key = "…"
 
 [servarr.apps.prowlarr]
 url = "http://192.168.1.10:9696"
-api_key = "…"
 
 [servarr.defaults.sonarr]
 quality_profile = "HD - 720p/1080p"
@@ -44,7 +40,7 @@ metadata_profile = "Standard"
 root_folder = "/data/media/music"
 ```
 
-Each app is a `[servarr.apps.<app>]` table with the app's URL and its API key, from the app's Settings > General > Security. An app with no table is not configured, and a verb that needs it answers `app_not_configured`. Configure only the apps the stack runs. Bazarr is not supported; its name is reserved.
+Each app is a `[servarr.apps.<app>]` table with the app's URL. Its API key, from the app's Settings > General > Security, is a deployment credential: the stack secret file `istota_servarr_<app>_api_key` (`istota_servarr_radarr_api_key` and so on), which the container exports as `ISTOTA_SERVARR_<APP>_API_KEY`. That variable wins over an `api_key` written in the table, which still loads but does not belong there. A table with a URL and no key anywhere is reported and left out until the key arrives. An app with no table is not configured, and a verb that needs it answers `app_not_configured`. Configure only the apps the stack runs. Bazarr is not supported; its name is reserved.
 
 **`requesters`** lists the users, besides admins, who get the requester tier. Admins never need listing. An empty list leaves the skill to admins. Matching ignores case, and a listed id that is not a configured user is warned about at load.
 
@@ -68,26 +64,27 @@ Two timeouts: `lookup_timeout_seconds` (30) for the lookups that reach TMDB, TVD
 
 The reference for every key is [`[servarr]`](../configuration/reference.md#servarr).
 
-### The API keys in a settings plan
+### The API keys
 
-An arr API key is full admin on that app. Keep it out of the plan itself: `istota snapshot` writes every credential as `<unchanged>`, so a snapshot holds a placeholder, and a rebuilt VM has no stored value for it to keep. Put the keys in the plan's private sidecar under `config`, by path:
+An arr API key is full admin on that app, so it is a secret file like every other deployment credential, never part of `config.toml` or a settings plan. Set it one of three ways:
+
+- the Servarr card in Admin > Connections, or the key's entry under Credentials on the Configuration page, which hand it to the host applier to write;
+- on the VM, by writing `/srv/app/istota/secrets/istota_servarr_<app>_api_key` and restarting, as the [deployment credential procedure](../configuration/credentials.md#provisioning-global-credentials) describes;
+- with the management role, in `istota_secrets` beside the other files:
 
 ```yaml
-istota_plan_secrets:
-  config:
-    - path: [servarr, apps, radarr, api_key]
-      value: "{{ vault_radarr_api_key }}"
-    - path: [servarr, apps, sonarr, api_key]
-      value: "{{ vault_sonarr_api_key }}"
+istota_secrets:
+  istota_servarr_radarr_api_key: "{{ vault_radarr_api_key }}"
+  istota_servarr_sonarr_api_key: "{{ vault_sonarr_api_key }}"
 ```
 
-The rest of `[servarr]` goes in the plan like any other config table. See [declarative settings](../configuration/declarative-settings.md#credentials).
+The rest of `[servarr]` goes in the plan like any other config table.
 
 ### Checking the connection
 
-Admin > Connections has a Servarr card. It lists each configured app with its URL, whether a key is set, and the result of the daemon's last `servarr.connection` check, which asks each app for its version with its key. A table missing its `url` or `api_key`, a URL with a user name or password in it, and plain HTTP to a host not in `private_hosts` show as setup incomplete. Check now runs the check again. `istota doctor --only servarr.connection` gives the same results from a terminal. The web interface never calls an arr app and never shows a key.
+Admin > Connections has a Servarr card. It lists each configured app with its URL, whether a key is set, and the result of the daemon's last `servarr.connection` check, which asks each app for its version with its key. A table missing its URL or its key, a URL with a user name or password in it, and plain HTTP to a host not in `private_hosts` show as setup incomplete. Check now runs the check again. `istota doctor --only servarr.connection` gives the same results from a terminal. The web interface never calls an arr app and never shows a key.
 
-Edit on the card changes each app's URL and key, `private_hosts`, the requesters and the add defaults. The key field starts empty and an empty field keeps the stored key; Replace key opens it. The change goes through the same review, confirmation and host applier as the Configuration page, and Istota restarts to load it. The card is read-only where the Configuration page is: on an install with no config applier, and where a plan manages `config.toml` (an Ansible-managed install). Ownership is recorded for the whole of `config.toml`, not per section, so on a managed install `[servarr]` is changed in the settings plan and the keys in its secrets.
+Edit on the card changes each app's URL and key, `private_hosts`, the requesters and the add defaults. The key field starts empty and an empty field keeps the stored key; Replace key opens it. A new key goes to its secret file, and turning an app off clears that file as well as removing the table. Where the secret files are managed by a deployment role, the key shows whether it is set and cannot be changed here. The change goes through the same review, confirmation and host applier as the Configuration page, and Istota restarts to load it. The card is read-only where the Configuration page is: on an install with no config applier, and where a plan manages `config.toml` (an Ansible-managed install). Ownership is recorded for the whole of `config.toml`, not per section, so on a managed install `[servarr]` is changed in the settings plan and the keys in its secret files.
 
 ## Network
 
@@ -114,7 +111,7 @@ The room narrows the tier:
 
 An operator's `disabled_skills`, or a per-user disable, refuses the CLI too.
 
-**The keys never reach a user.** They are read from the daemon's config inside the CLI process. No user's vault holds them, and the skill declares no environment variable for them, so `istota-credential` has nothing servarr-related to list or serve.
+**The keys never reach a user.** The daemon reads them from its own environment and hands them to the servarr CLI alone, the way it hands the model credentials to the code reviewer: never to the task's environment, never to any other skill's CLI, and never through the credential lookup the sandbox can ask. No user's vault holds them, and the skill declares no environment variable for them, so `istota-credential` has nothing servarr-related to list or serve.
 
 **Where these claims hold.** All of the above holds on the supported shape: Linux, bubblewrap and the skill proxy on. With the skill proxy off, a skill CLI runs in the model's own environment, where the user id can be set and the config file can be read; the tier table is then advisory, as every skill CLI's checks are on that shape.
 

@@ -821,12 +821,12 @@ Operator settings for the [`servarr` skill](../features/servarr.md): one install
 
 ### `[servarr.apps.<app>]`
 
-One table per app, named `sonarr`, `radarr`, `lidarr` or `prowlarr`. An app with no table is not configured. `bazarr` is reserved and ignored; any other name is warned about and ignored, and so is a table missing either field.
+One table per app, named `sonarr`, `radarr`, `lidarr` or `prowlarr`. An app with no table is not configured. `bazarr` is reserved and ignored; any other name is warned about and ignored. A table with no `url` is discarded; one with no key is warned about and left out until the key arrives.
 
 | Setting | Default | Description |
 |---|---|---|
 | `url` | | The app's base URL, including any URL base, e.g. `http://192.168.1.10:7878`. Never shown with userinfo |
-| `api_key` | | The app's API key (Settings > General > Security). A credential: redacted everywhere, and in a settings plan supplied through the private sidecar's `config` section, not the plan |
+| `api_key` | | The app's API key (Settings > General > Security). Set it as the stack secret file `istota_servarr_<app>_api_key` (the variable `ISTOTA_SERVARR_<APP>_API_KEY`), which wins over a value written here; an inline value still loads. Redacted everywhere |
 
 **Do not add the arr ports to `[security.network] extra_hosts`.** The skill's CLI reaches the apps host-side; without an entry the sandbox has no route to them.
 

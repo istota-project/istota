@@ -722,6 +722,10 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_sms_telnyx_public_key",
     "istota_sms_telnyx_messaging_profile_id",
     "istota_google_workspace_client_secret",
+    "istota_servarr_sonarr_api_key",
+    "istota_servarr_radarr_api_key",
+    "istota_servarr_lidarr_api_key",
+    "istota_servarr_prowlarr_api_key",
 )
 
 #: What the scripted endpoint is sent as a key. Nothing in this tier can use a

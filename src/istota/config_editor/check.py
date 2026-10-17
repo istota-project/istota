@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import tomllib
+from collections.abc import Mapping
 
 from istota.apply import CheckResult
 from istota.lib import toml_write
@@ -76,9 +78,18 @@ def _reply(stdout: bytes) -> CheckResult | None:
 
 
 async def run_check(
-    document: dict, *, command: list[str] | None = None, timeout: float = TIMEOUT_SECONDS,
+    document: dict,
+    *,
+    command: list[str] | None = None,
+    timeout: float = TIMEOUT_SECONDS,
+    environ: Mapping[str, str] | None = None,
 ) -> CheckResult:
-    """What loading `document` as `config.toml` reports, from a child process."""
+    """What loading `document` as `config.toml` reports, from a child process.
+
+    `environ` is laid over the inherited environment: the new file credentials
+    as the variables their files become, so the check loads what the restarted
+    process will. Never logged, as the plan is not.
+    """
     try:
         plan = toml_write.dumps({"config": document}).encode("utf-8")
     except toml_write.TomlWriteError as exc:
@@ -90,6 +101,7 @@ async def run_check(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env={**os.environ, **environ} if environ else None,
         )
     except OSError as exc:
         logger.warning("config check: could not start the check: %s", exc.strerror or type(exc).__name__)

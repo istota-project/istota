@@ -62,6 +62,111 @@ def _skill(name, *specs, cli=True):
     return SkillMeta(name=name, description="x", cli=cli, env_specs=list(specs))
 
 
+class TestTheServarrKeys:
+    """The arr keys arrive in the daemon's environment from stack secret files,
+    and `build_clean_env` is an allowlist that carries none of them. They reach
+    the servarr CLI the way the model credentials reach `code_review`: copied
+    into that skill's entry of the per-skill map, never into the shared
+    snapshot or the model's env, and blocked from lookup by name."""
+
+    VAR = "ISTOTA_SERVARR_RADARR_API_KEY"
+
+    def _inputs(self, runtime_inputs):
+        return {
+            **runtime_inputs,
+            "skill_index": {"servarr": _skill("servarr"), "kv": _skill("kv")},
+        }
+
+    def test_the_servarr_skill_gets_the_key_from_the_daemon_env(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "arr-key-test")
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        proxy = runtime.proxy_ctx
+        assert proxy.credential_env[self.VAR] == "arr-key-test"
+        assert self.VAR in proxy.skill_credential_map["servarr"]
+
+    def test_no_other_skill_gets_it(self, tmp_path, runtime_inputs, monkeypatch):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "arr-key-test")
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        proxy = runtime.proxy_ctx
+        assert self.VAR not in proxy.skill_credential_map.get("kv", set())
+        assert self.VAR not in proxy.base_env
+
+    def test_the_model_env_never_has_it(self, tmp_path, runtime_inputs, monkeypatch):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "arr-key-test")
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        assert self.VAR not in runtime.env
+        assert "arr-key-test" not in runtime.env.values()
+
+    def test_it_is_never_fetchable_over_the_socket(self, tmp_path, runtime_inputs, monkeypatch):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "arr-key-test")
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        assert self.VAR not in runtime.proxy_ctx.allowed_credentials
+
+    def test_a_task_that_cannot_run_the_skill_gets_nothing(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "arr-key-test")
+        runtime_inputs = {**runtime_inputs, "skill_index": {"kv": _skill("kv")}}
+        runtime = task_env.build_task_runtime(_config(tmp_path), **runtime_inputs)
+
+        assert "servarr" not in runtime.proxy_ctx.skill_credential_map
+
+    def test_nothing_is_injected_when_the_daemon_has_no_key(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "")
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        assert self.VAR not in runtime.proxy_ctx.credential_env
+
+    def test_the_four_names_are_the_loader_s_and_blocked_from_lookup(self):
+        from istota.config import SERVARR_APPS, servarr_key_variable
+
+        names = {servarr_key_variable(app) for app in SERVARR_APPS}
+        assert executor.SKILL_DAEMON_CREDENTIAL_VARS["servarr"] == names
+        assert names <= executor._PROXY_LOOKUP_BLOCKED
+
+    def test_a_lookup_over_the_socket_is_refused(self, tmp_path):
+        """Through a real proxy, with the allowlist the task runtime builds:
+        even a skill that declared the key `sensitive` in its manifest would
+        not make it fetchable, because `derive_lookup_allowlist` subtracts
+        `_PROXY_LOOKUP_BLOCKED`, and the endpoint serves only that allowlist."""
+        import json
+        import socket
+        import tempfile
+
+        declares_it = _skill("declares_it", EnvSpec(
+            var=self.VAR, source="config", config_path="servarr", sensitive=True,
+        ))
+        allowed = executor.derive_lookup_allowlist(["declares_it"], {"declares_it": declares_it})
+        assert self.VAR not in allowed
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            sock_path = Path(directory) / "s"
+            with skill_proxy.SkillProxy(
+                sock_path, {self.VAR: "arr-key-test"}, {}, allowed_credentials=allowed,
+            ):
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(10)
+                    sock.connect(str(sock_path))
+                    sock.sendall((json.dumps({"type": "credential", "name": self.VAR}) + "\n").encode())
+                    with sock.makefile("rb") as stream:
+                        reply = json.loads(stream.readline())
+        assert "value" not in reply
+        assert reply.get("reason") == "not_authorized_credential"
+
+
 class TestTheSandboxedMarker:
     """``ISTOTA_SANDBOXED`` reaches the model and not the host-side CLIs."""
 

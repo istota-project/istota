@@ -94,19 +94,43 @@ class TestParsing:
         assert KEY not in repr(config.servarr)
         assert KEY not in repr(config.servarr.apps["radarr"])
 
-    @pytest.mark.parametrize("table", [
-        'url = "http://10.0.0.5:7878"',
-        f'api_key = "{KEY}"',
-        'url = "http://10.0.0.5:7878"\napi_key = ""',
-    ])
-    def test_an_incomplete_app_is_dropped_with_a_warning(self, tmp_path, table):
-        config, problems = _load(tmp_path, f"[servarr.apps.radarr]\n{table}\n")
+    def test_an_app_without_a_url_is_discarded(self, tmp_path):
+        config, problems = _load(tmp_path, f'[servarr.apps.radarr]\napi_key = "{KEY}"\n')
         assert "radarr" not in config.servarr.apps
         assert config.servarr.incomplete_apps == ["radarr"]
         discarded = [p for p in problems if p["kind"] == "discarded"
                      and p["path"][:3] == ("servarr", "apps", "radarr")]
         assert len(discarded) == 1
         assert KEY not in discarded[0]["message"]
+
+    @pytest.mark.parametrize("table", [
+        'url = "http://10.0.0.5:7878"',
+        'url = "http://10.0.0.5:7878"\napi_key = ""',
+    ])
+    def test_an_app_without_a_key_is_left_out_with_a_warning(self, tmp_path, table):
+        """Not discarded: the key belongs in a stack secret file, which the
+        process checking a plan may not have yet, so a missing one is reported
+        and the app waits for it, as every other file credential does."""
+        config, problems = _load(tmp_path, f"[servarr.apps.radarr]\n{table}\n")
+        assert "radarr" not in config.servarr.apps
+        assert config.servarr.incomplete_apps == ["radarr"]
+        found = [p for p in problems if p["path"][:3] == ("servarr", "apps", "radarr")]
+        assert [p["kind"] for p in found] == ["warning"]
+        assert "istota_servarr_radarr_api_key" in found[0]["message"]
+        assert config.servarr.keyless_apps == ["radarr"]
+
+    def test_an_app_without_a_url_is_not_keyless(self, tmp_path):
+        config, _ = _load(tmp_path, f'[servarr.apps.radarr]\napi_key = "{KEY}"\n')
+        assert config.servarr.keyless_apps == []
+
+    @pytest.mark.parametrize("name", ["bazarr", "readarr"])
+    def test_a_name_the_skill_does_not_know_is_left_to_validation(self, tmp_path, name):
+        """No secret file exists for it, so no warning names one; the
+        reserved or unknown warning is the one it gets."""
+        _, problems = _load(tmp_path, f'[servarr.apps.{name}]\nurl = "http://10.0.0.5:6767"\n')
+        [message] = _messages(problems, "servarr", "apps", name)
+        assert "api_key" not in message
+        assert ("reserved" if name == "bazarr" else "not an app the skill knows") in message
 
     def test_a_complete_app_is_not_recorded_as_incomplete(self, tmp_path):
         config, _ = _load(tmp_path, f"""
@@ -159,6 +183,94 @@ class TestParsing:
         """)
         assert "radarr" in config.servarr.apps
         assert any(p["path"] == ("servarr", "apps", "radarr", "apikey") for p in problems)
+
+
+
+class TestTheKeyFromItsSecretFile:
+    """The keys are deployment credentials: a stack secret file each, exported
+    by `istota-secrets` as `ISTOTA_SERVARR_<APP>_API_KEY`, which wins over an
+    inline `api_key` the way every other file credential does."""
+
+    URL_ONLY = """
+        [servarr.apps.radarr]
+        url = "http://10.0.0.5:7878"
+    """
+
+    def test_a_url_and_the_variable_make_a_complete_app(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", KEY)
+        config, problems = _load(tmp_path, self.URL_ONLY)
+        assert config.servarr.apps["radarr"] == ServarrApp(url="http://10.0.0.5:7878", api_key=KEY)
+        assert config.servarr.incomplete_apps == []
+        assert _messages(problems, "servarr") == []
+        assert "servarr" in config.available_capabilities()
+
+    def test_the_variable_wins_over_an_inline_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", "from-the-secret-file")
+        config, _ = _load(tmp_path, f"""
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+        """)
+        assert config.servarr.apps["radarr"].api_key == "from-the-secret-file"
+
+    def test_an_empty_variable_leaves_the_inline_key(self, tmp_path, monkeypatch):
+        """The wizard writes every secret file, empty when unused."""
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", "")
+        config, _ = _load(tmp_path, f"""
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+        """)
+        assert config.servarr.apps["radarr"].api_key == KEY
+
+    @pytest.mark.parametrize("app", ["sonarr", "radarr", "lidarr", "prowlarr"])
+    def test_every_app_has_a_secret_file(self, tmp_path, monkeypatch, app):
+        from istota.setup_wizard import SECRET_NAMES
+
+        variable = f"ISTOTA_SERVARR_{app.upper()}_API_KEY"
+        assert variable.lower() in SECRET_NAMES
+        monkeypatch.setenv(variable, KEY)
+        config, _ = _load(tmp_path, f'[servarr.apps.{app}]\nurl = "https://{app}.example.org"\n')
+        assert config.servarr.apps[app].api_key == KEY
+
+    def test_each_app_reads_its_own_variable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_SONARR_API_KEY", "sonarr-key")
+        config, _ = _load(tmp_path, """
+            [servarr.apps.sonarr]
+            url = "http://10.0.0.5:8989"
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+        """)
+        assert config.servarr.apps["sonarr"].api_key == "sonarr-key"
+        assert "radarr" not in config.servarr.apps
+        assert config.servarr.incomplete_apps == ["radarr"]
+
+    def test_a_variable_with_no_table_configures_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", KEY)
+        config, problems = _load(tmp_path, "")
+        assert config.servarr.apps == {} and config.servarr.incomplete_apps == []
+        assert "servarr" not in config.available_capabilities()
+
+    def test_a_key_without_a_url_is_still_incomplete(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", KEY)
+        config, problems = _load(tmp_path, "[servarr.apps.radarr]\n")
+        assert config.servarr.apps == {}
+        assert config.servarr.incomplete_apps == ["radarr"]
+        assert KEY not in repr(problems)
+
+    def test_the_key_from_the_variable_is_not_in_the_repr(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", KEY)
+        config, _ = _load(tmp_path, self.URL_ONLY)
+        assert KEY not in repr(config.servarr)
+
+    def test_a_document_alone_does_not_read_the_environment(self, monkeypatch):
+        """`config_from_document` maps what a document says, no more."""
+        from istota.config import config_from_document
+
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", KEY)
+        config = config_from_document({"servarr": {"apps": {"radarr": {"url": "http://10.0.0.5:7878"}}}})
+        assert config.servarr.apps == {}
+        assert config.servarr.incomplete_apps == ["radarr"]
 
 
 class TestValidation:
