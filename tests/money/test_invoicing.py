@@ -1603,10 +1603,10 @@ class TestVoidWithCleanup:
 
         pdf = self._issue(tmp_path, monkeypatch)
 
-        def refuse(self, target):
+        def refuse(*args, **kwargs):
             raise OSError("read-only file system")
 
-        monkeypatch.setattr(Path, "rename", refuse)
+        monkeypatch.setattr("istota.money.invoice_files.os.rename", refuse)
         with pytest.raises(OSError, match="read-only"):
             self._void(tmp_path)
         monkeypatch.undo()

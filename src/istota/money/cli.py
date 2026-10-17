@@ -35,6 +35,10 @@ class UserContext:
     # autoclass_lookup). Resolved from istota config at context-build time,
     # so both the web routes and the CLI honour one switch.
     autoclass_lookup: bool = True
+    # `{mount}/Users/{user_id}`, the one component a no-follow walk to a file
+    # under `data_dir` may start from (see `money.invoice_files`). None outside
+    # `resolve_for_user`, and the web invoice-file paths then refuse.
+    user_root: Path | None = None
 
     def __post_init__(self):
         # The work store lives in this context's money.db (see work.py).

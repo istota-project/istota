@@ -1085,8 +1085,15 @@ def void_invoice_with_cleanup(
     replaced_by: tuple[str, ...] | list[str] = (),
     force: bool = False,
     delete_pdf: bool = False,
+    output_tree=None,
 ) -> dict:
     """Void an invoice, clear its DB state and set its PDF aside.
+
+    With ``output_tree`` (a pinned ``money.invoice_files.OutputTree``) the PDF
+    is looked up, renamed and removed only through that tree's descriptors,
+    and ``invoice_output_dir`` is not consulted: the web route's path, where
+    the tree is task-writable (ISSUE-775). Without it, by path, as the CLI
+    always has.
 
     One transaction voids the row, releases its entries and runs
     :func:`istota.money.db.clear_invoice_state`. A kept PDF is renamed to
@@ -1097,35 +1104,42 @@ def void_invoice_with_cleanup(
     :class:`istota.money.work.VoidError` raised before anything changes.
     """
     from istota.money.db import clear_invoice_state
+    from istota.money.invoice_files import InvoicePdf
     from istota.money.work import get_invoice, void_invoice, write_transaction
 
-    pdf: Path | None = None
-    renamed_to: Path | None = None
+    pdf: InvoicePdf | None = None
+    renamed_to: InvoicePdf | None = None
     try:
         with write_transaction(data_dir) as conn:
             record = get_invoice(data_dir, invoice_number, conn=conn)
             if record is not None:
-                if record.pdf_path and Path(record.pdf_path).is_file():
-                    pdf = Path(record.pdf_path)
-                elif invoice_output_dir is not None:
-                    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
+                if output_tree is not None:
+                    number = parse_invoice_number(invoice_number)
+                    if number is not None:
+                        pdf = output_tree.find(number, record.pdf_path)
+                else:
+                    found = None
+                    if record.pdf_path and Path(record.pdf_path).is_file():
+                        found = Path(record.pdf_path)
+                    elif invoice_output_dir is not None:
+                        found = find_invoice_pdf(invoice_output_dir, invoice_number)
+                    if found is not None:
+                        pdf = InvoicePdf(found.parent, found.name)
             new_pdf_path: str | None = None
             if pdf is not None:
-                new_pdf_path = "" if delete_pdf else str(_void_pdf_path(pdf))
+                new_pdf_path = "" if delete_pdf else str(_void_pdf_path(pdf.path))
             result = void_invoice(
                 data_dir, invoice_number, reason=reason, replaced_by=replaced_by,
                 force=force, pdf_path=new_pdf_path, conn=conn,
             )
             db_cleanup = clear_invoice_state(conn, invoice_number)
             if pdf is not None and not delete_pdf:
-                target = _void_pdf_path(pdf)
-                pdf.rename(target)
-                renamed_to = target
+                renamed_to = pdf.rename(_void_pdf_path(pdf.path).name)
     except Exception:
         # The commit failed after the rename: put the file back where the
         # still-open invoice's row says it is.
         if renamed_to is not None and pdf is not None:
-            renamed_to.rename(pdf)
+            renamed_to.rename(pdf.name)
         raise
 
     out = {

@@ -49,6 +49,24 @@ class TestMoneyLoader:
         ctx = resolve_for_user("alice", cfg)
         assert str(ctx.data_dir).startswith(str(tmp_path / "mount"))
 
+    def test_invoice_files_walk_from_the_user_root(self, tmp_path):
+        """ISSUE-775: the context carries the user root, and the pinned walk
+        reaches ``data_dir`` from it although ``data_dir`` is spelled resolved."""
+        from istota.money import resolve_for_user
+        from istota.money.invoice_files import open_output_tree
+
+        cfg = _config(tmp_path, users={"alice": UserConfig(display_name="Alice")})
+        ctx = resolve_for_user("alice", cfg)
+        assert ctx.user_root == cfg.workspace_root("alice")
+        year = ctx.data_dir / "invoices" / "generated" / "2026"
+        year.mkdir(parents=True)
+        (year / "Invoice-000007-01_02_2026.pdf").write_bytes(b"%PDF")
+
+        with open_output_tree(ctx.user_root, ctx.data_dir, None) as tree:
+            assert tree is not None
+            pdf = tree.find(7)
+            assert pdf is not None and pdf.name == "Invoice-000007-01_02_2026.pdf"
+
     def test_autoclass_lookup_gate_reaches_the_user_context(self, tmp_path):
         """`[money] autoclass_lookup` is a security control — it keeps held
         symbols off a third-party wire — and the UserContext hop is its only

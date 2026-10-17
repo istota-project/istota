@@ -120,6 +120,7 @@ def resolve_for_user(
     for path in (ctx.data_dir, ctx.data_dir / "ledgers"):
         if _contained_under_user_root(istota_config, user_id, path) is None:
             raise UserNotFoundError(f"money data for '{user_id}' leads outside the user's tree")
+    ctx.user_root = istota_config.workspace_root(user_id)
     # Operator gate on the portfolio module's third-party ticker lookup.
     money_cfg = getattr(istota_config, "money", None)
     ctx.autoclass_lookup = bool(getattr(money_cfg, "autoclass_lookup", True))
