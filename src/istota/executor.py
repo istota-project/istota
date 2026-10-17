@@ -3609,10 +3609,16 @@ def build_stripped_env() -> dict[str, str]:
     read as a human at a terminal. It is as unattended as any of them, so it
     says so.
     """
+    from istota.setup_wizard import SECRET_NAMES
+
+    # Every secret file by exact name too: the native brain's headers and the
+    # Telnyx ids match none of the patterns.
+    secret_file_vars = {name.upper() for name in SECRET_NAMES}
     env = {
         k: v for k, v in os.environ.items()
         if not any(p in k.upper() for p in _CREDENTIAL_ENV_PATTERNS)
         and k.upper() not in _SHELL_STARTUP_ENV_VARS
+        and k.upper() not in secret_file_vars
     }
     env["PRECOMMIT_SCANS_REQUIRED"] = "1"
     return env

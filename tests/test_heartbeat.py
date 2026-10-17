@@ -521,6 +521,18 @@ class TestCheckShellCommand:
         assert result.healthy is True
         assert str(config.db_path) in result.details["value"]
 
+    def test_secret_file_variable_not_propagated(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", '{"X-Key": "header-value"}')
+        config = Config(workspace_path=tmp_path)
+        check = HeartbeatCheck(
+            name="test",
+            type="shell-command",
+            config={"command": "echo headers=[$ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS]"},
+        )
+        result = _check_shell_command(check, config)
+        assert result.healthy is True
+        assert "headers=[]" in result.details["value"]
+
     def test_setup_env_hooks_dispatched(self, tmp_path):
         """ISSUE-097-shaped regression: heartbeat shell-commands must run
         ``dispatch_setup_env_hooks`` so vars declared ``from: "setup_env"``
