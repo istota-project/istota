@@ -430,6 +430,7 @@
   <EmptyState>Every document is attached to a record.</EmptyState>
 {:else}
   <div class="table-scroll" class:refreshing bind:this={documentList}>
+    <!-- svelte-ignore a11y_no_redundant_roles (Explicit roles preserve table semantics when Safari lays out rows as grids.) -->
     <table class="grid documents-grid" aria-label="Health documents" role="table">
       <thead role="rowgroup">
         <tr role="row">
