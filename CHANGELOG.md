@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Operators can send a test iOS notification to a user’s registered devices and see whether Apple accepted it. The doctor command checks the signing key’s presence and permissions without reading it.
 
-- Settings → Preferences now lists registered iOS push devices with a remove action, and saves choices for chat alerts and message previews. Device registration and delivery in the iOS app will follow.
+- Settings → Notifications now has inbox-category switches, chat defaults, message previews and registered device removal. Preferences remain available in browsers and save together with edits made on other settings pages. Native registration controls will follow.
 
 - The Feeds sidebar shows how many entries are unread and how many are starred next to Unread and Starred, and sources with unread entries are in bold. The counts update as you read, star and mark entries read.
 - **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation.

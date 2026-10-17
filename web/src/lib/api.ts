@@ -2199,6 +2199,8 @@ export interface UserProfile {
   show_nav_unread_badges: boolean;
   push_chat_alerts?: 'alerts' | 'badge' | 'off';
   push_preview?: boolean;
+  // Missing category IDs remain enabled, including newly registered sources.
+  push_inbox_categories?: Record<string, boolean>;
   // How much of a turn that arrived from outside the room (today, mirrored
   // email) the transcript shows. The row is always there whatever this says —
   // `hidden` withholds the body, never the turn.
@@ -6899,6 +6901,15 @@ export function saveGroupDeliveryPreferences(
 }
 export function groupBriefingDownloadUrl(group: string, name: string, run: number): string {
   return `${base}/api${groupBriefingPath(group, name)}/runs/${run}/download`;
+}
+
+export interface PushCategory {
+  id: string;
+  label: string;
+}
+
+export function listPushCategories(): Promise<{ categories: PushCategory[] }> {
+  return apiFetch('/push/categories');
 }
 
 export interface PushDevice {

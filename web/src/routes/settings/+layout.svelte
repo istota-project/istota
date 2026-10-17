@@ -16,8 +16,8 @@
 
   let sidebarOpen = $state(false);
 
-  // The profile is held here rather than by a section because three sections
-  // edit it (Account, Preferences, Delivery) and one save covers all of them.
+  // The profile is held here so Account, Preferences, Notifications and
+  // Delivery share one draft and one save.
   // This layout persists across a section switch, so an unsaved edit survives
   // a visit to another section and the app-bar Save still knows about it.
   let profile: UserProfile | null = $state(null);
@@ -61,6 +61,7 @@
         next.show_nav_unread_badges = next.show_nav_unread_badges ?? false;
         next.push_chat_alerts = next.push_chat_alerts ?? 'alerts';
         next.push_preview = next.push_preview ?? true;
+        next.push_inbox_categories = next.push_inbox_categories ?? {};
       }
       profile = next;
       initialProfileJson = next ? JSON.stringify(next) : '';
@@ -93,6 +94,7 @@
         show_nav_unread_badges: profile.show_nav_unread_badges,
         push_chat_alerts: profile.push_chat_alerts,
         push_preview: profile.push_preview,
+        push_inbox_categories: profile.push_inbox_categories,
         external_turn_display: profile.external_turn_display || 'collapsed',
         relay_delivery: profile.relay_delivery || '',
       };

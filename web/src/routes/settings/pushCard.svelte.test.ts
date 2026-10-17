@@ -8,6 +8,9 @@ vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 
 import Preferences from './preferences/+page.svelte';
+import Notifications from './notifications/+page.svelte';
+import { page } from '$app/state';
+import { base } from '$app/paths';
 import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
 
@@ -42,6 +45,7 @@ const device: PushDevice = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  page.url = new URL(`http://localhost${base}/settings/notifications`);
   Object.defineProperty(navigator, 'userAgent', { value: 'Mozilla/5.0', configurable: true });
   profile = {
     user_id: 'alice',
@@ -69,31 +73,57 @@ beforeEach(() => {
   };
   api.getProfile.mockImplementation(async () => ({ profile: structuredClone(profile) }));
   api.getModules.mockResolvedValue({ modules: [] });
+  api.listPushCategories.mockResolvedValue({
+    categories: [
+      { id: 'confirmation', label: 'Approvals' },
+      { id: 'new_source', label: 'A new source from the server' },
+    ],
+  });
   api.listPushDevices.mockResolvedValue({ devices: [] });
   api.deletePushDevice.mockResolvedValue({ ok: true });
   api.updateProfile.mockImplementation(async (patch) => {
-    Object.assign(profile, patch);
+    Object.assign(profile, JSON.parse(JSON.stringify(patch)));
     return {};
   });
 });
-afterEach(cleanup);
-
-function mount() {
-  return render(Harness, { user: person, component: Preferences, layout: SettingsLayout });
-}
-
-it('renders the browser stand-in and an empty device list', async () => {
-  mount();
-  expect(await screen.findByText('Register a device from the Istota iOS app.')).toBeInTheDocument();
-  expect(await screen.findByText('No devices registered.')).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Register' })).toBeNull();
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
 });
 
-it('saves both preferences through the shared settings Save action', async () => {
+function mount() {
+  return render(Harness, { user: person, component: Notifications, layout: SettingsLayout });
+}
+
+it('links to a dedicated Notifications section', async () => {
+  mount();
+  expect(await screen.findByRole('link', { name: 'Notifications' })).toHaveAttribute(
+    'href',
+    `${base}/settings/notifications`,
+  );
+});
+
+it.each(['Mozilla/5.0', 'Mozilla/5.0 IstotaApp/0.10.0'])(
+  'renders preferences and the device stand-in for %s',
+  async (userAgent) => {
+    Object.defineProperty(navigator, 'userAgent', { value: userAgent, configurable: true });
+    mount();
+    expect(
+      await screen.findByText('Register a device from the Istota iOS app.'),
+    ).toBeInTheDocument();
+    expect(await screen.findByText('No devices registered.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Register/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Chat notifications' })).toBeEnabled();
+    expect(await screen.findByRole('checkbox', { name: 'Approvals' })).toBeEnabled();
+  },
+);
+
+it('saves categories and both preferences through the shared settings Save action', async () => {
   mount();
   const previews = await screen.findByRole('checkbox', { name: /Show message previews/ });
   expect(previews).toBeChecked();
   await fireEvent.click(previews);
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Approvals' }));
   await fireEvent.pointerDown(screen.getByRole('button', { name: 'Chat notifications' }), {
     pointerType: 'mouse',
     button: 0,
@@ -107,6 +137,7 @@ it('saves both preferences through the shared settings Save action', async () =>
     expect(api.updateProfile).toHaveBeenCalledWith({
       push_chat_alerts: 'badge',
       push_preview: false,
+      push_inbox_categories: { confirmation: false },
     }),
   );
   await waitFor(() =>
@@ -133,4 +164,99 @@ it('keeps the row and reports a failed removal', async () => {
   await fireEvent.click(await screen.findByRole('button', { name: 'Remove device ending ababab' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('Removal failed');
   expect(screen.getByRole('button', { name: 'Remove device ending ababab' })).toBeEnabled();
+});
+
+it('uses server labels and enables missing category keys without dirtying the profile', async () => {
+  const realApi = await vi.importActual<typeof import('$lib/api')>('$lib/api');
+  const fetch = vi.fn(async () =>
+    Response.json({
+      categories: [
+        { id: 'confirmation', label: 'Approvals' },
+        { id: 'new_source', label: 'A new source from the server' },
+      ],
+    }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  api.listPushCategories.mockImplementationOnce(realApi.listPushCategories);
+  profile.push_inbox_categories = { confirmation: false };
+  mount();
+  expect(await screen.findByRole('checkbox', { name: 'Approvals' })).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'A new source from the server' })).toBeChecked();
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  expect(api.getProfile).toHaveBeenCalledTimes(1);
+  expect(fetch).toHaveBeenCalledWith(`${base}/api/push/categories`, expect.any(Object));
+});
+
+it('keeps edits across sections and saves them together', async () => {
+  const view = mount();
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Approvals' }));
+  expect(screen.getByRole('link', { name: 'Notifications' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  page.url = new URL(`http://localhost${base}/settings/preferences`);
+  await view.rerender({ user: person, component: Preferences, layout: SettingsLayout });
+  await fireEvent.click(
+    await screen.findByRole('checkbox', { name: /Show unread counts in navigation/ }),
+  );
+  expect(screen.queryByRole('heading', { name: 'Push notifications' })).toBeNull();
+  page.url = new URL(`http://localhost${base}/settings/notifications`);
+  await view.rerender({ user: person, component: Notifications, layout: SettingsLayout });
+  expect(await screen.findByRole('checkbox', { name: 'Approvals' })).not.toBeChecked();
+  expect(api.getProfile).toHaveBeenCalledTimes(1);
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(api.updateProfile).toHaveBeenCalledExactlyOnceWith({
+      show_nav_unread_badges: true,
+      push_inbox_categories: { confirmation: false },
+    }),
+  );
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled());
+});
+
+it('can re-enable a stored disabled category', async () => {
+  profile.push_inbox_categories = { confirmation: false };
+  mount();
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Approvals' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() =>
+    expect(api.updateProfile).toHaveBeenCalledExactlyOnceWith({
+      push_inbox_categories: { confirmation: true },
+    }),
+  );
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled());
+  expect(screen.getByRole('checkbox', { name: 'Approvals' })).toBeChecked();
+});
+
+it('keeps category edits after a failed save so they can be retried', async () => {
+  api.updateProfile.mockRejectedValueOnce(new Error('Save refused'));
+  mount();
+  await fireEvent.click(await screen.findByRole('checkbox', { name: 'Approvals' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  expect(await screen.findByText('Save refused')).toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: 'Approvals' })).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled());
+  expect(profile.push_inbox_categories).toEqual({ confirmation: false });
+});
+
+it('reports category loading failure while leaving devices and preferences usable', async () => {
+  api.listPushCategories.mockRejectedValueOnce(new Error('Categories unavailable'));
+  mount();
+  expect(await screen.findByRole('alert')).toHaveTextContent('Categories unavailable');
+  expect(await screen.findByText('No devices registered.')).toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: /Show message previews/ })).toBeEnabled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Retry categories' }));
+  expect(await screen.findByRole('checkbox', { name: 'Approvals' })).toBeChecked();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('respects managed category and chat preferences', async () => {
+  profile.managed = ['push_inbox_categories', 'push_chat_alerts', 'push_preview'];
+  mount();
+  expect(await screen.findByRole('checkbox', { name: /Approvals/ })).toBeDisabled();
+  expect(screen.getByRole('checkbox', { name: /A new source from the server/ })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Chat notifications' })).toBeDisabled();
+  expect(screen.getByRole('checkbox', { name: /Show message previews/ })).toBeDisabled();
 });

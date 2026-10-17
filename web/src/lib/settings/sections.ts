@@ -1,4 +1,4 @@
-import { UserRound, SlidersHorizontal, Send, KeyRound, Plug, Wallet } from '@lucide/svelte';
+import { UserRound, SlidersHorizontal, Send, KeyRound, Plug, Wallet, Bell } from '@lucide/svelte';
 import type { LucideIcon } from '@lucide/svelte';
 
 /**
@@ -19,6 +19,7 @@ export interface UserSettingsSection {
 export const USER_SETTINGS_SECTIONS: UserSettingsSection[] = [
   { href: '', label: 'Account', icon: UserRound },
   { href: '/preferences', label: 'Preferences', icon: SlidersHorizontal },
+  { href: '/notifications', label: 'Notifications', icon: Bell },
   { href: '/delivery', label: 'Delivery', icon: Send },
   { href: '/credentials', label: 'Credentials', icon: KeyRound },
   { href: '/wallet', label: 'Wallet', icon: Wallet },

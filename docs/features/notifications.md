@@ -107,6 +107,8 @@ Native push adds iOS alerts alongside your existing Talk, email or ntfy routing.
 
 The app badge counts open inbox items from enabled categories plus unread messages in rooms set to alerts or badge. The bell, inbox list and ordinary chat unread counts stay complete regardless of push preferences. Reading on another device causes a quiet badge update on the next sweep. Old messages after a scheduler outage update the badge without a burst of banners. A failed alert is not retried; the next sweep can still repair the badge.
 
+Settings → Notifications holds your personal push preferences. The page is available in browsers and older apps too. Category switches, the chat default and message previews use the shared Save button; edits survive a switch to another settings section and save together. Removing a device takes effect immediately.
+
 Push preferences are personal:
 
 - **Inbox categories:** each registered source can be turned off for push alerts and the app badge. Missing choices default to enabled, including new sources. Turning a category off leaves its inbox items and other delivery channels alone. Alerts suppressed during a sweep are acknowledged, so turning the category on later restores its open-item badge contribution without replaying those alerts.
