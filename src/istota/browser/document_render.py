@@ -189,8 +189,12 @@ def _from_answer(bundle: str, response: httpx.Response) -> DocumentRender:
         return _refused(bundle, "render_unavailable")
     if response.status_code == 503:
         # The pool refuses before the endpoint runs, with its own message as
-        # `error`; every 503 the browser sends is a capacity refusal.
-        return _refused(bundle, "capacity")
+        # `error`, so any 503 not naming itself unavailable is a capacity refusal.
+        try:
+            named = response.json().get("error")
+        except (ValueError, AttributeError):
+            named = None
+        return _refused(bundle, "render_unavailable" if named == "render_unavailable" else "capacity")
     try:
         body = response.json()
     except ValueError:
