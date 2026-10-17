@@ -319,6 +319,20 @@ def servarr_key_variable(app: str) -> str:
     return f"ISTOTA_SERVARR_{app.upper()}_API_KEY"
 
 
+#: Set by the daemon on a skill CLI's environment: the arr apps whose key the
+#: daemon's environment holds, comma-separated. Names only, never a key. The
+#: keys reach the servarr CLI alone, so any other skill CLI would otherwise
+#: judge every app keyless (#771, #772).
+SERVARR_DAEMON_KEYED_VAR = "ISTOTA_SERVARR_DAEMON_KEYED"
+
+
+def servarr_daemon_keyed_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """``{SERVARR_DAEMON_KEYED_VAR: "radarr,sonarr"}`` for the apps whose key
+    ``environ`` holds, or ``{}`` when it holds none."""
+    keyed = [app for app in SERVARR_APPS if environ.get(servarr_key_variable(app), "").strip()]
+    return {SERVARR_DAEMON_KEYED_VAR: ",".join(keyed)} if keyed else {}
+
+
 @dataclass
 class ServarrApp:
     """One arr app of the install-wide connection: where it is and its key.
@@ -357,6 +371,11 @@ class ServarrConfig:
     ``incomplete_apps`` that had a URL and lacked only the key, which lives in
     the daemon's environment; doctor reads absence there as a verdict only
     where the environment could have held it.
+
+    ``daemon_keyed_apps``: set by the loader, never from the file. Those of
+    ``keyless_apps`` whose key the daemon says it holds
+    (``SERVARR_DAEMON_KEYED_VAR``): configured, with the key out of sight of
+    this process only.
     """
     apps: dict[str, ServarrApp] = field(default_factory=dict)
     requesters: list[str] = field(default_factory=list)
@@ -366,6 +385,7 @@ class ServarrConfig:
     release_search_timeout_seconds: int = 120
     incomplete_apps: list[str] = field(default_factory=list)
     keyless_apps: list[str] = field(default_factory=list)
+    daemon_keyed_apps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2918,8 +2938,9 @@ class Config:
         if self.nextcloud_enabled:
             caps.add("nextcloud")
         # An app name the skill does not know is ignored, so it alone turns
-        # nothing on.
-        if any(name in SERVARR_APPS for name in self.servarr.apps):
+        # nothing on. An app whose key only the daemon holds counts, since the
+        # daemon built the menu with it (#772).
+        if any(name in SERVARR_APPS for name in self.servarr.apps) or self.servarr.daemon_keyed_apps:
             caps.add("servarr")
         return caps
 
@@ -3857,6 +3878,7 @@ _NOT_CONFIGURATION = frozenset({
     # What `_settle_servarr_apps` dropped, recorded once the environment is read.
     "servarr.incomplete_apps",
     "servarr.keyless_apps",
+    "servarr.daemon_keyed_apps",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -4480,7 +4502,15 @@ def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str])
     `incomplete_apps`, and one dropped for its key alone in `keyless_apps`.
     Messages name the app and the file, never a value. A name outside
     `SERVARR_APPS` has no secrets file and is left for `_validate_servarr`.
+
+    A skill CLI other than servarr never sees the keys, so the daemon names
+    the apps it holds keys for in `SERVARR_DAEMON_KEYED_VAR`. Such an app is
+    still keyless here, with no warning, and recorded in `daemon_keyed_apps`
+    (#771).
     """
+    daemon_keyed = {
+        part.strip() for part in environ.get(SERVARR_DAEMON_KEYED_VAR, "").split(",")
+    }
     apps = config.servarr.apps
     known = [name for name in apps if name in SERVARR_APPS]
     for name in known:
@@ -4497,17 +4527,19 @@ def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str])
                 "[config] [servarr.apps.%s] needs a non-empty url; ignoring the app", name,
             )
         elif not app.api_key:
-            report_problem(
-                "warning", path,
-                "[config] [servarr.apps.%s] has no API key: set the stack secret %s "
-                "(the variable %s); the app is ignored until then",
-                name, servarr_key_variable(name).lower(), servarr_key_variable(name),
-            )
+            if name not in daemon_keyed:
+                report_problem(
+                    "warning", path,
+                    "[config] [servarr.apps.%s] has no API key: set the stack secret %s "
+                    "(the variable %s); the app is ignored until then",
+                    name, servarr_key_variable(name).lower(), servarr_key_variable(name),
+                )
             keyless.append(name)
         else:
             continue
         del apps[name]
     config.servarr.keyless_apps = keyless
+    config.servarr.daemon_keyed_apps = [name for name in keyless if name in daemon_keyed]
     section = data.get("servarr")
     raw = section.get("apps") if isinstance(section, dict) else None
     config.servarr.incomplete_apps = (

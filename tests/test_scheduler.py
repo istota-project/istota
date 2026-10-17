@@ -5917,6 +5917,7 @@ class TestExecuteSkillTask:
         config = self._make_config(db_path, tmp_path)
         env = self._captured_env(self._task(skill="feeds", skill_args='["--help"]'), config)
         assert "ISTOTA_SERVARR_RADARR_API_KEY" not in env
+        assert env["ISTOTA_SERVARR_DAEMON_KEYED"] == "radarr"
 
     def test_experimental_features_propagated(self, db_path, tmp_path):
         """Skill-tasks must carry `ISTOTA_EXPERIMENTAL_FEATURES` so that

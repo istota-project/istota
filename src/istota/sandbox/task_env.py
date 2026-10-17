@@ -463,6 +463,10 @@ def build_task_runtime(
         if group_ids:
             from istota.sandbox.host_paths import TASK_GROUPS_VAR
             proxy_base_env[TASK_GROUPS_VAR] = ",".join(sorted(group_ids))
+        # Which arr apps the daemon holds a key for, names only: every skill
+        # CLI loads the config, and only servarr's gets the keys (#771, #772).
+        from istota.config import servarr_daemon_keyed_env
+        proxy_base_env.update(servarr_daemon_keyed_env(os.environ))
         # One skill CLI is itself a model caller, and the strip above left it
         # unauthenticated: `code_review` spawns the `claude` binary per
         # reviewer, so from ISSUE-390 every review came back `review_failed`

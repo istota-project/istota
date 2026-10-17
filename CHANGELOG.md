@@ -79,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With Sonarr or another arr app configured, skill commands no longer warn that the app has no API key, and the servarr skill's instructions load inside a task instead of being refused as disabled. A skill that cannot run because its service is not configured is now called unavailable rather than disabled.
 - A mail the bot sends as HTML no longer shows as raw markup in its web chat email room. It now goes out with a plain-text version beside the HTML, links kept, and the room shows that text. Mail recorded before this keeps its HTML.
 - Signing in to an install on this Mac (`http://localhost`) now works in Safari. Safari dropped the session cookie there, so every sign-in form answered "This form expired". Run `istota-stack setup --web --force` once on an existing local install to pick up the change.
 - A reply quote in a shared room names the person who wrote the quoted message. It used to show the viewer's own name on any quoted user message, so in a WhatsApp group or a shared web room another member's words were attributed to you.

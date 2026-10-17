@@ -119,6 +119,48 @@ class TestParsing:
         assert "istota_servarr_radarr_api_key" in found[0]["message"]
         assert config.servarr.keyless_apps == ["radarr"]
 
+    SONARR_URL_ONLY = '[servarr.apps.sonarr]\nurl = "http://10.0.0.5:8989"\n'
+
+    def test_a_key_the_daemon_holds_is_not_reported_missing(self, tmp_path, monkeypatch):
+        """#771: the keys reach the servarr CLI alone, so every other skill CLI
+        loads the config without them; the daemon names the apps it holds keys
+        for, and the warning would be true of the process and false of the
+        deployment."""
+        monkeypatch.setenv("ISTOTA_SERVARR_DAEMON_KEYED", "sonarr")
+        config, problems = _load(tmp_path, self.SONARR_URL_ONLY)
+        assert _messages(problems, "servarr") == []
+        assert "sonarr" not in config.servarr.apps
+        assert config.servarr.keyless_apps == ["sonarr"]
+        assert config.servarr.daemon_keyed_apps == ["sonarr"]
+
+    def test_a_key_the_daemon_lacks_is_still_reported(self, tmp_path, monkeypatch):
+        """A task on a deployment that really has no key: the daemon names no
+        app, and the warning is true everywhere."""
+        monkeypatch.setenv("ISTOTA_TASK_ID", "42")
+        monkeypatch.setenv("ISTOTA_SERVARR_DAEMON_KEYED", "radarr")
+        config, problems = _load(tmp_path, self.SONARR_URL_ONLY)
+        assert len(_messages(problems, "servarr", "apps", "sonarr")) == 1
+        assert config.servarr.daemon_keyed_apps == []
+        assert "servarr" not in config.available_capabilities()
+
+    def test_the_capability_holds_when_the_daemon_has_the_key(self, tmp_path, monkeypatch):
+        """#772: the daemon offered the skill, so a skill CLI that cannot see
+        the key must not call it disabled."""
+        monkeypatch.setenv("ISTOTA_SERVARR_DAEMON_KEYED", "sonarr")
+        config, _ = _load(tmp_path, self.SONARR_URL_ONLY)
+        assert "servarr" in config.available_capabilities()
+
+    def test_the_daemon_name_does_not_rescue_a_missing_url(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_DAEMON_KEYED", "sonarr")
+        config, problems = _load(tmp_path, f'[servarr.apps.sonarr]\napi_key = "{KEY}"\n')
+        assert len(_messages(problems, "servarr", "apps", "sonarr")) == 1
+        assert "servarr" not in config.available_capabilities()
+
+    def test_the_daemon_keyed_list_cannot_be_set_from_the_file(self, tmp_path):
+        config, problems = _load(tmp_path, '[servarr]\ndaemon_keyed_apps = ["sonarr"]\n')
+        assert config.servarr.daemon_keyed_apps == []
+        assert "servarr" not in config.available_capabilities()
+
     def test_an_app_without_a_url_is_not_keyless(self, tmp_path):
         config, _ = _load(tmp_path, f'[servarr.apps.radarr]\napi_key = "{KEY}"\n')
         assert config.servarr.keyless_apps == []
