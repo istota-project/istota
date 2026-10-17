@@ -33,15 +33,14 @@
      * unread glyph, no digits, taken out of flow past the end of the parent,
      * which must be positioned, so it appearing or clearing moves no link.
      * `inline-mark` is the same glyph in the row's flow, for a list row whose
-     * mark ends a line (the briefings archive's audience line).
+     * mark ends a line (the briefings archive's audience line) or a row (the
+     * feeds sidebar). Both are `--unread-mark-size`, so the asterisk is one size
+     * wherever it appears.
      */
     shape?: 'pill' | 'mark' | 'inline-mark';
-    /** `inline-mark` only: `text` scales with the row's type, `nav` is the app
-     *  nav mark's size (the feeds sidebar). */
-    markSize?: 'text' | 'nav';
   }
 
-  let { count, title, tone = 'accent', shape = 'pill', markSize = 'text' }: Props = $props();
+  let { count, title, tone = 'accent', shape = 'pill' }: Props = $props();
 
   const shown = $derived(count > 99 ? '99+' : String(count));
 </script>
@@ -59,11 +58,8 @@
 -->
 {#if count > 0}
   {#if shape === 'mark' || shape === 'inline-mark'}
-    <span
-      class="count-pill mark"
-      class:inline={shape === 'inline-mark'}
-      class:nav-size={markSize === 'nav'}
-      {title}><Asterisk size="100%" strokeWidth={3.5} /></span
+    <span class="count-pill mark" class:inline={shape === 'inline-mark'} {title}
+      ><Asterisk size="100%" strokeWidth={3.5} /></span
     >
   {:else}
     <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
@@ -108,11 +104,5 @@
   }
   .count-pill.mark.inline {
     position: static;
-    width: 1em;
-    height: 1em;
-  }
-  .count-pill.mark.inline.nav-size {
-    width: var(--unread-mark-size);
-    height: var(--unread-mark-size);
   }
 </style>
