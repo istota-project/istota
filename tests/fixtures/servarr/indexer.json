@@ -1,0 +1,11 @@
+[
+  {"id": 1, "name": "Example Tracker", "enable": true, "protocol": "torrent", "priority": 25,
+   "appProfileId": 1, "implementation": "Cardigann", "implementationName": "Cardigann",
+   "privacy": "private", "tags": [], "fields": []},
+  {"id": 2, "name": "Public Index", "enable": true, "protocol": "torrent", "priority": 20,
+   "appProfileId": 1, "implementation": "Cardigann", "implementationName": "Cardigann",
+   "privacy": "public", "tags": [1], "fields": []},
+  {"id": 3, "name": "Newsgroup Index", "enable": false, "protocol": "usenet", "priority": 10,
+   "appProfileId": 2, "implementation": "Newznab", "implementationName": "Generic Newznab",
+   "privacy": "private", "tags": [], "fields": []}
+]

@@ -13,7 +13,7 @@ Usage:
     python -m istota.skills.servarr wanted [--app A] [--cutoff] [--limit N]
     python -m istota.skills.servarr search-now --kind K (--library-id N | --tmdb N | --tvdb N | --mbid ID)
     python -m istota.skills.servarr requests [--user U] [--kind K] [--limit N]
-    python -m istota.skills.servarr indexers [--test]
+    python -m istota.skills.servarr indexers [--test] [--limit N]
 
 The connection is the operator's, one per app, read host-side from the
 daemon's own config (``ISTOTA_CONFIG_PATH``, ``[servarr.apps.<app>]``). The
@@ -149,6 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("indexers", help="prowlarr's indexers and their state")
     p.add_argument("--test", action="store_true", help="test every indexer (slow)")
+    _limit(p)
 
     return parser
 
@@ -175,13 +176,6 @@ def cmd_apps(run: Run, args) -> dict:
     }
 
 
-def _later_stage(verb: str):
-    def handler(run: Run, args) -> dict:
-        return error_envelope(f"{verb} is not available in this build yet.",
-                              reason="not_implemented", verb=verb)
-    return handler
-
-
 HANDLERS = {
     "apps": cmd_apps,
     "status": activity.cmd_status,
@@ -193,7 +187,7 @@ HANDLERS = {
     "wanted": activity.cmd_wanted,
     "search-now": activity.cmd_search_now,
     "requests": library.cmd_requests,
-    "indexers": _later_stage("indexers"),
+    "indexers": activity.cmd_indexers,
 }
 
 

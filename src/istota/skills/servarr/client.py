@@ -302,6 +302,7 @@ class ArrClient:
         json: object = None,
         kind: str = "local",
         lookup: str | None = None,
+        answer_on: tuple[int, ...] = (),
     ):
         """One call to ``{base}{api}/{path}``; the parsed JSON body, or None.
 
@@ -309,7 +310,9 @@ class ArrClient:
         service) or ``release`` (an interactive search across indexers); the
         last two get their own timeouts and are never retried. `lookup` is the
         command a caller hands to ``outcome_unknown`` so the model can find out
-        whether an ambiguous write applied.
+        whether an ambiguous write applied. `answer_on` names error statuses
+        whose JSON body is the answer itself, as prowlarr's ``indexer/testall``
+        answers 400 with its per-indexer results when any indexer fails.
         """
         method = method.upper()
         if method not in _METHODS:
@@ -324,7 +327,8 @@ class ArrClient:
             raise ServarrError(str(self._failure), self._failure.reason, **self._failure.extra)
         if path != "system/status":
             self._ensure_version()
-        return self._send_with_policy(method, path, params, json, kind, lookup)
+        return self._send_with_policy(method, path, params, json, kind, lookup,
+                                      frozenset(answer_on))
 
     def system_status(self) -> dict:
         """``GET system/status``, with the version check applied to the answer."""
@@ -355,7 +359,7 @@ class ArrClient:
             raise self._version_error
         self.version = version
 
-    def _send_with_policy(self, method, path, params, body, kind, lookup):
+    def _send_with_policy(self, method, path, params, body, kind, lookup, answer_on):
         scheme, netloc, host, port, prefix = self._target()
         addresses = self._checked_addresses(scheme, host, port)
         url = f"{scheme}://{netloc}{prefix}{self._kind.api}/{path}"
@@ -401,7 +405,7 @@ class ArrClient:
                 attempt += 1
                 continue
             try:
-                return self._interpret(response, raw)
+                return self._interpret(response, raw, answer_on)
             except ServarrError as exc:
                 # A 2xx is a write that applied; an answer that cannot be read
                 # must not invite a second send.
@@ -474,7 +478,8 @@ class ArrClient:
             text = text.replace(self._key, "<redacted>")
         return fence(text)
 
-    def _interpret(self, response: httpx.Response, raw: bytes):
+    def _interpret(self, response: httpx.Response, raw: bytes,
+                   answer_on: frozenset = frozenset()):
         status = response.status_code
         if 300 <= status < 400:
             location = response.headers.get("location", "")
@@ -495,6 +500,11 @@ class ArrClient:
                 parsed = False
         if 200 <= status < 300:
             if raw.strip() and not parsed:
+                raise self._error(f"{self.app} answered HTTP {status} with a body that is "
+                                  f"not JSON.", "bad_response", http_status=status)
+            return data
+        if status in answer_on:
+            if not parsed:
                 raise self._error(f"{self.app} answered HTTP {status} with a body that is "
                                   f"not JSON.", "bad_response", http_status=status)
             return data

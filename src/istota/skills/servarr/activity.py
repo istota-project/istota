@@ -5,11 +5,12 @@ thing to run when something seems wrong. ``queue`` merges every media app's
 download queue, problems first; ``why`` explains one item from its state, its
 queue rows and its history, with a plain-language ``hint`` and, on request, an
 interactive release search; ``wanted`` lists monitored items still missing;
-``search-now`` asks an app to search for one item. ``indexers`` follows in a
-later stage.
+``search-now`` asks an app to search for one item. ``indexers`` is prowlarr's
+indexers with a state each, and with ``--test`` the result of testing them all.
 
-Nothing here writes except ``search-now``'s one ``POST command``, which the
-arrs queue and de-duplicate, so it has no gate. A requester may search only
+Nothing here changes anything except ``search-now``'s one ``POST command``,
+which the arrs queue and de-duplicate, so it has no gate, and ``indexers
+--test``'s ``POST indexer/testall``, which changes no setting. A requester may search only
 for an item carrying their own ``req-`` tag (``not_your_request`` otherwise),
 and nobody may search for an item that is not monitored (``not_monitored``),
 since the search would find releases and grab nothing.
@@ -616,3 +617,105 @@ def cmd_search_now(run: Run, args) -> dict:
     return {"status": "ok", "app": client.app, "kind": kind, "library_id": library,
             "command": body["name"], "command_id": number(command.get("id")),
             "state": selector(command.get("status"))}
+
+
+# --------------------------------------------------------------------------- #
+# indexers
+# --------------------------------------------------------------------------- #
+
+#: Problems first: an indexer prowlarr has backed off, then one switched off.
+INDEXER_STATES = ("failing", "disabled_by_user", "ok")
+
+
+def _indexer_status(rows: list[dict]) -> dict[int, dict]:
+    out = {}
+    for row in rows:
+        indexer = _positive_id(row.get("indexerId"))
+        if indexer is not None:
+            out[indexer] = row
+    return out
+
+
+def _indexer_row(indexer: dict, status: dict, profiles: dict, now: datetime) -> dict:
+    """One indexer and its state. Prowlarr backs a failing indexer off until
+    ``disabledTill``; a time already past leaves it ``ok``."""
+    until = status.get("disabledTill", status.get("disableUntil"))
+    until_time = parse_time(until)
+    failing = until_time is not None and until_time > now
+    if indexer.get("enable") is False:
+        state = "disabled_by_user"
+    elif failing:
+        state = "failing"
+    else:
+        state = "ok"
+    profile = profiles.get(indexer.get("appProfileId"))
+    return {
+        "id": _positive_id(indexer.get("id")),
+        "name": _text(indexer.get("name")),
+        "enable": indexer.get("enable") is True,
+        "protocol": selector(indexer.get("protocol")),
+        "priority": number(indexer.get("priority")),
+        "app_profile": selector(profile) if profile is not None else None,
+        "state": state,
+        "failing_until": selector(until) if failing else None,
+        "most_recent_failure": selector(status.get("mostRecentFailure")),
+        "initial_failure": selector(status.get("initialFailure")),
+    }
+
+
+def _test_result(result: dict, names: dict) -> dict:
+    failures = []
+    raw = result.get("validationFailures")
+    for failure in raw if isinstance(raw, list) else []:
+        if not isinstance(failure, dict):
+            continue
+        message = failure.get("errorMessage")
+        if not isinstance(message, str) or not message:
+            continue
+        prop = failure.get("propertyName")
+        failures.append(fence(f"{prop}: {message}" if isinstance(prop, str) and prop
+                              else message))
+    indexer = _positive_id(result.get("id"))
+    return {"id": indexer, "name": names.get(indexer), "is_valid": result.get("isValid") is True,
+            "failures": failures}
+
+
+def _test_all(client: ArrClient, names: dict, limit: int) -> dict:
+    """``POST indexer/testall``, sent once. Prowlarr answers 400 with the same
+    per-indexer list when any indexer fails, so that status is an answer."""
+    data = client.request("POST", "indexer/testall", kind="release", lookup="indexers",
+                          answer_on=(400,))
+    results = [_test_result(row, names)
+               for row in as_rows(data, client.app, "indexer/testall")]
+    results.sort(key=lambda r: (r["is_valid"], r["id"] or 0))
+    return {"total": len(results), "invalid": sum(1 for r in results if not r["is_valid"]),
+            "results": results[:limit]}
+
+
+def cmd_indexers(run: Run, args) -> dict:
+    """Prowlarr's indexers, problems first, with its health checks; with
+    ``--test``, every indexer tested."""
+    limit = limit_of(args)
+    client = run.client("prowlarr")
+    indexers = as_rows(client.request("GET", "indexer"), client.app, "indexer")
+    status = _indexer_status(as_rows(client.request("GET", "indexerstatus"), client.app,
+                                     "indexerstatus"))
+    profiles = {row.get("id"): row.get("name")
+                for row in as_rows(client.request("GET", "appprofile"), client.app,
+                                   "appprofile")}
+    health = as_rows(client.request("GET", "health"), client.app, "health")
+    now = run.now()
+
+    rows = [_indexer_row(indexer, status.get(indexer.get("id"), {}), profiles, now)
+            for indexer in indexers]
+    rows.sort(key=lambda r: (INDEXER_STATES.index(r["state"]),
+                             r["priority"] if r["priority"] is not None else 0, r["id"] or 0))
+    counts = {state: sum(1 for r in rows if r["state"] == state)
+              for state in ("ok", "disabled_by_user", "failing")}
+    envelope = {"status": "ok", "app": client.app, "total": len(rows), "counts": counts,
+                "indexers": rows[:limit],
+                "health": [_health_item(item) for item in health]}
+    if args.test:
+        names = {r["id"]: r["name"] for r in rows if r["id"] is not None}
+        envelope["test"] = _test_all(client, names, limit)
+    return envelope
