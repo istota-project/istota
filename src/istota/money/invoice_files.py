@@ -10,8 +10,13 @@ and the bot directory included, is opened ``O_NOFOLLOW``. ``data_dir`` is
 only a spelling here: it was checked when the context was built, and a link
 swapped in since then would be followed by anything anchored at it.
 
-``invoice_output_parts`` is the one rule for the ``invoice_output`` setting
-on the web side: relative, with no ``..``.
+``invoice_output_parts`` is the one rule for the ``invoice_output`` setting:
+relative, with no ``..``. ``config_store.check_invoicing_scalars`` refuses
+anything else on write, and the readers here refuse a value stored before.
+
+Generation writes through the same rule: ``open_dir_for_write`` creates and
+opens the year folder from the user root, and ``name_taken`` and
+``remove_file`` ask and remove through that walk rather than by path.
 """
 
 from __future__ import annotations
@@ -174,6 +179,65 @@ class OutputTree:
 
     def open_pdf(self, pdf: InvoicePdf) -> int | None:
         return open_regular_at(pdf.dir_fd, pdf.name) if pdf.dir_fd is not None else None
+
+
+def _dir_parts(user_root: Path, directory: Path) -> tuple[str, ...]:
+    parts = _parts_below(Path(directory), Path(user_root))
+    if parts is None:
+        raise ValueError(f"{directory} is outside the user's tree")
+    return parts
+
+
+def open_dir_for_write(user_root: Path, directory: Path) -> int:
+    """An fd on ``directory``, created if missing, walked from ``user_root`` with no link followed.
+
+    Raises ``ValueError`` for a directory not below ``user_root`` by spelling,
+    and ``OSError`` when a component is a link or not a directory. The
+    caller closes the fd.
+    """
+    from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cost
+
+    return open_or_create_dirs(Path(user_root), _dir_parts(user_root, directory))
+
+
+def _open_existing_dir(user_root: Path, directory: Path) -> int | None:
+    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cost
+
+    parts = _parts_below(Path(directory), Path(user_root))
+    if parts is None:
+        return None
+    return open_overlay_dir(Path(user_root), *parts)
+
+
+def name_taken(user_root: Path, path: Path) -> bool:
+    """Whether anything is at ``path``, asked through the no-follow walk.
+
+    A directory the walk refuses reads as free: the publish through the same
+    walk refuses it, and a by-path ``lexists`` would follow the link.
+    """
+    fd = _open_existing_dir(user_root, path.parent)
+    if fd is None:
+        return False
+    try:
+        os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def remove_file(user_root: Path, path: Path) -> None:
+    """Remove ``path`` through the no-follow walk; a refused walk removes nothing."""
+    fd = _open_existing_dir(user_root, path.parent)
+    if fd is None:
+        return
+    try:
+        os.unlink(path.name, dir_fd=fd)
+    except FileNotFoundError:
+        pass
+    finally:
+        os.close(fd)
 
 
 class _NoOutputTree:

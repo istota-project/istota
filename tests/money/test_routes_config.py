@@ -61,6 +61,14 @@ class TestInvoicingScalars:
         )
         assert resp.status_code == 400
 
+    @pytest.mark.parametrize("value", ["/srv/elsewhere", "../elsewhere"])
+    def test_put_rejects_an_invoice_output_outside_the_money_folder(self, ctx, client, value):
+        before = config_store.load_invoicing(ctx.db_path).invoice_output
+        resp = client.put("/istota/api/money/config/invoicing", json={"invoice_output": value})
+        assert resp.status_code == 400
+        assert "invoice_output" in resp.json()["error"]
+        assert config_store.load_invoicing(ctx.db_path).invoice_output == before
+
 
 class TestCompanies:
     def test_create_list_delete(self, ctx, client):

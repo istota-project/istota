@@ -921,6 +921,7 @@ async def api_invoices_generate(
                 entity_filter=fields["entity"], dry_run=fields["dry_run"],
                 invoice_output_dir=output_dir, db_path=user_ctx.db_path,
                 record_schedule=True, entry_uids=fields["entry_uids"],
+                user_root=user_ctx.user_root,
             )
 
     try:
@@ -1056,6 +1057,7 @@ async def api_invoice_create(
             invoice_output_dir=output_dir,
             client_key=client_key.strip(), lines=items, entity=entity or None,
             db_path=user_ctx.db_path, config_path=user_ctx.invoicing_config_path,
+            user_root=user_ctx.user_root,
         )
 
     try:

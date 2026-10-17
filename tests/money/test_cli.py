@@ -2161,3 +2161,97 @@ class TestInvoiceRecordVoid:
         output = json.loads(result.output)
         assert output["status"] == "error"
         assert "nobody" in output["error"]
+
+
+class TestInvoiceFilesStayInTheUsersTree:
+    """ISSUE-775: void, record-void and create reach PDFs only below the user root.
+
+    alice's ``invoices/generated`` (or its year folder) is a link into bob's
+    tree, which holds a PDF under the same invoice number.
+    """
+
+    TOML = (
+        'accounting_path = "books"\n'
+        'invoice_output = "invoices/generated"\n'
+        'next_invoice_number = 1\n\n'
+        '[company]\nname = "Test Co"\naddress = "123 Main"\n\n'
+        '[clients.acme]\nname = "Acme Corp"\nterms = 30\n\n'
+        '[services.dev]\ndisplay_name = "Development"\nrate = 150.0\ntype = "hours"\n'
+        'income_account = "Income:Dev"\n'
+    )
+
+    @pytest.fixture
+    def world(self, tmp_path):
+        user_root = tmp_path / "Users" / "alice"
+        data_dir = user_root / "Istota" / "money"
+        (data_dir / "books").mkdir(parents=True)
+        db_path = data_dir / "data" / "money.db"
+        db_path.parent.mkdir()
+        config_store.init_db(db_path)
+        _seed_invoicing(db_path, self.TOML)
+        obj = Context()
+        obj.users["alice"] = UserContext(
+            data_dir=data_dir, ledgers=[], db_path=db_path, user_root=user_root,
+        )
+        obj.activate_user("alice")
+        bob_gen = tmp_path / "Users" / "bob" / "Istota" / "money" / "invoices" / "generated"
+        (bob_gen / "2026").mkdir(parents=True)
+        victim = bob_gen / "2026" / "Invoice-000001-01_05_2026.pdf"
+        victim.write_bytes(b"%PDF bob")
+        (data_dir / "invoices").mkdir()
+        (data_dir / "invoices" / "generated").symlink_to(bob_gen, target_is_directory=True)
+        return obj, data_dir, victim
+
+    @staticmethod
+    def _issue(data_dir, number):
+        from datetime import date
+
+        from istota.money.work import add_work_entry, create_invoice, load_work_entries, write_transaction
+
+        add_work_entry(data_dir, "2026-01-02", "acme", "dev", qty=1, description=number)
+        uid = next(e.uid for e in load_work_entries(data_dir) if e.description == number)
+        with write_transaction(data_dir) as conn:
+            create_invoice(
+                conn, number=number, client="acme", entity="", group_name="",
+                issue_date=date(2026, 1, 5), total=150.0, entry_uids=[uid], pdf_path="",
+            )
+
+    def _run(self, runner, obj, *args):
+        result = runner.invoke(cli, ["-u", "alice", *args], obj=obj)
+        return json.loads(result.output)
+
+    @pytest.mark.parametrize("delete", [False, True])
+    def test_void_leaves_the_other_users_pdf_alone(self, runner, world, delete):
+        obj, data_dir, victim = world
+        self._issue(data_dir, "INV-000001")
+        args = ["invoice", "void", "INV-000001"] + (["--delete-pdf"] if delete else [])
+        output = self._run(runner, obj, *args)
+        assert output["status"] == "ok", output
+        assert victim.read_bytes() == b"%PDF bob"
+        assert sorted(p.name for p in victim.parent.iterdir()) == [victim.name]
+        assert not output["pdf_path"]
+        assert not output.get("pdf_deleted")
+
+    def test_record_void_leaves_the_other_users_pdf_alone(self, runner, world):
+        obj, data_dir, victim = world
+        self._issue(data_dir, "INV-000002")
+        output = self._run(
+            runner, obj, "invoice", "record-void", "INV-000001", "--client", "acme",
+            "--date", "2026-01-05", "--total", "150", "--voided-on", "2026-01-10",
+        )
+        assert output["status"] == "ok", output
+        assert victim.read_bytes() == b"%PDF bob"
+        assert sorted(p.name for p in victim.parent.iterdir()) == [victim.name]
+        assert not output["pdf_path"]
+
+    def test_create_writes_nothing_into_the_other_users_tree(self, runner, world, monkeypatch):
+        import sys
+        import types
+
+        fake = types.ModuleType("weasyprint")
+        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
+        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        obj, data_dir, victim = world
+        output = self._run(runner, obj, "invoice", "create", "acme", "-s", "dev", "-q", "1")
+        assert output["status"] == "error", output
+        assert sorted(p.name for p in victim.parent.parent.rglob("*")) == ["2026", victim.name]

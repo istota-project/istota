@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +68,7 @@ class Context:
         self.users: dict[str, UserContext] = {}
         self.active_user: str | None = None
         self.autoclass_lookup: bool = True
+        self.user_root: Path | None = None
 
     @property
     def has_single_user(self) -> bool:
@@ -89,6 +91,7 @@ class Context:
         self.tax_config_path = uctx.tax_config_path
         self.db_path = uctx.db_path
         self.autoclass_lookup = uctx.autoclass_lookup
+        self.user_root = uctx.user_root
         if uctx.data_dir is not None:
             from istota.money.work import bind_db_path  # noqa: PLC0415
 
@@ -234,6 +237,25 @@ def _load_invoicing_config(ctx: Context):
         accounting_path = Path(config.accounting_path).resolve()
         invoice_output_dir = Path(config.invoice_output).resolve()
     return config, accounting_path, invoice_output_dir
+
+
+@contextmanager
+def _invoice_output_tree(ctx: Context, config):
+    """The pinned invoice output tree for a void, or None to keep the path lookup.
+
+    None only where the context has no user root (a context not built by
+    ``resolve_for_user``). With one, a walk that refuses yields the empty
+    tree, so a void touches no PDF rather than falling back to a path that
+    may lead into another user's folder (ISSUE-775).
+    """
+    if ctx.user_root is None:
+        yield None
+        return
+    from istota.money.invoice_files import NO_OUTPUT_TREE, open_output_tree  # noqa: PLC0415
+
+    invoice_output = config.invoice_output if config is not None else None
+    with open_output_tree(ctx.user_root, ctx.data_dir, invoice_output) as tree:
+        yield tree or NO_OUTPUT_TREE
 
 
 def _require_injected_context(ctx) -> "Context":
@@ -1163,7 +1185,7 @@ def invoice_generate(ctx, period, client, entity, entry_uids, dry_run):
             entity_filter=entity, dry_run=dry_run,
             invoice_output_dir=invoice_output_dir,
             db_path=ctx.db_path, record_schedule=True,
-            entry_uids=list(entry_uids) or None,
+            entry_uids=list(entry_uids) or None, user_root=ctx.user_root,
         )
     except Exception as e:
         _output({"status": "error", "error": str(e)})
@@ -1365,6 +1387,7 @@ def invoice_create(ctx, client_key, service, qty, description, item, entity):
             accounting_path=accounting_path, invoice_output_dir=invoice_output_dir,
             client_key=client_key, lines=lines, entity=entity,
             db_path=ctx.db_path, config_path=ctx.invoicing_config_path,
+            user_root=ctx.user_root,
         )
     except Exception as e:
         _output({"status": "error", "error": str(e)})
@@ -1502,16 +1525,17 @@ def invoice_void(ctx, invoice_number, reason, replaced_by, force, delete_pdf):
 
     data_dir = _require_data_dir(ctx)
     try:
-        _, _, invoice_output_dir = _load_invoicing_config(ctx)
+        config, _, invoice_output_dir = _load_invoicing_config(ctx)
     except click.ClickException:
-        invoice_output_dir = None
+        config, invoice_output_dir = None, None
 
     try:
-        voided = void_invoice_with_cleanup(
-            data_dir, invoice_number, invoice_output_dir=invoice_output_dir,
-            reason=reason, replaced_by=replaced_by.split(","), force=force,
-            delete_pdf=delete_pdf,
-        )
+        with _invoice_output_tree(ctx, config) as tree:
+            voided = void_invoice_with_cleanup(
+                data_dir, invoice_number, invoice_output_dir=invoice_output_dir,
+                reason=reason, replaced_by=replaced_by.split(","), force=force,
+                delete_pdf=delete_pdf, output_tree=tree,
+            )
     except Exception as e:
         _output({"status": "error", "error": str(e)})
         return
@@ -1558,13 +1582,14 @@ def invoice_record_void(ctx, invoice_number, client_key, issue_date, total, void
         return
     try:
         config, _, invoice_output_dir = _load_invoicing_config(ctx)
-        recorded = record_past_void(
-            config, _require_data_dir(ctx), format_invoice_number(number),
-            invoice_output_dir=invoice_output_dir, client_key=client_key,
-            issue_date=issue_date.date(), total=total, voided_on=voided_on.date(),
-            entity=entity, reason=reason, replaced_by=replaced_by.split(","),
-            was_paid=was_paid,
-        )
+        with _invoice_output_tree(ctx, config) as tree:
+            recorded = record_past_void(
+                config, _require_data_dir(ctx), format_invoice_number(number),
+                invoice_output_dir=invoice_output_dir, client_key=client_key,
+                issue_date=issue_date.date(), total=total, voided_on=voided_on.date(),
+                entity=entity, reason=reason, replaced_by=replaced_by.split(","),
+                was_paid=was_paid, output_tree=tree,
+            )
     except Exception as e:
         _output({"status": "error", "error": str(e)})
         return
@@ -1672,7 +1697,7 @@ def run_scheduled(ctx, dry_run, skip_monarch, match_invoices, tolerance):
                 accounting_path=accounting_path, data_dir=data_dir,
                 client_filter=client_key, dry_run=dry_run,
                 invoice_output_dir=invoice_output_dir,
-                db_path=ctx.db_path, record_schedule=True,
+                db_path=ctx.db_path, record_schedule=True, user_root=ctx.user_root,
             )
             all_results.extend(results)
         for invoice_result in all_results:

@@ -971,3 +971,42 @@ class TestCreateRoute:
             "client": "acme", "items": [{"description": "x", "amount": 1}],
         })
         assert resp.status_code == 400
+
+    @pytest.mark.parametrize("output", ["/elsewhere/invoices", "../elsewhere"])
+    def test_invoice_output_outside_the_money_folder_is_400(
+        self, make_client, tmp_path, fake_pdf, output,
+    ):
+        client = make_client(_write_invoicing_config(tmp_path, output))
+        resp = client.post(self.URL, json={
+            "client": "acme", "items": [{"description": "x", "amount": 1}],
+        })
+        assert resp.status_code == 400
+        assert "inside the money folder" in resp.json()["error"]
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
+    def test_a_linked_year_folder_gets_no_pdf(
+        self, make_client, tmp_path, tmp_path_factory, monkeypatch,
+    ):
+        """ISSUE-775: the PDF is published through a no-follow walk from the
+        user root, even when the output folder is outside ``accounting_path``."""
+        import sys
+        import types
+
+        fake = types.ModuleType("weasyprint")
+        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
+        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        outside = tmp_path_factory.mktemp("outside")
+        cfg = _write_invoicing_config(tmp_path, "invoices/generated")
+        cfg.write_text(cfg.read_text().replace('accounting_path = "."', 'accounting_path = "books"'))
+        (tmp_path / "books").mkdir()
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / str(date.today().year)).symlink_to(outside, target_is_directory=True)
+
+        resp = make_client(cfg).post(self.URL, json={
+            "client": "acme", "items": [{"description": "x", "amount": 1}],
+        })
+        assert resp.status_code == 500
+        assert list(outside.iterdir()) == []
+        assert _invoices_in_db(tmp_path) == []

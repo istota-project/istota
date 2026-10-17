@@ -1161,6 +1161,14 @@ class TestInvoicingScalarShapes:
     def test_blank_values_are_a_noop(self):
         cs.check_invoicing_scalars({"default_ar_account": "", "currency": ""})
 
+    @pytest.mark.parametrize("value", ["/srv/elsewhere", "../elsewhere", "invoices/../../x"])
+    def test_invoice_output_must_stay_inside_the_money_folder(self, value):
+        """ISSUE-775: the web routes refuse such a value on read; refuse it on write."""
+        with pytest.raises(ValueError, match="invoice_output"):
+            cs.check_invoicing_scalars({"invoice_output": value})
+        cs.check_invoicing_scalars({"invoice_output": "invoices/generated"})
+        cs.check_invoicing_scalars({"invoice_output": ""})
+
 
 class TestMonarchAccountsReachTheLedger:
     """Every config value naming an account the sync posts to is shape-checked.
