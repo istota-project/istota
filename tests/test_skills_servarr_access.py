@@ -98,10 +98,16 @@ REQUESTER_VERBS = {"apps", "status", "search", "add", "queue", "why", "search-no
 ADMIN_ONLY_VERBS = set(VERBS) - REQUESTER_VERBS
 
 
+#: The refusals the tier check gives; anything else got past it.
+TIER_REFUSALS = {"not_authorized", "verb_requires_admin", "flag_requires_admin",
+                 "confirmation_not_allowed_here"}
+
+
 def allowed(code, envelope) -> bool:
+    """Whether the call got past the tier check, whatever the fake stack said."""
     if envelope.get("status") == "ok":
         return True
-    return envelope.get("reason") == "not_implemented"
+    return envelope.get("reason") not in TIER_REFUSALS
 
 
 class TestTheTable:
@@ -315,6 +321,8 @@ class TestTheSkillGate:
 class TestTheKeyNeverLeaks:
     @pytest.mark.parametrize("argv", [
         ["status"], ["status", "--app", "radarr"], ["describe"], ["describe", "--app", "lidarr"],
+        ["search", "Paris", "--kind", "film"], ["add", "--kind", "film", "--tmdb", "655"],
+        ["add", "--kind", "show", "--tvdb", "70533"], ["requests"],
     ])
     def test_failure_envelopes_carry_no_key(self, arr, monkeypatch, argv):
         import httpx

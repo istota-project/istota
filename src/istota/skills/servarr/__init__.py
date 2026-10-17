@@ -34,13 +34,12 @@ from istota.skills._hostpath import REMOTE, host_path
 from . import access, activity, library
 from .apps import APP_ORDER, KIND_APP, display_url, ignored
 from .client import ServarrError, envelope_for, resolve_host
+from .library import SERIES_MONITOR_MODES
 from .run import Run, run_deadline
 
 log = logging.getLogger(__name__)
 
 KINDS = tuple(KIND_APP)
-SERIES_MONITOR_MODES = ("all", "future", "missing", "existing", "firstSeason", "lastSeason",
-                        "pilot", "none")
 
 
 def _transport():
@@ -176,13 +175,13 @@ HANDLERS = {
     "apps": cmd_apps,
     "status": activity.cmd_status,
     "describe": library.cmd_describe,
-    "search": _later_stage("search"),
-    "add": _later_stage("add"),
+    "search": library.cmd_search,
+    "add": library.cmd_add,
     "queue": _later_stage("queue"),
     "why": _later_stage("why"),
     "wanted": _later_stage("wanted"),
     "search-now": _later_stage("search-now"),
-    "requests": _later_stage("requests"),
+    "requests": library.cmd_requests,
     "indexers": _later_stage("indexers"),
 }
 

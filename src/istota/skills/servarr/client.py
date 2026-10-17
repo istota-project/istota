@@ -129,6 +129,15 @@ def library_id(value) -> int:
     return int(text)
 
 
+def external_id(value, flag: str) -> int:
+    """A TMDB or TVDB id from argv (`flag` names it): a positive integer."""
+    text = str(value).strip()
+    if not _ID_RE.fullmatch(text):
+        raise ServarrError(f"{flag} {value!r} is not an id (a positive whole number); "
+                           f"nothing was sent.", "invalid_id", flag=flag)
+    return int(text)
+
+
 def mbid(value) -> str:
     """A MusicBrainz id from argv: a UUID, lowercased, or a refusal."""
     text = str(value).strip().lower()
