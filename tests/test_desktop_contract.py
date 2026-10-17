@@ -200,3 +200,31 @@ class TestTheBundle:
             assert re.fullmatch(r"[0-9a-f]{64}", pins[f"{name}_SOURCE_SHA256"])
             assert pins[f"{name}_VERSION"] in pins[f"{name}_SOURCE_URL"]
         assert pins["MACOSX_DEPLOYMENT_TARGET"] == "14.0"
+
+
+TEST_FEATURES = ("desktop-test-hooks", "m6-negative-control", "m9-negative-control")
+
+
+class TestTestBuildsStayOutOfReleases:
+    """The tier's hooks and the negative controls are cargo features that only
+    `scripts/test-desktop.sh` turns on: a first run started from the
+    environment, a key put on an argv, IPC in the web UI's window."""
+
+    def test_no_test_feature_is_on_by_default(self):
+        import tomllib
+
+        cargo = tomllib.loads((REPO / "desktop" / "src-tauri" / "Cargo.toml").read_text())
+        features = cargo["features"]
+        for name in TEST_FEATURES:
+            assert name in features, name
+        assert not set(features.get("default", [])) & set(TEST_FEATURES)
+
+    def test_only_the_tier_script_builds_them(self):
+        scripts = [p for p in (REPO / "scripts").iterdir() if p.is_file()]
+        scripts += list((REPO / "desktop").glob("*.sh")) + list((REPO / "desktop" / "lima").glob("*.sh"))
+        naming = sorted(
+            p.relative_to(REPO).as_posix()
+            for p in scripts
+            if any(name in p.read_text(errors="replace") for name in TEST_FEATURES)
+        )
+        assert naming == ["scripts/test-desktop.sh"]

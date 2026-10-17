@@ -29,8 +29,11 @@ npm --prefix desktop run check                            # svelte-check on the 
 uv run pytest tests/test_desktop_contract.py              # the command table against the scripts
 scripts/test-desktop.sh                                   # the desktop tier: builds the app and drives it
 scripts/test-desktop.sh --control m9                      # row M9's negative control, which must go red
+ISTOTA_DESKTOP_RELEASE=<out>/<tag> scripts/test-desktop.sh --control m6   # row M6's, which needs a release
 ```
+
+The tier builds the app with the `desktop-test-hooks` feature into `target/desktop-tier`, never `target/release`. With `ISTOTA_DESKTOP_RELEASE` naming a directory from `scripts/build-appliance.sh` (and `ISTOTA_DESKTOP_RELEASE_KEY` the public key it was signed with, when that is not the project's), `tests/desktop/test_first_run.py` runs a first run to the web UI in a scratch state directory, instance (`istota-dt`) and workspace under `~/.istota-dt`, and removes the VM, the folder and its Keychain item afterwards. Without one it skips.
 
 ## Where the app keeps things
 
-`~/Library/Application Support/Istota/` holds `state.json` (the profiles, and whether the local VM's first run finished), `release/<tag>/` (the release copied out of the app, which the VM mounts read-only), `lima/` (the app's own `LIMA_HOME`, excluded from Time Machine), `config/` (the Mac CLI's `XDG_CONFIG_HOME`) and `logs/`. `ISTOTA_DESKTOP_STATE_DIR` moves it, which the desktop tier uses. A command-line install's `~/.lima` and `~/.config/istota-stack` are never read or written.
+`~/Library/Application Support/Istota/` holds `state.json` (the profiles, and whether the local VM's first run finished), `release/<tag>/` (the release copied out of the app, which the VM mounts read-only), `lima/` (the app's own `LIMA_HOME`, excluded from Time Machine), `config/` (the Mac CLI's `XDG_CONFIG_HOME`) and `logs/`. `ISTOTA_DESKTOP_STATE_DIR` moves it, and `ISTOTA_DESKTOP_INSTANCE` names the app's Lima instance (`istota` by default), which also names the Mac CLI's Keychain item, `secret-key-<instance>`; the desktop tier sets both, and together they make a second install beside the first. A command-line install's `~/.lima` and `~/.config/istota-stack` are never read or written.

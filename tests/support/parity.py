@@ -68,6 +68,7 @@ ROWS: dict[int | str, str] = {
     # The Mac app spec's rows, numbered as that spec numbers them.
     "M1": "only the Mac user who owns the app logs in to the local install without a password",
     "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
+    "M6": "brain keys and the master key never sit in an argv or a file under the app's state",
     "M7": "no release artifact contains Claude Code or Google Chrome",
     "M9": "web UI content cannot call into the Mac app",
     "M10": "the stack runs only images a manifest signed by the pinned key names",
