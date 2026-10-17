@@ -1,9 +1,12 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminNextcloudConnection } from '$lib/api';
-  import { Badge, Button } from '$lib/components/ui';
+  import { Button } from '$lib/components/ui';
   import { formatRelative } from '$lib/dateFormat';
   import { waitForDoctorRun } from '$lib/doctorRun';
+  import { Cloud } from '@lucide/svelte';
+  import CheckResult from './CheckResult.svelte';
+  import ConnectionCard from './ConnectionCard.svelte';
 
   interface Props {
     connection: AdminNextcloudConnection;
@@ -26,10 +29,11 @@
 
   let check = $derived(connection.check);
   let badge = $derived(
-    check === null || check.status === 'skip' ? BADGE.none : BADGE[check.status],
-  );
-  let showRemedy = $derived(
-    check !== null && (check.status === 'warn' || check.status === 'fail') && check.remedy !== '',
+    !connection.configured
+      ? null
+      : check === null || check.status === 'skip'
+        ? BADGE.none
+        : BADGE[check.status],
   );
   // The URL comes from config and is shown as typed; only an http(s) address
   // becomes a link, so a stray scheme never lands in an href.
@@ -55,96 +59,91 @@
   }
 </script>
 
-<section class="card" data-testid="nextcloud-card">
-  <div class="card-head">
-    <h2>{connection.label}</h2>
-    {#if connection.configured}
-      <span class="status">
-        {#if check?.stale}
-          <span class="caption">the daemon's last report is old</span>
-        {/if}
-        <Badge variant={badge.variant}>{badge.label}</Badge>
-      </span>
-    {/if}
-  </div>
-
+<ConnectionCard
+  testid="nextcloud-card"
+  title={connection.label}
+  subtitle="Files, Talk and calendars, as the bot account"
+  icon={Cloud}
+  {badge}
+>
   {#if connection.configured}
-    <dl class="kv">
-      <dt>Server</dt>
-      <dd>
-        {#if linkable}
-          <a href={connection.url} target="_blank" rel="noopener noreferrer">{connection.url}</a>
-        {:else}
-          {connection.url}
-        {/if}
-      </dd>
-      <dt>Bot account</dt>
-      <dd>{connection.username || '—'}</dd>
-      <dt>Talk</dt>
-      <dd>
-        {connection.talk_enabled ? `On, as ${connection.talk_bot_username || '—'}` : 'Off'}
-      </dd>
-      <dt>Storage</dt>
-      <dd>
-        {connection.storage === 'nextcloud'
-          ? 'Nextcloud files, through the mount'
-          : 'Local workspace'}
-      </dd>
-    </dl>
+    <div class="panel">
+      <h3 class="micro-label">Account</h3>
+      <dl class="kv">
+        <dt>Server</dt>
+        <dd>
+          {#if linkable}
+            <a href={connection.url} target="_blank" rel="noopener noreferrer">{connection.url}</a>
+          {:else}
+            {connection.url}
+          {/if}
+        </dd>
+        <dt>Bot account</dt>
+        <dd>{connection.username || '—'}</dd>
+        <dt>Talk</dt>
+        <dd>
+          {connection.talk_enabled ? `On, as ${connection.talk_bot_username || '—'}` : 'Off'}
+        </dd>
+        <dt>Storage</dt>
+        <dd>
+          {connection.storage === 'nextcloud'
+            ? 'Nextcloud files, through the mount'
+            : 'Local workspace'}
+        </dd>
+      </dl>
+    </div>
 
-    {#if check}
-      <p class="summary">{check.detail}</p>
-      {#if showRemedy}
-        <p class="summary remedy" data-testid="nextcloud-remedy">{check.remedy}</p>
+    <div class="panel">
+      <h3 class="micro-label">Last check</h3>
+      <CheckResult
+        {check}
+        empty="The daemon has not recorded a check of this connection yet."
+        remedyTestid="nextcloud-remedy"
+      />
+      {#if check?.at}
+        <p class="caption stamp">checked {formatRelative(check.at)}</p>
       {/if}
-      {#if check.at}
-        <p class="caption">checked {formatRelative(check.at)}</p>
+      {#if check?.stale}
+        <p class="stale">the daemon's last report is old</p>
       {/if}
-    {:else}
-      <p class="summary">The daemon has not recorded a check of this connection yet.</p>
-    {/if}
+    </div>
 
     {#if error}
-      <div class="banner error">{error}</div>
+      <div class="banner error wide">{error}</div>
     {/if}
     {#if notice}
-      <div class="banner warn">{notice}</div>
+      <div class="banner warn wide">{notice}</div>
     {/if}
+  {:else}
+    <p class="summary wide">
+      This install has no Nextcloud: <code>[nextcloud] url</code> is not set, and the workspace is local.
+    </p>
+  {/if}
 
-    <div class="form-actions">
-      <Button variant="secondary" href={`${base}/admin/config`}>Change in Configuration</Button>
+  {#snippet actions()}
+    <Button variant="secondary" href={`${base}/admin/config`}>Configure</Button>
+    {#if connection.configured}
       <Button variant="secondary" onclick={checkNow} loading={checking} loadingLabel="Checking…"
         >Check now</Button
       >
-    </div>
-  {:else}
-    <p class="summary">
-      This install has no Nextcloud: <code>[nextcloud] url</code> is not set, and the workspace is local.
-    </p>
-    <div class="form-actions">
-      <Button variant="secondary" href={`${base}/admin/config`}>Change in Configuration</Button>
-    </div>
-  {/if}
-</section>
+    {/if}
+  {/snippet}
+</ConnectionCard>
 
 <style>
-  .status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .summary {
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
   }
 
-  .remedy {
-    color: var(--text-primary);
+  .stamp {
+    margin: 0;
   }
 
-  .caption {
+  .stale {
     margin: 0;
+    font-size: var(--text-xs);
+    color: var(--status-warn-fg);
   }
 </style>

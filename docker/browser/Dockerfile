@@ -1,11 +1,20 @@
-FROM python:3.12-slim-trixie
+# Two stages. `base` is everything but Google Chrome, the shared libraries its
+# .deb depends on included; `chrome` adds the .deb alone. A plain build gets
+# both, as istota-browser. A release ships istota-browser-base (`--target
+# base`), since Chrome may not be redistributed, and the VM's `istota-stack
+# local-layers` builds the chrome stage on it with BROWSER_BASE naming that
+# image, which downloads one file.
+ARG BROWSER_BASE=base
+
+FROM python:3.12-slim-trixie AS base
 
 # Set system locale so Chrome and Intl APIs use en_US natively
 # (avoids needing CDP Emulation.setLocaleOverride which only affects main page)
 ENV LANG=en_US.UTF-8
 ENV TZ=America/New_York
 
-# Install system deps: VNC, noVNC, Google Chrome, fonts, and utilities.
+# Install system deps: VNC, noVNC, fonts, utilities, and what Google Chrome's
+# .deb depends on (the chrome stage below installs Chrome itself).
 # The font packages are the debian12 `tools` list that `patchright install-deps`
 # used to install for us. That command is gone: Patchright 1.50 has no Debian 13
 # entry, so on trixie it falls back to its ubuntu20.04 list and asks for
@@ -13,7 +22,9 @@ ENV TZ=America/New_York
 # list by hand keeps the font set -- and so the font-fingerprint surface -- the
 # same as the bookworm image, where the detection picked debian12 correctly.
 # Chrome's own .deb pulls in the chromium shared libs, which is the rest of what
-# install-deps did.
+# install-deps did. Here they are what `apt-get install -s` of the .deb plans
+# besides Chrome, recommends included, installed by name; the .deb is removed
+# in the same layer.
 #
 # fonts-dejavu-core is not on that list: it arrived on bookworm as a *recommends*
 # of the install-deps apt call, which ran without --no-install-recommends. DejaVu
@@ -75,8 +86,10 @@ RUN --mount=type=cache,id=browser-apt-archives,target=/var/cache/apt-build,shari
     libfreetype6 \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
     && wget -q "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb" \
-    && apt-get install -y "./google-chrome-stable_current_${arch}.deb" \
-    && rm "google-chrome-stable_current_${arch}.deb" \
+    && apt-get install -s -y "./google-chrome-stable_current_${arch}.deb" > /tmp/chrome-plan \
+    && chrome_deps="$(awk '$1 == "Inst" && $2 != "google-chrome-stable" { print $2 }' /tmp/chrome-plan)" \
+    && apt-get install -y --no-install-recommends ${chrome_deps} \
+    && rm "google-chrome-stable_current_${arch}.deb" /tmp/chrome-plan \
     && rm -f /etc/apt/apt.conf.d/zz-build-cache
 
 # Create non-root user so Chrome doesn't show --no-sandbox infobar
@@ -142,3 +155,15 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -sf "http://localhost:9224/live?deep=1" || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]
+
+# Google Chrome, on top of everything else. `dpkg -i` rather than `apt-get
+# install`, which refuses a local .deb with --no-download: the base stage
+# already holds every package Chrome depends on, and `apt-get check` fails the
+# build if the .deb now wants one it does not.
+FROM ${BROWSER_BASE} AS chrome
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    wget -q -O /tmp/google-chrome.deb "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb"; \
+    dpkg -i /tmp/google-chrome.deb; \
+    apt-get check; \
+    rm /tmp/google-chrome.deb

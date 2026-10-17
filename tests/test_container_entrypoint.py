@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from istota import db, user_profiles
+from tests.support import parity
 
 REPO = Path(__file__).resolve().parent.parent
 ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"
@@ -589,6 +590,40 @@ class TestThePublicName:
         volume = Volume(tmp_path, SITE_CONFIG)
 
         assert volume.run(INGRESS="local", DOMAIN="localhost").returncode == 0
+
+
+LOCAL_CODE_CONFIG = LOCAL_CONFIG + """
+[web]
+auth = ["local_code", "email"]
+
+[site]
+hostname = "localhost:8181"
+"""
+
+
+@parity.witness("M1")
+class TestLocalLoginCodesOnlyUnderLocalIngress:
+    """M1's ingress half: a login code is a password-free login, safe only on a
+    stack nginx publishes on the Mac's loopback. The web service waits on this
+    daemon being healthy, so the refusal keeps both down."""
+
+    @pytest.mark.parametrize("ingress", ["direct", "proxied"])
+    def test_any_other_ingress_is_refused(self, tmp_path, ingress):
+        volume = Volume(tmp_path, LOCAL_CODE_CONFIG)
+
+        result = volume.run(INGRESS=ingress, DOMAIN="localhost:8181")
+
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "local_code" in result.stderr
+        assert volume.calls() == []
+
+    @pytest.mark.parametrize("env", [{"INGRESS": "local"}, {}])
+    def test_local_ingress_starts(self, tmp_path, env):
+        volume = Volume(tmp_path, LOCAL_CODE_CONFIG)
+
+        result = volume.run(**env)
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestClaudeCode:

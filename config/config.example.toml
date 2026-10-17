@@ -1277,7 +1277,9 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # port = 8766
 #
 # Login methods: "nextcloud", "email", or both. ["none"] turns login off and
-# works only with `istota serve` on loopback.
+# works only with `istota serve` on loopback. "local_code" is the Mac app's
+# one-use login codes; it needs hostname = "localhost:<port>" under [site] and
+# the stack refuses it under any ingress but local.
 # auth = ["nextcloud"]
 # auth_enrol_ttl_hours = 168
 # auth_reset_ttl_hours = 1

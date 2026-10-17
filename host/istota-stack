@@ -8,10 +8,28 @@
 #                               the same for any tag, signed or not, on request
 #   istota-stack update --unsigned latest
 #                               the tip of main, recorded as main-<commit>
+#   istota-stack update <tag> --bundle FILE
+#                               the same signed release, its tag taken from a git bundle
+#                               (the Mac app's release) rather than fetched from origin
+#   istota-stack update <tag> --images DIR [--bundle FILE]
+#                               the same signed release, its images loaded from DIR's
+#                               images-<tag>.tar under a manifest the release key signed,
+#                               rather than built
+#   istota-stack local-layers   build what a release's images leave out because it may not
+#                               be redistributed, as host.env's ISTOTA_LOCAL_LAYERS names
+#                               (both when unset): Claude Code as istota:<tag>-cc, which
+#                               the stack then runs, and Chrome as istota-browser:<tag>
+#   istota-stack local-layers --status
+#                               one JSON line per layer: absent, building, ready or failed
+#   istota-stack trust-signer KEY
+#                               print the fingerprint of KEY, one line of an SSH public
+#                               key, and make it the one key releases are verified against
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
 #   istota-stack rollback       back to the previous tag, if its image can run the database;
 #                               reprovisions the host as update does
-#   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
+#   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force;
+#                               --desktop-app makes a local install moved into the Mac
+#                               app the app's: its login codes and settings)
 #   istota-stack setup --web [--local]
 #                               the first setup in a browser: prints an address and a
 #                               one-use code, then installs, builds and starts the stack
@@ -94,6 +112,23 @@
 # of origin's main and records it as main-<first 12 hex of the commit>, which
 # names that commit for good, so rollback and the image tags work as for a tag.
 # A main-<hex> name resolves only to a commit of main, never to any commit.
+#
+# `update <tag> --bundle FILE` changes only where the tag comes from: the one
+# tag is fetched out of the bundle, never over an existing tag of that name,
+# and verified as any release is. It refuses --unsigned. `trust-signer` is the
+# one way the release key changes, and no update writes allowed_signers.
+#
+# `update <tag> --images DIR` changes only where the images come from. After the
+# tag is verified, DIR's images-<tag>.json must carry a good SSH signature in the
+# istota-images namespace against the same allowed_signers, name the tag and the
+# archive's SHA-256, and every image `docker load` reports must be one it names,
+# at the ID it names. A refusal after the load puts back what the load replaced.
+# Nothing is built. It refuses --unsigned. Once the stack is up it runs
+# `local-layers`, which builds on those images what no release may carry:
+# Claude Code (istota:<tag>-cc, named by .env's ISTOTA_IMAGE) and Google Chrome
+# (istota-browser:<tag>, FROM the archive's istota-browser-base:<tag>). A layer
+# that fails leaves the stack on the release's own image. A server's update
+# builds both into the full images and never runs it.
 set -euo pipefail
 # A hardened host (umask 027) would check the tree out root-only, and the
 # image builds copy those modes in, out of uid 10001's reach.
@@ -134,6 +169,11 @@ APPARMOR_SYSFS="${ISTOTA_APPARMOR_SYSFS:-/sys/kernel/security/apparmor}"
 APPARMOR_DIR="${ISTOTA_APPARMOR_DIR:-/etc/apparmor.d}"
 # A scratch directory a command removes on exit.
 staging=""
+# Set once `update --images` has loaded and checked the release's images, so
+# the update builds none of them.
+images_loaded=""
+# The SSH signature namespace of an images manifest, beside git's for tags.
+IMAGES_NAMESPACE=istota-images
 # Exit codes: 1 a failure, 2 `apply` changed something, 3 the older image
 # refused the database (rollback), 64 usage, 65 a tag refused.
 EXIT_REFUSED_TAG=65
@@ -190,8 +230,11 @@ file_set() {
     if [ -f "$file" ]; then cat "$file" > "$tmp"; fi
     while [ "$#" -gt 0 ]; do
         local key="${1%%=*}" value="${1#*=}"
-        case "$value" in *$'\n'*) rm -f "$tmp"; die "a value for ${key} holds a newline" ;; esac
-        awk -F= -v k="$key" -v v="$value" '
+        case "$value" in *$'\n'*|*$'\r'*) rm -f "$tmp"; die "a value for ${key} holds a line break" ;; esac
+        # The value through the environment: awk -v would turn a literal \n
+        # in it into a line of its own.
+        FILE_SET_VALUE="$value" awk -F= -v k="$key" '
+            BEGIN { v = ENVIRON["FILE_SET_VALUE"] }
             $1 == k { if (!done) { print k "=" v; done = 1 }; next }
             { print }
             END { if (!done) print k "=" v }' "$tmp" > "${tmp}.new"
@@ -313,6 +356,11 @@ compose() {
             unset ISTOTA_BUILD_REVISION ISTOTA_BUILD_TAG
         fi
         if [ -n "$requests" ]; then export ISTOTA_REQUESTS_DIR="$requests"; fi
+        # A caller naming a tag means that tag's own image, for a build, the
+        # devbox render or rollback's schema check: .env's ISTOTA_IMAGE is
+        # the running tag's -cc layer, and a build would be tagged as it.
+        # Empty rather than unset, since the environment outranks .env.
+        if [ -n "${ISTOTA_TAG:-}" ]; then export ISTOTA_IMAGE=""; fi
         if [ -n "$ignore_orphans" ]; then export COMPOSE_IGNORE_ORPHANS=1; fi
         ISTOTA_SECRETS_DIR="$SECRETS_DIR" \
         ISTOTA_CONFIG_DIR="$CONFIG_DIR" \
@@ -491,17 +539,31 @@ PY
 # `down` nor `--remove-orphans` stops its container. One-off containers (setup,
 # apply) are left alone.
 stack_up() {
-    local active id service
+    local active id service tag missing up_args=(up -d --remove-orphans)
     ensure_data_dir
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     # Rendered by the script that starts the stack, so it names this script's
     # /data: one an older istota-stack rendered names a volume nothing mounts.
     if [ -s "$DEVBOX_COMPOSE" ]; then
-        render_devbox_compose "$(env_get "$ENV_FILE" ISTOTA_TAG)" \
+        render_devbox_compose "$tag" \
             || die "the devbox compose file could not be rendered; the stack was not started."
     fi
-    # Explicit: a caller on the left of `||` runs this with set -e off.
-    compose up -d --remove-orphans || return $?
     active="$(compose config --services)"
+    # The app's images came from a release archive: an `up` that built one
+    # would fetch from the network (Chrome, for the browser's), which a VM
+    # with none fails half-way. What a local layer has not made yet waits
+    # for run_local_layers, which starts it.
+    if desktop_app; then
+        up_args+=(--no-build)
+        missing="$(missing_service_images "$tag")"
+        if [ -n "$missing" ]; then
+            log "no image for $(echo "$missing" | tr '\n' ' ')on ${tag} yet (\`istota-stack local-layers\` makes it); starting the rest"
+            # shellcheck disable=SC2207
+            up_args+=($(grep -vxF -f <(printf '%s\n' "$missing") <<<"$active" || true))
+        fi
+    fi
+    # Explicit: a caller on the left of `||` runs this with set -e off.
+    compose "${up_args[@]}" || return $?
     docker ps -a --filter "label=com.docker.compose.project=${PROJECT}" --filter label=com.docker.compose.oneoff=False \
             --format '{{.ID}} {{.Label "com.docker.compose.service"}}' | while read -r id service; do
         [ -n "$id" ] || continue
@@ -565,7 +627,7 @@ build_devbox_images() {
 image_lacks_what_config_needs() {
     local tag="$1" config="${2:-}" env installed version pin
     [ "$(needs_claude_code ${config:+"$config"})" = 1 ] || return 0
-    env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${IMAGE}:${tag}" 2>/dev/null || true)"
+    env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(stack_image "$tag")" 2>/dev/null || true)"
     installed="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_INSTALLED=//p')"
     version="$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p')"
     pin="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
@@ -574,6 +636,38 @@ image_lacks_what_config_needs() {
     elif [ -n "$pin" ] && [ "$version" != "$pin" ]; then
         echo "the ${tag} image has Claude Code ${version}, and host.env pins ${pin}"
     fi
+}
+
+# A VM the Mac's `create --appliance` made: its images are a release's, loaded
+# from the archive and built without Claude Code or Chrome.
+desktop_app() {
+    [ "$(env_get "$HOST_ENV" ISTOTA_DESKTOP_APP)" = 1 ]
+}
+
+# The command that gives a tag's stack what image_lacks_what_config_needs names.
+image_remedy() {
+    if desktop_app; then echo "istota-stack local-layers"; else echo "istota-stack update $1"; fi
+}
+
+# The image daemon and web run for a tag: its Claude Code layer when .env names
+# it and it exists, else the tag's own.
+stack_image() {
+    local tag="$1" layer
+    layer="$(cc_image "$tag")"
+    if [ "$(env_get "$ENV_FILE" ISTOTA_IMAGE)" = "$layer" ] && docker image inspect "$layer" >/dev/null 2>&1; then
+        echo "$layer"
+    else
+        echo "${IMAGE}:${tag}"
+    fi
+}
+
+cc_image() { echo "${IMAGE}:$1-cc"; }
+
+# .env's ISTOTA_IMAGE for a tag being switched to: its Claude Code layer when
+# one was built for it (a rollback, or an update to the tag already running),
+# else empty, and the tag's own image runs.
+image_for_switch() {
+    if docker image inspect "$(cc_image "$1")" >/dev/null 2>&1; then cc_image "$1"; fi
 }
 
 # The services this stack builds whose image for the tag does not exist, one
@@ -595,6 +689,8 @@ prune_images() {
     docker image ls --format '{{.Repository}}:{{.Tag}}' | while read -r ref; do
         case "$ref" in "${IMAGE}":*|istota-*:*) ;; *) continue ;; esac
         tag="${ref##*:}"
+        # A Claude Code layer goes with its tag.
+        case "$ref" in "${IMAGE}":*-cc) tag="${tag%-cc}" ;; esac
         if [ "$tag" = "$keep_current" ] || [ "$tag" = "$keep_previous" ]; then continue; fi
         docker image rm "$ref" >/dev/null 2>&1 || log "could not remove ${ref}; in use?"
     done
@@ -665,21 +761,413 @@ latest_name() {
 
 # --- commands ----------------------------------------------------------------
 
+# The release's tag from a git bundle, in place of origin: that one ref and
+# nothing else. Without a `+` git will not move a tag the checkout already has,
+# so a bundle cannot repoint a name an earlier update or a rollback trusts.
+fetch_release_bundle() {
+    local bundle="$1" tag="$2"
+    case "$bundle" in /*) ;; *) bundle="${PWD}/${bundle}" ;; esac
+    [ -f "$bundle" ] || die "${bundle} is not a file; nothing was changed."
+    verified_git fetch --quiet --no-tags "$bundle" "refs/tags/${tag}:refs/tags/${tag}" \
+        || die "could not take ${tag} from ${bundle} (no such tag in it, or a different ${tag} is already here); nothing was changed."
+}
+
+# --- release images ----------------------------------------------------------
+
+refuse_images() { echo "[istota-stack] REFUSE: $*" >&2; exit "$EXIT_REFUSED_TAG"; }
+
+# Whether some line of $3 has $2, exactly, as its field $1.
+has_field() {
+    awk -v n="$1" -v want="$2" '$n == want { found = 1 } END { exit !found }' <<<"$3"
+}
+
+# Whether the manifest's signature is good in the istota-images namespace for a
+# principal allowed_signers trusts in it: the file and key tags are verified
+# with, so `trust-signer` changes both together.
+images_manifest_signed() {
+    local manifest="$1" signature="$2" principal principals
+    principals="$(ssh-keygen -Y find-principals -f "$ALLOWED_SIGNERS" -s "$signature" 2>/dev/null)" || return 1
+    while IFS= read -r principal; do
+        [ -n "$principal" ] || continue
+        if ssh-keygen -Y verify -f "$ALLOWED_SIGNERS" -I "$principal" -n "$IMAGES_NAMESPACE" \
+                -s "$signature" < "$manifest" >/dev/null 2>&1; then
+            return 0
+        fi
+    done <<<"$principals"
+    return 1
+}
+
+# The manifest's images as "<ref> <id>" lines, once it names this tag and the
+# archive's digest; otherwise "REFUSE <why>" and a non-zero exit. Read only
+# after the signature is good. Canonical JSON only (sorted keys, no whitespace),
+# the form scripts/sign-images-manifest.sh writes, so no second parser can read
+# one signed document another way. An istota image is named for this tag:
+# another tag's are what rollback runs.
+images_manifest_entries() {
+    python3 -I - "$1" "$2" "$3" <<'PY'
+import hashlib, json, re, sys
+
+manifest, tag, archive = sys.argv[1:4]
+
+
+def refuse(why):
+    print(f"REFUSE {why}")
+    sys.exit(2)
+
+
+with open(manifest, encoding="utf-8") as f:
+    text = f.read()
+try:
+    doc = json.loads(text)
+except ValueError:
+    refuse(f"{manifest} is not JSON")
+if not isinstance(doc, dict) or json.dumps(doc, sort_keys=True, separators=(",", ":")) != text:
+    refuse(f"{manifest} is not canonical JSON (sorted keys, no whitespace)")
+if doc.get("tag") != tag:
+    refuse(f"{manifest} is the manifest of {doc.get('tag')!r}, not {tag}")
+expected = doc.get("archive_sha256")
+if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+    refuse(f"{manifest} names no archive SHA-256")
+images = doc.get("images")
+if not isinstance(images, list) or not images:
+    refuse(f"{manifest} names no images")
+seen = set()
+for entry in images:
+    if not isinstance(entry, dict) or set(entry) != {"ref", "id"}:
+        refuse(f"{manifest} has an image entry that is not a ref and an id")
+    ref, image_id = entry["ref"], entry["id"]
+    if not isinstance(ref, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]{1,128}", ref):
+        refuse(f"{manifest} names an image by something other than name:tag: {ref!r}")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        refuse(f"{manifest} gives {ref} no sha256 image ID")
+    name, _, ref_tag = ref.rpartition(":")
+    if (name == "istota" or name.startswith("istota-")) and ref_tag != tag:
+        refuse(f"{manifest} names {ref}, an istota image of a tag other than {tag}")
+    if ref in seen:
+        refuse(f"{manifest} names {ref} twice")
+    seen.add(ref)
+digest = hashlib.sha256()
+with open(archive, "rb") as f:
+    for block in iter(lambda: f.read(1 << 20), b""):
+        digest.update(block)
+if digest.hexdigest() != expected:
+    refuse(f"the SHA-256 of {archive} is {digest.hexdigest()}, and the manifest names {expected}")
+for entry in images:
+    print(entry["ref"], entry["id"])
+PY
+}
+
+# Put back what a refused load replaced: each ref the manifest names on the ID
+# it had before, or removed when it had none, and any other image the load
+# reported removed. $1 is "<ref> <previous id, or ->" lines, $2 the load's output.
+put_back_images() {
+    local priors="$1" output="$2" ref prior current line
+    while read -r ref prior; do
+        [ -n "$ref" ] || continue
+        current="$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)"
+        if [ "$prior" = "-" ]; then
+            [ -z "$current" ] || docker image rm "$ref" >/dev/null 2>&1 || log "WARNING: could not remove ${ref}"
+        elif [ "$current" != "$prior" ]; then
+            docker image tag "$prior" "$ref" || log "WARNING: could not put ${ref} back on ${prior}"
+        fi
+    done <<<"$priors"
+    while IFS= read -r line; do
+        case "$line" in
+            "Loaded image: "*) ref="${line#Loaded image: }" ;;
+            "Loaded image ID: "*) ref="${line#Loaded image ID: }" ;;
+            *) continue ;;
+        esac
+        has_field 1 "$ref" "$priors" && continue
+        docker image rm "$ref" >/dev/null 2>&1 || log "WARNING: could not remove ${ref}"
+    done <<<"$output"
+}
+
+# `update --images`: the release's images from DIR, under a manifest the release
+# key signed, in place of a build. Every check before the load changes nothing;
+# one that fails after it puts back what the load replaced.
+load_release_images() {
+    local dir="$1" tag="$2" archive manifest signature entries priors="" output ref id prior line wrong=""
+    case "$dir" in /*) ;; *) dir="${PWD}/${dir}" ;; esac
+    archive="${dir}/images-${tag}.tar"
+    manifest="${dir}/images-${tag}.json"
+    signature="${manifest}.sig"
+    [ -f "$archive" ] && [ -f "$manifest" ] \
+        || die "${dir} does not hold images-${tag}.tar and images-${tag}.json; nothing was changed."
+    [ -f "$signature" ] || refuse_images "${manifest} is not signed (no ${signature}); nothing was changed."
+    if ! images_manifest_signed "$manifest" "$signature"; then
+        refuse_images "${manifest} is not signed by the key in ${ALLOWED_SIGNERS} for ${IMAGES_NAMESPACE} (its line must name namespaces=\"git,${IMAGES_NAMESPACE}\", as provision.sh writes it); nothing was changed."
+    fi
+    if ! entries="$(images_manifest_entries "$manifest" "$tag" "$archive")"; then
+        refuse_images "${entries#REFUSE }; nothing was changed."
+    fi
+
+    while read -r ref id; do
+        prior="$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)"
+        priors+="${ref} ${prior:--}"$'\n'
+    done <<<"$entries"
+    log "loading the images of ${tag} from ${archive}"
+    if ! output="$(docker load -i "$archive")"; then
+        put_back_images "$priors" "$output"
+        die "docker load of ${archive} failed; .env, the checkout and the running stack are unchanged."
+    fi
+    # Every image the archive held is one the manifest names, and every name
+    # the manifest gives is on the ID it gives.
+    while IFS= read -r line; do
+        case "$line" in
+            "Loaded image: "*)
+                ref="${line#Loaded image: }"
+                has_field 1 "$ref" "$priors" || wrong="${ref} is in the archive and not in the manifest" ;;
+            "Loaded image ID: "*)
+                id="${line#Loaded image ID: }"
+                has_field 2 "$id" "$entries" || wrong="the archive holds ${id}, which the manifest does not name" ;;
+        esac
+    done <<<"$output"
+    while read -r ref id; do
+        [ "$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true)" = "$id" ] \
+            || wrong="${ref} did not load as ${id}"
+    done <<<"$entries"
+    if [ -n "$wrong" ]; then
+        put_back_images "$priors" "$output"
+        refuse_images "${wrong}; the loaded images were removed, and .env, the checkout and the running stack are unchanged."
+    fi
+    log "the images of ${tag} loaded, and match the signed manifest"
+}
+
+# --- local layers ------------------------------------------------------------
+
+# Each layer's last run, for `--status`: <layer>.state (state, tag, pid) and
+# <layer>.log, the build's output. Root's.
+LOCAL_LAYERS_DIR="${STACK}/local-layers"
+LOCAL_LAYER_NAMES="claude-code chrome"
+BROWSER_BASE_IMAGE=istota-browser-base
+BROWSER_IMAGE=istota-browser
+
+# host.env's ISTOTA_LOCAL_LAYERS, separated by spaces or commas, quotes
+# dropped; every layer when the key is absent.
+wanted_local_layers() {
+    local value name
+    if ! grep -q '^ISTOTA_LOCAL_LAYERS=' "$HOST_ENV" 2>/dev/null; then
+        echo "$LOCAL_LAYER_NAMES"
+        return
+    fi
+    value="$(env_get "$HOST_ENV" ISTOTA_LOCAL_LAYERS | tr -d "\"'" | tr ',' ' ')"
+    for name in $value; do
+        case " ${LOCAL_LAYER_NAMES} " in
+            *" ${name} "*) printf '%s ' "$name" ;;
+            *) log "WARNING: ISTOTA_LOCAL_LAYERS names '${name}', which is no layer (${LOCAL_LAYER_NAMES})" >&2 ;;
+        esac
+    done
+    echo
+}
+
+layer_wanted() {
+    case " $(wanted_local_layers) " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+layer_state_set() {
+    local layer="$1" state="$2" tag="$3" tmp
+    install -d -m 0700 "$LOCAL_LAYERS_DIR"
+    tmp="$(mktemp "${LOCAL_LAYERS_DIR}/.${layer}.XXXXXX")"
+    printf 'state=%s\ntag=%s\npid=%s\n' "$state" "$tag" "$$" > "$tmp"
+    mv "$tmp" "${LOCAL_LAYERS_DIR}/${layer}.state"
+}
+
+# The version the Claude Code layer installs: host.env's pin, else the one the
+# release's image was built for (its Dockerfile's default), so the pin is the
+# release's.
+claude_code_layer_version() {
+    local tag="$1" version
+    version="$(env_get "$HOST_ENV" CLAUDE_CODE_VERSION)"
+    if [ -z "$version" ]; then
+        version="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${IMAGE}:${tag}" 2>/dev/null \
+            | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p' || true)"
+    fi
+    echo "$version"
+}
+
+# Whether a layer's image is there for the tag: Claude Code's at the version
+# it would install, and named by .env so the stack runs it.
+layer_ready() {
+    local layer="$1" tag="$2" image env
+    case "$layer" in
+        claude-code)
+            image="$(cc_image "$tag")"
+            [ "$(env_get "$ENV_FILE" ISTOTA_IMAGE)" = "$image" ] || return 1
+            env="$(docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$image" 2>/dev/null)" || return 1
+            [ "$(printf '%s\n' "$env" | sed -n 's/^ISTOTA_CLAUDE_CODE_VERSION=//p')" = "$(claude_code_layer_version "$tag")" ] ;;
+        chrome)
+            docker image inspect "${BROWSER_IMAGE}:${tag}" >/dev/null 2>&1 ;;
+    esac
+}
+
+# FROM the release's image, the npm install docker/istota/Dockerfile runs when
+# INSTALL_CLAUDE_CODE=1, and the two variables check-image and doctor read.
+build_claude_code_layer() {
+    local tag="$1" log="$2" version dockerfile rc=0
+    version="$(claude_code_layer_version "$tag")"
+    if ! [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+        echo "no Claude Code version to install: ${IMAGE}:${tag} names none and host.env pins none" > "$log"
+        return 1
+    fi
+    dockerfile="$(mktemp)"
+    # The variables are the Dockerfile's, expanded by docker, not here.
+    # shellcheck disable=SC2016
+    printf 'FROM %s\nARG CLAUDE_CODE_VERSION\nRUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"\nENV ISTOTA_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} ISTOTA_CLAUDE_CODE_INSTALLED=1\n' \
+        "${IMAGE}:${tag}" > "$dockerfile"
+    BUILDX_BUILDER=default docker build --build-arg "CLAUDE_CODE_VERSION=${version}" \
+        -t "$(cc_image "$tag")" - < "$dockerfile" > "$log" 2>&1 || rc=$?
+    rm -f -- "$dockerfile"
+    return "$rc"
+}
+
+# The checkout's browser Dockerfile, its chrome stage on the release's base
+# image rather than on a base built here.
+build_chrome_layer() {
+    local tag="$1" log="$2"
+    if ! docker image inspect "${BROWSER_BASE_IMAGE}:${tag}" >/dev/null 2>&1; then
+        echo "there is no ${BROWSER_BASE_IMAGE}:${tag} image to build Chrome on" > "$log"
+        return 1
+    fi
+    BUILDX_BUILDER=default docker build --build-arg "BROWSER_BASE=${BROWSER_BASE_IMAGE}:${tag}" \
+        --target chrome -t "${BROWSER_IMAGE}:${tag}" "${SRC}/docker/browser" > "$log" 2>&1
+}
+
+# Build each wanted layer the tag lacks, drop the Claude Code layer when it is
+# not wanted, and recreate a running stack whose image changed. Non-zero when a
+# wanted layer is not ready. update calls it on the left of ||, where set -e
+# is off, so each step checks its own status.
+run_local_layers() {
+    local tag="$1" layer rc=0 before after browser_built=""
+    before="$(env_get "$ENV_FILE" ISTOTA_IMAGE)"
+    install -d -m 0700 "$LOCAL_LAYERS_DIR"
+    for layer in $LOCAL_LAYER_NAMES; do
+        if ! layer_wanted "$layer"; then
+            if [ "$layer" = claude-code ] && [ -n "$before" ]; then
+                log "Claude Code is not wanted (ISTOTA_LOCAL_LAYERS); the stack goes back to ${IMAGE}:${tag}"
+                env_set "ISTOTA_IMAGE="
+            fi
+            (cd "$LOCAL_LAYERS_DIR" && rm -f -- "${layer}.state" "${layer}.log")
+            continue
+        fi
+        if layer_ready "$layer" "$tag"; then
+            layer_state_set "$layer" ready "$tag"
+            continue
+        fi
+        log "building the ${layer} layer for ${tag}"
+        layer_state_set "$layer" building "$tag"
+        if "build_${layer//-/_}_layer" "$tag" "${LOCAL_LAYERS_DIR}/${layer}.log"; then
+            if [ "$layer" = claude-code ]; then env_set "ISTOTA_IMAGE=$(cc_image "$tag")"; fi
+            if [ "$layer" = chrome ]; then browser_built=1; fi
+            layer_state_set "$layer" ready "$tag"
+            log "the ${layer} layer is ready"
+        else
+            layer_state_set "$layer" failed "$tag"
+            log "the ${layer} layer failed: ${LOCAL_LAYERS_DIR}/${layer}.log"
+            rc=1
+        fi
+    done
+    after="$(env_get "$ENV_FILE" ISTOTA_IMAGE)"
+    # A new image for daemon and web, or the browser's, which stack_up leaves
+    # down on the app's VM until its layer exists.
+    if [ -n "$browser_built" ] && ! compose config --services 2>/dev/null | grep -qx browser; then
+        browser_built=""
+    fi
+    if { [ "$after" != "$before" ] || [ -n "$browser_built" ]; } && [ -f "${CONFIG_DIR}/config.toml" ] \
+            && [ -n "$(compose ps -q "$(main_service)" 2>/dev/null)" ]; then
+        log "bringing the stack up on ${after:-${IMAGE}:${tag}} with the layers built"
+        stack_up || { log "the stack did not come up on ${after:-${IMAGE}:${tag}}"; rc=1; }
+    fi
+    if [ -z "$after" ] && [ -n "$before" ]; then
+        docker image rm "$before" >/dev/null 2>&1 || log "WARNING: could not remove ${before}"
+    fi
+    return "$rc"
+}
+
+# One JSON line per layer for the app: building while a run that is still
+# alive says so, ready when the image is there, failed with the build's last
+# lines when this tag's last run failed or died, otherwise absent.
+local_layers_status() {
+    local tag layer file state state_tag pid detail
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    for layer in $LOCAL_LAYER_NAMES; do
+        file="${LOCAL_LAYERS_DIR}/${layer}.state"
+        state="$(env_get "$file" state)"
+        state_tag="$(env_get "$file" tag)"
+        pid="$(env_get "$file" pid)"
+        detail=""
+        if [ -z "$tag" ]; then
+            state=absent; detail="no release is installed"
+        elif [ "$state" = building ] && [ "$state_tag" = "$tag" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            detail="building for ${tag}"
+        elif ! layer_wanted "$layer"; then
+            state=absent; detail="not wanted: ISTOTA_LOCAL_LAYERS in host.env leaves it out"
+        elif layer_ready "$layer" "$tag"; then
+            state=ready
+        elif [ "$state_tag" = "$tag" ] && { [ "$state" = failed ] || [ "$state" = building ]; }; then
+            if [ "$state" = building ]; then
+                detail="the run building it ended before it finished"
+            else
+                detail="$(tail -n 20 "${LOCAL_LAYERS_DIR}/${layer}.log" 2>/dev/null || true)"
+            fi
+            state=failed
+        else
+            state=absent
+        fi
+        python3 -I -c 'import json, sys; print(json.dumps({"layer": sys.argv[1], "state": sys.argv[2], "detail": sys.argv[3]}))' \
+            "$layer" "$state" "$detail"
+    done
+}
+
+cmd_local_layers() {
+    case "${1:-}" in
+        --status) [ "$#" -eq 1 ] || { usage >&2; exit 64; }; local_layers_status; return ;;
+        "") ;;
+        *) usage >&2; exit 64 ;;
+    esac
+    local tag
+    tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    [ -n "$tag" ] || die "no release is installed yet: \`istota-stack update <tag>\` first."
+    run_local_layers "$tag" || exit 1
+}
+
 cmd_update() {
-    local unsigned=""
-    if [ "${1:-}" = "--unsigned" ]; then unsigned=1; shift; fi
-    local newest=""
-    if [ "$#" -eq 0 ] && [ -z "$unsigned" ]; then
+    local unsigned="" bundle="" images="" tag="" tags=0 newest=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --unsigned) unsigned=1 ;;
+            --bundle)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                bundle="$2"
+                shift ;;
+            --images)
+                [ "$#" -ge 2 ] || { usage >&2; exit 64; }
+                images="$2"
+                shift ;;
+            *) tag="$1"; tags=$((tags + 1)) ;;
+        esac
+        shift
+    done
+    if [ -n "$bundle" ] && [ -n "$unsigned" ]; then
+        refuse_tag "--bundle installs only a signed release; --unsigned is refused with it."
+    fi
+    if [ -n "$images" ] && [ -n "$unsigned" ]; then
+        refuse_tag "--images loads only a signed release's images; --unsigned is refused with it."
+    fi
+    if [ "$tags" -eq 0 ] && [ -z "$unsigned" ] && [ -z "$bundle" ] && [ -z "$images" ]; then
         newest=1
-    elif [ "$#" -ne 1 ]; then
+    elif [ "$tags" -ne 1 ]; then
         usage >&2; exit 64
     fi
-    local tag="${1:-}" object before
+    local object before
     [ -n "$newest" ] || check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
-    verified_git fetch --quiet --tags origin \
-        "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
-        || die "git fetch failed; nothing was changed."
+    if [ -n "$bundle" ]; then
+        fetch_release_bundle "$bundle" "$tag"
+    else
+        verified_git fetch --quiet --tags origin \
+            "+refs/heads/${LATEST_BRANCH}:refs/remotes/origin/${LATEST_BRANCH}" \
+            || die "git fetch failed; nothing was changed."
+    fi
     if [ -n "$newest" ]; then
         tag="$(verified_git tag --list | newest_release_tag)" \
             || die "origin has no release tag (vX.Y.Z); \`istota-stack update <tag>\` names one. Nothing was changed."
@@ -704,6 +1192,10 @@ cmd_update() {
         fi
         exit "$EXIT_REFUSED_TAG"
     fi
+    if [ -n "$images" ]; then
+        load_release_images "$images" "$tag"
+        images_loaded=1
+    fi
     before="$(verified_git rev-parse HEAD)"
     prune_build_artifacts
     trap cleanup_update EXIT
@@ -726,9 +1218,14 @@ hand_update_to_release() {
     local tag="$1" unsigned="$2" before="$3" commit="$4" script="${SRC}/host/istota-stack"
     [ -z "${ISTOTA_STACK_UPDATE_HANDOFF:-}" ] || return 0
     [ -x "$script" ] && grep -q 'ISTOTA_STACK_UPDATE_HANDOFF' "$script" || return 0
+    # One that does not know ISTOTA_STACK_IMAGES_LOADED would build the images.
+    if [ -n "$images_loaded" ] && ! grep -q 'ISTOTA_STACK_IMAGES_LOADED' "$script"; then
+        return 0
+    fi
     log "handing the update to ${tag}'s own istota-stack"
     trap - EXIT
     exec env ISTOTA_STACK_UPDATE_HANDOFF=1 ISTOTA_STACK_LOCK_INHERITED=1 \
+        ISTOTA_STACK_IMAGES_LOADED="$images_loaded" \
         "$BASH" "$script" update-from-checkout "$tag" "$unsigned" "$before" "$commit"
 }
 
@@ -743,6 +1240,7 @@ cmd_update_from_checkout() {
     check_tag_name "$tag"
     [ "$(verified_git rev-parse HEAD)" = "$commit" ] \
         || die "the checkout is not the commit the update verified; nothing was changed."
+    images_loaded="${ISTOTA_STACK_IMAGES_LOADED:-}"
     trap cleanup_update EXIT
     update_from_checkout "$tag" "$unsigned" "$before"
 }
@@ -751,8 +1249,13 @@ update_from_checkout() {
     local tag="$1" unsigned="$2" before="$3" current current_unsigned previous previous_unsigned up_rc=0
     current="$(env_get "$ENV_FILE" ISTOTA_TAG)"
     current_unsigned="$(env_get "$ENV_FILE" ISTOTA_TAG_UNSIGNED)"
-    log "building ${tag}"
-    if ! build_images "$tag" || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
+    if [ -n "$images_loaded" ]; then
+        log "${tag}'s images came from its signed archive; building only the devbox images"
+    else
+        log "building ${tag}"
+    fi
+    if { [ -z "$images_loaded" ] && ! build_images "$tag"; } \
+            || ! render_devbox_compose "$tag" || ! build_devbox_images "$tag"; then
         verified_git checkout --quiet --detach "$before" || true
         die "building ${tag} failed; .env, the checkout and the running stack are unchanged."
     fi
@@ -774,11 +1277,17 @@ update_from_checkout() {
         previous_unsigned="$(env_get "$ENV_FILE" ISTOTA_PREVIOUS_TAG_UNSIGNED)"
     fi
     env_set "ISTOTA_TAG=${tag}" "ISTOTA_TAG_UNSIGNED=${unsigned}" \
-        "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}"
+        "ISTOTA_PREVIOUS_TAG=${previous}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${previous_unsigned}" \
+        "ISTOTA_IMAGE=$(image_for_switch "$tag")"
     if [ -f "${CONFIG_DIR}/config.toml" ]; then
         release_stack_up || up_rc=$?
     else
         log "no config yet: run \`istota-stack setup --web\` to set it up in a browser, or \`istota-stack setup\` in the terminal."
+    fi
+    # After the stack is up, so a layer that cannot be fetched holds nothing
+    # back; it reports, and the next `local-layers` tries again.
+    if [ -n "$images_loaded" ] && [ "$up_rc" -eq 0 ] && [ -f "${CONFIG_DIR}/config.toml" ]; then
+        run_local_layers "$tag" || log "WARNING: a local layer did not build (\`istota-stack local-layers --status\`); the stack runs ${tag}'s own images."
     fi
     copy_stack_env_out
     cleanup_update
@@ -858,7 +1367,8 @@ cmd_rollback() {
         die "${previous}'s AppArmor profile did not load; ${ENV_FILE} still names ${current}."
     fi
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
-        "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}"
+        "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}" \
+        "ISTOTA_IMAGE=$(image_for_switch "$previous")"
     release_stack_up
     log "rolled back to ${previous} (previous: ${current})"
     reprovision_if_changed
@@ -1011,7 +1521,7 @@ cmd_setup() {
     local lacking
     lacking="$(image_lacks_what_config_needs "$tag")"
     if [ -n "$lacking" ]; then
-        log "${lacking}: run \`istota-stack update ${tag}\`."
+        log "${lacking}: run \`$(image_remedy "$tag")\`."
     fi
     render_devbox_compose "$tag"
     copy_stack_env_out
@@ -1309,12 +1819,33 @@ setup_did_not_finish() {
     exit "$rc"
 }
 
+# The app VM's answer to image_lacks_what_config_needs: the local layers on the
+# release's archived image, never a build from source, which would replace it.
+# A failed layer is reported and left to `local-layers`; prints what the image
+# still lacks for the config (config.toml, or the path given), if anything.
+layers_for_what_config_needs() {
+    local tag="$1" config="${2:-}"
+    run_local_layers "$tag" >&2 \
+        || log "WARNING: a local layer did not build; \`istota-stack local-layers --status\` says why, and \`istota-stack local-layers\` tries again." >&2
+    image_lacks_what_config_needs "$tag" ${config:+"$config"}
+}
+
 # A rebuild for what the new config needs and the tag's images lack: Claude
 # Code, which only a build of every image adds, or the images of a profile the
-# setup turned on (the browser), built alone.
+# setup turned on (the browser), built alone. On the desktop app the images
+# came from the release's archive, and a build would fetch them all again:
+# what they lack is the local layers, and a layer that fails (no network) is
+# reported and left to `local-layers`, with the stack on the release's image.
 build_what_setup_needs() {
     local tag="$1" lacking missing
     lacking="$(image_lacks_what_config_needs "$tag")"
+    missing="$(missing_service_images "$tag")"
+    if desktop_app; then
+        [ -n "$lacking$missing" ] || return 0
+        log "${lacking:-the setup turned on what the release left out}: building the local layers for ${tag}"
+        layers_for_what_config_needs "$tag" >/dev/null
+        return 0
+    fi
     if [ -n "$lacking" ]; then
         log "${lacking}: building ${tag} again"
         if ! build_images "$tag" || ! build_devbox_images "$tag"; then
@@ -1322,7 +1853,6 @@ build_what_setup_needs() {
         fi
         return 0
     fi
-    missing="$(missing_service_images "$tag")"
     [ -n "$missing" ] || return 0
     log "building $(echo "$missing" | tr '\n' ' ')for ${tag}: the setup turned on what its first build left out"
     # shellcheck disable=SC2086
@@ -1705,11 +2235,12 @@ cmd_import_bare_metal() {
 # The module hands back the stack's .env and host.env copies (stack.env,
 # host.env, copied in by copy_stack_env_out) in a staging directory, as setup's
 # wizard does; they go in place here, except .env's tag lines, which name the
-# old VM's images and stay this VM's. Then what the restored config and
+# old VM's images and stay this VM's, as host.env's ISTOTA_DESKTOP_APP does. Then what the restored config and
 # profiles need is built and the host provisioned; the caller starts the stack.
 cmd_restore() {
-    local running owner=() tag rc=0 key saved=()
+    local running owner=() tag rc=0 key saved=() desktop
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    desktop="$(env_get "$HOST_ENV" ISTOTA_DESKTOP_APP)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was restored."
     if [ -n "$running" ]; then
@@ -1739,6 +2270,9 @@ cmd_restore() {
     fi
     if [ -e "${staging}/host.env" ] || [ -L "${staging}/host.env" ]; then
         install_staged "${staging}/host.env" "$HOST_ENV"
+        # Like the tag: this VM's images came from a release archive, whatever
+        # the backed-up install's did.
+        [ "$desktop" != 1 ] || file_set "$HOST_ENV" ISTOTA_DESKTOP_APP=1
         log "restored host.env from the workspace"
     fi
     render_devbox_compose "$tag"
@@ -2006,7 +2540,7 @@ cmd_check_image() {
     [ -n "$tag" ] || { log "no tag deployed yet; nothing to check"; return 0; }
     lacking="$(image_lacks_what_config_needs "$tag")"
     if [ -n "$lacking" ]; then
-        log "${lacking}: run \`istota-stack update ${tag}\`."
+        log "${lacking}: run \`$(image_remedy "$tag")\`."
         return 2
     fi
 }
@@ -2172,10 +2706,37 @@ cmd_host_env() {
     # signed tag before provision.sh runs.
     for pair in "$@"; do
         if [ "${pair%%=*}" = RELEASE_SIGNING_KEY ] && [ -n "${pair#*=}" ]; then
-            printf 'releases namespaces="git" %s\n' "${pair#*=}" > "$ALLOWED_SIGNERS"
+            printf 'releases namespaces="git,istota-images" %s\n' "${pair#*=}" > "$ALLOWED_SIGNERS"
             chmod 0644 "$ALLOWED_SIGNERS"
         fi
     done
+}
+
+# The release key, replaced: the only way it changes on an existing install,
+# since no update writes it. Printed first, so the caller can show what it is
+# about to trust. host.env is written too, or provision.sh puts the old key back.
+cmd_trust_signer() {
+    [ "$#" -eq 1 ] || { usage >&2; exit 64; }
+    local key="$1" fingerprint previous
+    # A bare key line: a leading option (cert-authority, namespaces=...) would
+    # widen what allowed_signers trusts. bash's =~ has no REG_NEWLINE, so a
+    # line break is refused before the match, and the comment takes no control
+    # character or backslash.
+    local bare_key='^(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+) [A-Za-z0-9+/]+=*( [^"\\[:cntrl:]]*)?$'
+    case "$key" in
+        *$'\n'*|*$'\r'*) die "trust-signer takes one line of an SSH public key; allowed_signers is unchanged." ;;
+    esac
+    if ! [[ "$key" =~ $bare_key ]]; then
+        die "trust-signer takes one line of an SSH public key; allowed_signers is unchanged."
+    fi
+    fingerprint="$(printf '%s\n' "$key" | ssh-keygen -l -f - 2>/dev/null)" \
+        || die "that is not an SSH public key ssh-keygen can read; allowed_signers is unchanged."
+    previous="$(awk '{ $1 = ""; $2 = ""; print }' "$ALLOWED_SIGNERS" 2>/dev/null \
+        | ssh-keygen -l -f - 2>/dev/null || true)"
+    echo "release key: ${fingerprint}"
+    [ -z "$previous" ] || echo "replacing:   ${previous}"
+    cmd_host_env "RELEASE_SIGNING_KEY=${key}"
+    log "releases are verified against this key from now on"
 }
 
 # Move a path the Mac CLI copied into the VM into a fresh directory under
@@ -2373,12 +2934,21 @@ config_apply_one() (
     if [ "$(cat "${dir}/claude-code")" = 1 ] && [ -n "$tag" ]; then
         lacking="$(image_lacks_what_config_needs "$tag" "${dir}/plan.json")"
         if [ -n "$lacking" ]; then
-            echo "${lacking}: building ${tag} with Claude Code" >> "$out"
             log "config-apply: request ${id}: building ${tag}"
             oneshot "$service" istota config-request mark --id "$id" --status building >/dev/null \
                 || log "config-apply: request ${id} was not marked building"
             rc=0
-            INSTALL_CLAUDE_CODE=1 build_images "$tag" >> "$out" 2>&1 || rc=$?
+            if desktop_app; then
+                echo "${lacking}: building the local layers for ${tag}" >> "$out"
+                lacking="$(layers_for_what_config_needs "$tag" "${dir}/plan.json" 2>> "$out")"
+                if [ -n "$lacking" ]; then
+                    echo "$lacking" >> "$out"
+                    rc=1
+                fi
+            else
+                echo "${lacking}: building ${tag} with Claude Code" >> "$out"
+                INSTALL_CLAUDE_CODE=1 build_images "$tag" >> "$out" 2>&1 || rc=$?
+            fi
             if [ "$rc" -ne 0 ]; then
                 tail -n 40 "$out" > "${out}.tail" && mv "${out}.tail" "$out"
                 echo "the build failed (exit ${rc}); nothing was written" >> "$out"
@@ -2578,8 +3148,11 @@ main() {
             fi ;;
         # Holds the update's lock through descriptor 9 or refuses; never waits.
         update-from-checkout) ;;
-        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down)
+        update|rollback|apply|import-bare-metal|restore|import-standalone|retire-bare-metal|put-files|localize-workspace|down|trust-signer)
             take_stack_lock "$command" ;;
+        # Reading the layers' status is a read.
+        local-layers)
+            [ "${1:-}" = --status ] || take_stack_lock local-layers ;;
         # Setting a key writes host.env, which setup and restore write too;
         # reading one is a read. stage and unstage take none: each makes or
         # removes a directory of its own, which only the verb it is handed
@@ -2611,6 +3184,8 @@ main() {
         exec) [ "$#" -gt 0 ] || { usage >&2; exit 64; }; stack_exec "$@" ;;
         compose) compose "$@" ;;
         host-env) cmd_host_env "$@" ;;
+        trust-signer) cmd_trust_signer "$@" ;;
+        local-layers) cmd_local_layers "$@" ;;
         stage) cmd_stage "$@" ;;
         unstage) cmd_unstage "$@" ;;
         -h|--help|help) usage ;;

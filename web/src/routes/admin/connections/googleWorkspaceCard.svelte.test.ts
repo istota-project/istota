@@ -151,7 +151,7 @@ describe('the admin Google Workspace card', () => {
       additional_scopes: ['https://www.googleapis.com/auth/drive.file'],
     });
     expect(q.getByText('Configured')).toBeTruthy();
-    expect(q.getByText('Additional scopes requested on connection')).toBeTruthy();
+    expect(q.getByText('Additional scopes')).toBeTruthy();
     expect(q.getByText('https://www.googleapis.com/auth/drive.file')).toBeTruthy();
     expect(q.getAllByText('No access')).toHaveLength(7);
     expect(q.queryByText('No services are allowed')).toBeNull();

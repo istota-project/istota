@@ -238,6 +238,22 @@ class TestRefusalsWriteNothing:
         assert (world.config_dir / "config.toml").read_text() == "# someone's\n"
         assert not (world.data / ".secret_key").exists()
 
+    def test_a_snapshot_a_newer_release_stamped(self, world):
+        """A move into the Mac app restores onto the release the app carries,
+        which may be older than the install the backups came from: its image
+        cannot open the database, so nothing is restored at all."""
+        world.back_up()
+        world.lose_the_vm()
+        snapshot = world.workspace / "Backups" / "db" / "snapshots" / DATE / "framework" / "istota.db"
+        conn = sqlite3.connect(snapshot)
+        conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
+        conn.commit()
+        conn.close()
+        rc, _, err = world.restore()
+        assert rc == 1, err
+        assert f"schema {db.SCHEMA_VERSION + 1}" in err
+        _nothing_written(world)
+
     def test_a_database_that_has_done_work(self, world):
         world.back_up()
         rc, _, err = world.restore()

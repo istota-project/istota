@@ -33,6 +33,9 @@
 #   proxied:   no-allow-list, no-docker-user-rule (row 18),
 #              role-user-settings-unchecked (the management role's --check)
 #
+# The appliance mode's controls (row L3 for the release directory, row M11)
+# live with their witnesses in the Mac app's repository, istota-mac.
+#
 # Run scripts/test-vm.sh first: the controls reuse its VM and images. No arrays:
 # macOS ships bash 3.2.
 set -euo pipefail

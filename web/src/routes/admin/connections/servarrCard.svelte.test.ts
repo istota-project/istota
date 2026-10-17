@@ -106,7 +106,8 @@ describe('the servarr card', () => {
     expect(link.getAttribute('target')).toBe('_blank');
     const sonarr = within(q.getByTestId('servarr-app-sonarr'));
     expect(sonarr.getByText(/sonarr 4\.0\.9\.2244/)).toBeTruthy();
-    expect(q.getByText('lidarr, prowlarr')).toBeTruthy();
+    expect(q.getByTestId('servarr-missing-lidarr')).toHaveTextContent('Not configured');
+    expect(q.getByTestId('servarr-missing-prowlarr')).toHaveTextContent('Not configured');
     expect(q.getByText('bob')).toBeTruthy();
     expect(q.getByText('quality profile: HD - 720p/1080p · root folder: /films')).toBeTruthy();
     expect(q.queryByText(/None of the apps passed/)).toBeNull();

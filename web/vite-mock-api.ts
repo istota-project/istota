@@ -4442,6 +4442,223 @@ function mockConfigRestore(id: number) {
   };
 }
 
+/**
+ * `GET /admin/connections` and the WhatsApp pairing routes.
+ *
+ * `VITE_MOCK_CONNECTIONS=problems` serves every card in a failing state (a
+ * stale Nextcloud check, a WhatsApp session unlinked for good, Google missing
+ * its secret, an arr app that never answered); the default is a healthy
+ * install. Starting a pairing opens an `awaiting_scan` window with a drawn
+ * placeholder code, so the pairing block can be looked at too.
+ */
+const MOCK_CONNECTIONS_PROBLEMS = process.env.VITE_MOCK_CONNECTIONS === 'problems';
+let mockPairing: Record<string, unknown> | null = null;
+let mockPairingSeq = 0;
+
+function mockCheck(status: 'ok' | 'warn' | 'fail', detail: string, remedy = '', stale = false) {
+  return {
+    status,
+    detail,
+    remedy,
+    at: new Date(Date.now() - 12 * 60_000).toISOString(),
+    stale,
+  };
+}
+
+function mockAdminConnections() {
+  const problems = MOCK_CONNECTIONS_PROBLEMS;
+  return {
+    connections: [
+      {
+        id: 'nextcloud',
+        label: 'Nextcloud',
+        configured: true,
+        url: 'https://cloud.example.com',
+        username: 'istota',
+        talk_enabled: true,
+        talk_bot_username: 'istota',
+        storage: 'nextcloud',
+        check: problems
+          ? mockCheck(
+              'fail',
+              'https://cloud.example.com answered 503: the server is in maintenance mode.',
+              'Take the server out of maintenance mode with occ maintenance:mode --off.',
+              true,
+            )
+          : mockCheck('ok', 'signed in as istota (Istota), Nextcloud 30.0.4'),
+      },
+      {
+        id: 'whatsapp',
+        label: 'WhatsApp',
+        enabled: true,
+        provider: 'baileys',
+        number: '+15550100123',
+        pairing_supported: true,
+        pairing_enabled: true,
+        restart_interval_seconds: 10,
+        credential_errors: [],
+        link: problems
+          ? {
+              listening: true,
+              connected: false,
+              ready: false,
+              fatal_reason: 'logged_out',
+              fatal_is_permanent: true,
+              connection_replaced_latched: false,
+              restarts: 3,
+            }
+          : {
+              listening: true,
+              connected: true,
+              ready: true,
+              fatal_reason: null,
+              fatal_is_permanent: false,
+              connection_replaced_latched: false,
+              restarts: 0,
+            },
+        pairing: mockPairing,
+        pairing_blocked_reason: null,
+      },
+      {
+        id: 'google_workspace',
+        label: 'Google Workspace',
+        enabled: true,
+        client_id: problems ? '' : '1234567890-abc123def456.apps.googleusercontent.com',
+        client_secret_set: !problems,
+        redirect_uri: 'https://istota.example.com/istota/api/settings/google/callback',
+        services: [
+          { service: 'gmail', label: 'Gmail', max_level: 'readonly' },
+          { service: 'calendar', label: 'Calendar', max_level: 'full' },
+          { service: 'drive', label: 'Drive', max_level: 'full' },
+          { service: 'contacts', label: 'Contacts', max_level: 'off' },
+        ],
+        additional_scopes: problems ? [] : ['https://www.googleapis.com/auth/tasks'],
+        missing: problems ? ['client_id', 'client_secret'] : [],
+        status: problems ? 'incomplete' : 'configured',
+      },
+      {
+        id: 'servarr',
+        label: 'Servarr',
+        status: problems ? 'incomplete' : 'configured',
+        apps: [
+          {
+            app: 'sonarr',
+            url: 'http://10.0.0.5:8989',
+            api_key_set: true,
+            incomplete: false,
+            problem: null,
+            check: mockCheck('ok', 'sonarr 4.0.9.2244 at http://10.0.0.5:8989'),
+          },
+          {
+            app: 'radarr',
+            url: 'http://10.0.0.5:7878',
+            api_key_set: true,
+            incomplete: false,
+            problem: null,
+            check: problems
+              ? mockCheck(
+                  'fail',
+                  'radarr at http://10.0.0.5:7878 did not answer: connection refused.',
+                  'Check that radarr is running and that a firewall is not blocking the port.',
+                )
+              : mockCheck('ok', 'radarr 5.9.1.9070 at http://10.0.0.5:7878'),
+          },
+          problems
+            ? {
+                app: 'lidarr',
+                url: '',
+                api_key_set: null,
+                incomplete: true,
+                problem: '[servarr.apps.lidarr] has no url or no api_key, so it is ignored.',
+                check: null,
+              }
+            : {
+                app: 'lidarr',
+                url: 'http://10.0.0.5:8686',
+                api_key_set: true,
+                incomplete: false,
+                problem: null,
+                check: null,
+              },
+        ],
+        missing: ['prowlarr'],
+        requesters: ['alice', 'bob'],
+        defaults: {
+          radarr: { quality_profile: 'HD - 720p/1080p', root_folder: '/films' },
+          sonarr: { quality_profile: 'HD - 720p/1080p', root_folder: '/tv' },
+        },
+      },
+    ],
+  };
+}
+
+function mockPairingQrSvg(seq: number): string {
+  // A deterministic grid that reads as a code without being one.
+  const cells: string[] = [];
+  let x = seq * 2654435761;
+  for (let r = 0; r < 25; r++) {
+    for (let c = 0; c < 25; c++) {
+      x = (x * 1103515245 + 12345) & 0x7fffffff;
+      const finder = (r < 7 && c < 7) || (r < 7 && c > 17) || (r > 17 && c < 7);
+      if (finder ? r % 6 === 0 || c % 6 === 0 || (r % 6 > 1 && c % 6 > 1) : x % 3 === 0) {
+        cells.push(`<rect x="${c}" y="${r}" width="1" height="1"/>`);
+      }
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 -2 29 29"><rect x="-2" y="-2" width="29" height="29" fill="#fff"/><g fill="#000">${cells.join('')}</g></svg>`;
+}
+
+function adminConnectionsHandler({ url, method }: MockReq): unknown | undefined {
+  const path = url.split('?')[0];
+  if (path === '/istota/api/admin/connections' && method === 'GET') return mockAdminConnections();
+  if (path === '/istota/api/admin/connections/whatsapp/pairing') {
+    if (method === 'GET') return { pairing: mockPairing };
+    if (method === 'POST') {
+      mockPairingSeq += 1;
+      const expires = Math.floor(Date.now() / 1000) + 90;
+      mockPairing = {
+        window_id: `w${mockPairingSeq}`,
+        state: 'awaiting_scan',
+        row_state: 'awaiting_scan',
+        terminal: false,
+        requested_by: 'admin',
+        requested_at: new Date().toISOString(),
+        expires_at: new Date(expires * 1000).toISOString(),
+        expires_at_epoch: expires,
+        message: '',
+        force: false,
+        qr_seq: mockPairingSeq,
+        qr_available: true,
+      };
+      return { window_id: mockPairing.window_id, state: 'awaiting_scan', force: false };
+    }
+    if (method === 'DELETE') {
+      const open = mockPairing !== null;
+      mockPairing = null;
+      return { cancelled: open, reason: open ? '' : 'none' };
+    }
+  }
+  if (path === '/istota/api/admin/connections/whatsapp/pairing/qr.svg') {
+    return { __raw: mockPairingQrSvg(mockPairingSeq), __contentType: 'image/svg+xml' };
+  }
+  if (path === '/istota/api/admin/connections/whatsapp/pairing/stream') {
+    // The open window's frame, or only a comment when there is none, since the
+    // server sends nothing until a window exists. Then held open.
+    const frame = mockPairing && {
+      state: mockPairing.state,
+      qr_seq: mockPairing.qr_seq,
+      qr_available: mockPairing.qr_available,
+      expires_at: mockPairing.expires_at_epoch,
+      message: '',
+    };
+    return {
+      __raw: frame ? `event: pairing\ndata: ${JSON.stringify(frame)}\n\n` : ': open\n\n',
+      __contentType: 'text/event-stream',
+    };
+  }
+  return undefined;
+}
+
 function configEditorHandler({ url, method, body }: MockReq): unknown | undefined {
   if (url === '/istota/api/settings/step-up' && method === 'POST') {
     return {
@@ -7065,6 +7282,7 @@ const handlers: MockHandler[] = [
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
   configEditorHandler,
+  adminConnectionsHandler,
   ({ url, method, body }) =>
     url === '/istota/api/admin/doctor/run' && method === 'POST'
       ? mockAdminDoctorRun(body)
@@ -14006,6 +14224,13 @@ export function mockApi(): Plugin {
               res.setHeader(k, v);
             }
             res.statusCode = 200;
+            // An event stream stays open, as the real one does: a closed one
+            // fires the client's connection-error path on every frame.
+            if (__contentType === 'text/event-stream') {
+              res.setHeader('Cache-Control', 'no-cache');
+              res.write(__raw);
+              return;
+            }
             res.end(__raw);
             return;
           }
