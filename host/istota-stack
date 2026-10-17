@@ -230,8 +230,11 @@ file_set() {
     if [ -f "$file" ]; then cat "$file" > "$tmp"; fi
     while [ "$#" -gt 0 ]; do
         local key="${1%%=*}" value="${1#*=}"
-        case "$value" in *$'\n'*) rm -f "$tmp"; die "a value for ${key} holds a newline" ;; esac
-        awk -F= -v k="$key" -v v="$value" '
+        case "$value" in *$'\n'*|*$'\r'*) rm -f "$tmp"; die "a value for ${key} holds a line break" ;; esac
+        # The value through the environment: awk -v would turn a literal \n
+        # in it into a line of its own.
+        FILE_SET_VALUE="$value" awk -F= -v k="$key" '
+            BEGIN { v = ENVIRON["FILE_SET_VALUE"] }
             $1 == k { if (!done) { print k "=" v; done = 1 }; next }
             { print }
             END { if (!done) print k "=" v }' "$tmp" > "${tmp}.new"
@@ -2686,8 +2689,14 @@ cmd_trust_signer() {
     [ "$#" -eq 1 ] || { usage >&2; exit 64; }
     local key="$1" fingerprint previous
     # A bare key line: a leading option (cert-authority, namespaces=...) would
-    # widen what allowed_signers trusts.
-    if ! [[ "$key" =~ ^(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+)\ [A-Za-z0-9+/]+=*(\ [^\"]*)?$ ]]; then
+    # widen what allowed_signers trusts. bash's =~ has no REG_NEWLINE, so a
+    # line break is refused before the match, and the comment takes no control
+    # character or backslash.
+    local bare_key='^(ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9@.-]+) [A-Za-z0-9+/]+=*( [^"\\[:cntrl:]]*)?$'
+    case "$key" in
+        *$'\n'*|*$'\r'*) die "trust-signer takes one line of an SSH public key; allowed_signers is unchanged." ;;
+    esac
+    if ! [[ "$key" =~ $bare_key ]]; then
         die "trust-signer takes one line of an SSH public key; allowed_signers is unchanged."
     fi
     fingerprint="$(printf '%s\n' "$key" | ssh-keygen -l -f - 2>/dev/null)" \

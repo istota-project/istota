@@ -2528,6 +2528,20 @@ class TestHostEnv:
         assert result.returncode != 0
         assert (fx.stack / "host.env").read_text() == before
 
+    @pytest.mark.parametrize("value", ["a\nRELEASE_SIGNING_KEY=x", "a\rRELEASE_SIGNING_KEY=x"])
+    def test_a_value_with_a_line_break_is_refused(self, fx, value):
+        before = (fx.stack / "host.env").read_text()
+        result = fx.run("host-env", f"HOST_LOOPBACK_ALLOW={value}")
+        assert result.returncode != 0
+        assert (fx.stack / "host.env").read_text() == before
+
+    def test_a_backslash_in_a_value_is_written_as_it_is(self, fx):
+        result = fx.run("host-env", "HOST_LOOPBACK_ALLOW=a\\nRELEASE_SIGNING_KEY=x")
+        assert result.returncode == 0, result.stderr
+        lines = (fx.stack / "host.env").read_text().splitlines()
+        assert "HOST_LOOPBACK_ALLOW=a\\nRELEASE_SIGNING_KEY=x" in lines
+        assert not any(line.startswith("RELEASE_SIGNING_KEY=") for line in lines)
+
     def test_a_mix_of_reads_and_writes_is_a_usage_error(self, fx):
         assert fx.run("host-env", "INGRESS=local", "STORAGE").returncode == 64
 

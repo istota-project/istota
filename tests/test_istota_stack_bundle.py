@@ -207,6 +207,9 @@ class TestTrustSigner:
         "ssh-ed25519 AAAA\nssh-ed25519 BBBB",
         'cert-authority ssh-ed25519 {pub}',
         'namespaces="file" ssh-ed25519 {pub}',
+        "{pub} c\nx {pub}",
+        "{pub} c\rx {pub}",
+        "{pub} c\\nx {pub}",
     ])
     def test_anything_but_one_public_key_changes_nothing(self, fx, key):
         pub = " ".join(fx.other_key.with_suffix(".pub").read_text().split()[:2])
