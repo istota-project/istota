@@ -88,6 +88,9 @@
     readErrorId = null;
     try {
       const result = await markBriefingArchiveRead(id);
+      // A reply with no read_at would leave the entry unread and re-arm the
+      // presentation effect, so it is a failure rather than a reason to post again.
+      if (!result?.read_at) throw new Error('read response carried no read_at');
       invalidateNavUnreadCounts();
       confirmedReads.set(id, result.read_at);
       briefingReadAck.set({ id, read_at: result.read_at });

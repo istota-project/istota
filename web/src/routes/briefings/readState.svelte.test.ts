@@ -254,6 +254,16 @@ describe('briefing reader acknowledgments', () => {
     expect(readRequests()).toHaveLength(2);
   });
 
+  it('treats a read response without read_at as a failure, not a reason to post again', async () => {
+    acknowledge = async () => response({});
+    selectedBriefingId.set(1);
+    render(Page);
+    await screen.findByText('Could not mark this briefing as read.');
+    await settle();
+    expect(readRequests()).toHaveLength(1);
+    expect(invalidateNavUnreadCounts).not.toHaveBeenCalled();
+  });
+
   it('allows a failed acknowledgment to retry on a new visible presentation', async () => {
     acknowledge = async () => response({}, 500);
     selectedBriefingId.set(1);
