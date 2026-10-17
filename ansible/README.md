@@ -66,7 +66,7 @@ istota_plan_secrets:
     alice: {karakeep: {api_key: "{{ vault_alice_karakeep }}"}}
 ```
 
-`istota_plan_secrets` is the plan's private sidecar: `users` maps user, service and key to a value, and `config` replaces inline config credentials by path. The role marks the config it applies as managed by ansible, so the web config editor shows it read-only; each user's `profile_mode` stays as the plan says. A snapshot says `update`, which neither adds nor releases a field lock; set `managed` on the profiles the inventory should own.
+`istota_plan_secrets` is the plan's private sidecar: `users` maps user, service and key to a value, and `config` replaces inline config credentials by path. The config is managed, and read-only in the web config editor, only when the plan sets `meta.managed = true`: the role passes the plan's `meta` through and adds none. Secrets and the admins list are marked managed when the role sets them. Each user's `profile_mode` stays as the plan says. A snapshot says `update`, which neither adds nor releases a field lock; set `managed` on the profiles the inventory should own.
 
 `istota_plan_prune: true` removes the folders, briefings, jobs and heartbeat checks a user's plan does not list, from the collections it does list. It never removes users or credentials. `istota_plan_prune_secrets: true`, which needs `istota_plan_prune`, also removes the provisionable keys of a service a user's `secrets` entry names but does not list. Both need `istota_plan`.
 

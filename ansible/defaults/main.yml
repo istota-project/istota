@@ -161,8 +161,8 @@ istota_admins: []
 # group_vars file setting this variable (see the README):
 #   istota snapshot --format ansible | ansible-vault encrypt --output FILE -
 # Applied with `istota-stack apply`; under --check, with --dry-run. Empty skips
-# the step. The role marks its config as managed by ansible; each user's
-# profile_mode is left as written.
+# the step. The config is managed (read-only in the web editor) only when the
+# plan sets meta.managed = true; each user's profile_mode is left as written.
 istota_plan: {}
 # Explicit current owner/admin identity for changed group briefing definitions.
 istota_plan_actor: ""
