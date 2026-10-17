@@ -1165,7 +1165,7 @@ cmd_update() {
     elif [ "$tags" -ne 1 ]; then
         usage >&2; exit 64
     fi
-    local object before
+    local object before declared
     [ -n "$newest" ] || check_tag_name "$tag"
     [ -d "${SRC}/.git" ] || die "${SRC} is not a git checkout; provision.sh clones it."
     if [ -n "$bundle" ]; then
@@ -1204,12 +1204,16 @@ cmd_update() {
         images_loaded=1
     fi
     before="$(verified_git rev-parse HEAD)"
+    # A first install's checkout may have no compose file yet.
+    declared="$(secret_names 2>/dev/null || true)"
     prune_build_artifacts
     trap cleanup_update EXIT
 
     # From here until .env is written, a failure puts the checkout back, so .env,
     # the checkout and the running stack all stay as they were.
     verified_git checkout --quiet --detach "${object}^{commit}"
+    # Here, not after the handoff: an older release's script has no such check.
+    warn_unread_secrets "$tag" "$declared"
     hand_update_to_release "$tag" "$unsigned" "$before" "$(verified_git rev-parse HEAD)"
     update_from_checkout "$tag" "$unsigned" "$before"
 }
@@ -1366,8 +1370,9 @@ cmd_rollback() {
         die "${previous} could not check the database (exit ${rc}); ${ENV_FILE} still names ${current}."
     fi
 
-    local before
+    local before declared
     before="$(verified_git rev-parse HEAD)"
+    declared="$(secret_names 2>/dev/null || true)"
     verified_git checkout --quiet --detach "${object}^{commit}"
     if ! load_apparmor; then
         verified_git checkout --quiet --detach "$before" || true
@@ -1376,6 +1381,7 @@ cmd_rollback() {
     env_set "ISTOTA_TAG=${previous}" "ISTOTA_TAG_UNSIGNED=${previous_unsigned}" \
         "ISTOTA_PREVIOUS_TAG=${current}" "ISTOTA_PREVIOUS_TAG_UNSIGNED=${current_unsigned}" \
         "ISTOTA_IMAGE=$(image_for_switch "$previous")"
+    warn_unread_secrets "$previous" "$declared"
     release_stack_up
     log "rolled back to ${previous} (previous: ${current})"
     reprovision_if_changed
@@ -1388,6 +1394,22 @@ secret_names() {
     # Names are [a-z0-9_] only; the single quotes are sed's, not the shell's.
     # shellcheck disable=SC2016
     sed -n 's|^ *file: \${ISTOTA_SECRETS_DIR:-\./secrets}/\([a-z0-9_]*\)$|\1|p' "${SRC}/docker/docker-compose.yml"
+}
+
+# After a rollback, or an update to an older tag: every secret file the
+# outgoing release declared, the checkout now does not, and that holds a value. The file is kept, but the
+# older release exports nothing from it.
+warn_unread_secrets() {
+    local release="$1" declared="$2" name now unread=""
+    now=" $( (secret_names 2>/dev/null || true) | tr '\n' ' ') "
+    for name in $declared; do
+        case "$now" in *" ${name} "*) continue ;; esac
+        if [ -n "$(find -P "${SECRETS_DIR}/${name}" -maxdepth 0 -type f -size +0 2>/dev/null)" ]; then
+            unread="${unread} ${name}"
+        fi
+    done
+    [ -z "$unread" ] && return 0
+    echo "[istota-stack] WARNING: ${release} does not read the secret files${unread}. Their values are kept, but nothing uses them until an update past ${release}." >&2
 }
 
 ensure_secret_files() {

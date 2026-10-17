@@ -996,6 +996,58 @@ class TestARollbackReprovisionsTheHost:
         assert "provision ran" not in fx.docker_calls()
 
 
+def _replace(path: Path, text: str) -> None:
+    """put-files leaves a secret file 0400; replace it as the host would."""
+    path.unlink()
+    path.write_text(text)
+
+
+class TestARollbackPastASecretFile:
+    """ISSUE-768: a release from before a secret file's compose declaration
+    exports nothing from it, so a value moved there stops being read."""
+
+    @pytest.fixture
+    def rolled_forward(self, fx):
+        compose = fx.origin / "docker" / "docker-compose.yml"
+        compose.parent.mkdir(parents=True)
+        old = "secrets:\n  old_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/old_one\n"
+        compose.write_text(old)
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        compose.write_text(old + "  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n")
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        fx.commit("v2")
+        fx.tag("v2", key=fx.release_key)
+        assert fx.run("update", "v1").returncode == 0
+        assert fx.run("update", "v2").returncode == 0
+        _replace(fx.stack / "secrets" / "old_one", "kept")
+        return fx
+
+    def test_a_secret_file_holding_a_value_is_named(self, rolled_forward):
+        fx = rolled_forward
+        _replace(fx.stack / "secrets" / "new_one", "moved-value")
+        result = fx.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "WARNING: v1 does not read the secret files new_one." in result.stderr
+        assert "moved-value" not in result.stdout + result.stderr
+        assert (fx.stack / "secrets" / "new_one").read_text() == "moved-value"
+
+    def test_an_update_to_the_older_tag_names_it_too(self, rolled_forward):
+        fx = rolled_forward
+        _replace(fx.stack / "secrets" / "new_one", "moved-value")
+        result = fx.run("update", "v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_TAG=v1\n" in fx.env_text()
+        assert "WARNING: v1 does not read the secret files new_one." in result.stderr
+
+    def test_an_empty_secret_file_is_not_named(self, rolled_forward):
+        result = rolled_forward.run("rollback")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARNING" not in result.stderr
+
+
 class TestAHardenedUmask:
     """A host whose umask is 027 (zorg's) checked the tree out root-only, and
     the image copied those modes in: uid 10001 could not import istota.cli."""
