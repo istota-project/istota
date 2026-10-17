@@ -95,7 +95,9 @@
                 form[name].key = value ?? '';
               }}
             />
-            <Badge size="sm" variant={status.variant}>{status.label}</Badge>
+            <span class="key-badge"
+              ><Badge size="sm" variant={status.variant}>{status.label}</Badge></span
+            >
           {:else}
             <ConfigSecretField
               label="API key"
@@ -161,9 +163,17 @@
   .key-row {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: flex-start;
     column-gap: var(--space-2);
     row-gap: var(--space-1);
+  }
+
+  /* On the input's line, at the row's far end, as on any credential field. */
+  .key-badge {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-height-lg);
+    margin-inline-start: auto;
   }
 
   .key-row > :global(.field) {

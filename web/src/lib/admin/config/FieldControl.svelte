@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CircleDashed } from '@lucide/svelte';
+  import { CircleDashed, Lock } from '@lucide/svelte';
   import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
   import { Badge, Button, Chip, Field, Input, Select, TextArea } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
@@ -46,13 +46,8 @@
       ? field.value.length > 0 && field.value.every((v) => typeof v === 'number')
       : false,
   );
-  let badge = $derived(
-    kind === 'readonly' && field.read_only_reason
-      ? 'read-only'
-      : field.risky
-        ? 'needs confirmation'
-        : undefined,
-  );
+  let badge = $derived(kind === 'readonly' && field.read_only_reason ? 'read-only' : undefined);
+  let labelMark = $derived(field.risky && !badge ? lockMark : undefined);
   let selectOptions = $derived(
     (field.choices ?? []).map((choice) => ({
       value: choice,
@@ -153,6 +148,12 @@
   }
 </script>
 
+{#snippet lockMark()}
+  <span class="lock-mark" role="img" aria-label="Needs confirmation" title="Needs confirmation"
+    ><Lock size={13} aria-hidden="true" /></span
+  >
+{/snippet}
+
 {#snippet defaultMark()}
   {#if notInFile}
     <span class="default-mark" role="img" aria-label={markLabel} title={markLabel}
@@ -173,7 +174,7 @@
         onChange={(value) => onSecret(field.credential!.name, value)}
       />
     {:else if kind === 'bool'}
-      <Field label={field.name} {hint} {badge} inline checkbox error={problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline checkbox error={problem}>
         <span class="adorned beside">
           <input
             type="checkbox"
@@ -184,7 +185,7 @@
         </span>
       </Field>
     {:else if kind === 'int' || kind === 'float'}
-      <Field label={field.name} {hint} {badge} inline error={inputError || problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={inputError || problem}>
         <span class="adorned number" class:marked={notInFile}>
           <Input
             type="number"
@@ -199,7 +200,7 @@
         </span>
       </Field>
     {:else if kind === 'str' || kind === 'path'}
-      <Field label={field.name} {hint} {badge} inline error={problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem}>
         <span class="adorned" class:marked={notInFile}>
           <Input
             value={blank || shown === null || shown === undefined ? '' : String(shown)}
@@ -211,7 +212,7 @@
         </span>
       </Field>
     {:else if kind === 'list'}
-      <Field label={field.name} {hint} {badge} inline error={inputError || problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={inputError || problem}>
         <span class="adorned area" class:marked={notInFile}>
           <TextArea
             monospace
@@ -226,7 +227,7 @@
         </span>
       </Field>
     {:else if kind === 'choice'}
-      <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
         <span class="adorned select">
           <Select
             value={String(shown ?? '')}
@@ -239,7 +240,7 @@
         </span>
       </Field>
     {:else if kind === 'multi_choice'}
-      <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
         <span class="adorned beside">
           <span class="choices">
             {#each field.multi_choices ?? [] as choice (choice)}
@@ -253,13 +254,13 @@
         </span>
       </Field>
     {:else if kind === 'table' && !pendingUnset}
-      <TableEditor {field} {op} {hint} {badge} {problem} {onOp} />
+      <TableEditor {field} {op} {hint} {badge} {labelMark} {problem} {onOp} />
     {:else if kind === 'table'}
-      <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
         <span class="config-value dim">Removed from config.toml.</span>
       </Field>
     {:else}
-      <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
         {#if field.secret || field.editor === 'secret'}
           <span class="value-badge">
             <Badge size="sm" variant={status.variant}>{status.label}</Badge>
@@ -404,6 +405,11 @@
     display: block;
     width: 100%;
     max-width: 24rem;
+  }
+
+  .lock-mark {
+    display: inline-flex;
+    color: var(--text-dim);
   }
 
   .default-mark {

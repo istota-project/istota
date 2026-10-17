@@ -707,6 +707,8 @@ export interface ConfigSecretFile {
   name: string;
   label: string;
   config_key: string | null;
+  /** For a file no config key reads, the section it is shown in. */
+  section?: string | null;
   set: boolean;
   source: ConfigSecretSource;
   /** Why a new value cannot be set here; a move may still be offered. */

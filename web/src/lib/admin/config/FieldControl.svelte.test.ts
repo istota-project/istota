@@ -303,6 +303,14 @@ describe('credentials', () => {
     expect(onSecret).toHaveBeenLastCalledWith('istota_email_imap_password', '');
   });
 
+  it('draw Clear beside the field, outside its width, as Reset is', () => {
+    const { container } = mount(secret);
+    const field = container.querySelector('.field');
+    const clear = screen.getByRole('button', { name: 'Clear stored imap_password' });
+    expect(field).not.toBeNull();
+    expect(field!.contains(clear)).toBe(false);
+  });
+
   it('show a pending clear as a state with undo', async () => {
     const { onSecret } = mount(secret, { secretPending: '' });
     expect(screen.getByText('Will be cleared.')).toBeInTheDocument();

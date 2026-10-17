@@ -398,6 +398,14 @@
   --text-xl: 1.25rem;
 }
 
+/* A wide screen has room to spare beside a form, and a config key such as
+   `claude_code_oauth_token` wrapped at 9rem. */
+@media (min-width: 1024px) {
+  :root {
+    --field-label-width: 15rem;
+  }
+}
+
 /* Mobile: the avatar column is pure chrome, so it is what gives up width to the
    message text.
 

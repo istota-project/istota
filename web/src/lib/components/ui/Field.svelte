@@ -8,6 +8,9 @@
     /** A short state beside the label, as a compact `Badge` — "Set by your
      *  administrator" on a field the deployment owns. Visible, unlike `hint`. */
     badge?: string;
+    /** A small mark after the label, for a state that a word would crowd:
+     *  the config editor's lock on a key that needs confirmation. */
+    labelMark?: Snippet;
     /** Guidance shown in a popover behind a "?" beside the label. Optional
      *  reading — anything the user must see belongs in `warning` or `error`. */
     hint?: string;
@@ -55,6 +58,7 @@
   let {
     label,
     badge,
+    labelMark,
     hint,
     warning,
     error,
@@ -69,7 +73,7 @@
 
 {#snippet fieldLabel()}
   <span class="field-label"
-    >{label}{#if badge}<Badge size="sm">{badge}</Badge>{/if}<HintPopover
+    >{label}{#if badge}<Badge size="sm">{badge}</Badge>{/if}{@render labelMark?.()}<HintPopover
       text={hint}
       label="About {label}"
     /></span

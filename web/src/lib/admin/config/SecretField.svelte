@@ -53,6 +53,9 @@
     </div>
   </Field>
 {:else}
+  <!-- Clear is drawn after the field, not inside it: the editor caps a field
+       at the label column plus 24rem, and a button inside that cap made every
+       secret input a button narrower than the inputs beside it. -->
   <SecretField
     {label}
     {hint}
@@ -60,8 +63,18 @@
     {configured}
     value={pending ?? ''}
     onValueChange={(next) => onChange(next === '' ? null : next)}
-    onRequestClear={() => onChange('')}
   />
+  {#if configured}
+    <div class="secret-clear control-row">
+      <Button
+        variant="secondary"
+        size="sm"
+        ariaLabel="Clear stored {label}"
+        title="Clear stored value"
+        onclick={() => onChange('')}>Clear</Button
+      >
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -69,6 +82,13 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-height: var(--control-height-lg);
+  }
+
+  /* On the input's line, as the editor's Reset is. */
+  .secret-clear {
+    display: flex;
+    align-items: center;
     min-height: var(--control-height-lg);
   }
 </style>

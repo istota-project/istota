@@ -540,6 +540,13 @@ class TestTopLevel:
         assert entries["anthropic_api_key"]["config_key"] is None
         assert entries["anthropic_api_key"]["label"] == "Anthropic API key"
         assert entries["claude_code_oauth_token"]["set"] is False
+        # The Claude Code CLI's two files belong with its brain's section; a
+        # file a config key reads is shown by that key's field instead.
+        assert entries["anthropic_api_key"]["section"] == "brain.claude_code"
+        assert entries["claude_code_oauth_token"]["section"] == "brain.claude_code"
+        assert entries["istota_email_imap_password"]["section"] is None
+        sections = {section["key"] for section in payload["sections"]}
+        assert "brain.claude_code" in sections
         assert entries["istota_email_imap_password"]["set"] is True
         assert entries["istota_email_imap_password"]["config_key"] == "email.imap_password"
         assert entries["istota_brain_native_api_key"]["config_key"] == "brain.native.api_key"
