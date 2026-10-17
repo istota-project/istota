@@ -769,6 +769,23 @@ def _attach_files(msg: EmailMessage, attachments: list[str]) -> None:
         msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
 
 
+def plain_part(
+    body: str, *, content_type: str = "plain", html_body: str | None = None,
+) -> str:
+    """The text/plain part `_set_body` sends for these arguments.
+
+    An HTML ``body`` with no ``html_body`` gets a text part derived from it
+    (links kept inline as ``[label](url)``), so it is never single-part HTML
+    (ISSUE-770). Every place that records a sent mail calls this, so the
+    thread room shows what a plain-text reader of the mail sees.
+    """
+    if content_type == "html" and not html_body:
+        from istota.briefings.sources._html import html_to_markdown
+
+        return html_to_markdown(body, max_links=0, curate=False)
+    return body
+
+
 def _set_body(
     msg: EmailMessage,
     body: str,
@@ -781,10 +798,15 @@ def _set_body(
     With ``html_body`` the plain text is always the fallback part (a
     ``content_type`` of ``html`` would be meaningless there), so an HTML-capable
     client renders the rich version while a plain-only one still gets readable
-    text. Without it, the historical single-part ``set_content`` is used
-    verbatim — an empty ``html_body`` counts as "none supplied" so the briefing
-    renderer's failure signal degrades to plain rather than an empty HTML part.
+    text. ``content_type="html"`` alone makes ``body`` the HTML part and
+    `plain_part` derives the text part. Otherwise the single-part
+    ``set_content`` is used verbatim — an empty ``html_body`` counts as "none
+    supplied" so the briefing renderer's failure signal degrades to plain
+    rather than an empty HTML part.
     """
+    if content_type == "html" and not html_body and body:
+        html_body = body
+        body = plain_part(body, content_type="html")
     if html_body:
         msg.set_content(body)
         msg.add_alternative(html_body, subtype="html")
@@ -2630,7 +2652,10 @@ def cmd_send(args):
         reply_to=getattr(args, "reply_to", None),
     )
 
-    _write_deferred_sent_email(message_id, args.to, args.subject, cc=cc, body=body)
+    _write_deferred_sent_email(
+        message_id, args.to, args.subject, cc=cc,
+        body=plain_part(body, content_type=content_type),
+    )
 
     return {
         "status": "ok",
@@ -2707,12 +2732,13 @@ def cmd_reply(args):
     if held is not None:
         return held
 
+    content_type = "html" if getattr(args, "html", False) else "plain"
     message_id = send_email(
         to=to_addr,
         subject=subject,
         body=body,
         config=email_config,
-        content_type="html" if getattr(args, "html", False) else "plain",
+        content_type=content_type,
         cc=cc or None,
         attachments=send_paths or None,
         in_reply_to=orig.message_id,
@@ -2720,7 +2746,8 @@ def cmd_reply(args):
     )
     _write_deferred_sent_email(
         message_id, to_addr, subject, cc=cc, in_reply_to=orig.message_id,
-        references=references or None, body=body,
+        references=references or None,
+        body=plain_part(body, content_type=content_type),
     )
     return {
         "status": "ok",

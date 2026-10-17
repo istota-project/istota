@@ -196,7 +196,7 @@ def _safe_label(text: str) -> str:
     return label
 
 
-def _normalize(html: str) -> str:
+def _normalize(html: str, protocols: tuple[str, ...] = ("http", "https")) -> str:
     """Pre-clean, then sanitise with bleach when it's installed.
 
     ``<script>``/``<style>``/comments/pixels go first because bleach strips
@@ -214,7 +214,7 @@ def _normalize(html: str) -> str:
             out,
             tags=_KEEP_TAGS,
             attributes={"a": ["href"]},
-            protocols=["http", "https"],
+            protocols=list(protocols),
             strip=True,
             strip_comments=True,
         )
@@ -224,20 +224,26 @@ def _normalize(html: str) -> str:
 
 
 def html_to_markdown(
-    html: str | None, *, max_links: int = DEFAULT_MAX_LINKS,
+    html: str | None, *, max_links: int = DEFAULT_MAX_LINKS, curate: bool = True,
 ) -> str:
     """Flatten newsletter HTML to text, keeping article links inline.
 
     ``max_links`` caps the inline links kept per body (``0`` = unlimited);
     over-cap and filtered-out anchors keep their text and lose only the
     destination. Never raises — the caller (a briefing source) is fail-soft.
+
+    ``curate=False`` is for HTML the bot wrote itself (the text part of a sent
+    mail, ISSUE-770): no noise filter, no redirect unwrapping and no
+    de-duplication, so every http(s) link stays exactly as written, and a link
+    labelled with its own URL is written once. A ``mailto:`` link keeps its
+    address as ``label <address>``.
     """
     if not html:
         return ""
 
     from ...skills.briefing import _strip_html
 
-    normalized = _normalize(html)
+    normalized = _normalize(html) if curate else _normalize(html, ("http", "https", "mailto"))
 
     kept: dict[str, None] = {}  # ordered set of URLs already linked
     links: list[str] = []  # rendered markdown, indexed by placeholder number
@@ -249,8 +255,19 @@ def html_to_markdown(
         if not label:
             return " "  # image-only / empty anchor: nothing worth keeping
         url = _href_of(match.group(1))
+        if not curate and url.lower().startswith("mailto:"):
+            address = unquote(url[len("mailto:"):].split("?", 1)[0]).strip()
+            if not address or address == label:
+                return label
+            links.append(f"{label} <{address}>")
+            return _PLACEHOLDER.format(len(links) - 1)
         if not url or not _HTTP_URL_RE.match(url):
             return label
+        if not curate:
+            if max_links and len(links) >= max_links:
+                return label
+            links.append(url if label == url else f"[{label}]({_encode_url(url)})")
+            return _PLACEHOLDER.format(len(links) - 1)
         if _NOISE_LABEL_RE.match(label) or _NOISE_URL_RE.search(url):
             dropped += 1
             return label

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Feeds sidebar shows how many entries are unread and how many are starred next to Unread and Starred, and sources with unread entries are in bold. The counts update as you read, star and mark entries read.
 - **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation.
 - **Request films, shows and albums from chat.** The new `servarr` skill works with the operator's Sonarr, Radarr, Lidarr and Prowlarr: ask for something, see what is stuck and why, and list your requests. Admins can do everything; listed requesters request with the stack's defaults. Asking for a film or show the library holds unmonitored monitors it, tags it as your request and searches for it. It cannot delete media. Admin > Connections shows each app and whether it answers with its key, and the `[servarr]` section of Admin > Configuration has a block per app for its URL and API key. The API keys are secret files on the stack, like the other deployment credentials, and never sit in `config.toml`. See docs/features/servarr.md.
 - **Export the work log.** `money work export` writes work entries and invoices as CSV, one row per entry for a spreadsheet, or as JSON with every invoice, voided ones included, complete enough to rebuild the store. The Work and Invoices pages have a download menu for both, and the Work page's download follows its year filter.
@@ -78,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A mail the bot sends as HTML no longer shows as raw markup in its web chat email room. It now goes out with a plain-text version beside the HTML, links kept, and the room shows that text. Mail recorded before this keeps its HTML.
 - Signing in to an install on this Mac (`http://localhost`) now works in Safari. Safari dropped the session cookie there, so every sign-in form answered "This form expired". Run `istota-stack setup --web --force` once on an existing local install to pick up the change.
 - A reply quote in a shared room names the person who wrote the quoted message. It used to show the viewer's own name on any quoted user message, so in a WhatsApp group or a shared web room another member's words were attributed to you.
 - Group briefings can use the shared newsletter pool. Duplicating a personal briefing to a group used to leave its Newsletters source out as if it were personal, though the pool holds only mail addressed to no user.

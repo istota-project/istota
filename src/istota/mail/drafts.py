@@ -574,7 +574,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
     """
     from istota import db
     from istota.mail.support import get_email_config
-    from istota.skills.email import send_email
+    from istota.skills.email import plain_part, send_email
     from istota.transport.email import threads as email_threads
 
     email_config = get_email_config(config)
@@ -693,6 +693,10 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
         _revert("send failed")
         raise
 
+    # What a plain-text reader of the mail sees, which is what both the
+    # thread's room and the draft's card record (ISSUE-770).
+    sent_text = plain_part(draft.body, content_type="html" if draft.html else "plain")
+
     # Everything from here runs *after* the mail has left. A failure is no
     # longer a send failure, and must never be reported as one — hence the
     # wrapper: it turns "the bookkeeping broke" into a distinct exception
@@ -732,7 +736,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
                     conn, config, user_id=draft.user_id, message_id=message_id,
                     in_reply_to=draft.in_reply_to, references=draft.references,
                     to=list(draft.to_addrs), cc=list(draft.cc_addrs),
-                    subject=draft.subject, body=draft.body, task_id=draft.task_id,
+                    subject=draft.subject, body=sent_text, task_id=draft.task_id,
                 )
             except Exception as e:  # noqa: BLE001 — provenance is not the send
                 # Losing this row costs reply routing on this thread, not the
@@ -746,7 +750,7 @@ def release(config: "Config", draft_id: int, *, by: str = "system") -> str:
             # (ISSUE-612). Swallowed for the same reason: a view of the send.
             try:
                 db.settle_draft_mail(conn, draft.room_token, draft_id,
-                                     state="sent", body=draft.body)
+                                     state="sent", body=sent_text)
             except Exception as e:  # noqa: BLE001 — the card is not the send
                 logger.warning("released draft %d but could not update its card: %s",
                                draft_id, e)

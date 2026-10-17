@@ -21,11 +21,11 @@ from istota.mail.support import get_email_config
 from istota.lib.llm_json import find_fenced_block
 from istota.notifications.resolvers import outbound_draft as draft_source
 from istota.notifications.store import RaiseResult, deliver_pending
-from ...skills.email import reply_to_email, send_email
+from ...skills.email import plain_part, reply_to_email, send_email
 from . import threads as email_threads
 
 # NOTE: the briefing skill's body helpers (``strip_markdown`` /
-# ``render_briefing_html`` / ``_strip_html``) are imported function-locally
+# ``render_briefing_html``) are imported function-locally
 # inside ``_briefing_email_bodies``, not here. A transport must not structurally
 # depend on a sibling feature-skill at import time — keeping it lazy stops
 # ``import istota.transport`` from eagerly dragging in ``skills.briefing`` and
@@ -476,13 +476,14 @@ def composed_mail_body(config: "Config", task: db.Task, result: str) -> str | No
 
     The deferred file first, then an envelope in the result, as
     `deliver_email_result` reads them; the file is peeked, never consumed.
+    An HTML body is returned as the text part it is mailed with (ISSUE-770).
     """
     parsed = (
         _load_deferred_email_output(config, task, consume=False)
         or _parse_email_output(result)
     )
     if parsed and parsed.get("body"):
-        return parsed["body"]
+        return plain_part(parsed["body"], content_type=parsed.get("format") or "plain")
     return None
 
 
@@ -562,7 +563,7 @@ async def _send_thread_reply(
     The operator's disclosure footer, when turned on, goes on here so every
     mail into the thread carries it, a held draft included (ISSUE-605).
     """
-    mailed = body
+    mailed = plain_part(body, content_type=content_type, html_body=html_body)
     if content_type == "plain":
         try:
             with db.get_db(config.db_path) as conn:
@@ -642,7 +643,6 @@ def _briefing_email_bodies(
     through unchanged.
     """
     from ...skills.briefing import (
-        _strip_html,
         render_briefing_html,
         render_briefing_document_html,
         render_briefing_document_plain,
@@ -661,10 +661,10 @@ def _briefing_email_bodies(
 
     if fmt == "html":
         # Rare hand-authored path: the model already produced HTML. Pass it
-        # through as the rich part and derive a tag-stripped plain fallback.
+        # through as the rich part, with the text part every HTML send gets.
         if not want_html:
             return body, None, "html"
-        return _strip_html(body), body, "plain"
+        return plain_part(body, content_type="html"), body, "plain"
 
     plain = strip_markdown(body)
     if not want_html:
@@ -847,7 +847,8 @@ async def deliver_email_result(
             config, task, sent_message_id,
             to_addr=user_config.email_addresses[0],
             subject=subject,
-            to=[user_config.email_addresses[0]], body=body_text,
+            to=[user_config.email_addresses[0]],
+            body=plain_part(body_text, content_type=content_type, html_body=html_body),
         )
         return True
     except Exception as e:

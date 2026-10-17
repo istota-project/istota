@@ -138,7 +138,7 @@ Read: `list`, `read`, `search`, `thread`, `attachments --dest`, `from-senders`, 
 - **`--attach` is `EGRESS`** (ISSUE-447): root `{mount}/Users/{uid}` only, resolved at parse by `skills/_hostpath.resolve_parsed`, replacing the split `_scoped_attachments` / `_holdable_attachments`. Talk, channel and deferred files must be copied into the workspace first.
 - `effective_policy` resolves before opening the DB. `!drafts` answers drafts; `nag_stale_outbound_drafts` alerts at 24h, stamping `nagged_at` after delivery; `release` raises `DraftSentButUnrecorded` when bookkeeping fails after SMTP.
 - **Read scoping**: `istota.mail.ownership` is shared with the inbound poll; `shared`/`all` fail closed without the DB; `--scope mine` pushes all arms server-side, the thread arm from `_MINE_THREAD_MAX_IDS` sends (ISSUE-252), and the client filter stays authoritative.
-- `delete_emails_before` is library-only retention (scheduler.md). `html_body` (`_set_body`) is used only by briefing email.
+- `delete_emails_before` is library-only retention (scheduler.md). `html_body` (`_set_body`) is passed only by briefing email; `content_type="html"` alone sends `multipart/alternative` with a text part from `plain_part` (`briefings/sources/_html.html_to_markdown(curate=False)`), and every place that records a sent mail stores that text, so a thread room card never shows markup (ISSUE-770).
 
 ### `browse/` - headless browser
 `get`, `render`, `screenshot`, `extract`, `interact`, `links`, `close`; env `BROWSER_API_URL`; `requires_capability: [browser]`.
