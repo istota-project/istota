@@ -410,17 +410,84 @@ def write_managed(config_dir: Path, entries: dict[str, tuple[bool, str]]) -> boo
 
 
 def _keep_newest_backups(config_path: Path, keep: int) -> None:
+    for stale in _backups_of(config_path)[:-keep]:
+        stale.unlink(missing_ok=True)
+
+
+def scrub_moved_credentials(copy: Path, environ=None) -> bool:
+    """Remove from a copy of `config.toml` every credential whose secret file
+    holds a value; True when the copy was rewritten.
+
+    The file wins over an inline value, so the inline copy is never read while
+    the file is set and a rollback to the scrubbed copy loads the same
+    credential (ISSUE-769). A copy that does not parse is left as it is. The
+    rewrite goes through the plan renderer, so comments and key order go too.
+    """
+    from istota.config_editor.edits import _unset_everywhere, inline_file_credentials
+
+    environ = os.environ if environ is None else environ
+    try:
+        document = tomllib.loads(copy.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    moved = [
+        path for path, name in inline_file_credentials(document)
+        if _overrides_inline(name, environ.get(name.upper(), ""))
+    ]
+    if not moved:
+        return False
+    for path in moved:
+        _unset_everywhere(document, path)
+    write_private(copy, render_config(document))
+    return True
+
+
+def _overrides_inline(name: str, raw: str) -> bool:
+    """Whether the loader takes this variable over the inline value."""
+    from istota.config import parse_native_extra_headers
+
+    if not raw.strip():
+        return False
+    if name == "istota_brain_native_extra_headers":
+        # The loader keeps the inline table when the variable does not parse.
+        return parse_native_extra_headers(raw) is not None
+    return True
+
+
+def _backups_of(config_path: Path) -> list[Path]:
     prefix = config_path.name
-    backups = sorted(
+    return sorted(
         candidate for candidate in config_path.parent.iterdir()
         if candidate.name.startswith(prefix)
         and _BACKUP_SUFFIX.fullmatch(candidate.name[len(prefix):])
     )
-    for stale in backups[:-keep]:
-        stale.unlink(missing_ok=True)
 
 
-def write_config_with_backup(config_path: Path, new_text: str, backup: int | None) -> None:
+def _scrub_backups(config_path: Path) -> None:
+    from istota.maintenance.workspace_localize import PRE_LOCALIZE_SUFFIX
+
+    copies = _backups_of(config_path)
+    pre_localize = config_path.with_name(config_path.name + PRE_LOCALIZE_SUFFIX)
+    if pre_localize.is_file() and not pre_localize.is_symlink():
+        copies.append(pre_localize)
+    for copy in copies:
+        try:
+            scrub_moved_credentials(copy)
+        except OSError as exc:
+            # The new config is already written; a copy left as it was is not a failed apply.
+            print(f"warning: could not remove moved credentials from {copy.name}: {exc.strerror}",
+                  file=sys.stderr)
+
+
+def write_config_with_backup(
+    config_path: Path, new_text: str, backup: int | None, *, scrub: bool = True,
+) -> None:
+    """Replace `config_path`, keeping the newest `backup` copies of the old file.
+
+    `scrub` removes a moved credential from every copy (ISSUE-769), which is
+    only right where the environment holds what the secret files hold; setup
+    reads its answers from the same variables, so it passes False.
+    """
     if backup and config_path.exists():
         # Bytes, so the backup is the file as it was, line endings included.
         previous = config_path.read_bytes()
@@ -429,6 +496,9 @@ def write_config_with_backup(config_path: Path, new_text: str, backup: int | Non
     write_private(config_path, new_text)
     if backup:
         _keep_newest_backups(config_path, backup)
+    if scrub:
+        # An apply without --backup still scrubs the copies earlier applies left.
+        _scrub_backups(config_path)
 
 
 def plan_config(document: object, config_path: Path, *, backup: int | None = None) -> SectionPlan:

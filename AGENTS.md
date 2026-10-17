@@ -1,5 +1,21 @@
 # Istota - Claude Code Bot
 
+## Load project memory before working
+
+These instructions are shared by Claude Code and Codex. The injected copy can be truncated: read this file from disk in bounded sections through the end before starting work. For the affected subsystem, also read the corresponding `.claude/rules/*.md` files listed below; their `paths` frontmatter identifies where they apply. Do not assume Codex has loaded those files automatically.
+
+Read `.claude/project-memory/MEMORY.md` at the start of each task, then open the notes relevant to the request, including feedback. This gitignored directory is a local link to Claude's existing project memory, so both agents read the same notes. In a worktree, resolve the primary checkout with `git rev-parse --git-common-dir` and look for the link under that checkout. If the link is absent, look under `~/.claude/projects/` for the memory directory matching this project's primary checkout, not a sibling project. If no matching memory is available, say so and continue with the repository guidance. Treat remembered implementation status as historical context: verify it against the current tree. Current user instructions and repository rules take precedence over older notes. Never copy private memory into tracked files.
+
+### UI patterns are required reading
+
+Before planning or changing any UI, read `web/AGENTS.md` from disk, even when working from the repository root or changing a backend response that affects the UI. It is the shared design guide, not an optional reference. Read it in bounded sections through the end; its component tables and later layout rules can exceed the instruction-loading or tool-output limit. Also read `.claude/rules/web-ui.md`, the relevant subsystem rules, and the memory note `feedback_web_alerts_follow_chat.md` when available.
+
+- Start with `web/src/lib/components/ui/index.ts`, `web/src/lib/styles/tokens.css`, and the nearest sibling page. Reuse the existing primitives and page skeleton. Import UI components through `$lib/components/ui`.
+- Use theme tokens and the spacing/type scales. Add new color tokens to both themes. Reuse shared styles rather than redefining primitives or adding per-page theme overrides.
+- Follow chat's feedback patterns: out-of-band action failures use `notifyError` / `notifyWarning`; lasting conditions use `NoticeBanner`. Field validation and failed sends stay beside their field or message. Do not invent ad-hoc error banners.
+- Use `Modal`, `ConfirmDialog`, and `EmptyState` for their existing roles. Use `copyText` for clipboard actions and the platform facade for native-shell behavior.
+- Keep desktop and mobile behavior consistent with sibling pages. Run the design lint and the frontend checks specified in `web/AGENTS.md` for UI changes.
+
 Claude Code-powered assistant bot with Nextcloud Talk interface.
 
 **Production server**: `your-server` (SSH, installed at `/srv/app/istota`).
