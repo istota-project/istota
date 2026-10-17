@@ -209,6 +209,30 @@ def _open_existing_dir(user_root: Path, directory: Path) -> int | None:
     return open_overlay_dir(Path(user_root), *parts)
 
 
+def read_file_below(user_root: Path, path: Path, *, max_bytes: int) -> bytes | None:
+    """The bytes of the regular file ``path``, read once through the no-follow walk.
+
+    None when ``path`` is not below ``user_root`` by spelling, any component is
+    a link or missing, the leaf is not a regular file, or it exceeds
+    ``max_bytes``. One open and one read, so there is no check to race.
+    """
+    from istota.skills._loader import read_overlay_bytes  # noqa: PLC0415 - import cost
+
+    parts = _parts_below(Path(path), Path(user_root))
+    if not parts:
+        return None
+    fd = _open_existing_dir(user_root, Path(path).parent)
+    if fd is None:
+        return None
+    try:
+        data, reason, size = read_overlay_bytes(Path(parts[-1]), max_bytes=max_bytes, dir_fd=fd)
+    finally:
+        os.close(fd)
+    if reason is not None or size is None:
+        return None
+    return data
+
+
 def name_taken(user_root: Path, path: Path) -> bool:
     """Whether anything is at ``path``, asked through the no-follow walk.
 

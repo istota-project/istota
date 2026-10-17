@@ -681,6 +681,10 @@ def _service_eq(a, b) -> bool:
 def _prepare_invoicing_import(ctx, data: dict, replace: bool):
     from istota.money.invoice_review import validate_payment_detection
 
+    # The settings page's rule for the output folder (ISSUE-775), checked
+    # alone: the other scalars keep this import's sanitize-not-raise rule.
+    if "invoice_output" in data:
+        config_store.check_invoicing_scalars({"invoice_output": data["invoice_output"]})
     previous = config_store.load_invoicing(ctx.db_path)
     incoming = config_store.invoicing_config_from_toml_dict(data)
     cfg = incoming if replace else _merge_invoicing(ctx.db_path, data)

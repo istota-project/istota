@@ -1970,3 +1970,107 @@ class TestLogoStaysInsideAccountingPath:
         from istota.money.core.invoicing import _resolve_logo
 
         assert _resolve_logo(tmp_path, "") is None
+
+
+class TestLogoIsReadThroughTheUsersTree:
+    """ISSUE-775: the logo embedded in a PDF is read once, through a no-follow
+    walk from the user root, so neither a linked ``money`` folder nor a leaf
+    swapped for a link after the check reaches another user's file."""
+
+    SECRET = b"bob-logo-bytes"
+    OWN = b"alice-logo-bytes"
+
+    @pytest.fixture
+    def tree(self, tmp_path, monkeypatch):
+        import base64
+
+        from istota.money.core import invoicing as invoicing_mod
+
+        fake = types.ModuleType("weasyprint")
+        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
+        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        rendered: list[str] = []
+
+        def capture(html, output_path, **kwargs):
+            rendered.append(html)
+
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", capture)
+
+        user_root = tmp_path / "Users" / "alice"
+        data_dir = user_root / "Istota" / "money"
+        (data_dir / "branding").mkdir(parents=True)
+        bob_money = tmp_path / "Users" / "bob" / "Istota" / "money"
+        (bob_money / "branding").mkdir(parents=True)
+        (bob_money / "branding" / "logo.png").write_bytes(self.SECRET)
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            'accounting_path = "."\ninvoice_output = "invoices"\nnext_invoice_number = 1\n\n'
+            '[company]\nname = "My Co"\nlogo = "branding/logo.png"\n\n'
+            '[clients.acme]\nname = "Acme"\nterms = 30\n'
+        )
+        encoded = {
+            name: base64.b64encode(value).decode() for name, value in
+            (("secret", self.SECRET), ("own", self.OWN))
+        }
+        return types.SimpleNamespace(
+            user_root=user_root, data_dir=data_dir, bob_money=bob_money,
+            config_file=config_file, config=parse_invoicing_config(config_file),
+            rendered=rendered, encoded=encoded,
+        )
+
+    def _create(self, t):
+        from istota.money.core.invoicing import InvoiceRecordError, create_manual_invoice
+
+        try:
+            create_manual_invoice(
+                config=t.config, data_dir=t.data_dir, accounting_path=t.data_dir,
+                invoice_output_dir=t.data_dir / "invoices", client_key="acme",
+                lines=[{"description": "x", "amount": 10}], config_path=t.config_file,
+                user_root=t.user_root,
+            )
+        except InvoiceRecordError:
+            pass
+        assert len(t.rendered) == 1
+        return t.rendered[0]
+
+    def test_an_own_logo_is_embedded(self, tree):
+        (tree.data_dir / "branding" / "logo.png").write_bytes(self.OWN)
+        assert tree.encoded["own"] in self._create(tree)
+
+    def test_a_linked_money_folder_is_not_followed(self, tree):
+        import shutil
+
+        shutil.rmtree(tree.data_dir)
+        tree.data_dir.symlink_to(tree.bob_money, target_is_directory=True)
+        assert tree.encoded["secret"] not in self._create(tree)
+
+    def test_a_linked_logo_folder_is_not_followed(self, tree):
+        import shutil
+
+        shutil.rmtree(tree.data_dir / "branding")
+        (tree.data_dir / "branding").symlink_to(
+            tree.bob_money / "branding", target_is_directory=True,
+        )
+        assert tree.encoded["secret"] not in self._create(tree)
+
+    def test_a_linked_logo_is_not_embedded(self, tree):
+        own = tree.data_dir / "branding" / "real.png"
+        own.write_bytes(self.OWN)
+        (tree.data_dir / "branding" / "logo.png").symlink_to(own)
+        assert tree.encoded["own"] not in self._create(tree)
+
+    def test_a_logo_swapped_for_a_link_after_the_check_is_not_read(self, tree, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+
+        logo = tree.data_dir / "branding" / "logo.png"
+        logo.write_bytes(self.OWN)
+        real = invoicing_mod._resolve_logo
+
+        def then_swap(*args, **kwargs):
+            result = real(*args, **kwargs)
+            logo.unlink()
+            logo.symlink_to(tree.bob_money / "branding" / "logo.png")
+            return result
+
+        monkeypatch.setattr(invoicing_mod, "_resolve_logo", then_swap)
+        assert tree.encoded["secret"] not in self._create(tree)

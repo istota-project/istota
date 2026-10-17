@@ -2255,3 +2255,45 @@ class TestInvoiceFilesStayInTheUsersTree:
         output = self._run(runner, obj, "invoice", "create", "acme", "-s", "dev", "-q", "1")
         assert output["status"] == "error", output
         assert sorted(p.name for p in victim.parent.parent.rglob("*")) == ["2026", victim.name]
+
+    @staticmethod
+    def _stub_weasyprint(monkeypatch):
+        import sys
+        import types
+
+        fake = types.ModuleType("weasyprint")
+        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
+        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+
+    def test_generate_writes_nothing_into_the_other_users_tree(self, runner, world, monkeypatch):
+        from datetime import date
+
+        from istota.money.work import add_work_entry
+
+        self._stub_weasyprint(monkeypatch)
+        obj, data_dir, victim = world
+        add_work_entry(data_dir, date.today().isoformat(), "acme", "dev", qty=1)
+        output = self._run(runner, obj, "invoice", "generate")
+        assert output["status"] == "error", output
+        assert sorted(p.name for p in victim.parent.parent.rglob("*")) == ["2026", victim.name]
+
+    def test_run_scheduled_writes_nothing_into_the_other_users_tree(
+        self, runner, world, monkeypatch,
+    ):
+        from datetime import date, timedelta
+
+        from istota.money.work import add_work_entry
+
+        self._stub_weasyprint(monkeypatch)
+        obj, data_dir, victim = world
+        config = config_store.load_invoicing(obj.db_path)
+        config.clients["acme"].schedule = "monthly"
+        config.clients["acme"].schedule_day = 1
+        config_store.save_invoicing(obj.db_path, config)
+        previous = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
+        add_work_entry(data_dir, previous.isoformat(), "acme", "dev", qty=1)
+
+        # A refused publish raises out of the scheduled run, as any record failure does.
+        result = runner.invoke(cli, ["-u", "alice", "run-scheduled"], obj=obj)
+        assert result.exit_code != 0, result.output
+        assert sorted(p.name for p in victim.parent.parent.rglob("*")) == ["2026", victim.name]

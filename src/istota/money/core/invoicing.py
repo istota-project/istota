@@ -18,8 +18,9 @@ import re
 import secrets
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from istota.lib.file_lock import exclusive_lock
 
@@ -135,7 +136,20 @@ def _parse_company_data(key: str, company_data: dict) -> CompanyConfig:
 # =============================================================================
 
 
-def _resolve_logo(accounting_path: Path, logo: str) -> Path | None:
+LOGO_MAX_BYTES = 5 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class LogoImage:
+    """A logo already read, so embedding it opens nothing."""
+
+    data: bytes
+    mime_type: str
+
+
+def _resolve_logo(
+    accounting_path: Path, logo: str, user_root: Path | None = None,
+) -> Path | LogoImage | None:
     """Resolve an entity logo, refusing anything outside the accounting folder.
 
     ``accounting_path / logo`` follows pathlib semantics, so an absolute
@@ -143,9 +157,28 @@ def _resolve_logo(accounting_path: Path, logo: str) -> Path | None:
     base64-embedded into the PDF. The store rejects such a value at write time;
     this is the read-side half, covering rows written before that check and any
     other writer.
+
+    With ``user_root`` the logo is read here, once, through a no-follow walk
+    from the user root, and its bytes are returned (ISSUE-775): a resolved
+    path read later could be reached through a ``money`` folder linked to
+    another user's, or a leaf swapped for a link after the check. Without it,
+    the resolved path, as before.
     """
     if not logo:
         return None
+    if user_root is not None:
+        from istota.money.invoice_files import read_file_below  # noqa: PLC0415
+
+        pure = PurePosixPath(logo)
+        data = None
+        if not pure.is_absolute() and ".." not in pure.parts and pure.parts:
+            data = read_file_below(
+                user_root, accounting_path.joinpath(*pure.parts), max_bytes=LOGO_MAX_BYTES,
+            )
+        if not data:
+            logger.warning("invoice_logo_unreadable logo=%r — ignored", logo)
+            return None
+        return LogoImage(data, mimetypes.guess_type(logo)[0] or "image/png")
     candidate = accounting_path / logo
     try:
         root = accounting_path.resolve()
@@ -529,7 +562,7 @@ def _generate_invoices(
 
         entity = config.companies.get(entity_key, config.company)
 
-        logo_path = _resolve_logo(accounting_path, entity.logo)
+        logo_path = _resolve_logo(accounting_path, entity.logo, user_root)
 
         groups = group_entries_by_bundle(client_entity_entries, client_config)
 
@@ -814,13 +847,23 @@ def update_invoice_number(config_path: Path, new_number: int) -> None:
 # =============================================================================
 
 
-def _embed_logo(logo_path: Path) -> str:
-    mime_type = mimetypes.guess_type(str(logo_path))[0] or "image/png"
-    data = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+def _embed_logo(logo_path: Path | LogoImage) -> str:
+    if isinstance(logo_path, LogoImage):
+        mime_type, raw = logo_path.mime_type, logo_path.data
+    else:
+        mime_type = mimetypes.guess_type(str(logo_path))[0] or "image/png"
+        raw = logo_path.read_bytes()
+    data = base64.b64encode(raw).decode("ascii")
     return f"data:{mime_type};base64,{data}"
 
 
-def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> str:
+def _has_logo(logo_path: Path | LogoImage | None) -> bool:
+    if isinstance(logo_path, LogoImage):
+        return True
+    return bool(logo_path) and logo_path.exists()
+
+
+def generate_invoice_html(invoice: Invoice, logo_path: Path | LogoImage | None = None) -> str:
     """Generate HTML for an invoice, suitable for PDF conversion.
 
     Every interpolated string is HTML-escaped. These are names, addresses and
@@ -902,7 +945,7 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 <body>
     <div class="header">
         <div>
-            {f'<img class="company-logo" src="{_embed_logo(logo_path)}" alt="{company_name}">' if logo_path and logo_path.exists() else f'<div class="company-name">{company_name}</div>'}
+            {f'<img class="company-logo" src="{_embed_logo(logo_path)}" alt="{company_name}">' if _has_logo(logo_path) else f'<div class="company-name">{company_name}</div>'}
             <div style="white-space: pre-line; color: #666; margin-top: 4px;">{company_address}</div>
         </div>
         <div class="invoice-meta">
@@ -1406,7 +1449,7 @@ def _issue_manual_invoice(
     )
 
     html_text = generate_invoice_html(
-        inv, logo_path=_resolve_logo(accounting_path, resolved_entity.logo),
+        inv, logo_path=_resolve_logo(accounting_path, resolved_entity.logo, user_root),
     )
     pdf_path = (
         invoice_output_dir / str(invoice_date.year)

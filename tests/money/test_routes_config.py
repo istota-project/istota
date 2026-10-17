@@ -1669,6 +1669,20 @@ class TestPaymentDetectionSettings:
 
 
 @pytest.mark.parametrize("dry_run", [0, 1])
+@pytest.mark.parametrize("value", ["/srv/elsewhere", "../elsewhere"])
+def test_import_rejects_an_invoice_output_outside_the_money_folder(client, ctx, dry_run, value):
+    """ISSUE-775: the import applies the settings page's rule for the folder."""
+    before = config_store.load_invoicing(ctx.db_path).invoice_output
+    response = client.post(
+        f"/istota/api/money/config/import?section=invoicing&dry_run={dry_run}",
+        json={"text": f'invoice_output = "{value}"\n'},
+    )
+    assert response.status_code == 400
+    assert "invoice_output" in response.json()["error"]
+    assert config_store.load_invoicing(ctx.db_path).invoice_output == before
+
+
+@pytest.mark.parametrize("dry_run", [0, 1])
 def test_import_rejects_invalid_detection_pair(client, ctx, dry_run):
     response = client.post(
         f"/istota/api/money/config/import?section=invoicing&dry_run={dry_run}",

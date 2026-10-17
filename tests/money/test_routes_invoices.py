@@ -706,6 +706,31 @@ class TestGenerateRoute:
         assert resp.status_code == 400
         assert _invoices_in_db(tmp_path) == []
 
+    def test_a_linked_year_folder_gets_no_pdf(
+        self, make_client, tmp_path, tmp_path_factory, monkeypatch,
+    ):
+        """ISSUE-775: generation passes the user root, so the PDF goes through
+        the no-follow walk even when the output folder is outside ``accounting_path``."""
+        import sys
+        import types
+
+        fake = types.ModuleType("weasyprint")
+        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF")
+        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        outside = tmp_path_factory.mktemp("outside")
+        cfg = _write_invoicing_config(tmp_path, "invoices/generated")
+        cfg.write_text(cfg.read_text().replace('accounting_path = "."', 'accounting_path = "books"'))
+        (tmp_path / "books").mkdir()
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / str(date.today().year)).symlink_to(outside, target_is_directory=True)
+        _add(tmp_path, "work", day=date.today().isoformat())
+
+        resp = make_client(cfg).post(self.URL, json={"dry_run": False})
+        assert resp.status_code == 500
+        assert list(outside.iterdir()) == []
+        assert _invoices_in_db(tmp_path) == []
+
     @pytest.mark.parametrize("output", ["/elsewhere/invoices", "../elsewhere"])
     def test_invoice_output_outside_the_money_folder_is_400(
         self, make_client, tmp_path, fake_pdf, output,
