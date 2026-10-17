@@ -395,6 +395,13 @@ oneshot() {
     local tty=(-T)
     if [ -t 0 ] && [ -t 1 ]; then tty=(); fi
     ensure_data_dir
+    # compose refuses a `run` whose service declares a missing secret file, and
+    # an update runs one from the new tag's compose file before it starts the
+    # stack, so a release that adds a secret would fail every update.
+    if ! ensure_secret_files; then
+        log "could not create the secret files compose declares in ${SECRETS_DIR}"
+        return 1
+    fi
     compose run --rm --no-deps "${tty[@]}" --entrypoint istota-drop "$@"
 }
 
