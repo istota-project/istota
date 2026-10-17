@@ -649,6 +649,34 @@ class TestASignedTagIsDeployed:
         assert (secrets / "new_one").read_text() == ""
         assert list(elsewhere.iterdir()) == []
 
+    def test_a_new_secret_exists_before_the_first_one_shot(self, fx, tmp_path):
+        """compose refuses a `run` as it refuses an `up` when a declared secret
+        file is missing, and the update starts a one-shot from the new tag's
+        compose file (the devbox render) before it starts the stack."""
+        compose = fx.origin / "docker" / "docker-compose.yml"
+        compose.parent.mkdir(parents=True)
+        compose.write_text("secrets:\n  new_one:\n    file: ${ISTOTA_SECRETS_DIR:-./secrets}/new_one\n")
+        _git(fx.origin, "add", "docker/docker-compose.yml", env=fx.env)
+        fx.commit("v1")
+        fx.tag("v1", key=fx.release_key)
+        secrets = fx.stack / "secrets"
+        secrets.mkdir()
+        runs = tmp_path / "one-shots"
+        stub = Path(fx.env["PATH"].split(":")[0]) / "docker"
+        stub.write_text(DOCKER_STUB.replace(
+            'case "$args" in\n',
+            'case "$args" in\n'
+            f'  *" run --rm "*) echo run >> "{runs}"; [ -e "{secrets}/new_one" ] || '
+            '{ echo "bind source path does not exist: new_one" >&2; exit 1; } ;;\n',
+            1,
+        ))
+
+        result = fx.run("update", "v1")
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert runs.read_text().strip(), "no one-shot ran, so the test proved nothing"
+        assert (secrets / "new_one").read_text() == ""
+
     def test_a_release_build_is_told_its_tag(self, fx, tmp_path):
         commit = fx.commit("v1")
         fx.tag("v1", key=fx.release_key)
