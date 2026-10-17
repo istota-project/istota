@@ -24,6 +24,7 @@ from istota.config import Config
 from istota.config_editor import edits, handoff, requests
 from istota.config_editor.secrets import SENTINEL
 from istota.lib import toml_write
+from istota.setup_wizard import SECRET_NAMES
 from istota.webui import auth as web_auth
 
 REPO = Path(__file__).resolve().parents[1]
@@ -47,11 +48,14 @@ class Install:
             "ISTOTA_ADMINS_FILE": str(self.admins_path),
         }
         self.env.pop("ISTOTA_CONFIG_PATH", None)
+        for name in SECRET_NAMES:
+            self.env.pop(name.upper(), None)
 
-    def run(self, *argv: str) -> subprocess.CompletedProcess:
+    def run(self, *argv: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, "-m", "istota.cli", "-c", str(self.config_path), *argv],
-            capture_output=True, text=True, env=self.env, timeout=120, cwd=self.root,
+            capture_output=True, text=True, env={**self.env, **(env or {})}, timeout=120,
+            cwd=self.root,
         )
 
     def digest(self) -> str:
@@ -74,6 +78,8 @@ class Install:
 @pytest.fixture
 def install(tmp_path, monkeypatch) -> Install:
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "k" * 64)
+    for name in SECRET_NAMES:
+        monkeypatch.delenv(name.upper(), raising=False)
     found = Install(tmp_path)
     found.db_path.parent.mkdir()
     found.config_path.parent.mkdir()
@@ -279,6 +285,39 @@ class TestMove:
         assert MOVED_TOKEN not in json.dumps(plan)
         assert plan["config"]["whatsapp"] == {"enabled": False}
         assert files["secrets"] == {"istota_whatsapp_access_token": MOVED_TOKEN}
+
+    def test_a_secret_file_set_since_the_preview_refuses_the_move(self, install):
+        install.config_path.write_text(
+            install.config_path.read_text()
+            + f'\n[whatsapp]\nenabled = false\naccess_token = "{MOVED_TOKEN}"\n'
+        )
+        taken = self._taken(install, {"move_to_file": ["whatsapp.cloud.access_token"]})
+        current = tomllib.loads(install.config_path.read_text())
+        rotated = "whatsapp-token-rotated-on-host-5d"
+        with pytest.raises(handoff.HandoffError, match=r"whatsapp\.cloud\.access_token") as raised:
+            handoff.build(taken, current, environ={"ISTOTA_WHATSAPP_ACCESS_TOKEN": rotated})
+        assert "istota_whatsapp_access_token" in str(raised.value)
+        assert MOVED_TOKEN not in str(raised.value)
+        assert rotated not in str(raised.value)
+
+    def test_the_take_refuses_a_move_over_a_secret_file_set_since(self, install):
+        install.config_path.write_text(
+            install.config_path.read_text() + f'\n[sms.twilio]\nauth_token = "{MOVED_TOKEN}"\n'
+        )
+        request_id = install.submit({"move_to_file": ["sms.twilio.auth_token"]})
+        rotated = "twilio-token-rotated-on-host-5d"
+        result = install.run(
+            "config-request", "take", "--out", str(install.out),
+            env={"ISTOTA_SMS_TWILIO_AUTH_TOKEN": rotated},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+        assert not (install.out / "files.json").exists()
+        with db.get_db(install.db_path) as conn:
+            row = conn.execute("SELECT * FROM config_change_requests WHERE id = ?", (request_id,)).fetchone()
+        assert row["status"] == "refused"
+        stored = " ".join(str(row[key]) for key in row.keys())
+        assert MOVED_TOKEN not in stored and rotated not in stored
 
     def test_the_build_removes_a_flat_copy_the_stored_document_still_holds(self, install):
         install.config_path.write_text(

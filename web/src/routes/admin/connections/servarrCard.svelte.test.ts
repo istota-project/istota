@@ -2,26 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
-import type {
-  AdminConfigView,
-  AdminNextcloudCheck,
-  AdminServarrApp,
-  AdminServarrConnection,
-} from '$lib/api';
-import {
-  configField,
-  configPreview,
-  configRequest,
-  configSecret,
-  configView,
-} from '$lib/test/adminConfig';
+import type { AdminNextcloudCheck, AdminServarrApp, AdminServarrConnection } from '$lib/api';
 
 /**
- * The servarr card on `/admin/connections`, read view.
+ * The servarr card on `/admin/connections`: status only.
  *
  * It shows what the config names per arr app and what the daemon's last
  * `servarr.connection.<app>` check found, and offers a fresh doctor run. The
  * payload never carries a key, so the card can only say whether one is set.
+ * `[servarr]` is edited in Configuration, which Configure and Add apps open.
  */
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
@@ -187,13 +176,15 @@ describe('the servarr card', () => {
     expect(q.queryByRole('link', { name: 'ftp://10.0.0.5' })).toBeNull();
   });
 
-  it('links Configure to the servarr section', async () => {
+  it('links Configure to the servarr section and has no form of its own', async () => {
     const card = await mount();
     const configure = within(card).getByRole('link', { name: 'Configure' });
     expect(configure.getAttribute('href')).toBe('/istota/admin/config?section=servarr');
+    expect(within(card).queryByRole('button', { name: 'Edit' })).toBeNull();
+    expect(within(card).queryByRole('textbox')).toBeNull();
   });
 
-  it('offers to add apps on an install with none, with no Check now or Edit', async () => {
+  it('links Add apps to Configuration on an install with none, with no Check now', async () => {
     const card = await mount({
       status: 'disabled',
       apps: [],
@@ -204,8 +195,9 @@ describe('the servarr card', () => {
     const q = within(card);
     expect(q.getByText('Disabled')).toBeTruthy();
     expect(q.getByText(/No arr apps are connected/)).toBeTruthy();
-    expect(q.getByRole('button', { name: 'Add apps' })).toBeTruthy();
-    expect(q.queryByRole('button', { name: 'Edit' })).toBeNull();
+    expect(q.getByRole('link', { name: 'Add apps' }).getAttribute('href')).toBe(
+      '/istota/admin/config?section=servarr',
+    );
     expect(q.queryByRole('button', { name: 'Check now' })).toBeNull();
     expect(q.getByRole('link', { name: 'Configure' })).toBeTruthy();
     expect(q.getByRole('link', { name: 'Setup guide' }).getAttribute('target')).toBe('_blank');
@@ -245,342 +237,5 @@ describe('Check now', () => {
     const card = await mount();
     await fireEvent.click(within(card).getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('API error: 403'));
-  });
-});
-
-describe('editing', () => {
-  const KEY_FILE = 'istota_servarr_radarr_api_key';
-
-  /** The view's secrets entries for the four keys, as `GET /admin/config` lists them. */
-  function keyFiles(readOnlyReason: string | null = null) {
-    return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) =>
-      configSecret({
-        name: `istota_servarr_${name}_api_key`,
-        config_key: `servarr.apps.${name}.api_key`,
-        set: name === 'radarr',
-        source: name === 'radarr' ? 'file' : 'none',
-        used_by: 'Servarr',
-        read_only_reason: readOnlyReason,
-      }),
-    );
-  }
-  const UNMANAGED = { managed: false, source: null, at: null };
-  const MANAGED = {
-    config: { managed: true, source: 'ansible', at: null },
-    secrets: UNMANAGED,
-    admins: UNMANAGED,
-  };
-
-  function servarrView(over: Partial<AdminConfigView> = {}): AdminConfigView {
-    return configView(
-      [
-        configField({
-          path: ['servarr', 'private_hosts'],
-          value: ['10.0.0.5'],
-          type: 'list[str]',
-          editor: 'list',
-          in_file: true,
-        }),
-      ],
-      { secrets: keyFiles(), ...over },
-    );
-  }
-
-  const DISABLED: Partial<AdminServarrConnection> = {
-    status: 'disabled',
-    apps: [],
-    missing: ['sonarr', 'radarr', 'lidarr', 'prowlarr'],
-    requesters: [],
-    defaults: {},
-  };
-
-  async function openEditor(
-    view: AdminConfigView = servarrView(),
-    over: Partial<AdminServarrConnection> = {},
-    button = 'Edit',
-  ) {
-    api.getAdminConfig.mockResolvedValue(view);
-    api.getAdminUsers.mockResolvedValue({
-      users: [
-        {
-          user_id: 'alice',
-          display_name: 'Alice',
-          is_admin: true,
-          state: 'password_set',
-          identity: null,
-        },
-        {
-          user_id: 'bob',
-          display_name: 'Bob',
-          is_admin: false,
-          state: 'password_set',
-          identity: null,
-        },
-      ],
-      orphans: [],
-      email_enabled: true,
-    });
-    const card = await mount(over);
-    await fireEvent.click(within(card).getByRole('button', { name: button }));
-    return card;
-  }
-
-  async function form(card: HTMLElement, app = 'radarr') {
-    return within(await within(card).findByTestId(`servarr-edit-${app}`));
-  }
-
-  async function typeUrl(card: HTMLElement, url: string) {
-    const radarr = await form(card);
-    await fireEvent.input(radarr.getByLabelText(/^URL/), { target: { value: url } });
-    return radarr;
-  }
-
-  function review(card: HTMLElement) {
-    return fireEvent.click(within(card).getByRole('button', { name: 'Review changes' }));
-  }
-
-  beforeEach(() => {
-    api.getAdminConfig.mockReset();
-    api.getAdminUsers.mockReset();
-    api.previewConfigChange.mockReset();
-    api.submitConfigChange.mockReset();
-    api.getConfigRequest.mockReset();
-    api.startStepUp.mockReset();
-  });
-
-  it('starts the key input empty and never holds the stored value', async () => {
-    const card = await openEditor();
-    const radarr = await form(card);
-    expect(radarr.getByText('set')).toBeTruthy();
-    expect(radarr.queryByLabelText(/^New API key/)).toBeNull();
-    await fireEvent.click(radarr.getByRole('button', { name: 'Replace key' }));
-    const input = radarr.getByLabelText<HTMLInputElement>(/^New API key/);
-    expect(input.value).toBe('');
-    expect(input.type).toBe('password');
-    expect(radarr.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7878');
-  });
-
-  it('sends an untouched key as no credential, and the change to the shared review', async () => {
-    api.previewConfigChange.mockResolvedValue(
-      configPreview({ diff: ['+url = "http://10.0.0.5:7879"'], changed_sections: ['servarr'] }),
-    );
-    const card = await openEditor();
-    await typeUrl(card, 'http://10.0.0.5:7879');
-    await review(card);
-    expect(await screen.findByText('+url = "http://10.0.0.5:7879"')).toBeTruthy();
-    expect(api.previewConfigChange).toHaveBeenCalledWith({
-      base_digest: 'digest-1',
-      ops: [
-        { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://10.0.0.5:7879' },
-      ],
-      raw: null,
-      secrets: {},
-    });
-  });
-
-  it('sends a replaced key as one credential value and in no set op', async () => {
-    api.previewConfigChange.mockResolvedValue(configPreview({ secret_names: [KEY_FILE] }));
-    const card = await openEditor();
-    const radarr = await form(card);
-    await fireEvent.click(radarr.getByRole('button', { name: 'Replace key' }));
-    await fireEvent.input(radarr.getByLabelText(/^New API key/), {
-      target: { value: 'fixture-arr-key-9' },
-    });
-    await review(card);
-    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
-    const changeSet = api.previewConfigChange.mock.calls[0][0];
-    expect(changeSet.secrets).toEqual({ [KEY_FILE]: 'fixture-arr-key-9' });
-    expect(changeSet.ops).toEqual([]);
-  });
-
-  it('removes the table of an app turned off and clears its key file', async () => {
-    api.previewConfigChange.mockResolvedValue(configPreview());
-    const card = await openEditor();
-    const radarr = await form(card);
-    await fireEvent.click(radarr.getByLabelText('Enabled'));
-    await review(card);
-    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
-    const changeSet = api.previewConfigChange.mock.calls[0][0];
-    expect(changeSet.ops).toEqual([{ op: 'unset', path: ['servarr', 'apps', 'radarr'] }]);
-    expect(changeSet.secrets).toEqual({ [KEY_FILE]: '' });
-  });
-
-  it('shows a read-only key file with its reason and no way to replace it', async () => {
-    const reason = 'Managed by ansible. Change it there.';
-    const card = await openEditor(servarrView({ secrets: keyFiles(reason) }));
-    const radarr = await form(card);
-    expect(radarr.getByText(reason)).toBeTruthy();
-    expect(radarr.queryByRole('button', { name: 'Replace key' })).toBeNull();
-  });
-
-  it('refuses plain HTTP to a host not in the private hosts before any preview', async () => {
-    const card = await openEditor();
-    const radarr = await typeUrl(card, 'http://arr.example.com:7878');
-    await review(card);
-    expect(await radarr.findByText(/not in the private hosts/)).toBeTruthy();
-    expect(api.previewConfigChange).not.toHaveBeenCalled();
-  });
-
-  it('applies through step-up and follows the request', async () => {
-    api.previewConfigChange.mockResolvedValue(configPreview());
-    api.startStepUp.mockResolvedValue({
-      request_id: 'step-1',
-      method: 'email' as const,
-      email_hint: 'a•••@example.com',
-      expires_at: 'later',
-    });
-    api.submitConfigChange.mockResolvedValue({ id: 17 });
-    api.getConfigRequest.mockResolvedValue(configRequest({ id: 17, status: 'pending' }));
-    const card = await openEditor();
-    await typeUrl(card, 'http://10.0.0.5:7879');
-    await review(card);
-    await fireEvent.click(await screen.findByRole('button', { name: 'Apply…' }));
-    expect(api.startStepUp).toHaveBeenCalledWith('admin_config_change', undefined);
-    await screen.findByText(/a•••@example.com/);
-    await fireEvent.input(screen.getByLabelText('Confirmation code'), {
-      target: { value: '123456' },
-    });
-    await fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect(await within(card).findByText('Change #17')).toBeTruthy();
-    expect(api.submitConfigChange.mock.calls[0][0].step_up).toEqual({
-      request_id: 'step-1',
-      code: '123456',
-    });
-    expect(within(card).queryByTestId('servarr-edit-radarr')).toBeNull();
-  });
-
-  it('is read-only with the reason when there is no config applier', async () => {
-    const reason = 'This install has no config applier; changes are made on the host.';
-    const card = await openEditor(
-      servarrView({ editable: false, applier: { kind: 'none', available: false, reason } }),
-    );
-    expect(await within(card).findByText(reason)).toBeTruthy();
-    expect(within(card).queryByTestId('servarr-edit-radarr')).toBeNull();
-  });
-
-  it('is read-only and names the plan when config.toml is managed', async () => {
-    const card = await openEditor(servarrView({ managed: MANAGED }));
-    expect(await within(card).findByText(/managed by ansible/)).toBeTruthy();
-    expect(within(card).queryByTestId('servarr-edit-radarr')).toBeNull();
-  });
-
-  it('keeps the edits when config.toml changed under the card', async () => {
-    api.previewConfigChange
-      .mockRejectedValueOnce(
-        new api.ConfigChangeError('changed', 409, 'config_changed', { digest: 'digest-2' }),
-      )
-      .mockResolvedValue(configPreview());
-    const card = await openEditor();
-    await typeUrl(card, 'http://10.0.0.5:7879');
-    api.getAdminConfig.mockResolvedValue(servarrView({ document_digest: 'digest-2' }));
-    api.getAdminConnections.mockResolvedValue({
-      connections: [connection({ requesters: ['bob', 'alice'] })],
-    });
-    await review(card);
-    expect(await within(card).findByText(/changed on the host/)).toBeTruthy();
-    const kept = await form(card);
-    expect(kept.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7879');
-    await review(card);
-    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalledTimes(2));
-    expect(api.previewConfigChange.mock.calls[1][0]).toMatchObject({
-      base_digest: 'digest-2',
-      ops: [
-        { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://10.0.0.5:7879' },
-      ],
-    });
-  });
-
-  it('drops the edits and goes read-only when the changed file is now managed', async () => {
-    api.previewConfigChange.mockRejectedValueOnce(
-      new api.ConfigChangeError('changed', 409, 'config_changed', { digest: 'digest-2' }),
-    );
-    const card = await openEditor();
-    await typeUrl(card, 'http://10.0.0.5:7879');
-    api.getAdminConfig.mockResolvedValue(
-      servarrView({ document_digest: 'digest-2', managed: MANAGED }),
-    );
-    await review(card);
-    expect(await within(card).findByText(/managed by ansible/)).toBeTruthy();
-    expect(within(card).queryByTestId('servarr-edit-radarr')).toBeNull();
-  });
-
-  it('opens the form on an install with no apps (ISSUE-767)', async () => {
-    const card = await openEditor(servarrView(), DISABLED, 'Add apps');
-    const sonarr = await form(card, 'sonarr');
-    expect(sonarr.getByLabelText('Enabled')).toBeTruthy();
-    expect(within(card).queryByText(/no arr apps/i)).toBeNull();
-  });
-
-  it('adds a first app as its URL and a key file, from an empty card', async () => {
-    api.previewConfigChange.mockResolvedValue(configPreview());
-    const card = await openEditor(servarrView(), DISABLED, 'Add apps');
-    const sonarr = await form(card, 'sonarr');
-    await fireEvent.click(sonarr.getByLabelText('Enabled'));
-    const url = sonarr.getByLabelText<HTMLInputElement>(/^URL/);
-    expect(url.placeholder).toBe('http://192.168.1.10:8989');
-    await fireEvent.input(url, { target: { value: 'https://sonarr.example.com' } });
-    await fireEvent.input(sonarr.getByLabelText(/^API key/), {
-      target: { value: 'fixture-arr-key-1' },
-    });
-    await review(card);
-    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
-    const changeSet = api.previewConfigChange.mock.calls[0][0];
-    expect(changeSet.ops).toEqual([
-      {
-        op: 'set',
-        path: ['servarr', 'apps', 'sonarr', 'url'],
-        value: 'https://sonarr.example.com',
-      },
-    ]);
-    expect(changeSet.secrets).toEqual({ istota_servarr_sonarr_api_key: 'fixture-arr-key-1' });
-  });
-
-  it('offers to add a plain-HTTP host to the private hosts before review', async () => {
-    api.previewConfigChange.mockResolvedValue(configPreview());
-    const card = await openEditor();
-    const radarr = await typeUrl(card, 'http://10.0.0.9:7878');
-    expect(radarr.getByText(/not in the private hosts/)).toBeTruthy();
-    await fireEvent.click(radarr.getByRole('button', { name: 'Add 10.0.0.9 to private hosts' }));
-    expect(radarr.queryByText(/not in the private hosts/)).toBeNull();
-    await review(card);
-    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
-    expect(api.previewConfigChange.mock.calls[0][0].ops).toContainEqual({
-      op: 'set',
-      path: ['servarr', 'private_hosts'],
-      value: ['10.0.0.5', '10.0.0.9'],
-    });
-  });
-
-  it('clears the refused URL once the quick fix answers it', async () => {
-    const card = await openEditor();
-    const radarr = await typeUrl(card, 'http://10.0.0.9:7878');
-    await review(card);
-    expect(api.previewConfigChange).not.toHaveBeenCalled();
-    await fireEvent.click(radarr.getByRole('button', { name: 'Add 10.0.0.9 to private hosts' }));
-    expect(radarr.queryByText(/not in the private hosts/)).toBeNull();
-  });
-
-  it('keeps Add defaults open while its last value is cleared', async () => {
-    const card = await openEditor(servarrView(), DISABLED, 'Add apps');
-    const sonarr = await form(card, 'sonarr');
-    await fireEvent.click(sonarr.getByLabelText('Enabled'));
-    const details = sonarr.getByText('Add defaults').closest('details')!;
-    details.open = true;
-    const profile = sonarr.getByLabelText(/^Quality profile/);
-    await fireEvent.input(profile, { target: { value: 'x' } });
-    await fireEvent.input(profile, { target: { value: '' } });
-    expect(details.open).toBe(true);
-  });
-
-  it('withdraws Add apps and says why when the card cannot change [servarr]', async () => {
-    const reason = 'This install has no config applier; changes are made on the host.';
-    const card = await openEditor(
-      servarrView({ editable: false, applier: { kind: 'none', available: false, reason } }),
-      DISABLED,
-      'Add apps',
-    );
-    expect(await within(card).findByText(reason)).toBeTruthy();
-    expect(within(card).queryByRole('button', { name: 'Add apps' })).toBeNull();
-    expect(within(card).queryByTestId('servarr-edit-sonarr')).toBeNull();
   });
 });

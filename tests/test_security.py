@@ -569,6 +569,26 @@ class TestBuildStrippedEnv:
             env = build_stripped_env()
         assert env.get("ENV") == "production"
 
+    def test_strips_native_extra_headers(self):
+        """The native brain's headers are a secret file whose variable matches
+        none of the substring patterns."""
+        with patch.dict(os.environ, {
+            "PATH": "/usr/bin",
+            "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS": '{"X-Key": "header-value"}',
+        }, clear=True):
+            env = build_stripped_env()
+        assert "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS" not in env
+        assert env["PATH"] == "/usr/bin"
+
+    def test_strips_every_secret_file_variable(self):
+        from istota.setup_wizard import SECRET_NAMES
+
+        planted = {name.upper(): f"value-of-{name}" for name in SECRET_NAMES}
+        with patch.dict(os.environ, {"PATH": "/usr/bin", **planted}, clear=True):
+            env = build_stripped_env()
+        assert sorted(set(planted) & set(env)) == []
+        assert env["PATH"] == "/usr/bin"
+
     def test_strips_nc_pass(self):
         with patch.dict(os.environ, {
             "PATH": "/usr/bin",

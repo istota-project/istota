@@ -44,7 +44,7 @@ def test_warns_naming_each_inline_path_and_its_file(tmp_path):
     assert "sms.twilio.auth_token (istota_sms_twilio_auth_token)" in result.detail
     assert "brain.native.extra_headers (istota_brain_native_extra_headers)" in result.detail
     assert "web.map" not in result.detail
-    assert "Admin > Secrets" in result.remedy
+    assert "Admin > Configuration" in result.remedy
     assert "Move to secret file" in result.remedy
     serialized = _serialized(result)
     for value in ("TWILIO-TOKEN-SENTINEL", "HEADER-VALUE-SENTINEL", "X-Key", "MAP-KEY-SENTINEL"):

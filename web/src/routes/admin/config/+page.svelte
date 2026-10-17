@@ -1,21 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { base } from '$app/paths';
   import { page } from '$app/state';
   import {
     getAdminConfig,
+    getAdminConnections,
     listConfigRequests,
     restoreConfigRequest,
     type AdminConfigField,
     type AdminConfigView,
+    type AdminServarrConnection,
     type ConfigOp,
     type ConfigPreview,
     type ConfigProblem,
     type ConfigRequest,
     type ConfigResource,
+    type ServarrApp,
   } from '$lib/api';
-  import { Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
+  import { notifyWarning } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
@@ -24,11 +27,22 @@
   import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
   import ConfigSecretField from '$lib/admin/config/SecretField.svelte';
+  import ServarrAppsEditor from '$lib/admin/config/ServarrAppsEditor.svelte';
+  import {
+    appProblems,
+    rebaseApps,
+    servarrAppsDraft,
+    servarrAppsForm,
+    withPrivateHost,
+    type ServarrAppsForm,
+  } from '$lib/admin/config/servarrApps';
+  import { credentialStatus, secretsByConfigKey } from '$lib/admin/config/credentialStatus';
   import {
     buildChangeSet,
     changeCount,
     emptyDraft,
     formatValue,
+    mergeDrafts,
     pathKey,
     retainExisting,
     withAdmins,
@@ -38,11 +52,6 @@
     withSecret,
     type ConfigDraft,
   } from '$lib/admin/config/changeSet';
-
-  /** Sections whose Connections card has a guided form for the same keys. */
-  const CARD_SECTIONS: Record<string, { card: string; covers: string }> = {
-    servarr: { card: 'Servarr', covers: "each arr app's URL, API key and add defaults" },
-  };
 
   const current = getCurrentUser();
   let self = $derived(current.user.username);
@@ -74,13 +83,41 @@
    *  credentials cleared since, which a second preview could not see. */
   let restored = $state<{ preview: ConfigPreview; note: string } | null>(null);
 
+  /** `[servarr.apps]` has a block per app rather than a TOML table. Its form
+   *  starts from the servarr connection, which knows each app's URL and
+   *  whether its key is set; the view's table value redacts both. */
+  let servarr = $state<AdminServarrConnection | null>(null);
+  let appsInitial = $state<ServarrAppsForm | null>(null);
+  let appsForm = $state<ServarrAppsForm | null>(null);
+  let appsProblems = $state<Record<string, string>>({});
+
   let editable = $derived(!!view?.editable);
-  let count = $derived(changeCount(draft));
   let configManaged = $derived(!!view?.managed.config.managed);
-  /** Form changes the raw editor cannot be combined with: ops, and moves. */
-  let opCount = $derived(Object.keys(draft.ops).length + draft.move_to_file.length);
   /** The form's fields, locked while the raw editor holds the whole file. */
   let formEditable = $derived(editable && draft.raw === null);
+
+  let servarrFields = $derived(view?.sections.find((s) => s.key === 'servarr')?.fields ?? []);
+  let appsField = $derived(servarrFields.find((f) => f.key === 'servarr.apps') ?? null);
+  let appsEditable = $derived(formEditable && !!appsField && appsField.editor !== 'readonly');
+  let appsDraft = $derived(
+    appsForm && appsInitial && appsEditable
+      ? servarrAppsDraft(appsForm, appsInitial)
+      : emptyDraft(),
+  );
+  /** `[servarr] private_hosts` as it will be once the pending change lands. */
+  let servarrPrivateHosts = $derived.by(() => {
+    const field = servarrFields.find((f) => f.key === 'servarr.private_hosts');
+    if (!field) return [];
+    const op = draft.ops[pathKey(field.path)];
+    const value = op?.op === 'set' ? op.value : op?.op === 'unset' ? [] : field.value;
+    return Array.isArray(value) ? value.map(String) : [];
+  });
+
+  /** Everything the review sends: the page's draft and the apps editor's part. */
+  let combined = $derived(mergeDrafts(draft, appsDraft));
+  let count = $derived(changeCount(combined));
+  /** Form changes the raw editor cannot be combined with: ops, and moves. */
+  let opCount = $derived(Object.keys(combined.ops).length + combined.move_to_file.length);
 
   useSettingsSave(() =>
     editable
@@ -90,9 +127,7 @@
           disabled: requestId !== null || !view?.document_digest,
           label: 'Review changes',
           dirtyLabel: count > 0 ? (count === 1 ? '1 change' : `${count} changes`) : undefined,
-          save: () => {
-            reviewing = true;
-          },
+          save: openReview,
           discard,
         }
       : null,
@@ -153,6 +188,25 @@
   /** File credentials no config key reads, so no section field shows them. */
   let standaloneSecrets = $derived(view ? view.secrets.filter((s) => !s.config_key) : []);
 
+  let secretByKey = $derived(secretsByConfigKey(view));
+
+  let inlineSecrets = $derived(view ? view.secrets.filter((s) => s.source === 'inline') : []);
+  /** The inline credentials this page can move; a managed plan keeps the rest. */
+  let movableLabels = $derived(
+    editable ? inlineSecrets.flatMap((s) => (s.movable && s.config_key ? [s.config_key] : [])) : [],
+  );
+  let unmovableCount = $derived(editable ? inlineSecrets.length - movableLabels.length : 0);
+  let allMovesPending = $derived(
+    movableLabels.length > 0 && movableLabels.every((l) => draft.move_to_file.includes(l)),
+  );
+  let unmovableReason = $derived(
+    view?.managed.config.managed
+      ? `a plan (${view.managed.config.source ?? 'unknown'}) manages config.toml`
+      : view?.managed.secrets.managed
+        ? `a plan (${view.managed.secrets.source ?? 'unknown'}) manages the deployment credentials`
+        : null,
+  );
+
   function matches(field: AdminConfigField, needle: string): boolean {
     return (
       field.key.toLowerCase().includes(needle) ||
@@ -181,7 +235,59 @@
     } finally {
       loading = false;
     }
-    await loadHistory();
+    await Promise.all([loadServarr(), loadHistory()]);
+  }
+
+  /** The apps editor's starting point, rebased so pending edits survive a reload.
+   *  Without the connection the page falls back to the plain table editor. */
+  async function loadServarr() {
+    if (!view || !view.sections.some((s) => s.fields.some((f) => f.key === 'servarr.apps'))) {
+      return;
+    }
+    try {
+      const { connections } = await getAdminConnections();
+      servarr = connections.find((c): c is AdminServarrConnection => c.id === 'servarr') ?? servarr;
+    } catch {
+      // Keep the last connection; with none, the table editor stands in.
+    }
+    if (!servarr) return;
+    const after = servarrAppsForm(servarr, view.secrets);
+    if (appsForm && appsInitial) {
+      appsForm = rebaseApps($state.snapshot(appsForm), $state.snapshot(appsInitial), after);
+    } else {
+      appsForm = structuredClone(after);
+    }
+    appsInitial = after;
+  }
+
+  function resetApps() {
+    appsProblems = {};
+    if (appsInitial) appsForm = structuredClone($state.snapshot(appsInitial));
+  }
+
+  function openReview() {
+    appsProblems =
+      appsForm && appsInitial && appsEditable
+        ? appProblems(appsForm, appsInitial, servarrPrivateHosts)
+        : {};
+    if (Object.keys(appsProblems).length) {
+      notifyWarning('An app under [servarr] needs fixing before the change can be reviewed.');
+      return;
+    }
+    reviewing = true;
+  }
+
+  function allowHost(app: ServarrApp, host: string) {
+    setOp(
+      {
+        op: 'set',
+        path: ['servarr', 'private_hosts'],
+        value: withPrivateHost(servarrPrivateHosts, host),
+      },
+      ['servarr', 'private_hosts'],
+    );
+    const { [`${app}.url`]: _answered, ...rest } = appsProblems;
+    appsProblems = rest;
   }
 
   /** The history, and the request still open in it: a change submitted from
@@ -216,6 +322,14 @@
     draft = withMove(draft, problem.path.join('.'), !movePending(problem));
   }
 
+  /** Every movable inline credential into its file, or all of them back. */
+  function toggleMoveAll() {
+    const move = !allMovesPending;
+    let next = draft;
+    for (const label of movableLabels) next = withMove(next, label, move);
+    draft = next;
+  }
+
   async function restore(id: number) {
     restoring = id;
     try {
@@ -241,6 +355,7 @@
 
   function discard() {
     draft = emptyDraft();
+    resetApps();
     restored = null;
     pageNotice = '';
   }
@@ -253,14 +368,20 @@
   /** config.toml changed under the page: reload, keep what still applies. */
   async function onConflict() {
     closeReview();
+    const appChanges = changeCount(appsDraft);
     await load();
     if (!view) return;
     const kept = retainExisting(draft, view);
     draft = kept.draft;
+    let dropped = kept.dropped;
+    if (!appsEditable && appChanges) {
+      dropped += appChanges;
+      resetApps();
+    }
     pageNotice =
       'config.toml changed on the host since this page loaded. The page now shows the new values' +
-      (kept.dropped
-        ? `, and ${kept.dropped} of your changes no longer apply and were dropped.`
+      (dropped
+        ? `, and ${dropped} of your changes no longer apply and were dropped.`
         : '; your changes are kept.') +
       ' Review them again.';
   }
@@ -268,6 +389,7 @@
   function onSubmitted(id: number) {
     closeReview();
     draft = emptyDraft();
+    resetApps();
     pageNotice = '';
     requestId = id;
     void loadHistory();
@@ -355,6 +477,37 @@
       </NoticeBanner>
     {/if}
 
+    {#if inlineSecrets.length}
+      <NoticeBanner
+        title={inlineSecrets.length === 1
+          ? '1 credential is stored in config.toml in plain text'
+          : `${inlineSecrets.length} credentials are stored in config.toml in plain text`}
+        variant="warn"
+        collapsed={false}
+      >
+        <p>
+          They work, but anyone who can read config.toml can read them. Moving one to its secret
+          file is done by the host, so the value never reaches this page.
+        </p>
+        {#if unmovableCount}
+          <p>
+            {unmovableCount === inlineSecrets.length
+              ? 'None of them can'
+              : `${unmovableCount} of them cannot`} be moved from here{unmovableReason
+              ? `, because ${unmovableReason}`
+              : ''}.
+          </p>
+        {/if}
+        {#if movableLabels.length}
+          <div class="banner-actions">
+            <Button variant="secondary" size="sm" disabled={!formEditable} onclick={toggleMoveAll}
+              >{allMovesPending ? 'Keep all in config.toml' : 'Move all to secret files'}</Button
+            >
+          </div>
+        {/if}
+      </NoticeBanner>
+    {/if}
+
     {#if pageNotice}
       <p class="banner warn" role="status">{pageNotice}</p>
     {/if}
@@ -366,6 +519,7 @@
           onApplied={(fresh) => {
             view = fresh;
             void loadHistory();
+            void loadServarr();
           }}
           onDismiss={() => {
             requestId = null;
@@ -435,17 +589,22 @@
         <section class="card">
           <header class="section-header"><h2>Credentials</h2></header>
           {#each standaloneSecrets as secret (secret.name)}
+            {@const status = credentialStatus(secret.set, secret.source)}
             {#if editable && !secret.read_only_reason}
-              <ConfigSecretField
-                label={secret.label}
-                configured={secret.set}
-                pending={draft.secrets[secret.name]}
-                onChange={(value) => setSecret(secret.name, value)}
-              />
+              <div class="standalone-row">
+                <ConfigSecretField
+                  label={secret.label}
+                  configured={secret.set}
+                  pending={draft.secrets[secret.name]}
+                  onChange={(value) => setSecret(secret.name, value)}
+                />
+                <Badge size="sm" variant={status.variant}>{status.label}</Badge>
+              </div>
             {:else}
               <ConfigSecretField
                 label={secret.label}
                 configured={secret.set}
+                {status}
                 pending={undefined}
                 readOnlyReason={secret.read_only_reason ?? 'Read-only'}
                 onChange={() => {}}
@@ -463,23 +622,28 @@
     {#each sections as section (section.key)}
       <section class="card">
         <header class="section-header"><h2>{section.label}</h2></header>
-        {#if CARD_SECTIONS[section.key]}
-          {@const card = CARD_SECTIONS[section.key]}
-          <p class="banner info card-pointer">
-            The {card.card} card in Connections has a form for {card.covers}.
-            <a href={`${base}/admin/connections`}>Open Connections</a>
-          </p>
-        {/if}
         {#each section.fields as field (field.key)}
-          <FieldControl
-            {field}
-            op={draft.ops[pathKey(field.path)]}
-            secretPending={field.credential ? draft.secrets[field.credential.name] : undefined}
-            editable={formEditable}
-            problem={problemByKey.get(field.path.join('.'))}
-            onOp={setOp}
-            onSecret={setSecret}
-          />
+          {#if field.key === 'servarr.apps' && appsForm}
+            <ServarrAppsEditor
+              bind:form={appsForm}
+              problems={appsProblems}
+              privateHosts={servarrPrivateHosts}
+              editable={appsEditable}
+              readOnlyReason={field.read_only_reason}
+              onAllowHost={allowHost}
+            />
+          {:else}
+            <FieldControl
+              {field}
+              op={draft.ops[pathKey(field.path)]}
+              secretPending={field.credential ? draft.secrets[field.credential.name] : undefined}
+              secretSource={secretByKey.get(field.key)?.source}
+              editable={formEditable}
+              problem={problemByKey.get(field.path.join('.'))}
+              onOp={setOp}
+              onSecret={setSecret}
+            />
+          {/if}
         {/each}
       </section>
     {/each}
@@ -505,7 +669,7 @@
 
     {#if reviewing && view.document_digest}
       <ReviewDialog
-        changeSet={buildChangeSet(draft, view.document_digest)}
+        changeSet={buildChangeSet(combined, view.document_digest)}
         initialPreview={restored?.preview ?? null}
         note={restored?.note ?? ''}
         onClose={closeReview}
@@ -537,8 +701,21 @@
     white-space: nowrap;
   }
 
-  .card-pointer {
-    margin: 0 0 var(--space-3);
+  .banner-actions {
+    margin-top: var(--space-2);
+  }
+
+  /* The status sits after the input, as it does on a section's credential. */
+  .standalone-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-2);
+    row-gap: var(--space-1);
+  }
+
+  .standalone-row > :global(.field) {
+    flex: 0 1 calc(var(--field-label-width) + var(--space-3) + 24rem);
   }
 
   .problem-list {

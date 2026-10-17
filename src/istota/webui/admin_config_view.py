@@ -494,29 +494,6 @@ def _value_at(config: Any, path: tuple[str, ...]) -> Any:
 #: Where the stack mounts its secret files, in every container.
 STACK_SECRETS_DIR = Path("/run/secrets")
 
-#: What reads each secret file, by its config section, for grouping a list of
-#: them. Every file's section has a title; a test holds that.
-_SECTION_TITLES = {
-    "nextcloud": "Nextcloud",
-    "web": "Web UI",
-    "email": "Email",
-    "caldav": "CalDAV",
-    "developer": "Developer",
-    "google_workspace": "Google Workspace",
-    "sms.telnyx": "SMS (Telnyx)",
-    "sms.twilio": "SMS (Twilio)",
-    "whatsapp.cloud": "WhatsApp Cloud API",
-    "brain.native": "Native brain",
-    "servarr": "Servarr",
-}
-
-#: The same, for the files no config key reads.
-_STANDALONE_USED_BY = {
-    "anthropic_api_key": "Claude Code",
-    "claude_code_oauth_token": "Claude Code",
-}
-
-
 def _env_override_reason(variable: str) -> str:
     return (
         f"Set by the environment variable {variable}, which wins over "
@@ -569,11 +546,10 @@ def _secret_source(
 
 
 def _secret_files(config: "Config", ctx: dict) -> list[dict]:
-    """One entry per stack secrets file: whether it is set, where from, what
-    reads it, and never its value."""
+    """One entry per stack secrets file: whether it is set, where from, and
+    never its value."""
     import os
 
-    from istota.config_editor.edits import section_of
     from istota.config_editor.reference import credential_files
     from istota.setup_wizard import SECRET_NAMES
 
@@ -585,14 +561,11 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
         if dotted:
             path = tuple(dotted.split("."))
             is_set = _is_set(_value_at(config, path))
-            section = section_of(path)
-            used_by = _SECTION_TITLES.get(section, f"[{section}]")
         else:
             path = None
             # No config key reads it; `istota-secrets` exports each file as
             # the uppercase variable, in the web process too.
             is_set = bool(os.environ.get(name.upper(), "").strip())
-            used_by = _STANDALONE_USED_BY.get(name, "[stack]")
         source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
         reason = (schema.READ_ONLY.get(path) if path else None) or ctx["managed_reasons"]["secrets"]
         if reason is None and source == "environment":
@@ -610,7 +583,6 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             "config_key": dotted,
             "set": is_set,
             "source": source,
-            "used_by": used_by,
             "read_only_reason": reason,
             "movable": movable,
             "risky": path in schema.RISKY_KEYS if path else False,

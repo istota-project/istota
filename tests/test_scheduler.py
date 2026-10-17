@@ -5395,6 +5395,19 @@ class TestExecuteCommandTask:
         assert success is True
         assert "key=[]" in result
 
+    def test_secret_file_variable_never_in_command_env(self, db_path, tmp_path, monkeypatch):
+        """A secret file whose variable matches no credential pattern."""
+        monkeypatch.setenv("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", '{"X-Key": "header-value"}')
+        config = self._make_config(db_path, tmp_path)
+        config.admin_users = {"alice"}
+        task = self._make_task(
+            user_id="alice",
+            command="echo headers=[$ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS]",
+        )
+        success, result = _execute_command_task(task, config)
+        assert success is True
+        assert "headers=[]" in result
+
     def test_deferred_dir_in_env(self, db_path, tmp_path):
         """ISSUE-233: the command path omitted ``ISTOTA_DEFERRED_DIR`` while
         both sibling paths export it. A CRON ``command:`` job calling a skill

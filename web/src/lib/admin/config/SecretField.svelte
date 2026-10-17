@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Badge, Button, Field } from '$lib/components/ui';
   import { SecretField } from '$lib/components/settings';
+  import { credentialStatus, type CredentialStatus } from './credentialStatus';
 
   interface Props {
     label: string;
@@ -9,9 +10,13 @@
     /** What the admin typed, `""` for a pending clear, undefined for unchanged. */
     pending: string | undefined;
     readOnlyReason?: string | null;
+    /** Where the value is held, shown in place of the input when read-only. */
+    status?: CredentialStatus;
     hint?: string;
     /** Passed to `Field`: the label in a column beside the control. */
     inline?: boolean;
+    /** Offer Clear for a stored value. */
+    clearable?: boolean;
     /** The new value, `""` to clear, or null to leave the credential as it is. */
     onChange: (value: string | null) => void;
   }
@@ -21,10 +26,14 @@
     configured,
     pending,
     readOnlyReason = null,
+    status,
     hint,
     inline = false,
+    clearable = true,
     onChange,
   }: Props = $props();
+
+  let shownStatus = $derived(status ?? credentialStatus(configured));
 </script>
 
 <!--
@@ -36,7 +45,7 @@
 {#if readOnlyReason}
   <Field {label} {hint} {inline} labelled={false}>
     <div class="secret-state">
-      <Badge variant={configured ? 'success' : 'partial'}>{configured ? 'set' : 'not set'}</Badge>
+      <Badge size="sm" variant={shownStatus.variant}>{shownStatus.label}</Badge>
     </div>
   </Field>
 {:else if pending === ''}
@@ -54,7 +63,7 @@
     {configured}
     value={pending ?? ''}
     onValueChange={(next) => onChange(next === '' ? null : next)}
-    onRequestClear={() => onChange('')}
+    onRequestClear={clearable ? () => onChange('') : undefined}
   />
 {/if}
 

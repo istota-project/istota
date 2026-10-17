@@ -26,7 +26,7 @@ import json
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from istota.config_editor import secrets
 
@@ -82,11 +82,16 @@ def _secret_file_text(label: str, name: str, value: Any) -> str:
     )
 
 
-def _moved_secrets(moves: list[str], current: dict, file_secrets: dict[str, str]) -> dict[str, str]:
+def _moved_secrets(
+    moves: list[str], current: dict, file_secrets: dict[str, str], environ: Mapping[str, str],
+) -> dict[str, str]:
     """Each credential `moves` names, by its secret file, read from `current`.
 
     A path that holds no value now (another change emptied it) refuses the
-    request rather than writing an empty file over nothing.
+    request rather than writing an empty file over nothing. So does a secret
+    file that holds a value now: the preview checked it was empty, but a value
+    put there on the host since is newer than the inline one, and a secret
+    file has no backup.
     """
     from istota.config_editor.edits import inline_file_credentials, normalized
     from istota.config_editor.reference import INSTALLATION_CREDENTIALS
@@ -100,6 +105,11 @@ def _moved_secrets(moves: list[str], current: dict, file_secrets: dict[str, str]
             raise HandoffError("the request moves something that is not a credential with a secret file")
         if name in file_secrets:
             raise HandoffError(f"the request both moves and replaces {label}")
+        if environ.get(name.upper(), "").strip():
+            raise HandoffError(
+                f"{label} already has a value in its secret file {name}, set since the "
+                "request was made; remove it from config.toml on the host"
+            )
         path = tuple(label.split("."))
         if held.get(path) != name:
             raise HandoffError(
@@ -109,13 +119,17 @@ def _moved_secrets(moves: list[str], current: dict, file_secrets: dict[str, str]
     return found
 
 
-def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
+def build(
+    taken: Any, current: dict | None, environ: Mapping[str, str] | None = None,
+) -> tuple[dict, dict, bool]:
     """The plan, the put-files request and the Claude Code flag for `taken`.
 
     `taken` is a `requests.TakenRequest`; `current` the live `config.toml` as
     a document, whose values fill every sentinel no new value replaces, or
     None when it does not parse, which refuses the request. A moved
     credential's value comes from `current` too, and is dropped from the plan.
+    `environ` defaults to the process's own, which `take` runs with the secret
+    files loaded, so it says what each one holds now.
     """
     from istota.config_editor.edits import UNREADABLE_CONFIG, _unset_everywhere
     from istota.setup_wizard import SECRET_NAMES
@@ -133,7 +147,8 @@ def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
     except secrets.SentinelError as exc:
         raise HandoffError(f"{exc}; the credential was removed since the request was made") from None
     moves = list(getattr(taken, "moves", None) or [])
-    moved = _moved_secrets(moves, current, file_secrets)
+    environ = os.environ if environ is None else environ
+    moved = _moved_secrets(moves, current, file_secrets, environ)
     for label in moves:
         _unset_everywhere(document, tuple(label.split(".")))
     file_secrets = {**moved, **file_secrets}
