@@ -65,7 +65,7 @@ def cli_env(monkeypatch, make_config, db_path):
         )
         return True, f"{DRY_RUN_PROMPT_HEADER}\n\n{rendered}", None, None
 
-    monkeypatch.setattr(cli, "execute_task", _execute_task)
+    monkeypatch.setattr("istota.executor.execute_task", _execute_task)
     return config, calls
 
 
@@ -146,7 +146,7 @@ def test_immediate_execution_persists_result_without_caller_transaction(cli_env,
     def execute(task, cfg, resources, **kwargs):
         assert kwargs.get("conn") is None
         return success, "fixture result", None, None
-    monkeypatch.setattr(cli, "execute_task", execute)
+    monkeypatch.setattr("istota.executor.execute_task", execute)
     if success:
         cli.cmd_task(_Args(execute=True))
     else:
@@ -166,7 +166,7 @@ def test_immediate_task_cannot_be_claimed(cli_env, monkeypatch):
         assert task.status == "running"
         return True, "ok", None, None
 
-    monkeypatch.setattr(cli, "execute_task", execute)
+    monkeypatch.setattr("istota.executor.execute_task", execute)
     cli.cmd_task(_Args(execute=True))
 
 
@@ -196,5 +196,5 @@ def test_immediate_task_heartbeat_prevents_stale_reclaim(cli_env, monkeypatch):
                                  stuck_running_minutes=1, heartbeat_stuck_minutes=1) is None
         return True, "ok", None, None
 
-    monkeypatch.setattr(cli, "execute_task", execute)
+    monkeypatch.setattr("istota.executor.execute_task", execute)
     cli.cmd_task(_Args(execute=True))

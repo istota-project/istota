@@ -342,6 +342,20 @@ class TestTheLoginCodeVerb:
         code, out, err = web_cli("login-code")
         assert code == 1 and out == "" and err
 
+    def test_the_verb_loads_none_of_the_task_machinery(self):
+        """The Mac app waits on this verb before its window signs in, so the
+        CLI it starts must not load the executor's graph (pandas, caldav) first."""
+        import subprocess
+        import sys
+
+        probe = (
+            "import sys, istota.cli, istota.webui.auth\n"
+            "heavy = ['istota.executor', 'istota.scheduler', 'istota.skills.calendar', 'pandas', 'caldav']\n"
+            "print(','.join(m for m in heavy if m in sys.modules))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+        assert result.stdout.strip() == ""
+
     def test_an_install_without_the_method_mints_nothing(self, cli_config, web_cli, identity):
         cli_config.web.auth = ["email"]
         code, out, err = web_cli("login-code")
