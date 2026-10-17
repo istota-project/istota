@@ -41,3 +41,7 @@ export const selectedGroupEdition = writable<GroupEditionSelection | null>(null)
 // The reader asks to delete the personal edition on screen; the layout owns the
 // confirmation and the archive list it has to update.
 export const briefingDeleteRequest = writable<BriefingArchiveItem | null>(null);
+
+// The reader reports a confirmed read so the archive sidebar can clear that
+// row's unread mark without refetching the list.
+export const briefingReadAck = writable<{ id: number; read_at: string } | null>(null);

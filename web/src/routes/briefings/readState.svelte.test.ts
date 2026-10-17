@@ -116,6 +116,23 @@ describe('briefing reader acknowledgments', () => {
     ]);
   });
 
+  it('clears the archive row unread mark once the read is confirmed', async () => {
+    render(Harness, {
+      layout: Layout,
+      component: Page,
+      user: { username: 'alice', show_nav_unread_badges: false } as User,
+    });
+    await screen.findByText('Body of briefing 2');
+    await waitFor(() => expect(readRequests()).toHaveLength(1));
+    await settle();
+    // Only briefing 1 is still unread; the list itself was not refetched.
+    expect(screen.queryAllByText(', unread')).toHaveLength(1);
+    const listFetches = fetchMock.mock.calls.filter(([url]) =>
+      String(url).startsWith('/istota/api/briefings/archive?'),
+    );
+    expect(listFetches).toHaveLength(1);
+  });
+
   it('does not acknowledge archive preloads on the settings route', async () => {
     __history.reset('/istota/briefings/settings/');
     render(Harness, { layout: Layout, user: { username: 'alice' } as User });

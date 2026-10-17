@@ -18,6 +18,7 @@
     briefingDeleteRequest,
     briefingArchiveCount,
     briefingArchiveError,
+    briefingReadAck,
   } from '$lib/stores/briefings';
   import GroupEdition from '$lib/components/briefings/GroupEdition.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
@@ -89,6 +90,7 @@
       const result = await markBriefingArchiveRead(id);
       invalidateNavUnreadCounts();
       confirmedReads.set(id, result.read_at);
+      briefingReadAck.set({ id, read_at: result.read_at });
       if (mounted && $selectedBriefingId === id && current?.id === id) {
         current = { ...current, read_at: result.read_at };
         readErrorId = null;
