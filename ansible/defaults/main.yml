@@ -119,7 +119,9 @@ istota_stack_env:
   ISTOTA_SECRETS_DIR: ./secrets
   NGINX_PUBLISH: "{{ '80:80' if istota_ingress == 'direct' else (('127.0.0.1::80' if istota_tls_cert_source in ['self-signed', 'files'] else istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':80') if istota_ingress == 'proxied' else '127.0.0.1:' ~ (istota_domain.rpartition(':')[2] if istota_domain.rpartition(':')[2].isdigit() else '8080') ~ ':80') }}"
   NGINX_PUBLISH_TLS: "{{ '443:443' if istota_ingress == 'direct' else (istota_listen_addr ~ ':' ~ (istota_listen_port or 8080) ~ ':443' if istota_ingress == 'proxied' and istota_tls_cert_source in ['self-signed', 'files'] else '127.0.0.1::443') }}"
-  ISTOTA_WEB_INSECURE_COOKIES: "0"
+  # local is plain http on loopback, where a Secure cookie protects nothing and
+  # Safari drops it; every other ingress keeps Secure (setup_wizard.stack_env_values).
+  ISTOTA_WEB_INSECURE_COOKIES: "{{ '1' if istota_ingress == 'local' else '0' }}"
 
 # --- Deployment secrets ------------------------------------------------------
 # One file per name under secrets/, 0400, owned by uid 10001: what compose

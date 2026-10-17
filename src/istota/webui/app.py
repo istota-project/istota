@@ -260,10 +260,9 @@ def _resolve_session_secret() -> str:
 
 _session_secret = _resolve_session_secret()
 
-# `https_only` defaults to True so production cookies carry `Secure`. Browsers
-# refuse Secure cookies on plaintext origins, which kills the whole auth flow
-# on local dev (Docker default = http://localhost:8766). Operators flip
-# `ISTOTA_WEB_INSECURE_COOKIES=1` for those setups.
+# `https_only` defaults to True so cookies carry `Secure`. Setup writes
+# `ISTOTA_WEB_INSECURE_COOKIES=1` for `local` ingress, plain http on loopback,
+# where Secure protects nothing and Safari and WKWebView drop the cookie.
 _https_only = os.environ.get("ISTOTA_WEB_INSECURE_COOKIES", "").strip() not in ("1", "true", "yes")
 
 app = FastAPI(title="Istota Web", lifespan=lifespan)

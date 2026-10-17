@@ -816,9 +816,10 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
         "ISTOTA_SECRETS_DIR": "./secrets",
         "NGINX_PUBLISH": plain,
         "NGINX_PUBLISH_TLS": tls,
-        # Secure in every mode: `local` is http://localhost, which browsers
-        # treat as a secure context. Owned here so a re-run resets an older 1.
-        "ISTOTA_WEB_INSECURE_COOKIES": "0",
+        # `local` is plain http on loopback: Secure protects nothing there, and
+        # Safari and WKWebView drop a Secure cookie from http://localhost. Derived
+        # on every run, so a move off `local` writes 0 again.
+        "ISTOTA_WEB_INSECURE_COOKIES": "1" if a.ingress == "local" else "0",
     }
 
 
