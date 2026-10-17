@@ -77,9 +77,11 @@ class TestTheProxiesForwardThePort:
         `$host` and the container's port, so `localhost:8181/istota` landed on
         `localhost/istota/`. A relative `Location` keeps the client's port."""
         text = HOST_HEADER_SOURCES["docker"].read_text()
-        block = re.search(r"location /istota/ \{(.*?)\n\}", text, re.S)
-        assert block, "no `location /istota/` block"
-        assert "absolute_redirect off;" in block.group(1)
+        # /istota/auth/ is a prefix of its own (ISSUE-777), so `/istota/auth` gets the same 301.
+        for prefix in ("/istota/", "/istota/auth/"):
+            block = re.search(rf"location {re.escape(prefix)} \{{(.*?)\n\}}", text, re.S)
+            assert block, f"no `location {prefix}` block"
+            assert "absolute_redirect off;" in block.group(1), prefix
 
 
 try:

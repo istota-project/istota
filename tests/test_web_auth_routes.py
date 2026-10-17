@@ -966,6 +966,25 @@ async def test_a_small_cookieless_auth_form_still_meets_the_csrf_check(configure
     assert status == 403
 
 
+async def test_the_bounded_form_is_parsed_field_by_field(client):
+    """A right token and a wrong password reach the password check, not the CSRF one."""
+    page = await client.get("/istota/login")
+    response = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": "not the password", "csrf_token": csrf(page),
+    })
+    assert response.status_code == 400
+    assert "Email or password was not accepted" in response.text
+
+
+async def test_a_multipart_sign_in_form_still_parses(client):
+    page = await client.get("/istota/login")
+    response = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": PASSWORD, "csrf_token": csrf(page),
+    }, files={"unused": ("unused.txt", b"x", "text/plain")})
+    assert response.request.headers["content-type"].startswith("multipart/form-data")
+    assert response.status_code == 302
+
+
 async def test_the_largest_set_password_form_fits_under_the_limit(client, configured):
     """Two passwords at the 1024-byte cap, every byte percent-encoded, still sign in."""
     token = web_auth.issue_token(configured._config.db_path, "alice", "reset", 3600)
