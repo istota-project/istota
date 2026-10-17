@@ -187,6 +187,10 @@ def _from_answer(bundle: str, response: httpx.Response) -> DocumentRender:
     if response.status_code == 404:
         # A browser image older than the endpoint.
         return _refused(bundle, "render_unavailable")
+    if response.status_code == 503:
+        # The pool refuses before the endpoint runs, with its own message as
+        # `error`; every 503 the browser sends is a capacity refusal.
+        return _refused(bundle, "capacity")
     try:
         body = response.json()
     except ValueError:

@@ -236,6 +236,9 @@ class TestTheCache:
 class TestTheAnswer:
     @pytest.mark.parametrize("answer,reason,detail", [
         (_answer(status=503, json={"status": "error", "error": "capacity"}), "capacity", None),
+        # The pool's own refusal, before the endpoint runs (browse_api._capacity_response).
+        (_answer(status=503, json={"status": "error", "error": "Browser pool is full",
+                                   "retry_after_seconds": 30}), "capacity", None),
         (_answer(status=504, json={"status": "error", "error": "render_timeout"}),
          "render_timeout", None),
         (_answer(status=502, json={"status": "error", "error": "destination_blocked"}),
