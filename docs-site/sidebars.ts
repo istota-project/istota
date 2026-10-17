@@ -13,7 +13,6 @@ const sidebars: SidebarsConfig = {
       items: [
         'getting-started/quickstart-server',
         'getting-started/local-install',
-        'getting-started/mac-app',
         'getting-started/post-install',
       ],
     },
