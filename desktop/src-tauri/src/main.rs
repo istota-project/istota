@@ -15,6 +15,7 @@ mod login;
 mod paths;
 mod profiles;
 mod settings;
+mod shims;
 mod stack;
 mod testhooks;
 mod vm;
@@ -28,7 +29,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -85,6 +86,7 @@ struct Status {
 }
 
 const LOCAL_WINDOW: &str = "web-local";
+const LOCAL_TITLE: &str = "Istota — this Mac";
 
 fn shared(app: &AppHandle) -> Arc<Shared> {
     app.state::<Arc<Shared>>().inner().clone()
@@ -206,12 +208,12 @@ fn hide_app_window(app: &AppHandle) {
     }
 }
 
-fn open_web_window(app: &AppHandle, label: &str, title: &str, url: Url) {
+fn open_web_window(app: &AppHandle, label: &str, title: &str, url: Url, store: Option<[u8; 16]>) {
     let log = shared(app).log.clone();
     let handle = app.clone();
     let label = label.to_string();
     let title = title.to_string();
-    let _ = app.run_on_main_thread(move || match web::open(&handle, &label, &title, &url, log) {
+    let _ = app.run_on_main_thread(move || match web::open(&handle, &label, &title, &url, store, log) {
         Ok(()) => hide_app_window(&handle),
         Err(err) => {
             set_notice(&handle, Some(format!("Could not open the window: {err}")));
@@ -238,20 +240,52 @@ fn open_local(app: &AppHandle) -> Result<(), String> {
         Err(f) => return Err(format!("{} {}", f.message, f.tail.join(" ")).trim().to_string()),
     };
     let url = Url::parse(&url).map_err(|err| err.to_string())?;
-    open_web_window(app, LOCAL_WINDOW, "Istota", url);
+    open_web_window(app, LOCAL_WINDOW, LOCAL_TITLE, url, None);
     Ok(())
 }
 
 fn open_current(app: &AppHandle) -> Result<(), String> {
-    let current = shared(app).profiles.lock().unwrap().current().cloned();
+    let shared = shared(app);
+    let current = shared.profiles.lock().unwrap().current().cloned();
     match current.map(|p| (p.id, p.kind)) {
         Some((id, Kind::Remote { url })) => {
             let url = profiles::remote_url(&url)?;
-            open_web_window(app, &format!("web-{id}"), &format!("Istota — {id}"), url);
+            let store = profiles::data_store_id(&shared.paths.instance, &id);
+            open_web_window(app, &format!("web-{id}"), &format!("Istota — {id}"), url, Some(store));
             Ok(())
         }
         _ => open_local(app),
     }
+}
+
+/// Switches the window to another profile. The install on this Mac is
+/// started when it is set up and not running; one not set up yet shows the
+/// first run.
+fn select_and_open(app: &AppHandle, id: &str) -> Result<(), String> {
+    let shared = shared(app);
+    let mut changed = Ok(());
+    save_profiles(&shared, |p| changed = p.select(id));
+    changed?;
+    refresh_menu(app);
+    publish(app);
+    let local = matches!(shared.profiles.lock().unwrap().current().map(|p| &p.kind), Some(Kind::Local));
+    if !local {
+        return open_current(app);
+    }
+    let ready = shared.profiles.lock().unwrap().local_ready;
+    if !matches!(shared.supervisor.state(), VmState::Running) {
+        if !ready {
+            show_app_window(app);
+            return Ok(());
+        }
+        if let Some(folder) = login::local_workspace(&shared.paths) {
+            shared_workspace_refusal(&shared, &folder)?;
+        }
+        if !matches!(shared.supervisor.adopt_or_start(ready), VmState::Running) {
+            return Ok(());
+        }
+    }
+    open_local(app)
 }
 
 /// Runs `job` off the main thread, showing a failure in the app window.
@@ -285,7 +319,7 @@ fn on_vm_state(app: &AppHandle, state: &VmState) {
             return;
         }
         match Url::parse(url) {
-            Ok(url) => open_web_window(app, LOCAL_WINDOW, "Istota setup", url),
+            Ok(url) => open_web_window(app, LOCAL_WINDOW, "Istota setup", url, None),
             Err(err) => (shared.log)(&format!("the setup address did not parse: {err}")),
         }
     }
@@ -486,6 +520,12 @@ fn make_local(app: &AppHandle, job: Job, folder: &Path, date: Option<String>) ->
     }
     #[cfg(feature = "m6-negative-control")]
     testhooks::put_the_master_key_on_an_argv(&shared.paths.instance, &*shared.log);
+    if let Some(dir) = testhooks::shim_dir() {
+        match shims::install_into(&dir, &shared.paths) {
+            Ok(()) => (shared.log)("command-line tools written by ISTOTA_DESKTOP_SHIM_DIR (desktop-test-hooks)"),
+            Err(err) => (shared.log)(&format!("command-line tools: {err}")),
+        }
+    }
     start_layers(app);
     open_local(app)?;
     if first && !lifecycle::launch_at_login_enabled() && testhooks::first_run_folder().is_none() {
@@ -593,9 +633,31 @@ fn quit(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+/// A profile as the menu names it.
+fn profile_label(profile: &profiles::Profile) -> String {
+    match &profile.kind {
+        Kind::Local => "This Mac".to_string(),
+        Kind::Remote { url } => {
+            let host = Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+            format!("{} ({host})", profile.id)
+        }
+    }
+}
+
+/// The menu: status, the profiles when there is more than one, then the
+/// actions. Built again whenever the profiles change.
+fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<Wry>, Menus)> {
+    let state = shared(app).profiles.lock().unwrap().clone();
     let status = MenuItem::with_id(app, "status", "Istota: checking", false, None::<&str>)?;
     let layers = MenuItem::with_id(app, "layers", "Background installs: not checked", false, None::<&str>)?;
+    let mut profile_items = Vec::new();
+    if state.profiles.len() > 1 {
+        for profile in &state.profiles {
+            let checked = state.last_profile.as_deref() == Some(profile.id.as_str());
+            let id = format!("profile:{}", profile.id);
+            profile_items.push(CheckMenuItem::with_id(app, id, profile_label(profile), true, checked, None::<&str>)?);
+        }
+    }
     let open = MenuItem::with_id(app, "open", "Open Istota", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let restart_item = MenuItem::with_id(app, "restart", "Restart Istota", true, None::<&str>)?;
@@ -603,22 +665,45 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let sign_out = MenuItem::with_id(app, "sign-out", "Sign out everywhere", true, None::<&str>)?;
     let login = CheckMenuItem::with_id(app, "login", "Open at login", true, false, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Istota", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status,
-            &layers,
-            &PredefinedMenuItem::separator(app)?,
-            &open,
-            &settings_item,
-            &restart_item,
-            &logs,
-            &sign_out,
-            &PredefinedMenuItem::separator(app)?,
-            &login,
-            &quit_item,
-        ],
-    )?;
+    let separators = [
+        PredefinedMenuItem::separator(app)?,
+        PredefinedMenuItem::separator(app)?,
+        PredefinedMenuItem::separator(app)?,
+    ];
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&status, &layers, &separators[0]];
+    if !profile_items.is_empty() {
+        items.extend(profile_items.iter().map(|item| item as &dyn IsMenuItem<Wry>));
+        items.push(&separators[1]);
+    }
+    items.extend([
+        &open as &dyn IsMenuItem<Wry>,
+        &settings_item,
+        &restart_item,
+        &logs,
+        &sign_out,
+        &separators[2],
+        &login,
+        &quit_item,
+    ]);
+    let menu = Menu::with_items(app, &items)?;
+    Ok((menu, Menus { status, layers, login }))
+}
+
+fn refresh_menu(app: &AppHandle) {
+    let shared = shared(app);
+    match build_menu(app) {
+        Ok((menu, menus)) => {
+            if let Some(tray) = shared.tray.lock().unwrap().as_ref() {
+                let _ = tray.set_menu(Some(menu));
+            }
+            *shared.menus.lock().unwrap() = Some(menus);
+        }
+        Err(err) => (shared.log)(&format!("could not build the menu: {err}")),
+    }
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let (menu, menus) = build_menu(app)?;
     let tray = TrayIconBuilder::with_id("istota")
         .icon(tray_icon(false))
         .icon_as_template(true)
@@ -640,12 +725,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 result
             }),
             "quit" => background(app, quit),
-            _ => {}
+            other => {
+                if let Some(id) = other.strip_prefix("profile:") {
+                    let id = id.to_string();
+                    background(app, move |app| select_and_open(app, &id));
+                }
+            }
         })
         .build(app)?;
     let shared = shared(app);
     *shared.tray.lock().unwrap() = Some(tray);
-    *shared.menus.lock().unwrap() = Some(Menus { status, layers, login });
+    *shared.menus.lock().unwrap() = Some(menus);
     Ok(())
 }
 
@@ -689,7 +779,7 @@ fn open_setup(app: AppHandle) -> Result<(), String> {
         return Err("No setup is waiting.".into());
     };
     let url = Url::parse(&url).map_err(|err| err.to_string())?;
-    open_web_window(&app, LOCAL_WINDOW, "Istota setup", url);
+    open_web_window(&app, LOCAL_WINDOW, "Istota setup", url, None);
     Ok(())
 }
 
@@ -929,6 +1019,116 @@ fn locate_folder(app: AppHandle) {
     });
 }
 
+/// Settings' list of profiles.
+#[derive(Serialize)]
+struct ProfileView {
+    id: String,
+    remote: bool,
+    url: Option<String>,
+    current: bool,
+}
+
+#[tauri::command]
+fn profiles_info(app: AppHandle) -> Vec<ProfileView> {
+    let state = shared(&app).profiles.lock().unwrap().clone();
+    state
+        .profiles
+        .iter()
+        .map(|p| ProfileView {
+            id: p.id.clone(),
+            remote: matches!(p.kind, Kind::Remote { .. }),
+            url: match &p.kind {
+                Kind::Remote { url } => Some(url.clone()),
+                Kind::Local => None,
+            },
+            current: state.last_profile.as_deref() == Some(p.id.as_str()),
+        })
+        .collect()
+}
+
+/// Adds a remote install and opens it.
+#[tauri::command]
+fn add_profile(app: AppHandle, id: String, url: String) -> Result<(), String> {
+    let shared = shared(&app);
+    let id = id.trim().to_string();
+    let mut added = Ok(());
+    save_profiles(&shared, |p| added = p.add_remote(&id, &url));
+    added?;
+    refresh_menu(&app);
+    background(&app, move |app| select_and_open(app, &id));
+    Ok(())
+}
+
+#[tauri::command]
+fn select_profile(app: AppHandle, id: String) {
+    set_notice(&app, None);
+    background(&app, move |app| select_and_open(app, &id));
+}
+
+/// Removes a remote profile, with its window and its website data.
+#[tauri::command]
+fn remove_profile(app: AppHandle, id: String) -> Result<(), String> {
+    let shared = shared(&app);
+    let mut removed = Ok(());
+    save_profiles(&shared, |p| removed = p.remove_remote(&id));
+    removed?;
+    let store = profiles::data_store_id(&shared.paths.instance, &id);
+    let label = format!("web-{id}");
+    let log = shared.log.clone();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || web::remove_store(&handle, &label, store, log));
+    refresh_menu(&app);
+    publish(&app);
+    Ok(())
+}
+
+/// Settings' command-line tools: where the app's are, and where a file the
+/// app did not write is in the way.
+#[derive(Serialize)]
+struct CliTools {
+    system_dir: String,
+    user_dir: String,
+    system: bool,
+    user: bool,
+    system_blocked: Option<String>,
+    user_blocked: Option<String>,
+}
+
+#[tauri::command]
+fn cli_tools_info(app: AppHandle) -> CliTools {
+    let home = shared(&app).home.clone();
+    let system = shims::dir_of(shims::Place::System, &home);
+    let user = shims::dir_of(shims::Place::User, &home);
+    CliTools {
+        system: shims::installed_in(&system),
+        user: shims::installed_in(&user),
+        system_blocked: shims::check_dir(&system).err(),
+        user_blocked: shims::check_dir(&user).err(),
+        system_dir: system.display().to_string(),
+        user_dir: user.display().to_string(),
+    }
+}
+
+#[tauri::command]
+async fn install_cli_tools(app: AppHandle, place: shims::Place) -> Result<String, String> {
+    let shared = shared(&app);
+    let dir = shims::install(place, &shared.paths, &shared.home)?;
+    (shared.log)(&format!("command-line tools installed in {}", dir.display()));
+    let mut message = format!("istota-stack and istota are in {}.", dir.display());
+    if place == shims::Place::User {
+        message.push_str(" If your shell does not find them, add ~/.local/bin to PATH in ~/.zprofile.");
+    }
+    Ok(message)
+}
+
+#[tauri::command]
+async fn remove_cli_tools(app: AppHandle, place: shims::Place) -> Result<(), String> {
+    let shared = shared(&app);
+    shims::remove(place, &shared.home)?;
+    (shared.log)(&format!("command-line tools removed from {}", shims::dir_of(place, &shared.home).display()));
+    Ok(())
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     let handle = app.handle().clone();
@@ -937,11 +1137,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let log_path = paths.app_log();
     let log: Log = Arc::new(move |line: &str| logs::append(&log_path, line));
     log(&format!("launched; resources at {}", paths.resources.display()));
+    // The command-line tools find the app through this link, wherever it is now.
+    if let Err(err) = shims::link_app(&paths) {
+        log(&err);
+    }
 
-    let (profiles, notice) = match AppState::load(&paths.state_file()) {
+    let (mut profiles, notice) = match AppState::load(&paths.state_file()) {
         Ok(state) => (state, None),
         Err(err) => (AppState::default(), Some(err)),
     };
+    // The install on this Mac is always on the list, so a window showing only
+    // remote ones can still switch to it; nothing is made until it is chosen.
+    profiles.ensure_local();
     let ready = profiles.local_ready;
     let notify_handle = handle.clone();
     let line_log = log.clone();
@@ -1035,7 +1242,14 @@ fn main() {
             set_host_port,
             restore_backup,
             remove_istota,
-            locate_folder
+            locate_folder,
+            profiles_info,
+            add_profile,
+            select_profile,
+            remove_profile,
+            cli_tools_info,
+            install_cli_tools,
+            remove_cli_tools
         ])
         .setup(setup)
         .build(tauri::generate_context!())

@@ -266,7 +266,8 @@ const CLI_INSTALL_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/
 /// when it is there, else the bundled one with the bundled `limactl`.
 pub fn cli_install_stop(paths: &Paths, home: &Path) -> Command {
     let own = home.join(".local/bin/istota-stack");
-    let (program, search_path) = if own.is_file() {
+    // The app's own command-line tools would stop the app's VM, not this one.
+    let (program, search_path) = if own.is_file() && !crate::shims::is_ours(&own) {
         (own, CLI_INSTALL_PATH.to_string())
     } else {
         (paths.mac_cli(), paths.search_path())
@@ -550,6 +551,11 @@ mod tests {
         assert_eq!(own.get_program(), home.join(".local/bin/istota-stack").as_os_str());
         assert!(env_of(&own, "PATH").unwrap().starts_with("/opt/homebrew/bin:"));
         assert_eq!(own.get_args().collect::<Vec<_>>(), ["stop"]);
+        // The app's own tools there are not the command-line install's.
+        crate::shims::install_into(&home.join(".local/bin"), &paths).unwrap_err();
+        std::fs::remove_file(home.join(".local/bin/istota-stack")).unwrap();
+        crate::shims::install_into(&home.join(".local/bin"), &paths).unwrap();
+        assert_eq!(cli_install_stop(&paths, &home).get_program(), "/A/Contents/Resources/bin/istota-stack");
         let _ = std::fs::remove_dir_all(&home);
     }
 

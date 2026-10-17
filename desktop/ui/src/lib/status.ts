@@ -73,6 +73,26 @@ export type SettingsInfo = {
   workspace: string | null;
 };
 
+// `ProfileView` in main.rs.
+export type ProfileView = {
+  id: string;
+  remote: boolean;
+  url: string | null;
+  current: boolean;
+};
+
+// `shims::Place` and `CliTools` in main.rs.
+export type Place = 'system' | 'user';
+
+export type CliTools = {
+  system_dir: string;
+  user_dir: string;
+  system: boolean;
+  user: boolean;
+  system_blocked: string | null;
+  user_blocked: string | null;
+};
+
 export const JOB_TITLES: Record<Job, string> = {
   create: 'Setting up Istota on this Mac',
   move: 'Moving your command-line Istota into the app',

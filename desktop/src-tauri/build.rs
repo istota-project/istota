@@ -21,6 +21,13 @@ fn main() {
             "restore_backup",
             "remove_istota",
             "locate_folder",
+            "profiles_info",
+            "add_profile",
+            "select_profile",
+            "remove_profile",
+            "cli_tools_info",
+            "install_cli_tools",
+            "remove_cli_tools",
         ]),
     ))
     .expect("tauri-build");

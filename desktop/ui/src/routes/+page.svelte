@@ -36,7 +36,7 @@
 
     {#if making(status)}
       <ProgressView {status} />
-    {:else if settingsOpen && !status.remote && status.vm.state !== 'absent'}
+    {:else if settingsOpen}
       <Settings {status} onclose={() => (settingsOpen = false)} />
     {:else if firstRun(status)}
       <FirstRun />
@@ -86,9 +86,7 @@
         {:else if status.vm.state === 'stopped' || status.vm.state === 'error'}
           <button onclick={() => invoke('vm_start')}>Start Istota</button>
         {/if}
-        {#if !status.remote && status.vm.state !== 'absent'}
-          <button onclick={() => (settingsOpen = true)}>Settings</button>
-        {/if}
+        <button onclick={() => (settingsOpen = true)}>Settings</button>
         <button onclick={() => invoke('show_log_files')}>Show logs</button>
         <button onclick={() => invoke('quit_app')}>Quit Istota</button>
       </div>

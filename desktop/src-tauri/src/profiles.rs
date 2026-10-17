@@ -86,6 +86,93 @@ impl AppState {
         let id = self.last_profile.as_deref()?;
         self.profiles.iter().find(|p| p.id == id)
     }
+
+    /// Adds a remote install by name and URL; the name is its id.
+    pub fn add_remote(&mut self, id: &str, url: &str) -> Result<(), String> {
+        valid_id(id)?;
+        if self.profiles.iter().any(|p| p.id == id) {
+            return Err(format!("There is already a profile called {id}."));
+        }
+        let url = remote_url(url.trim())?;
+        self.profiles.push(Profile { id: id.into(), kind: Kind::Remote { url: url.to_string() } });
+        Ok(())
+    }
+
+    /// Removes a remote profile. The local install is removed with "Remove
+    /// Istota", not here. The window falls back to the local install, or
+    /// the first profile left.
+    pub fn remove_remote(&mut self, id: &str) -> Result<(), String> {
+        match self.profiles.iter().position(|p| p.id == id) {
+            Some(index) if matches!(self.profiles[index].kind, Kind::Remote { .. }) => {
+                self.profiles.remove(index);
+            }
+            Some(_) => return Err("The install on this Mac is removed in Settings, with Remove Istota.".into()),
+            None => return Err(format!("There is no profile called {id}.")),
+        }
+        if self.last_profile.as_deref() == Some(id) {
+            self.last_profile = self
+                .profiles
+                .iter()
+                .find(|p| p.kind == Kind::Local)
+                .or(self.profiles.first())
+                .map(|p| p.id.clone());
+        }
+        Ok(())
+    }
+
+    pub fn select(&mut self, id: &str) -> Result<(), String> {
+        if !self.profiles.iter().any(|p| p.id == id) {
+            return Err(format!("There is no profile called {id}."));
+        }
+        self.last_profile = Some(id.into());
+        Ok(())
+    }
+
+    /// The install on this Mac, put back in the list (a state file that has
+    /// only remote profiles, when the user sets one up after all).
+    pub fn ensure_local(&mut self) {
+        if !self.profiles.iter().any(|p| p.kind == Kind::Local) {
+            self.profiles.insert(0, Profile { id: LOCAL_ID.into(), kind: Kind::Local });
+        }
+    }
+}
+
+/// A profile's name: lowercase letters, digits and inner dashes, which is
+/// also what a window label may hold. `local` is the install on this Mac.
+pub fn valid_id(id: &str) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    let ok = !id.is_empty()
+        && id.len() <= 32
+        && id.chars().all(allowed)
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && id != LOCAL_ID;
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "{id:?} cannot be a profile's name: use lowercase letters, digits and dashes, and not \"local\"."
+        ))
+    }
+}
+
+/// The website data store a remote profile's window uses: its own, so the
+/// cookies and storage of one install never reach another's window
+/// (`WKWebsiteDataStore(forIdentifier:)`, macOS 14). Derived from the app's
+/// instance and the profile's name, so a profile keeps its store across
+/// launches and a second instance of the app never shares one: FNV-1a 64 over
+/// the name, twice with different offsets, as a version 8 UUID.
+pub fn data_store_id(instance: &str, profile: &str) -> [u8; 16] {
+    let name = format!("istota-desktop:{instance}:{profile}");
+    let fnv = |offset: u64| {
+        name.bytes().fold(offset, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3))
+    };
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&fnv(0xcbf2_9ce4_8422_2325).to_be_bytes());
+    id[8..].copy_from_slice(&fnv(0x6c62_272e_07bb_0142).to_be_bytes());
+    id[6] = (id[6] & 0x0f) | 0x80;
+    id[8] = (id[8] & 0x3f) | 0x80;
+    id
 }
 
 fn loopback(host: &str) -> bool {
@@ -123,6 +210,48 @@ mod tests {
         assert!(remote_url("https://user:pw@istota.example.org/").is_err());
         assert!(remote_url("not a url").is_err());
     }
+
+    #[test]
+    fn remote_profiles_are_added_selected_and_removed() {
+        let mut state = AppState::default();
+        state.add_remote("work", "https://istota.example.org/istota/").unwrap();
+        assert!(state.add_remote("work", "https://other.example.org/").unwrap_err().contains("already"));
+        assert!(state.add_remote("home", "http://istota.example.org/").is_err());
+        assert!(state.add_remote("Home", "https://istota.example.org/").is_err());
+        assert!(state.add_remote("local", "https://istota.example.org/").is_err());
+        state.select("work").unwrap();
+        assert_eq!(state.current().map(|p| p.id.as_str()), Some("work"));
+        assert!(state.select("nowhere").is_err());
+        assert!(state.remove_remote("local").is_err());
+        state.remove_remote("work").unwrap();
+        assert_eq!(state.current().map(|p| &p.kind), Some(&Kind::Local));
+    }
+
+    #[test]
+    fn with_only_remote_profiles_the_local_one_comes_back_when_wanted() {
+        let mut state = AppState { profiles: vec![], last_profile: None, local_ready: false, pending_job: None };
+        state.add_remote("work", "https://istota.example.org/").unwrap();
+        state.select("work").unwrap();
+        state.ensure_local();
+        state.ensure_local();
+        assert_eq!(state.profiles.iter().filter(|p| p.kind == Kind::Local).count(), 1);
+        assert_eq!(state.current().map(|p| p.id.as_str()), Some("work"));
+    }
+
+    #[test]
+    fn each_profile_has_a_data_store_of_its_own() {
+        let work = data_store_id("istota", "work");
+        assert_eq!(work, data_store_id("istota", "work"), "stable across launches");
+        assert_ne!(work, data_store_id("istota", "home"));
+        assert_ne!(work, data_store_id("istota-dt", "work"));
+        assert_eq!(work[6] >> 4, 8, "a version 8 UUID");
+        assert_eq!(work[8] >> 6, 0b10, "RFC 4122 variant");
+        // Pinned, since tests/desktop computes the same to clean up after itself.
+        let hex: String = data_store_id("istota-dt", "dt-a").iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, PINNED_DT_A);
+    }
+
+    const PINNED_DT_A: &str = "13f0730808848d93bf90807f8ac58ca6";
 
     #[test]
     fn no_state_file_is_the_local_install_alone() {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import Profiles from '$lib/Profiles.svelte';
   import type { FirstRun, Job } from '$lib/status';
 
   let info = $state<FirstRun | null>(null);
@@ -100,6 +101,14 @@
   {#if error}
     <p class="notice">{error}</p>
   {/if}
+
+  <details class="remote">
+    <summary>Connect to a remote Istota</summary>
+    <p class="muted">
+      An Istota on a server opens in this app's window. Nothing is set up on this Mac.
+    </p>
+    <Profiles addOnly />
+  </details>
 {/if}
 
 <style>
@@ -124,5 +133,13 @@
   .small {
     font-size: 12px;
     margin-top: 16px;
+  }
+
+  .remote {
+    margin-top: 24px;
+  }
+
+  summary {
+    cursor: pointer;
   }
 </style>

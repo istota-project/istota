@@ -16,6 +16,10 @@
 //! default browser. Subframes may load other origins (the feed reader embeds
 //! video players), but never a local file or a custom scheme. Downloads go to
 //! `~/Downloads` through wry's handler.
+//!
+//! Each remote profile's window has a website data store of its own
+//! (`profiles::data_store_id`), so one install's cookies and storage never
+//! reach another's window; the local install's window uses the default store.
 
 #![cfg_attr(feature = "m9-negative-control", allow(dead_code))]
 
@@ -75,10 +79,10 @@ pub fn open_externally(url: &str) {
 }
 
 #[cfg(not(feature = "m9-negative-control"))]
-pub use confined::{close_all, open};
+pub use confined::{close_all, open, remove_store};
 
 #[cfg(feature = "m9-negative-control")]
-pub use control::{close_all, open};
+pub use control::{close_all, open, remove_store};
 
 #[cfg(not(feature = "m9-negative-control"))]
 mod confined {
@@ -95,7 +99,7 @@ mod confined {
         WKNavigationResponse, WKNavigationResponsePolicy, WKWebView,
     };
     use tauri::{AppHandle, Manager, Url};
-    use wry::{NewWindowResponse, WebViewBuilder, WebViewExtMacOS};
+    use wry::{NewWindowResponse, WebViewBuilder, WebViewBuilderExtDarwin, WebViewExtDarwin, WebViewExtMacOS};
 
     use super::{decide, decide_new_window, open_externally, Nav};
 
@@ -231,8 +235,16 @@ mod confined {
     }
 
     /// Opens (or brings forward and navigates) the web UI window `label` at
-    /// `url`, confined to `url`'s origin. Must run on the main thread.
-    pub fn open(app: &AppHandle, label: &str, title: &str, url: &Url, log: Log) -> Result<(), String> {
+    /// `url`, confined to `url`'s origin, with the website data store `store`
+    /// (the default one when `None`). Must run on the main thread.
+    pub fn open(
+        app: &AppHandle,
+        label: &str,
+        title: &str,
+        url: &Url,
+        store: Option<[u8; 16]>,
+        log: Log,
+    ) -> Result<(), String> {
         let mtm = MainThreadMarker::new().ok_or("the web UI window is made on the main thread")?;
         let navigated = WINDOWS.with(|windows| {
             windows.borrow().get(label).map(|open| open.webview.load_url(url.as_str()))
@@ -257,7 +269,11 @@ mod confined {
         let origin = url.clone();
         let new_window_log = log.clone();
         let own_label = label.to_string();
-        let webview = WebViewBuilder::new()
+        let mut builder = WebViewBuilder::new();
+        if let Some(store) = store {
+            builder = builder.with_data_store_identifier(store);
+        }
+        let webview = builder
             .with_url(url.as_str())
             .with_new_window_req_handler(move |target, _features| {
                 match decide_new_window(&origin, &target) {
@@ -310,10 +326,26 @@ mod confined {
     pub fn close_all(app: &AppHandle) {
         let labels: Vec<String> = WINDOWS.with(|windows| windows.borrow().keys().cloned().collect());
         for label in labels {
-            if let Some(window) = app.get_window(&label) {
-                let _ = window.destroy();
-            }
+            close(app, &label);
         }
+    }
+
+    fn close(app: &AppHandle, label: &str) {
+        if let Some(window) = app.get_window(label) {
+            let _ = window.destroy();
+        }
+        WINDOWS.with(|windows| windows.borrow_mut().remove(label));
+    }
+
+    /// A removed profile's window closed and its data store deleted, so
+    /// nothing of that install stays on this Mac. Must run on the main thread.
+    pub fn remove_store(app: &AppHandle, label: &str, store: [u8; 16], log: Log) {
+        close(app, label);
+        wry::WebView::remove_data_store(&store, move |result| {
+            if let Err(err) = result {
+                log(&format!("could not delete a removed profile's website data: {err}"));
+            }
+        });
     }
 }
 
@@ -324,7 +356,14 @@ mod control {
 
     use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
-    pub fn open(app: &AppHandle, label: &str, title: &str, url: &Url, _log: Arc<dyn Fn(&str) + Send + Sync>) -> Result<(), String> {
+    pub fn open(
+        app: &AppHandle,
+        label: &str,
+        title: &str,
+        url: &Url,
+        _store: Option<[u8; 16]>,
+        _log: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Result<(), String> {
         if let Some(window) = app.get_webview_window(label) {
             return window.navigate(url.clone()).map_err(|err| err.to_string());
         }
@@ -337,6 +376,8 @@ mod control {
     }
 
     pub fn close_all(_app: &AppHandle) {}
+
+    pub fn remove_store(_app: &AppHandle, _label: &str, _store: [u8; 16], _log: Arc<dyn Fn(&str) + Send + Sync>) {}
 }
 
 #[cfg(test)]

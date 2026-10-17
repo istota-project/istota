@@ -7,7 +7,8 @@
 //! rather than the window, so the test answers the setup over its API (the
 //! page would spend the one-use code first), and leaves out the
 //! launch-at-login offer, whose default button would register the test build
-//! as a login item.
+//! as a login item. `ISTOTA_DESKTOP_SHIM_DIR` writes the command-line tools
+//! there once the first run is done (`shim_dir`).
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -23,6 +24,14 @@ pub fn first_run_folder_from(value: Option<&OsStr>) -> Option<PathBuf> {
 
 pub fn first_run_folder() -> Option<PathBuf> {
     first_run_folder_from(std::env::var_os("ISTOTA_DESKTOP_FIRST_RUN_FOLDER").as_deref())
+}
+
+/// `ISTOTA_DESKTOP_SHIM_DIR`: where the first run writes the command-line
+/// tools once it is done, through the same writer "Install command-line tools"
+/// uses for `~/.local/bin`, so the tier runs row L4's witness through them
+/// without the administrator prompt or the user's own `~/.local/bin`.
+pub fn shim_dir() -> Option<PathBuf> {
+    first_run_folder_from(std::env::var_os("ISTOTA_DESKTOP_SHIM_DIR").as_deref())
 }
 
 /// Row M6's negative control, built only by `scripts/test-desktop.sh
