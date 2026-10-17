@@ -1755,6 +1755,7 @@ class TestRestore:
         run = next(call for call in calls if "restore-workspace" in call)
         assert re.search(
             r"run --rm --no-deps -T --entrypoint istota-drop -v \S+/\.restore\.\w+:/vm "
+            r"-v \S+/secrets:/vm/secrets "
             r"daemon istota migrate restore-workspace --vm-dir /vm --date 2026-10-10$", run), run
         assert Path(f"{fx.calls}.stdin").read_text() == self.KEY + "\n"
         assert not any(self.KEY in call for call in calls)
