@@ -36,7 +36,7 @@ from istota.sandbox.claude_runtime_env import (
     # the only remaining call, and `tests/test_security.py` imports both names
     # from here beside `build_clean_env`.
 )
-from .config import Config
+from .config import SERVARR_APPS, Config, servarr_key_variable
 from istota.prompts import persona as operator_persona
 from istota.sandbox.plan import (
     Mount,
@@ -3505,9 +3505,28 @@ SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
 )
 
 
-def skill_model_credentials(*sources: Mapping[str, str]) -> dict[str, str]:
-    """:data:`SKILL_MODEL_CREDENTIAL_VARS`, read from the first source that has
-    each one.
+#: Skills whose CLI needs an operator credential the daemon holds only in its
+#: own environment, by skill: the same copy as :data:`SKILL_MODEL_CALLERS`,
+#: for a credential that is not a model's.
+#:
+#: The servarr keys are stack secret files, which `istota-secrets` exports into
+#: the daemon's environment as `ISTOTA_SERVARR_<APP>_API_KEY`; the CLI's own
+#: `load_config` reads them, so they have to be in its environment, and
+#: `build_clean_env` carries none of them. Not a manifest `env:` entry, for
+#: the reasons :data:`SKILL_MODEL_CALLERS` gives and because a `sensitive`
+#: manifest value is served to the sandbox by the proxy's `credential`
+#: request wherever reveal enforcement is off (the servarr spec's decision).
+SKILL_DAEMON_CREDENTIAL_VARS: dict[str, frozenset[str]] = {
+    "servarr": frozenset(servarr_key_variable(app) for app in SERVARR_APPS),
+}
+
+
+def skill_model_credentials(
+    *sources: Mapping[str, str], names: frozenset[str] = SKILL_MODEL_CREDENTIAL_VARS,
+) -> dict[str, str]:
+    """``names`` (:data:`SKILL_MODEL_CREDENTIAL_VARS` unless given), read from
+    the first source that has each one. An entry of
+    :data:`SKILL_DAEMON_CREDENTIAL_VARS` is read the same way.
 
     A *copy* out of its sources, never a split, and that is the shape of the
     whole fix. Everything else in the proxy's `credential_env` got there by
@@ -3522,7 +3541,7 @@ def skill_model_credentials(*sources: Mapping[str, str]) -> dict[str, str]:
     nothing rather than an empty string a CLI would read as a credential.
     """
     out: dict[str, str] = {}
-    for name in SKILL_MODEL_CREDENTIAL_VARS:
+    for name in names:
         for source in sources:
             if source.get(name):
                 out[name] = source[name]
@@ -3622,6 +3641,9 @@ _PROXY_LOOKUP_BLOCKED = (
     # outbound proxy URL can carry basic-auth userinfo, and the lookup
     # allowlist is a union anything holding the socket can fetch by name.
     | SKILL_MODEL_REACHABILITY_VARS
+    # Injected into one skill each from the daemon's environment, for the same
+    # reason as the model credentials, so blocked from lookup the same way.
+    | frozenset().union(*SKILL_DAEMON_CREDENTIAL_VARS.values())
 )
 
 

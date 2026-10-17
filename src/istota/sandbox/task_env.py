@@ -209,6 +209,7 @@ def build_task_runtime(
         HOOK_PATH_PREPEND_KEY,
         SANDBOX_CACHE_NPM,
         SANDBOX_CACHE_UV,
+        SKILL_DAEMON_CREDENTIAL_VARS,
         SKILL_MODEL_CALLERS,
         _build_network_allowlist,
         _split_credential_env,
@@ -498,6 +499,19 @@ def build_task_runtime(
                 skill_cred_map.setdefault(skill_name, set()).update(
                     scoped_for_model
                 )
+        # The same copy for a skill whose CLI needs an operator credential
+        # that only the daemon's environment holds (the servarr keys, from
+        # stack secret files). Gated on `cli_skills` rather than
+        # `authorized_skills`: such a skill declares no manifest credential,
+        # so a menu pick never authorizes it, and `cli_skills` is what the
+        # proxy will run for this task, reach gates applied.
+        for skill_name, names in SKILL_DAEMON_CREDENTIAL_VARS.items():
+            if skill_name not in cli_skills:
+                continue
+            daemon_creds = skill_model_credentials(os.environ, names=names)
+            if daemon_creds:
+                credential_env.update(daemon_creds)
+                skill_cred_map.setdefault(skill_name, set()).update(daemon_creds)
         # The user's shared-credential namespace, resolved once here and held
         # by the proxy, which serves it by name over the socket it already
         # owns. **Nothing goes into any environment** — not the model's, not

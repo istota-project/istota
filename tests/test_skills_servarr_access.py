@@ -473,7 +473,7 @@ def _proxy_call(sock_path, args):
 
 
 class TestThroughTheProxy:
-    def _env(self, tmp_path, port, **extra):
+    def _env(self, tmp_path, port, *, inline_key=True, **extra):
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
         admins = tmp_path / "admins"
@@ -484,20 +484,23 @@ class TestThroughTheProxy:
             f'skills_dir = "{tmp_path / "skills"}"\n'
             '[users.alice]\n[users.bob]\n'
             '[servarr]\nrequesters = ["bob"]\nprivate_hosts = ["127.0.0.1"]\n'
-            f'[servarr.apps.radarr]\nurl = "http://127.0.0.1:{port}"\napi_key = "{KEY}"\n'
+            f'[servarr.apps.radarr]\nurl = "http://127.0.0.1:{port}"\n'
+            + (f'api_key = "{KEY}"\n' if inline_key else "")
         )
         env = {k: v for k, v in os.environ.items()
-               if k not in ("ISTOTA_TASK_ID", "ISTOTA_WITHHELD_SCOPES", "ISTOTA_CONVERSATION_TOKEN")}
+               if k not in ("ISTOTA_TASK_ID", "ISTOTA_WITHHELD_SCOPES", "ISTOTA_CONVERSATION_TOKEN")
+               and not k.startswith("ISTOTA_SERVARR_")}
         env.update(ISTOTA_USER_ID="bob", ISTOTA_CONFIG_PATH=str(config_path),
                    ISTOTA_ADMINS_FILE=str(admins), ISTOTA_DB_PATH=str(db_path), **extra)
         return env
 
-    def _call(self, env, args):
+    def _call(self, env, args, *, credential_env=None, skill_credential_map=None):
         from istota.sandbox.skill_proxy import SkillProxy
 
         with tempfile.TemporaryDirectory(prefix="servarr_proxy_", dir="/tmp") as directory:
             sock = Path(directory) / "s"
-            with SkillProxy(sock, {}, env, allowed_skills=frozenset({"servarr"})):
+            with SkillProxy(sock, credential_env or {}, env, allowed_skills=frozenset({"servarr"}),
+                            skill_credential_map=skill_credential_map):
                 response = _proxy_call(sock, args)
         assert KEY not in response["stdout"] and KEY not in response["stderr"]
         return response
@@ -529,3 +532,28 @@ class TestThroughTheProxy:
             "/api/v3/system/status", "/api/v3/health",
         ]
         assert {key for _, key in _Recorder.seen} == {KEY}
+
+    def test_a_key_from_its_secret_file_reaches_the_cli_through_the_proxy(
+        self, tmp_path, recording_arr,
+    ):
+        """The key is in no config file and in no shared env: the proxy injects
+        it into the servarr CLI alone, the shape `build_task_runtime` builds
+        from the daemon's environment, and the CLI's own loader reads it."""
+        env = self._env(tmp_path, recording_arr.server_port, inline_key=False)
+        response = self._call(
+            env, ["status", "--app", "radarr"],
+            credential_env={"ISTOTA_SERVARR_RADARR_API_KEY": KEY},
+            skill_credential_map={"servarr": {"ISTOTA_SERVARR_RADARR_API_KEY"}},
+        )
+        assert response["returncode"] == 0, response
+        assert {key for _, key in _Recorder.seen} == {KEY}
+
+    def test_without_the_injection_the_app_is_not_configured(self, tmp_path, recording_arr):
+        env = self._env(tmp_path, recording_arr.server_port, inline_key=False)
+        response = self._call(
+            env, ["status", "--app", "radarr"],
+            credential_env={"ISTOTA_SERVARR_RADARR_API_KEY": KEY},
+            skill_credential_map={"servarr": set()},
+        )
+        assert response["returncode"] == 1, response
+        assert _Recorder.seen == []
