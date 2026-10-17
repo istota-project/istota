@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The Mac app signs you in about two seconds sooner when you open its window, and other quick `istota` commands start faster too, because the command line no longer loads the task, email and calendar machinery for commands that do not use it.
-- Health Documents has equal-height rows, compact source badges beside desktop titles, and a stacked mobile layout. Preview opens PDFs and images in the shared viewer, with a separate Download action.
+- Health Documents has equal-height rows, compact source badges beside desktop titles, and a stacked mobile layout with consistent spacing between titles, metadata and attachments. Attachment chips use distinct colors for visits, conditions and vaccinations, with compact record labels. Preview opens PDFs and images in the shared viewer, with a separate Download action.
 
 - The Briefings archive sidebar marks an unread briefing with the same amber asterisk the navigation uses, after its audience name, instead of a blue dot in its own column. Rows gain the width the column took.
 - **Twilio, WhatsApp Cloud API and native-brain header credentials now have secret files**, so the web UI no longer has to write them into `config.toml` in plain text. A credential already in `config.toml` keeps working, but the health check and the config editor now warn about it, and Move to secret file has the host move it without anyone retyping it.

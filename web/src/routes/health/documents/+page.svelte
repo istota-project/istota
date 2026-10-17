@@ -473,9 +473,13 @@
             <td class="links-column">
               <div class="links">
                 {#each links(doc) as link (`${link.entity_type}:${link.entity_id}`)}
-                  <span class="link-chip">
-                    <span class="link-kind">{entityTypeLabel(link.entity_type)}</span>
-                    <span class="link-label" title={link.label}>{link.label}</span>
+                  <span
+                    class="link-chip"
+                    data-kind={link.entity_type}
+                    title="{entityTypeLabel(link.entity_type)}: {link.label}"
+                  >
+                    <span class="visually-hidden">{entityTypeLabel(link.entity_type)}</span>
+                    <span class="link-label">{link.label}</span>
                     <button
                       type="button"
                       class="detach touch-target"
@@ -711,16 +715,23 @@
     min-width: 0;
   }
 
-  .link-kind {
-    flex-shrink: 0;
-    color: var(--text-dim);
-    font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+  .link-chip[data-kind='encounter'] {
+    background: var(--category-blue-bg);
+    color: var(--category-blue-fg);
+  }
+
+  .link-chip[data-kind='diagnosis'] {
+    background: var(--category-purple-bg);
+    color: var(--category-purple-fg);
+  }
+
+  .link-chip[data-kind='immunization'] {
+    background: var(--category-teal-bg);
+    color: var(--category-teal-fg);
   }
 
   .link-label {
-    color: var(--text-primary);
+    color: inherit;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -736,6 +747,10 @@
     color: var(--text-dim);
     padding: 0 var(--space-1);
     border-radius: var(--radius-pill);
+  }
+
+  .detach {
+    color: inherit;
   }
 
   .detach:hover:not(:disabled) {
@@ -781,11 +796,13 @@
     .documents-grid tr {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
+      align-content: start;
       gap: var(--space-2) var(--space-3);
       padding: var(--space-3) 0;
       border-bottom: 1px solid var(--border-subtle);
     }
     .grid.documents-grid tbody tr td {
+      align-content: start;
       width: auto;
       min-width: 0;
       padding: 0;
@@ -797,6 +814,7 @@
     }
     .document-title {
       flex-wrap: wrap;
+      row-gap: var(--space-1);
     }
     .name {
       flex-basis: 100%;
@@ -813,7 +831,7 @@
       align-self: start;
     }
     .links {
-      gap: var(--space-2);
+      gap: var(--space-1);
     }
     .link-chip {
       border-radius: var(--radius-sm);

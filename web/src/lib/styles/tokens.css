@@ -95,6 +95,14 @@
 	   moving the identity color. Hover is the underline only — see `.prose a`. */
   --link: var(--accent-amber);
 
+  /* Categorical chips, independent of status severity. */
+  --category-blue-bg: #203245;
+  --category-blue-fg: #a7c8ee;
+  --category-purple-bg: #342944;
+  --category-purple-fg: #cdb7e9;
+  --category-teal-bg: #193a36;
+  --category-teal-fg: #9bd5c9;
+
   /* Status severities — the standardized chip/badge palette. `-fg` is the text
 	   color for a bare status label; `-bg` is the fill for a filled chip, which
 	   pairs with the same `-fg`. Four severities only; a categorical palette (the
@@ -494,6 +502,14 @@
   --accent-blue: #2563b0;
   --accent-whatsapp: #1c8043;
   --link: var(--accent-amber);
+
+  /* Categorical chips. */
+  --category-blue-bg: #e6effa;
+  --category-blue-fg: #345d8a;
+  --category-purple-bg: #f0e9f8;
+  --category-purple-fg: #70518e;
+  --category-teal-bg: #e0f1ec;
+  --category-teal-fg: #316a5c;
 
   /* Status severities — darkened foregrounds that hold contrast on white, and
 	   pale tinted fills in place of the dark-theme blocks. */
