@@ -1015,8 +1015,6 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
     Unauthenticated, so it names no version: an exact version tells a visitor
     which advisories apply (ISSUE-569). `/admin` carries it instead.
     """
-    from istota.groups.system import ACCOUNT_HISTORY_DISCLOSURE
-    body += f'<p class="muted">{escape(ACCOUNT_HISTORY_DISCLOSURE)}</p>'
     name = escape(bot_name)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
