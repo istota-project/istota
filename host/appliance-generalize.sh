@@ -1,8 +1,10 @@
 #!/bin/bash
 # Generalize a provisioned VM into the Mac app's appliance disk.
 #
-# Run as root in the build VM `scripts/build-appliance.sh` made from the
-# release's own template and provision.sh, after its images are saved:
+# Run as root in the build VM the Mac app's release builder (istota-mac's
+# scripts/build-appliance.sh) made from the release's own template and
+# provision.sh, after its images are saved. The builder reads this script from
+# the release tag, so it ships with the release:
 #
 #   limactl shell --workdir / <vm> sudo bash -s < host/appliance-generalize.sh
 #

@@ -4,7 +4,8 @@ Run against a scratch root (`ISTOTA_GENERALIZE_ROOT`) laid out as a provisioned
 build VM, with `docker`, `systemctl`, `cloud-init`, `journalctl`, `apt-get`,
 `systemd-run` and the finish script's `pkill`, `userdel` and `fstrim` stubbed on
 PATH; each stub records its calls. What the commands do to a real disk is the
-release build's (`scripts/build-appliance.sh`) and the vm tier's appliance mode.
+release build's (istota-mac's `scripts/build-appliance.sh`, which reads this
+script from the tag) and that repository's vm-tier appliance mode.
 """
 
 from __future__ import annotations

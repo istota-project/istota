@@ -58,8 +58,9 @@ REPO_MOUNT = "/mnt/istota-repo"
 #: The template mounts the checkout and the Mac workspace folder; a Lima mount
 #: cannot be optional, so the tier's VM drops the workspace at create and
 #: shares a folder in only for the host-folder mode (`share_host_folder`).
-#: The release directory is the appliance's (`tests/vm/test_appliance.py`);
-#: every other VM drops it, since Lima refuses a mount with no location.
+#: The release directory is the appliance's (istota-mac's
+#: `tests/vm/test_appliance.py`, which loads this module from the istota tag it
+#: pins); every other VM drops it, since Lima refuses a mount with no location.
 DROP_RELEASE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/mnt/istota-release"))'
 DROP_WORKSPACE_MOUNT = 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))'
 

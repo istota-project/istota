@@ -1,4 +1,5 @@
-"""Every security parity row is witnessed, pending, or excluded by design.
+"""Every security parity row is witnessed, witnessed in istota-mac, pending,
+or excluded by design.
 
 `tests/support/parity.py` holds the matrix's rows and the decorator a witness
 carries. This file walks `tests/` for that decorator with `ast` rather than
@@ -86,8 +87,19 @@ class TestEveryRowHasAWitness:
         unaccounted = [
             row for row in parity.ROWS
             if row not in witnesses and row not in parity.PENDING and row not in parity.NOT_WITNESSED
+            and row not in parity.WITNESSED_IN_ISTOTA_MAC
         ]
         assert unaccounted == [], f"rows with no witness and no pending stage: {unaccounted}"
+
+    def test_a_row_witnessed_in_istota_mac_is_a_mac_app_row_with_no_witness_here(self, witnesses):
+        """istota-mac holds this dict to its own witnesses; here a row in it
+        must be a known M row, not pending, and not also witnessed in this tree,
+        where the moved witness would otherwise be counted twice."""
+        for row, where in parity.WITNESSED_IN_ISTOTA_MAC.items():
+            assert row in parity.ROWS and re.fullmatch(r"M[1-9]\d*", row), row
+            assert row not in witnesses, f"row {row} is witnessed here and listed as istota-mac's"
+            assert row not in parity.PENDING and row not in parity.NOT_WITNESSED
+            assert where.startswith("tests/"), (row, where)
 
     def test_a_witnessed_row_is_no_longer_pending(self, witnesses):
         both = sorted(set(witnesses) & set(parity.PENDING))

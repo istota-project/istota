@@ -23,9 +23,10 @@ Rows 1 to 20 are that spec's. The local-VM spec (a Lima VM on the Mac running
 the same stack) adds its own as `L1` onward, held the same way, and the Mac app
 spec its `M` rows, under that spec's own numbers.
 
-Every row is in exactly one of three states: witnessed (some test carries the
-decorator for it), pending (named in `PENDING` with the stage that will close
-it), or not witnessed by design (`NOT_WITNESSED`, row 14 only). `PENDING` may
+Every row is in exactly one of four states: witnessed (some test carries the
+decorator for it), witnessed in the Mac app's repository (`WITNESSED_IN_ISTOTA_MAC`,
+below), pending (named in `PENDING` with the stage that will close it), or not
+witnessed by design (`NOT_WITNESSED`, row 14 only). `PENDING` may
 only shrink: it must stay a subset of `PENDING_AT_STAGE_1`, so a row added to
 the matrix later has to arrive with its witness, and a witnessed row has to be
 taken out of `PENDING`. Witnessed is not closed: a row is closed when its
@@ -77,6 +78,18 @@ ROWS: dict[int | str, str] = {
 
 NOT_WITNESSED: dict[int, str] = {
     14: "rootful dockerd inside a dedicated VM; parity with bare metal plus a container, closed by the rootless-podman spec",
+}
+
+# The Mac app's rows whose witnesses moved with the app into its own
+# repository, istota-mac, which pins an istota release. That repository copies
+# these rows' text and holds the copy to this registry at its pinned tag, and
+# holds this dict to the rows it witnesses, so a row is added here first. Row
+# L3's appliance half is witnessed there too; its other half is witnessed here.
+WITNESSED_IN_ISTOTA_MAC: dict[str, str] = {
+    "M6": "tests/desktop/test_first_run.py (desktop tier), control scripts/test-desktop.sh --control m6",
+    "M7": "tests/test_release_mac.py (default suite)",
+    "M9": "tests/desktop/test_confinement.py (desktop tier), control scripts/test-desktop.sh --control m9",
+    "M11": "tests/vm/test_appliance.py (vm tier, appliance mode), control appliance-without-offline-rule",
 }
 
 # Empty since Stage 7: the last pending rows are witnessed by the vm tier.
