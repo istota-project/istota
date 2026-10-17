@@ -109,7 +109,7 @@ istota_plan_secrets:
     alice: {karakeep: {api_key: "{{ vault_alice_karakeep }}"}}
 ```
 
-Credentials stay in the vault and reach the plan through `istota_plan_secrets`, the sidecar in variable form. Host settings, deployment secrets and the admins list keep their own role variables; a snapshot does not contain them, so it is not a complete inventory. The role marks the config as managed by ansible. `istota_plan_prune` and `istota_plan_prune_secrets` pass `--prune` and `--prune-secrets`. Under `ansible-playbook --check` the role runs the same dry run and reports per-user drift without writing anything or restarting the stack. The variables it took before `istota_plan` (`istota_config`, `istota_users` and the rest) are retired, and a play that still sets one fails before it changes anything.
+Credentials stay in the vault and reach the plan through `istota_plan_secrets`, the sidecar in variable form. Host settings, deployment secrets and the admins list keep their own role variables; a snapshot does not contain them, so it is not a complete inventory. The config is managed, and read-only in the web config editor, only when the plan sets `meta.managed = true`; the role adds no metadata of its own. `istota_plan_prune` and `istota_plan_prune_secrets` pass `--prune` and `--prune-secrets`. Under `ansible-playbook --check` the role runs the same dry run and reports per-user drift without writing anything or restarting the stack. The variables it took before `istota_plan` (`istota_config`, `istota_users` and the rest) are retired, and a play that still sets one fails before it changes anything.
 
 A settings plan applied by the role is a settings import, not a recovery. To move a whole install, use the backup, restore and migration tools.
 
