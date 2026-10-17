@@ -61,6 +61,24 @@ describe('the review', () => {
     expect(screen.getByText(/Applying restarts Istota/)).toHaveTextContent(
       '2 tasks are running now and will be interrupted.',
     );
+    expect(screen.queryByText('Moved out of config.toml')).not.toBeInTheDocument();
+  });
+
+  it('lists each credential moved into its secret file', async () => {
+    api.previewConfigChange.mockResolvedValue(
+      configPreview({
+        diff: ['--- config.toml', '+++ config.toml', '-auth_token = "<unchanged>"'],
+        secret_names: ['istota_sms_twilio_auth_token'],
+        moves: [{ label: 'sms.twilio.auth_token', file: 'istota_sms_twilio_auth_token' }],
+      }),
+    );
+    mount();
+    expect(await screen.findByText('Moved out of config.toml')).toBeInTheDocument();
+    const item = screen.getByText('sms.twilio.auth_token').closest('li')!;
+    expect(item).toHaveTextContent(
+      'sms.twilio.auth_token moves to the secret file istota_sms_twilio_auth_token',
+    );
+    expect(screen.getByRole('button', { name: 'Apply…' })).toBeEnabled();
   });
 
   it('blocks on a problem and marks one already in the file as fix this first', async () => {

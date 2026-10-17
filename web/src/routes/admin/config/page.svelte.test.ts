@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { configField, configPreview, configRequest, configView } from '$lib/test/adminConfig';
+import {
+  configField,
+  configPreview,
+  configRequest,
+  configSecret,
+  configView,
+} from '$lib/test/adminConfig';
 import type { AdminConfigView, ConfigRequest, User } from '$lib/api';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
@@ -163,14 +169,12 @@ describe('the change set', () => {
     mount(
       configView([imapHost], {
         secrets: [
-          {
+          configSecret({
             name: 'anthropic_api_key',
             label: 'Anthropic API key',
             config_key: null,
-            set: false,
-            read_only_reason: null,
-            risky: false,
-          },
+            used_by: 'Claude Code',
+          }),
         ],
       }),
     );
@@ -231,6 +235,33 @@ describe('the current file', () => {
         }),
       ),
     );
+  });
+
+  it('moves a credential held only inline into its secret file', async () => {
+    mount(
+      configView([imapHost], {
+        problems: [
+          {
+            kind: 'warning',
+            path: ['sms', 'twilio', 'auth_token'],
+            message: 'sms.twilio.auth_token is stored in config.toml in plain text',
+            blocking: false,
+            action: 'move',
+          },
+        ],
+      }),
+    );
+    await fireEvent.click(await screen.findByRole('button', { name: 'Move to secret file' }));
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Keep in config.toml' })).toBeInTheDocument();
+
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
+    const sent = api.previewConfigChange.mock.calls[0][0];
+    expect(sent.move_to_file).toEqual(['sms.twilio.auth_token']);
+    expect(sent.ops).toEqual([]);
+    expect(sent.secrets).toEqual({});
   });
 });
 

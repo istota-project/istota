@@ -20,6 +20,9 @@ export interface ConfigDraft {
   /** A credential name (a secrets file, or an inline field's label) to its
    *  new value; `""` clears it. */
   secrets: Record<string, string>;
+  /** Credentials (dotted labels) the host moves from config.toml into their
+   *  secret files. Names only: nobody in the browser holds the value. */
+  move_to_file: string[];
   /** The whole new admin list, or null for unchanged. */
   admins: string[] | null;
   /** The whole new config.toml from the raw editor, or null. The server takes
@@ -32,7 +35,7 @@ export interface ConfigDraft {
 export const SENTINEL = '<unchanged>';
 
 export function emptyDraft(): ConfigDraft {
-  return { ops: {}, secrets: {}, admins: null, raw: null };
+  return { ops: {}, secrets: {}, move_to_file: [], admins: null, raw: null };
 }
 
 export function pathKey(path: string[]): string {
@@ -57,6 +60,12 @@ export function withSecret(draft: ConfigDraft, name: string, value: string | nul
   return { ...draft, secrets };
 }
 
+/** `draft` with the credential at `label` moved into its secret file, or not. */
+export function withMove(draft: ConfigDraft, label: string, move: boolean): ConfigDraft {
+  const others = draft.move_to_file.filter((held) => held !== label);
+  return { ...draft, move_to_file: move ? [...others, label] : others };
+}
+
 export function withAdmins(draft: ConfigDraft, admins: string[] | null): ConfigDraft {
   return { ...draft, admins: admins ? [...admins] : null };
 }
@@ -70,6 +79,7 @@ export function changeCount(draft: ConfigDraft): number {
   return (
     Object.keys(draft.ops).length +
     Object.keys(draft.secrets).length +
+    draft.move_to_file.length +
     (draft.admins ? 1 : 0) +
     (draft.raw !== null ? 1 : 0)
   );
@@ -82,6 +92,7 @@ export function buildChangeSet(draft: ConfigDraft, baseDigest: string): ConfigCh
     raw: draft.raw,
     secrets: { ...draft.secrets },
   };
+  if (draft.move_to_file.length) changeSet.move_to_file = [...draft.move_to_file];
   if (draft.admins) changeSet.admins = [...draft.admins];
   return changeSet;
 }
@@ -160,7 +171,8 @@ const EDITABLE: ReadonlySet<ConfigEditorKind> = new Set([
  * After `config_changed` the page reloads the view and keeps the local change
  * set where it still applies: an op whose field is gone or became read-only,
  * and a credential no editable field or secrets file names, are dropped. A
- * removal is kept while the new file still has the problem it removes. Raw
+ * removal is kept while the new file still has the problem it removes, and a
+ * move while the credential is still inline and editable. Raw
  * text is dropped: it was written against a file that is no longer there, and
  * submitting it would undo whatever changed the file. `dropped` counts them
  * so the page can say so.
@@ -181,8 +193,15 @@ export function retainExisting(
   for (const file of view.secrets) {
     if (!file.read_only_reason) credentials.add(file.name);
   }
+  const movable = new Set<string>();
+  for (const file of view.secrets) {
+    if (file.config_key && file.source === 'inline' && !file.read_only_reason) {
+      movable.add(file.config_key);
+    }
+  }
   for (const problem of view.problems) {
     if (problem.action === 'unset') editablePaths.add(pathKey(problem.path));
+    if (problem.action === 'move') movable.add(problem.path.join('.'));
   }
 
   let dropped = 0;
@@ -193,6 +212,10 @@ export function retainExisting(
   }
   for (const [name, value] of Object.entries(draft.secrets)) {
     if (credentials.has(name)) kept.secrets[name] = value;
+    else dropped += 1;
+  }
+  for (const label of draft.move_to_file) {
+    if (movable.has(label)) kept.move_to_file.push(label);
     else dropped += 1;
   }
   if (draft.admins) {

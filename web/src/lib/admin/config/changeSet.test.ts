@@ -10,11 +10,12 @@ import {
   parseNumber,
   retainExisting,
   withAdmins,
+  withMove,
   withOp,
   withRaw,
   withSecret,
 } from './changeSet';
-import { configField, configView } from '$lib/test/adminConfig';
+import { configField, configSecret, configView } from '$lib/test/adminConfig';
 
 describe('the draft', () => {
   it('addresses a field by its path, so a dotted segment is its own key', () => {
@@ -191,5 +192,81 @@ describe('raw text, tables and removals', () => {
     const { draft, dropped } = retainExisting(withRaw(emptyDraft(), 'a = 1\n'), configView([]));
     expect(draft.raw).toBeNull();
     expect(dropped).toBe(1);
+  });
+
+  it('keeps a move while the credential is still inline and editable', () => {
+    const view = configView([], {
+      secrets: [
+        configSecret({
+          name: 'istota_sms_twilio_auth_token',
+          config_key: 'sms.twilio.auth_token',
+          source: 'inline',
+        }),
+        configSecret({
+          name: 'istota_whatsapp_access_token',
+          config_key: 'whatsapp.cloud.access_token',
+          source: 'file',
+        }),
+        configSecret({
+          name: 'istota_whatsapp_app_secret',
+          config_key: 'whatsapp.cloud.app_secret',
+          source: 'inline',
+          read_only_reason: 'managed by ansible',
+        }),
+      ],
+    });
+    let draft = withMove(emptyDraft(), 'sms.twilio.auth_token', true);
+    draft = withMove(draft, 'whatsapp.cloud.access_token', true);
+    draft = withMove(draft, 'whatsapp.cloud.app_secret', true);
+    const { draft: kept, dropped } = retainExisting(draft, view);
+    expect(kept.move_to_file).toEqual(['sms.twilio.auth_token']);
+    expect(dropped).toBe(2);
+  });
+
+  it('keeps a move the new file still offers as a problem action', () => {
+    const view = configView([], {
+      problems: [
+        {
+          kind: 'warning',
+          path: ['sms', 'twilio', 'auth_token'],
+          message: 'stored in config.toml',
+          blocking: false,
+          action: 'move',
+        },
+      ],
+    });
+    const { draft, dropped } = retainExisting(
+      withMove(emptyDraft(), 'sms.twilio.auth_token', true),
+      view,
+    );
+    expect(draft.move_to_file).toEqual(['sms.twilio.auth_token']);
+    expect(dropped).toBe(0);
+  });
+});
+
+describe('moving a credential into its secret file', () => {
+  it('names the label once, counts it, and takes it back', () => {
+    let draft = withMove(emptyDraft(), 'sms.twilio.auth_token', true);
+    draft = withMove(draft, 'sms.twilio.auth_token', true);
+    expect(draft.move_to_file).toEqual(['sms.twilio.auth_token']);
+    expect(changeCount(draft)).toBe(1);
+    draft = withMove(draft, 'sms.twilio.auth_token', false);
+    expect(draft.move_to_file).toEqual([]);
+    expect(changeCount(draft)).toBe(0);
+  });
+
+  it('sends move_to_file with no value and nothing in secrets or ops', () => {
+    const changeSet = buildChangeSet(withMove(emptyDraft(), 'sms.twilio.auth_token', true), 'abc');
+    expect(changeSet).toEqual({
+      base_digest: 'abc',
+      ops: [],
+      raw: null,
+      secrets: {},
+      move_to_file: ['sms.twilio.auth_token'],
+    });
+  });
+
+  it('leaves move_to_file off a change set with no moves', () => {
+    expect(buildChangeSet(emptyDraft(), 'abc')).not.toHaveProperty('move_to_file');
   });
 });

@@ -8,7 +8,13 @@ import type {
   AdminServarrApp,
   AdminServarrConnection,
 } from '$lib/api';
-import { configField, configPreview, configRequest, configView } from '$lib/test/adminConfig';
+import {
+  configField,
+  configPreview,
+  configRequest,
+  configSecret,
+  configView,
+} from '$lib/test/adminConfig';
 
 /**
  * The servarr card on `/admin/connections`, read view.
@@ -244,14 +250,16 @@ describe('editing', () => {
 
   /** The view's secrets entries for the four keys, as `GET /admin/config` lists them. */
   function keyFiles(readOnlyReason: string | null = null) {
-    return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) => ({
-      name: `istota_servarr_${name}_api_key`,
-      label: `servarr.apps.${name}.api_key`,
-      config_key: `servarr.apps.${name}.api_key`,
-      set: name === 'radarr',
-      read_only_reason: readOnlyReason,
-      risky: false,
-    }));
+    return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) =>
+      configSecret({
+        name: `istota_servarr_${name}_api_key`,
+        config_key: `servarr.apps.${name}.api_key`,
+        set: name === 'radarr',
+        source: name === 'radarr' ? 'file' : 'none',
+        used_by: 'Servarr',
+        read_only_reason: readOnlyReason,
+      }),
+    );
   }
   const UNMANAGED = { managed: false, source: null, at: null };
   const MANAGED = {
