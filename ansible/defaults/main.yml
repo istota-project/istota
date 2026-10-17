@@ -102,6 +102,7 @@ istota_host_env:
   HOST_LOOPBACK_ALLOW: "{{ istota_host_loopback_allow | join(' ') }}"
   LOCAL_FORWARD_PORT: ""
   ISTOTA_LOCAL_LAYERS: ""
+  ISTOTA_DESKTOP_APP: ""
 # Optional keys only a unit reads (ISTOTA_DEVBOX_SUBNET, the browser watchdog's
 # ISTOTA_BROWSER_WATCHDOG_*), written beside the ones above.
 istota_host_env_extra: {}

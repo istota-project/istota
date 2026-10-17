@@ -46,6 +46,10 @@
 #                        release's loaded images, separated by spaces or commas
 #                        (claude-code, chrome); all of them when absent, none
 #                        when empty. A server builds neither and never reads it
+#   ISTOTA_DESKTOP_APP   1 on a VM the Mac's `istota-stack create --appliance`
+#                        made, whose images are a release's: a setup or
+#                        check-image adds what they lack as local layers rather
+#                        than rebuilding them. Empty on a server
 set -euo pipefail
 # The checkout it clones is what the images are built from: under a hardened
 # umask (027) it would be root-only, and out of uid 10001's reach in them.

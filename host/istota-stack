@@ -619,6 +619,17 @@ image_lacks_what_config_needs() {
     fi
 }
 
+# A VM the Mac's `create --appliance` made: its images are a release's, loaded
+# from the archive and built without Claude Code or Chrome.
+desktop_app() {
+    [ "$(env_get "$HOST_ENV" ISTOTA_DESKTOP_APP)" = 1 ]
+}
+
+# The command that gives a tag's stack what image_lacks_what_config_needs names.
+image_remedy() {
+    if desktop_app; then echo "istota-stack local-layers"; else echo "istota-stack update $1"; fi
+}
+
 # The image daemon and web run for a tag: its Claude Code layer when .env names
 # it and it exists, else the tag's own.
 stack_image() {
@@ -1485,7 +1496,7 @@ cmd_setup() {
     local lacking
     lacking="$(image_lacks_what_config_needs "$tag")"
     if [ -n "$lacking" ]; then
-        log "${lacking}: run \`istota-stack update ${tag}\`."
+        log "${lacking}: run \`$(image_remedy "$tag")\`."
     fi
     render_devbox_compose "$tag"
     copy_stack_env_out
@@ -1785,10 +1796,21 @@ setup_did_not_finish() {
 
 # A rebuild for what the new config needs and the tag's images lack: Claude
 # Code, which only a build of every image adds, or the images of a profile the
-# setup turned on (the browser), built alone.
+# setup turned on (the browser), built alone. On the desktop app the images
+# came from the release's archive, and a build would fetch them all again:
+# what they lack is the local layers, and a layer that fails (no network) is
+# reported and left to `local-layers`, with the stack on the release's image.
 build_what_setup_needs() {
     local tag="$1" lacking missing
     lacking="$(image_lacks_what_config_needs "$tag")"
+    missing="$(missing_service_images "$tag")"
+    if desktop_app; then
+        [ -n "$lacking$missing" ] || return 0
+        log "${lacking:-the setup turned on what the release left out}: building the local layers for ${tag}"
+        run_local_layers "$tag" \
+            || log "WARNING: a local layer did not build; \`istota-stack local-layers --status\` says why, and \`istota-stack local-layers\` tries again."
+        return 0
+    fi
     if [ -n "$lacking" ]; then
         log "${lacking}: building ${tag} again"
         if ! build_images "$tag" || ! build_devbox_images "$tag"; then
@@ -1796,7 +1818,6 @@ build_what_setup_needs() {
         fi
         return 0
     fi
-    missing="$(missing_service_images "$tag")"
     [ -n "$missing" ] || return 0
     log "building $(echo "$missing" | tr '\n' ' ')for ${tag}: the setup turned on what its first build left out"
     # shellcheck disable=SC2086
@@ -2480,7 +2501,7 @@ cmd_check_image() {
     [ -n "$tag" ] || { log "no tag deployed yet; nothing to check"; return 0; }
     lacking="$(image_lacks_what_config_needs "$tag")"
     if [ -n "$lacking" ]; then
-        log "${lacking}: run \`istota-stack update ${tag}\`."
+        log "${lacking}: run \`$(image_remedy "$tag")\`."
         return 2
     fi
 }

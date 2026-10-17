@@ -2421,6 +2421,13 @@ class TestCheckImage:
         result = self._check(claude_code, "ISTOTA_CLAUDE_CODE_INSTALLED=1\nISTOTA_CLAUDE_CODE_VERSION=2.0.1")
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_on_the_desktop_app_it_names_the_local_layer(self, claude_code):
+        (claude_code.stack / "host.env").write_text("INGRESS=local\nISTOTA_DESKTOP_APP=1\n")
+        result = self._check(claude_code, "ISTOTA_CLAUDE_CODE_INSTALLED=0\nISTOTA_CLAUDE_CODE_VERSION=2.1.296")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "istota-stack local-layers" in result.stdout + result.stderr
+        assert "istota-stack update" not in result.stdout + result.stderr
+
     def test_setup_uses_the_same_check(self):
         text = SCRIPT.read_text()
         setup = text.split("\ncmd_setup() {", 1)[1].split("\n}\n", 1)[0]
@@ -3651,6 +3658,45 @@ class TestSetupWebFinished:
     def test_nothing_missing_builds_nothing(self, web):
         assert web.run("setup", "--web", **_finished()).returncode == 0
         assert not [call for call in web.docker_calls() if " build " in f"{call} "]
+
+    DESKTOP_HOST_ENV = STAGED_HOST_ENV + "ISTOTA_DESKTOP_APP=1\n"
+
+    def test_on_the_desktop_app_claude_code_is_the_local_layer(self, web):
+        """The app's images came from the release's archive, built without
+        Claude Code; a full build would fetch everything again. The layer is
+        Claude Code on the loaded image, and the browser the Chrome layer."""
+        result = web.run("setup", "--web", **_finished(
+            STUB_STAGED_HOST_ENV=self.DESKTOP_HOST_ENV,
+            STUB_CONFIG='[brain]\nkind = "claude_code"\n',
+            STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0\nISTOTA_CLAUDE_CODE_VERSION=2.1.296",
+            STUB_IMAGE_ENV_CC=CC_ENV,
+            STUB_SERVICES="daemon\\nweb\\nnginx\\nbrowser\\n", STUB_MISSING_IMAGES="istota-browser:v0"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = web.docker_calls()
+        assert not [call for call in calls if call.endswith((" build daemon browser", " build browser"))]
+        layers = _layer_builds(web)
+        assert layers[0] == "build --build-arg CLAUDE_CODE_VERSION=2.1.296 -t istota:v0-cc -"
+        assert layers[1].startswith("build --build-arg BROWSER_BASE=istota-browser-base:v0 --target chrome")
+        assert "ISTOTA_IMAGE=istota:v0-cc\n" in web.env_text()
+        assert calls.index(layers[0]) < calls.index("systemctl enable --now istota-stack")
+
+    def test_on_the_desktop_app_a_failed_layer_does_not_stop_the_start(self, web):
+        """No network at first launch: the layer is reported, retried later,
+        and the stack runs on the release's own image meanwhile."""
+        result = web.run("setup", "--web", **_finished(
+            STUB_STAGED_HOST_ENV=self.DESKTOP_HOST_ENV,
+            STUB_CONFIG='[brain]\nkind = "claude_code"\n',
+            STUB_IMAGE_ENV="ISTOTA_CLAUDE_CODE_INSTALLED=0\nISTOTA_CLAUDE_CODE_VERSION=2.1.296",
+            STUB_BUILD_FAIL="istota:v0-cc"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "local-layers" in result.stdout + result.stderr
+        assert "systemctl enable --now istota-stack" in web.docker_calls()
+        assert "ISTOTA_IMAGE=istota:v0-cc" not in web.env_text()
+
+    def test_on_the_desktop_app_nothing_lacking_builds_nothing(self, web):
+        assert web.run("setup", "--web", **_finished(STUB_STAGED_HOST_ENV=self.DESKTOP_HOST_ENV)).returncode == 0
+        assert not [call for call in web.docker_calls() if " build " in f"{call} "]
+        assert _layer_builds(web) == []
 
     def test_a_failed_build_stops_before_the_start(self, web):
         result = web.run("setup", "--web", **_finished(
