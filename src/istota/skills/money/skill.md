@@ -73,7 +73,7 @@ istota-skill money run-scheduled [--dry-run] [--skip-monarch] [--no-match-invoic
 
 All output is JSON with `status: ok|error`.
 
-**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/record-void/create`, `monarch-category-map set`, `transaction-rules set`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `invoice list`, `monarch-category-map list`, `transaction-rules list/test`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
+**Concurrency rule:** mutation commands (`add-transaction`, `edit-transaction`, `backfill-ids`, `sync-monarch`, `import-csv`, `run-scheduled`, `work add/update/remove`, `invoice generate/paid/unpaid/void/record-void/create`, `monarch-category-map set`, `transaction-rules set`, `portfolio import/delete-snapshot/classify/unclassify`, and `portfolio accounts` when it carries a `--set-*`/`--exclude`/`--include` flag) must be called sequentially, never in parallel. Running concurrent writes causes duplicate entries and race conditions. Read-only commands (`list`, `check`, `balances`, `query`, `report`, `lots`, `wash-sales`, `work list`, `work export`, `invoice list`, `monarch-category-map list`, `transaction-rules list/test`, `portfolio snapshots/summary/history/diff/symbol/classifications`, and bare `portfolio accounts`) are safe to parallelize.
 
 ## Adding transactions
 
@@ -209,7 +209,12 @@ istota-skill money work update 5 [--qty 8] [--description "Updated"] [--separate
 
 # Remove an uninvoiced work entry
 istota-skill money work remove 3
+
+# Export work entries and invoices (read-only)
+istota-skill money work export [--format csv|json] [--year 2026] [--out /Users/{user_id}/exports/work-2026.csv]
 ```
+
+**Exporting.** `work export --format csv` writes one row per entry with its invoice number, the invoice's status (`open` or `paid`), issue and paid dates, and any voided invoices that also covered it; it is the file to open in a spreadsheet. `--format json` is the complete record: every entry and every invoice, voided ones included with their totals, income split, reason and replacements. `--year` keeps the entries dated that year and the invoices that cover them. Without `--out` the export is printed; when the user wants a file, pass `--out` with a path under their workspace and give them that path. The Work and Invoices pages in the web UI download the same files.
 
 **Entry identity.** `work list` returns both an `id` (1-based display index) and a
 `uid` (stable). The `#N` index is what `work update` / `work remove` take, but it

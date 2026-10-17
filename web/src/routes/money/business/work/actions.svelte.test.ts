@@ -237,3 +237,64 @@ describe('deleting an entry', () => {
     expect(await screen.findByText(/changed elsewhere/)).toBeTruthy();
   });
 });
+
+describe('sorting and download', () => {
+  const LATER_BILL = entryRow({
+    uid: 'w4',
+    index: 4,
+    etag: 'etag-w4',
+    date: '2026-09-20',
+    description: 'Hotfix',
+    invoice: 'INV-000009',
+    editable: false,
+    deletable: false,
+  });
+
+  beforeEach(() => {
+    localStorage.clear();
+    listed = [UNBILLED, BILLED, LATER_BILL];
+  });
+
+  function order(): string[] {
+    return [...document.querySelectorAll('.money-table-row .work-desc')].map(
+      (el) => el.textContent?.trim() ?? '',
+    );
+  }
+
+  it('sorts by date, newest first, until told otherwise', async () => {
+    render(Page);
+    await screen.findByText('Hotfix');
+    expect(order()).toEqual(['Hotfix', 'API work', 'Design pass']);
+  });
+
+  it('sorts by invoice number, keeping uninvoiced entries last both ways', async () => {
+    render(Page);
+    await screen.findByText('Hotfix');
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by invoice number' }));
+    expect(order()).toEqual(['Design pass', 'Hotfix', 'API work']);
+    await fireEvent.click(screen.getByRole('button', { name: /Sorted by invoice number/ }));
+    expect(order()).toEqual(['Hotfix', 'Design pass', 'API work']);
+  });
+
+  it('remembers the sort across visits', async () => {
+    render(Page);
+    await screen.findByText('Hotfix');
+    await fireEvent.click(screen.getByRole('button', { name: 'Sort by invoice number' }));
+    cleanup();
+    render(Page);
+    await screen.findByText('Hotfix');
+    expect(order()).toEqual(['Design pass', 'Hotfix', 'API work']);
+  });
+
+  it('offers CSV and JSON downloads of the work log', async () => {
+    render(Page);
+    await screen.findByText('Hotfix');
+    await fireEvent.keyDown(screen.getByLabelText('Download work log'), { key: 'Enter' });
+    const csv = await screen.findByRole('menuitem', { name: 'Download as CSV' });
+    expect(csv).toHaveAttribute('href', '/istota/api/money/work/export?format=csv');
+    expect(csv).toHaveAttribute('download', '');
+    expect(
+      screen.getByRole('menuitem', { name: 'Download as JSON (full record)' }),
+    ).toHaveAttribute('href', '/istota/api/money/work/export?format=json');
+  });
+});

@@ -769,3 +769,29 @@ class TestSeparateField:
         assert resp.status_code == 400
         assert "separate" in resp.json()["error"]
         assert load_work_entries(tmp_path) == []
+
+
+class TestExportWork:
+    def test_csv_download(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=3, description="API work")
+        assign_invoice_number(tmp_path, [1], "INV-000001")
+        resp = make_client().get("/api/money/work/export?format=csv&year=2026")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert resp.headers["content-disposition"] == 'attachment; filename="work-2026.csv"'
+        assert resp.headers["cache-control"] == "no-store"
+        header, row = resp.text.splitlines()
+        assert header.startswith("uid,date,client")
+        assert "INV-000001" in row and "API work" in row
+
+    def test_json_download(self, make_client, tmp_path):
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=3)
+        resp = make_client().get("/api/money/work/export?format=json")
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"] == 'attachment; filename="work.json"'
+        assert resp.json()["entries"][0]["client"] == "acme"
+
+    def test_unknown_format_is_refused(self, make_client):
+        resp = make_client().get("/api/money/work/export?format=xlsx")
+        assert resp.status_code == 400
+        assert "format" in resp.json()["error"]
