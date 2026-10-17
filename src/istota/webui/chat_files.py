@@ -30,10 +30,11 @@ logger = logging.getLogger("istota.webui.chat_files")
 class ChatFileError(Exception):
     """Refusal to serve a path, carrying the status the caller should see."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, kind: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.kind = kind
 
 
 def chat_file_workspace(config: "Config | None", username: str) -> Path:
@@ -164,7 +165,7 @@ def _refusal(root: Path, parts: list[str]) -> ChatFileError:
         except (OSError, ValueError):
             break
         if stat.S_ISLNK(info.st_mode):
-            return ChatFileError(403, "path is a link, which is not followed")
+            return ChatFileError(403, "path is a link, which is not followed", kind="link")
         if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
             return ChatFileError(404, "file not found")
     if info is not None and stat.S_ISDIR(info.st_mode):
@@ -193,6 +194,10 @@ _REASONS = {
     400: "not a file",
     403: "outside your workspace",
     404: "file not found",
+}
+# Refusals sharing a status with a different cause, keyed by `ChatFileError.kind`.
+_KIND_REASONS = {
+    "link": "a link, which is not followed",
 }
 
 
@@ -354,7 +359,7 @@ def check_chat_file_links(
             resolve_chat_file(config, user_id, path, roots=roots)
             return match.group(0)
         except ChatFileError as e:
-            reason = _REASONS.get(e.status)
+            reason = _KIND_REASONS.get(e.kind) or _REASONS.get(e.status)
             if reason is None:
                 return match.group(0)
         except Exception:

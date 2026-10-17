@@ -112,3 +112,14 @@ def test_without_the_request_headers_a_range_is_not_served(served):
     assert resp.status_code == 200
     assert resp.content == BODY
     assert "accept-ranges" not in resp.headers
+
+
+@pytest.mark.parametrize("header", [
+    "bytes=" + "1" * 5000 + "-", "bytes=0-" + "9" * 5000, "bytes=-" + "9" * 5000,
+])
+def test_an_offset_longer_than_int_parses_is_ignored(served, header):
+    """`int()` refuses more than 4300 digits; that must not be a 500."""
+    client, _ = served
+    resp = client.get("/ranged", headers={"range": header})
+    assert resp.status_code == 200
+    assert resp.content == BODY

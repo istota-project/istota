@@ -28,6 +28,8 @@ _CHUNK = 64 * 1024
 
 UNSATISFIABLE = "unsatisfiable"
 
+_MAX_OFFSET_DIGITS = 20
+
 
 def content_disposition(disposition_type: str, filename: str) -> str:
     """`FileResponse`'s spelling: a quoted name, or RFC 5987 when it needs escaping."""
@@ -62,6 +64,9 @@ def byte_range(header: str, size: int) -> tuple[int, int] | str | None:
     if not sep or not (first_text or last_text):
         return None
     if (first_text and not first_text.isdecimal()) or (last_text and not last_text.isdecimal()):
+        return None
+    # `int()` refuses more than 4300 digits; no file offset needs 20.
+    if len(first_text) > _MAX_OFFSET_DIGITS or len(last_text) > _MAX_OFFSET_DIGITS:
         return None
     if not first_text:
         suffix = int(last_text)
