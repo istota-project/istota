@@ -5,6 +5,7 @@ writers that read them (`istota apply` and `istota-stack put-files`)."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -229,6 +230,65 @@ class TestTake:
             row = requests.get(conn, request_id)
         assert row["status"] == "refused"
         assert row["output_text"] == "a plan now manages secrets; change it there"
+
+
+MOVED_TOKEN = "twilio-token-to-move-8c"
+
+
+class TestMove:
+    def test_a_moved_table_goes_from_the_live_file_to_its_secret_file_as_json(self, install):
+        request_id = install.submit({"move_to_file": ["brain.native.extra_headers"]})
+        result = install.run("config-request", "take", "--out", str(install.out))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"{request_id}\n"
+        plan_text = (install.out / "plan.json").read_text()
+        assert OLD_HEADER not in plan_text
+        assert "brain" not in json.loads(plan_text)["config"]
+        files = json.loads((install.out / "files.json").read_text())
+        assert set(files["secrets"]) == {"istota_brain_native_extra_headers"}
+        assert json.loads(files["secrets"]["istota_brain_native_extra_headers"]) == {"X-Key": OLD_HEADER}
+        assert files["managed"] == {"source": "web", "secrets": False}
+        with db.get_db(install.db_path) as conn:
+            row = conn.execute("SELECT * FROM config_change_requests WHERE id = ?", (request_id,)).fetchone()
+        assert OLD_HEADER not in " ".join(str(row[key]) for key in row.keys())
+
+    def test_a_moved_string_goes_to_its_secret_file_as_it_is(self, install):
+        install.config_path.write_text(
+            install.config_path.read_text() + f'\n[sms.twilio]\nauth_token = "{MOVED_TOKEN}"\n'
+        )
+        install.submit({"move_to_file": ["sms.twilio.auth_token"]})
+        assert install.run("config-request", "take", "--out", str(install.out)).returncode == 0
+        assert MOVED_TOKEN not in (install.out / "plan.json").read_text()
+        files = json.loads((install.out / "files.json").read_text())
+        assert files["secrets"] == {"istota_sms_twilio_auth_token": MOVED_TOKEN}
+        # finish keeps no line of the host's output holding the moved value.
+        kept = handoff.redact_output(f"ok\nwrote {MOVED_TOKEN}\n", install.out)
+        assert MOVED_TOKEN not in kept and "ok" in kept
+
+    def _taken(self, install, change_set):
+        install.submit(change_set)
+        with db.get_db(install.db_path) as conn:
+            return requests.take(conn, install.digest())
+
+    def test_a_path_emptied_since_refuses_the_build_by_name(self, install):
+        taken = self._taken(install, {"move_to_file": ["brain.native.extra_headers"]})
+        for current in ({"email": {"imap_host": "imap.old.example.org"}},
+                        {"brain": {"native": {"extra_headers": {}}}}):
+            with pytest.raises(handoff.HandoffError, match=r"brain\.native\.extra_headers") as raised:
+                handoff.build(taken, current)
+            assert OLD_HEADER not in str(raised.value)
+
+    def test_a_header_table_its_file_cannot_carry_refuses_the_build(self, install):
+        taken = self._taken(install, {"move_to_file": ["brain.native.extra_headers"]})
+        current = {"brain": {"native": {"extra_headers": {"X-Count": 7}}}}
+        with pytest.raises(handoff.HandoffError, match=r"brain\.native\.extra_headers"):
+            handoff.build(taken, current)
+
+    def test_a_label_that_is_not_a_credential_with_a_file_refuses_the_build(self, install):
+        taken = self._taken(install, {"move_to_file": ["brain.native.extra_headers"]})
+        forged = dataclasses.replace(taken, moves=["email.imap_host"])
+        with pytest.raises(handoff.HandoffError):
+            handoff.build(forged, {"email": {"imap_host": "imap.old.example.org"}})
 
 
 class TestBuild:

@@ -5234,7 +5234,9 @@ async def admin_config(_: dict = Depends(_require_admin)):
 _started_at: str | None = None
 
 _CONFIG_CHANGE_BODY_LIMIT = 256 * 1024
-_CONFIG_CHANGE_KEYS = frozenset({"base_digest", "ops", "raw", "secrets", "admins", "confirm", "step_up"})
+_CONFIG_CHANGE_KEYS = frozenset({
+    "base_digest", "ops", "raw", "secrets", "move_to_file", "admins", "confirm", "step_up",
+})
 _CONFIG_REQUEST_ID = re.compile(r"[1-9][0-9]{0,17}")
 
 
@@ -5319,7 +5321,7 @@ def _touched_resources(preview) -> list[str]:
     touched = []
     if preview.changed_keys:
         touched.append("config")
-    if preview.file_secrets:
+    if preview.file_secrets or preview.moves:
         touched.append("secrets")
     if preview.admins_changed:
         touched.append("admins")

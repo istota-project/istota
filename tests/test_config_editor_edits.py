@@ -456,6 +456,87 @@ class TestFileCredentialProblems:
         assert actions == {("caldav", "password"): "unset"}
 
 
+MOVED_TOKEN = "move-me-token-6d2a"
+WITH_TOKEN = CURRENT + f'\n[sms.twilio]\nauth_token = "{MOVED_TOKEN}"\n'
+
+
+class TestMoveToFile:
+    def test_a_move_drops_the_leaf_and_names_its_file(self):
+        found, seen = _preview(WITH_TOKEN, {"move_to_file": ["sms.twilio.auth_token"]})
+        assert not found.blocked, found.errors
+        assert "sms" not in seen[0]
+        assert "sms" not in found.document
+        assert found.moves == [{"label": "sms.twilio.auth_token", "file": "istota_sms_twilio_auth_token"}]
+        assert found.as_json()["moves"] == found.moves
+        assert found.file_secrets == {} and found.inline_secrets == {} and found.secrets == {}
+        assert found.changed and found.changed_sections == ["sms.twilio"]
+        assert found.secret_names == ["istota_sms_twilio_auth_token"]
+        assert 'auth_token = "<redacted>"' in "\n".join(found.diff)
+        assert any(line.startswith("-auth_token") for line in found.diff)
+        shown = repr(found.as_json()) + found.document_toml
+        assert MOVED_TOKEN not in shown
+        # The move answers its own warning; the headers' warning stays.
+        assert [problem["path"] for problem in found.warnings] == [["brain", "native", "extra_headers"]]
+
+    def test_a_table_credential_moves_whole(self):
+        found, seen = _preview(CURRENT, {"move_to_file": ["brain.native.extra_headers"]})
+        assert not found.blocked, found.errors
+        assert "brain" not in seen[0]
+        assert found.moves == [
+            {"label": "brain.native.extra_headers", "file": "istota_brain_native_extra_headers"},
+        ]
+        assert "header-value-1" not in repr(found.as_json()) + found.document_toml
+
+    def test_a_label_named_twice_is_one_move(self):
+        found, _ = _preview(WITH_TOKEN, {"move_to_file": ["sms.twilio.auth_token"] * 2})
+        assert len(found.moves) == 1
+
+    @pytest.mark.parametrize("moves", [
+        "sms.twilio.auth_token",
+        [["sms", "twilio", "auth_token"]],
+        ["email.imap_host"],
+        ["web.map.api_key"],
+        ['sms.twilio."auth_token'],
+        [""],
+    ])
+    def test_anything_but_installation_credentials_is_refused(self, moves):
+        with pytest.raises(ChangeError) as raised:
+            _preview(WITH_TOKEN, {"move_to_file": moves})
+        assert "imap_host" not in str(raised.value) and "map.api_key" not in str(raised.value)
+
+    def test_a_move_and_a_replace_of_the_same_credential_is_refused(self):
+        with pytest.raises(ChangeError, match="sms.twilio.auth_token"):
+            _preview(WITH_TOKEN, {
+                "move_to_file": ["sms.twilio.auth_token"],
+                "secrets": {"istota_sms_twilio_auth_token": "typed-again"},
+            })
+
+    def test_a_move_with_raw_is_refused(self):
+        with pytest.raises(ChangeError, match="raw"):
+            _preview(WITH_TOKEN, {"raw": WITH_TOKEN, "move_to_file": ["sms.twilio.auth_token"]})
+
+    def test_nothing_inline_is_nothing_to_move(self):
+        found, _ = _preview(CURRENT, {"move_to_file": ["sms.twilio.auth_token"]})
+        assert found.blocked
+        assert found.errors == ["sms.twilio.auth_token holds no value in config.toml to move"]
+
+    def test_a_credential_whose_file_is_set_is_not_moved_over_it(self):
+        found, _ = _preview(
+            WITH_TOKEN, {"move_to_file": ["sms.twilio.auth_token"]},
+            environ={"ISTOTA_SMS_TWILIO_AUTH_TOKEN": "from-the-file"},
+        )
+        assert found.blocked
+        assert any(
+            error.startswith("sms.twilio.auth_token is already set in istota_sms_twilio_auth_token")
+            for error in found.errors
+        ), found.errors
+
+    def test_moving_a_risky_credential_is_risky(self):
+        text = CURRENT + '\n[web]\noauth2_client_secret = "inline-client-secret"\n'
+        found, _ = _preview(text, {"move_to_file": ["web.oauth2_client_secret"]})
+        assert found.risky_keys == ["web.oauth2_client_secret"]
+
+
 class TestLoggableNames:
     def test_a_file_credential_is_its_name(self):
         assert edits.loggable_secret_name("istota_email_imap_password") == "istota_email_imap_password"

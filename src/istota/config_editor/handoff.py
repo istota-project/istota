@@ -9,7 +9,9 @@ binds at `/out`, which is on the host's `/run` tmpfs:
   marking the config as the web's and naming the request.
 - `files.json`: what `istota-stack put-files` reads: the file credentials and
   the admins file the request changes, and who manages them now. Empty (`{}`)
-  when the request changes neither, which the host skips.
+  when the request changes neither, which the host skips. A credential the
+  request moves out of `config.toml` is read here from the live file and
+  written to its secret file; it never passed through the web.
 - `claude-code`: `1` or `0`, whether the new config needs Claude Code in the
   image (`needs_claude_code`).
 
@@ -66,14 +68,55 @@ def needs_claude_code(document: dict) -> bool:
     return any(isinstance(kind, str) and kind in _CLAUDE_CODE_KINDS for kind in kinds)
 
 
+def _secret_file_text(label: str, name: str, value: Any) -> str:
+    """A moved value as its secret file holds it: a table (the native brain's
+    headers) as the JSON object its variable is read as."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    ):
+        return json.dumps(value)
+    raise HandoffError(
+        f"{label} holds a value its secret file {name} cannot carry; move it on the host"
+    )
+
+
+def _moved_secrets(moves: list[str], current: dict, file_secrets: dict[str, str]) -> dict[str, str]:
+    """Each credential `moves` names, by its secret file, read from `current`.
+
+    A path that holds no value now (another change emptied it) refuses the
+    request rather than writing an empty file over nothing.
+    """
+    from istota.config_editor.edits import inline_file_credentials
+    from istota.config_editor.reference import INSTALLATION_CREDENTIALS
+
+    held = dict(inline_file_credentials(current))
+    found: dict[str, str] = {}
+    for label in moves:
+        name = INSTALLATION_CREDENTIALS.get(label) if isinstance(label, str) else None
+        if not name:
+            raise HandoffError("the request moves something that is not a credential with a secret file")
+        if name in file_secrets:
+            raise HandoffError(f"the request both moves and replaces {label}")
+        path = tuple(label.split("."))
+        if held.get(path) != name:
+            raise HandoffError(
+                f"{label} holds no value in config.toml any more, so there is nothing to move to {name}"
+            )
+        found[name] = _secret_file_text(label, name, secrets.lookup(current, path)[1])
+    return found
+
+
 def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
     """The plan, the put-files request and the Claude Code flag for `taken`.
 
     `taken` is a `requests.TakenRequest`; `current` the live `config.toml` as
     a document, whose values fill every sentinel no new value replaces, or
-    None when it does not parse, which refuses the request.
+    None when it does not parse, which refuses the request. A moved
+    credential's value comes from `current` too, and is dropped from the plan.
     """
-    from istota.config_editor.edits import UNREADABLE_CONFIG
+    from istota.config_editor.edits import UNREADABLE_CONFIG, _unset_at
     from istota.setup_wizard import SECRET_NAMES
 
     if current is None:
@@ -88,6 +131,11 @@ def build(taken: Any, current: dict | None) -> tuple[dict, dict, bool]:
         document = secrets.restore_sentinels(document, current, values=inline)
     except secrets.SentinelError as exc:
         raise HandoffError(f"{exc}; the credential was removed since the request was made") from None
+    moves = list(getattr(taken, "moves", None) or [])
+    moved = _moved_secrets(moves, current, file_secrets)
+    for label in moves:
+        _unset_at(document, tuple(label.split(".")))
+    file_secrets = {**moved, **file_secrets}
     plan = {
         "meta": {"managed": False, "source": "web", "request": int(taken.id)},
         "config": document,

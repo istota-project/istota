@@ -1,10 +1,10 @@
 """Turning a change into a new config document, and showing it.
 
 `preview` is the whole of it: a change set (ops or a raw document, credentials,
-the admin list) applied to the current `config.toml`, refused where it touches
-what the editor may not change, validated by `istota apply --check` in a child
-process, and described without a credential value in it. The web's preview and
-submit both run it; a submit then stores what it returns
+credentials to move into their secret files, the admin list) applied to the
+current `config.toml`, refused where it touches what the editor may not change,
+validated by `istota apply --check` in a child process, and described without a
+credential value in it. The web's preview and submit both run it; a submit then stores what it returns
 (`config_editor.requests.create`).
 
 A path is a list of strings, never a dotted string, since a key can hold a dot.
@@ -499,6 +499,28 @@ def _read_secrets(raw: Any) -> tuple[dict[str, str], dict[str, str]]:
     return files, inline
 
 
+def _read_moves(raw: Any) -> dict[str, str]:
+    """`move_to_file`: installation credentials by label, to their secret files.
+
+    Names only: the value is read out of the live file by the host applier
+    (`handoff.build`), never by the web.
+    """
+    from istota.config_editor.reference import INSTALLATION_CREDENTIALS
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ChangeError("move_to_file is not a list of credential names")
+    moves: dict[str, str] = {}
+    for label in raw:
+        if not isinstance(label, str) or label not in INSTALLATION_CREDENTIALS:
+            raise ChangeError(
+                "move_to_file names something that is not a credential with a secret file"
+            )
+        moves[label] = INSTALLATION_CREDENTIALS[label]
+    return moves
+
+
 def _read_admins(raw: Any) -> list[str] | None:
     if raw is None:
         return None
@@ -629,7 +651,8 @@ class Preview:
 
     `document` holds a sentinel at every secret leaf. The only credential
     values are in `file_secrets` and `inline_secrets`, which `as_json` leaves
-    out.
+    out. `moves` names each credential moved from `config.toml` to its secret
+    file, as `{label, file}`, and carries no value.
     """
 
     document: dict
@@ -646,6 +669,7 @@ class Preview:
     secret_names: list[str] = field(default_factory=list)
     admins_changed: bool = False
     running_tasks: int = 0
+    moves: list[dict] = field(default_factory=list)
 
     @property
     def blocking(self) -> list[dict]:
@@ -680,6 +704,7 @@ class Preview:
             "secret_names": self.secret_names,
             "admins_changed": self.admins_changed,
             "running_tasks": self.running_tasks,
+            "moves": self.moves,
         }
 
 
@@ -712,9 +737,15 @@ async def preview(
         raise ChangeError(UNREADABLE_CONFIG) from None
     ops = change_set.get("ops") or []
     raw = change_set.get("raw")
+    moves = _read_moves(change_set.get("move_to_file"))
     if raw is not None:
         if ops:
             raise ChangeError("raw replaces the whole file, so ops must be empty")
+        if moves:
+            raise ChangeError(
+                "raw replaces the whole file, so move_to_file must be empty; move "
+                "a credential from the form, or remove it in the raw text and set its file"
+            )
         candidate = apply_raw(raw)
     else:
         candidate = apply_ops(base, ops)
@@ -730,9 +761,22 @@ async def preview(
         else:
             _set_at(new, path, value)
     admins = _read_admins(change_set.get("admins"))
+    errors: list[str] = []
+    for label, name in moves.items():
+        if name in file_secrets or label in inline_given:
+            raise ChangeError(f"{label} is both moved and replaced; send one of the two")
+        path = tuple(label.split("."))
+        present, value = secrets.lookup(base, path)
+        if not present or not _holds_value(value):
+            errors.append(f"{label} holds no value in config.toml to move")
+        elif environ.get(name.upper(), "").strip():
+            errors.append(
+                f"{label} is already set in {name}, which wins over config.toml; "
+                "remove the copy in config.toml rather than moving it over the file"
+            )
+        _unset_at(new, path)
 
     paths_by_name = {name: path for path, name in schema.file_credentials().items()}
-    errors: list[str] = []
     errors += check_read_only(new, base, environ)
     errors += check_file_credentials(new, base)
     for name in sorted(file_secrets):
@@ -788,7 +832,8 @@ async def preview(
         changed_sections=sorted({section_of(path) for path in changed}),
         changed_keys=len(changed),
         risky_keys=sorted(risky),
-        secret_names=sorted(set(file_secrets) | set(inline_new) | set(removed)),
+        secret_names=sorted(set(file_secrets) | set(inline_new) | set(removed) | set(moves.values())),
         admins_changed=admins_changed,
         running_tasks=running_tasks(getattr(config, "db_path", None)),
+        moves=[{"label": label, "file": name} for label, name in moves.items()],
     )

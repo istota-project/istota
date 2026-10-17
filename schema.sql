@@ -2494,6 +2494,8 @@ CREATE TABLE IF NOT EXISTS config_change_requests (
     admins_before_json TEXT,
     changed_sections_json TEXT NOT NULL,
     secret_names_json TEXT NOT NULL,
+    -- Labels of credentials moved from config.toml to their secret files; no value.
+    moves_json TEXT,
     diff_text TEXT NOT NULL,
     output_text TEXT,
     created_at TEXT NOT NULL,

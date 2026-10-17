@@ -575,6 +575,50 @@ class TestServarrCardChangeSet:
         assert "servarr" not in setup["checked"][-1]
 
 
+class TestMoveToFile:
+    MOVE = {"ops": [], "move_to_file": ["brain.native.extra_headers"]}
+
+    async def test_a_move_through_preview_and_submit_carries_no_value(self, alice, setup):
+        preview = await alice.post(f"{BASE}/preview", json=_change(setup, **self.MOVE), headers=ORIGIN)
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["moves"] == [
+            {"label": "brain.native.extra_headers", "file": "istota_brain_native_extra_headers"},
+        ]
+        assert preview.json()["errors"] == []
+        assert "brain" not in setup["checked"][-1]
+        submitted = await _submit(alice, setup, **self.MOVE)
+        assert submitted.status_code == 202, submitted.text
+        request_id = submitted.json()["id"]
+        with db.get_db(setup["config"].db_path) as conn:
+            row = dict(conn.execute(
+                "SELECT * FROM config_change_requests WHERE id = ?", (request_id,),
+            ).fetchone())
+        for column, value in row.items():
+            assert INLINE_SECRET not in str(value), column
+        assert row["secrets_sealed"] is None
+        assert json.loads(row["moves_json"]) == ["brain.native.extra_headers"]
+        status = await alice.get(f"{BASE}/requests/{request_id}")
+        assert status.json()["moves"] == ["brain.native.extra_headers"]
+        for response in (preview, submitted, status, await alice.get(f"{BASE}/requests")):
+            assert INLINE_SECRET not in response.text, response.request.url
+
+    async def test_an_unknown_label_is_400_without_the_input(self, alice, setup):
+        body = _change(setup, ops=[], move_to_file=["email.marker-xyz"])
+        response = await alice.post(f"{BASE}/preview", json=body, headers=ORIGIN)
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_change"
+        assert "marker-xyz" not in response.text
+
+    async def test_a_move_is_refused_while_a_plan_manages_the_secrets(self, alice, setup):
+        (setup["file"].parent / "managed.json").write_text(
+            json.dumps({"secrets": {"managed": True, "source": "ansible"}}), encoding="utf-8",
+        )
+        response = await alice.post(f"{BASE}/preview", json=_change(setup, **self.MOVE), headers=ORIGIN)
+        assert response.status_code == 409
+        assert response.json()["error"] == "managed"
+        assert response.json()["resources"] == ["secrets"]
+
+
 async def test_no_credential_value_in_any_response(alice, setup):
     """Sentinel-by-value across preview, submit, status, history and restore."""
     secrets = {

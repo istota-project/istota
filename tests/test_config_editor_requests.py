@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -96,6 +97,43 @@ class TestCreate:
                 _create(conn)
         with db.get_db(db_path) as conn:
             assert requests.list_recent(conn) == []
+
+
+class TestMoves:
+    MOVE = dict(
+        document={"email": {"imap_host": "imap.example.org"}},
+        file_secrets={}, inline_secrets={}, admins=None, admins_changed=False,
+        changed_sections=["sms"], secret_names=["istota_sms_twilio_auth_token"],
+        moves=[{"label": "sms.twilio.auth_token", "file": "istota_sms_twilio_auth_token"}],
+    )
+
+    def test_a_move_is_stored_by_label_and_nothing_is_sealed(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **self.MOVE)
+            row = requests.get(conn, request_id)
+            sealed = conn.execute(
+                "SELECT secrets_sealed, moves_json FROM config_change_requests WHERE id = ?", (request_id,),
+            ).fetchone()
+        assert row["moves"] == ["sms.twilio.auth_token"]
+        assert "moves_json" not in row
+        assert sealed["secrets_sealed"] is None
+        assert json.loads(sealed["moves_json"]) == ["sms.twilio.auth_token"]
+        with db.get_db(db_path) as conn:
+            taken = requests.take(conn, DIGEST)
+        assert taken.moves == ["sms.twilio.auth_token"] and taken.secrets == {}
+
+    def test_a_request_with_no_move_reads_as_none(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn)
+            assert requests.get(conn, request_id)["moves"] == []
+            assert requests.take(conn, DIGEST).moves == []
+
+    def test_a_move_is_refused_once_a_plan_manages_the_secrets(self, db_path):
+        with db.get_db(db_path) as conn:
+            request_id = _create(conn, **self.MOVE)
+        with db.get_db(db_path) as conn:
+            assert requests.take(conn, DIGEST, managed={"secrets": {"managed": True, "source": "ansible"}}) is None
+            assert requests.get(conn, request_id)["output_text"] == "a plan now manages secrets; change it there"
 
 
 class TestTake:

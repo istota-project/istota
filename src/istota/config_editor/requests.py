@@ -15,7 +15,9 @@ index holds that, so a second `create` raises `RequestOpen`.
 No credential value is stored in the clear. The document is TOML with a
 sentinel at every secret leaf, and every new credential value is in
 `secrets_sealed`, sealed with the master key (`credentials.store.seal`), which
-`take` nulls in the transaction that claims the row.
+`take` nulls in the transaction that claims the row. A credential moved from
+`config.toml` to its secret file is in `moves_json` by label alone: the host
+reads its value from the live file, so the web never had one to seal.
 
 A request reaching `applied` or `failed` raises `admin_config_change` for
 every admin before or after it but the actor, handed to the daemon in the same
@@ -27,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -72,6 +74,7 @@ class TakenRequest:
     admins: list[str] | None
     changed_sections: list[str]
     secret_names: list[str]
+    moves: list[str] = field(default_factory=list)
 
 
 def _now() -> str:
@@ -110,13 +113,14 @@ def create(conn: sqlite3.Connection, preview: Any, *, admin_id: str, base_digest
             """INSERT INTO config_change_requests (
                    status, admin_id, base_digest, document_toml, secrets_sealed,
                    admins_json, changed_sections_json, secret_names_json,
-                   diff_text, created_at)
-               VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   moves_json, diff_text, created_at)
+               VALUES ('pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 admin_id, base_digest, preview.document_toml, sealed,
                 json.dumps(preview.admins) if preview.admins is not None else None,
                 json.dumps(preview.changed_sections),
                 json.dumps(preview.secret_names),
+                json.dumps([move["label"] for move in preview.moves]) if preview.moves else None,
                 "\n".join(preview.diff), _now(),
             ),
         )
@@ -137,9 +141,14 @@ def _public(row: sqlite3.Row) -> dict:
     found["admins_changed"] = row["admins_json"] is not None
     found["changed_sections"] = json.loads(row["changed_sections_json"])
     found["secret_names"] = json.loads(row["secret_names_json"])
+    found["moves"] = _moves(row)
     for name in ("admins_json", "changed_sections_json", "secret_names_json"):
         del found[name]
     return found
+
+
+def _moves(row: sqlite3.Row) -> list[str]:
+    return json.loads(row["moves_json"]) if row["moves_json"] else []
 
 
 def get(conn: sqlite3.Connection, request_id: int) -> dict | None:
@@ -203,7 +212,8 @@ def _managed_now(row: sqlite3.Row, managed: dict | None) -> list[str]:
     from istota.webui.admin_config_view import managed_state
 
     touched = ["config"]
-    if any(name in SECRET_NAMES for name in json.loads(row["secret_names_json"])):
+    names = json.loads(row["secret_names_json"])
+    if _moves(row) or any(name in SECRET_NAMES for name in names):
         touched.append("secrets")
     if row["admins_json"] is not None:
         touched.append("admins")
@@ -273,6 +283,7 @@ def take(
             admins=json.loads(row["admins_json"]) if row["admins_json"] else None,
             changed_sections=json.loads(row["changed_sections_json"]),
             secret_names=json.loads(row["secret_names_json"]),
+            moves=_moves(row),
         )
 
 

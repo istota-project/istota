@@ -397,6 +397,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     ISSUE-261 shipped green and killed inbound email for two days.
     """
     _add_columns(conn, "message_relays", {"return_claimed_at": "TEXT"})
+    # A config change moving credentials into their secret files. NULL, on
+    # every older row, is a request that moves nothing.
+    _add_columns(conn, "config_change_requests", {"moves_json": "TEXT"})
     # A password step-up where the install cannot mail. Every older row was
     # a mailed code, which the constant default says.
     _add_columns(conn, "web_auth_step_ups", {"method": "TEXT NOT NULL DEFAULT 'email'"})
