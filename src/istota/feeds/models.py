@@ -543,6 +543,33 @@ def media_type_for_url(url: str) -> str | None:
     return PLAYABLE_MEDIA_TYPES.get(ext.lower())
 
 
+def safe_http_url(url: str | None) -> str | None:
+    """The URL with surrounding whitespace removed, if it is http(s) with a
+    host; otherwise None (ISSUE-774).
+
+    Every feed-supplied URL that can become an ``href`` or a ``src`` passes
+    through here, on the way in (the poller) and on the way out (the routes'
+    serializer, for rows stored before this check). The scheme is parsed
+    rather than prefix-matched, and a URL holding any control character is
+    refused outright: browsers drop tabs and newlines anywhere in a URL, so
+    ``java\tscript:`` is ``javascript:`` to them.
+    """
+    if not isinstance(url, str):
+        return None
+    candidate = url.strip()
+    if not candidate:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in candidate):
+        return None
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        return None
+    return candidate
+
+
 def is_http_url(url: str) -> bool:
     """Whether a URL is one we are willing to put in a browser ``src``.
 
@@ -551,8 +578,7 @@ def is_http_url(url: str) -> bool:
     and so never pass through it. Both the poller (on the way in) and the v7
     migration (over URLs stored before there was a check) use this one.
     """
-    lo = (url or "").strip().lower()
-    return lo.startswith("http://") or lo.startswith("https://")
+    return safe_http_url(url) is not None
 
 
 def parse_image_urls(raw: Any) -> list[str]:

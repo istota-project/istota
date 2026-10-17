@@ -40,6 +40,7 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
     try:
         from istota import feeds
         from istota.feeds import db as feeds_db
+        from istota.feeds.models import safe_http_url
     except Exception:  # noqa: BLE001
         return GatheredSource(
             kind="rss", title=title,
@@ -89,7 +90,7 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
         items.append({
             "title": entry.title or "(untitled)",
             "summary": (entry.content_text or entry.content_html or "")[:1000],
-            "url": entry.url or "",
+            "url": safe_http_url(entry.url) or "",
             "published_at": entry.published_at or "",
         })
         if len(items) >= limit:

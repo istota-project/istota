@@ -5,7 +5,7 @@
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
-  import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';
+  import { fileKind, inlineMedia, linkUrl, playerUrl, providerLabel } from '$lib/feeds/embed';
   import { notifyError } from '$lib/stores/notices';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -49,7 +49,7 @@
   const hasNext = $derived(
     current !== null && (current < entries.length - 1 || (hasMore && !!onNeedMore)),
   );
-  const permalink = $derived(entry ? entry.url || entry.feed.site_url || '' : '');
+  const permalink = $derived(entry ? linkUrl(entry.url) || linkUrl(entry.feed.site_url) : '');
   const hasImages = $derived(!!entry && entry.images.length > 0);
 
   // Same media reasoning as FeedCard, one click further in: an Are.na Embed
@@ -78,7 +78,7 @@
   );
   // Images the player did not consume, rendered under it as ordinary heroes.
   const mediaImages = $derived(media && !mediaPoster && entry ? entry.images : []);
-  const documentUrl = $derived(!player && !media && entry?.file_url ? entry.file_url : '');
+  const documentUrl = $derived(!player && !media ? linkUrl(entry?.file_url) : '');
   const documentKind = $derived(fileKind(documentUrl));
 
   // Keyed on the entry rather than a bare boolean, so paging to the next post

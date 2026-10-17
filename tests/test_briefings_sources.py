@@ -101,6 +101,40 @@ class TestRss:
         assert gs.ok is True
         assert gs.items[0]["title"] == "Recent"
 
+    def test_a_stored_unsafe_entry_link_is_not_passed_on(self, tmp_path):
+        """ISSUE-774. A row stored before ingestion checked a scheme can hold
+        a ``javascript:`` link; the briefing gets an empty one instead."""
+        from istota.feeds import db as fdb
+        from istota.feeds.models import EntryRecord
+
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            workspace_path=tmp_path / "mount",
+            users={"alice": UserConfig()},
+        )
+        fctx_db = cfg.module_db_path("alice", "feeds")
+        fdb.init_db(fctx_db)
+        with fdb.connect(fctx_db) as conn:
+            cat = fdb.upsert_category(conn, "world", "World")
+            feed_id = fdb.upsert_feed(
+                conn, url="http://x/feed", title="X", site_url=None,
+                source_type="rss", category_id=cat, poll_interval_minutes=30,
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            fdb.insert_entries(conn, feed_id, [
+                EntryRecord(id=0, feed_id=feed_id, guid="g1", title="Hostile",
+                            url="javascript:alert(1)", author=None,
+                            content_html=None, content_text="body",
+                            published_at=now, fetched_at=now),
+            ])
+            conn.commit()
+
+        ctx = SourceContext(app_config=cfg, user_id="alice")
+        gs = resolve_source(
+            "rss", {"feed_ref": {"kind": "category", "value": "world"}}, ctx,
+        )
+        assert gs.items[0]["url"] == ""
+
     def test_a_subscription_ref_matches_either_spelling(self, tmp_path):
         """A `feed_ref` is whatever the user typed, while a feed added since
         ISSUE-432 is stored canonically. An unresolved subscription ref reads

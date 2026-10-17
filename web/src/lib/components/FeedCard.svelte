@@ -2,7 +2,7 @@
   import { FileText, Play, Star } from '@lucide/svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
-  import { fileKind, inlineMedia, playerUrl, providerLabel } from '$lib/feeds/embed';
+  import { fileKind, inlineMedia, linkUrl, playerUrl, providerLabel } from '$lib/feeds/embed';
 
   import { markReadDelay } from '$lib/stores/feeds';
   import { notifyError } from '$lib/stores/notices';
@@ -66,7 +66,7 @@
   // so a card that lost all its images doesn't just look empty.
   const repeatCount = $derived(entry.duplicate_image_count ?? 0);
   const galleryCount = $derived(Math.min(entry.images.length, maxGrid));
-  const permalink = $derived(entry.url || entry.feed.site_url || '');
+  const permalink = $derived(linkUrl(entry.url) || linkUrl(entry.feed.site_url));
 
   // Playable media (an Are.na Embed block). `playerUrl` is an allowlist over
   // known providers and returns null for anything it can't vouch for — the
@@ -111,7 +111,7 @@
   // from a photo and its hero click zooms page 1 instead of opening the file.
   // A video wins if an entry somehow carries both, since playing is the more
   // specific affordance.
-  const documentUrl = $derived(!player && !media && entry.file_url ? entry.file_url : '');
+  const documentUrl = $derived(!player && !media ? linkUrl(entry.file_url) : '');
   const documentKind = $derived(fileKind(documentUrl));
 
   // The card opens the reader on any click that isn't a link or a button, and

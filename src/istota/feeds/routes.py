@@ -33,6 +33,7 @@ from istota.feeds.models import (
     default_poll_interval_for,
     detect_source_type,
     normalize_feed_url,
+    safe_http_url,
 )
 from istota.feeds.retention import resolve_max_entries_per_feed
 from istota.feeds.sanitize import image_identity
@@ -71,7 +72,7 @@ def _map_feed(feed, cat_by_id: dict) -> dict:
     return {
         "id": feed.id,
         "title": feed.title or feed.url,
-        "site_url": feed.site_url or "",
+        "site_url": safe_http_url(feed.site_url) or "",
         "category": {
             "id": cat.id if cat else 0,
             "title": cat.title if cat else "",
@@ -89,7 +90,7 @@ def _map_entry(
     return {
         "id": entry.id,
         "title": entry.title or "",
-        "url": entry.url or "",
+        "url": safe_http_url(entry.url) or "",
         "content": entry.content_html or "",
         "images": images,
         # Images dropped because a newer entry already showed them. Reported
@@ -98,20 +99,20 @@ def _map_entry(
         "duplicate_image_count": len(entry.image_urls or []) - len(images),
         # Set for playable media (an Are.na Embed block). The reader turns it
         # into an inline player; empty for everything else.
-        "embed_url": entry.embed_url or "",
+        "embed_url": safe_http_url(entry.embed_url) or "",
         # Set for an attached document (an Are.na Attachment — usually a PDF).
         # The reader opens it instead of lightboxing the cover page.
-        "file_url": entry.file_url or "",
+        "file_url": safe_http_url(entry.file_url) or "",
         # Set for a media file the reader plays inline with a native
         # <video>/<audio> — a Mastodon video attachment, a podcast enclosure.
         # This is the field that keeps such a URL out of `images`, where it
         # rendered as an <img> that never decodes (ISSUE-356).
-        "media_url": entry.media_url or "",
-        "media_type": entry.media_type or "",
+        "media_url": safe_http_url(entry.media_url) or "",
+        "media_type": (entry.media_type or "") if safe_http_url(entry.media_url) else "",
         "feed": {
             "id": feed.id if feed else 0,
             "title": (feed.title or feed.url) if feed else "",
-            "site_url": (feed.site_url or "") if feed else "",
+            "site_url": (safe_http_url(feed.site_url) or "") if feed else "",
             "category": {
                 "id": cat.id if cat else 0,
                 "title": cat.title if cat else "",

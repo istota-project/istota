@@ -44,6 +44,18 @@ function parse(raw: string | null | undefined): URL | null {
   return url;
 }
 
+/**
+ * A feed-supplied URL safe to put in an `href`, or `''` (ISSUE-774).
+ *
+ * Entry links, a feed's site link and attached files all come from a third
+ * party, and a `javascript:` one clicked runs on this origin. The URL parser
+ * already strips the whitespace and tab tricks a browser would, so the scheme
+ * it reports is the one a click would use.
+ */
+export function linkUrl(raw: string | null | undefined): string {
+  return parse(raw)?.href ?? '';
+}
+
 /** The last non-empty path segment, e.g. `/embed/abc/` → `abc`. */
 function lastSegment(url: URL): string {
   const parts = url.pathname.split('/').filter(Boolean);
