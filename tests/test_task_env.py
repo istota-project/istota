@@ -167,6 +167,39 @@ class TestTheServarrKeys:
         assert reply.get("reason") == "not_authorized_credential"
 
 
+class TestTheNativeExtraHeaders:
+    """`code_review` builds the native brain from its own `load_config`, so the
+    headers it sends come from `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS` once they
+    live in their secret file. The daemon's copy reaches that skill alone."""
+
+    VAR = "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"
+    VALUE = '{"Authorization": "Bearer header-test"}'
+
+    def _inputs(self, runtime_inputs):
+        return {
+            **runtime_inputs,
+            "skill_index": {"code_review": _skill("code_review"), "kv": _skill("kv")},
+        }
+
+    def test_code_review_gets_the_headers_from_the_daemon_env(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, self.VALUE)
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        proxy = runtime.proxy_ctx
+        assert proxy.credential_env[self.VAR] == self.VALUE
+        assert self.VAR in proxy.skill_credential_map["code_review"]
+        assert self.VAR not in proxy.skill_credential_map.get("kv", set())
+        assert self.VAR not in runtime.env
+        assert self.VAR not in runtime.proxy_ctx.allowed_credentials
+
+    def test_the_name_is_mapped_and_blocked_from_lookup(self):
+        assert self.VAR in executor.SKILL_DAEMON_CREDENTIAL_VARS["code_review"]
+        assert self.VAR in executor._PROXY_LOOKUP_BLOCKED
+
+
 class TestTheSandboxedMarker:
     """``ISTOTA_SANDBOXED`` reaches the model and not the host-side CLIs."""
 

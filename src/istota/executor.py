@@ -3516,8 +3516,13 @@ SKILL_MODEL_CREDENTIAL_VARS = CLAUDE_RUNTIME_ENV_VARS | frozenset(
 #: the reasons :data:`SKILL_MODEL_CALLERS` gives and because a `sensitive`
 #: manifest value is served to the sandbox by the proxy's `credential`
 #: request wherever reveal enforcement is off (the servarr spec's decision).
+#:
+#: `code_review` builds the native brain from its own `load_config`, so the
+#: headers in the `istota_brain_native_extra_headers` secret file reach its
+#: model calls only through this copy.
 SKILL_DAEMON_CREDENTIAL_VARS: dict[str, frozenset[str]] = {
     "servarr": frozenset(servarr_key_variable(app) for app in SERVARR_APPS),
+    "code_review": frozenset({"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"}),
 }
 
 
