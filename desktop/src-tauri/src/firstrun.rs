@@ -146,7 +146,11 @@ pub fn stage_release(tag: &str, source: &Path, release_root: &Path) -> std::io::
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
-            std::fs::copy(entry.path(), partial.join(entry.file_name()))?;
+            let copy = partial.join(entry.file_name());
+            std::fs::copy(entry.path(), &copy)?;
+            // same_files compares a large file's mtime, so the copy carries the source's.
+            let modified = entry.metadata()?.modified()?;
+            std::fs::File::options().write(true).open(&copy)?.set_modified(modified)?;
         }
     }
     if target.exists() {
@@ -156,16 +160,32 @@ pub fn stage_release(tag: &str, source: &Path, release_root: &Path) -> std::io::
     Ok(target)
 }
 
+/// Files up to this size (the manifest, its signature, the bundle's
+/// metadata) are compared byte for byte: a rebuilt release with the same tag
+/// can keep their sizes.
+const COMPARED_BY_CONTENT: u64 = 1 << 20;
+
+/// Whether every file in `a` is in `b` unchanged: the small ones by content,
+/// the disk and the image archives by size and modification time.
 fn same_files(a: &Path, b: &Path) -> std::io::Result<bool> {
     for entry in std::fs::read_dir(a)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
         }
-        let Ok(copy) = std::fs::metadata(b.join(entry.file_name())) else {
+        let copy_path = b.join(entry.file_name());
+        let Ok(copy) = std::fs::metadata(&copy_path) else {
             return Ok(false);
         };
-        if copy.len() != entry.metadata()?.len() {
+        let source = entry.metadata()?;
+        if copy.len() != source.len() {
+            return Ok(false);
+        }
+        if source.len() <= COMPARED_BY_CONTENT {
+            if std::fs::read(entry.path())? != std::fs::read(&copy_path)? {
+                return Ok(false);
+            }
+        } else if copy.modified()? != source.modified()? {
             return Ok(false);
         }
     }
@@ -393,6 +413,35 @@ mod tests {
         std::fs::write(staged.join("images-v1.2.3.json"), "{\"x\":1}").unwrap();
         stage_release("v1.2.3", &source, &root).unwrap();
         assert_eq!(std::fs::read_to_string(staged.join("images-v1.2.3.json")).unwrap(), "{}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rebuilt_release_with_the_same_tag_and_sizes_is_staged_again() {
+        let dir = scratch("rebuilt");
+        let source = dir.join("Resources/release/v1.2.3");
+        std::fs::create_dir_all(&source).unwrap();
+        let disk = source.join("istota-appliance-v1.2.3.raw.zst");
+        let big = (COMPARED_BY_CONTENT + 1) as usize;
+        std::fs::write(&disk, vec![b'a'; big]).unwrap();
+        std::fs::write(source.join("images-v1.2.3.json"), "{\"a\":1}").unwrap();
+        std::fs::write(source.join("images-v1.2.3.json.sig"), "sig-one").unwrap();
+        let root = dir.join("state/release");
+        let staged = stage_release("v1.2.3", &source, &root).unwrap();
+
+        // The rebuild: a manifest and signature of the same sizes.
+        std::fs::write(source.join("images-v1.2.3.json"), "{\"a\":2}").unwrap();
+        std::fs::write(source.join("images-v1.2.3.json.sig"), "sig-two").unwrap();
+        stage_release("v1.2.3", &source, &root).unwrap();
+        assert_eq!(std::fs::read_to_string(staged.join("images-v1.2.3.json")).unwrap(), "{\"a\":2}");
+        assert_eq!(std::fs::read_to_string(staged.join("images-v1.2.3.json.sig")).unwrap(), "sig-two");
+
+        // A disk of the same size, written later.
+        std::fs::write(&disk, vec![b'b'; big]).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&disk).unwrap().set_modified(later).unwrap();
+        stage_release("v1.2.3", &source, &root).unwrap();
+        assert_eq!(std::fs::read(staged.join("istota-appliance-v1.2.3.raw.zst")).unwrap()[0], b'b');
         let _ = std::fs::remove_dir_all(&dir);
     }
 
