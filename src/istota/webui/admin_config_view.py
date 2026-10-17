@@ -582,6 +582,13 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
         reason = (schema.READ_ONLY.get(path) if path else None) or ctx["managed_reasons"]["secrets"]
         if reason is None and source == "environment":
             reason = _env_override_reason(name.upper())
+        # A move writes both resources but keeps the value, so `READ_ONLY`,
+        # which refuses a new value, does not stop it.
+        movable = (
+            source == "inline"
+            and ctx["managed_reasons"]["secrets"] is None
+            and ctx["managed_reasons"]["config"] is None
+        )
         entries.append({
             "name": name,
             "label": dotted or _SECRET_LABELS.get(name, name),
@@ -590,6 +597,7 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             "source": source,
             "used_by": used_by,
             "read_only_reason": reason,
+            "movable": movable,
             "risky": path in schema.RISKY_KEYS if path else False,
         })
     return entries

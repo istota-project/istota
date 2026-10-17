@@ -586,6 +586,51 @@ class TestMoveToFile:
         assert found.risky_keys == ["web.oauth2_client_secret"]
 
 
+class TestMovingAReadOnlyCredential:
+    """A move applies the same value from the secret file, so a credential the
+    editor never changes may still be moved; a new value is still refused."""
+
+    NEXTCLOUD = CURRENT + '\n[nextcloud]\napp_password = "NC-APP-PASSWORD-SENTINEL"\n'
+    SESSION = CURRENT + '\n[web]\nsession_secret_key = "SESSION-KEY-SENTINEL-0123456789abcdef"\n'
+
+    @pytest.mark.parametrize("text,label", [
+        (NEXTCLOUD, "nextcloud.app_password"),
+        (SESSION, "web.session_secret_key"),
+    ])
+    def test_a_move_is_not_refused_as_read_only(self, text, label):
+        found, seen = _preview(text, {"move_to_file": [label]})
+        assert found.errors == []
+        assert label.split(".")[0] not in seen[0]
+        assert found.moves[0]["label"] == label
+        assert "SENTINEL" not in repr(found.as_json()) + found.document_toml
+
+    def test_a_new_value_by_op_is_still_refused(self):
+        found, _ = _preview(self.NEXTCLOUD, {
+            "ops": [{"op": "set", "path": ["nextcloud", "app_password"], "value": "typed"}],
+        })
+        assert any(e.startswith("nextcloud.app_password is not edited here.") for e in found.errors)
+
+    def test_a_raw_edit_is_still_refused(self):
+        raw = CURRENT + '\n[nextcloud]\napp_password = "typed-in-raw"\n'
+        found, _ = _preview(self.NEXTCLOUD, {"raw": raw})
+        assert any(e.startswith("nextcloud.app_password is not edited here.") for e in found.errors)
+
+    def test_a_raw_removal_is_still_refused(self):
+        found, _ = _preview(self.NEXTCLOUD, {"raw": CURRENT})
+        assert any(e.startswith("nextcloud.app_password is not edited here.") for e in found.errors)
+
+    def test_a_new_file_value_is_still_refused(self):
+        found, _ = _preview(self.SESSION, {"secrets": {"istota_web_session_secret_key": "y" * 40}})
+        assert any("istota_web_session_secret_key" in error for error in found.errors)
+
+    def test_an_op_on_the_moved_path_is_refused_with_the_move(self):
+        with pytest.raises(ChangeError, match="nextcloud.app_password is both moved and replaced"):
+            _preview(self.NEXTCLOUD, {
+                "move_to_file": ["nextcloud.app_password"],
+                "ops": [{"op": "set", "path": ["nextcloud", "app_password"], "value": "typed"}],
+            })
+
+
 class TestLoggableNames:
     def test_a_file_credential_is_its_name(self):
         assert edits.loggable_secret_name("istota_email_imap_password") == "istota_email_imap_password"

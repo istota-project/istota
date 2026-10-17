@@ -753,6 +753,28 @@ class TestSecretSources:
         assert [p["path"] for p in moves] == [["whatsapp", "cloud", "access_token"]]
         assert "FLAT-WHATSAPP-SENTINEL" not in str(payload)
 
+    def test_a_read_only_credential_held_inline_can_be_moved(self, tmp_path, secret_env):
+        payload = view.build_config_view(
+            Config(), document='[nextcloud]\napp_password = "NC-SENTINEL"\n',
+            secrets_dir=tmp_path,
+        )
+        entry = next(e for e in payload["secrets"] if e["name"] == "istota_nextcloud_app_password")
+        assert entry["source"] == "inline"
+        assert entry["read_only_reason"]
+        assert entry["movable"] is True
+        assert "NC-SENTINEL" not in str(payload)
+
+    def test_only_an_inline_credential_is_movable(self, tmp_path, monkeypatch, secret_env):
+        entries = _secret_entries(Config(), tmp_path, document=self.INLINE_DOCUMENT)
+        assert entries[self.TWILIO]["movable"] is True
+        assert entries["istota_nextcloud_app_password"]["movable"] is False
+        assert entries["anthropic_api_key"]["movable"] is False
+        managed = _secret_entries(
+            Config(), tmp_path, document=self.INLINE_DOCUMENT,
+            managed={"secrets": {"managed": True, "source": "ansible", "at": "t"}},
+        )
+        assert managed[self.TWILIO]["movable"] is False
+
     def test_file_wins_over_an_inline_copy(self, tmp_path, monkeypatch, secret_env):
         (tmp_path / self.TWILIO).write_text("x")
         monkeypatch.setenv(self.TWILIO.upper(), "x")

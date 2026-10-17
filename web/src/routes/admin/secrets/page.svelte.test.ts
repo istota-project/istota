@@ -211,7 +211,7 @@ describe('read-only states', () => {
     const reason = 'The deployment credentials are managed by ansible.';
     mount(
       viewOf([
-        { ...twilioToken, read_only_reason: reason },
+        { ...twilioToken, read_only_reason: reason, movable: false },
         { ...imapPassword, read_only_reason: reason },
       ]),
     );
@@ -219,6 +219,33 @@ describe('read-only states', () => {
     expect(screen.queryByRole('button', { name: 'Move to secret file' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Replace' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull();
+  });
+
+  it('offers only Move for an inline credential no new value may be set for', async () => {
+    const reason = 'The Nextcloud mount reads rclone.conf. Change it on the host.';
+    mount(
+      viewOf([
+        configSecret({
+          name: 'istota_nextcloud_app_password',
+          label: 'nextcloud.app_password',
+          config_key: 'nextcloud.app_password',
+          used_by: 'Nextcloud',
+          set: true,
+          source: 'inline',
+          read_only_reason: reason,
+          movable: true,
+        }),
+      ]),
+    );
+    const row = await waitFor(() => rowOf('nextcloud.app_password'));
+    expect(within(row).getByText(reason)).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: 'Replace' })).toBeNull();
+    expect(within(row).queryByRole('button', { name: 'Clear' })).toBeNull();
+    await fireEvent.click(within(row).getByRole('button', { name: 'Move to secret file' }));
+    expect(within(row).getByRole('button', { name: 'Keep in config.toml' })).toBeInTheDocument();
+    const sent = await review();
+    expect(sent.move_to_file).toEqual(['nextcloud.app_password']);
+    expect(sent.secrets).toEqual({});
   });
 
   it('is read-only without a host applier, and says why', async () => {
@@ -257,7 +284,7 @@ describe('a changed file', () => {
     // The Twilio token was moved by someone else meanwhile, so that move no
     // longer applies; the two others still do.
     api.getAdminConfig.mockResolvedValue(
-      viewOf([imapPassword, { ...twilioToken, source: 'file' }, smtpPassword], {
+      viewOf([imapPassword, { ...twilioToken, source: 'file', movable: false }, smtpPassword], {
         document_digest: 'digest-2',
       }),
     );

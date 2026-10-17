@@ -26,7 +26,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Collection, Mapping
 
 from istota.config_editor import secrets
 from istota.lib import toml_write
@@ -388,11 +388,15 @@ def check_admins(admins: list[str], *, acting_admin: str, db_path: Path) -> list
 
 def check_read_only(
     new: dict, current: dict, environ: Mapping[str, str] | None = None,
+    *, moved: Collection[tuple[str, ...]] = (),
 ) -> list[str]:
     """Keys the editor shows and never edits, and keys the environment sets.
 
     `[users.*]` is the exception: seed-only, it may be edited in the raw editor.
     A path with a `*` segment is retired input: it may be removed, never written.
+    A path in `moved` that `new` no longer holds is a move to its secret file,
+    which applies the same value, so it passes; `preview` refuses any other
+    change at a moved path.
     """
     from istota.config_editor import schema
 
@@ -404,6 +408,8 @@ def check_read_only(
             for concrete in _expand(new, path):
                 if _differs(new, current, concrete):
                     errors.append(f"{secrets.label(concrete)} is not edited here. {reason}")
+            continue
+        if path in moved and not secrets.lookup(new, path)[0]:
             continue
         if _differs(new, current, path):
             errors.append(f"{secrets.label(path)} is not edited here. {reason}")
@@ -790,9 +796,9 @@ async def preview(
     errors: list[str] = []
     base_read = normalized(base)
     for label, name in moves.items():
-        if name in file_secrets or label in inline_given:
-            raise ChangeError(f"{label} is both moved and replaced; send one of the two")
         path = tuple(label.split("."))
+        if name in file_secrets or label in inline_given or _differs(new, base, path):
+            raise ChangeError(f"{label} is both moved and replaced; send one of the two")
         present, value = secrets.lookup(base_read, path)
         if not present or not _holds_value(value):
             errors.append(f"{label} holds no value in config.toml to move")
@@ -804,7 +810,9 @@ async def preview(
         _unset_everywhere(new, path)
 
     paths_by_name = {name: path for path, name in schema.file_credentials().items()}
-    errors += check_read_only(new, base, environ)
+    errors += check_read_only(
+        new, base, environ, moved={tuple(label.split(".")) for label in moves},
+    )
     errors += check_file_credentials(new, base)
     for name in sorted(file_secrets):
         path = paths_by_name.get(name)

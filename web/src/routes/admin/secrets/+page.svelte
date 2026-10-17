@@ -101,8 +101,9 @@
     return editable && !secret.read_only_reason;
   }
 
+  /** A move keeps the value, so a row read-only for a new value may still offer it. */
   function canMove(secret: ConfigSecretFile): boolean {
-    return canChange(secret) && !configManaged && secret.source === 'inline' && !!secret.config_key;
+    return editable && !configManaged && secret.movable && !!secret.config_key;
   }
 
   function ignoredCopy(secret: ConfigSecretFile): ConfigProblem | undefined {
@@ -289,7 +290,21 @@
                   <td class="col-actions">
                     {#if secret.read_only_reason}
                       <span class="caption">{secret.read_only_reason}</span>
-                    {:else if canChange(secret)}
+                    {/if}
+                    {#if secret.read_only_reason && canMove(secret)}
+                      <div class="row-actions">
+                        {#if movePending(secret)}
+                          <span class="caption">Moves to its secret file.</span>
+                          <Button variant="secondary" size="sm" onclick={() => toggleMove(secret)}
+                            >Keep in config.toml</Button
+                          >
+                        {:else}
+                          <Button variant="secondary" size="sm" onclick={() => toggleMove(secret)}
+                            >Move to secret file</Button
+                          >
+                        {/if}
+                      </div>
+                    {:else if !secret.read_only_reason && canChange(secret)}
                       <div class="row-actions">
                         {#if pending === ''}
                           <span class="caption">Will be cleared.</span>

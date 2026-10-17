@@ -195,7 +195,7 @@ export function retainExisting(
   }
   const movable = new Set<string>();
   for (const file of view.secrets) {
-    if (file.config_key && file.source === 'inline' && !file.read_only_reason) {
+    if (file.config_key && file.movable) {
       movable.add(file.config_key);
     }
   }

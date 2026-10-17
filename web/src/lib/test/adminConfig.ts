@@ -24,6 +24,7 @@ export function configSecret(overrides: Partial<ConfigSecretFile> = {}): ConfigS
     source: 'none',
     used_by: 'Email',
     read_only_reason: null,
+    movable: overrides.source === 'inline' && !overrides.read_only_reason,
     risky: false,
     ...overrides,
   };
