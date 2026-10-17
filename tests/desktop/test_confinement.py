@@ -5,7 +5,8 @@ profile, through the same window code the local install's web UI uses. It
 reports what of Tauri's IPC it can see, then follows a link to another origin.
 The witness: `window.__TAURI_INTERNALS__`, `window.__TAURI__`, `window.ipc` and
 a WebKit message handler are all absent, the link does not move the window,
-and the app opens it in the default browser instead (a browser tab opens).
+and the app hands it to the default browser instead. The test gives the app
+a recording opener (`ISTOTA_DESKTOP_OPENER`), so no tab opens on this Mac.
 
 The other half of the row, the same probe against a page served by the local
 stack in an appliance VM, is not run here: it needs a release directory and a
@@ -108,6 +109,11 @@ def probe_run(app_executable: Path):
     }))
     env = {k: v for k, v in os.environ.items() if k in ("HOME", "USER", "LOGNAME", "TMPDIR", "PATH", "LANG")}
     env["ISTOTA_DESKTOP_STATE_DIR"] = str(state_dir)
+    opened = state_dir / "opened"
+    opener = state_dir / "opener"
+    opener.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{opened}"\n')
+    opener.chmod(0o755)
+    env["ISTOTA_DESKTOP_OPENER"] = str(opener)
     app = subprocess.Popen([str(app_executable)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         deadline = time.monotonic() + 60
@@ -135,6 +141,7 @@ def probe_run(app_executable: Path):
         "stderr": app.stderr.read().decode(errors="replace") if app.stderr else "",
         "off_origin": off_origin,
         "probe_url": f"http://127.0.0.1:{probe.port}/probe",
+        "opened": opened.read_text().splitlines() if opened.exists() else [],
         "lima_home": sorted(p.name for p in (state_dir / "lima").iterdir()) if (state_dir / "lima").exists() else [],
     }
     shutil.rmtree(state_dir, ignore_errors=True)
@@ -160,6 +167,7 @@ class TestWebUIContentCannotCallIntoTheApp:
         after = _report(probe_run, "after")
         assert after["href"] == probe_run["probe_url"], "the window followed the link"
         assert f"opened in the default browser: {probe_run['off_origin']}/link" in probe_run["log"]
+        assert probe_run["opened"] == [f"{probe_run['off_origin']}/link"]
 
     def test_a_remote_profile_makes_no_vm(self, probe_run):
         assert "$ istota-stack" not in probe_run["log"]

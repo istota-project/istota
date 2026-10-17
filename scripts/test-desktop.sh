@@ -9,8 +9,8 @@
 # codesign identity; ad hoc when unset). ISTOTA_DESKTOP_APP names an app to
 # test instead of building one. Needs an Apple silicon Mac with Go, Rust and
 # Node (desktop/README.md); the first build fetches Lima's and zstd's sources
-# and the Rust crates. Row M9 follows a link to another origin, which the app
-# opens in the default browser: expect a browser tab.
+# and the Rust crates. The app's window appears while a test runs; links it
+# would open in the default browser go to a recording opener instead.
 #
 # The control builds the app with the m9-negative-control feature into a
 # target directory of its own and passes only when the M9 witness turns red.

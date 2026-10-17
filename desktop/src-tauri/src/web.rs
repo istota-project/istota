@@ -66,8 +66,12 @@ pub fn decide_new_window(origin: &Url, target: &str) -> Nav {
     }
 }
 
+/// The default browser, through `open`. `ISTOTA_DESKTOP_OPENER` names another
+/// program to hand the URL to, so the desktop tier records the call rather
+/// than opening a tab on the Mac it runs on.
 pub fn open_externally(url: &str) {
-    let _ = std::process::Command::new("/usr/bin/open").arg(url).status();
+    let opener = std::env::var_os("ISTOTA_DESKTOP_OPENER").unwrap_or_else(|| "/usr/bin/open".into());
+    let _ = std::process::Command::new(opener).arg(url).status();
 }
 
 #[cfg(not(feature = "m9-negative-control"))]
