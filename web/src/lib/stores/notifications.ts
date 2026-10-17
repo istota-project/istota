@@ -98,6 +98,7 @@ let generation = 0;
  * wins by landing last. The visible symptom is one filter's rows under the
  * other filter's chip, with `aria-pressed` on the chip that did not fetch them. */
 let listRequest = 0;
+let countRequest = 0;
 
 /** How many loads are in flight. A boolean cleared in the first `finally`
  *  reports "loaded" while the second request is still running. */
@@ -129,13 +130,14 @@ async function tick() {
  */
 export async function refreshCounts(): Promise<void> {
   const mine = generation;
+  const request = ++countRequest;
   try {
     const next = await getNotificationCounts();
-    if (mine !== generation) return;
+    if (mine !== generation || request !== countRequest) return;
     counts.set(next);
     consecutiveFailures = 0;
   } catch (e) {
-    if (mine !== generation) return;
+    if (mine !== generation || request !== countRequest) return;
     if (e instanceof AuthError) {
       // The session is gone. The layout redirects to login on its own; keeping
       // the loop running would spend the interval hammering a 401 and leave a
@@ -146,6 +148,11 @@ export async function refreshCounts(): Promise<void> {
     }
     consecutiveFailures += 1;
   }
+}
+
+/** Invalidate after a successful read or preference write, once the poll is live. */
+export function invalidateNotificationCounts(): void {
+  if (polling) void refreshCounts();
 }
 
 /** Adopt a count the room stream pushed, rather than one this module fetched.
@@ -167,10 +174,13 @@ export async function refreshCounts(): Promise<void> {
  */
 export function applyNotificationCounts(next: NotificationCounts): void {
   if (!polling) return;
-  counts.set({
+  counts.update((current) => ({
+    ...current,
     open: Math.max(0, Math.trunc(next?.open ?? 0)) || 0,
     actionable: Math.max(0, Math.trunc(next?.actionable ?? 0)) || 0,
-  });
+    ...(next.chat_unread !== undefined ? { chat_unread: next.chat_unread } : {}),
+    ...(next.push_badge !== undefined ? { push_badge: next.push_badge } : {}),
+  }));
 }
 
 /** Fetch the panel's rows. Also corrects the badge, because it can.
@@ -276,6 +286,7 @@ export async function runAction(id: number, action: NotificationAction): Promise
     return false;
   }
   dropItem(id);
+  invalidateNotificationCounts();
   void refreshItems();
   return true;
 }
@@ -289,6 +300,7 @@ export async function dismissNotification(id: number): Promise<boolean> {
     return false;
   }
   dropItem(id);
+  invalidateNotificationCounts();
   void refreshItems();
   return true;
 }

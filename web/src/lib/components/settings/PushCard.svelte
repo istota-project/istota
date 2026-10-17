@@ -3,6 +3,7 @@
   import {
     AuthError,
     listPushDevices,
+    registerPushDevice,
     deletePushDevice,
     type PushDevice,
     listPushCategories,
@@ -13,6 +14,16 @@
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
+  import { shellVersion } from '$lib/platform/native';
+  import {
+    pushAvailable,
+    pushPermissions,
+    registerForPush,
+    type PushPermission,
+  } from '$lib/platform/nativePush';
+  // The location plugin already opens this app's system Settings page.
+  import { openAppSettings } from '$lib/platform/nativeLocation';
+  import { invalidateNotificationCounts } from '$lib/stores/notifications';
 
   const settings = getUserSettings();
   const identity = getCurrentUser();
@@ -24,6 +35,60 @@
   let categories: PushCategory[] = $state([]);
   let categoriesLoading = $state(true);
   let categoriesError = $state('');
+  let native = $state(false);
+  let permission: PushPermission | null = $state(null);
+  let registering = $state(false);
+  let registrationMessage = $state('');
+  let permissionRequest = 0;
+
+  async function readPermission() {
+    if (registering) return;
+    const request = ++permissionRequest;
+    try {
+      const result = await pushPermissions();
+      if (request === permissionRequest) permission = result?.permission ?? null;
+    } catch {
+      if (request !== permissionRequest) return;
+      error = 'Could not read notification permission. Try registering again.';
+    }
+  }
+
+  async function registerDevice() {
+    if (registering) return;
+    registering = true;
+    permissionRequest += 1;
+    error = '';
+    registrationMessage = '';
+    try {
+      const result = await registerForPush();
+      if (!result) throw new Error('Push notifications are unavailable in this app build.');
+      permission = result.permission;
+      if (result.permission !== 'granted') return;
+      if (!result.token) throw new Error('No device token was returned. Try again.');
+      await registerPushDevice({
+        token: result.token,
+        environment: result.environment,
+        platform: 'ios',
+        app_version: shellVersion() ?? '',
+      });
+      registrationMessage = 'This device is registered.';
+      invalidateNotificationCounts();
+      await loadDevices();
+    } catch (e) {
+      if (e instanceof AuthError) identity.expireSession();
+      else error = (e as Error).message || 'Could not register this device.';
+    } finally {
+      registering = false;
+    }
+  }
+
+  async function openSettings() {
+    try {
+      await openAppSettings();
+    } catch {
+      error = 'Could not open iOS Settings.';
+    }
+  }
   const chatOptions = [
     { value: 'alerts', label: 'Alerts and badge' },
     { value: 'badge', label: 'Badge only' },
@@ -57,6 +122,7 @@
   async function removeDevice(id: number) {
     removing = id;
     error = '';
+    registrationMessage = '';
     try {
       await deletePushDevice(id);
       devices = devices.filter((device) => device.id !== id);
@@ -69,8 +135,16 @@
   }
 
   onMount(() => {
+    native = pushAvailable();
     void loadDevices();
     void loadCategories();
+    if (!native) return;
+    void readPermission();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void readPermission();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   });
 </script>
 
@@ -109,7 +183,29 @@
 </SettingsCard>
 
 <SettingsCard title="Push notifications">
-  <p class="hint">Register a device from the Istota iOS app.</p>
+  {#if native}
+    {#if permission === 'denied'}
+      <p class="hint">
+        Notifications are denied in iOS Settings. Enable them there, then register this device.
+      </p>
+      <Button variant="secondary" size="sm" onclick={openSettings}>Open iOS Settings</Button>
+    {:else}
+      <Button
+        variant="secondary"
+        size="sm"
+        loading={registering}
+        loadingLabel="Registering…"
+        onclick={registerDevice}
+      >
+        Register this device
+      </Button>
+    {/if}
+    {#if registrationMessage && permission !== 'denied'}<p class="hint" role="status">
+        {registrationMessage}
+      </p>{/if}
+  {:else}
+    <p class="hint">Register a device from the Istota iOS app.</p>
+  {/if}
   <p class="hint">iOS notification settings control whether alerts appear on each device.</p>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}
   {#if loading}

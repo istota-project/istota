@@ -5320,6 +5320,7 @@ export interface ResolvedNotification {
 }
 
 export interface NotificationCounts {
+  push_badge?: number;
   chat_unread?: number;
   open: number;
   actionable: number;

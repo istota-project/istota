@@ -84,7 +84,7 @@ import {
 import { rememberLastUserId, seedUserId } from '$lib/offline/lastUser';
 import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
 import { isHiddenRoom, sortRoomsByActivity, touchRoomActivity } from '$lib/stores/roomOrder';
-import { applyNotificationCounts } from '$lib/stores/notifications';
+import { applyNotificationCounts, invalidateNotificationCounts } from '$lib/stores/notifications';
 import {
   isKnownCommand,
   dropRoomCatalogue,
@@ -1673,7 +1673,10 @@ function createSession(): ChatSession {
     if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     setRoomUnread(roomId, 0);
     markRoomRead(roomId)
-      .then(invalidateNavUnreadCounts)
+      .then(() => {
+        invalidateNavUnreadCounts();
+        invalidateNotificationCounts();
+      })
       .catch(() => {
         /* transient; next open/poll retries */
       });
@@ -3516,7 +3519,10 @@ function createSession(): ChatSession {
           await loadHistory(target.id);
           if (superseded()) return;
           markRoomRead(target.id)
-            .then(invalidateNavUnreadCounts)
+            .then(() => {
+              invalidateNavUnreadCounts();
+              invalidateNotificationCounts();
+            })
             .catch(() => {});
         }
       }
@@ -3594,7 +3600,10 @@ function createSession(): ChatSession {
     messages.set([]);
     await loadHistory(id);
     markRoomRead(id)
-      .then(invalidateNavUnreadCounts)
+      .then(() => {
+        invalidateNavUnreadCounts();
+        invalidateNotificationCounts();
+      })
       .catch(() => {
         /* non-fatal; refresh/poll will retry */
       });
@@ -3621,6 +3630,12 @@ function createSession(): ChatSession {
     // off before the merge — spread onto the record it would stay there for the
     // life of the session and read as a standing property of the room.
     const { cleared, ...updated } = await updateChatRoom(id, patch);
+    if (
+      patch.push_notifications !== undefined ||
+      patch.listed !== undefined ||
+      patch.archived !== undefined
+    )
+      invalidateNotificationCounts();
     if (patch.listed !== undefined || patch.archived !== undefined) invalidateNavUnreadCounts();
     if (patch.brain !== undefined) {
       // The room's model aliases were resolved through the brain it had when

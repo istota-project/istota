@@ -591,3 +591,49 @@ describe('navigation badge presentation', () => {
     expect(screen.queryByRole('menuitem', { name: /Briefings|Feeds/ })).toBeNull();
   });
 });
+
+describe('native push lifecycle', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  function installPush() {
+    useAgent('IstotaApp/0.11.0');
+    const plugin = {
+      consumePendingOpen: vi.fn(async () => ({ open: null })),
+      setBadge: vi.fn(async () => {}),
+    };
+    vi.stubGlobal('Capacitor', { Plugins: { IstotaPush: plugin } });
+    return plugin;
+  }
+  it('waits for live authentication and releases the open listener at unmount', async () => {
+    const plugin = installPush();
+    let resolve!: (value: User) => void;
+    getMe.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    const mounted = render(Layout, { children });
+    window.dispatchEvent(new Event('istotaPushOpen'));
+    expect(plugin.consumePendingOpen).not.toHaveBeenCalled();
+    resolve(person());
+    await screen.findByText('Alice');
+    expect(plugin.consumePendingOpen).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event('istotaPushOpen'));
+    expect(plugin.consumePendingOpen).toHaveBeenCalledTimes(2);
+    mounted.unmount();
+    window.dispatchEvent(new Event('istotaPushOpen'));
+    expect(plugin.consumePendingOpen).toHaveBeenCalledTimes(2);
+  });
+  it('leaves the badge and pending tap untouched with only an offline identity', async () => {
+    const plugin = installPush();
+    online.set(false);
+    getMe.mockRejectedValue(new TypeError('Failed to fetch'));
+    readUser.mockResolvedValue(person());
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(plugin.consumePendingOpen).not.toHaveBeenCalled();
+    expect(plugin.setBadge).not.toHaveBeenCalled();
+  });
+});

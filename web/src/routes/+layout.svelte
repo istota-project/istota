@@ -24,6 +24,8 @@
   import { online, startConnectivity } from '$lib/stores/connectivity';
   import { installViewportGuard } from '$lib/viewport';
   import { installKeyboardDismiss } from '$lib/platform/input';
+  import { startPushBadgeSync } from '$lib/stores/pushBadge';
+  import { startPushOpenHandling } from '$lib/platform/pushOpen';
   import { shellAtLeast } from '$lib/platform/native';
   import {
     canReadCachedUser,
@@ -238,6 +240,8 @@
    * the app had just resolved.
    */
   let loadGeneration = 0;
+  let stopPushBadge: (() => void) | undefined;
+  let stopPushOpen: (() => void) | undefined;
 
   /**
    * Resolve who is signed in, and paint something either way.
@@ -262,6 +266,9 @@
   function expireSession() {
     loadGeneration += 1;
     stopNavUnreadPoll();
+    stopNotificationPoll();
+    stopPushBadge?.();
+    stopPushOpen?.();
     // The session is over, so the pointer that says whose cache to read before
     // the next one resolves goes with it (ISSUE-202). Whoever signs in next
     // writes their own on the first config read; until then a cold launch with
@@ -302,6 +309,8 @@
       // authenticated endpoint fails, backs off, and is then indistinguishable
       // from a real outage at the next login.
       startNotificationPoll();
+      stopPushBadge ??= startPushBadgeSync();
+      stopPushOpen ??= startPushOpenHandling();
       if (fresh.show_nav_unread_badges === true) startNavUnreadPoll(fresh.username);
       else stopNavUnreadPoll();
       return true;
@@ -421,6 +430,8 @@
     loadGeneration += 1;
     stopNotificationPoll();
     stopNavUnreadPoll();
+    stopPushBadge?.();
+    stopPushOpen?.();
   });
 
   function isActive(path: string): boolean {

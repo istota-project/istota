@@ -196,6 +196,34 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('refreshes the filtered count after reads and personal preference saves, but not failed writes', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.getNotificationCounts.mockResolvedValue({ open: 5, actionable: 1, push_badge: 3 });
+    const s = await freshSession();
+    const notifications = await import('./notifications');
+    notifications.startNotificationPoll();
+    await vi.advanceTimersByTimeAsync(0);
+    api.getNotificationCounts.mockClear();
+    await s.init();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(1);
+    await s.selectRoom(2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(2);
+    api.updateChatRoom.mockResolvedValue({ ...room(2), push_notifications: 'off' });
+    await s.updateRoomSettings(2, { push_notifications: 'off' });
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(3);
+    api.updateChatRoom.mockRejectedValueOnce(new Error('Save failed'));
+    await expect(s.updateRoomSettings(2, { push_notifications: 'alerts' })).rejects.toThrow(
+      'Save failed',
+    );
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(3);
+    s.teardown();
+    notifications.resetNotifications();
+  });
+
   it('seeds the cursor from the server before connecting', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomEvents.mockResolvedValue({ events: [], cursor: 41, gap: false });

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Compatible iOS apps now open the room or inbox destination when a notification is tapped. The app badge follows saved notification preferences and refreshes after reads and a return to the foreground; offline counts do not clear it.
+
 - Room settings now lets each member choose alerts and badge, badge only, off, or the account default. This personal choice leaves other members’ preferences and the room’s unread count unchanged.
 
 - iOS push preferences can filter inbox categories and override chat notifications for individual rooms without changing the inbox or room unread counts. Signing out removes the device enrolled in that session; disabled or revoked account credentials stop further sends.
@@ -17,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Operators can send a test iOS notification to a user’s registered devices and see whether Apple accepted it. The doctor command checks the signing key’s presence and permissions without reading it.
 
-- Settings → Notifications now has inbox-category switches, chat defaults, message previews and registered device removal. Preferences remain available in browsers and save together with edits made on other settings pages. Native registration controls will follow.
+- Settings → Notifications now has inbox-category switches, chat defaults, message previews and registered device removal. Preferences remain available in browsers and save together with edits made on other settings pages. Compatible iOS apps can register from that page and open iOS Settings after a permission denial.
 
 - The Feeds sidebar shows how many entries are unread and how many are starred next to Unread and Starred, and sources with unread entries are in bold. The counts update as you read, star and mark entries read.
 - **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation.

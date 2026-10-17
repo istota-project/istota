@@ -1,3 +1,4 @@
+import { tick } from 'svelte';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
@@ -13,6 +14,7 @@ import { page } from '$app/state';
 import { base } from '$app/paths';
 import SettingsLayout from './+layout.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
+import { startNotificationPoll, resetNotifications } from '$lib/stores/notifications';
 
 const person = {
   username: 'alice',
@@ -88,6 +90,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  resetNotifications();
   vi.unstubAllGlobals();
 });
 
@@ -119,6 +122,8 @@ it.each(['Mozilla/5.0', 'Mozilla/5.0 IstotaApp/0.10.0'])(
 );
 
 it('saves categories and both preferences through the shared settings Save action', async () => {
+  api.getNotificationCounts.mockResolvedValue({ open: 4, actionable: 1, push_badge: 2 });
+  startNotificationPoll();
   mount();
   const previews = await screen.findByRole('checkbox', { name: /Show message previews/ });
   expect(previews).toBeChecked();
@@ -146,6 +151,7 @@ it('saves categories and both preferences through the shared settings Save actio
     ),
   );
   expect(screen.getByRole('checkbox', { name: /Show message previews/ })).not.toBeChecked();
+  expect(api.getNotificationCounts).toHaveBeenCalledTimes(2);
 });
 
 it('removes a listed device immediately through its own API', async () => {
@@ -259,4 +265,104 @@ it('respects managed category and chat preferences', async () => {
   expect(screen.getByRole('checkbox', { name: /A new source from the server/ })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Chat notifications' })).toBeDisabled();
   expect(screen.getByRole('checkbox', { name: /Show message previews/ })).toBeDisabled();
+});
+
+function nativePush(permission = 'prompt') {
+  Object.defineProperty(navigator, 'userAgent', { value: 'IstotaApp/0.11.0', configurable: true });
+  const plugin = {
+    permissions: vi.fn(async () => ({ permission, registered: false })),
+    register: vi.fn(async () => ({
+      permission: 'granted',
+      token: 'ab'.repeat(32),
+      environment: 'sandbox',
+    })),
+    setBadge: vi.fn(async () => {}),
+  };
+  const openAppSettings = vi.fn(async () => {});
+  vi.stubGlobal('Capacitor', {
+    Plugins: { IstotaPush: plugin, IstotaLocation: { openAppSettings } },
+  });
+  return { plugin, openAppSettings };
+}
+
+it('registers a Debug token through the real cookie-authenticated API client', async () => {
+  const { plugin } = nativePush();
+  const real = await vi.importActual<typeof import('$lib/api')>('$lib/api');
+  api.registerPushDevice.mockImplementation(real.registerPushDevice);
+  const request = vi.fn(async () => new Response(JSON.stringify({ id: 7 })));
+  vi.stubGlobal('fetch', request);
+  mount();
+  const button = await screen.findByRole('button', { name: 'Register this device' });
+  expect(plugin.register).not.toHaveBeenCalled();
+  await fireEvent.click(button);
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+  const [url, options] = request.mock.calls[0] as unknown as [string, RequestInit];
+  expect(url).toBe(`${base}/api/push/devices`);
+  expect(options.method).toBe('POST');
+  expect(options.credentials).toBe('same-origin');
+  expect(JSON.parse(options.body as string)).toEqual({
+    token: 'ab'.repeat(32),
+    environment: 'sandbox',
+    platform: 'ios',
+    app_version: '0.11.0',
+  });
+  await waitFor(() => expect(api.listPushDevices).toHaveBeenCalledTimes(2));
+});
+it('reports denied authorization and opens the existing app Settings control', async () => {
+  const { plugin, openAppSettings } = nativePush();
+  plugin.register.mockResolvedValue({
+    permission: 'denied',
+    token: null as unknown as string,
+    environment: 'sandbox',
+  });
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByText(/Notifications are denied/)).toBeInTheDocument();
+  expect(api.registerPushDevice).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open iOS Settings' }));
+  expect(openAppSettings).toHaveBeenCalledTimes(1);
+});
+it('reports registration failures without claiming success', async () => {
+  const { plugin } = nativePush();
+  plugin.register.mockRejectedValue(new Error('Token request timed out.'));
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Token request timed out.');
+  expect(api.registerPushDevice).not.toHaveBeenCalled();
+});
+
+it('keeps a denial from registration when an earlier permission read finishes late', async () => {
+  const { plugin } = nativePush();
+  let resolve!: (value: { permission: string; registered: boolean }) => void;
+  plugin.permissions.mockImplementationOnce(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+  );
+  plugin.register.mockResolvedValue({
+    permission: 'denied',
+    token: null as unknown as string,
+    environment: 'sandbox',
+  });
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  await screen.findByText(/Notifications are denied/);
+  resolve({ permission: 'prompt', registered: false });
+  await Promise.resolve();
+  await Promise.resolve();
+  await tick();
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Open iOS Settings' })).toBeInTheDocument(),
+  );
+});
+
+it('keeps registration retryable when enrollment fails on the server', async () => {
+  nativePush();
+  api.registerPushDevice.mockRejectedValueOnce(new Error('Enrollment failed.'));
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Enrollment failed.');
+  expect(screen.queryByText('This device is registered.')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Register this device' })).toBeEnabled();
 });

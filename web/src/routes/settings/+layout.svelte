@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNotificationCounts } from '$lib/stores/notifications';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { page } from '$app/state';
@@ -108,6 +109,8 @@
         return;
       }
       await updateProfile(patch);
+      if (patch.push_chat_alerts !== undefined || patch.push_inbox_categories !== undefined)
+        invalidateNotificationCounts();
       await reload();
       info = 'Profile saved.';
     } catch (e) {
