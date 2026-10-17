@@ -179,6 +179,7 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
 | `ISTOTA_BRAIN_NATIVE_API_KEY` | `brain.native.api_key` (native brain provider key; kept out of TOML) |
+| `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS` | `brain.native.extra_headers`, as a JSON object of header name to string value. Replaces the inline table whole; a value that is not such an object is ignored with a warning |
 | `ISTOTA_SMS_TWILIO_ACCOUNT_SID` | `sms.twilio.account_sid` |
 | `ISTOTA_SMS_TWILIO_AUTH_TOKEN` | `sms.twilio.auth_token` |
 | `ISTOTA_SMS_TWILIO_API_KEY_SID` | `sms.twilio.api_key_sid` |

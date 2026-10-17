@@ -478,6 +478,8 @@ default_sender_number = ""
 max_segments = 6
 request_timeout_seconds = 10
 
+# auth_token, api_key_sid and api_key_secret belong in the stack secret files
+# istota_sms_twilio_auth_token, _api_key_sid and _api_key_secret, not here.
 [sms.twilio]
 account_sid = ""
 auth_token = ""
@@ -491,7 +493,8 @@ public_key = ""
 messaging_profile_id = ""
 
 # One WhatsApp business phone number. The Cloud adapter's three credentials
-# belong in ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN, not here.
+# belong in the stack secret files istota_whatsapp_access_token, _app_secret
+# and _verify_token (ISTOTA_WHATSAPP_ACCESS_TOKEN, ...), not here.
 [whatsapp]
 enabled = false
 # Which adapter sends and receives: "baileys" (a WhatsApp Web session paired by
