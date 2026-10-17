@@ -1,0 +1,16 @@
+[
+  {
+    "id": 2,
+    "name": "Standard",
+    "upgradeAllowed": true,
+    "cutoff": 7,
+    "items": [],
+    "minFormatScore": 0,
+    "cutoffFormatScore": 0,
+    "formatItems": [],
+    "language": {
+      "id": 1,
+      "name": "English"
+    }
+  }
+]
