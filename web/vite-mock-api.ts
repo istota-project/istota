@@ -8743,6 +8743,13 @@ const handlers: MockHandler[] = [
         archive.splice(idx, 1);
         return { status: 'ok' };
       }
+      const rm = p.match(/^\/archive\/(\d+)\/read$/);
+      if (rm && method === 'POST') {
+        const item = archive.find((a) => a.id === Number(rm[1]));
+        if (!item) return { __status: 404, detail: 'not found' };
+        item.read_at ??= new Date().toISOString();
+        return { id: item.id, read_at: item.read_at };
+      }
 
       if (p === '/config' && method === 'GET') return configResponse();
       if (p === '/preview' && method === 'POST') {

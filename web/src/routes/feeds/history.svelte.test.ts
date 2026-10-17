@@ -94,7 +94,7 @@ describe('view counts', () => {
     expect(screen.getByTitle('2 starred')).toHaveTextContent('2');
     const art = screen.getByRole('button', { name: /^Example art\s*, unread$/ });
     expect(art).toHaveClass('has-unread');
-    expect(art.querySelector('.count-pill.mark.inline.nav-size')).not.toBeNull();
+    expect(art.querySelector('.count-pill.mark.inline')).not.toBeNull();
     const news = screen.getByRole('button', { name: 'Example news' });
     expect(news).not.toHaveClass('has-unread');
     expect(news.querySelector('.count-pill')).toBeNull();

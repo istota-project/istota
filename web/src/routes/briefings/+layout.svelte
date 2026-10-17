@@ -823,6 +823,11 @@
     white-space: nowrap;
   }
 
+  /* Pull the unread mark in to 2px from the audience, the feeds sidebar's gap. */
+  .archive-audience :global(.count-pill.mark) {
+    margin-left: -2px;
+  }
+
   /* Off or draft, as a glyph: a word-sized badge crowded the name. */
   .view-state {
     display: inline-flex;

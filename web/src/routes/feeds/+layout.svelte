@@ -368,7 +368,6 @@
                   count={$feedCounts.unread_by_feed[feed.id] ?? 0}
                   title="Unread"
                   shape="inline-mark"
-                  markSize="nav"
                 />
                 {#if ($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}<span class="visually-hidden"
                     >, unread</span
@@ -417,7 +416,9 @@
   .feed-btn {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    /* The row holds the name and its unread mark only; the mark sits against
+       the name, as the nav's does. */
+    gap: 2px;
     width: 100%;
     background: none;
     border: none;
