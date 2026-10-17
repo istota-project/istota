@@ -36,9 +36,12 @@
      * mark ends a line (the briefings archive's audience line).
      */
     shape?: 'pill' | 'mark' | 'inline-mark';
+    /** `inline-mark` only: `text` scales with the row's type, `nav` is the app
+     *  nav mark's size (the feeds sidebar). */
+    markSize?: 'text' | 'nav';
   }
 
-  let { count, title, tone = 'accent', shape = 'pill' }: Props = $props();
+  let { count, title, tone = 'accent', shape = 'pill', markSize = 'text' }: Props = $props();
 
   const shown = $derived(count > 99 ? '99+' : String(count));
 </script>
@@ -56,8 +59,11 @@
 -->
 {#if count > 0}
   {#if shape === 'mark' || shape === 'inline-mark'}
-    <span class="count-pill mark" class:inline={shape === 'inline-mark'} {title}
-      ><Asterisk size="100%" strokeWidth={3.5} /></span
+    <span
+      class="count-pill mark"
+      class:inline={shape === 'inline-mark'}
+      class:nav-size={markSize === 'nav'}
+      {title}><Asterisk size="100%" strokeWidth={3.5} /></span
     >
   {:else}
     <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
@@ -92,8 +98,8 @@
     left: calc(100% - 1px);
     top: 2px;
     min-width: 0;
-    width: 0.7em;
-    height: 0.7em;
+    width: var(--unread-mark-size);
+    height: var(--unread-mark-size);
     padding: 0;
     border-radius: 0;
     background: none;
@@ -104,5 +110,9 @@
     position: static;
     width: 1em;
     height: 1em;
+  }
+  .count-pill.mark.inline.nav-size {
+    width: var(--unread-mark-size);
+    height: var(--unread-mark-size);
   }
 </style>
