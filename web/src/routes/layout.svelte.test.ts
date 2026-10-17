@@ -554,9 +554,13 @@ describe('navigation badge presentation', () => {
           );
           const pill = link.querySelector('.count-pill');
           if (count) {
-            expect(pill).toHaveTextContent(count > 99 ? '99+' : String(count));
-            // Only the inline row takes the out-of-flow superscript; the menu keeps the pill.
-            expect(pill?.classList.contains('superscript')).toBe(role === 'link');
+            // The inline row shows a bare glyph; the menu keeps the numeric pill.
+            if (role === 'link') {
+              expect(pill).toHaveClass('mark');
+              expect(pill).toHaveTextContent(/^$/);
+            } else {
+              expect(pill).toHaveTextContent(count > 99 ? '99+' : String(count));
+            }
             expect(link).toHaveAttribute('title', label);
             expect(pill).toHaveAttribute('title', label);
             expect(link.closest('[aria-live]')).toBeNull();

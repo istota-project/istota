@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Sparkle } from '@lucide/svelte';
+
   /**
    * A numeric badge, capped at `99+`.
    *
@@ -27,11 +29,11 @@
      */
     tone?: 'accent' | 'muted';
     /**
-     * `pill` sits in the row's flow. `superscript` is the inline app nav's:
-     * small amber digits taken out of flow past the end of the parent, which
-     * must be positioned, so a count appearing or changing moves no link.
+     * `pill` sits in the row's flow. `mark` is the inline app nav's: a small
+     * unread glyph, no digits, taken out of flow past the end of the parent,
+     * which must be positioned, so it appearing or clearing moves no link.
      */
-    shape?: 'pill' | 'superscript';
+    shape?: 'pill' | 'mark';
   }
 
   let { count, title, tone = 'accent', shape = 'pill' }: Props = $props();
@@ -51,12 +53,11 @@
   its button's own `aria-label`, which overrides descendant content entirely.
 -->
 {#if count > 0}
-  <span
-    class="count-pill"
-    class:muted={tone === 'muted'}
-    class:superscript={shape === 'superscript'}
-    {title}>{shown}</span
-  >
+  {#if shape === 'mark'}
+    <span class="count-pill mark" {title}><Sparkle size="100%" fill="currentColor" /></span>
+  {:else}
+    <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
+  {/if}
 {/if}
 
 <style>
@@ -81,18 +82,18 @@
     background: var(--surface-badge);
     color: var(--text-muted);
   }
-  .count-pill.superscript {
+  /* The count itself is in the owning link's accessible name and title. */
+  .count-pill.mark {
     position: absolute;
-    left: calc(100% - 1px);
-    top: 1px;
+    left: calc(100% + 1px);
+    top: 0;
     min-width: 0;
-    height: auto;
+    width: 0.7em;
+    height: 0.7em;
     padding: 0;
     border-radius: 0;
     background: none;
     color: var(--accent-amber);
-    font-size: 0.7em;
-    font-variant-numeric: tabular-nums;
     pointer-events: none;
   }
 </style>
