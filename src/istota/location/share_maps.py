@@ -2,9 +2,14 @@
 
 Talk and WhatsApp get a 640 x 360 picture of the same projected observation
 the share's text discloses; web draws its own interactive card and never comes
-here. The picture is drawn by the browser service's `POST /map-snapshot`
-(`docker/browser/map_snapshot.py`), which loads the web app's `/map-snapshot/`
-page, the same `ShareMap` component the web card uses, so the two cannot drift.
+here. The picture is the `share-map` render bundle (`web/src/render/share-map/`),
+which mounts the same `ShareMap` component the web card uses, so the two cannot
+drift; `istota.browser.document_render` sends it to the browser service.
+
+The payload is checked here, because this side owns what it means: the
+precision and freshness enums, finite coordinates (an area's already rounded),
+plain labels, and a basemap of the resolver's shape whose attribution carries
+plain http(s) links only, since MapLibre inserts it as HTML.
 
 `render_location_map` makes one attempt and says why it has no picture;
 `render_location_png` is the same call for a caller that only wants the
@@ -24,23 +29,16 @@ import hashlib
 import logging
 import math
 import os
+import re
 import secrets
 import struct
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
+from urllib.parse import urlsplit
 
-import httpx
-
-from istota.browser.admission import (
-    BrowserAdmissionUnconfigured,
-    BrowserQueueTimeout,
-    browser_admission,
-    browser_call,
-)
-from istota.browser.owner import browser_headers
+from istota.browser.document_render import render_document
 from istota.webui.map_basemap import basemap_for_user
 
 if TYPE_CHECKING:
@@ -51,7 +49,7 @@ logger = logging.getLogger(__name__)
 WIDTH = 640
 HEIGHT = 360
 MAX_PNG_BYTES = 1024 * 1024
-#: Web Mercator's edge, as `shareMap.ts` and the browser service draw it.
+#: Web Mercator's edge, as `shareMap.ts` draws it.
 MERCATOR_MAX_LAT = 85.0511
 #: How long to wait for the browser's admission lock. A share's text is
 #: already out or about to be; a map is not worth queueing behind a browse.
@@ -59,11 +57,30 @@ ADMISSION_WAIT_S = 2.0
 #: The whole call, admission included.
 TOTAL_TIMEOUT_S = 10.0
 
+BUNDLE = "share-map"
+VIEWPORT = {"width": WIDTH, "height": HEIGHT}
+
 #: Reasons that mean "no map was possible here", not "the map failed".
 SKIP_REASONS = frozenset({"render_unavailable", "not_mercator_safe"})
 
-_BROWSER_REASONS = frozenset({"render_unavailable", "capacity", "render_timeout"})
+_PASSED_ON = frozenset({"render_unavailable", "capacity", "render_timeout"})
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+PRECISIONS = ("exact", "area")
+FRESHNESS = ("fresh", "fresh_clock_skew", "last_known")
+PROVIDERS = ("openfreemap", "carto", "osm", "custom")
+BASEMAP_KINDS = ("style", "raster")
+_MAX_ACCURACY_M = 100_000
+_MAX_LABEL = 200
+_MAX_URL = 2048
+_MAX_ATTRIBUTION = 1000
+_OBSERVED_AT = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})?"
+)
+# The one markup an attribution may carry: a plain http(s) link, as the
+# resolver's own provider rows write it.
+_ATTRIBUTION_LINK = re.compile(r'<a href="https?://[^"<>\s]+">|</a>')
+_URL_FORBIDDEN = re.compile(r"[\x00-\x20\x7f\"'<>\\`]")
 
 
 @dataclass(frozen=True)
@@ -88,6 +105,33 @@ def _finite(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _plain_label(value) -> bool:
+    return (isinstance(value, str) and 0 < len(value) <= _MAX_LABEL
+            and "<" not in value and ">" not in value
+            and not any(ord(char) < 32 or ord(char) == 127 for char in value))
+
+
+def _http_url(value) -> bool:
+    if not isinstance(value, str) or not value or len(value) > _MAX_URL:
+        return False
+    if _URL_FORBIDDEN.search(value):
+        return False
+    try:
+        parts = urlsplit(value)
+        parts.port
+    except ValueError:
+        return False
+    return (parts.scheme in ("http", "https") and bool(parts.hostname)
+            and parts.username is None and parts.password is None)
+
+
+def _attribution_ok(value) -> bool:
+    if not isinstance(value, str) or len(value) > _MAX_ATTRIBUTION:
+        return False
+    rest = _ATTRIBUTION_LINK.sub("", value)
+    return "<" not in rest and ">" not in rest
+
+
 def _observation_payload(observation: dict) -> dict | None:
     """The projection the page draws, from a card's stored observation, or None."""
     try:
@@ -98,29 +142,48 @@ def _observation_payload(observation: dict) -> dict | None:
         owner_user_id = observation["owner_user_id"]
     except (KeyError, TypeError):
         return None
-    if precision not in ("exact", "area"):
+    freshness = observation.get("freshness") or "fresh"
+    if precision not in PRECISIONS or freshness not in FRESHNESS:
         return None
     if not _finite(lat) or not _finite(lon) or abs(lat) > 90 or abs(lon) > 180:
         return None
-    if accuracy is not None and (not _finite(accuracy) or accuracy < 0):
+    if precision == "area":
+        # Rounded before it left the location module; a value that is not is
+        # not drawn as a cell around it.
+        accuracy = None
+        if round(lat, 2) != lat or round(lon, 2) != lon:
+            return None
+    elif accuracy is not None and (not _finite(accuracy)
+                                   or not 0 <= accuracy <= _MAX_ACCURACY_M):
         return None
-    if not isinstance(observed_at, str) or not observed_at:
+    if not isinstance(observed_at, str) or not _OBSERVED_AT.fullmatch(observed_at):
         return None
-    if not isinstance(owner_user_id, str) or not owner_user_id:
+    if not _plain_label(owner_user_id):
         return None
     return {
         "precision": precision,
         "lat": lat,
         "lon": lon,
-        "accuracy_m": None if precision == "area" else accuracy,
+        "accuracy_m": accuracy,
         "observed_at": observed_at,
-        "freshness": observation.get("freshness") or "fresh",
+        "freshness": freshness,
         "owner_user_id": owner_user_id,
     }
 
 
-def _basemap_payload(config: "Config", actor_user_id: str) -> dict:
+def _basemap_payload(config: "Config", actor_user_id: str) -> dict | None:
+    """The actor's basemap as the page takes it, or None when the page should not draw it."""
     spec = basemap_for_user(config, actor_user_id)
+    if spec.provider not in PROVIDERS or spec.kind not in BASEMAP_KINDS:
+        return None
+    urls = [spec.light] + ([spec.dark] if spec.dark else [])
+    if not all(_http_url(url) for url in urls):
+        return None
+    if spec.kind == "raster" and not all(
+            all(token in url for token in ("{z}", "{x}", "{y}")) for url in urls):
+        return None
+    if not _attribution_ok(spec.attribution):
+        return None
     return {
         "provider": spec.provider,
         "kind": spec.kind,
@@ -151,17 +214,6 @@ def _checked(data: bytes) -> RenderedMap | None:
     return RenderedMap(clean, hashlib.sha256(clean).hexdigest(), WIDTH, HEIGHT)
 
 
-def _reason_from_answer(response: httpx.Response) -> str:
-    if response.status_code == 404:
-        # A browser image older than the endpoint.
-        return "render_unavailable"
-    try:
-        reason = response.json().get("error")
-    except Exception:
-        reason = None
-    return reason if reason in _BROWSER_REASONS else "render_failed"
-
-
 def _skip(reason: str) -> MapRender:
     logger.info("location.share_map.no_render reason=%s", reason)
     return MapRender(None, reason)
@@ -180,44 +232,26 @@ def render_location_map(
         return _skip("bad_observation")
     if abs(payload_observation["lat"]) > MERCATOR_MAX_LAT:
         return _skip("not_mercator_safe")
-    browser = getattr(config, "browser", None)
-    if browser is None or not getattr(browser, "enabled", False):
-        return _skip("render_unavailable")
-    try:
-        headers = browser_headers(actor_user_id)
-    except ValueError:
-        return _skip("render_unavailable")
     owner = observation.get("owner_label") or payload_observation["owner_user_id"]
+    if not _plain_label(owner):
+        return _skip("bad_observation")
+    basemap = _basemap_payload(config, actor_user_id)
+    if basemap is None:
+        # The operator's basemap is not one this page draws: no map here.
+        return _skip("render_unavailable")
     payload = {
         "observation": payload_observation,
-        "basemap": _basemap_payload(config, actor_user_id),
+        "basemap": basemap,
         "owner": owner,
+        "viewport": dict(VIEWPORT),
     }
-    started = time.monotonic()
-    try:
-        with browser_admission(db_path=config.db_path, queue_timeout=ADMISSION_WAIT_S):
-            remaining = max(1.0, TOTAL_TIMEOUT_S - (time.monotonic() - started))
-            response = browser_call(
-                "post", f"{browser.api_url}/map-snapshot",
-                headers=headers, json=payload, timeout=remaining,
-            )
-    except BrowserQueueTimeout:
-        return _skip("capacity")
-    except BrowserAdmissionUnconfigured:
-        return _skip("render_unavailable")
-    except httpx.TimeoutException:
-        return _skip("render_timeout")
-    except httpx.HTTPError:
-        return _skip("render_unavailable")
-    except Exception as error:  # noqa: BLE001 - a map never fails the share
-        logger.warning("location.share_map.no_render reason=render_failed error=%s",
-                       type(error).__name__)
-        return MapRender(None, "render_failed")
-    if response.status_code != 200:
-        return _skip(_reason_from_answer(response))
-    if response.headers.get("content-type", "").split(";")[0].strip() != "image/png":
-        return _skip("bad_png")
-    rendered = _checked(response.content)
+    attempt = render_document(
+        config, actor_user_id=actor_user_id, bundle=BUNDLE, payload=payload,
+        viewport=dict(VIEWPORT), timeout_s=TOTAL_TIMEOUT_S, admission_wait_s=ADMISSION_WAIT_S,
+    )
+    if attempt.data is None:
+        return _skip(attempt.reason if attempt.reason in _PASSED_ON else "render_failed")
+    rendered = _checked(attempt.data)
     if rendered is None:
         return _skip("bad_png")
     return MapRender(rendered, None)

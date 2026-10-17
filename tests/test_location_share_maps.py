@@ -1,14 +1,16 @@
-"""A location share's map as a PNG: the browser call, the PNG checks and the fallbacks.
+"""A location share's map as a PNG: the payload, the PNG checks and the fallbacks.
 
 The browser is mocked at `browser_call`, the one function that sends a request
-to the browser service, so the admission lock, the headers, the payload and the
-answer handling all run as shipped.
+to the browser service, so the admission lock, the headers, the document
+envelope and the answer handling all run as shipped. The `share-map` bundle is
+a stand-in file in a render directory, since only its digest matters here.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import os
 import stat
@@ -18,6 +20,7 @@ import pytest
 from PIL import Image
 
 from istota import db
+from istota.browser import document_render
 from istota.browser.admission import BrowserQueueTimeout
 from istota.config import BrowserConfig, Config
 from istota.location import share_maps
@@ -42,6 +45,22 @@ def _png(width=640, height=360, color=(120, 160, 200), **info) -> bytes:
     picture = Image.new("RGB", (width, height), color)
     picture.save(buffer, "PNG", **info)
     return buffer.getvalue()
+
+
+BUNDLE = "<!doctype html><title>share-map stand-in</title>"
+
+
+@pytest.fixture(autouse=True)
+def render_dir(tmp_path, monkeypatch):
+    directory = tmp_path / "build-render"
+    directory.mkdir()
+    (directory / "share-map.html").write_text(BUNDLE)
+    (directory / "manifest.json").write_text(
+        json.dumps({"share-map": hashlib.sha256(BUNDLE.encode()).hexdigest()}))
+    monkeypatch.setenv("ISTOTA_WEB_RENDER_DIR", str(directory))
+    document_render.reset_cache()
+    yield directory
+    document_render.reset_cache()
 
 
 @pytest.fixture
@@ -69,7 +88,7 @@ class _Browser:
 
 
 def _answer(body: bytes = b"", *, status=200, content_type="image/png", json=None):
-    request = httpx.Request("POST", "http://browser.test:9223/map-snapshot")
+    request = httpx.Request("POST", "http://browser.test:9223/render-document")
     if json is not None:
         return httpx.Response(status, json=json, request=request)
     return httpx.Response(status, content=body, headers={"content-type": content_type},
@@ -80,7 +99,7 @@ def _answer(body: bytes = b"", *, status=200, content_type="image/png", json=Non
 def browser(monkeypatch):
     def install(**kwargs):
         fake = _Browser(**kwargs)
-        monkeypatch.setattr(share_maps, "browser_call", fake)
+        monkeypatch.setattr(document_render, "browser_call", fake)
         return fake
     return install
 
@@ -102,18 +121,24 @@ class TestTheRender:
         assert b"from the browser" not in rendered.data
         assert len(fake.calls) == 1
 
-    def test_the_request_carries_the_actor_and_only_the_projection(self, config, browser):
+    def test_the_request_carries_the_actor_the_bundle_and_only_the_projection(
+            self, config, browser):
         fake = browser(response=_answer(_png()))
 
         share_maps.render_location_png(config, actor_user_id="bob", observation=OBSERVATION)
 
         method, url, kwargs = fake.calls[0]
         assert method == "post"
-        assert url == "http://browser.test:9223/map-snapshot"
+        assert url == "http://browser.test:9223/render-document"
         assert kwargs["headers"]["X-Istota-User"] == "bob"
-        body = kwargs["json"]
-        assert set(body) == {"observation", "basemap", "owner"}
+        envelope = kwargs["json"]
+        assert envelope["document"] == BUNDLE
+        assert envelope["viewport"] == {"width": 640, "height": 360}
+        assert "assets" not in envelope
+        body = envelope["payload"]
+        assert set(body) == {"observation", "basemap", "owner", "viewport"}
         assert body["owner"] == "Alice"
+        assert body["viewport"] == {"width": 640, "height": 360}
         assert body["observation"] == {
             "precision": "exact", "lat": 48.208176, "lon": 16.373819, "accuracy_m": 12.0,
             "observed_at": "2026-10-16T14:02:00+00:00", "freshness": "fresh",
@@ -137,7 +162,7 @@ class TestTheRender:
         share_maps.render_location_png(config, actor_user_id="bob", observation=OBSERVATION)
 
         assert seen == ["bob"]
-        assert fake.calls[0][2]["json"]["basemap"]["provider"] == "osm"
+        assert fake.calls[0][2]["json"]["payload"]["basemap"]["provider"] == "osm"
 
     def test_an_area_share_sends_no_accuracy(self, config, browser):
         fake = browser(response=_answer(_png()))
@@ -146,7 +171,7 @@ class TestTheRender:
 
         share_maps.render_location_png(config, actor_user_id="bob", observation=area)
 
-        sent = fake.calls[0][2]["json"]["observation"]
+        sent = fake.calls[0][2]["json"]["payload"]["observation"]
         assert sent["precision"] == "area"
         assert sent["accuracy_m"] is None
 
@@ -175,13 +200,83 @@ class TestNoBrowserCall:
         assert outcome.reason in share_maps.SKIP_REASONS
         assert fake.calls == []
 
+    def test_no_render_bundle_is_skipped(self, config, browser, render_dir):
+        fake = browser(response=_answer(_png()))
+        (render_dir / "share-map.html").unlink()
+        document_render.reset_cache()
+
+        outcome = share_maps.render_location_map(
+            config, actor_user_id="bob", observation=OBSERVATION)
+
+        assert outcome.reason == "render_unavailable"
+        assert outcome.reason in share_maps.SKIP_REASONS
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("spec", [
+        {"provider": "mapbox"},
+        {"kind": "vector"},
+        {"light": "javascript:alert(1)"},
+        {"light": "file:///etc/passwd"},
+        {"light": "https://user:pass@tiles.example/style"},
+        {"light": 'https://tiles.example/style" onload="x'},
+        {"kind": "raster", "light": "https://tiles.example/{z}/{x}.png",
+         "dark": "https://tiles.example/{z}/{x}/{y}.png"},
+        {"attribution": '<a href="javascript:alert(1)">x</a>'},
+        {"attribution": "<img src=x onerror=alert(1)>"},
+        {"attribution": '<a href="https://x.example/" onclick="y">x</a>'},
+    ], ids=lambda spec: ",".join(f"{k}={v}" for k, v in spec.items()))
+    def test_a_basemap_the_page_should_not_draw_is_not_sent(self, config, browser,
+                                                            monkeypatch, spec):
+        """MapLibre puts the attribution in as HTML; only plain http(s) links pass."""
+        import dataclasses
+
+        from istota.webui.map_basemap import resolve_basemap
+
+        base = resolve_basemap("osm")
+        monkeypatch.setattr(share_maps, "basemap_for_user",
+                            lambda cfg, user_id: dataclasses.replace(base, **spec))
+        fake = browser(response=_answer(_png()))
+
+        outcome = share_maps.render_location_map(
+            config, actor_user_id="bob", observation=OBSERVATION)
+
+        assert outcome.reason == "render_unavailable"
+        assert fake.calls == []
+
+    def test_the_raster_shape_and_its_attribution_pass(self, config, browser, monkeypatch):
+        import dataclasses
+
+        from istota.webui.map_basemap import resolve_basemap
+
+        base = dataclasses.replace(
+            resolve_basemap("osm"), provider="carto", kind="raster",
+            light="https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png?api_key=k%26x",
+            dark="https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
+            attribution=('&copy; <a href="https://carto.com/">CARTO</a> '
+                         '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'))
+        monkeypatch.setattr(share_maps, "basemap_for_user", lambda cfg, user_id: base)
+        fake = browser(response=_answer(_png()))
+
+        outcome = share_maps.render_location_map(
+            config, actor_user_id="bob", observation=OBSERVATION)
+
+        assert outcome.reason is None
+        assert fake.calls[0][2]["json"]["payload"]["basemap"]["kind"] == "raster"
+
     @pytest.mark.parametrize("change", [
         {"precision": "street"},
         {"lat": float("nan")},
         {"lon": 181.0},
         {"lat": True},
         {"accuracy_m": -1},
+        {"accuracy_m": 10_000_000},
         {"observed_at": ""},
+        {"observed_at": "yesterday"},
+        {"freshness": "stale"},
+        {"owner_user_id": "<img src=x onerror=alert(1)>"},
+        {"owner_label": "Alice\nBob"},
+        {"owner_label": "<b>Alice</b>"},
+        {"precision": "area", "accuracy_m": None, "lat": 48.2081},
     ])
     def test_an_observation_out_of_shape_is_not_sent(self, config, browser, change):
         fake = browser(response=_answer(_png()))
@@ -204,7 +299,7 @@ class TestTheFallbacks:
          "render_failed"),
         (_answer(status=404, json={"status": "error", "error": "Not Found"}),
          "render_unavailable"),
-        (_answer(b"<html>", content_type="text/html"), "bad_png"),
+        (_answer(b"<html>", content_type="text/html"), "render_failed"),
     ])
     def test_an_answer_that_is_not_a_map(self, config, browser, answer, reason):
         browser(response=answer)
@@ -244,13 +339,13 @@ class TestTheFallbacks:
 
     def test_the_admission_wait_is_short(self, config, browser, monkeypatch):
         waits = []
-        real = share_maps.browser_admission
+        real = document_render.browser_admission
 
         def admission(**kwargs):
             waits.append(kwargs["queue_timeout"])
             return real(**kwargs)
 
-        monkeypatch.setattr(share_maps, "browser_admission", admission)
+        monkeypatch.setattr(document_render, "browser_admission", admission)
         browser(response=_answer(_png()))
 
         share_maps.render_location_png(config, actor_user_id="bob", observation=OBSERVATION)

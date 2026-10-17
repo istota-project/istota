@@ -10,6 +10,10 @@ paths:
   - "src/istota/webui/map_basemap.py"
   - "src/istota/usage/**"
   - "src/istota/sandbox/net_guard.py"
+  - "src/istota/browser/document_render.py"
+  - "docker/browser/document_render.py"
+  - "web/src/render/**"
+  - "web/vite.render.config.ts"
 ---
 
 # Leaf modules
@@ -178,6 +182,17 @@ Du-style tree measurement and the first-level directory scan beneath it, shared 
 - One scan is deliberately not converted: `maintenance.sandbox_cache_sweeper._candidates_in_root` (the one-level layout) iterates the root itself, because it must yield a symlinked entry (its `ACTION_OUTSIDE` planted-symlink detector), which `first_level_dirs` skips by construction.
 
 stdlib-only leaf: `os`, `pathlib`.
+
+## browser/document_render.py
+
+The daemon's way to turn a piece of the web UI into an image: a render bundle sent to the browser service as a document. The location share map is the first renderer. A chart or a preview is the same mechanism with a new bundle and a new caller. Only PNG output exists; PDF is the expected second output type and is not built.
+
+- **The page never calls istota.** The browser service sits on a network only the daemon joins (parity row 17), so the daemon pushes everything in: the document, a JSON payload and optional assets. The page has no API, no cookie and no callback origin. This rule is not relaxed for a later renderer; one that needs live istota data needs a different mechanism.
+- **The web half.** `web/src/render/<name>/main.ts` is an entry that calls `registerRenderer(fn)` from `web/src/render/host.ts`. That installs `window.istotaRender(payload)` once (a second call answers `busy`), applies the light theme and the app's tokens, and hands `fn` the payload and `[data-render-frame]`, sized from `payload.viewport`. An entry mounts real app components with Svelte's `mount`, so the image looks like the web UI. `web/vite.render.config.ts` builds each entry, one Vite environment per entry because dynamic imports inline only on a single-input build, into a self-contained `web/build-render/<name>.html`, and writes `manifest.json` with each file's sha256. `npm run build` runs it after the app build. The output is outside `web/build/`, so the web never serves it; the istota image copies it to `/app/web/build-render` and sets `ISTOTA_WEB_RENDER_DIR`, which `webui/static_dir.resolve_render_dir` reads.
+- **The envelope.** `POST /render-document` (`docker/browser/document_render.py`) takes `document` (at most 4 MiB, with a matching `document_sha256`), `payload` (a JSON object, at most 64 KiB, never read by the browser), optional `assets` (`[a-z0-9._/-]` paths, no `..`, an allowlist of image, font, JSON and CSS types, 2 MiB decoded in total), `viewport` (integers 1 to 2000), `output` (`"png"`) and `timeout_ms` (at most 15000). Keys are exact. Validation of what the payload means belongs to the caller: `location/share_maps.py` checks the observation and the basemap.
+- **The render origin.** A fresh, cookie-free context (`chrome.temporary_context`, counted against the user's session capacity, never evicting a session) serves the document at `https://render.istota.invalid/` with a CSP allowing inline script and style, `blob:` workers, `data:`/`blob:` images and `https:` connections and images, and the assets at `/assets/<path>`; any other path there is a 404. Every other request, redirects included, must pass the vendored net-guard rule (`docker/browser/lib/istota_net_guard.py`, synced by `scripts/sync-devbox-lib.sh`). A navigation off the document, a popup or a download fails the render with `destination_blocked`. `page.set_content` was rejected: its null origin is refused by some tile servers and gives the CSP no stable base.
+- **Reasons.** The browser answers `bad_request` 400, `capacity` 503, `render_timeout` 504, `destination_blocked` and `render_failed` 502, with the page's own `[a-z_]` reason in `detail`. `render_document(config, *, actor_user_id, bundle, payload, viewport, timeout_s, assets=None, admission_wait_s=2.0)` never raises: it refuses a malformed bundle name or oversized arguments as `bad_request` before any call, maps a missing or mismatched bundle (logged once per process), a disabled browser and a 404 from an older browser image to `render_unavailable`, and passes `capacity` and `render_timeout` through. Checking the image is the caller's job. Nothing on either side logs the payload, the document or the image.
+- **Adding a renderer** is an entry directory under `web/src/render/` and a caller of `render_document`. Nothing in the browser service changes. `docker/browser/` is vendored from the stealth-browser repository, so a change there lands in both.
 
 ## sandbox/net_guard.py
 

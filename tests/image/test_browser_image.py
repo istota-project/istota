@@ -1,4 +1,4 @@
-"""The shipped browser's card fill contract and share-map render, exercised by real Chromium."""
+"""The shipped browser's card fill contract and document render, exercised by real Chromium."""
 
 import json
 import os
@@ -30,38 +30,37 @@ def browser_image(pytestconfig):
 
 
 @pytest.fixture(scope="session")
-def snapshot_site():
-    """The built web bundle, whose `/map-snapshot/` page the render loads.
+def render_bundles():
+    """The built render bundles (`web/build-render`), as the istota image ships them.
 
-    `ISTOTA_MAP_SNAPSHOT_SITE` names a prebuilt one instead, which is how the
-    negative control hands over a bundle with MapLibre's chunk removed.
+    `ISTOTA_RENDER_BUNDLE_DIR` names a prebuilt directory instead, which is how
+    the negative control hands over a bundle with its renderer unregistered.
     """
-    override = os.environ.get("ISTOTA_MAP_SNAPSHOT_SITE")
+    override = os.environ.get("ISTOTA_RENDER_BUNDLE_DIR")
     if override:
-        site = Path(override)
+        bundles = Path(override)
     else:
         if shutil.which("npm") is None:
-            pytest.fail("npm is needed to build the web bundle the map render loads",
-                        pytrace=False)
-        result = subprocess.run(["npm", "--prefix", str(REPO / "web"), "run", "build"],
+            pytest.fail("npm is needed to build the render bundles", pytrace=False)
+        result = subprocess.run(["npm", "--prefix", str(REPO / "web"), "run", "build:render"],
                                 capture_output=True, text=True, timeout=900)
         assert result.returncode == 0, (result.stdout + result.stderr)[-4000:]
-        site = REPO / "web" / "build"
-    assert (site / "map-snapshot" / "index.html").is_file(), f"no map-snapshot page in {site}"
-    return site
+        bundles = REPO / "web" / "build-render"
+    assert (bundles / "share-map.html").is_file(), f"no share-map bundle in {bundles}"
+    return bundles
 
 
-def test_map_snapshot_renders_the_built_page(browser_image, snapshot_site, tmp_path):
-    """The real page, the real MapLibre, the real guard: a 640 x 360 map with tiles on it."""
+def test_document_render_draws_the_share_map_bundle(browser_image, render_bundles, tmp_path):
+    """The real bundle sent as a document, the real MapLibre, the real guard: a 640 x 360 map."""
     out = tmp_path / "out"
     out.mkdir()
     out.chmod(0o777)
-    script = Path(__file__).with_name("map_snapshot_render.py").read_text()
+    script = Path(__file__).with_name("document_render_run.py").read_text()
     result = run_in(browser_image, ["-c", script], entrypoint="python", timeout=600,
-                    volumes=[(snapshot_site, "/site", "ro"), (out, "/out", "rw")])
-    report = json.loads(assert_ok(result, "map snapshot render").strip().splitlines()[-1])
+                    volumes=[(render_bundles, "/bundle", "ro"), (out, "/out", "rw")])
+    report = json.loads(assert_ok(result, "document render").strip().splitlines()[-1])
 
-    assert report["drawn"] is None, report
+    assert report["drawn"] == [None, None], report
     assert report["blocked"] == "destination_blocked", report
     with Image.open(out / "map.png") as picture:
         assert picture.size == (640, 360)

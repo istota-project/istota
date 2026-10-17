@@ -185,6 +185,7 @@ src/istota/
 │   └── compat.py         # The None-returning variants four best-effort daemon paths depend on
 ├── mail/                 # Email plumbing that is not a transport: support (get_email_config, thread helpers, cleanup), ownership, outbound_policy, drafts
 ├── browser/              # Admission to the single-threaded browser API, and browser profile identity
+│   └── document_render.py  # A web render bundle (`web/src/render/`) sent to the browser's `/render-document`, an image back; the page never calls istota → leaf-modules.md
 ├── lib/                  # Dependency-free leaves; nothing here imports from `istota` → leaf-modules.md
 │   ├── sqlite_util.py    # One SQLite open, each caller's pragma set as parameters; no journal_mode, deliberately → leaf-modules.md
 │   ├── du.py             # Du-style tree measurement and the first-level directory scan → leaf-modules.md

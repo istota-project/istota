@@ -1,29 +1,25 @@
-"""Run inside the browser image: draw a share map from the built web page, for real.
+"""Run inside the browser image: render the built share-map bundle as a document, for real.
 
-The built web bundle is bound at /site and served on loopback under /istota/,
-as the web app serves it, beside a deterministic tile server on the same
-origin. Real Chromium loads `/istota/map-snapshot/`, and the shipped
-`map_snapshot.render` drives it. The PNG goes to /out; the last stdout line is
-a JSON report for the test on the host to read.
+The bundle is bound at /bundle. Real Chromium loads it on the render origin
+through the shipped `document_render.render`, with a raster basemap whose one
+tile is a sent asset, so nothing leaves the container. The PNG goes to /out;
+the last stdout line is a JSON report for the test on the host to read.
 """
 
-import http.server
+import base64
+import hashlib
 import json
 import struct
-import threading
 import zlib
 from pathlib import Path
 
 from patchright.sync_api import sync_playwright
 
-import map_snapshot
+import document_render
 
-SITE = Path("/site")
+BUNDLE = Path("/bundle/share-map.html")
 OUT = Path("/out")
 TILE_COLOR = (214, 96, 40)
-_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css",
-          ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
-          ".woff2": "font/woff2", ".webmanifest": "application/manifest+json"}
 
 
 def _solid_png(size, color):
@@ -39,65 +35,46 @@ def _solid_png(size, color):
             + chunk(b"IEND", b""))
 
 
-TILE = _solid_png(256, TILE_COLOR)
-
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        path = self.path.split("?", 1)[0]
-        if path.startswith("/tiles/"):
-            return self._send(TILE, "image/png")
-        if not path.startswith("/istota/"):
-            return self._send(b"not found", "text/plain", 404)
-        target = SITE / path[len("/istota/"):]
-        if target.is_dir():
-            target = target / "index.html"
-        if not target.is_file():
-            return self._send(b"not found", "text/plain", 404)
-        return self._send(target.read_bytes(),
-                          _TYPES.get(target.suffix, "application/octet-stream"))
-
-    def _send(self, body, content_type, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-def _payload(tiles):
+def _envelope(document, tiles):
+    viewport = {"width": 640, "height": 360}
     return {
-        "observation": {
-            "precision": "exact", "lat": 48.208176, "lon": 16.373819, "accuracy_m": 120.0,
-            "observed_at": "2026-10-16T14:02:00+00:00", "freshness": "fresh",
-            "owner_user_id": "alice",
+        "document": document,
+        "document_sha256": hashlib.sha256(document.encode()).hexdigest(),
+        "payload": {
+            "observation": {
+                "precision": "exact", "lat": 48.208176, "lon": 16.373819, "accuracy_m": 120.0,
+                "observed_at": "2026-10-16T14:02:00+00:00", "freshness": "fresh",
+                "owner_user_id": "alice",
+            },
+            "basemap": {
+                "provider": "osm", "kind": "raster", "light": tiles, "dark": tiles,
+                "attribution": "Test tiles",
+            },
+            "owner": "Alice",
+            "viewport": viewport,
         },
-        "basemap": {
-            "provider": "osm", "kind": "raster", "light": tiles, "dark": tiles,
-            "attribution": "Test tiles",
+        "assets": {
+            "tile.png": {"content_type": "image/png",
+                         "data_base64": base64.b64encode(_solid_png(256, TILE_COLOR)).decode()},
         },
-        "owner": "Alice",
+        "viewport": viewport,
+        "output": "png",
+        "timeout_ms": 15000,
     }
 
 
-def _draw(browser, render_url, payload):
-    checked, refusal = map_snapshot.validate_request(payload)
+def _draw(browser, raw):
+    envelope, refusal = document_render.validate_envelope(raw)
     assert refusal is None, refusal
-    context = browser.new_context(**map_snapshot.CONTEXT_OPTIONS)
+    context = browser.new_context(**document_render.context_options(envelope))
     try:
-        return map_snapshot.render(context, render_url, checked)
+        return document_render.render(context, envelope)
     finally:
         context.close()
 
 
 def main():
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    origin = f"http://127.0.0.1:{server.server_address[1]}"
-    render_url = f"{origin}/istota/map-snapshot/"
+    document = BUNDLE.read_text(encoding="utf-8")
     report = {}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -105,16 +82,16 @@ def main():
             args=["--no-sandbox", "--use-gl=swiftshader", "--enable-unsafe-swiftshader",
                   "--enable-webgl"],
         )
-        png, reason = _draw(browser, render_url, _payload(f"{origin}/tiles/{{z}}/{{x}}/{{y}}.png"))
-        report["drawn"] = reason
-        if png is not None:
-            (OUT / "map.png").write_bytes(png)
-        # Tiles from the metadata address: the guard must stop the render.
-        _, blocked = _draw(browser, render_url,
-                           _payload("http://169.254.169.254/{z}/{x}/{y}.png"))
-        report["blocked"] = blocked
+        # One URL with no placeholders: every tile is the one sent asset.
+        drawn = _draw(browser, _envelope(document, f"{document_render.RENDER_ORIGIN}/assets/tile.png"))
+        report["drawn"] = [drawn.reason, drawn.detail]
+        if drawn.data is not None:
+            (OUT / "map.png").write_bytes(drawn.data)
+        # Tiles from the metadata address over https, which the page's CSP
+        # allows: the guard must stop the render.
+        blocked = _draw(browser, _envelope(document, "https://169.254.169.254/{z}/{x}/{y}.png"))
+        report["blocked"] = blocked.reason
         browser.close()
-    server.shutdown()
     print(json.dumps(report))
 
 
