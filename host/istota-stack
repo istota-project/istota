@@ -27,7 +27,9 @@
 #   istota-stack latest-tag     print the name update --unsigned latest would install; changes nothing
 #   istota-stack rollback       back to the previous tag, if its image can run the database;
 #                               reprovisions the host as update does
-#   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force)
+#   istota-stack setup [args]   run `istota setup` for this VM (first install, or --force;
+#                               --desktop-app makes a local install moved into the Mac
+#                               app the app's: its login codes and settings)
 #   istota-stack setup --web [--local]
 #                               the first setup in a browser: prints an address and a
 #                               one-use code, then installs, builds and starts the stack
@@ -2200,11 +2202,12 @@ cmd_import_bare_metal() {
 # The module hands back the stack's .env and host.env copies (stack.env,
 # host.env, copied in by copy_stack_env_out) in a staging directory, as setup's
 # wizard does; they go in place here, except .env's tag lines, which name the
-# old VM's images and stay this VM's. Then what the restored config and
+# old VM's images and stay this VM's, as host.env's ISTOTA_DESKTOP_APP does. Then what the restored config and
 # profiles need is built and the host provisioned; the caller starts the stack.
 cmd_restore() {
-    local running owner=() tag rc=0 key saved=()
+    local running owner=() tag rc=0 key saved=() desktop
     tag="$(env_get "$ENV_FILE" ISTOTA_TAG)"
+    desktop="$(env_get "$HOST_ENV" ISTOTA_DESKTOP_APP)"
     [ -n "$tag" ] || die "no image yet: run \`istota-stack update <tag>\` first."
     running="$(compose ps -q)" || die "could not ask docker compose whether the stack is running; nothing was restored."
     if [ -n "$running" ]; then
@@ -2234,6 +2237,9 @@ cmd_restore() {
     fi
     if [ -e "${staging}/host.env" ] || [ -L "${staging}/host.env" ]; then
         install_staged "${staging}/host.env" "$HOST_ENV"
+        # Like the tag: this VM's images came from a release archive, whatever
+        # the backed-up install's did.
+        [ "$desktop" != 1 ] || file_set "$HOST_ENV" ISTOTA_DESKTOP_APP=1
         log "restored host.env from the workspace"
     fi
     render_devbox_compose "$tag"

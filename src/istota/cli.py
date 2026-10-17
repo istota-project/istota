@@ -5277,6 +5277,11 @@ def main():
         "--restore", metavar="DIR",
         help="Put back what --snapshot took, then remove DIR (container)",
     )
+    setup_parser.add_argument(
+        "--desktop-app", action="store_true",
+        help="Make an existing local install the Mac app's: login codes, host.env's "
+        "ISTOTA_DESKTOP_APP and the local cookie setting (container; needs --vm-dir)",
+    )
 
     # serve (combined local launcher: scheduler + web in one process)
     serve_parser = subparsers.add_parser(

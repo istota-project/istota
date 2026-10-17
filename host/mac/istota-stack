@@ -1117,6 +1117,20 @@ rebuild_if_lacking() {
     fi
 }
 
+# A VM made from an appliance is the Mac app's. One a restore or an import
+# filled holds another install's config and env files, made without the app:
+# the VM's `setup --desktop-app` adds what a new app install has (its login
+# codes, ISTOTA_DESKTOP_APP, the local cookie setting). A refusal leaves the
+# install with its own sign-in, which still works.
+become_the_apps() {
+    [ -n "$(state_get APPLIANCE)" ] || return 0
+    local rc=0
+    vm_stack setup --desktop-app </dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "WARNING: \`istota-stack setup --desktop-app\` failed (exit ${rc}); this install keeps its own sign-in, and the app opens its login page."
+    fi
+}
+
 # host.env's LOCAL_FORWARD_PORT, the port Lima forwards, which setup publishes
 # nginx and its page on. Written only when the VM's differs: the read takes no
 # lock, and a write waits up to 600 s behind a running `setup --web`.
@@ -1591,6 +1605,7 @@ cmd_restore() {
     printf '%s\n' "$key" | run_step "restore the backups" "istota-stack ${restore[*]}" vm_stack "${restore[@]}"
     # The backup's host.env may predate the key, or name an older VM's port.
     write_forward_port
+    become_the_apps
     rebuild_if_lacking
     run_step "start the stack" "systemctl enable --now istota-stack" \
         vm systemctl enable --now istota-stack </dev/null
@@ -1904,6 +1919,7 @@ cmd_import_standalone() {
 
     # The import installed the old install's host.env over the one create wrote.
     write_forward_port
+    become_the_apps
     log "copying the files of ${from} into ${folder}"
     copy_workspace "$from" "$folder"
     run_step "start the stack" "systemctl enable --now istota-stack" \

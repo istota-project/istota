@@ -1759,6 +1759,18 @@ class TestRestore:
         assert host == "STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\n"
         assert not list(fx.stack.glob(".restore.*")), "the staging directory was left behind"
 
+    def test_the_mac_apps_vm_stays_the_mac_apps(self, fx):
+        """ISTOTA_DESKTOP_APP says this VM's images came from a release archive,
+        a fact about the VM and not the backed-up install, so it is kept as the
+        tag is: without it a config needing Claude Code rebuilds the release."""
+        (fx.stack / "host.env").write_text("STORAGE=host-folder\nINGRESS=local\nISTOTA_DESKTOP_APP=1\n")
+        result = self._restore(
+            fx, STUB_STACK_DOWN="1",
+            STUB_RESTORED_HOST_ENV="STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        host = (fx.stack / "host.env").read_text()
+        assert host == "STORAGE=host-folder\nINGRESS=local\nHOST_LOOPBACK_ALLOW=11434\nISTOTA_DESKTOP_APP=1\n"
+
     def test_without_stack_files_the_vms_own_stay(self, fx):
         env_before = fx.env_text()
         host_before = (fx.stack / "host.env").read_text()

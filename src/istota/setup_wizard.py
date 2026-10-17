@@ -344,6 +344,8 @@ def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
     if getattr(args, "snapshot", None) or getattr(args, "restore", None):
         return run_rerun_snapshot(args, out=out)
+    if getattr(args, "desktop_app", False):
+        return run_desktop_app(args, out=out)
     if getattr(args, "web", False) or getattr(args, "local", False):
         from .webui import setup_app  # noqa: PLC0415 - FastAPI only for the web setup
 
@@ -816,11 +818,18 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
         "ISTOTA_SECRETS_DIR": "./secrets",
         "NGINX_PUBLISH": plain,
         "NGINX_PUBLISH_TLS": tls,
-        # `local` is plain http on loopback: Secure protects nothing there, and
-        # Safari and WKWebView drop a Secure cookie from http://localhost. Derived
-        # on every run, so a move off `local` writes 0 again.
-        "ISTOTA_WEB_INSECURE_COOKIES": "1" if a.ingress == "local" else "0",
+        "ISTOTA_WEB_INSECURE_COOKIES": web_insecure_cookies(a.ingress),
     }
+
+
+def web_insecure_cookies(ingress: str) -> str:
+    """``.env``'s ISTOTA_WEB_INSECURE_COOKIES for an ingress mode.
+
+    `local` is plain http on loopback: Secure protects nothing there, and
+    Safari and WKWebView drop a Secure cookie from http://localhost. Derived on
+    every run, so a move off `local` writes 0 again.
+    """
+    return "1" if ingress == "local" else "0"
 
 
 #: The remote's name in the ``rclone.conf`` setup stages, and ``host.env``'s
@@ -2172,4 +2181,93 @@ def run_rerun_snapshot(args, *, out) -> int:
     else:
         restore_rerun_snapshot(Path(restore), data_dir, secrets_dir)
         out(f"Put the setup files back from {restore}.")
+    return 0
+
+
+# ===========================================================================
+# An install moved into the Mac app
+# ===========================================================================
+
+
+def adopt_desktop_app(data_dir: Path, vm_dir: Path, *, out) -> None:
+    """Give a local install moved into the Mac app what the app's own setup
+    writes, added to what is there.
+
+    The Mac's `istota-stack restore` and `import-standalone`, made from an
+    appliance, run this once the backup or the standalone install is in
+    place: host.env's ISTOTA_DESKTOP_APP, `.env`'s session-cookie value for
+    local ingress (`web_insecure_cookies`), and `local_code` added to
+    `[web] auth` (`ContainerAnswers.web_auth`'s rule for a new install). The
+    config goes through apply's planner, so it is validated by loading it and
+    the old file is kept as a backup. A config that cannot take the codes is
+    left as it is and the reason printed: the install keeps its own sign-in,
+    and the env files still change, since neither needs the codes.
+    """
+    host_path, env_path = vm_dir / "host.env", vm_dir / ".env"
+    host_text = host_path.read_text(encoding="utf-8") if host_path.is_file() else ""
+    ingress = _host_env_value(host_text, "INGRESS")
+    if ingress != "local":
+        raise SetupError(
+            f"host.env's INGRESS is {ingress or 'not set'}; only a local install, on this Mac's "
+            "loopback, can be the Mac app's. Nothing was changed."
+        )
+    config_path = data_dir / "config" / "config.toml"
+    if not config_path.is_file():
+        raise SetupError(f"There is no {config_path}: no install to move into the Mac app. Nothing was changed.")
+    import tomllib  # noqa: PLC0415
+
+    try:
+        document = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise SetupError(f"{config_path} does not parse ({exc}). Nothing was changed.") from None
+
+    host_path.write_text(merge_env_text(host_text, {"ISTOTA_DESKTOP_APP": "1"}, _HOST_ENV_HEADER), encoding="utf-8")
+    out("  host.env: ISTOTA_DESKTOP_APP=1")
+    env_text = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    cookies = {"ISTOTA_WEB_INSECURE_COOKIES": web_insecure_cookies(ingress)}
+    env_path.write_text(merge_env_text(env_text, cookies, _STACK_ENV_HEADER), encoding="utf-8")
+    out(f"  .env: ISTOTA_WEB_INSECURE_COOKIES={cookies['ISTOTA_WEB_INSECURE_COOKIES']}")
+    _add_login_codes(document, config_path, out=out)
+
+
+def _add_login_codes(document: dict, config_path: Path, *, out) -> None:
+    from istota import apply  # noqa: PLC0415
+    from istota.config import WEB_AUTH_METHODS  # noqa: PLC0415
+
+    keeps = "this install keeps its own sign-in"
+    web = document.setdefault("web", {})
+    raw = web.get("auth", ["nextcloud"]) if isinstance(web, dict) else None
+    methods = raw.split(",") if isinstance(raw, str) else raw
+    if not isinstance(methods, list) or not all(isinstance(m, str) for m in methods):
+        out(f"  Not turning on the app's login codes: [web] auth is not a list of methods; {keeps}.")
+        return
+    methods = [m.strip().lower() for m in methods if m.strip()]
+    if "local_code" in methods:
+        out("  [web] auth already has local_code.")
+        return
+    if "none" in methods or not set(methods) <= set(WEB_AUTH_METHODS):
+        out(f"  Not turning on the app's login codes: [web] auth is {methods}; {keeps}.")
+        return
+    web["auth"] = ["local_code", *methods]
+    try:
+        section = apply.plan_config(document, config_path, backup=RERUN_CONFIG_BACKUPS)
+    except apply.PlanError as exc:
+        out(f"  Not turning on the app's login codes: {exc}; {keeps}.")
+        return
+    if section.changed and section.write is not None:
+        section.write()
+    out(f"  [web] auth: {web['auth']}")
+
+
+def run_desktop_app(args, *, out) -> int:
+    """``istota setup --desktop-app --vm-dir /vm``, run as uid 10001 by
+    ``istota-stack setup --desktop-app``, which installs the staged files."""
+    if getattr(args, "web", False) or getattr(args, "force", False):
+        raise SetupError("--desktop-app changes an existing install by itself; it takes no --web or --force.")
+    setup_shape(args)
+    if not getattr(args, "vm_dir", None):
+        raise SetupError("--desktop-app needs --vm-dir, whose host.env and .env it changes.")
+    data_dir = Path(getattr(args, "data_dir", None) or CONTAINER_DATA_DIR)
+    out("Making this install the Mac app's:")
+    adopt_desktop_app(data_dir, Path(args.vm_dir), out=out)
     return 0

@@ -286,7 +286,7 @@ if verb == "shell":
         vm["config"] = True
         vm["admin"] = state.get("admin", "alice")
         save()
-        sys.exit(0)
+        sys.exit(state.get("setup_rc", 0))
     if stack[:1] == ["check-image"]:
         rcs = state.get("check_image_rcs", [0])
         rc = rcs.pop(0) if rcs else 0
@@ -2629,6 +2629,24 @@ class TestRestoreFromARelease:
         assert calls[check + 1] == ["local-layers"]
         assert [c for c in calls[check:] if c[:1] == ["update"]] == []
 
+    def test_the_restored_install_becomes_the_apps(self, made):
+        """The backup is a command-line install's: its config has no login
+        codes and its .env an older cookie setting. `setup --desktop-app` adds
+        what a new app install has, before the stack starts."""
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        vm = made.vm_calls()
+        adopt = vm.index(["istota-stack", "setup", "--desktop-app"])
+        assert vm.index(["istota-stack", "restore"]) < adopt
+        assert adopt < vm.index(["systemctl", "enable", "--now", "istota-stack"])
+
+    def test_an_install_that_cannot_become_the_apps_still_starts(self, made):
+        made.set(setup_rc=1)
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "WARNING" in result.stdout and "setup --desktop-app" in result.stdout
+        assert ["systemctl", "enable", "--now", "istota-stack"] in made.vm_calls()
+
     def test_a_release_that_does_not_verify_is_refused_before_the_old_vm_goes(self, made, release):
         release.file("istota-appliance-TAG.raw.zst").write_bytes(b"another disk\n")
         result = made.run("restore", stdin="istota\n")
@@ -2642,6 +2660,18 @@ class TestImportStandaloneTakesARelease:
         # No standalone install here: refused before any VM, and not for the option.
         assert result.returncode == 78, result.stdout + result.stderr
         assert "no standalone install" in result.stderr
+
+    def test_the_imported_install_becomes_the_apps(self, mac, release, standalone):
+        result = mac.run("import-standalone", "--appliance", str(release.dir), "--signing-key", release.public)
+        assert result.returncode == 0, result.stdout + result.stderr
+        vm = mac.vm_calls()
+        adopt = vm.index(["istota-stack", "setup", "--desktop-app"])
+        assert vm.index(["istota-stack", "import-standalone", STAGED, "--hostname", "localhost:8080"]) < adopt
+        assert adopt < vm.index(["systemctl", "enable", "--now", "istota-stack"])
+
+    def test_an_import_from_a_release_tag_is_left_as_it_was(self, mac, standalone):
+        assert _import(mac).returncode == 0
+        assert not any(c[:2] == ["setup", "--desktop-app"] for c in mac.stack_calls())
 
 
 class TestTheSetupInTheApp:
