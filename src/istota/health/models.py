@@ -56,6 +56,8 @@ class HealthContext:
     uploaded lab reports. ``framework_db_path`` is the path to istota.db
     (where the encrypted ``secrets`` table holding Garmin tokens lives)
     — defaults to ``None`` so existing callers keep working.
+    ``user_root`` is the configured ``{mount}/Users/{user_id}``, resolved: the
+    one directory a walk into the uploads tree may open following links.
     """
     user_id: str
     workspace_root: Path
@@ -63,6 +65,7 @@ class HealthContext:
     db_path: Path
     uploads_dir: Path
     framework_db_path: Path | None = None
+    user_root: Path | None = None
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

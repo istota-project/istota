@@ -29,7 +29,7 @@ from fastapi import (
 )
 from fastapi import File as FastAPIFile
 from fastapi import Form
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from istota.lib.filenames import filename_parts
 from istota.workspace.listing import ListingError
@@ -57,6 +57,7 @@ from istota.health.units import (
 )
 from istota.notifications.resolvers import health_panel as notification_health_panel
 from istota.lib.timestamps import iso_now as _now
+from istota.webui.fd_response import fd_file_response
 from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
     require_auth,  # re-exported: `webui/app.py` keys `dependency_overrides` on it
@@ -978,6 +979,7 @@ async def api_extract_request(
 @router.get("/panels/{panel_id}/source")
 async def api_panel_source(
     panel_id: int,
+    request: Request,
     ctx: HealthContext = Depends(get_user_context),
 ):
     """Stream the original uploaded image/PDF.
@@ -994,18 +996,25 @@ async def api_panel_source(
         raise HTTPException(404, "panel not found")
     if not panel.source_file:
         raise HTTPException(404, "no source file")
-    candidate = (ctx.uploads_dir / panel.source_file).resolve()
-    uploads_root = ctx.uploads_dir.resolve()
+    fd = await _open_upload_or_raise(ctx, panel.source_file)
+    return fd_file_response(
+        fd,
+        filename=Path(panel.source_file).name,
+        media_type=panel.source_mime or "application/octet-stream",
+        disposition_type="inline",
+        request_headers=request.headers,
+    )
+
+
+async def _open_upload_or_raise(ctx: HealthContext, rel: str) -> int:
+    """The download routes' open: an fd on the upload, or their 400 / 404."""
     try:
-        candidate.relative_to(uploads_root)
+        fd = await asyncio.to_thread(health_documents.open_upload, ctx, rel)
     except ValueError:
         raise HTTPException(400, "invalid source path")
-    if not candidate.is_file():
+    if fd is None:
         raise HTTPException(404, "source file missing")
-    return FileResponse(
-        candidate,
-        media_type=panel.source_mime or "application/octet-stream",
-    )
+    return fd
 
 
 # ---- Biomarker trends -----------------------------------------------------
@@ -2819,6 +2828,7 @@ async def api_get_document(
 @router.get("/documents/{document_id}/file")
 async def api_document_file(
     document_id: int,
+    request: Request,
     ctx: HealthContext = Depends(get_user_context),
 ):
     """Stream a document's bytes. Auth-gated; path resolved server-side.
@@ -2837,18 +2847,13 @@ async def api_document_file(
     doc = await asyncio.to_thread(_query)
     if doc is None:
         raise HTTPException(404, "document not found")
-    try:
-        candidate = health_documents.resolve_document_path(ctx, doc)
-    except ValueError:
-        raise HTTPException(400, "invalid source path")
-    if not candidate.is_file():
-        raise HTTPException(404, "source file missing")
-    return FileResponse(
-        candidate,
-        media_type=doc.mime or "application/octet-stream",
+    fd = await _open_upload_or_raise(ctx, doc.stored_path)
+    return fd_file_response(
+        fd,
         filename=doc.filename,
+        media_type=doc.mime or "application/octet-stream",
         headers={"X-Content-Type-Options": "nosniff"},
-        content_disposition_type="attachment",
+        request_headers=request.headers,
     )
 
 

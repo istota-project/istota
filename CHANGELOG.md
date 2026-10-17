@@ -113,6 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Files uses your assistant's own name in the robot icon's tooltips, the "How … reaches your files" panel and its notes, instead of always saying "Istota".
 - Invoice PDFs in the web app no longer follow a link placed in your money folder (ISSUE-775). A link there let a download serve a file from outside your workspace, including another user's invoices or the web app's own keys, and let a void rename or delete a file outside it. Downloading, listing, voiding and generating now use only real files inside your invoice folder, and the web app refuses an invoice folder setting that points outside the money folder.
 - A file opened or downloaded from web chat is now always the file that was checked (ISSUE-776). A task could swap the file for a link just after the check and be served a file from outside your workspace. A link inside your workspace is no longer followed either, and audio and video still seek.
+- A lab report's source file or a health document opened from the web app is now always the file that was checked (ISSUE-781). A task could swap the file, or a folder above it, for a link and be served a file from outside your workspace. A link anywhere in the health uploads folder is no longer followed, including one inside your workspace.
 
 ## [0.46.0] - 2026-10-14
 

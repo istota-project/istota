@@ -6,9 +6,9 @@ the per-user health DB (``documents`` + ``document_links``). Kept out of
 share the same code path verbatim rather than reimplementing containment
 and sanitisation.
 
-The parent is ``uploads_dir`` — the same root ``/panels/{id}/source`` already
-guards — so one containment rule (``relative_to(uploads_dir)``) covers both
-panel sources and documents.
+The parent is ``uploads_dir``, the same tree panel sources live in, so one
+open covers both: ``open_upload``, a no-follow walk from the user root
+(ISSUE-781).
 """
 
 from __future__ import annotations
@@ -175,14 +175,70 @@ def uploads_walk(ctx: HealthContext, *parts: str) -> tuple[Path, list[str]]:
     opened without following a link: the bot directory was checked when the
     context was resolved, and a task can still swap it for a link afterwards.
     An ``uploads_dir`` configured outside the workspace is its own root.
+
+    With the configured user root known (``resolve_for_user`` sets it), the
+    walk starts there instead (ISSUE-781). The bot directory may be a link to
+    elsewhere in the user's tree, and the context resolves through it, so the
+    parent of the resolved workspace can be a directory the user writes; the
+    walk opens its anchor following links, and only the user root may be.
     """
     uploads = Path(ctx.uploads_dir)
     workspace = Path(ctx.workspace_root)
+    if ctx.user_root is not None:
+        try:
+            rel = uploads.relative_to(ctx.user_root)
+        except ValueError:
+            pass
+        else:
+            return Path(ctx.user_root), [*rel.parts, *parts]
     try:
         rel = uploads.relative_to(workspace)
     except ValueError:
         return uploads, list(parts)
     return workspace.parent, [workspace.name, *rel.parts, *parts]
+
+
+def open_upload(ctx: HealthContext, rel: str) -> int | None:
+    """A read-only fd on the regular file at ``uploads_dir/rel``, or None.
+
+    For the download routes, which serve this fd rather than a path a second
+    open would resolve again (ISSUE-781): every directory from the walk's
+    anchor down is opened ``O_NOFOLLOW`` and the leaf is ``O_NOFOLLOW`` plus
+    ``S_ISREG``. Raises :class:`ValueError` for a stored path that is not a
+    plain relative one, or one the walk refused because a component is a
+    link; None means missing or not a regular file. The caller closes the fd.
+    """
+    from istota.sandbox.attachment_source import open_regular_at  # noqa: PLC0415
+    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415
+
+    parts = (rel or "").split("/")
+    if rel.startswith("/") or any(p in ("", ".", "..") for p in parts):
+        raise ValueError("invalid source path")
+    *dirs, leaf = parts
+    root, walk = uploads_walk(ctx, *dirs)
+    dir_fd = open_overlay_dir(root, *walk)
+    fd = None
+    if dir_fd is not None:
+        try:
+            fd = open_regular_at(dir_fd, leaf)
+        finally:
+            os.close(dir_fd)
+    if fd is None and _walk_meets_a_link(root, [*walk, leaf]):
+        raise ValueError("invalid source path")
+    return fd
+
+
+def _walk_meets_a_link(root: Path, parts: list[str]) -> bool:
+    """Whether a refused walk was refused at a link. Picks the status only."""
+    current = root
+    for part in parts:
+        current = current / part
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return True
+        except OSError:
+            return False
+    return False
 
 
 def _clear_document_dir_at(dir_fd: int) -> None:

@@ -7,6 +7,7 @@ facade. Mirrors :mod:`istota.location._loader` and :mod:`istota.feeds._loader`.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from istota import module_loader
@@ -47,8 +48,10 @@ def resolve_for_user(
     framework_db = getattr(istota_config, "db_path", None)
     ctx = synthesize_health_context(user_id, workspace, db_path=db_override)
     if framework_db:
-        from dataclasses import replace
         ctx = replace(ctx, framework_db_path=Path(framework_db))
+    user_root = istota_config.workspace_root(user_id)
+    if user_root is not None:
+        ctx = replace(ctx, user_root=Path(user_root).resolve())
     return ctx
 
 
