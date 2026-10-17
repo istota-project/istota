@@ -901,6 +901,8 @@ def _music_ready(fake):
     fake.config.servarr.defaults = {"lidarr": {"quality_profile": "Any",
                                                "metadata_profile": "Standard"}}
     fake.json("lidarr", "artist", fixture("artist_added.json"), method="POST", status=201)
+    fake.json("lidarr", "artist/3", _lib_artist())
+    fake.json("lidarr", "artist/editor", [_lib_artist()], method="PUT", status=202)
     fake.json("lidarr", "album/monitor", [_listed_album(monitored=True)], method="PUT",
               status=202)
     fake.json("lidarr", "command", fixture("command_album_search.json"), method="POST",
@@ -911,9 +913,20 @@ def _new_artist_album(fake, *listed):
     """An album whose artist is not in the library; `listed` scripts the
     ``album?foreignAlbumId=`` answers, the first being the check before any write."""
     _music_ready(fake)
+    # What Lidarr 3.1 answers for the skill's body: `addOptions.monitor: none`
+    # wins over the body's `monitored: true`.
+    fake.json("lidarr", "artist", _artist_added_unmonitored(), method="POST", status=201)
     fake.json("lidarr", "album/lookup", fixture("album_lookup.json"))
     fake.json("lidarr", "artist/lookup", [_new_artist()])
     fake.on("lidarr", "GET", "album", *[httpx.Response(200, json=rows) for rows in listed])
+
+
+def _artist_added_unmonitored():
+    return dict(fixture("artist_added.json"), monitored=False, monitorNewItems="none")
+
+
+def _editor_bodies(fake):
+    return [_body(r) for r in fake.sent("lidarr", "artist/editor")]
 
 
 def _writes_in_order(fake):
@@ -1006,13 +1019,20 @@ class TestSearchMusic:
 
 
 class TestAddAlbum:
-    def test_a_new_artist_is_added_unmonitored_then_the_album_monitored_and_searched(self, arr):
+    def test_a_new_artist_is_added_then_monitored_then_the_album_monitored_and_searched(self, arr):
         _new_artist_album(arr, [], [], [_listed_album()])
         code, envelope = run("add", "--kind", "album", "--mbid", NEW_ALBUM)
         assert code == 0, envelope
         assert _writes_in_order(arr) == [
-            ("POST", "artist"), ("PUT", "album/monitor"), ("POST", "command"),
+            ("POST", "artist"), ("PUT", "artist/editor"), ("PUT", "album/monitor"),
+            ("POST", "command"),
         ]
+        # Lidarr stores the new artist unmonitored, and Wanted lists an album
+        # only when its artist is monitored too (ISSUE-773).
+        assert _editor_bodies(arr) == [{"artistIds": [7], "monitored": True,
+                                        "monitorNewItems": "none"}]
+        assert envelope["artist_monitored"] is True
+        assert envelope["artist_monitored_now"] is True
         artist = _body(arr.sent("lidarr", "artist")[0])
         assert artist["foreignArtistId"] == NEW_ARTIST
         assert artist["qualityProfileId"] == 1 and artist["metadataProfileId"] == 1
@@ -1040,7 +1060,8 @@ class TestAddAlbum:
         _new_artist_album(arr, [], [_listed_album()])
         code, envelope = run("add", "--kind", "album", "--mbid", NEW_ALBUM, "--no-search")
         assert code == 0, envelope
-        assert _writes_in_order(arr) == [("POST", "artist"), ("PUT", "album/monitor")]
+        assert _writes_in_order(arr) == [("POST", "artist"), ("PUT", "artist/editor"),
+                                         ("PUT", "album/monitor")]
         assert envelope["searching"] is False and envelope["search_command_id"] is None
 
     def test_the_poll_gives_up_and_says_the_artist_was_added(self, arr):
@@ -1050,6 +1071,7 @@ class TestAddAlbum:
         assert envelope["reason"] == "album_not_listed"
         assert envelope["partial"] is True and envelope["artist_added"] is True
         assert envelope["album_monitored"] is False and envelope["search_sent"] is False
+        assert envelope["artist_monitored"] is False
         assert envelope["artist_library_id"] == 7
         assert _writes_in_order(arr) == [("POST", "artist")]
         assert 0 < sum(arr.sleeps) <= library.ALBUM_POLL_SECONDS
@@ -1078,9 +1100,21 @@ class TestAddAlbum:
         assert code == 1
         assert envelope["reason"] == "api_error"
         assert envelope["partial"] is True and envelope["artist_added"] is True
+        assert envelope["artist_monitored"] is True
         assert envelope["album_monitored"] is False and envelope["search_sent"] is False
         assert len([r for r in arr.sent("lidarr", "album/monitor") if r.method == "PUT"]) == 1
         assert arr.sent("lidarr", "command") == []
+        assert "the artist is monitored" in envelope["error"]
+
+    def test_a_failure_monitoring_the_new_artist_is_partial(self, arr):
+        _new_artist_album(arr, [], [_listed_album()])
+        arr.on("lidarr", "PUT", "artist/editor", httpx.Response(500, text="boom"))
+        code, envelope = run("add", "--kind", "album", "--mbid", NEW_ALBUM)
+        assert code == 1
+        assert envelope["partial"] is True and envelope["artist_added"] is True
+        assert envelope["artist_monitored"] is False and envelope["album_monitored"] is False
+        assert _writes_in_order(arr) == [("POST", "artist"), ("PUT", "artist/editor")]
+        assert "same add again" in envelope["error"]
 
     def test_an_artist_already_present_monitors_the_album_with_no_artist_add(self, arr):
         _music_ready(arr)
@@ -1090,6 +1124,7 @@ class TestAddAlbum:
         code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
         assert code == 0, envelope
         assert _writes_in_order(arr) == [("PUT", "album/monitor"), ("POST", "command")]
+        assert envelope["artist_monitored"] is True and envelope["artist_monitored_now"] is False
         assert arr.sent("lidarr", "artist/lookup") == []
         assert arr.sent("lidarr", "tag") == []
         assert _body(arr.sent("lidarr", "command")[0])["albumIds"] == [21]
@@ -1097,6 +1132,68 @@ class TestAddAlbum:
         assert envelope["artist_library_id"] == 3
         # The no-retag rule: an existing artist gets no req tag, so say so.
         assert envelope["tag"] is None and "requests" in envelope["note"]
+
+    def test_an_unmonitored_library_artist_is_monitored_with_its_new_albums_as_they_were(
+            self, arr):
+        _music_ready(arr)
+        arr.json("lidarr", "artist/3", dict(_lib_artist(), monitored=False))
+        arr.json("lidarr", "album/lookup", fixture("album_library.json"))
+        arr.json("lidarr", "album", fixture("album_library.json"))
+        code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
+        assert code == 0, envelope
+        assert _writes_in_order(arr) == [("PUT", "artist/editor"), ("PUT", "album/monitor"),
+                                         ("POST", "command")]
+        # No monitorNewItems: the artist's own setting for new releases stands.
+        assert _editor_bodies(arr) == [{"artistIds": [3], "monitored": True}]
+        assert envelope["artist_monitored"] is True and envelope["artist_monitored_now"] is True
+        assert envelope["artist_added"] is False
+        assert "already monitored are wanted now too" in envelope["note"]
+
+    def test_a_monitored_album_under_an_unmonitored_artist_is_finished_not_present(self, arr):
+        _music_ready(arr)
+        arr.json("lidarr", "artist/3", dict(_lib_artist(), monitored=False))
+        arr.json("lidarr", "album/lookup", fixture("album_library.json"))
+        arr.json("lidarr", "album", [dict(fixture("album_library.json")[0], monitored=True)])
+        code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
+        assert code == 0, envelope
+        assert _writes_in_order(arr) == [("PUT", "artist/editor"), ("POST", "command")]
+        assert envelope["added"] is True and "already_present" not in envelope
+        assert envelope["artist_monitored_now"] is True and envelope["album_monitored"] is True
+
+    def test_a_failure_monitoring_a_library_artist_changes_nothing_else(self, arr):
+        _music_ready(arr)
+        arr.json("lidarr", "artist/3", dict(_lib_artist(), monitored=False))
+        arr.json("lidarr", "album/lookup", fixture("album_library.json"))
+        arr.json("lidarr", "album", fixture("album_library.json"))
+        arr.on("lidarr", "PUT", "artist/editor", httpx.Response(500, text="boom"))
+        code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
+        assert code == 1 and "partial" not in envelope
+        assert _writes_in_order(arr) == [("PUT", "artist/editor")]
+
+    def test_an_album_failure_after_monitoring_a_library_artist_is_partial(self, arr):
+        _music_ready(arr)
+        arr.json("lidarr", "artist/3", dict(_lib_artist(), monitored=False))
+        arr.json("lidarr", "album/lookup", [dict(fixture("album_library.json")[0],
+                                                 artist={"foreignArtistId": LIB_ARTIST})])
+        arr.json("lidarr", "album", fixture("album_library.json"))
+        arr.on("lidarr", "PUT", "album/monitor", httpx.Response(500, text="boom"))
+        code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
+        assert code == 1
+        assert envelope["partial"] is True and envelope["artist_added"] is False
+        assert envelope["artist_monitored_now"] is True and envelope["album_monitored"] is False
+        assert "already monitored are wanted too" in envelope["error"]
+        assert "same add again" in envelope["error"]
+
+    def test_an_ambiguous_artist_monitor_names_the_artist_lookup(self, arr):
+        _music_ready(arr)
+        arr.json("lidarr", "artist/3", dict(_lib_artist(), monitored=False))
+        arr.json("lidarr", "album/lookup", [dict(fixture("album_library.json")[0],
+                                                 artist={"foreignArtistId": LIB_ARTIST})])
+        arr.json("lidarr", "album", fixture("album_library.json"))
+        arr.on("lidarr", "PUT", "artist/editor", httpx.ReadTimeout("no answer"))
+        code, envelope = run("add", "--kind", "album", "--mbid", LIB_ALBUM)
+        assert envelope["reason"] == "outcome_unknown"
+        assert envelope["lookup"] == f"search --kind artist --mbid {LIB_ARTIST}"
 
     def test_a_search_failure_after_monitoring_is_partial(self, arr):
         _music_ready(arr)
