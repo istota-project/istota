@@ -648,6 +648,90 @@ class TestAddFilm:
         assert envelope["tag"] == "req-bob"
 
 
+def _unmonitored(kind_fixture, index=0, **extra):
+    return [dict(fixture(kind_fixture)[index], monitored=False, **extra)]
+
+
+class TestMonitorExisting:
+    """An item already in the library but unmonitored is the stack's own way of
+    saying nobody wants it yet; a request monitors it, tags it and searches."""
+
+    def _film(self, fake):
+        _film_ready(fake)
+        fake.json("radarr", "movie/lookup", _unmonitored("movie_lookup_library.json"))
+        fake.json("radarr", "movie/editor", [], method="PUT", status=202)
+        fake.json("radarr", "command", fixture("command_album_search.json"), method="POST",
+                  status=201)
+
+    def _show(self, fake):
+        _show_ready(fake)
+        fake.json("sonarr", "series/lookup", _unmonitored("series_lookup.json", 1))
+        fake.json("sonarr", "seasonpass", {}, method="POST", status=202)
+        fake.json("sonarr", "series/editor", [], method="PUT", status=202)
+        fake.json("sonarr", "command", fixture("command_album_search.json"), method="POST",
+                  status=201)
+
+    def test_a_film_is_monitored_tagged_and_searched(self, arr):
+        self._film(arr)
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603")
+        assert code == 0, envelope
+        assert _writes_in_order(arr) == [("PUT", "movie/editor"), ("POST", "command")]
+        assert _body(arr.sent("radarr", "movie/editor")[0]) == {
+            "movieIds": [12], "monitored": True, "tags": [1], "applyTags": "add"}
+        assert _body(arr.sent("radarr", "command")[0]) == {"name": "MoviesSearch",
+                                                           "movieIds": [12]}
+        assert envelope["added"] is False and envelope["already_present"] is True
+        assert envelope["monitored_now"] is True and envelope["library_id"] == 12
+        assert envelope["tag"] == "req-alice" and envelope["searching"] is True
+        assert envelope["search_command_id"] == 101
+
+    def test_no_search_only_monitors(self, arr):
+        self._film(arr)
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603", "--no-search")
+        assert code == 0, envelope
+        assert _writes_in_order(arr) == [("PUT", "movie/editor")]
+        assert envelope["searching"] is False and envelope["monitored_now"] is True
+
+    def test_a_show_gets_the_monitor_mode_then_the_tag_then_a_search(self, arr):
+        self._show(arr)
+        code, envelope = run("add", "--kind", "show", "--tvdb", "324570", "--monitor",
+                             "lastSeason")
+        assert code == 0, envelope
+        assert _writes_in_order(arr) == [("POST", "seasonpass"), ("PUT", "series/editor"),
+                                         ("POST", "command")]
+        assert _body(arr.sent("sonarr", "seasonpass")[0]) == {
+            "series": [{"id": 5, "monitored": True}],
+            "monitoringOptions": {"monitor": "lastSeason"}}
+        assert _body(arr.sent("sonarr", "series/editor")[0]) == {
+            "seriesIds": [5], "tags": [1], "applyTags": "add"}
+        assert _body(arr.sent("sonarr", "command")[0]) == {"name": "SeriesSearch",
+                                                           "seriesId": 5}
+        assert envelope["monitored_now"] is True and envelope["monitor"] == "lastSeason"
+
+    def test_monitor_none_on_an_unmonitored_show_writes_nothing(self, arr):
+        self._show(arr)
+        code, envelope = run("add", "--kind", "show", "--tvdb", "324570", "--monitor", "none")
+        assert code == 1 and envelope["reason"] == "invalid_arguments"
+        assert _writes(arr) == []
+
+    def test_a_failed_search_says_it_is_monitored_and_names_search_now(self, arr):
+        self._film(arr)
+        arr.json("radarr", "command", {"message": "boom"}, method="POST", status=500)
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603")
+        assert code == 1
+        assert envelope["partial"] is True and envelope["monitored_now"] is True
+        assert envelope["search_sent"] is False
+        assert "search-now --kind film --library-id 12" in envelope["error"]
+
+    def test_a_requester_can_then_search_now_their_request(self, arr, monkeypatch):
+        self._film(arr)
+        arr.json("radarr", "tag", [{"id": 5, "label": "req-bob"}])
+        monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+        code, envelope = run("add", "--kind", "film", "--tmdb", "603")
+        assert code == 0, envelope
+        assert _body(arr.sent("radarr", "movie/editor")[0])["tags"] == [5]
+
+
 class TestReqTags:
     def test_a_missing_tag_is_created_once(self, arr):
         _film_ready(arr)
