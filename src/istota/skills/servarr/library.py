@@ -970,6 +970,10 @@ def _partial(exc: ServarrError, progress: dict) -> ServarrError:
     done = []
     if progress.get("artist_added"):
         done.append("the artist was added to lidarr with no albums monitored")
+    if progress.get("artist_monitored_now"):
+        done.append("the artist is monitored" if progress.get("artist_added") else
+                    "the artist is monitored now, so any of its albums that were already "
+                    "monitored are wanted too")
     if progress.get("album_monitored"):
         done.append("the album is monitored")
     if exc.reason == "outcome_unknown" and progress.get("album_monitored"):
@@ -989,19 +993,24 @@ def _partial(exc: ServarrError, progress: dict) -> ServarrError:
                         exc.reason, app="lidarr", **extra)
 
 
-def _album_already_present(client: ArrClient, album: dict, listed: dict) -> dict:
-    """A monitored library album; who requested it is read off its artist."""
+def _library_artist(client: ArrClient, artist_id: int | None) -> dict:
+    """The artist's library row, or ``{}`` when there is none."""
+    if artist_id is None:
+        return {}
+    try:
+        found = client.request("GET", f"artist/{artist_id}")
+    except ServarrError as exc:
+        if exc.reason != "not_found":
+            raise
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def _album_already_present(client: ArrClient, album: dict, listed: dict,
+                           artist: dict) -> dict:
+    """A monitored album under a monitored artist; who requested it is read
+    off the artist."""
     item = {**album, **listed}
-    artist = {}
-    artist_id = _positive_id(listed.get("artistId"))
-    if artist_id is not None:
-        try:
-            found = client.request("GET", f"artist/{artist_id}")
-        except ServarrError as exc:
-            if exc.reason != "not_found":
-                raise
-            found = None
-        artist = found if isinstance(found, dict) else {}
     return {
         "status": "ok", "app": "lidarr", "kind": "album", "added": False,
         "already_present": True, "item": _album(item),
@@ -1015,13 +1024,21 @@ def _add_album(run: Run, args, ident: str) -> dict:
     """One album: monitor and search it, adding its artist first if need be.
 
     Every check and read happens before the first write. A new artist is added
-    unmonitored (``monitor: none``) and tagged; an artist already in the
-    library is not tagged (a monitored existing artist is never retagged), so such an
-    album does not show in `requests`, and the envelope says so.
+    with no albums monitored (``monitor: none``) and tagged; an artist already in
+    the library is not tagged (a monitored existing artist is never retagged), so
+    such an album does not show in `requests`, and the envelope says so.
+
+    Lidarr's Wanted lists an album only when its artist is monitored too, and
+    it stores a new artist unmonitored under ``monitor: none`` whatever the
+    body's ``monitored`` says. So the artist is monitored with ``artist/editor``
+    before the album is: a new one with new albums off, an existing one with
+    its own new-albums setting left as it is (ISSUE-773).
     """
     client = run.client("lidarr")
     album = _single_lookup(client, "album", ident)
-    progress = {"artist_added": False, "album_monitored": False, "search_sent": False}
+    progress = {"artist_added": False, "artist_monitored": False,
+                "artist_monitored_now": False, "album_monitored": False,
+                "search_sent": False}
     listed = _library_album(client, ident)
     label = None
     names: dict = {}
@@ -1075,18 +1092,43 @@ def _add_album(run: Run, args, ident: str) -> dict:
             if progress["artist_added"]:
                 raise _partial(exc, progress) from None
             raise exc
-    elif listed.get("monitored") is True:
-        return _album_already_present(client, album, listed)
 
     album_id = _positive_id(listed.get("id"))
-    progress.setdefault("artist_library_id", _positive_id(listed.get("artistId")))
+    artist_id = (progress.get("artist_library_id")
+                 or _positive_id(listed.get("artistId")))
+    progress["artist_library_id"] = artist_id
+    editor = None
+    if artist_id is None:
+        pass  # Nothing names the artist; the album is still monitored and searched.
+    elif progress["artist_added"]:
+        editor = {"artistIds": [artist_id], "monitored": True, "monitorNewItems": "none"}
+    else:
+        library_artist = _library_artist(client, artist_id)
+        if library_artist.get("monitored") is True:
+            if listed.get("monitored") is True:
+                return _album_already_present(client, album, listed, library_artist)
+            progress["artist_monitored"] = True
+        else:
+            editor = {"artistIds": [artist_id], "monitored": True}
+    if editor is not None:
+        foreign = _album_artist(album).get("foreignArtistId")
+        try:
+            client.request("PUT", "artist/editor", json=editor,
+                           lookup=(f"search --kind artist --mbid {foreign}" if foreign
+                                   else f"search --kind album --mbid {ident}"))
+        except ServarrError as exc:
+            if progress["artist_added"]:
+                raise _partial(exc, progress) from None
+            raise
+        progress["artist_monitored"] = progress["artist_monitored_now"] = True
+
     if listed.get("monitored") is not True:
         try:
             client.request("PUT", "album/monitor", json={"albumIds": [album_id],
                                                          "monitored": True},
                            lookup=f"search --kind album --mbid {ident}")
         except ServarrError as exc:
-            if progress["artist_added"]:
+            if progress["artist_added"] or progress["artist_monitored_now"]:
                 raise _partial(exc, progress) from None
             raise
     progress["album_monitored"] = True
@@ -1108,9 +1150,16 @@ def _add_album(run: Run, args, ident: str) -> dict:
         "album_library_id": album_id, **progress, "searching": not args.no_search,
         "search_command_id": command_id, "tag": label, **names,
     }
+    notes = []
     if label is None:
-        out["note"] = ("The artist was already in the library, so nothing was tagged and this "
-                       "request will not show in requests.")
+        notes.append("The artist was already in the library, so nothing was tagged and this "
+                     "request will not show in requests.")
+    if progress["artist_monitored_now"] and not progress["artist_added"]:
+        notes.append("The artist was not monitored, so it is now: lidarr wants an album only "
+                     "when its artist is monitored, and any of this artist's albums that were "
+                     "already monitored are wanted now too.")
+    if notes:
+        out["note"] = " ".join(notes)
     return out
 
 
