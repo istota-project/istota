@@ -118,6 +118,14 @@ describe('servarrAppsDraft', () => {
     expect(JSON.stringify(changeSet.ops)).not.toContain('fixture-arr-key-1');
   });
 
+  it('clears a stored key with an empty credential and leaves the table', () => {
+    const edited = form();
+    edited.radarr.clearKey = true;
+    const changeSet = changeOf(edited);
+    expect(changeSet.secrets).toEqual({ [RADARR_FILE]: '' });
+    expect(changeSet.ops).toEqual([]);
+  });
+
   it('adds a new app as its URL and a credential', () => {
     const edited = form();
     edited.sonarr = { ...edited.sonarr, enabled: true, url: 'http://192.0.2.10:8989' };
