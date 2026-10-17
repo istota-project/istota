@@ -29,10 +29,14 @@ fifteen minutes and needs the network; the appliance VM itself does not.
 **What M11 counts.** The template is given one extra provision step, ahead of
 its own, that runs at the first boot before anything else of istota's: every
 new outbound packet from the VM's own processes except loopback, link-local
-multicast and DNS to Lima's resolver is logged (`istota-m11:`) and rejected,
+multicast, DNS to Lima's resolver and NTP is logged (`istota-m11:`) and rejected,
 and `apt-get` is wrapped to record its calls. Container traffic crosses the
 FORWARD chain, not OUTPUT, so the counter is the host's: apt, Docker pulls,
-curl, git. The window closes when the daemon is healthy. Debian's daily apt
+curl, git. NTP (UDP 123) is let through and counted apart: the Debian cloud
+image's own clock sync queries the public pool from the first boot (measured,
+about a hundred packets in the window), which no istota step asks for and
+whose failure offline costs nothing, since Lima's guest agent also steps the
+clock from the Mac. The window closes when the daemon is healthy. Debian's daily apt
 timers are not stopped; generalize removed their stamps so they do not catch up
 at the first boot, and one that fired inside the window would count.
 
@@ -95,6 +99,12 @@ for proto in udp tcp; do
 done
 iptables -A OUTPUT -d 224.0.0.0/4 -j ACCEPT
 ip6tables -A OUTPUT -d ff00::/8 -j ACCEPT
+# The Debian image's own clock sync, counted apart and let through (see the docstring).
+for ipt in iptables ip6tables; do
+    "$ipt" -N ISTOTA_M11_TIME
+    "$ipt" -A ISTOTA_M11_TIME -j ACCEPT
+    "$ipt" -A OUTPUT -p udp --dport 123 -j ISTOTA_M11_TIME
+done
 iptables -A OUTPUT -j ISTOTA_M11
 ip6tables -A OUTPUT -j ISTOTA_M11
 cat > /usr/local/sbin/apt-get <<'EOF'
@@ -174,8 +184,12 @@ class ApplianceVm:
                               input=stdin, timeout=timeout, check=check)
 
     def sh(self, command: str, check: bool = False, timeout: int = 120) -> subprocess.CompletedProcess:
-        return self.limactl("shell", "--workdir", "/", INSTANCE, "sudo", "bash", "-s",
-                            stdin="set -uo pipefail\n" + command + "\n", check=check, timeout=timeout)
+        result = self.limactl("shell", "--workdir", "/", INSTANCE, "sudo", "bash", "-s",
+                              stdin="set -uo pipefail\n" + command + "\n", check=False, timeout=timeout)
+        if check and result.returncode != 0:
+            raise lima.VmError(f"in {INSTANCE}, exit {result.returncode}:\n{command[:1500]}\n"
+                               f"--- stdout ---\n{result.stdout[-6000:]}\n--- stderr ---\n{result.stderr[-6000:]}")
+        return result
 
 
 def _wait_healthy(vm: ApplianceVm, timeout: int = 900) -> str:
@@ -197,6 +211,8 @@ def _close_window(vm: ApplianceVm) -> None:
     for ipt in ("iptables", "ip6tables"):
         rule = vm.sh(f"{ipt} -L ISTOTA_M11 -v -x -n | awk '$3 == \"LOG\" {{ print $1 }}'").stdout.strip()
         vm.window[f"{ipt}_packets"] = rule or "missing"
+        vm.window[f"{ipt}_time_sync_packets"] = vm.sh(
+            f"{ipt} -L ISTOTA_M11_TIME -v -x -n | awk '$3 == \"ACCEPT\" {{ print $1 }}'").stdout.strip()
     vm.window["dropped"] = vm.sh(
         "journalctl -k --no-pager | grep 'istota-m11: ' "
         "| sed -E 's/.*(DST=[^ ]+).*(PROTO=[^ ]+)( SPT=[^ ]+)?( DPT=[^ ]+)?.*/\\1 \\2\\4/' "
@@ -238,13 +254,16 @@ def appliance(tmp_path_factory) -> ApplianceVm:
         subprocess.run(
             ["/bin/bash", str(lima.MAC_CLI), "create", "--appliance", release, "--signing-key", key,
              "--workspace", str(folder), "--port", str(port),
-             "--cpus", "4", "--memory", "4", "--disk", str(DISK_GIB), "--no-setup"],
+             "--cpus", "4", "--memory", "4", "--disk", str(DISK_GIB), "--no-setup",
+             # The folder already holds the L3 probe file.
+             "--adopt"],
             env=env, stdin=subprocess.DEVNULL, check=True, timeout=lima.CREATE_TIMEOUT,
         )
         vm.window["create_seconds"] = f"{time.monotonic() - started:.0f}"
         setup = [*lima.common_args("http://127.0.0.1:9/v1"),
                  "--ingress", "local", "--hostname", f"localhost:{port}", "--storage", "host-folder"]
-        vm.sh(f"istota-stack setup {shlex.join(setup)} </dev/null && "
+        vm.sh(f"export ISTOTA_BRAIN_NATIVE_API_KEY={shlex.quote(lima.NATIVE_KEY)}\n"
+              f"istota-stack setup {shlex.join(setup)} </dev/null && "
               "/srv/app/istota/src/host/provision.sh && systemctl enable --now istota-stack",
               check=True, timeout=lima.BUILD_TIMEOUT)
         vm.window["daemon"] = _wait_healthy(vm)

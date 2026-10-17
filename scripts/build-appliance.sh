@@ -220,8 +220,15 @@ raw="${work}/istota-appliance-${tag}.raw"
 cp -c "${LIMA_HOME}/${VM}/disk" "$raw"
 log "checking the disk for Claude Code and the builder's identity"
 checks=0
+# The login name in the forms a leaked account takes: Lima's home for it, a
+# passwd or group line, a sudoers rule. The bare name is no signal: Debian's
+# copyright files and Python metadata name other people who share it.
+login="$(id -un)"
 python3 -I "${HERE}/release-artifacts.py" disk "$raw" \
-    --forbid "the builder's login name=$(id -un)" --forbid "the builder's home path=${HOME}" || checks=1
+    --forbid "the builder's home path=${HOME}" \
+    --forbid "a Lima home for the builder's login=/home/${login}." \
+    --forbid "an account line for the builder's login=${login}:x:" \
+    --forbid "a sudoers rule for the builder's login=${login} ALL=" || checks=1
 python3 -I "${HERE}/release-artifacts.py" paths "${work}/disk-paths.txt" || checks=1
 log "compressing the disk"
 zstd -q -T0 -19 --long=27 "$raw" -o "${raw}.zst"

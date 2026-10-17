@@ -149,7 +149,9 @@ class TestNoReleaseArtifactCarriesClaudeCodeOrChrome:
 
     def test_the_disks_file_list_is_checked_by_path(self, tmp_path):
         listing = tmp_path / "paths.txt"
-        listing.write_text("/usr/bin/env\n/srv/app/istota/src/docker/browser/chrome.py\n")
+        # bash-completion ships a completion file named for Chrome on every Debian.
+        listing.write_text("/usr/bin/env\n/srv/app/istota/src/docker/browser/chrome.py\n"
+                           "/usr/share/bash-completion/completions/google-chrome-stable\n")
         assert check("paths", str(listing)).returncode == 0
         listing.write_text("/usr/bin/env\n/opt/google/chrome/chrome\n")
         result = check("paths", str(listing))
@@ -340,4 +342,7 @@ class TestWhatTheBuilderWrites:
 
     def test_the_build_vm_runs_as_a_user_that_is_not_the_builder(self):
         assert '.user = {"name": "build"' in self.text
-        assert "id -un" in self.text and "${HOME}" in self.text
+        # Read at runtime, and looked for in the forms a leaked account takes.
+        assert 'login="$(id -un)"' in self.text and "home path=${HOME}" in self.text
+        for form in ("=/home/${login}.", "=${login}:x:", "=${login} ALL="):
+            assert form in self.text, form

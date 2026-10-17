@@ -42,7 +42,9 @@ CLAUDE_MARKER = " ".join(["Anthropic PBC.", "All rights", "reserved."]).encode()
 CLAUDE_PATH = re.compile(r"(^|/)node_modules/@anthropic-ai/claude-code(-[a-z0-9-]+)?(/|$)")
 CHROME_PATH = re.compile(
     r"(^|/)opt/google/chrome(/|$)"
-    r"|(^|/)(google-chrome|google-chrome-stable)$"
+    # A launcher on PATH, not bash-completion's file of the same name, which
+    # Debian ships for every system whether Chrome is installed or not.
+    r"|(^|/)(usr/)?(local/)?s?bin/(google-chrome|google-chrome-stable)$"
     r"|(^|/)var/lib/dpkg/info/google-chrome[^/]*$"
 )
 
