@@ -6702,6 +6702,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
         phone_bindings = db.phone_bindings_for_member(conn, username)
         email_threads = db.email_thread_tokens_for_member(conn, username)
         noted = _noted_room_tokens(conn, username)
+        starred_counts = db.count_starred_messages_by_room(conn, username)
         out: list[dict] = []
         for r in registry:
             handle = db.ensure_web_chat_handle(
@@ -6725,6 +6726,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
             # The kebab offers "My notes" for a shared room and for any room
             # the user already has notes about (one they have since left alone).
             d["has_my_notes"] = r.token in noted
+            d["starred_count"] = starred_counts.get(r.token, 0)
             # Standing per-room model/effort default lives on the shared registry
             # room (canonical), not the per-user web handle.
             d["model"] = r.model

@@ -7277,6 +7277,19 @@ _CROSS_ROOM_WHERE = (
 )
 
 
+def count_starred_messages_by_room(
+    conn: sqlite3.Connection, user_id: str,
+) -> dict[str, int]:
+    """Count stars with the aggregate view's visibility rules, without paging."""
+    rows = conn.execute(
+        "SELECT m.room_token, COUNT(*) AS n "
+        + _CROSS_ROOM_FROM + _CROSS_ROOM_WHERE
+        + "AND s.message_id IS NOT NULL GROUP BY m.room_token",
+        {"user": user_id},
+    ).fetchall()
+    return {row["room_token"]: row["n"] for row in rows}
+
+
 def max_message_id(conn: sqlite3.Connection) -> int:
     """The highest `messages.id` in the whole store, or 0 when empty.
 

@@ -1735,6 +1735,7 @@ function createSession(): ChatSession {
           policy: fresh.policy ?? null,
           off: fresh.off ?? null,
           unread_count: unreadFor(fresh),
+          starred_count: fresh.starred_count ?? 0,
           // Whichever stamp is newer. This response was built before it was
           // awaited, so a frame that landed in between is ahead of it — taking
           // the server's value unconditionally would drop a room the user is
@@ -3175,6 +3176,7 @@ function createSession(): ChatSession {
       if (!next && get(view) === 'starred') {
         messages.update((arr) => arr.filter((x) => x.cid !== cid));
       }
+      await refreshRooms();
     } catch {
       updateMsg(cid, (mm) => {
         mm.starred = !next;
@@ -3203,6 +3205,7 @@ function createSession(): ChatSession {
     }
     messages.update((arr) => arr.filter((x) => x.cid !== cid));
     notifySuccess('Message deleted.', { key: 'chat:message-delete' });
+    await refreshRooms();
   }
 
   // Mark every room read in one shot (the header chip). Badges zero locally on
