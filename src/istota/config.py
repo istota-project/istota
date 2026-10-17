@@ -4468,6 +4468,20 @@ def _servarr_apps(raw: object, key: str) -> object:
     return apps
 
 
+def parse_native_extra_headers(raw: str) -> dict[str, str] | None:
+    """`ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS` as the headers it carries, or None
+    when it is not a JSON object of header name to string value."""
+    try:
+        headers = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(headers, dict) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in headers.items()
+    ):
+        return None
+    return headers
+
+
 def _apply_native_extra_headers(config: Config, raw: str) -> None:
     """`[brain.native] extra_headers` from `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`.
 
@@ -4478,13 +4492,8 @@ def _apply_native_extra_headers(config: Config, raw: str) -> None:
     """
     if not raw:
         return
-    try:
-        headers = json.loads(raw)
-    except ValueError:
-        headers = None
-    if not isinstance(headers, dict) or not all(
-        isinstance(name, str) and isinstance(value, str) for name, value in headers.items()
-    ):
+    headers = parse_native_extra_headers(raw)
+    if headers is None:
         report_problem(
             "discarded", ("brain", "native", "extra_headers"),
             "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS is not a JSON object of header names to "

@@ -520,6 +520,105 @@ class TestBackups:
         assert not os.listdir(config_path.parent)
 
 
+class TestBackupsOfAMovedCredential:
+    """ISSUE-769: once a credential's secret file holds a value, the file wins
+    and an inline copy is never read, so no backup of config.toml keeps one."""
+
+    VALUE = "s3cret-moved-value"
+    BACKUP_NAME = "config.toml.bak.20261017T000000.000000Z"
+
+    def _config(self, poll: int, *, password: str | None) -> dict:
+        nextcloud = {"url": "https://cloud.example.com"}
+        if password is not None:
+            nextcloud["app_password"] = password
+        return dict(
+            PLAN_CONFIG, workspace_path="/mnt/shared",
+            scheduler={"poll_interval": poll}, nextcloud=nextcloud,
+        )
+
+    def _apply(self, monkeypatch, capsys, tmp_path, config_path, document) -> None:
+        plan = _write_plan(tmp_path / f"p{len(os.listdir(tmp_path))}.toml", document)
+        code, _, err = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--backup", "10")
+        assert code == 2, err
+
+    def _backups(self, config_path: Path) -> list[Path]:
+        return sorted(config_path.parent.glob("config.toml.bak.*"))
+
+    def test_a_move_scrubs_every_backup_holding_the_value(self, monkeypatch, capsys, tmp_path, config_path):
+        monkeypatch.delenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", raising=False)
+        for poll in (1, 2):
+            self._apply(monkeypatch, capsys, tmp_path, config_path, self._config(poll, password=self.VALUE))
+        assert any(self.VALUE in b.read_text() for b in self._backups(config_path))
+
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", self.VALUE)
+        self._apply(monkeypatch, capsys, tmp_path, config_path, self._config(3, password=None))
+
+        backups = self._backups(config_path)
+        assert len(backups) == 2
+        for backup in backups:
+            assert self.VALUE not in backup.read_text()
+            assert backup.stat().st_mode & 0o777 == 0o600
+        documents = [tomllib.loads(b.read_text()) for b in backups]
+        assert [d["scheduler"]["poll_interval"] for d in documents] == [1, 2]
+        assert [d["nextcloud"] for d in documents] == [{"url": "https://cloud.example.com"}] * 2
+
+    def test_a_backup_keeps_the_value_while_its_file_is_empty(self, monkeypatch, capsys, tmp_path, config_path):
+        """The inline copy is the one in use then, and a rollback needs it."""
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", " ")
+        for poll in (1, 2):
+            self._apply(monkeypatch, capsys, tmp_path, config_path, self._config(poll, password=self.VALUE))
+
+        (backup,) = self._backups(config_path)
+        assert tomllib.loads(backup.read_text())["nextcloud"]["app_password"] == self.VALUE
+
+    def test_a_credential_with_no_secret_file_is_left_alone(self, tmp_path):
+        copy = tmp_path / self.BACKUP_NAME
+        text = '[sms.twilio]\naccount_sid = "AC0000"\n'
+        copy.write_text(text)
+        environ = {"ISTOTA_SMS_TWILIO_ACCOUNT_SID": "AC0000"}
+        assert apply.scrub_moved_credentials(copy, environ) is False
+        assert copy.read_text() == text
+
+    def test_headers_stay_while_their_variable_does_not_parse(self, tmp_path):
+        """The loader keeps the inline table then, so the copy needs it."""
+        copy = tmp_path / self.BACKUP_NAME
+        copy.write_text('[brain.native.extra_headers]\nX-Org = "abc"\n')
+        assert apply.scrub_moved_credentials(copy, {"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS": "not json"}) is False
+        assert apply.scrub_moved_credentials(copy, {"ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS": '{"X-Org": "abc"}'})
+        assert "abc" not in copy.read_text()
+
+    def test_the_pre_localize_copy_is_scrubbed_and_kept(self, monkeypatch, capsys, tmp_path, config_path):
+        pre_localize = config_path.with_name("config.toml.pre-localize")
+        pre_localize.write_text(f'[nextcloud]\napp_password = "{self.VALUE}"\n')
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", self.VALUE)
+        self._apply(monkeypatch, capsys, tmp_path, config_path, self._config(1, password=None))
+        self._apply(monkeypatch, capsys, tmp_path, config_path, self._config(2, password=None))
+
+        assert self.VALUE not in pre_localize.read_text()
+        assert len(self._backups(config_path)) == 1
+
+    def test_a_copy_that_cannot_be_rewritten_does_not_fail_the_apply(
+        self, monkeypatch, capsys, tmp_path, config_path,
+    ):
+        def fail(copy, environ=None):
+            raise PermissionError(13, "Permission denied")
+
+        self._apply(monkeypatch, capsys, tmp_path, config_path, self._config(1, password=None))
+        monkeypatch.setattr(apply, "scrub_moved_credentials", fail)
+        plan = _write_plan(tmp_path / "late.toml", self._config(2, password=None))
+        code, _, err = _invoke(monkeypatch, capsys, config_path, "-f", str(plan), "--backup", "10")
+
+        assert code == 2
+        assert "could not remove moved credentials" in err
+        assert tomllib.loads(config_path.read_text())["scheduler"]["poll_interval"] == 2
+
+    def test_a_copy_that_does_not_parse_is_left_alone(self, tmp_path):
+        copy = tmp_path / self.BACKUP_NAME
+        copy.write_text("not = [toml\n")
+        assert apply.scrub_moved_credentials(copy, {"ISTOTA_NEXTCLOUD_APP_PASSWORD": "x"}) is False
+        assert copy.read_text() == "not = [toml\n"
+
+
 class TestReadingTheMarker:
     def test_a_missing_file_is_nothing_managed(self, tmp_path):
         assert apply.read_managed(tmp_path) == {}

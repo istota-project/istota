@@ -428,3 +428,18 @@ class TestTheAnthropicHalf:
         assert caught.value.code == 400
         body = json.loads(caught.value.read())
         assert "scripted endpoint exhausted" in body["error"]["message"]
+
+
+class TestTheSharedRoomProbeIgnoresBackgroundRequests:
+    async def test_a_background_request_cannot_consume_the_probe(self):
+        from tests.smoke.test_sandbox_shared_room import PROBE, SCRIPT
+
+        with serve_script(SCRIPT) as endpoint:
+            await _drive(endpoint, "Summarize background memory")
+            events = await _drive(endpoint, "[e2e:shared-room-probe] probe the room")
+
+        done = _done(events)
+        calls = [b for b in done.message.content if type(b).__name__ == "ToolCallContent"]
+        assert len(calls) == 1, done.message.content
+        assert calls[0].name == "Bash"
+        assert calls[0].arguments == {"command": PROBE}

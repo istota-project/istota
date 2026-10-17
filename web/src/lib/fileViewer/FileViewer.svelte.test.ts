@@ -402,14 +402,14 @@ describe('url sources', () => {
   it('says there is no PDF on a 404 and hides Download', async () => {
     loadFails(404);
     openUrl();
-    expect(await screen.findByText('No PDF for this invoice')).toBeTruthy();
+    expect(await screen.findByText('This file is no longer available.')).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Download' })).toBeNull();
   });
   it('keeps Download when the PDF fails for another reason', async () => {
     loadFails(500);
     openUrl();
     expect(await screen.findByText(/Couldn.t load this PDF/)).toBeTruthy();
-    expect(screen.queryByText('No PDF for this invoice')).toBeNull();
+    expect(screen.queryByText('This file is no longer available.')).toBeNull();
     expect(screen.getByRole('link', { name: 'Download' })).toHaveAttribute('href', url);
   });
 });

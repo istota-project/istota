@@ -2037,7 +2037,7 @@ def write_container_setup(
 
     text = render_container_config(a, inline_credentials=inline)
     if backup and config_path.exists():
-        apply.write_config_with_backup(config_path, text, backup)
+        apply.write_config_with_backup(config_path, text, backup, scrub=False)
     else:
         _write_private(config_path, text)
     _ensure_admins_file(config_path.parent / "admins", a.user_id, out=out)
