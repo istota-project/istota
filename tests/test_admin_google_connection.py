@@ -81,7 +81,7 @@ def google_entry(response):
     assert response.status_code == 200, response.text
     entries = response.json()["connections"]
     assert [entry["id"] for entry in entries] == [
-        "nextcloud", "whatsapp", "google_workspace",
+        "nextcloud", "whatsapp", "google_workspace", "servarr",
     ]
     return entries[2]
 

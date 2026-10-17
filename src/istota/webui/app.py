@@ -5917,6 +5917,87 @@ def _google_workspace_connection_payload(config: Config) -> dict:
     }
 
 
+def _servarr_connection_payload(config: Config) -> dict:
+    """The arr apps of the install connection, from loaded config and doctor.
+
+    Calls no arr: config problems come from `servarr.connection` run with
+    ``probe=False``, which sends nothing, and each app's live status is the
+    daemon's last `servarr.connection.<app>` row, redacted again with this
+    process's config. Never a key, only whether one is set.
+    """
+    from istota import doctor
+    from istota.config import SERVARR_APPS, SERVARR_DEFAULT_FIELDS
+
+    servarr = config.servarr
+    findings = {r.name: r for r in doctor.check_servarr_connection(config, False)}
+    rows: dict[str, dict] = {}
+    try:
+        report = doctor.read_reports(config)["report"]
+    except Exception as exc:  # noqa: BLE001 - the card still renders without results
+        logger.warning("servarr_connection_report_unread err=%s", type(exc).__name__)
+        report = None
+    if report:
+        prefix = f"{doctor.SERVARR_CHECK_NAME}."
+        for row in report.get("checks") or []:
+            if str(row.get("name", "")).startswith(prefix):
+                rows[row["name"]] = row
+    at = report.get("at") if report else None
+    stale = (_doctor_report_stale_age(at, config.scheduler.doctor_check_interval)
+             is not None)
+
+    apps = []
+    for app in SERVARR_APPS:
+        connection = servarr.apps.get(app)
+        incomplete = connection is None and app in servarr.incomplete_apps
+        if connection is None and not incomplete:
+            continue
+        name = f"{doctor.SERVARR_CHECK_NAME}.{app}"
+        finding = findings.get(name)
+        check = None
+        if name in rows:
+            row = rows[name]
+            [result] = doctor.redact([doctor.CheckResult(
+                row["name"], row["status"], row["detail"], remedy=row.get("remedy", ""),
+                scope=row.get("scope", doctor.DEPLOYMENT),
+            )], config)
+            check = {"status": result.status, "detail": result.detail,
+                     "remedy": result.remedy, "at": at, "stale": stale}
+        apps.append({
+            "app": app,
+            "url": "" if incomplete else doctor._redact_userinfo(connection.url, remove=True),
+            "api_key_set": None if incomplete else bool(connection.api_key),
+            "incomplete": incomplete,
+            "problem": finding.detail if finding and finding.status == doctor.FAIL else None,
+            "check": check,
+        })
+
+    defaults = {}
+    for app in SERVARR_APPS:
+        table = servarr.defaults.get(app)
+        if not isinstance(table, dict):
+            continue
+        kept = {key: value for key, value in table.items()
+                if key in SERVARR_DEFAULT_FIELDS[app] and isinstance(value, str) and value.strip()}
+        if kept:
+            defaults[app] = kept
+
+    if not apps:
+        status = "disabled"
+    elif any(row["problem"] for row in apps):
+        status = "incomplete"
+    else:
+        status = "configured"
+    return {
+        "id": "servarr",
+        "label": "Servarr",
+        "status": status,
+        "apps": apps,
+        "missing": [app for app in SERVARR_APPS if app not in {row["app"] for row in apps}],
+        "requesters": [str(user) for user in servarr.requesters],
+        "defaults": defaults,
+    }
+
+
 def _whatsapp_connection_payload() -> dict:
     """One card's worth of facts about the deployment's WhatsApp link.
 
@@ -5990,7 +6071,8 @@ async def admin_connections(_: dict = Depends(_require_admin)):
     if payload["pairing_supported"] and payload["enabled"]:
         payload["pairing"] = await asyncio.to_thread(_pairing_state_payload)
     google = _google_workspace_connection_payload(config)
-    return {"connections": [nextcloud, payload, google]}
+    servarr = await asyncio.to_thread(_servarr_connection_payload, config)
+    return {"connections": [nextcloud, payload, google, servarr]}
 
 
 @api_router.get("/admin/connections/whatsapp/pairing")
