@@ -382,6 +382,10 @@ def run_serve(
         assert_no_auth_bind_safe(config.web.auth, host)
     except RuntimeError as exc:
         raise ServeError(str(exc)) from exc
+    if "none" in config.web.auth and bind_port == 0:
+        # The Host guard needs the port before the first request; uvicorn
+        # would pick one only once it is already listening.
+        raise ServeError('[web] auth = ["none"] needs an explicit port; --port 0 is refused.')
 
     bootstrap_checks(config)
 

@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The development no-auth mode of `istota serve` now answers only at `localhost`, `127.0.0.1` and `[::1]` on its own port, and refuses a POST whose `Origin` names another site (ISSUE-778). A page on another name that resolved to loopback could otherwise reach the API as the local administrator.
+- The development no-auth mode of `istota serve` now answers only at `localhost`, `127.0.0.1` and `[::1]` on its own port, accepts a POST only from its own page or the Vite dev server, and refuses requests another site makes in the background, such as an image tag pointed at the API (ISSUE-778). A page on another name that resolved to loopback could otherwise reach the API as the local administrator.
 
 - The sign-in forms no longer accept large bodies from a client with no session (ISSUE-777). The web app stops reading a form past 16 KiB and answers 413 before parsing it, and the stack's nginx caps the sign-in paths at 32k instead of the 512M upload limit.
 

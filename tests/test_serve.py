@@ -247,6 +247,14 @@ class TestRunServe:
         with pytest.raises(serve.ServeError, match="loopback"):
             serve.run_serve(cfg, host="0.0.0.0", port=8799)
 
+    def test_no_auth_refuses_an_ephemeral_port(self, tmp_path):
+        # The no-auth Host guard is keyed on the port; 0 would leave it unknown.
+        from istota import serve
+        cfg = _serve_config(tmp_path)
+        assert "none" in cfg.web.auth
+        with pytest.raises(serve.ServeError, match="--port 0"):
+            serve.run_serve(cfg, host="127.0.0.1", port=0)
+
     def test_orchestration_starts_and_stops(self, tmp_path, monkeypatch):
         import istota.scheduler as sched
         from istota import serve

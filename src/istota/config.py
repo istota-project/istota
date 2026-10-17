@@ -1358,6 +1358,11 @@ def local_login_hosts(hostname: str) -> frozenset[str]:
     return _loopback_hosts(int(port), ("localhost", "127.0.0.1"))
 
 
+VITE_DEV_PORT = 5173
+"""The Vite dev server's port, `DEV_PORT` in `web/vite.config.ts` (held equal by
+`tests/test_no_auth_web_mode.py`). Its pages may post to a no-auth listener."""
+
+
 def no_auth_hosts(port: int) -> frozenset[str]:
     """The ``Host`` values an ``auth = "none"`` listener answers at.
 
@@ -1366,6 +1371,12 @@ def no_auth_hosts(port: int) -> frozenset[str]:
     to derive from: a development config names none.
     """
     return _loopback_hosts(port, ("localhost", "127.0.0.1", "[::1]"))
+
+
+def no_auth_origins(port: int) -> frozenset[str]:
+    """The ``Origin`` authorities a no-auth listener accepts a POST from: its own
+    and the Vite dev server's, which proxies the API to it."""
+    return no_auth_hosts(port) | no_auth_hosts(VITE_DEV_PORT)
 
 
 def _loopback_hosts(port: int, names: tuple[str, ...]) -> frozenset[str]:

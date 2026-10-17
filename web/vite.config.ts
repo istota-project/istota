@@ -9,6 +9,10 @@ const APP_BUILT_AT = new Date().toISOString();
 
 const useMock = process.env.VITE_MOCK_API === '1';
 
+// A no-auth listener accepts a POST from this origin by port, so the Python side
+// names it too (istota.config.VITE_DEV_PORT); strictPort keeps Vite from moving.
+const DEV_PORT = 5173;
+
 export default defineConfig({
   plugins: [pdfAssets(), sveltekit(), ...(useMock ? [mockApi()] : [])],
   define: {
@@ -16,8 +20,10 @@ export default defineConfig({
     __APP_BUILT_AT__: JSON.stringify(APP_BUILT_AT),
   },
   server: useMock
-    ? {}
+    ? { port: DEV_PORT, strictPort: true }
     : {
+        port: DEV_PORT,
+        strictPort: true,
         proxy: {
           '/istota/api': {
             target: 'http://localhost:8766',

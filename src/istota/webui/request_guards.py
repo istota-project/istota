@@ -46,6 +46,36 @@ def origin_refusal(headers, hostname: str) -> str | None:
     return None
 
 
+def origin_authority_refusal(headers, allowed: frozenset[str]) -> str | None:
+    """Why the request's ``Origin`` (or ``Referer``) authority is not one of
+    ``allowed``, compared like ``host_refusal``: exact, port included."""
+    origin = headers.get("origin") or headers.get("referer")
+    if not origin:
+        return "missing origin"
+    parts = urlsplit(origin)
+    if parts.scheme not in ("http", "https") or parts.netloc.lower() not in allowed:
+        return "origin mismatch"
+    return None
+
+
+def cross_site_refusal(headers) -> str | None:
+    """Why a browser request from another site is refused, or None.
+
+    Reads Fetch Metadata. ``same-site`` is refused too, because a site ignores
+    the port: a page on another loopback port sends it. A top-level navigation
+    is allowed, and so is a request with no ``Sec-Fetch-Site``, which is what
+    curl and older browsers send.
+    """
+    site = (headers.get("sec-fetch-site") or "").lower()
+    if site not in ("cross-site", "same-site"):
+        return None
+    if (headers.get("sec-fetch-mode") or "").lower() == "navigate" and (
+        headers.get("sec-fetch-dest") or ""
+    ).lower() == "document":
+        return None
+    return "cross-site request"
+
+
 def host_refusal(headers, allowed: frozenset[str]) -> str | None:
     """Why the request's ``Host`` is not one of ``allowed``, or None when it is.
 

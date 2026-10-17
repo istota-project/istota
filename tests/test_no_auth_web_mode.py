@@ -434,6 +434,95 @@ class TestNoAuthHostAndOrigin:
         finally:
             app.state.local_no_auth_port = None
 
+    async def test_an_origin_on_another_loopback_port_is_refused(self, app):
+        # Any local dev server shares the loopback names; only the bound port
+        # and the Vite dev server's are this app's pages.
+        async with self._client(app, "localhost:8766") as client:
+            resp = await client.post(
+                "/istota/api/chat/rooms", json={"name": "planted"},
+                headers={"origin": "http://localhost:3000"},
+            )
+        assert resp.status_code == 403
+        assert self._room_count(app, "planted") == 0
+
+    @pytest.mark.parametrize("site", ["cross-site", "same-site"])
+    async def test_a_cross_site_subresource_get_is_refused(self, app, monkeypatch, site):
+        # Cooper's repro: an <img> on any page fires a GET whose cache miss
+        # calls the brain. `same-site` is what a page on another loopback
+        # port sends, since a site ignores the port.
+        from istota.health import explainer
+
+        calls = []
+        monkeypatch.setattr(explainer, "_call_brain", lambda *a, **k: calls.append(a) or None)
+        async with self._client(app, "localhost:8766") as client:
+            resp = await client.get(
+                "/istota/api/health/biomarkers/x1/explainer?direction=high",
+                headers={"sec-fetch-site": site, "sec-fetch-mode": "no-cors",
+                         "sec-fetch-dest": "image"},
+            )
+        assert resp.status_code == 403
+        assert calls == []
+
+    async def test_a_cross_site_top_level_navigation_is_allowed(self, app):
+        async with self._client(app, "localhost:8766") as client:
+            resp = await client.get("/istota/", headers={
+                "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate",
+                "sec-fetch-dest": "document",
+            })
+        assert resp.status_code != 403
+
+    async def test_same_origin_fetch_metadata_is_allowed(self, app):
+        async with self._client(app, "localhost:8766") as client:
+            resp = await client.get("/istota/api/me", headers={
+                "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors",
+                "sec-fetch-dest": "empty",
+            })
+        assert resp.status_code == 200
+
+    @pytest.mark.parametrize("host", ["localhost.:8766", "[::ffff:127.0.0.1]:8766"])
+    async def test_lookalike_loopback_hosts_are_refused(self, app, host):
+        async with self._client(app, host) as client:
+            assert (await client.get("/istota/api/me")).status_code == 403
+
+    async def test_a_missing_host_is_refused(self, app):
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "GET", "scheme": "http", "path": "/istota/api/me",
+            "raw_path": b"/istota/api/me", "root_path": "", "query_string": b"",
+            "headers": [], "client": ("127.0.0.1", 50000), "server": None,
+        }
+        await app(scope, receive, send)
+        assert sent[0]["status"] == 403
+
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+    async def test_bare_names_are_this_install_on_port_80(self, app, host):
+        app.state.local_no_auth_port = 80
+        try:
+            async with self._client(app, host) as client:
+                assert (await client.get("/istota/api/me")).status_code == 200
+        finally:
+            app.state.local_no_auth_port = None
+
+    def test_the_vite_dev_port_matches_the_vite_config(self):
+        # The dev server's Origin is admitted by port, so the two must agree.
+        import re
+        from pathlib import Path
+
+        from istota.config import VITE_DEV_PORT
+
+        text = (Path(__file__).parents[1] / "web" / "vite.config.ts").read_text()
+        match = re.search(r"const DEV_PORT = (\d+);", text)
+        assert match and int(match.group(1)) == VITE_DEV_PORT
+        assert "strictPort: true" in text
+
     def test_a_websocket_with_a_foreign_host_is_closed(self, app):
         from starlette.testclient import TestClient
         from starlette.websockets import WebSocketDisconnect
