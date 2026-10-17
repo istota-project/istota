@@ -1,0 +1,15 @@
+/* The render document is one frame at the top-left corner of a viewport the
+   service sizes to match it, so nothing around the frame may take room. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+[data-render-frame] {
+  position: fixed;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  background: var(--surface-card);
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseSnapshotPayload } from './snapshot';
+import { parseSnapshotPayload } from './payload';
 
 function observation(overrides: Record<string, unknown> = {}) {
   return {

@@ -1,24 +1,20 @@
-// The payload the browser service hands `/map-snapshot/`'s `renderSnapshot`.
+// The share-map renderer's payload, as the Python caller sends it
+// (`istota.location.share_maps`): the projected observation, the actor's
+// resolved basemap, the owner's label, and the frame's viewport.
 //
-// The service validates it field by field before it gets here; this is the
-// page's own check, so a malformed call draws nothing rather than half a map,
-// and so a payload with no basemap is refused instead of sending the page to
-// `GET /api/map/basemap`, which a cookie-free capture context cannot reach.
+// The caller validates it before it leaves the daemon; this is the page's own
+// check, so a malformed call draws nothing rather than half a map, and so a
+// payload with no basemap is refused instead of sending the page to
+// `GET /api/map/basemap`, which the render document can never reach.
 
 import type { BasemapSpec } from '$lib/basemap';
-import type { ShareObservation } from './shareMap';
-
-/** The PNG's frame, in CSS px. The capture screenshots exactly this element. */
-export const SNAPSHOT_WIDTH = 640;
-export const SNAPSHOT_HEIGHT = 360;
+import type { ShareObservation } from '$lib/location/shareMap';
 
 export interface SnapshotPayload {
   observation: ShareObservation;
   basemap: BasemapSpec;
   ownerLabel: string;
 }
-
-export type SnapshotResult = { ok: true } | { ok: false; reason: string };
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
