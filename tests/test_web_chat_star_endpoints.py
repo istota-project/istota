@@ -125,6 +125,39 @@ class TestStarEndpoint:
         with db.get_db(_db_path()) as conn:
             assert db.get_starred_message_ids(conn, "alice", [mid]) == set()
 
+    async def test_room_star_counts_cover_all_pages_and_follow_mutations(self, chat_client):
+        cookies = await _login(chat_client, "alice")
+        room = await _default_room(chat_client, cookies)
+        mids = [_add_msg(room["token"]) for _ in range(55)]
+        other = _add_msg(room["token"])
+        excluded = _add_msg(room["token"], role="user", origin="scheduled")
+        with db.get_db(_db_path()) as conn:
+            for mid in mids:
+                db.set_message_starred(conn, mid, "alice", True)
+            db.set_message_starred(conn, other, "bob", True)
+            db.set_message_starred(conn, excluded, "alice", True)
+        assert (await _default_room(chat_client, cookies))["starred_count"] == 55
+        page = await chat_client.get(
+            "/istota/api/chat/messages?view=starred&limit=2", cookies=cookies,
+        )
+        assert len(page.json()["messages"]) == 2
+        assert page.json()["has_more"] is True
+        response = await chat_client.put(
+            f"/istota/api/chat/messages/{mids[0]}/star",
+            json={"starred": False}, cookies=cookies, headers=ORIGIN,
+        )
+        assert response.status_code == 200
+        assert (await _default_room(chat_client, cookies))["starred_count"] == 54
+        response = await chat_client.delete(
+            f"/istota/api/chat/messages/{mids[1]}", cookies=cookies, headers=ORIGIN,
+        )
+        assert response.status_code == 200
+        assert (await _default_room(chat_client, cookies))["starred_count"] == 53
+        with db.get_db(_db_path()) as conn:
+            db.add_room_member(conn, room["token"], "bob")
+        bob = await _login(chat_client, "bob")
+        assert (await _default_room(chat_client, bob))["starred_count"] == 1
+
     async def test_requires_auth(self, chat_client):
         resp = await chat_client.put(
             "/istota/api/chat/messages/1/star", json={"starred": True},

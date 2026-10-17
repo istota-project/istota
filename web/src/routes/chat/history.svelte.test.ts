@@ -115,6 +115,33 @@ afterEach(() => {
 });
 
 describe('chat selection history', () => {
+  it('uses feeds count pills for visible-room totals and hides zero counts', async () => {
+    session.rooms.set([
+      { ...rooms[0], unread_count: 2, starred_count: 120 },
+      { ...rooms[1], unread_count: 3, starred_count: 4 },
+      {
+        ...rooms[1],
+        id: 3,
+        token: 'hidden',
+        email_thread: true,
+        listed: false,
+        unread_count: 9,
+        starred_count: 9,
+      },
+    ]);
+    const { container } = renderPage();
+    const unread = container.querySelector('.views button:nth-child(2)')!;
+    const starred = container.querySelector('.views button:nth-child(3)')!;
+    await waitFor(() => expect(starred.querySelector('.count-pill')).toHaveTextContent('99+'));
+    expect(starred.querySelector('.count-pill')).toHaveClass('muted');
+    expect(starred.querySelector('.count-pill')).toHaveAttribute('title', '124 starred');
+    expect(unread.querySelector('.count-pill')).toHaveTextContent('5');
+    expect(unread.querySelector('.count-pill')).not.toHaveClass('muted');
+    session.rooms.set(rooms);
+    await waitFor(() => expect(starred.querySelector('.count-pill')).toBeNull());
+    expect(unread.querySelector('.count-pill')).toBeNull();
+  });
+
   it('replaces a bare URL with the seeded room without adding an entry', async () => {
     renderPage();
     await waitFor(() => expect(currentUrl()).toBe('/istota/chat/?room=room-a'));

@@ -194,6 +194,19 @@ class TestListMessagesAcrossRooms:
         assert [r["msg_id"] for r in rows] == [ids["a2"], ids["u1"]]
         assert all(r["starred"] for r in rows)
 
+    def test_star_counts_follow_view_visibility(self, conn):
+        r1, r2, rb, ids = self._seed(conn)
+        for mid in ids.values():
+            db.set_message_starred(conn, mid, "alice", True)
+        excluded = _msg(conn, r1.token, role="user", origin="scheduled")
+        db.set_message_starred(conn, excluded, "alice", True)
+        assert db.count_starred_messages_by_room(conn, "alice") == {
+            r1.token: 3, r2.token: 2,
+        }
+        db.dismiss_room(conn, r1.token, "alice")
+        db.set_room_archived(conn, r2.token, True)
+        assert db.count_starred_messages_by_room(conn, "alice") == {}
+
     def test_starred_flag_in_all_view(self, conn):
         r1, r2, rb, ids = self._seed(conn)
         db.set_message_starred(conn, ids["a1"], "alice", True)
