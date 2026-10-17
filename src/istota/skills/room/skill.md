@@ -50,6 +50,7 @@ A request key is 1–64 letters, digits, dashes or underscores. Reuse it when re
 
 ```bash
 istota-skill room location --user Alice
+istota-skill room location --user Alice --map off
 istota-skill room locations
 istota-skill room location-stop
 istota-skill room location-stop --all
@@ -59,6 +60,6 @@ For “Where is Alice?” or “Where is everyone?” in a shared room, use thes
 
 `location` accepts a current member ID or unambiguous display name. If ambiguous, ask the user to choose among the returned members. `locations` returns only active sharers; an active sharer without a usable fix has `no_fresh_location`. Say “No fresh location is available” without repeating an old point or its time. `location_unavailable` means that person is not sharing a current location here; do not infer their settings or whereabouts. A limit error asks for individual queries instead of a partial “everyone.”
 
-Keep the returned precision, observed time and expiry in the answer. Exact shares include accuracy. Area shares are approximate rounded coordinates; never add an exact pin, saved-place label or precise accuracy. These commands read only the current room, with no destination override.
+Keep the returned precision, observed time, expiry and `map_url` in the answer. A single `location` result gets a map in the room only when the answer contains that link unchanged; pass `--map off` when the user asks for no map. `locations` never draws maps. Exact shares include accuracy. Area shares are approximate rounded coordinates; never add an exact pin, saved-place label or precise accuracy. These commands read only the current room, with no destination override.
 
 `location-stop` immediately stops the caller's held and active shares in this room, without approval or GPS access. `--all` stops their shares everywhere and returns only a count. It cannot erase earlier messages or recall a tool result already returned. For a request to share the caller's own location once or for a duration, load the `location` skill and use `location share`.

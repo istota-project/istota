@@ -15,6 +15,7 @@ GPS-based location tracking via the Overland iOS app. Tracks location pings, res
 istota-skill location share --request-key here-1
 istota-skill location share --precision area --request-key area-1
 istota-skill location share --room Hiking --request-key hiking-1
+istota-skill location share --map off --request-key nomap-1
 istota-skill location share --for 1h --precision exact --request-key hour-1
 istota-skill location sharing
 istota-skill location unshare
@@ -23,6 +24,8 @@ istota-skill location unshare --all
 ```
 
 A request with no duration shares one observation. In the caller's current shared room, `delivery: reply` means render the returned snapshot in the ordinary answer. From a private chat, name a room or use the linked room; the exact text is held for approval through `room post`. Reuse the request key on retry: that post keeps its original observation. A shared-room turn cannot target a second room. Email threads are unsupported.
+
+A one-time share shows a map of the same observation with the answer: an interactive map in a web room, a picture after the text on Talk, the image the text is captioned on in a Baileys WhatsApp group. In the current room the map is attached only if your answer contains the returned `map_url` exactly as given, so always keep that link in the answer and never shorten or rewrite it. Add `--map off` when the user asks for no map; it applies to one-time shares only (`--for` refuses it with `map_not_applicable`). From a private chat, the held preview says when a map will be posted with the text. Never describe the map in words or promise one: without the browser service, on SMS or email, or when drawing fails, the text and link go out alone.
 
 “Roughly” selects `--precision area`; otherwise use exact. Exact shares carry the measured point, accuracy and observed time. Area shares round coordinates to two decimal places before any output or map link; say “Approximate area,” never an exact pin or an anonymity guarantee. Share only the returned projection: no saved places, visit details, Wi-Fi, battery or personal history. Do not substitute `location current`, whose personal payload is broader.
 

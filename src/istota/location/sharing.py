@@ -135,6 +135,19 @@ def record_post_card(conn, *, request_id, task_id, actor_user_id, room_token, ob
     return {"card_id": card_id, **observation}
 
 
+# A card no answer carried its link for is never attached, and goes after this long.
+UNATTACHED_CARD_RETENTION_DAYS = 7
+
+
+def prune_unattached_cards(conn, retention_days=UNATTACHED_CARD_RETENTION_DAYS):
+    """Delete map cards no message took that are older than ``retention_days``."""
+    return conn.execute(
+        "DELETE FROM location_share_cards WHERE message_id IS NULL "
+        "AND created_at < datetime('now', '-' || ? || ' days')",
+        (retention_days,),
+    ).rowcount
+
+
 def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key,
                             now, room=None, precision="exact", allow_last_known=False,
                             map_card=True):
@@ -161,6 +174,9 @@ def share_location_snapshot(conn, config, *, actor_user_id, task_id, request_key
     private_replies._post_destination(conn, target, actor_user_id)
     context = {"kind": "location_snapshot", "precision": precision,
                "allow_last_known": allow_last_known}
+    # Only when off, so a post held before the option existed still replays.
+    if not map_card:
+        context["map"] = "off"
     if not shared:
         existing = conn.execute(
             "SELECT * FROM whatsapp_skill_requests WHERE requester_user_id=? "

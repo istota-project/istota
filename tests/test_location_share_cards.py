@@ -297,3 +297,103 @@ def test_field_builder_passes_listed_keys_and_omits_bad_json():
     assert app._location_shares_field(json.dumps({"a": 1})) is None
     assert app._location_shares_field(None) is None
     assert "location_shares" not in app._assistant_message_dict({"body": "x"}, "x", "completed")
+
+
+# --- the --map option -------------------------------------------------------
+
+
+def _skill_env(monkeypatch, config, actor, ident):
+    monkeypatch.setenv("ISTOTA_USER_ID", actor)
+    monkeypatch.setenv("ISTOTA_TASK_ID", str(ident))
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(config.db_path))
+
+
+def _running_turn(config, room, actor, text="where?"):
+    ident = _turn(config, room, actor, text)
+    with db.get_db(config.db_path) as conn:
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
+    return ident
+
+
+@pytest.mark.parametrize("argv,cards", [([], 1), (["--map", "auto"], 1), (["--map", "off"], 0)])
+def test_location_share_map_option(env, monkeypatch, capsys, argv, cards):
+    from istota.skills import location as cli
+    config, room = env
+    ident = _running_turn(config, room, "alice")
+    _skill_env(monkeypatch, config, "alice", ident)
+    cli.cmd_share(cli.build_parser().parse_args(["share", "--request-key", "k", *argv]))
+    assert json.loads(capsys.readouterr().out)["delivery"] == "reply"
+    assert len(_cards(config)) == cards
+
+
+def test_location_share_map_off_from_private_chat_holds_a_post_without_a_map(env, monkeypatch, capsys):
+    from istota.rooms.private_replies import MAP_PREVIEW_LINE
+    from istota.skills import location as cli
+    config, room = env
+    with db.get_db(config.db_path) as conn:
+        private = db.create_web_chat_room(conn, "alice", "Private").token
+    ident = _running_turn(config, private, "alice", "share my location with Hiking")
+    _skill_env(monkeypatch, config, "alice", ident)
+    argv = ["share", "--request-key", "k", "--room", room, "--map", "off"]
+    cli.cmd_share(cli.build_parser().parse_args(argv))
+    assert json.loads(capsys.readouterr().out)["status"] == "held"
+    with db.get_db(config.db_path) as conn:
+        destination, preview = conn.execute(
+            "SELECT destination, preview FROM whatsapp_skill_requests").fetchone()
+    assert "location_share" not in json.loads(destination)
+    assert MAP_PREVIEW_LINE not in preview
+    # The same key with the map on is a different request, not a replay of this one.
+    with db.get_db(config.db_path) as conn:
+        with pytest.raises(sharing.RequestError, match="request_conflict"):
+            sharing.share_location_snapshot(
+                conn, config, actor_user_id="alice", task_id=ident, request_key="k",
+                now=datetime.now(timezone.utc), room=room)
+
+
+def test_location_share_map_off_is_refused_for_a_timed_share(env, monkeypatch):
+    from istota.skills import location as cli
+    config, room = env
+    ident = _running_turn(config, room, "alice")
+    _skill_env(monkeypatch, config, "alice", ident)
+    args = cli.build_parser().parse_args(["share", "--request-key", "k", "--for", "1h", "--map", "off"])
+    with pytest.raises(sharing.RequestError, match="map_not_applicable"):
+        cli.cmd_share(args)
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM location_share_grants").fetchone()[0] == 0
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["share", "--request-key", "k", "--map", "never"])
+
+
+@pytest.mark.parametrize("argv,cards", [([], 1), (["--map", "off"], 0)])
+def test_room_location_map_option(env, monkeypatch, argv, cards):
+    from istota.skills import room as room_cli
+    config, room = env
+    _grant(config, room)
+    ident = _running_turn(config, room, "bob")
+    _skill_env(monkeypatch, config, "bob", ident)
+    result = room_cli._dispatch(room_cli.build_parser().parse_args(
+        ["location", "--user", "alice", *argv]))
+    assert result["owner_user_id"] == "alice"
+    assert len(_cards(config)) == cards
+
+
+# --- retention --------------------------------------------------------------
+
+
+def test_cleanup_sweeps_unattached_cards_older_than_seven_days(env):
+    from istota.scheduler import run_cleanup_checks
+    config, room = env
+    observation = {"owner_user_id": "alice", "owner_label": "Alice", "precision": "area",
+                   "lat": 1.0, "lon": 2.0, "accuracy_m": None,
+                   "observed_at": "2026-01-01T00:00:00+00:00", "freshness": "fresh",
+                   "map_url": "https://www.openstreetmap.org/?mlat=1.0&mlon=2.0"}
+    ids = {}
+    with db.get_db(config.db_path) as conn:
+        for name, age_days, message_id in (("old_loose", 8, None), ("old_attached", 30, 7),
+                                           ("recent_loose", 6, None)):
+            ids[name] = sharing._insert_card(conn, task_id=None, actor_user_id="alice",
+                                             room_token=room, observation=observation)
+            conn.execute("UPDATE location_share_cards SET created_at=datetime('now', ?), "
+                         "message_id=? WHERE id=?", (f"-{age_days} days", message_id, ids[name]))
+    run_cleanup_checks(config)
+    assert {card["id"] for card in _cards(config)} == {ids["old_attached"], ids["recent_loose"]}

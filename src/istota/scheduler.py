@@ -8471,6 +8471,10 @@ def run_cleanup_checks(config: Config) -> None:
         deleted_count = db.cleanup_old_tasks(conn, sched.task_retention_days)
         if deleted_count > 0:
             logger.info(f"Cleaned up {deleted_count} old task(s)")
+        from istota.location.sharing import prune_unattached_cards
+        card_rows = prune_unattached_cards(conn)
+        if card_rows > 0:
+            logger.info("Pruned %d unattached location map card(s)", card_rows)
 
         from istota.briefings.group_store import prune_runs
         prune_runs(conn, retention_days=config.briefings.archive_retention_days)

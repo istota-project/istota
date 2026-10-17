@@ -100,6 +100,9 @@ def cmd_share(args):
     path = os.environ.get("ISTOTA_DB_PATH", "")
     if not actor or not task.isdecimal() or not path:
         raise RequestError("task_unavailable")
+    # A timed share's maps are decided by each reader's `room location` query.
+    if args.duration_seconds is not None and args.map == "off":
+        raise RequestError("map_not_applicable")
     try:
         with db.get_db(Path(path)) as conn:
             options = dict(actor_user_id=actor, task_id=int(task), request_key=args.request_key,
@@ -109,7 +112,8 @@ def cmd_share(args):
                     conn, load_config(), duration_seconds=args.duration_seconds, **options)
             else:
                 result = share_location_snapshot(
-                    conn, load_config(), allow_last_known=args.last_known, **options)
+                    conn, load_config(), allow_last_known=args.last_known,
+                    map_card=args.map != "off", **options)
     except sqlite3.Error:
         raise RequestError("location_temporarily_unavailable") from None
     print(json.dumps(result))
@@ -872,6 +876,8 @@ def build_parser():
     share.add_argument("--request-key", required=True)
     share.add_argument("--room", default=None)
     share.add_argument("--precision", choices=["exact", "area"], default="exact")
+    share.add_argument("--map", choices=["auto", "off"], default="auto",
+                       help="Show a map with a one-time share (default auto)")
     mode = share.add_mutually_exclusive_group()
     mode.add_argument("--last-known", action="store_true")
     mode.add_argument("--for", dest="duration_seconds", type=_share_duration,
