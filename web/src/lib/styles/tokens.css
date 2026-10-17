@@ -390,6 +390,9 @@
   --text-xs: 0.7rem;
   --text-sm: 0.75rem;
   --text-base: 0.85rem;
+  /* The amber unread asterisk, one size wherever it marks something unread:
+     0.7 of the app nav's 0.85rem links, where it first appeared. */
+  --unread-mark-size: 0.595rem;
   /* Headings. Undefined for a long time, which is worse than it sounds:
 	   `font-size: var(--text-lg)` on an undefined property is invalid at
 	   computed-value time, so it inherits rather than falling back to the UA

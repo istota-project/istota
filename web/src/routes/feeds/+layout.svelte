@@ -364,6 +364,15 @@
                 type="button"
               >
                 <span class="feed-name">{feed.title}</span>
+                <CountPill
+                  count={$feedCounts.unread_by_feed[feed.id] ?? 0}
+                  title="Unread"
+                  shape="inline-mark"
+                  markSize="nav"
+                />
+                {#if ($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}<span class="visually-hidden"
+                    >, unread</span
+                  >{/if}
               </button>
             {/each}
           </CategoryGroup>
