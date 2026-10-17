@@ -32,8 +32,10 @@
      * `pill` sits in the row's flow. `mark` is the inline app nav's: a small
      * unread glyph, no digits, taken out of flow past the end of the parent,
      * which must be positioned, so it appearing or clearing moves no link.
+     * `inline-mark` is the same glyph in the row's flow, for a list row whose
+     * mark ends a line (the briefings archive's audience line).
      */
-    shape?: 'pill' | 'mark';
+    shape?: 'pill' | 'mark' | 'inline-mark';
   }
 
   let { count, title, tone = 'accent', shape = 'pill' }: Props = $props();
@@ -53,8 +55,10 @@
   its button's own `aria-label`, which overrides descendant content entirely.
 -->
 {#if count > 0}
-  {#if shape === 'mark'}
-    <span class="count-pill mark" {title}><Asterisk size="100%" strokeWidth={3.5} /></span>
+  {#if shape === 'mark' || shape === 'inline-mark'}
+    <span class="count-pill mark" class:inline={shape === 'inline-mark'} {title}
+      ><Asterisk size="100%" strokeWidth={3.5} /></span
+    >
   {:else}
     <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
   {/if}
@@ -95,5 +99,10 @@
     background: none;
     color: var(--accent-amber);
     pointer-events: none;
+  }
+  .count-pill.mark.inline {
+    position: static;
+    width: 1em;
+    height: 1em;
   }
 </style>

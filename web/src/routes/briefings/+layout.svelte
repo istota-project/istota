@@ -35,6 +35,7 @@
     SidebarToggle,
     CategoryGroup,
     Chip,
+    CountPill,
     Select,
     ConfirmDialog,
     EmptyState,
@@ -677,7 +678,6 @@
                   entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
               >
                 <span class="archive-line">
-                  <span class="unread" class:on={row.unread} aria-hidden="true"></span>
                   <span class="archive-subject">{row.title}</span>
                   <time class="archive-date" datetime={entry.at} title={fmtDate(entry.at)}
                     >{formatRelative(entry.at)}</time
@@ -686,6 +686,7 @@
                 <span class="archive-audience">
                   {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
                   <span>{row.audience}</span>
+                  <CountPill count={row.unread ? 1 : 0} title="Unread" shape="inline-mark" />
                   {#if row.unread}<span class="visually-hidden">, unread</span>{/if}
                 </span>
                 {#if row.preview}<span class="archive-preview">{row.preview}</span>{/if}
@@ -760,19 +761,6 @@
     min-width: 0;
   }
 
-  /* Holds its width when read, so titles stay aligned down the list. */
-  .unread {
-    flex-shrink: 0;
-    width: 0.4rem;
-    height: 0.4rem;
-    border-radius: 50%;
-    align-self: center;
-  }
-
-  .unread.on {
-    background: var(--accent-blue);
-  }
-
   .archive-subject {
     flex: 1;
     min-width: 0;
@@ -795,8 +783,6 @@
     align-items: center;
     gap: var(--space-1);
     min-width: 0;
-    /* Under the title, past the dot's column. */
-    padding-left: calc(0.4rem + var(--space-2));
     font-size: var(--text-xs);
     color: var(--text-dim);
   }
@@ -807,7 +793,6 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     overflow: hidden;
-    padding-left: calc(0.4rem + var(--space-2));
     font-size: var(--text-xs);
     line-height: 1.4;
     color: var(--text-muted);
