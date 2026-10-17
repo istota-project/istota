@@ -88,6 +88,21 @@ class TestTheServarrKeys:
         assert proxy.credential_env[self.VAR] == "arr-key-test"
         assert self.VAR in proxy.skill_credential_map["servarr"]
 
+    def test_every_skill_cli_is_told_which_apps_the_daemon_holds_keys_for(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        """#771/#772: names only, in the shared snapshot, so the `skills` CLI
+        and every other config loader know the key exists without holding it."""
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        monkeypatch.setenv(self.VAR, "arr-key-test")
+        monkeypatch.delenv("ISTOTA_SERVARR_SONARR_API_KEY", raising=False)
+        runtime = task_env.build_task_runtime(_config(tmp_path), **self._inputs(runtime_inputs))
+
+        base = runtime.proxy_ctx.base_env
+        assert base["ISTOTA_SERVARR_DAEMON_KEYED"] == "radarr"
+        assert "arr-key-test" not in base.values()
+        assert "ISTOTA_SERVARR_DAEMON_KEYED" not in runtime.env
+
     def test_no_other_skill_gets_it(self, tmp_path, runtime_inputs, monkeypatch):
         monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
         monkeypatch.setenv(self.VAR, "arr-key-test")

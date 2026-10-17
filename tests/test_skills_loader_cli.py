@@ -195,6 +195,55 @@ class TestDevboxFold:
         assert "Run things." in out
 
 
+class TestServarrOutsideTheDaemon:
+    """#772: the servarr keys reach the servarr CLI alone, so the `skills` CLI
+    sees the app keyless. When the daemon holds the key, `skills show` must
+    agree with the menu the daemon built."""
+
+    def _add_servarr(self, ctx, *, daemon_keyed):
+        from istota.config import ServarrConfig
+
+        _write_skill(
+            ctx.bundled_skills_dir, "servarr", "# Servarr\n\nSearch, then add by id.\n",
+            requires_capability=["servarr"],
+        )
+        ctx.servarr = ServarrConfig(
+            keyless_apps=["sonarr"], incomplete_apps=["sonarr"],
+            daemon_keyed_apps=["sonarr"] if daemon_keyed else [],
+        )
+
+    def test_show_returns_the_body_when_the_daemon_holds_the_key(self, ctx, capsys):
+        self._add_servarr(ctx, daemon_keyed=True)
+        from istota.skills.skills import cmd_list, cmd_show
+
+        cmd_show(argparse.Namespace(name="servarr"))
+        assert "Search, then add by id." in capsys.readouterr().out
+        cmd_list(argparse.Namespace())
+        names = {s["name"] for s in json.loads(capsys.readouterr().out)["skills"]}
+        assert "servarr" in names
+
+    def test_a_keyless_deployment_refuses_it_as_unavailable(self, ctx, capsys):
+        self._add_servarr(ctx, daemon_keyed=False)
+        from istota.skills.skills import cmd_list, cmd_show
+
+        with pytest.raises(SystemExit):
+            cmd_show(argparse.Namespace(name="servarr"))
+        error = json.loads(capsys.readouterr().out)["error"]
+        assert "unavailable" in error and "disabled" not in error
+        cmd_list(argparse.Namespace())
+        names = {s["name"] for s in json.loads(capsys.readouterr().out)["skills"]}
+        assert "servarr" not in names
+
+    def test_a_switched_off_skill_is_still_called_disabled(self, ctx, capsys):
+        self._add_servarr(ctx, daemon_keyed=True)
+        ctx.disabled_skills = ["servarr"]
+        from istota.skills.skills import cmd_show
+
+        with pytest.raises(SystemExit):
+            cmd_show(argparse.Namespace(name="servarr"))
+        assert "is disabled" in json.loads(capsys.readouterr().out)["error"]
+
+
 class TestShowCompanions:
     """`skills show <name>` delivers the skill's companions in the same
     response — the safety-critical change (a menu-pulled ingest skill arrives

@@ -123,6 +123,9 @@ def _guard_skill(name: str, ctx: dict) -> str | None:
     if meta is None:
         return f"unknown skill: {name!r}"
     if name in ctx["disabled"]:
+        missing = sorted(set(meta.requires_capability) - ctx["config"].available_capabilities())
+        if missing:
+            return f"skill {name!r} is unavailable: {', '.join(missing)} is not configured here"
         return f"skill {name!r} is disabled"
     if meta.admin_only and not ctx["is_admin"]:
         return f"skill {name!r} is restricted to admins"

@@ -125,6 +125,7 @@ from .config import (
     SchedulerConfig,
     load_config,
     refresh_user_profiles_if_changed,
+    servarr_daemon_keyed_env,
 )
 from .brain.claude_code import is_api_error_banner, is_permanent_api_error
 from .executor import (
@@ -2663,6 +2664,7 @@ def _execute_skill_task(
         env.update(skill_model_credentials(
             os.environ, names=SKILL_DAEMON_CREDENTIAL_VARS[skill_name],
         ))
+    env.update(servarr_daemon_keyed_env(os.environ))
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     try:

@@ -572,7 +572,7 @@ class TestTopLevel:
         cfg = Config()
         cfg.admin_users = {"zoe", "alice"}
         admins = view.build_config_view(cfg)["admins"]
-        assert admins == {"users": ["alice", "zoe"], "read_only_reason": None}
+        assert admins == {"users": ["alice", "zoe"], "candidates": [], "read_only_reason": None}
 
     def test_no_secret_value_from_the_document_reaches_the_payload(self):
         payload = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)
