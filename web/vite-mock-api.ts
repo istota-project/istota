@@ -4121,6 +4121,13 @@ const MOCK_FILE_CREDENTIALS: Record<string, string> = {
   'web.session_secret_key': 'istota_web_session_secret_key',
   'brain.native.api_key': 'istota_brain_native_api_key',
 };
+const MOCK_SECTION_TITLES: Record<string, string> = {
+  'sms.twilio': 'SMS (Twilio)',
+  'sms.telnyx': 'SMS (Telnyx)',
+  nextcloud: 'Nextcloud',
+  web: 'Web UI',
+  'brain.native': 'Native brain',
+};
 const MOCK_DOCS: Record<string, string> = {
   'logging.level': 'Minimum level written to the log.',
   'brain.native.base_url': 'An OpenAI-compatible endpoint the native brain talks to.',
@@ -4210,11 +4217,30 @@ function mockAdminConfig() {
     has_comments: state.hasComments,
     raw_toml: mockRawToml(sections),
     secrets: [
+      ...Object.entries(MOCK_FILE_CREDENTIALS).map(([key, name]) => {
+        const set =
+          sections.flatMap((s) => s.fields).find((f) => f.key === key)?.set ??
+          state.secretsSet.get(name) ??
+          false;
+        const section = key.split('.').slice(0, -1).join('.');
+        return {
+          name,
+          label: key,
+          config_key: key,
+          set,
+          source: set ? 'file' : 'none',
+          used_by: MOCK_SECTION_TITLES[section] ?? `[${section}]`,
+          read_only_reason: null,
+          risky: false,
+        };
+      }),
       {
         name: 'anthropic_api_key',
         label: 'Anthropic API key',
         config_key: null,
         set: state.secretsSet.get('anthropic_api_key') ?? false,
+        source: state.secretsSet.get('anthropic_api_key') ? 'file' : 'none',
+        used_by: 'Claude Code',
         read_only_reason: null,
         risky: false,
       },
@@ -4223,6 +4249,8 @@ function mockAdminConfig() {
         label: 'Claude Code OAuth token',
         config_key: null,
         set: state.secretsSet.get('claude_code_oauth_token') ?? true,
+        source: (state.secretsSet.get('claude_code_oauth_token') ?? true) ? 'file' : 'none',
+        used_by: 'Claude Code',
         read_only_reason: null,
         risky: false,
       },

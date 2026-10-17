@@ -219,7 +219,10 @@ class TestPreview:
         assert found.blocked
         assert [problem["path"] for problem in found.blocking] == [["scheduler", "talk_poll_timeout"]]
         assert found.blocking[0]["pre_existing"] is True
-        assert [problem["kind"] for problem in found.warnings] == ["retired"]
+        # CURRENT's inline extra_headers has a secret file, so it is also a move.
+        assert [(problem["kind"], problem.get("action")) for problem in found.warnings] == [
+            ("retired", None), ("warning", "move"),
+        ]
 
     def test_a_discard_the_change_caused_is_not_pre_existing(self):
         result = CheckResult(problems=[
@@ -398,6 +401,234 @@ class TestPreview:
             conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
         found, _ = _preview(CURRENT, {"ops": []}, config=Config(admin_users={"alice"}, db_path=db_path))
         assert found.running_tasks == 1
+
+
+class TestFileCredentialProblems:
+    def test_an_inline_credential_with_an_empty_file_is_a_move(self):
+        document = {"sms": {"twilio": {"auth_token": "INLINE-TOKEN-SENTINEL"}}}
+        found = edits.file_credential_problems(document, {})
+        assert found == [{
+            "kind": "warning",
+            "path": ["sms", "twilio", "auth_token"],
+            "message": (
+                "sms.twilio.auth_token is stored in config.toml in plain text; "
+                "move it to the secret file istota_sms_twilio_auth_token"
+            ),
+            "blocking": False,
+            "pre_existing": False,
+            "action": "move",
+        }]
+
+    def test_an_inline_table_credential_is_a_move(self):
+        document = {"brain": {"native": {"extra_headers": {"X-Key": "HEADER-SENTINEL"}}}}
+        found = edits.file_credential_problems(document, {})
+        assert [(p["path"], p["action"]) for p in found] == [
+            (["brain", "native", "extra_headers"], "move"),
+        ]
+        assert "HEADER-SENTINEL" not in str(found)
+
+    def test_a_credential_set_in_both_places_stays_an_unset(self):
+        document = {"sms": {"twilio": {"auth_token": "INLINE-TOKEN-SENTINEL"}}}
+        found = edits.file_credential_problems(
+            document, {"ISTOTA_SMS_TWILIO_AUTH_TOKEN": "from-the-file"},
+        )
+        assert [(p["path"], p["action"]) for p in found] == [
+            (["sms", "twilio", "auth_token"], "unset"),
+        ]
+        assert "where it is ignored" in found[0]["message"]
+
+    @pytest.mark.parametrize("value", ["", "   ", {}])
+    def test_an_empty_inline_value_is_nothing_to_move(self, value):
+        document = {"sms": {"twilio": {"auth_token": value}}}
+        assert edits.file_credential_problems(document, {}) == []
+
+    def test_a_credential_with_no_file_is_not_reported(self):
+        document = {"web": {"map": {"api_key": "browser-visible"}}}
+        assert edits.file_credential_problems(document, {}) == []
+
+    def test_preview_reads_a_file_set_in_the_same_change_set(self):
+        text = CURRENT + '\n[caldav]\npassword = "old-inline"\n'
+        found, _ = _preview(text, {"secrets": {"istota_caldav_password": "new-file-value"}})
+        actions = {
+            tuple(p["path"]): p.get("action") for p in found.warnings
+            if p["path"] == ["caldav", "password"]
+        }
+        assert actions == {("caldav", "password"): "unset"}
+
+
+FLAT_TOKEN = "FLAT-WHATSAPP-TOKEN-SENTINEL"
+FLAT_LABEL = "whatsapp.cloud.access_token"
+WITH_FLAT = CURRENT + f'\n[whatsapp]\nenabled = false\naccess_token = "{FLAT_TOKEN}"\n'
+
+
+class TestLegacyFlatWhatsapp:
+    """`load_config` reads a flat `[whatsapp] access_token` as
+    `[whatsapp.cloud] access_token`, so it is held inline all the same."""
+
+    def test_it_is_inline(self):
+        document = {"whatsapp": {"access_token": FLAT_TOKEN}}
+        assert edits.inline_file_credentials(document) == [
+            (("whatsapp", "cloud", "access_token"), "istota_whatsapp_access_token"),
+        ]
+        assert document == {"whatsapp": {"access_token": FLAT_TOKEN}}
+
+    def test_it_is_a_move_and_an_unset_beside_a_set_file(self):
+        document = {"whatsapp": {"access_token": FLAT_TOKEN}}
+        moves = edits.file_credential_problems(document, {})
+        assert [(p["path"], p["action"]) for p in moves] == [(FLAT_LABEL.split("."), "move")]
+        unsets = edits.file_credential_problems(document, {"ISTOTA_WHATSAPP_ACCESS_TOKEN": "f"})
+        assert [(p["path"], p["action"]) for p in unsets] == [(FLAT_LABEL.split("."), "unset")]
+        assert FLAT_TOKEN not in repr(moves) + repr(unsets)
+
+    def test_a_move_removes_the_flat_key(self):
+        found, seen = _preview(WITH_FLAT, {"move_to_file": [FLAT_LABEL]})
+        assert not found.blocked, found.errors
+        assert seen[0]["whatsapp"] == {"enabled": False}
+        assert found.moves == [{"label": FLAT_LABEL, "file": "istota_whatsapp_access_token"}]
+        assert FLAT_TOKEN not in repr(found.as_json()) + found.document_toml + repr(seen)
+        assert [p["path"] for p in found.warnings] == [["brain", "native", "extra_headers"]]
+
+    def test_an_unset_of_the_nested_label_removes_the_flat_key(self):
+        found, seen = _preview(
+            WITH_FLAT, {"ops": [{"op": "unset", "path": FLAT_LABEL.split(".")}]},
+        )
+        assert not found.blocked, found.errors
+        assert seen[0]["whatsapp"] == {"enabled": False}
+        assert FLAT_TOKEN not in repr(found.as_json()) + found.document_toml + repr(seen)
+
+    def test_a_raw_edit_cannot_write_the_flat_key_inline(self):
+        found, _ = _preview(CURRENT, {"raw": WITH_FLAT})
+        assert any("istota_whatsapp_access_token" in error for error in found.errors), found.errors
+
+    def test_a_stale_flat_key_left_alone_is_not_an_error(self):
+        found, _ = _preview(WITH_FLAT, {"ops": [{"op": "set", "path": ["email", "imap_host"], "value": "x"}]})
+        assert found.errors == []
+
+
+MOVED_TOKEN = "move-me-token-6d2a"
+WITH_TOKEN = CURRENT + f'\n[sms.twilio]\nauth_token = "{MOVED_TOKEN}"\n'
+
+
+class TestMoveToFile:
+    def test_a_move_drops_the_leaf_and_names_its_file(self):
+        found, seen = _preview(WITH_TOKEN, {"move_to_file": ["sms.twilio.auth_token"]})
+        assert not found.blocked, found.errors
+        assert "sms" not in seen[0]
+        assert "sms" not in found.document
+        assert found.moves == [{"label": "sms.twilio.auth_token", "file": "istota_sms_twilio_auth_token"}]
+        assert found.as_json()["moves"] == found.moves
+        assert found.file_secrets == {} and found.inline_secrets == {} and found.secrets == {}
+        assert found.changed and found.changed_sections == ["sms.twilio"]
+        assert found.secret_names == ["istota_sms_twilio_auth_token"]
+        assert 'auth_token = "<redacted>"' in "\n".join(found.diff)
+        assert any(line.startswith("-auth_token") for line in found.diff)
+        shown = repr(found.as_json()) + found.document_toml
+        assert MOVED_TOKEN not in shown
+        # The move answers its own warning; the headers' warning stays.
+        assert [problem["path"] for problem in found.warnings] == [["brain", "native", "extra_headers"]]
+
+    def test_a_table_credential_moves_whole(self):
+        found, seen = _preview(CURRENT, {"move_to_file": ["brain.native.extra_headers"]})
+        assert not found.blocked, found.errors
+        assert "brain" not in seen[0]
+        assert found.moves == [
+            {"label": "brain.native.extra_headers", "file": "istota_brain_native_extra_headers"},
+        ]
+        assert "header-value-1" not in repr(found.as_json()) + found.document_toml
+
+    def test_a_label_named_twice_is_one_move(self):
+        found, _ = _preview(WITH_TOKEN, {"move_to_file": ["sms.twilio.auth_token"] * 2})
+        assert len(found.moves) == 1
+
+    @pytest.mark.parametrize("moves", [
+        "sms.twilio.auth_token",
+        [["sms", "twilio", "auth_token"]],
+        ["email.imap_host"],
+        ["web.map.api_key"],
+        ['sms.twilio."auth_token'],
+        [""],
+    ])
+    def test_anything_but_installation_credentials_is_refused(self, moves):
+        with pytest.raises(ChangeError) as raised:
+            _preview(WITH_TOKEN, {"move_to_file": moves})
+        assert "imap_host" not in str(raised.value) and "map.api_key" not in str(raised.value)
+
+    def test_a_move_and_a_replace_of_the_same_credential_is_refused(self):
+        with pytest.raises(ChangeError, match="sms.twilio.auth_token"):
+            _preview(WITH_TOKEN, {
+                "move_to_file": ["sms.twilio.auth_token"],
+                "secrets": {"istota_sms_twilio_auth_token": "typed-again"},
+            })
+
+    def test_a_move_with_raw_is_refused(self):
+        with pytest.raises(ChangeError, match="raw"):
+            _preview(WITH_TOKEN, {"raw": WITH_TOKEN, "move_to_file": ["sms.twilio.auth_token"]})
+
+    def test_nothing_inline_is_nothing_to_move(self):
+        found, _ = _preview(CURRENT, {"move_to_file": ["sms.twilio.auth_token"]})
+        assert found.blocked
+        assert found.errors == ["sms.twilio.auth_token holds no value in config.toml to move"]
+
+    def test_a_credential_whose_file_is_set_is_not_moved_over_it(self):
+        found, _ = _preview(
+            WITH_TOKEN, {"move_to_file": ["sms.twilio.auth_token"]},
+            environ={"ISTOTA_SMS_TWILIO_AUTH_TOKEN": "from-the-file"},
+        )
+        assert found.blocked
+        assert any(
+            error.startswith("sms.twilio.auth_token is already set in istota_sms_twilio_auth_token")
+            for error in found.errors
+        ), found.errors
+
+    def test_moving_a_risky_credential_is_risky(self):
+        text = CURRENT + '\n[web]\noauth2_client_secret = "inline-client-secret"\n'
+        found, _ = _preview(text, {"move_to_file": ["web.oauth2_client_secret"]})
+        assert found.risky_keys == ["web.oauth2_client_secret"]
+
+
+class TestMovingAReadOnlyCredential:
+    """A move applies the same value from the secret file, so a credential the
+    editor never changes may still be moved; a new value is still refused."""
+
+    NEXTCLOUD = CURRENT + '\n[nextcloud]\napp_password = "NC-APP-PASSWORD-SENTINEL"\n'
+    SESSION = CURRENT + '\n[web]\nsession_secret_key = "SESSION-KEY-SENTINEL-0123456789abcdef"\n'
+
+    @pytest.mark.parametrize("text,label", [
+        (NEXTCLOUD, "nextcloud.app_password"),
+        (SESSION, "web.session_secret_key"),
+    ])
+    def test_a_move_is_not_refused_as_read_only(self, text, label):
+        found, seen = _preview(text, {"move_to_file": [label]})
+        assert found.errors == []
+        assert label.split(".")[0] not in seen[0]
+        assert found.moves[0]["label"] == label
+        assert "SENTINEL" not in repr(found.as_json()) + found.document_toml
+
+    def test_a_new_value_by_op_is_still_refused(self):
+        found, _ = _preview(self.NEXTCLOUD, {
+            "ops": [{"op": "set", "path": ["nextcloud", "app_password"], "value": "typed"}],
+        })
+        assert any(e.startswith("nextcloud.app_password is not edited here.") for e in found.errors)
+
+    def test_a_raw_edit_is_still_refused(self):
+        raw = CURRENT + '\n[nextcloud]\napp_password = "typed-in-raw"\n'
+        found, _ = _preview(self.NEXTCLOUD, {"raw": raw})
+        assert any(e.startswith("nextcloud.app_password is not edited here.") for e in found.errors)
+
+    def test_a_raw_removal_is_still_refused(self):
+        found, _ = _preview(self.NEXTCLOUD, {"raw": CURRENT})
+        assert any(e.startswith("nextcloud.app_password is not edited here.") for e in found.errors)
+
+    def test_a_new_file_value_is_still_refused(self):
+        found, _ = _preview(self.SESSION, {"secrets": {"istota_web_session_secret_key": "y" * 40}})
+        assert any("istota_web_session_secret_key" in error for error in found.errors)
+
+    def test_an_op_on_the_moved_path_is_refused_with_the_move(self):
+        with pytest.raises(ChangeError, match="nextcloud.app_password is both moved and replaced"):
+            _preview(self.NEXTCLOUD, {
+                "move_to_file": ["nextcloud.app_password"],
+                "ops": [{"op": "set", "path": ["nextcloud", "app_password"], "value": "typed"}],
+            })
 
 
 class TestLoggableNames:

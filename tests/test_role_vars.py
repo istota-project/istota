@@ -143,13 +143,29 @@ def test_a_caldav_password_without_its_url_is_left_out_as_the_old_role_did():
     assert _convert(old).vars["istota_secrets"]["istota_caldav_password"] == "caldav-0005"
 
 
-def test_a_credential_with_no_stack_file_refuses_and_names_it_without_its_value():
-    old = _old() | {"istota_sms_twilio_auth_token": "twilio-0011", "istota_whatsapp_app_secret": "wa-0012"}
+def test_a_value_with_no_stack_file_refuses_and_names_it_without_its_value():
+    old = _old() | {"istota_sms_twilio_account_sid": "AC0011", "istota_sms_twilio_messaging_service_sid": "MG0012"}
     with pytest.raises(Refusal) as refused:
         _convert(old)
     message = str(refused.value)
-    assert "istota_sms_twilio_auth_token" in message and "istota_whatsapp_app_secret" in message
-    assert "twilio-0011" not in message and "wa-0012" not in message
+    assert "istota_sms_twilio_account_sid" in message
+    assert "istota_sms_twilio_messaging_service_sid" in message
+    assert "AC0011" not in message and "MG0012" not in message
+
+
+def test_the_twilio_and_whatsapp_credentials_land_under_their_stack_names():
+    carried = {
+        "istota_sms_twilio_auth_token": "twilio-0016",
+        "istota_sms_twilio_api_key_sid": "twilio-0017",
+        "istota_sms_twilio_api_key_secret": "twilio-0018",
+        "istota_whatsapp_access_token": "wa-0019",
+        "istota_whatsapp_app_secret": "wa-0020",
+        "istota_whatsapp_verify_token": "wa-0021",
+    }
+    secrets = _convert(_old() | carried).vars["istota_secrets"]
+    for name, value in carried.items():
+        assert secrets[name] == value, name
+    assert set(secrets) <= set(setup_wizard.SECRET_NAMES)
 
 
 def test_the_master_key_and_web_token_key_are_kept_in_the_vault_for_recovery():
@@ -307,14 +323,14 @@ def test_the_cli_writes_a_private_vars_file_and_prints_no_value(tmp_path, capsys
 
 
 def test_the_cli_refuses_and_writes_nothing(tmp_path, capsys):
-    old = _old() | {"istota_whatsapp_access_token": "wa-0013"}
+    old = _old() | {"istota_sms_twilio_account_sid": "AC0013"}
     out = tmp_path / "vars.yml"
     code = role_vars.main(_write_inputs(tmp_path, old) + ["--output", str(out)])
     captured = capsys.readouterr()
     assert code == 1
     assert not out.exists()
-    assert "istota_whatsapp_access_token" in captured.err
-    assert "wa-0013" not in captured.err and "wa-0013" not in captured.out
+    assert "istota_sms_twilio_account_sid" in captured.err
+    assert "AC0013" not in captured.err and "AC0013" not in captured.out
 
 
 def test_a_yaml_error_names_the_position_and_not_the_line(tmp_path, capsys):

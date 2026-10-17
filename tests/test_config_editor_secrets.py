@@ -82,6 +82,8 @@ class TestRedactDocument:
         document: dict = {"brain": {"native": {"extra_headers": {"authorization": "marker-header-0"}}}}
         values = ["marker-header-0"]
         for index, dotted in enumerate(SECRET_CREDENTIALS):
+            if dotted == "brain.native.extra_headers":
+                continue  # a table of headers, planted above
             *parents, leaf = dotted.split(".")
             node = document
             for part in parents:

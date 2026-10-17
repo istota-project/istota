@@ -104,9 +104,17 @@ class TestEditorKind:
         assert schema.editor_kind(path, str, "AC1") == "str"
 
     def test_an_inline_credential_is_named_by_its_label(self):
-        assert schema.credential_for(("brain", "native", "extra_headers")) == {
-            "kind": "inline", "name": "brain.native.extra_headers",
+        assert schema.credential_for(("web", "map", "api_key")) == {
+            "kind": "inline", "name": "web.map.api_key",
         }
+
+    def test_the_native_headers_are_one_file_credential_edited_as_a_secret(self):
+        """A JSON object in its secrets file, so one write-only field, not a table."""
+        path = ("brain", "native", "extra_headers")
+        assert schema.credential_for(path) == {
+            "kind": "file", "name": "istota_brain_native_extra_headers",
+        }
+        assert schema.editor_kind(path, dict, {}) == "secret"
 
     def test_choices(self):
         assert "encrypted" in schema.choices_for(("web", "token_storage"))
@@ -127,11 +135,15 @@ class TestEnvOverride:
         environ = {"ISTOTA_EMAIL_IMAP_PASSWORD": "x"}
         assert schema.env_override_for(("email", "imap_password"), environ) is None
 
-    def test_an_inline_credentials_variable_is(self):
-        environ = {"ISTOTA_SMS_TWILIO_AUTH_TOKEN": "x"}
-        assert schema.env_override_for(("sms", "twilio", "auth_token"), environ) == (
-            "ISTOTA_SMS_TWILIO_AUTH_TOKEN"
+    def test_a_variable_with_no_secrets_file_is(self):
+        environ = {"ISTOTA_SMS_TWILIO_ACCOUNT_SID": "x"}
+        assert schema.env_override_for(("sms", "twilio", "account_sid"), environ) == (
+            "ISTOTA_SMS_TWILIO_ACCOUNT_SID"
         )
+
+    def test_the_twilio_token_has_a_file_now_so_its_variable_is_not(self):
+        environ = {"ISTOTA_SMS_TWILIO_AUTH_TOKEN": "x"}
+        assert schema.env_override_for(("sms", "twilio", "auth_token"), environ) is None
 
 
 def _fake(script: str) -> list[str]:

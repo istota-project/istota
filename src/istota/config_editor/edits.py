@@ -1,10 +1,10 @@
 """Turning a change into a new config document, and showing it.
 
 `preview` is the whole of it: a change set (ops or a raw document, credentials,
-the admin list) applied to the current `config.toml`, refused where it touches
-what the editor may not change, validated by `istota apply --check` in a child
-process, and described without a credential value in it. The web's preview and
-submit both run it; a submit then stores what it returns
+credentials to move into their secret files, the admin list) applied to the
+current `config.toml`, refused where it touches what the editor may not change,
+validated by `istota apply --check` in a child process, and described without a
+credential value in it. The web's preview and submit both run it; a submit then stores what it returns
 (`config_editor.requests.create`).
 
 A path is a list of strings, never a dotted string, since a key can hold a dot.
@@ -26,7 +26,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Collection, Mapping
 
 from istota.config_editor import secrets
 from istota.lib import toml_write
@@ -184,6 +184,29 @@ def _unset_at(document: dict, path: tuple[str, ...]) -> None:
         del trail[depth - 1][path[depth - 1]]
 
 
+def _unset_everywhere(document: dict, path: tuple[str, ...]) -> None:
+    """Remove `path` and every older spelling `load_config` would read as it."""
+    from istota.config import legacy_spellings
+
+    _unset_at(document, path)
+    for older in legacy_spellings(path):
+        _unset_at(document, older)
+
+
+def normalized(document: dict) -> dict:
+    """A copy of `document` with the loader's legacy rewrites applied, so a
+    credential is found where `load_config` reads it, whatever its spelling."""
+    from istota.config import normalize_legacy_document
+
+    found = copy.deepcopy(document)
+    try:
+        normalize_legacy_document(found)
+    except ValueError:
+        # The mount-path rename refuses a conflict; the WhatsApp rewrite ran first.
+        pass
+    return found
+
+
 def _snippet_value(path: tuple[str, ...], snippet: Any) -> Any:
     """What a `set_toml` snippet defines for the last segment of `path`.
 
@@ -220,7 +243,7 @@ def apply_ops(document: dict, ops: Any) -> dict:
             _check_value(op["value"])
             _set_at(new, path, copy.deepcopy(op["value"]))
         elif kind == "unset":
-            _unset_at(new, path)
+            _unset_everywhere(new, path)
         elif kind == "set_toml":
             _set_at(new, path, _snippet_value(path, op.get("toml")))
         else:
@@ -365,11 +388,15 @@ def check_admins(admins: list[str], *, acting_admin: str, db_path: Path) -> list
 
 def check_read_only(
     new: dict, current: dict, environ: Mapping[str, str] | None = None,
+    *, moved: Collection[tuple[str, ...]] = (),
 ) -> list[str]:
     """Keys the editor shows and never edits, and keys the environment sets.
 
     `[users.*]` is the exception: seed-only, it may be edited in the raw editor.
     A path with a `*` segment is retired input: it may be removed, never written.
+    A path in `moved` that `new` no longer holds is a move to its secret file,
+    which applies the same value, so it passes; `preview` refuses any other
+    change at a moved path.
     """
     from istota.config_editor import schema
 
@@ -381,6 +408,8 @@ def check_read_only(
             for concrete in _expand(new, path):
                 if _differs(new, current, concrete):
                     errors.append(f"{secrets.label(concrete)} is not edited here. {reason}")
+            continue
+        if path in moved and not secrets.lookup(new, path)[0]:
             continue
         if _differs(new, current, path):
             errors.append(f"{secrets.label(path)} is not edited here. {reason}")
@@ -401,6 +430,7 @@ def check_file_credentials(new: dict, current: dict) -> list[str]:
     """
     from istota.config_editor import schema
 
+    new, current = normalized(new), normalized(current)
     errors = []
     for path, name in schema.file_credentials().items():
         found, _ = secrets.lookup(new, path)
@@ -499,6 +529,28 @@ def _read_secrets(raw: Any) -> tuple[dict[str, str], dict[str, str]]:
     return files, inline
 
 
+def _read_moves(raw: Any) -> dict[str, str]:
+    """`move_to_file`: installation credentials by label, to their secret files.
+
+    Names only: the value is read out of the live file by the host applier
+    (`handoff.build`), never by the web.
+    """
+    from istota.config_editor.reference import INSTALLATION_CREDENTIALS
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ChangeError("move_to_file is not a list of credential names")
+    moves: dict[str, str] = {}
+    for label in raw:
+        if not isinstance(label, str) or label not in INSTALLATION_CREDENTIALS:
+            raise ChangeError(
+                "move_to_file names something that is not a credential with a secret file"
+            )
+        moves[label] = INSTALLATION_CREDENTIALS[label]
+    return moves
+
+
 def _read_admins(raw: Any) -> list[str] | None:
     if raw is None:
         return None
@@ -514,25 +566,68 @@ def _read_admins(raw: Any) -> list[str] | None:
     return admins
 
 
-def file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict]:
-    """A file credential also set in `config.toml`, where the set file wins."""
+def _holds_value(value: Any) -> bool:
+    """Whether a leaf holds something: a blank string or an empty table does not."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list)):
+        return bool(value)
+    return True
+
+
+def inline_file_credentials(document: dict) -> list[tuple[tuple[str, ...], str]]:
+    """Each credential with a secret file that `document` holds a value for
+    inline, with the file's name. Never the value itself."""
     from istota.config_editor import schema
 
+    document = normalized(document)
     found = []
     for path, name in schema.file_credentials().items():
-        present, _ = secrets.lookup(new, path)
-        if present and environ.get(name.upper(), "").strip():
-            found.append({
-                "kind": "warning",
-                "path": list(path),
-                "message": (
-                    f"{secrets.label(path)} is also set in config.toml, where it is "
-                    f"ignored: the credential {name} wins"
-                ),
-                "blocking": False,
-                "pre_existing": False,
-                "action": "unset",
-            })
+        present, value = secrets.lookup(document, path)
+        if present and _holds_value(value):
+            found.append((path, name))
+    return found
+
+
+def file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict]:
+    """A file credential also held in `config.toml`.
+
+    Set in its file as well, the file wins and the inline copy is ignored
+    (`action: "unset"`). With the file empty, the inline value is the one in
+    use, in plain text, and can be moved into the file (`action: "move"`).
+    """
+    from istota.config_editor import schema
+
+    new = normalized(new)
+    found = []
+    for path, name in schema.file_credentials().items():
+        present, value = secrets.lookup(new, path)
+        if not present:
+            continue
+        if environ.get(name.upper(), "").strip():
+            message = (
+                f"{secrets.label(path)} is also set in config.toml, where it is "
+                f"ignored: the credential {name} wins"
+            )
+            action = "unset"
+        elif _holds_value(value):
+            message = (
+                f"{secrets.label(path)} is stored in config.toml in plain text; "
+                f"move it to the secret file {name}"
+            )
+            action = "move"
+        else:
+            continue
+        found.append({
+            "kind": "warning",
+            "path": list(path),
+            "message": message,
+            "blocking": False,
+            "pre_existing": False,
+            "action": action,
+        })
     return found
 
 
@@ -588,7 +683,8 @@ class Preview:
 
     `document` holds a sentinel at every secret leaf. The only credential
     values are in `file_secrets` and `inline_secrets`, which `as_json` leaves
-    out.
+    out. `moves` names each credential moved from `config.toml` to its secret
+    file, as `{label, file}`, and carries no value.
     """
 
     document: dict
@@ -605,6 +701,7 @@ class Preview:
     secret_names: list[str] = field(default_factory=list)
     admins_changed: bool = False
     running_tasks: int = 0
+    moves: list[dict] = field(default_factory=list)
 
     @property
     def blocking(self) -> list[dict]:
@@ -639,6 +736,7 @@ class Preview:
             "secret_names": self.secret_names,
             "admins_changed": self.admins_changed,
             "running_tasks": self.running_tasks,
+            "moves": self.moves,
         }
 
 
@@ -671,9 +769,15 @@ async def preview(
         raise ChangeError(UNREADABLE_CONFIG) from None
     ops = change_set.get("ops") or []
     raw = change_set.get("raw")
+    moves = _read_moves(change_set.get("move_to_file"))
     if raw is not None:
         if ops:
             raise ChangeError("raw replaces the whole file, so ops must be empty")
+        if moves:
+            raise ChangeError(
+                "raw replaces the whole file, so move_to_file must be empty; move "
+                "a credential from the form, or remove it in the raw text and set its file"
+            )
         candidate = apply_raw(raw)
     else:
         candidate = apply_ops(base, ops)
@@ -689,10 +793,26 @@ async def preview(
         else:
             _set_at(new, path, value)
     admins = _read_admins(change_set.get("admins"))
+    errors: list[str] = []
+    base_read = normalized(base)
+    for label, name in moves.items():
+        path = tuple(label.split("."))
+        if name in file_secrets or label in inline_given or _differs(new, base, path):
+            raise ChangeError(f"{label} is both moved and replaced; send one of the two")
+        present, value = secrets.lookup(base_read, path)
+        if not present or not _holds_value(value):
+            errors.append(f"{label} holds no value in config.toml to move")
+        elif environ.get(name.upper(), "").strip():
+            errors.append(
+                f"{label} is already set in {name}, which wins over config.toml; "
+                "remove the copy in config.toml rather than moving it over the file"
+            )
+        _unset_everywhere(new, path)
 
     paths_by_name = {name: path for path, name in schema.file_credentials().items()}
-    errors: list[str] = []
-    errors += check_read_only(new, base, environ)
+    errors += check_read_only(
+        new, base, environ, moved={tuple(label.split(".")) for label in moves},
+    )
     errors += check_file_credentials(new, base)
     for name in sorted(file_secrets):
         path = paths_by_name.get(name)
@@ -725,7 +845,7 @@ async def preview(
     for problem in problems:
         path = tuple(problem.get("path") or ())
         problem["pre_existing"] = bool(path) and not any(_related(path, item) for item in changed)
-    problems += file_credential_problems(new, environ)
+    problems += file_credential_problems(new, {**environ, **overlay})
 
     risky = {secrets.label(path) for path in schema.RISKY_KEYS if _differs(new, base, path)}
     for name in file_secrets:
@@ -747,7 +867,8 @@ async def preview(
         changed_sections=sorted({section_of(path) for path in changed}),
         changed_keys=len(changed),
         risky_keys=sorted(risky),
-        secret_names=sorted(set(file_secrets) | set(inline_new) | set(removed)),
+        secret_names=sorted(set(file_secrets) | set(inline_new) | set(removed) | set(moves.values())),
         admins_changed=admins_changed,
         running_tasks=running_tasks(getattr(config, "db_path", None)),
+        moves=[{"label": label, "file": name} for label, name in moves.items()],
     )

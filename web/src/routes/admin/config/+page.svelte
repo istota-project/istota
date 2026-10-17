@@ -32,6 +32,7 @@
     pathKey,
     retainExisting,
     withAdmins,
+    withMove,
     withOp,
     withRaw,
     withSecret,
@@ -76,7 +77,8 @@
   let editable = $derived(!!view?.editable);
   let count = $derived(changeCount(draft));
   let configManaged = $derived(!!view?.managed.config.managed);
-  let opCount = $derived(Object.keys(draft.ops).length);
+  /** Form changes the raw editor cannot be combined with: ops, and moves. */
+  let opCount = $derived(Object.keys(draft.ops).length + draft.move_to_file.length);
   /** The form's fields, locked while the raw editor holds the whole file. */
   let formEditable = $derived(editable && draft.raw === null);
 
@@ -204,6 +206,14 @@
     draft = removalPending(problem)
       ? withOp(draft, null, problem.path)
       : withOp(draft, { op: 'unset', path: problem.path });
+  }
+
+  function movePending(problem: ConfigProblem): boolean {
+    return draft.move_to_file.includes(problem.path.join('.'));
+  }
+
+  function toggleMove(problem: ConfigProblem) {
+    draft = withMove(draft, problem.path.join('.'), !movePending(problem));
   }
 
   async function restore(id: number) {
@@ -405,6 +415,14 @@
                     disabled={!formEditable}
                     onclick={() => toggleRemoval(problem)}
                     >{removalPending(problem) ? 'Keep' : 'Remove'}</Button
+                  >
+                {:else if editable && problem.action === 'move'}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!formEditable}
+                    onclick={() => toggleMove(problem)}
+                    >{movePending(problem) ? 'Keep in config.toml' : 'Move to secret file'}</Button
                   >
                 {/if}
               </li>

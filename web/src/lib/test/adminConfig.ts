@@ -3,7 +3,32 @@
  * key the server sends, and a view around a list of them. Overrides are
  * partial so a test states only what it is about.
  */
-import type { AdminConfigField, AdminConfigView, ConfigPreview, ConfigRequest } from '$lib/api';
+import type {
+  AdminConfigField,
+  AdminConfigView,
+  ConfigPreview,
+  ConfigRequest,
+  ConfigSecretFile,
+} from '$lib/api';
+
+/** One entry of the view's `secrets`: a file credential with a config key,
+ *  not set, unless the overrides say otherwise. */
+export function configSecret(overrides: Partial<ConfigSecretFile> = {}): ConfigSecretFile {
+  const configKey =
+    overrides.config_key === undefined ? 'email.imap_password' : overrides.config_key;
+  return {
+    name: 'istota_email_imap_password',
+    label: configKey ?? 'istota_email_imap_password',
+    config_key: configKey,
+    set: false,
+    source: 'none',
+    used_by: 'Email',
+    read_only_reason: null,
+    movable: overrides.source === 'inline' && !overrides.read_only_reason,
+    risky: false,
+    ...overrides,
+  };
+}
 
 export function configField(overrides: Partial<AdminConfigField> = {}): AdminConfigField {
   const path = overrides.path ?? ['email', 'imap_host'];
@@ -74,6 +99,7 @@ export function configPreview(overrides: Partial<ConfigPreview> = {}): ConfigPre
     changed_keys: 1,
     risky_keys: [],
     secret_names: [],
+    moves: [],
     admins_changed: false,
     running_tasks: 0,
     base_digest: 'digest-1',
@@ -92,6 +118,7 @@ export function configRequest(overrides: Partial<ConfigRequest> = {}): ConfigReq
     admins_changed: false,
     changed_sections: ['email'],
     secret_names: [],
+    moves: [],
     diff_text: '',
     output_text: null,
     created_at: '2026-10-12T08:05:00Z',

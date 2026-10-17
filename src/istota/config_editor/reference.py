@@ -4,8 +4,10 @@
   section and key they document. The example is read line by line rather than
   parsed, because most of it is commented out. `field_docs` is the same prose
   keyed by path, for the editor's per-field docs.
-- `credential_files` maps each credential's config key to its stack secrets
-  file, or to "" for a credential that has none and lives in `config.toml`.
+- `INSTALLATION_CREDENTIALS` maps each installation credential's config key to
+  its stack secrets file, and `NOT_CREDENTIALS` names the secret-looking keys
+  that are not credentials. `credential_files` is the first, plus "" for a
+  credential that has no file and lives in `config.toml`.
 - `setup_paths` is the container layout `istota setup` writes.
 
 The header and assignment patterns are the field coverage guard's
@@ -61,25 +63,74 @@ def _collection_of_dataclasses(owner: type, field: dataclasses.Field) -> bool:
     return any(dataclasses.is_dataclass(arg) for arg in typing.get_args(declared))
 
 
+#: Credentials whose variable is outside `config.SECRET_ENV_OVERRIDES`,
+#: because they sit deeper than its section/key rows: the native brain's two,
+#: and each arr app's key under the `servarr.apps` dict field.
+_DEEP_CREDENTIAL_VARIABLES: tuple[tuple[str, str], ...] = (
+    ("brain.native.api_key", "ISTOTA_BRAIN_NATIVE_API_KEY"),
+    ("brain.native.extra_headers", "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS"),
+) + tuple(
+    (f"servarr.apps.{app}.api_key", config_module.servarr_key_variable(app))
+    for app in config_module.SERVARR_APPS
+)
+
+
+def _credential_variables() -> list[tuple[str, str]]:
+    """Every config path a credential variable can set, with that variable."""
+    found = [
+        (f"{section}.{key}", env)
+        for env, section, key in config_module.SECRET_ENV_OVERRIDES
+    ]
+    found.extend(_DEEP_CREDENTIAL_VARIABLES)
+    return found
+
+
+def _installation_credentials() -> dict[str, str]:
+    from istota import setup_wizard
+
+    return {
+        dotted: env.lower()
+        for dotted, env in _credential_variables()
+        if env.lower() in setup_wizard.SECRET_NAMES
+    }
+
+
+#: Every installation credential `Config` reads, by dotted path, to its stack
+#: secrets file (`setup_wizard.SECRET_NAMES`). The file name is the variable
+#: `load_config` reads it from, lowercased. A path whose variable has no file
+#: is not here. `tests/test_installation_credentials.py` requires every path
+#: `is_secret_path` flags to be here or in `NOT_CREDENTIALS`.
+INSTALLATION_CREDENTIALS: dict[str, str] = _installation_credentials()
+
+#: Paths `is_secret_path` flags that hold no credential, each with the reason.
+#: Redaction is broad on purpose; this list is the exact answer the guard needs,
+#: and an entry here never un-redacts anything.
+NOT_CREDENTIALS: dict[str, str] = {
+    "email.authserv_id": "the id our MTA stamps its Authentication-Results headers with",
+    "scheduler.credential_backup_interval": "seconds between encrypted credential backups",
+    "developer.author_credit": "a line appended to commit messages",
+    "security.credential_history_days": "retention for credential history, in days",
+    "security.credential_audit_days": "retention for the credential audit log, in days",
+    "security.credential_exports_per_day": "a rate limit on credential exports",
+    "security.credential_backup_retention": "how many credential backups are kept",
+    "security.wallet_authorization_minutes": "how long a wallet authorization lasts, in minutes",
+    "web.auth_step_up_ttl_minutes": "how long a step-up lasts, in minutes",
+    "web.oauth2_provider": "the OAuth2 provider's URL",
+    "web.oauth2_client_id": "the OAuth2 client's public identifier",
+    "web.oauth2_userinfo_endpoint": "a URL",
+    "web.oauth2_redirect_uri": "a URL",
+    "web.map.api_key": "public by construction: MapLibre sends it to every browser in the tile URL",
+}
+
+
 def credential_files() -> dict[str, str]:
     """Each credential key's dotted path, to its stack secrets file or "".
 
-    `config.SECRET_ENV_OVERRIDES` is the credentials that reach the config from
-    the environment, which is how a stack secrets file reaches it too.
+    `INSTALLATION_CREDENTIALS`, plus every other path a credential variable can
+    set, mapped to "": a credential with no file lives in `config.toml`.
     """
-    from istota import setup_wizard
-
-    found: dict[str, str] = {}
-    for env, section, key in config_module.SECRET_ENV_OVERRIDES:
-        name = env.lower()
-        found[f"{section}.{key}"] = name if name in setup_wizard.SECRET_NAMES else ""
-    # brain.native.api_key is read two levels deep, outside the table.
-    if "istota_brain_native_api_key" in setup_wizard.SECRET_NAMES:
-        found["brain.native.api_key"] = "istota_brain_native_api_key"
-    # So are the arr keys, one per app under a dict field.
-    for app in config_module.SERVARR_APPS:
-        name = config_module.servarr_key_variable(app).lower()
-        found[f"servarr.apps.{app}.api_key"] = name if name in setup_wizard.SECRET_NAMES else ""
+    found = {dotted: "" for dotted, _env in _credential_variables()}
+    found.update(INSTALLATION_CREDENTIALS)
     return found
 
 

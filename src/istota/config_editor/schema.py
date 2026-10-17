@@ -249,6 +249,10 @@ def editor_kind(path: tuple[str, ...] | list[str], declared: Any, value: Any) ->
     path = tuple(path)
     if read_only_reason(path) is not None:
         return "readonly"
+    # A table with a secrets file (`extra_headers`) holds its value there as
+    # one JSON object, so it is one write-only field rather than a table.
+    if path in file_credentials():
+        return "secret"
     if path in TABLE_PATHS:
         return "table"
     if credential_for(path) is not None:

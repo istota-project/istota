@@ -112,9 +112,9 @@ One provider-neutral SMS surface backed by Twilio or Telnyx. See the [SMS setup 
 | Setting | Default | Description |
 |---|---|---|
 | `account_sid` | `""` | Account checked on signed inbound events |
-| `auth_token` | `""` | Secret used only for Twilio webhook validation |
-| `api_key_sid` | `""` | Restricted API key SID used for outbound sends |
-| `api_key_secret` | `""` | Restricted API key secret used for outbound sends |
+| `auth_token` | `""` | Secret used only for Twilio webhook validation. Set it as the stack secret file `istota_sms_twilio_auth_token` |
+| `api_key_sid` | `""` | Restricted API key SID used for outbound sends. Stack secret file `istota_sms_twilio_api_key_sid` |
+| `api_key_secret` | `""` | Restricted API key secret used for outbound sends. Stack secret file `istota_sms_twilio_api_key_secret` |
 | `messaging_service_sid` | `""` | Messaging Service whose sender pool carries outbound messages |
 
 ### `[sms.telnyx]`
@@ -150,9 +150,9 @@ Meta's Cloud API, used directly rather than through a Business Solution Provider
 |---|---|---|
 | `waba_id` | `""` | Decimal WhatsApp Business Account id; an event from another WABA is rejected |
 | `phone_number_id` | `""` | Decimal business phone number id from the Meta app, not the phone number |
-| `access_token` | `""` | System-user token with `whatsapp_business_messaging`. Deliver it through `ISTOTA_WHATSAPP_ACCESS_TOKEN` |
-| `app_secret` | `""` | Meta app secret; validates `X-Hub-Signature-256` over the raw webhook body. `ISTOTA_WHATSAPP_APP_SECRET` |
-| `verify_token` | `""` | Shared secret Meta echoes on the `GET` verification handshake. `ISTOTA_WHATSAPP_VERIFY_TOKEN` |
+| `access_token` | `""` | System-user token with `whatsapp_business_messaging`. Stack secret file `istota_whatsapp_access_token` (`ISTOTA_WHATSAPP_ACCESS_TOKEN`) |
+| `app_secret` | `""` | Meta app secret; validates `X-Hub-Signature-256` over the raw webhook body. Stack secret file `istota_whatsapp_app_secret` (`ISTOTA_WHATSAPP_APP_SECRET`) |
+| `verify_token` | `""` | Shared secret Meta echoes on the `GET` verification handshake. Stack secret file `istota_whatsapp_verify_token` (`ISTOTA_WHATSAPP_VERIFY_TOKEN`) |
 | `graph_api_version` | `""` | Empty follows the version the installed PyWa release pins. An explicit `v23.0`-style value is for a controlled migration |
 | `business_timezone` | `"UTC"` | IANA zone the monthly quota month is computed in |
 | `request_timeout_seconds` | `10` | Cloud API timeout, from 1 through 30 seconds |
@@ -462,7 +462,7 @@ Selects which model-invocation backend the executor uses. See [architecture/brai
 | `fallback_on_transient` | `true` | Also reroute a persistent `transient_api_error` |
 | `fallback_cooldown_seconds` | `900` | Skip an unavailable primary at most this long before retrying it; a usage limit against a Claude subscription instead ends at the quota's own reset (floor 60s). 0 disables |
 
-`[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `soft_deadline_percent`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file. Full annotations in the [native brain runbook](native-brain.md).
+`[brain.native]` (used when `kind = "native"`, when it is the `fallback`, or when a `source_type_overrides` entry routes to it): `provider` (only `"openai_compat"`), `model` (explicit id), `base_url`, `effort`, `model_overrides`, `extra_headers`, `context_window`, `max_turns`, `max_tokens`, `prompt_caching`, `compaction_reserve_tokens`, `compaction_keep_recent_tokens`, `bash_spill_full_output`, `turn_budget_nudge`, `turn_budget_nudge_early_percent`, `turn_budget_nudge_remaining`, `soft_deadline_percent`, `model_catalog_fetch`, `model_catalog_cache_ttl_hours`, plus the nested `[brain.native.web_fetch]` SSRF-policy block. The API key comes from `ISTOTA_BRAIN_NATIVE_API_KEY`, never the TOML file. `extra_headers` can carry a bearer token, so it has a stack secret file too, `istota_brain_native_extra_headers`, holding a JSON object of header name to string value; when set it replaces the inline table. Full annotations in the [native brain runbook](native-brain.md).
 
 `soft_deadline_percent` (default `90`) stops the loop at that share of `[scheduler] task_timeout_minutes`, on a stop that keeps the model's partial work. The hard clock discards that work and `max_turns` delivers it, and on a slow brain the clock is what arrives first; the remaining slack still covers a turn that hangs. `0` or `100` and above disables it.
 

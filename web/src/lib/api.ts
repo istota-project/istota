@@ -686,8 +686,9 @@ export interface ConfigProblem {
   /** In the file before this change; the change can fix it, and must. */
   pre_existing?: boolean;
   /** `unset` when removing the key at `path` resolves it: an unknown or
-   *  retired key, or a file credential also set inline. */
-  action?: 'unset';
+   *  retired key, or a file credential also set inline. `move` for a file
+   *  credential held only inline, which the host can move into its file. */
+  action?: 'unset' | 'move';
 }
 
 export interface ConfigManagedEntry {
@@ -698,13 +699,29 @@ export interface ConfigManagedEntry {
 
 export type ConfigResource = 'config' | 'secrets' | 'admins';
 
+/** Where a credential is held: its secret file, inline in config.toml, a
+ *  variable set from outside the stack (read-only here), or nowhere. */
+export type ConfigSecretSource = 'file' | 'inline' | 'environment' | 'none';
+
 export interface ConfigSecretFile {
   name: string;
   label: string;
   config_key: string | null;
   set: boolean;
+  source: ConfigSecretSource;
+  /** The title of the config section that reads it, for grouping. */
+  used_by: string;
+  /** Why a new value cannot be set here; a move may still be offered. */
   read_only_reason: string | null;
+  /** Held inline with nothing managed, so it can move to its secret file. */
+  movable: boolean;
   risky: boolean;
+}
+
+/** A credential the host moves from config.toml into its secret file. */
+export interface ConfigMove {
+  label: string;
+  file: string;
 }
 
 export interface AdminConfigView {
@@ -733,12 +750,15 @@ export type ConfigOp =
   | { op: 'set_toml'; path: string[]; toml: string };
 
 /** What preview and submit take. `secrets` maps a credential name to its new
- *  value, `""` clearing it; `admins` is the whole new list, or absent. */
+ *  value, `""` clearing it; `admins` is the whole new list, or absent.
+ *  `move_to_file` names credentials (by dotted label) the host moves from
+ *  config.toml into their secret files; it carries no value. */
 export interface ConfigChangeSet {
   base_digest: string;
   ops: ConfigOp[];
   raw: string | null;
   secrets: Record<string, string>;
+  move_to_file?: string[];
   admins?: string[];
   confirm?: string[];
   step_up?: StepUpProof;
@@ -754,6 +774,8 @@ export interface ConfigPreview {
   /** Labels of the risky keys the change touches, `admins` for the list. */
   risky_keys: string[];
   secret_names: string[];
+  /** Credentials the change moves from config.toml into their secret files. */
+  moves: ConfigMove[];
   admins_changed: boolean;
   /** Tasks running now, which the restart after applying interrupts. */
   running_tasks: number;
@@ -773,6 +795,8 @@ export interface ConfigRequest {
   admins_changed: boolean;
   changed_sections: string[];
   secret_names: string[];
+  /** Labels of the credentials the request moves into their secret files. */
+  moves: string[];
   diff_text: string;
   output_text: string | null;
   created_at: string;

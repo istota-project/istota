@@ -8,6 +8,7 @@ import type {
   ConfigSecretFile,
 } from '$lib/api';
 import { buildChangeSet } from '$lib/admin/config/changeSet';
+import { configSecret } from '$lib/test/adminConfig';
 import {
   formProblems,
   privateHostNeed,
@@ -54,15 +55,16 @@ const HOSTS = ['192.0.2.10'];
 
 /** The view's secrets entries for the four keys, as the Configuration page has them. */
 function secretFiles(over: Partial<ConfigSecretFile> = {}): ConfigSecretFile[] {
-  return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) => ({
-    name: `istota_servarr_${name}_api_key`,
-    label: `servarr.apps.${name}.api_key`,
-    config_key: `servarr.apps.${name}.api_key`,
-    set: name === 'radarr',
-    read_only_reason: null,
-    risky: false,
-    ...over,
-  }));
+  return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) =>
+    configSecret({
+      name: `istota_servarr_${name}_api_key`,
+      config_key: `servarr.apps.${name}.api_key`,
+      set: name === 'radarr',
+      source: name === 'radarr' ? 'file' : 'none',
+      used_by: 'Servarr',
+      ...over,
+    }),
+  );
 }
 
 const RADARR_FILE = 'istota_servarr_radarr_api_key';

@@ -195,6 +195,18 @@
       {#if preview.secret_names.length}
         <p>Credentials changed: <code>{preview.secret_names.join(', ')}</code></p>
       {/if}
+      {#if preview.moves.length}
+        <h3 class="micro-label">Moved out of config.toml</h3>
+        <ul class="problems">
+          {#each preview.moves as move (move.label)}
+            <li><code>{move.label}</code> moves to the secret file <code>{move.file}</code></li>
+          {/each}
+        </ul>
+        <p class="caption">
+          The host reads each value from config.toml and writes it to its secret file. It is never
+          sent to this page.
+        </p>
+      {/if}
       {#if preview.admins_changed}
         <p>The admin list changes.</p>
       {/if}

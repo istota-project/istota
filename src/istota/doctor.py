@@ -3370,6 +3370,47 @@ def check_admins(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_inline_credentials(config: "Config", probe: bool) -> CheckResult:
+    """Installation credentials held in plain text in ``config.toml``.
+
+    Each one has a secret file; an inline value still works but sits in the
+    config file. Reads the file the daemon loaded as a document and reports
+    paths and file names only, never a value, and an unreadable file by its
+    error class alone, since a TOML error can quote the line it failed on.
+    """
+    name = "security.inline_credentials"
+    path = getattr(config, "config_path", None)
+    if not path:
+        return CheckResult(name, SKIP, "this process built its config in memory, so there "
+                           "is no config.toml to read", scope=DEPLOYMENT)
+    try:
+        import tomllib  # noqa: PLC0415
+
+        from istota.config_editor.edits import inline_file_credentials  # noqa: PLC0415
+
+        with open(path, "rb") as handle:
+            document = tomllib.load(handle)
+        inline = inline_file_credentials(document)
+    except Exception as exc:
+        return CheckResult(
+            name, WARN,
+            f"the config file could not be read for inline credentials: {type(exc).__name__}",
+            remedy="Fix the config file the daemon was started with.",
+            scope=DEPLOYMENT,
+        )
+    if not inline:
+        return CheckResult(name, OK, "no installation credential is stored in config.toml",
+                           scope=DEPLOYMENT)
+    listed = ", ".join(f"{'.'.join(key)} ({file})" for key, file in inline)
+    return CheckResult(
+        name, WARN,
+        f"{len(inline)} installation credential(s) stored in config.toml in plain text: {listed}",
+        remedy="Move each one into its secret file: Admin > Secrets, Move to secret file. "
+               "A copy whose secret file is already set is ignored and can be removed.",
+        scope=DEPLOYMENT,
+    )
+
+
 def check_signup_tags(config: "Config", probe: bool) -> CheckResult:
     """Warn if a receiving address is open after its credential was removed."""
     name = "security.signup_tags"
@@ -10008,6 +10049,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.room_scope_confinement", check_room_scope_confinement),
     ("security.credential_backup", check_credential_backup),
     ("security.signup_tags", check_signup_tags),
+    ("security.inline_credentials", check_inline_credentials),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -10143,6 +10185,7 @@ CHECK_SCOPES: dict[str, str] = {
     "security.room_scope_confinement": DEPLOYMENT,
     "security.credential_backup": DEPLOYMENT,
     "security.signup_tags": DEPLOYMENT,
+    "security.inline_credentials": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,

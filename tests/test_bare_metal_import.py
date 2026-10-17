@@ -559,15 +559,27 @@ class TestTheSurveyedSecretSet:
 class TestRefusals:
     def test_an_unmapped_secret_refuses_and_touches_nothing(self, tmp_path, target, capsys):
         source = _export(
-            tmp_path, secrets=SECRETS_ENV + "ISTOTA_SMS_TWILIO_AUTH_TOKEN=twilio-token\n",
+            tmp_path, secrets=SECRETS_ENV + "ISTOTA_SMS_TWILIO_ACCOUNT_SID=twilio-sid\n",
         )
         before = target.snapshot()
         assert bmi.main(target.args(source)) == bmi.EXIT_REFUSED
         assert target.snapshot() == before
         assert not target.config.exists()
         err = capsys.readouterr().err
-        assert "ISTOTA_SMS_TWILIO_AUTH_TOKEN" in err
-        assert "twilio-token" not in err
+        assert "ISTOTA_SMS_TWILIO_ACCOUNT_SID" in err
+        assert "twilio-sid" not in err
+
+    def test_the_twilio_whatsapp_and_header_credentials_have_files(self, tmp_path, target):
+        carried = {
+            "istota_sms_twilio_auth_token": "twilio-token",
+            "istota_whatsapp_access_token": "whatsapp-token",
+            "istota_brain_native_extra_headers": '{"X-Tenant": "tenant"}',
+        }
+        lines = "".join(f"{name.upper()}={value}\n" for name, value in carried.items())
+        source = _export(tmp_path, secrets=SECRETS_ENV + lines)
+        assert bmi.main(target.args(source)) == bmi.EXIT_OK
+        for name, value in carried.items():
+            assert (target.secrets / name).read_text() == value, name
 
     def test_a_target_that_has_done_work_refuses(self, source, target):
         target.db_path.parent.mkdir(parents=True)

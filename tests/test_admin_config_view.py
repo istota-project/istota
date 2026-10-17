@@ -381,8 +381,13 @@ class TestPerFieldEditorKeys:
         assert field["credential"] == {"kind": "file", "name": "istota_nextcloud_app_password"}
 
     def test_an_inline_credential(self):
+        field = _field(view.build_config_view(Config()), "web.map.api_key")
+        assert field["credential"] == {"kind": "inline", "name": "web.map.api_key"}
+
+    def test_the_native_headers_are_a_file_credential(self, no_overrides):
         field = _field(view.build_config_view(Config()), "brain.native.extra_headers")
-        assert field["credential"] == {"kind": "inline", "name": "brain.native.extra_headers"}
+        assert field["credential"] == {"kind": "file", "name": "istota_brain_native_extra_headers"}
+        assert field["editor"] == "secret"
 
     def test_a_plain_field_has_no_credential(self):
         assert _field(view.build_config_view(Config()), "bot_name")["credential"] is None
@@ -445,7 +450,6 @@ class TestTables:
 
         payload = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)
         field = _field(payload, "brain.native.extra_headers")
-        assert field["editor"] == "table"
         assert SENTINEL in field["toml"]
         assert "x-tenant" in field["toml"]
         assert "HEADER-VALUE-SENTINEL" not in field["toml"]
@@ -678,10 +682,188 @@ class TestRemovableProblems:
         assert "also set in config.toml" in inline[0]["message"]
         assert "INLINE-PASSWORD-SENTINEL" not in str(problems)
 
-    def test_no_inline_warning_when_the_secrets_file_is_empty(self, monkeypatch):
+    def test_an_inline_credential_with_an_empty_file_can_be_moved(self, monkeypatch):
         monkeypatch.delenv("ISTOTA_EMAIL_IMAP_PASSWORD", raising=False)
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", raising=False)
         problems = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)["problems"]
-        assert problems == []
+        assert sorted((p["path"], p["action"]) for p in problems) == [
+            (["brain", "native", "extra_headers"], "move"),
+            (["email", "imap_password"], "move"),
+        ]
+        assert all(p["kind"] == "warning" and not p["blocking"] for p in problems)
+        assert "istota_email_imap_password" in str(problems)
+        assert "INLINE-PASSWORD-SENTINEL" not in str(problems)
+        assert "HEADER-VALUE-SENTINEL" not in str(problems)
+
+    @pytest.mark.parametrize("managed", ["config", "secrets"])
+    def test_no_move_action_when_a_plan_manages_either_side(self, monkeypatch, managed):
+        monkeypatch.delenv("ISTOTA_EMAIL_IMAP_PASSWORD", raising=False)
+        document = '[email]\nimap_password = "INLINE-PASSWORD-SENTINEL"\n'
+        problems = view.build_config_view(
+            Config(), document=document,
+            managed={managed: {"managed": True, "source": "ansible", "at": "t"}},
+        )["problems"]
+        assert len(problems) == 1
+        assert "action" not in problems[0]
+
+
+@pytest.fixture
+def secret_env(monkeypatch, no_overrides):
+    """No credential variable set, the stack's file ones included."""
+    from istota.setup_wizard import SECRET_NAMES
+
+    for name in SECRET_NAMES:
+        monkeypatch.delenv(name.upper(), raising=False)
+
+
+def _secret_entries(cfg: Config, secrets_dir: Path, **kwargs) -> dict[str, dict]:
+    payload = view.build_config_view(cfg, secrets_dir=secrets_dir, **kwargs)
+    return {entry["name"]: entry for entry in payload["secrets"]}
+
+
+class TestSecretSources:
+    TWILIO = "istota_sms_twilio_auth_token"
+    INLINE_DOCUMENT = '[sms.twilio]\nauth_token = "INLINE-TWILIO-SENTINEL"\n'
+
+    def test_none_when_nothing_holds_it(self, tmp_path, secret_env):
+        entries = _secret_entries(Config(), tmp_path, document="")
+        assert entries[self.TWILIO]["source"] == "none"
+        assert entries["anthropic_api_key"]["source"] == "none"
+
+    def test_file_when_the_secret_file_is_not_empty(self, tmp_path, monkeypatch, secret_env):
+        (tmp_path / self.TWILIO).write_text("FILE-SENTINEL\n")
+        monkeypatch.setenv(self.TWILIO.upper(), "FILE-SENTINEL")
+        cfg = Config()
+        cfg.sms.twilio.auth_token = "FILE-SENTINEL"
+        payload = view.build_config_view(cfg, document="", secrets_dir=tmp_path)
+        entry = next(e for e in payload["secrets"] if e["name"] == self.TWILIO)
+        assert entry["source"] == "file"
+        assert entry["set"] is True
+        assert entry["read_only_reason"] is None
+        assert "FILE-SENTINEL" not in str(payload)
+
+    def test_inline_when_only_config_toml_holds_it(self, tmp_path, secret_env):
+        cfg = Config()
+        cfg.sms.twilio.auth_token = "INLINE-TWILIO-SENTINEL"
+        payload = view.build_config_view(
+            cfg, document=self.INLINE_DOCUMENT, secrets_dir=tmp_path,
+        )
+        entry = next(e for e in payload["secrets"] if e["name"] == self.TWILIO)
+        assert entry["source"] == "inline"
+        assert entry["set"] is True
+        assert entry["read_only_reason"] is None
+        assert "INLINE-TWILIO-SENTINEL" not in str(payload)
+
+    def test_a_legacy_flat_whatsapp_credential_is_inline(self, tmp_path, secret_env):
+        cfg = Config()
+        cfg.whatsapp.cloud.access_token = "FLAT-WHATSAPP-SENTINEL"
+        payload = view.build_config_view(
+            cfg, document='[whatsapp]\naccess_token = "FLAT-WHATSAPP-SENTINEL"\n',
+            secrets_dir=tmp_path,
+        )
+        entry = next(e for e in payload["secrets"] if e["name"] == "istota_whatsapp_access_token")
+        assert entry["source"] == "inline"
+        assert entry["set"] is True
+        moves = [p for p in payload["problems"] if p.get("action") == "move"]
+        assert [p["path"] for p in moves] == [["whatsapp", "cloud", "access_token"]]
+        assert "FLAT-WHATSAPP-SENTINEL" not in str(payload)
+
+    def test_a_read_only_credential_held_inline_can_be_moved(self, tmp_path, secret_env):
+        payload = view.build_config_view(
+            Config(), document='[nextcloud]\napp_password = "NC-SENTINEL"\n',
+            secrets_dir=tmp_path,
+        )
+        entry = next(e for e in payload["secrets"] if e["name"] == "istota_nextcloud_app_password")
+        assert entry["source"] == "inline"
+        assert entry["read_only_reason"]
+        assert entry["movable"] is True
+        assert "NC-SENTINEL" not in str(payload)
+
+    def test_only_an_inline_credential_is_movable(self, tmp_path, monkeypatch, secret_env):
+        entries = _secret_entries(Config(), tmp_path, document=self.INLINE_DOCUMENT)
+        assert entries[self.TWILIO]["movable"] is True
+        assert entries["istota_nextcloud_app_password"]["movable"] is False
+        assert entries["anthropic_api_key"]["movable"] is False
+        managed = _secret_entries(
+            Config(), tmp_path, document=self.INLINE_DOCUMENT,
+            managed={"secrets": {"managed": True, "source": "ansible", "at": "t"}},
+        )
+        assert managed[self.TWILIO]["movable"] is False
+
+    def test_a_newline_only_file_is_not_the_source(self, tmp_path, secret_env):
+        # `istota-secrets` exports `$(cat file)`, which strips the newline and
+        # skips the empty result, so the inline value is the one in use.
+        (tmp_path / self.TWILIO).write_text("\n\n")
+        entries = _secret_entries(Config(), tmp_path, document=self.INLINE_DOCUMENT)
+        assert entries[self.TWILIO]["source"] == "inline"
+        assert entries[self.TWILIO]["movable"] is True
+
+    def test_file_wins_over_an_inline_copy(self, tmp_path, monkeypatch, secret_env):
+        (tmp_path / self.TWILIO).write_text("x")
+        monkeypatch.setenv(self.TWILIO.upper(), "x")
+        entries = _secret_entries(Config(), tmp_path, document=self.INLINE_DOCUMENT)
+        assert entries[self.TWILIO]["source"] == "file"
+
+    def test_environment_when_the_variable_comes_from_outside(
+        self, tmp_path, monkeypatch, secret_env,
+    ):
+        (tmp_path / self.TWILIO).write_text("")
+        monkeypatch.setenv(self.TWILIO.upper(), "ENV-SENTINEL")
+        cfg = Config()
+        cfg.sms.twilio.auth_token = "ENV-SENTINEL"
+        payload = view.build_config_view(
+            cfg, document=self.INLINE_DOCUMENT, secrets_dir=tmp_path,
+        )
+        entry = next(e for e in payload["secrets"] if e["name"] == self.TWILIO)
+        assert entry["source"] == "environment"
+        assert self.TWILIO.upper() in entry["read_only_reason"]
+        assert "ENV-SENTINEL" not in str(payload)
+
+    def test_a_standalone_file_has_no_inline_source(self, tmp_path, monkeypatch, secret_env):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+        assert _secret_entries(Config(), tmp_path)["anthropic_api_key"]["source"] == "environment"
+        (tmp_path / "anthropic_api_key").write_text("a")
+        entry = _secret_entries(Config(), tmp_path)["anthropic_api_key"]
+        assert entry["source"] == "file"
+        assert entry["read_only_reason"] is None
+
+    def test_a_managed_reason_outranks_the_source(self, tmp_path, monkeypatch, secret_env):
+        monkeypatch.setenv(self.TWILIO.upper(), "x")
+        entries = _secret_entries(
+            Config(), tmp_path,
+            managed={"secrets": {"managed": True, "source": "ansible", "at": "t"}},
+        )
+        assert entries[self.TWILIO]["source"] == "environment"
+        assert "ansible" in entries[self.TWILIO]["read_only_reason"]
+
+    def test_without_a_document_nothing_is_inline(self, tmp_path, secret_env):
+        cfg = Config()
+        cfg.sms.twilio.auth_token = "x"
+        assert _secret_entries(cfg, tmp_path)[self.TWILIO]["source"] == "none"
+
+    @pytest.mark.requires_dac
+    def test_the_secret_file_is_stat_ed_never_read(self, tmp_path, monkeypatch, secret_env):
+        secret = tmp_path / self.TWILIO
+        secret.write_text("UNREADABLE-SENTINEL")
+        secret.chmod(0)
+        monkeypatch.setenv(self.TWILIO.upper(), "x")
+        try:
+            assert _secret_entries(Config(), tmp_path)[self.TWILIO]["source"] == "file"
+        finally:
+            secret.chmod(0o600)
+
+    def test_every_entry_names_what_uses_it(self, tmp_path, secret_env):
+        entries = _secret_entries(Config(), tmp_path)
+        for name, entry in entries.items():
+            assert entry["used_by"], name
+            assert not entry["used_by"].startswith("["), (
+                f"{name} has no section title in admin_config_view._SECTION_TITLES"
+            )
+        assert entries[self.TWILIO]["used_by"] == "SMS (Twilio)"
+        assert entries["istota_whatsapp_access_token"]["used_by"] == "WhatsApp Cloud API"
+        assert entries["istota_brain_native_extra_headers"]["used_by"] == "Native brain"
+        assert entries["istota_servarr_radarr_api_key"]["used_by"] == "Servarr"
+        assert entries["istota_nextcloud_app_password"]["used_by"] == "Nextcloud"
 
 
 class TestManaged:
