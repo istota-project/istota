@@ -249,7 +249,7 @@ The full list is in the [command reference](../reference/commands.md).
 
 ## Location sharing
 
-In a web room, Talk group or Baileys WhatsApp group, “Share my location here” posts one timestamped observation from your phone. “Roughly” selects an approximate area instead of the default exact point. A one-time share gives other members no permission to request later updates. From your private chat, naming a room holds the exact post for your approval.
+In a web room, Talk group or Baileys WhatsApp group, “Share my location here” posts one timestamped observation from your phone. “Roughly” selects an approximate area instead of the default exact point. A one-time share gives other members no permission to request later updates. From your private chat, naming a room holds the exact post for your approval. A one-time share and an answer about one member's location come with a map: a card you can pan and zoom in a web room, a picture on Talk and in a Baileys WhatsApp group. The map shows the same observation as the text and needs the answer to carry the share's map link.
 
 “Share my location here for an hour” asks for private approval naming every reader, precision and duration. Timed sharing requires known configured readers and lasts from 5 minutes to 24 hours after approval. The preview goes to your private chat or your notifications, never the group. Room members can then ask “Where is Alice?” or “Where is everyone?”, even without their own GPS enabled. Only active shares with a fresh usable phone observation return a location; a stale point is not repeated. These replies reveal no personal history or saved places and create no periodic updates. Email threads are unsupported.
 
