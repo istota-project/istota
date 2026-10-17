@@ -3870,6 +3870,14 @@ function mockAdminDoctor() {
   };
 }
 
+/**
+ * `VITE_MOCK_CONNECTIONS=problems` serves every connection card failing;
+ * `empty` serves an install with no arr apps, the Servarr card's first-run
+ * state. The config view reads them too, so its `[servarr]` section agrees.
+ */
+const MOCK_CONNECTIONS_PROBLEMS = process.env.VITE_MOCK_CONNECTIONS === 'problems';
+const MOCK_CONNECTIONS_EMPTY = process.env.VITE_MOCK_CONNECTIONS === 'empty';
+
 /** The read-only payload the pane started with: sections of typed fields. The
  *  editor's keys are added by `mockAdminConfig` below. */
 function mockAdminConfigBase() {
@@ -3988,6 +3996,18 @@ function mockAdminConfigBase() {
           f('model', 'anthropic/claude-sonnet-4-6', 'str'),
           f('base_url', 'https://openrouter.ai/api/v1', 'str'),
           f('api_key', null, 'secret', { secret: true, set: false }),
+        ],
+      },
+      {
+        key: 'servarr',
+        label: '[servarr]',
+        fields: [
+          f('apps', {}, 'table'),
+          f('requesters', MOCK_CONNECTIONS_EMPTY ? [] : ['alice', 'bob'], 'list'),
+          f('private_hosts', MOCK_CONNECTIONS_EMPTY ? [] : ['10.0.0.5'], 'list'),
+          f('defaults', {}, 'table'),
+          f('lookup_timeout_seconds', 30, 'int'),
+          f('release_search_timeout_seconds', 120, 'int'),
         ],
       },
     ],
@@ -4206,6 +4226,16 @@ function mockAdminConfig() {
         read_only_reason: null,
         risky: false,
       },
+      ...['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((app) => ({
+        name: `istota_servarr_${app}_api_key`,
+        label: `servarr.apps.${app}.api_key`,
+        config_key: `servarr.apps.${app}.api_key`,
+        set:
+          state.secretsSet.get(`istota_servarr_${app}_api_key`) ??
+          (!MOCK_CONNECTIONS_EMPTY && app !== 'prowlarr'),
+        read_only_reason: null,
+        risky: false,
+      })),
     ],
     admins: { users: [...state.admins], read_only_reason: null },
   };
@@ -4447,11 +4477,11 @@ function mockConfigRestore(id: number) {
  *
  * `VITE_MOCK_CONNECTIONS=problems` serves every card in a failing state (a
  * stale Nextcloud check, a WhatsApp session unlinked for good, Google missing
- * its secret, an arr app that never answered); the default is a healthy
- * install. Starting a pairing opens an `awaiting_scan` window with a drawn
- * placeholder code, so the pairing block can be looked at too.
+ * its secret, an arr app that never answered); `empty` serves an install with
+ * no arr apps; the default is a healthy install. Starting a pairing opens an
+ * `awaiting_scan` window with a drawn placeholder code, so the pairing block
+ * can be looked at too.
  */
-const MOCK_CONNECTIONS_PROBLEMS = process.env.VITE_MOCK_CONNECTIONS === 'problems';
 let mockPairing: Record<string, unknown> | null = null;
 let mockPairingSeq = 0;
 
@@ -4536,58 +4566,68 @@ function mockAdminConnections() {
         missing: problems ? ['client_id', 'client_secret'] : [],
         status: problems ? 'incomplete' : 'configured',
       },
-      {
-        id: 'servarr',
-        label: 'Servarr',
-        status: problems ? 'incomplete' : 'configured',
-        apps: [
-          {
-            app: 'sonarr',
-            url: 'http://10.0.0.5:8989',
-            api_key_set: true,
-            incomplete: false,
-            problem: null,
-            check: mockCheck('ok', 'sonarr 4.0.9.2244 at http://10.0.0.5:8989'),
-          },
-          {
-            app: 'radarr',
-            url: 'http://10.0.0.5:7878',
-            api_key_set: true,
-            incomplete: false,
-            problem: null,
-            check: problems
-              ? mockCheck(
-                  'fail',
-                  'radarr at http://10.0.0.5:7878 did not answer: connection refused.',
-                  'Check that radarr is running and that a firewall is not blocking the port.',
-                )
-              : mockCheck('ok', 'radarr 5.9.1.9070 at http://10.0.0.5:7878'),
-          },
-          problems
-            ? {
-                app: 'lidarr',
-                url: '',
-                api_key_set: null,
-                incomplete: true,
-                problem: '[servarr.apps.lidarr] has no url or no api_key, so it is ignored.',
-                check: null,
-              }
-            : {
-                app: 'lidarr',
-                url: 'http://10.0.0.5:8686',
+      MOCK_CONNECTIONS_EMPTY
+        ? {
+            id: 'servarr',
+            label: 'Servarr',
+            status: 'disabled',
+            apps: [],
+            missing: ['sonarr', 'radarr', 'lidarr', 'prowlarr'],
+            requesters: [],
+            defaults: {},
+          }
+        : {
+            id: 'servarr',
+            label: 'Servarr',
+            status: problems ? 'incomplete' : 'configured',
+            apps: [
+              {
+                app: 'sonarr',
+                url: 'http://10.0.0.5:8989',
                 api_key_set: true,
                 incomplete: false,
                 problem: null,
-                check: null,
+                check: mockCheck('ok', 'sonarr 4.0.9.2244 at http://10.0.0.5:8989'),
               },
-        ],
-        missing: ['prowlarr'],
-        requesters: ['alice', 'bob'],
-        defaults: {
-          radarr: { quality_profile: 'HD - 720p/1080p', root_folder: '/films' },
-          sonarr: { quality_profile: 'HD - 720p/1080p', root_folder: '/tv' },
-        },
-      },
+              {
+                app: 'radarr',
+                url: 'http://10.0.0.5:7878',
+                api_key_set: true,
+                incomplete: false,
+                problem: null,
+                check: problems
+                  ? mockCheck(
+                      'fail',
+                      'radarr at http://10.0.0.5:7878 did not answer: connection refused.',
+                      'Check that radarr is running and that a firewall is not blocking the port.',
+                    )
+                  : mockCheck('ok', 'radarr 5.9.1.9070 at http://10.0.0.5:7878'),
+              },
+              problems
+                ? {
+                    app: 'lidarr',
+                    url: '',
+                    api_key_set: null,
+                    incomplete: true,
+                    problem: '[servarr.apps.lidarr] has no url or no api_key, so it is ignored.',
+                    check: null,
+                  }
+                : {
+                    app: 'lidarr',
+                    url: 'http://10.0.0.5:8686',
+                    api_key_set: true,
+                    incomplete: false,
+                    problem: null,
+                    check: null,
+                  },
+            ],
+            missing: ['prowlarr'],
+            requesters: ['alice', 'bob'],
+            defaults: {
+              radarr: { quality_profile: 'HD - 720p/1080p', root_folder: '/films' },
+              sonarr: { quality_profile: 'HD - 720p/1080p', root_folder: '/tv' },
+            },
+          },
     ],
   };
 }

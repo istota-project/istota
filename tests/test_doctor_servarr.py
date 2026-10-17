@@ -149,6 +149,14 @@ class TestConfigProblems:
         results, _ = _run(_config(apps=(), incomplete=("radarr",)))
         assert _by_app(results)["radarr"].status == FAIL
 
+    def test_a_private_address_not_listed_fails_with_probe_off(self):
+        """Guard 2 refuses it before any request, so doctor and the card say so (ISSUE-767)."""
+        from istota.skills.servarr.client import config_problem
+
+        assert "private address" in config_problem("radarr", "https://10.1.2.3:7878", [])
+        assert config_problem("radarr", "https://10.1.2.3:7878", ["10.1.2.3"]) == ""
+        assert config_problem("radarr", "https://arr.example.com", []) == ""
+
     def test_config_problems_fail_even_with_probe_off(self):
         results, _ = _run(_config(urls={"radarr": "ftp://x"}, apps=("radarr", "sonarr")),
                           probe=False)
