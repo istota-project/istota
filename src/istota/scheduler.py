@@ -2562,7 +2562,12 @@ def _execute_skill_task(
 
     Skill-tasks are not arbitrary shell, so they are not admin-gated.
     """
-    from .executor import build_clean_env, get_user_temp_dir
+    from .executor import (
+        SKILL_DAEMON_CREDENTIAL_VARS,
+        build_clean_env,
+        get_user_temp_dir,
+        skill_model_credentials,
+    )
     from .skills._env import EnvContext, build_skill_env, dispatch_setup_env_hooks
     from .skills._loader import load_skill_index
 
@@ -2650,6 +2655,14 @@ def _execute_skill_task(
     # Resolved from the live user_profiles DB row so it tracks travel
     # without a daemon restart (ISSUE-099).
     env["ISTOTA_USER_TZ"] = config.resolve_user_timezone(task.user_id)
+
+    # The copy `build_task_runtime` makes for the proxy: a skill whose CLI needs
+    # an operator credential only the daemon's environment holds gets it here
+    # too, or a CRON.md `skill = "servarr"` job finds every app keyless.
+    if skill_name in SKILL_DAEMON_CREDENTIAL_VARS:
+        env.update(skill_model_credentials(
+            os.environ, names=SKILL_DAEMON_CREDENTIAL_VARS[skill_name],
+        ))
 
     cmd = [sys.executable, "-m", f"istota.skills.{skill_name}"] + skill_args
     try:

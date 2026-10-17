@@ -5874,6 +5874,37 @@ class TestExecuteSkillTask:
         assert env.get("NC_USER") == "ncuser"
         assert env.get("FEEDS_USER") == "alice"
 
+    def _captured_env(self, task, config):
+        captured = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env", {})
+            return MagicMock(returncode=0, stdout="ok", stderr="")
+
+        with patch("istota.scheduler._run_capture", side_effect=_fake_run):
+            with patch("istota.scheduler.discover_calendars_for_task", return_value=[]):
+                success, _ = _execute_skill_task(task, config)
+        assert success is True
+        return captured["env"]
+
+    def test_a_servarr_job_gets_the_keys_from_the_daemon_env(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """A CRON.md `skill = "servarr"` job runs the CLI directly, with no
+        proxy to inject the keys; the same copy `build_task_runtime` makes
+        for the proxy has to be made here, or every run is
+        `app_not_configured` and the job auto-disables."""
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", "arr-key-cron")
+        config = self._make_config(db_path, tmp_path)
+        env = self._captured_env(self._task(skill="servarr", skill_args='["apps"]'), config)
+        assert env["ISTOTA_SERVARR_RADARR_API_KEY"] == "arr-key-cron"
+
+    def test_another_skill_job_does_not_get_them(self, db_path, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SERVARR_RADARR_API_KEY", "arr-key-cron")
+        config = self._make_config(db_path, tmp_path)
+        env = self._captured_env(self._task(skill="feeds", skill_args='["--help"]'), config)
+        assert "ISTOTA_SERVARR_RADARR_API_KEY" not in env
+
     def test_experimental_features_propagated(self, db_path, tmp_path):
         """Skill-tasks must carry `ISTOTA_EXPERIMENTAL_FEATURES` so that
         gated subcommands (e.g. money_tax) behave consistently across the
