@@ -1,0 +1,123 @@
+[
+  {
+    "guid": "guid-The.Glass.Orchard.2024.2160p.UHD.BluRay.x265-HDR",
+    "quality": {
+      "quality": {
+        "id": 0,
+        "name": "Bluray-2160p"
+      },
+      "revision": {
+        "version": 1
+      }
+    },
+    "customFormats": [],
+    "customFormatScore": -10000,
+    "qualityWeight": 0,
+    "age": 3,
+    "size": 60000000000,
+    "indexerId": 1,
+    "indexer": "Indexer A",
+    "title": "The.Glass.Orchard.2024.2160p.UHD.BluRay.x265-HDR",
+    "approved": false,
+    "temporarilyRejected": false,
+    "rejected": true,
+    "rejections": [
+      "Custom Formats x265 (HD) have score -10000 below Movie's minimum 0",
+      "Size too large"
+    ],
+    "seeders": 40,
+    "leechers": 1,
+    "protocol": "torrent",
+    "downloadAllowed": false,
+    "movieId": 42
+  },
+  {
+    "guid": "guid-The.Glass.Orchard.2024.1080p.WEB-DL-OTHER",
+    "quality": {
+      "quality": {
+        "id": 0,
+        "name": "WEBDL-1080p"
+      },
+      "revision": {
+        "version": 1
+      }
+    },
+    "customFormats": [],
+    "customFormatScore": 100,
+    "qualityWeight": 0,
+    "age": 3,
+    "size": 5000000000,
+    "indexerId": 1,
+    "indexer": "Indexer B",
+    "title": "The.Glass.Orchard.2024.1080p.WEB-DL-OTHER",
+    "approved": true,
+    "temporarilyRejected": false,
+    "rejected": false,
+    "rejections": [],
+    "seeders": 12,
+    "leechers": 1,
+    "protocol": "torrent",
+    "downloadAllowed": true,
+    "movieId": 42
+  },
+  {
+    "guid": "guid-The.Glass.Orchard.2024.720p.HDTV-OLD",
+    "quality": {
+      "quality": {
+        "id": 0,
+        "name": "HDTV-720p"
+      },
+      "revision": {
+        "version": 1
+      }
+    },
+    "customFormats": [],
+    "customFormatScore": 0,
+    "qualityWeight": 0,
+    "age": 3,
+    "size": 2000000000,
+    "indexerId": 1,
+    "indexer": "Indexer B",
+    "title": "The.Glass.Orchard.2024.720p.HDTV-OLD",
+    "approved": false,
+    "temporarilyRejected": false,
+    "rejected": true,
+    "rejections": [
+      "No seeders"
+    ],
+    "seeders": 0,
+    "leechers": 1,
+    "protocol": "torrent",
+    "downloadAllowed": false,
+    "movieId": 42
+  },
+  {
+    "guid": "guid-The.Glass.Orchard.2024.1080p.BluRay.x264-GRP",
+    "quality": {
+      "quality": {
+        "id": 0,
+        "name": "Bluray-1080p"
+      },
+      "revision": {
+        "version": 1
+      }
+    },
+    "customFormats": [],
+    "customFormatScore": 200,
+    "qualityWeight": 0,
+    "age": 3,
+    "size": 9000000000,
+    "indexerId": 1,
+    "indexer": "Indexer A",
+    "title": "The.Glass.Orchard.2024.1080p.BluRay.x264-GRP",
+    "approved": true,
+    "temporarilyRejected": false,
+    "rejected": false,
+    "rejections": [],
+    "seeders": 30,
+    "leechers": 1,
+    "protocol": "torrent",
+    "downloadAllowed": true,
+    "movieId": 42
+  }
+]

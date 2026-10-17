@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from datetime import datetime, timezone
 
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import REMOTE, host_path
@@ -60,6 +61,11 @@ def _clock() -> float:
 def _sleep(seconds: float) -> None:
     """The run's wait between polls. Tests replace this."""
     time.sleep(seconds)
+
+
+def _now() -> datetime:
+    """Wall-clock time, for the dates the apps report. Tests replace this."""
+    return datetime.now(timezone.utc)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,10 +188,10 @@ HANDLERS = {
     "describe": library.cmd_describe,
     "search": library.cmd_search,
     "add": library.cmd_add,
-    "queue": _later_stage("queue"),
-    "why": _later_stage("why"),
-    "wanted": _later_stage("wanted"),
-    "search-now": _later_stage("search-now"),
+    "queue": activity.cmd_queue,
+    "why": activity.cmd_why,
+    "wanted": activity.cmd_wanted,
+    "search-now": activity.cmd_search_now,
     "requests": library.cmd_requests,
     "indexers": _later_stage("indexers"),
 }
@@ -202,7 +208,7 @@ def _verb(verb: str):
         config = ctx["config"]
         clock = _clock
         run = Run(config=config, tier=tier, user_id=ctx["user_id"],
-                  deadline=run_deadline(config, clock), clock=clock, sleep=_sleep,
+                  deadline=run_deadline(config, clock), clock=clock, sleep=_sleep, now=_now,
                   transport=_transport(), resolve=_resolver())
         try:
             return handler(run, args)

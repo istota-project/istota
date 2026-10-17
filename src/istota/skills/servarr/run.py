@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable
 
 from .access import Tier
+from .apps import MEDIA_APPS
 from .client import ArrClient, ServarrError
 
 #: Kept back from the proxy's own timeout for this skill, so the CLI finishes
@@ -44,6 +46,8 @@ class Run:
     deadline: float
     clock: Callable[[], float]
     sleep: Callable[[float], None] = time.sleep
+    #: Wall-clock time, for comparing against the dates the apps report.
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     transport: object = None
     resolve: Callable | None = None
     clients: dict[str, ArrClient] = field(default_factory=dict)
@@ -72,6 +76,20 @@ class Run:
     def close(self) -> None:
         for client in self.clients.values():
             client.close()
+
+
+def media_apps(run: Run, app: str | None, verb: str) -> tuple[list[str], bool]:
+    """The apps a media verb visits, and whether ``--app`` named one.
+
+    With no ``--app``, every configured app that serves media; prowlarr named
+    with ``--app`` is refused, since it holds no library.
+    """
+    if app:
+        if app not in MEDIA_APPS:
+            raise ServarrError(f"{app} serves no media, so it has nothing for {verb}; "
+                               f"use status for it.", "not_a_media_app", app=app)
+        return [app], True
+    return [name for name in MEDIA_APPS if name in run.config.servarr.apps], False
 
 
 def error_entry(app: str, exc: ServarrError) -> dict:

@@ -5,8 +5,10 @@ resolves it: from `skills._load_context`, `_guard_skill`, the room's withheld
 scopes and whether the task's room is an email thread. A refusal must send
 nothing, so each one asserts the fake transport recorded zero requests.
 
-Verbs whose handlers later stages write answer ``not_implemented`` once the
-table lets them through; that answer is how these tests see "allowed".
+A verb the table lets through reaches the fake stack, so "allowed" is any
+answer other than a tier refusal. ``search-now``'s ownership rule (a requester
+may search only for an item carrying their own ``req-`` tag) is tested here
+too, since it is the one tier rule that depends on what the item carries.
 """
 
 from __future__ import annotations
@@ -322,7 +324,10 @@ class TestTheKeyNeverLeaks:
     @pytest.mark.parametrize("argv", [
         ["status"], ["status", "--app", "radarr"], ["describe"], ["describe", "--app", "lidarr"],
         ["search", "Paris", "--kind", "film"], ["add", "--kind", "film", "--tmdb", "655"],
-        ["add", "--kind", "show", "--tvdb", "70533"], ["requests"],
+        ["add", "--kind", "show", "--tvdb", "70533"], ["requests"], ["queue"],
+        ["queue", "--app", "radarr", "--mine"], ["wanted"],
+        ["why", "--kind", "film", "--library-id", "42", "--releases"],
+        ["search-now", "--kind", "film", "--library-id", "42"],
     ])
     def test_failure_envelopes_carry_no_key(self, arr, monkeypatch, argv):
         import httpx
@@ -333,6 +338,73 @@ class TestTheKeyNeverLeaks:
         code, envelope = run(*argv)
         # `run` asserts the key is absent from stdout; the shape is checked too.
         assert envelope
+
+
+class TestSearchNowOwnership:
+    """A requester may search only for an item carrying their own ``req-`` tag."""
+
+    TAGS = [{"id": 1, "label": "req-alice"}, {"id": 3, "label": "4k"},
+            {"id": 5, "label": "req-bob"}]
+
+    def _film(self, fake, tags):
+        fake.json("radarr", "movie/42", dict(fixture("movie_library.json"), tags=tags))
+        fake.json("radarr", "tag", self.TAGS)
+        fake.json("radarr", "command", {"name": "MoviesSearch", "status": "queued", "id": 9},
+                  method="POST", status=201)
+
+    def _commands(self, fake):
+        return [r for r in fake.requests if r.method == "POST"]
+
+    def test_an_own_tagged_item_is_searched(self, arr):
+        self._film(arr, [3, 5])
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "42")
+        assert code == 0, envelope
+        assert len(self._commands(arr)) == 1
+
+    def test_someone_else_s_item_is_not_your_request(self, arr):
+        self._film(arr, [1])
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "42")
+        assert code == 1
+        assert envelope["reason"] == "not_your_request"
+        assert envelope["requested_by"] == ["alice"]
+        assert "alice" in envelope["error"]
+        assert self._commands(arr) == []
+
+    def test_an_untagged_item_is_not_your_request(self, arr):
+        self._film(arr, [3])
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "42")
+        assert envelope["reason"] == "not_your_request"
+        assert envelope["requested_by"] == []
+        assert self._commands(arr) == []
+
+    def test_a_tag_the_app_does_not_have_is_not_yours(self, arr):
+        self._film(arr, [5])
+        arr.json("radarr", "tag", [{"id": 1, "label": "req-alice"}])
+        assert run("search-now", "--kind", "film", "--library-id", "42")[1]["reason"] == (
+            "not_your_request")
+        assert self._commands(arr) == []
+
+    def test_an_admin_may_search_for_anyone_s(self, arr, monkeypatch):
+        as_user(monkeypatch, "alice")
+        self._film(arr, [5])
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "42")
+        assert code == 0, envelope
+        assert len(self._commands(arr)) == 1
+        assert arr.sent("radarr", "tag") == []
+
+    def test_an_album_is_owned_through_its_artist_s_tag(self, arr):
+        arr.json("lidarr", "album/31", {"id": 31, "title": "Northern Static",
+                                        "monitored": True, "artistId": 7})
+        arr.json("lidarr", "artist/7", dict(fixture("artist_added.json"), tags=[5]))
+        arr.json("lidarr", "tag", self.TAGS)
+        arr.json("lidarr", "command", {"name": "AlbumSearch", "status": "queued", "id": 9},
+                 method="POST", status=201)
+        code, envelope = run("search-now", "--kind", "album", "--library-id", "31")
+        assert code == 0, envelope
+        arr.json("lidarr", "artist/7", dict(fixture("artist_added.json"), tags=[1]))
+        assert run("search-now", "--kind", "album", "--library-id", "31")[1]["reason"] == (
+            "not_your_request")
+        assert len(self._commands(arr)) == 1
 
 
 class TestTheFrontmatter:

@@ -1,9 +1,11 @@
 """The servarr CLI's verbs against a fake stack: argv, app selection, output.
 
 ``apps``, ``status``, ``describe`` and its add-defaults resolution, then
-``search``, ``add`` and ``requests`` for films, shows, artists and albums. The fixtures are built from the public arr API
-docs and source, so these prove parsing and request shape only; whether a real
-arr answers the same is the live checklist's job.
+``search``, ``add`` and ``requests`` for films, shows, artists and albums, then
+the activity verbs ``queue``, ``why``, ``wanted`` and ``search-now``. The
+fixtures are built from the public arr API docs and source, so these prove
+parsing and request shape only; whether a real arr answers the same is the live
+checklist's job.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import importlib
 import json
 import pkgutil
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -1175,3 +1178,390 @@ class TestRequests:
         assert code == 0
         assert by_app(envelope)["sonarr"]["error"] == "connection_failed"
         assert by_app(envelope)["radarr"]["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Activity: queue, why, wanted, search-now
+# ---------------------------------------------------------------------------
+
+NOW = datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def activity(arr, monkeypatch):
+    import istota.skills.servarr as servarr
+
+    monkeypatch.setattr(servarr, "_now", lambda: NOW)
+    return arr
+
+
+def _page(records, total=None):
+    return {"page": 1, "pageSize": 200, "totalRecords": len(records) if total is None else total,
+            "records": records}
+
+
+def _lidarr_row(row_id, *, state="downloading", status="ok", added="2026-10-16T11:00:00Z",
+                eta="2026-10-16T13:00:00Z", tags=(1,)):
+    return {"artistId": 7, "albumId": 31,
+            "artist": {"id": 7, "artistName": "Lantern Field", "tags": list(tags)},
+            "album": {"id": 31, "title": "Northern Static"},
+            "size": 400, "sizeleft": 100, "timeleft": "00:10:00",
+            "estimatedCompletionTime": eta, "added": added, "status": "downloading",
+            "trackedDownloadStatus": status, "trackedDownloadState": state,
+            "statusMessages": [], "protocol": "torrent", "downloadClient": "qBittorrent",
+            "title": f"Lantern.Field-Northern.Static-{row_id}", "id": row_id}
+
+
+def _queues(fake, *, lidarr=()):
+    fake.json("radarr", "queue", fixture("queue_radarr_import_blocked.json"))
+    fake.json("sonarr", "queue", fixture("queue_sonarr_downloading.json"))
+    fake.json("lidarr", "queue", _page(list(lidarr)))
+
+
+def _ids(envelope):
+    return [(row["app"], row["queue_id"]) for row in envelope["rows"]]
+
+
+class TestQueue:
+    def test_merges_the_apps_problems_first_then_by_completion(self, activity):
+        _queues(activity)
+        code, envelope = run("queue")
+        assert code == 0, envelope
+        assert _ids(envelope) == [("radarr", 901), ("sonarr", 701), ("radarr", 902)]
+        assert [a["app"] for a in envelope["apps"]] == ["sonarr", "radarr", "lidarr"]
+        assert envelope["total"] == 3 and envelope["truncated"] is False
+        assert activity.sent("prowlarr") == []
+        sonarr = activity.sent("sonarr", "queue")[0].url.params
+        assert sonarr["pageSize"] == "200" and sonarr["includeSeries"] == "true"
+        assert sonarr["includeEpisode"] == "true"
+        assert sonarr["includeUnknownSeriesItems"] == "false"
+        assert activity.sent("radarr", "queue")[0].url.params["includeMovie"] == "true"
+        lidarr = activity.sent("lidarr", "queue")[0].url.params
+        assert lidarr["includeArtist"] == "true" and lidarr["includeAlbum"] == "true"
+        assert activity.sent("radarr", "tag") == []
+        assert _writes(activity) == []
+
+    def test_a_row_carries_state_progress_and_fenced_text(self, activity):
+        _queues(activity, lidarr=[_lidarr_row(801)])
+        rows = {(r["app"], r["queue_id"]): r for r in run("queue")[1]["rows"]}
+        blocked = rows[("radarr", 901)]
+        assert blocked["title"] == fenced("The Glass Orchard (2024)")
+        assert blocked["kind"] == "film" and blocked["library_id"] == 42
+        assert blocked["tracked_download_status"] == "warning"
+        assert blocked["tracked_download_state"] == "importBlocked"
+        assert blocked["problem"] is True and blocked["progress"] == 100.0
+        assert blocked["status_messages"] == [fenced(
+            "The.Glass.Orchard.2024.1080p.BluRay.x264-GRP: Not a Custom Format upgrade for "
+            "existing movie file(s)")]
+        assert blocked["download_client"] == fenced("qBittorrent")
+        assert blocked["protocol"] == "torrent" and blocked["tags"] == [1]
+        assert blocked["error_message"] is None
+        episode = rows[("sonarr", 701)]
+        assert episode["title"] == fenced("Quiet Harbour S02E03")
+        assert episode["progress"] == 75.0 and episode["timeleft"] == "00:05:00"
+        assert episode["problem"] is False
+        album = rows[("lidarr", 801)]
+        assert album["title"] == fenced("Lantern Field - Northern Static")
+        assert album["kind"] == "album" and album["library_id"] == 31
+
+    def test_problems_keeps_what_needs_attention(self, activity):
+        _queues(activity, lidarr=[
+            _lidarr_row(811, state="importPending", added="2026-10-16T10:00:00Z"),
+            _lidarr_row(812, state="importPending", added="2026-10-16T11:30:00Z"),
+            _lidarr_row(813, state="failedPending"),
+            _lidarr_row(814, status="error"),
+            _lidarr_row(815),
+        ])
+        envelope = run("queue", "--problems")[1]
+        assert sorted(_ids(envelope)) == [("lidarr", 811), ("lidarr", 813), ("lidarr", 814),
+                                          ("radarr", 901)]
+        assert envelope["total"] == 4
+
+    def test_mine_keeps_the_caller_s_tagged_items(self, activity, monkeypatch):
+        _queues(activity, lidarr=[_lidarr_row(801, tags=(9,))])
+        activity.json("radarr", "tag", fixture("tag.json"))
+        activity.json("sonarr", "tag", [{"id": 2, "label": "req-alice"}])
+        activity.json("lidarr", "tag", [{"id": 9, "label": "req-bob"}])
+        assert _ids(run("queue", "--mine")[1]) == [("radarr", 901), ("sonarr", 701)]
+        monkeypatch.setenv("ISTOTA_USER_ID", "bob")
+        assert _ids(run("queue", "--mine")[1]) == [("lidarr", 801)]
+
+    def test_more_records_than_fetched_is_truncated(self, activity):
+        _queues(activity)
+        queue = fixture("queue_radarr_import_blocked.json")
+        activity.json("radarr", "queue", dict(queue, totalRecords=350))
+        envelope = run("queue")[1]
+        radarr = by_app(envelope)["radarr"]
+        assert radarr["total_records"] == 350 and radarr["truncated"] is True
+        assert by_app(envelope)["sonarr"]["truncated"] is False
+        assert envelope["truncated"] is True
+
+    def test_one_app_down_keeps_the_others_rows_in_order(self, activity):
+        _queues(activity, lidarr=[_lidarr_row(801)])
+        activity.on("radarr", "GET", "system/status", httpx.ConnectTimeout("dropped"))
+        code, envelope = run("queue")
+        assert code == 0
+        assert [a["app"] for a in envelope["apps"]] == ["sonarr", "radarr", "lidarr"]
+        assert by_app(envelope)["radarr"]["error"] == "connection_failed"
+        assert _ids(envelope) == [("sonarr", 701), ("lidarr", 801)]
+
+    def test_the_limit_caps_rows_and_total_counts_them_all(self, activity):
+        _queues(activity)
+        envelope = run("queue", "--limit", "1")[1]
+        assert _ids(envelope) == [("radarr", 901)] and envelope["total"] == 3
+
+    def test_a_named_app(self, activity):
+        _queues(activity)
+        envelope = run("queue", "--app", "sonarr")[1]
+        assert _ids(envelope) == [("sonarr", 701)]
+        assert activity.sent("radarr") == []
+
+    def test_prowlarr_has_no_queue(self, activity):
+        code, envelope = run("queue", "--app", "prowlarr")
+        assert envelope["reason"] == "not_a_media_app"
+        assert activity.requests == []
+
+
+def _movie_ready(fake, **movie):
+    item = dict(fixture("movie_library.json"), **movie)
+    fake.json("radarr", "movie/42", item)
+    fake.json("radarr", "movie", [item])
+    fake.json("radarr", "qualityprofile", fixture("qualityprofile.json"))
+    fake.json("radarr", "queue", fixture("queue_radarr_import_blocked.json"))
+    fake.json("radarr", "history/movie", fixture("history_movie.json"))
+    fake.json("radarr", "release", fixture("release_movie.json"))
+    fake.json("radarr", "tag", fixture("tag.json"))
+    return item
+
+
+class TestWhy:
+    def test_reports_the_item_its_queue_rows_and_history(self, activity):
+        _movie_ready(activity)
+        code, envelope = run("why", "--kind", "film", "--library-id", "42")
+        assert code == 0, envelope
+        item = envelope["item"]
+        assert item["library_id"] == 42 and item["title"] == fenced("The Glass Orchard")
+        assert item["monitored"] is True and item["has_file"] is False
+        assert item["minimum_availability"] == "released" and item["is_available"] is True
+        assert item["quality_profile"] == "HD - 720p/1080p"
+        assert [row["queue_id"] for row in envelope["queue"]] == [901]
+        first, second = envelope["history"]
+        assert first["event_type"] == "grabbed" and first["date"] == "2026-10-16T07:00:00Z"
+        assert first["source_title"] == fenced("The.Glass.Orchard.2024.1080p.BluRay.x264-GRP")
+        assert second["event_type"] == "downloadFailed"
+        assert second["message"] == fenced("Download client reported the torrent as stalled")
+        [history] = activity.sent("radarr", "history/movie")
+        assert history.url.params["movieId"] == "42"
+        assert activity.sent("radarr", "release") == []
+        assert _writes(activity) == []
+
+    def test_an_external_id_is_found_in_the_library_without_a_lookup(self, activity):
+        _movie_ready(activity)
+        code, envelope = run("why", "--kind", "film", "--tmdb", "800001")
+        assert code == 0, envelope
+        [request] = activity.sent("radarr", "movie")
+        assert request.url.params["tmdbId"] == "800001"
+        assert activity.sent("radarr", "movie/lookup") == []
+        assert envelope["item"]["library_id"] == 42
+
+    def test_an_item_not_in_the_library(self, activity):
+        _movie_ready(activity)
+        activity.json("radarr", "movie", [])
+        code, envelope = run("why", "--kind", "film", "--tmdb", "800001")
+        assert code == 1
+        assert envelope["reason"] == "not_in_library"
+
+    def test_hint_not_monitored(self, activity):
+        _movie_ready(activity, monitored=False)
+        assert run("why", "--kind", "film", "--library-id", "42")[1]["hint"] == (
+            "not monitored, so nothing will grab it")
+
+    def test_hint_not_yet_available(self, activity):
+        _movie_ready(activity, isAvailable=False, minimumAvailability="inCinemas")
+        hint = run("why", "--kind", "film", "--library-id", "42")[1]["hint"]
+        assert hint == "not yet available under minimum availability inCinemas"
+
+    def test_hint_never_grabbed(self, activity):
+        _movie_ready(activity)
+        activity.json("radarr", "queue", _page([]))
+        activity.json("radarr", "history/movie", [])
+        hint = run("why", "--kind", "film", "--library-id", "42")[1]["hint"]
+        assert hint.startswith("never grabbed") and "why --releases" in hint
+
+    def test_hint_the_last_event_failed(self, activity):
+        _movie_ready(activity)
+        activity.json("radarr", "queue", _page([]))
+        history = fixture("history_movie.json")
+        history[0]["date"] = "2026-10-16T08:00:00Z"
+        activity.json("radarr", "history/movie", history)
+        hint = run("why", "--kind", "film", "--library-id", "42")[1]["hint"]
+        assert "downloadFailed" in hint
+        assert fenced("Download client reported the torrent as stalled") in hint
+
+    def test_no_hint_while_it_downloads_normally(self, activity):
+        _movie_ready(activity)
+        queue = fixture("queue_radarr_import_blocked.json")
+        activity.json("radarr", "queue", _page([queue["records"][1] | {"movieId": 42}]))
+        assert run("why", "--kind", "film", "--library-id", "42")[1]["hint"] is None
+
+    def test_releases_are_sorted_approved_first_then_by_score(self, activity):
+        _movie_ready(activity)
+        envelope = run("why", "--kind", "film", "--library-id", "42", "--releases",
+                       "--limit", "3")[1]
+        [request] = activity.sent("radarr", "release")
+        assert request.url.params["movieId"] == "42"
+        releases = envelope["releases"]
+        assert releases["total"] == 4
+        assert [r["custom_format_score"] for r in releases["results"]] == [200, 100, 0]
+        best, second, rejected = releases["results"]
+        assert best["approved"] is True and best["quality"] == "Bluray-1080p"
+        assert best["title"] == fenced("The.Glass.Orchard.2024.1080p.BluRay.x264-GRP")
+        assert best["indexer"] == fenced("Indexer A")
+        assert best["size"] == 9000000000 and best["seeders"] == 30
+        assert rejected["rejections"] == [fenced("No seeders")]
+
+    def test_a_release_search_is_not_retried(self, activity):
+        _movie_ready(activity)
+        activity.on("radarr", "GET", "release", httpx.Response(502))
+        code, envelope = run("why", "--kind", "film", "--library-id", "42", "--releases")
+        assert code == 1 and envelope["reason"] == "api_error"
+        assert len(activity.sent("radarr", "release")) == 1
+
+    def test_a_show_uses_its_series_history_and_latest_monitored_season(self, activity):
+        show = dict(fixture("series_lookup.json")[1], seasons=[
+            {"seasonNumber": 0, "monitored": False}, {"seasonNumber": 1, "monitored": True},
+            {"seasonNumber": 2, "monitored": True}, {"seasonNumber": 3, "monitored": False}])
+        activity.json("sonarr", "series/5", show)
+        activity.json("sonarr", "qualityprofile", fixture("qualityprofile.json"))
+        activity.json("sonarr", "queue", fixture("queue_sonarr_downloading.json"))
+        activity.json("sonarr", "history/series", [])
+        activity.json("sonarr", "release", [])
+        envelope = run("why", "--kind", "show", "--library-id", "5", "--releases")[1]
+        assert envelope["item"]["episode_files"] == 10 and envelope["item"]["episodes"] == 18
+        assert [row["queue_id"] for row in envelope["queue"]] == [701]
+        assert activity.sent("sonarr", "history/series")[0].url.params["seriesId"] == "5"
+        params = activity.sent("sonarr", "release")[0].url.params
+        assert params["seriesId"] == "5" and params["seasonNumber"] == "2"
+        assert envelope["releases"]["season_number"] == 2
+
+    def test_an_album_narrows_the_artist_history(self, activity):
+        album = dict(fixture("album_library.json")[0], id=31, artistId=7, monitored=True)
+        activity.json("lidarr", "album/31", album)
+        activity.json("lidarr", "artist/7", fixture("artist_added.json"))
+        activity.json("lidarr", "qualityprofile", fixture("qualityprofile.json"))
+        activity.json("lidarr", "queue", _page([_lidarr_row(801)]))
+        activity.json("lidarr", "history/artist", [])
+        activity.json("lidarr", "release", [])
+        envelope = run("why", "--kind", "album", "--library-id", "31", "--releases")[1]
+        assert envelope["item"]["title"] == fenced("Harbour Lights")
+        assert envelope["item"]["artist"] == fenced("Lantern Field")
+        assert envelope["item"]["quality_profile"] == "Any"
+        params = activity.sent("lidarr", "history/artist")[0].url.params
+        assert params["artistId"] == "7" and params["albumId"] == "31"
+        assert activity.sent("lidarr", "release")[0].url.params["albumId"] == "31"
+        assert [row["queue_id"] for row in envelope["queue"]] == [801]
+
+    def test_releases_for_a_whole_artist_are_refused_before_any_call(self, activity):
+        code, envelope = run("why", "--kind", "artist", "--library-id", "7", "--releases")
+        assert envelope["reason"] == "invalid_arguments"
+        assert activity.requests == []
+
+    @pytest.mark.parametrize("argv", [
+        ["why", "--kind", "film"],
+        ["why", "--kind", "film", "--tvdb", "5"],
+        ["why", "--kind", "film", "--library-id", "abc"],
+        ["why", "--kind", "film", "--library-id", "42", "--limit", "0"],
+    ])
+    def test_bad_arguments_send_nothing(self, activity, argv):
+        code, envelope = run(*argv)
+        assert code == 1
+        assert activity.requests == []
+
+
+class TestWanted:
+    def test_each_media_app_s_missing_items(self, activity):
+        activity.json("radarr", "wanted/missing", fixture("wanted_missing.json"))
+        activity.json("sonarr", "wanted/missing", _page([{
+            "seriesId": 5, "seasonNumber": 2, "episodeNumber": 4, "title": "Undertow",
+            "airDateUtc": "2026-10-10T02:00:00Z", "monitored": True, "id": 502,
+            "series": {"id": 5, "title": "Quiet Harbour"}}]))
+        activity.json("lidarr", "wanted/missing", _page([dict(
+            fixture("album_library.json")[0], id=31, artistId=7,
+            artist={"id": 7, "artistName": "Lantern Field"})]))
+        code, envelope = run("wanted")
+        assert code == 0, envelope
+        assert [a["app"] for a in envelope["apps"]] == ["sonarr", "radarr", "lidarr"]
+        radarr = by_app(envelope)["radarr"]
+        assert radarr["total"] == 3
+        first, second = radarr["items"]
+        assert first["library_id"] == 42 and first["title"] == fenced("The Glass Orchard")
+        assert second["is_available"] is False
+        [episode] = by_app(envelope)["sonarr"]["items"]
+        assert episode["series"] == fenced("Quiet Harbour") and episode["episode"] == "S02E04"
+        assert episode["series_id"] == 5 and episode["title"] == fenced("Undertow")
+        [album] = by_app(envelope)["lidarr"]["items"]
+        assert album["artist"] == fenced("Lantern Field") and album["library_id"] == 31
+        params = activity.sent("radarr", "wanted/missing")[0].url.params
+        assert params["pageSize"] == "10" and params["monitored"] == "true"
+        assert activity.sent("sonarr", "wanted/missing")[0].url.params["includeSeries"] == "true"
+        assert activity.sent("lidarr", "wanted/missing")[0].url.params["includeArtist"] == "true"
+        assert activity.sent("prowlarr") == []
+
+    def test_cutoff_and_limit(self, activity):
+        activity.json("radarr", "wanted/cutoff", _page([]))
+        envelope = run("wanted", "--app", "radarr", "--cutoff", "--limit", "5")[1]
+        assert envelope["apps"][0]["total"] == 0
+        [request] = activity.sent("radarr", "wanted/cutoff")
+        assert request.url.params["pageSize"] == "5"
+        assert activity.sent("radarr", "wanted/missing") == []
+
+    def test_prowlarr_has_nothing_wanted(self, activity):
+        assert run("wanted", "--app", "prowlarr")[1]["reason"] == "not_a_media_app"
+        assert activity.requests == []
+
+
+class TestSearchNow:
+    def _command(self, fake, app, name):
+        fake.json(app, "command", {"name": name, "status": "queued", "id": 202},
+                  method="POST", status=201)
+
+    def test_a_film_search_is_one_command(self, activity):
+        _movie_ready(activity)
+        self._command(activity, "radarr", "MoviesSearch")
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "42")
+        assert code == 0, envelope
+        assert _writes_in_order(activity) == [("POST", "command")]
+        assert _body(activity.sent("radarr", "command")[0]) == {
+            "name": "MoviesSearch", "movieIds": [42]}
+        assert envelope["command_id"] == 202 and envelope["state"] == "queued"
+        assert envelope["library_id"] == 42
+
+    def test_by_external_id(self, activity):
+        _movie_ready(activity)
+        self._command(activity, "radarr", "MoviesSearch")
+        assert run("search-now", "--kind", "film", "--tmdb", "800001")[0] == 0
+        assert _body(activity.sent("radarr", "command")[0])["movieIds"] == [42]
+
+    @pytest.mark.parametrize("kind, app, path, item, body", [
+        ("show", "sonarr", "series/5", {"id": 5, "title": "Quiet Harbour", "monitored": True},
+         {"name": "SeriesSearch", "seriesId": 5}),
+        ("album", "lidarr", "album/31", {"id": 31, "title": "Northern Static",
+                                         "monitored": True, "artistId": 7},
+         {"name": "AlbumSearch", "albumIds": [31]}),
+        ("artist", "lidarr", "artist/7", {"id": 7, "artistName": "Lantern Field",
+                                          "monitored": True},
+         {"name": "ArtistSearch", "artistId": 7}),
+    ])
+    def test_each_kind_s_command(self, activity, kind, app, path, item, body):
+        activity.json(app, path, item)
+        self._command(activity, app, body["name"])
+        library_id = path.rsplit("/", 1)[1]
+        code, envelope = run("search-now", "--kind", kind, "--library-id", library_id)
+        assert code == 0, envelope
+        assert _body(activity.sent(app, "command")[0]) == body
+
+    def test_an_unmonitored_item_is_refused_with_nothing_sent(self, activity):
+        _movie_ready(activity, monitored=False)
+        code, envelope = run("search-now", "--kind", "film", "--library-id", "42")
+        assert code == 1 and envelope["reason"] == "not_monitored"
+        assert _writes(activity) == []

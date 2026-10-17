@@ -49,7 +49,7 @@ from .apps import APPS, DEFAULT_FIELDS, KIND_APP, MEDIA_APPS
 from .client import (
     ArrClient, ServarrError, as_rows, external_id, fence, mbid, number, selector,
 )
-from .run import Run, walk_apps
+from .run import Run, media_apps, walk_apps
 
 SERIES_MONITOR_MODES = ("all", "future", "missing", "existing", "firstSeason", "lastSeason",
                         "pilot", "none")
@@ -225,15 +225,8 @@ def _describe(client: ArrClient, defaults: dict) -> dict:
 def cmd_describe(run: Run, args) -> dict:
     """Profiles, root folders, tags and the add defaults of each media app."""
     defaults = run.config.servarr.defaults
-    if args.app:
-        if args.app not in MEDIA_APPS:
-            raise ServarrError(f"{args.app} serves no media, so it has nothing to describe; "
-                               f"use status for it.", "not_a_media_app", app=args.app)
-        names = [args.app]
-    else:
-        names = [name for name in MEDIA_APPS if name in run.config.servarr.apps]
-    return walk_apps(run, names, lambda client: _describe(client, defaults),
-                     named=bool(args.app))
+    names, named = media_apps(run, args.app, "describe")
+    return walk_apps(run, names, lambda client: _describe(client, defaults), named=named)
 
 
 # --------------------------------------------------------------------------- #
@@ -477,14 +470,19 @@ def _tags(client: ArrClient) -> list[dict]:
     return as_rows(client.request("GET", "tag"), client.app, "tag")
 
 
-def _find_tag(client: ArrClient, label: str) -> int | None:
-    for row in _tags(client):
+def tag_id_in(rows: list[dict], label: str) -> int | None:
+    """The id of the tag `label` among an app's tag rows, or None."""
+    for row in rows:
         found = row.get("label")
         if isinstance(found, str) and found.casefold() == label:
             tag_id = _positive_id(row.get("id"))
             if tag_id is not None:
                 return tag_id
     return None
+
+
+def _find_tag(client: ArrClient, label: str) -> int | None:
+    return tag_id_in(_tags(client), label)
 
 
 def ensure_tag(client: ArrClient, label: str) -> int:
@@ -520,7 +518,15 @@ def _requested_by(client: ArrClient, item: dict) -> list:
     tag_ids = item.get("tags")
     if not isinstance(tag_ids, list) or not tag_ids:
         return []
-    labels = {row.get("id"): row.get("label") for row in _tags(client)}
+    return requesters_in(item, _tags(client))
+
+
+def requesters_in(item: dict, rows: list[dict]) -> list:
+    """Whose ``req-`` tags `item` carries, read against an app's tag rows."""
+    tag_ids = item.get("tags")
+    if not isinstance(tag_ids, list):
+        return []
+    labels = {row.get("id"): row.get("label") for row in rows}
     out = []
     for tag_id in tag_ids:
         label = labels.get(tag_id) if isinstance(tag_id, int) else None
