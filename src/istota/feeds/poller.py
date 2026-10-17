@@ -333,7 +333,10 @@ def _rss_entry_to_item(entry) -> FetchedItem:
     # Drop the hero image(s) from the body so the reader doesn't paint it twice
     # (once as the hero, once at the top of the excerpt). Only images promoted
     # to image_urls are removed; every other inline image is preserved.
-    cleaned_html = remove_images(cleaned_html, image_urls)
+    # The raw lead spelling goes in too: an extensionless `//` src keys on the
+    # full URL, so its https form alone would not match the body copy.
+    hoisted_raw = [body_images[0]] if lead else []
+    cleaned_html = remove_images(cleaned_html, image_urls + hoisted_raw)
     content_text = html_to_text(cleaned_html)
 
     published_at = _published_iso(entry)

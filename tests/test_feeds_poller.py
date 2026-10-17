@@ -1476,6 +1476,16 @@ class TestLeadImageSchemes:
         assert entry.image_urls == ["https://cdn.example.com/a.jpg"]
         assert "<img" not in (entry.content_html or "")
 
+    def test_an_extensionless_protocol_relative_lead_image_leaves_the_body(self, tmp_path):
+        entry = self._poll(
+            tmp_path,
+            '<p>Intro</p><img src="//images.example.com/photo-123?w=800">'
+            '<p>Mid</p><img src="https://other.example.com/b.jpg"><p>Body</p>',
+        )
+        assert entry.image_urls == ["https://images.example.com/photo-123?w=800"]
+        assert "photo-123" not in (entry.content_html or "")
+        assert "other.example.com/b.jpg" in (entry.content_html or "")
+
     def test_a_data_lead_image_stays_in_the_body(self, tmp_path):
         entry = self._poll(
             tmp_path,
