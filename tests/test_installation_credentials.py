@@ -36,19 +36,6 @@ NOT_INSTALLATION_SCOPED: dict[str, str] = {
     "briefing_shared_blocks": "briefing text blocks shared between users",
 }
 
-#: The seven credentials Stage 2 of the installation-credentials spec gives a
-#: secrets file. Until then each is an inline credential and the guard fails
-#: for it; Stage 2 removes these marks, and `strict` makes it.
-_STAGE_2 = frozenset({
-    "sms.twilio.auth_token",
-    "sms.twilio.api_key_sid",
-    "sms.twilio.api_key_secret",
-    "whatsapp.cloud.access_token",
-    "whatsapp.cloud.app_secret",
-    "whatsapp.cloud.verify_token",
-    "brain.native.extra_headers",
-})
-
 
 class UnclassifiedCollection(Exception):
     pass
@@ -106,17 +93,8 @@ CONFIG_LEAVES = leaf_paths(Config, COLLECTION_KEYS, NOT_INSTALLATION_SCOPED)
 FLAGGED = [path for path in CONFIG_LEAVES if is_secret_path(tuple(path.split(".")))]
 
 
-def _guarded(path: str):
-    if path in _STAGE_2:
-        return pytest.param(path, marks=pytest.mark.xfail(
-            strict=True,
-            reason="no secrets file until Stage 2 of the installation-credentials spec; remove this mark there",
-        ))
-    return path
-
-
 class TestTheGuard:
-    @pytest.mark.parametrize("path", [_guarded(path) for path in FLAGGED])
+    @pytest.mark.parametrize("path", FLAGGED)
     def test_every_flagged_path_is_a_credential_with_a_file_or_not_a_credential(self, path):
         found = unclassified(
             [path], is_secret_path, reference.INSTALLATION_CREDENTIALS, reference.NOT_CREDENTIALS,

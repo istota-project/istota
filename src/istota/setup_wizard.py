@@ -433,6 +433,13 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_servarr_radarr_api_key",
     "istota_servarr_lidarr_api_key",
     "istota_servarr_prowlarr_api_key",
+    "istota_sms_twilio_auth_token",
+    "istota_sms_twilio_api_key_sid",
+    "istota_sms_twilio_api_key_secret",
+    "istota_whatsapp_access_token",
+    "istota_whatsapp_app_secret",
+    "istota_whatsapp_verify_token",
+    "istota_brain_native_extra_headers",
 )
 
 #: Ingress modes, as `host.env`'s INGRESS names them, mapped to the hop count the
@@ -611,6 +618,13 @@ def container_secret_values(a: ContainerAnswers) -> dict[str, str]:
         "istota_servarr_radarr_api_key": "",
         "istota_servarr_lidarr_api_key": "",
         "istota_servarr_prowlarr_api_key": "",
+        "istota_sms_twilio_auth_token": "",
+        "istota_sms_twilio_api_key_sid": "",
+        "istota_sms_twilio_api_key_secret": "",
+        "istota_whatsapp_access_token": "",
+        "istota_whatsapp_app_secret": "",
+        "istota_whatsapp_verify_token": "",
+        "istota_brain_native_extra_headers": "",
     }
     assert tuple(values) == SECRET_NAMES
     return values

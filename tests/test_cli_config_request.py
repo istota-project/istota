@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[1]
 STACK_SCRIPT = REPO / "host" / "istota-stack"
 
 OLD_HEADER = "header-old-value-3"
-NEW_HEADER = "header-new-value-4"
+NEW_MAP_KEY = "map-key-new-value-4"
 NEW_IMAP = "imap-new-value-5"
 
 
@@ -92,7 +92,8 @@ CHANGE = {
     "secrets": {
         "istota_email_imap_password": NEW_IMAP,
         "istota_caldav_password": "",
-        "brain.native.extra_headers.X-New": NEW_HEADER,
+        # A redacted field with no secrets file, carried as an inline credential.
+        "web.map.api_key": NEW_MAP_KEY,
     },
     "admins": ["alice", "bob"],
 }
@@ -114,7 +115,8 @@ class TestTake:
         plan = json.loads((install.out / "plan.json").read_text())
         assert plan["meta"] == {"managed": False, "source": "web", "request": request_id}
         assert plan["config"]["email"] == {"imap_host": "imap.example.org"}
-        assert plan["config"]["brain"]["native"]["extra_headers"] == {"X-Key": OLD_HEADER, "X-New": NEW_HEADER}
+        assert plan["config"]["brain"]["native"]["extra_headers"] == {"X-Key": OLD_HEADER}
+        assert plan["config"]["web"]["map"]["api_key"] == NEW_MAP_KEY
 
         files = json.loads((install.out / "files.json").read_text())
         assert files == {
@@ -128,7 +130,7 @@ class TestTake:
             row = conn.execute("SELECT * FROM config_change_requests WHERE id = ?", (request_id,)).fetchone()
         assert row["status"] == "taken" and row["secrets_sealed"] is None
         stored = " ".join(str(row[key]) for key in row.keys())
-        assert NEW_IMAP not in stored and NEW_HEADER not in stored and OLD_HEADER not in stored
+        assert NEW_IMAP not in stored and NEW_MAP_KEY not in stored and OLD_HEADER not in stored
 
         again = install.run("config-request", "take", "--out", str(install.out))
         assert again.returncode == 0 and again.stdout == ""
@@ -144,7 +146,7 @@ class TestTake:
 
         dry = install.run("apply", "--dry-run", "-f", plan)
         assert dry.returncode == 2, dry.stdout + dry.stderr
-        assert NEW_HEADER not in dry.stdout + dry.stderr
+        assert NEW_MAP_KEY not in dry.stdout + dry.stderr
 
     def test_the_written_files_are_a_request_put_files_accepts(self, install, tmp_path):
         install.submit(CHANGE)
@@ -174,6 +176,15 @@ class TestTake:
         assert json.loads(plan)["config"]["servarr"]["apps"]["radarr"] == {"url": "https://radarr.example.org"}
         files = json.loads((install.out / "files.json").read_text())
         assert files["secrets"] == {"istota_servarr_radarr_api_key": arr_key}
+
+    def test_the_native_headers_go_to_their_secrets_file_and_not_the_plan(self, install):
+        headers = '{"X-Tenant": "header-for-the-file-5"}'
+        install.submit({"secrets": {"istota_brain_native_extra_headers": headers}})
+        assert install.run("config-request", "take", "--out", str(install.out)).returncode == 0
+        plan = (install.out / "plan.json").read_text()
+        assert "header-for-the-file-5" not in plan
+        files = json.loads((install.out / "files.json").read_text())
+        assert files["secrets"] == {"istota_brain_native_extra_headers": headers}
 
     def test_a_request_changing_no_file_names_nothing(self, install):
         install.submit({"ops": [{"op": "set", "path": ["email", "imap_host"], "value": "imap.example.org"}]})

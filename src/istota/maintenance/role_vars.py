@@ -51,8 +51,8 @@ from istota.maintenance.bare_metal_import import Refusal, parse_env_file
 EXIT_OK = 0
 EXIT_REFUSED = 1
 
-#: The old role's variable for each stack secrets file. Held to the old
-#: role's secrets.env.j2 and to `SECRET_NAMES` by tests/test_role_vars.py.
+#: The old role's variable for each stack secrets file. Held to
+#: `SECRET_NAMES` by tests/test_role_vars.py.
 SECRET_VARS = {
     "istota_nextcloud_app_password": "istota_nextcloud_app_password",
     "istota_caldav_password": "istota_caldav_password",
@@ -68,18 +68,19 @@ SECRET_VARS = {
     "istota_google_workspace_client_secret": "istota_google_workspace_client_secret",
     "istota_claude_code_oauth_token": "claude_code_oauth_token",
     "istota_brain_native_api_key": "istota_brain_native_api_key",
+    "istota_sms_twilio_auth_token": "istota_sms_twilio_auth_token",
+    "istota_sms_twilio_api_key_sid": "istota_sms_twilio_api_key_sid",
+    "istota_sms_twilio_api_key_secret": "istota_sms_twilio_api_key_secret",
+    "istota_whatsapp_access_token": "istota_whatsapp_access_token",
+    "istota_whatsapp_app_secret": "istota_whatsapp_app_secret",
+    "istota_whatsapp_verify_token": "istota_whatsapp_verify_token",
 }
 
-#: Credentials the old role rendered that the stack has no secrets file for.
+#: Values the old role rendered beside its secrets that have no stack secrets
+#: file: the two Twilio identifiers, which are config values, not credentials.
 NO_STACK_FILE = (
     "istota_sms_twilio_account_sid",
-    "istota_sms_twilio_auth_token",
-    "istota_sms_twilio_api_key_sid",
-    "istota_sms_twilio_api_key_secret",
     "istota_sms_twilio_messaging_service_sid",
-    "istota_whatsapp_access_token",
-    "istota_whatsapp_app_secret",
-    "istota_whatsapp_verify_token",
 )
 
 #: Keys the state volume holds, kept in the vault as the only copy off the VM.
@@ -148,8 +149,8 @@ def _secrets(old: dict, notes: list[str]) -> dict[str, str]:
     if no_file:
         raise Refusal(
             "no stack secrets file for " + ", ".join(no_file) + ". Nothing was written. "
-            "Set these inline in the plan's config (the [sms.twilio] and [whatsapp.cloud] keys) "
-            "or add a secrets file for them first; a credential is never dropped silently."
+            "Set these in the plan's config (the [sms.twilio] keys); "
+            "a value is never dropped silently."
         )
     secrets: dict[str, str] = {}
     for variable, name in SECRET_VARS.items():

@@ -372,8 +372,13 @@ class TestPerFieldEditorKeys:
         assert field["credential"] == {"kind": "file", "name": "istota_nextcloud_app_password"}
 
     def test_an_inline_credential(self):
+        field = _field(view.build_config_view(Config()), "web.map.api_key")
+        assert field["credential"] == {"kind": "inline", "name": "web.map.api_key"}
+
+    def test_the_native_headers_are_a_file_credential(self, no_overrides):
         field = _field(view.build_config_view(Config()), "brain.native.extra_headers")
-        assert field["credential"] == {"kind": "inline", "name": "brain.native.extra_headers"}
+        assert field["credential"] == {"kind": "file", "name": "istota_brain_native_extra_headers"}
+        assert field["editor"] == "secret"
 
     def test_a_plain_field_has_no_credential(self):
         assert _field(view.build_config_view(Config()), "bot_name")["credential"] is None
@@ -436,7 +441,6 @@ class TestTables:
 
         payload = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)
         field = _field(payload, "brain.native.extra_headers")
-        assert field["editor"] == "table"
         assert SENTINEL in field["toml"]
         assert "x-tenant" in field["toml"]
         assert "HEADER-VALUE-SENTINEL" not in field["toml"]

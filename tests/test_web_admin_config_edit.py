@@ -577,7 +577,11 @@ class TestServarrCardChangeSet:
 
 async def test_no_credential_value_in_any_response(alice, setup):
     """Sentinel-by-value across preview, submit, status, history and restore."""
-    secrets = {"istota_email_imap_password": FILE_SECRET, "brain.native.extra_headers.X-New": "fixture-new-header-7e"}
+    secrets = {
+        "istota_email_imap_password": FILE_SECRET,
+        "istota_brain_native_extra_headers": '{"X-New": "fixture-new-header-7e"}',
+        "web.map.api_key": "fixture-new-map-key-5f",
+    }
     seen = [await alice.post(f"{BASE}/preview", json=_change(setup, secrets=secrets), headers=ORIGIN)]
     submitted = await _submit(alice, setup, secrets=secrets)
     assert submitted.status_code == 202, submitted.text
@@ -590,7 +594,7 @@ async def test_no_credential_value_in_any_response(alice, setup):
         await alice.get(BASE),
     ]
     for response in seen:
-        for value in (FILE_SECRET, INLINE_SECRET, "fixture-new-header-7e"):
+        for value in (FILE_SECRET, INLINE_SECRET, "fixture-new-header-7e", "fixture-new-map-key-5f"):
             assert value not in response.text, response.request.url
     trigger = (setup["requests"] / applier.TRIGGER_NAME).read_text()
     assert trigger == f"{request_id}\n"

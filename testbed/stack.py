@@ -726,6 +726,13 @@ SECRET_NAMES: tuple[str, ...] = (
     "istota_servarr_radarr_api_key",
     "istota_servarr_lidarr_api_key",
     "istota_servarr_prowlarr_api_key",
+    "istota_sms_twilio_auth_token",
+    "istota_sms_twilio_api_key_sid",
+    "istota_sms_twilio_api_key_secret",
+    "istota_whatsapp_access_token",
+    "istota_whatsapp_app_secret",
+    "istota_whatsapp_verify_token",
+    "istota_brain_native_extra_headers",
 )
 
 #: What the scripted endpoint is sent as a key. Nothing in this tier can use a
