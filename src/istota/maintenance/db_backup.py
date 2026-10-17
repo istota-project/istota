@@ -294,6 +294,7 @@ def copy_config_files(config, date_str: str) -> Path | None:
     except OSError as exc:
         logger.error("db_backup config copy failed dir=%s err=%s", dated, exc)
         return None
+    _scrub_config_copies(root)
     keep = getattr(config.scheduler, "db_backup_retention", 7)
     if keep > 0:
         dated_dirs = _dated_dirs(root)
@@ -309,6 +310,21 @@ def copy_config_files(config, date_str: str) -> Path | None:
             except OSError as exc:
                 logger.warning("db_backup_config_prune_failed dir=%s err=%s", old, exc)
     return dated
+
+
+def _scrub_config_copies(root: Path) -> None:
+    """Remove a credential moved to its secret file from every day's copy of
+    ``config.toml`` (ISSUE-769). Never raises."""
+    from istota.apply import scrub_moved_credentials
+
+    for dated in _dated_dirs(root):
+        copy = dated / "config.toml"
+        if copy.is_symlink() or not copy.is_file():
+            continue
+        try:
+            scrub_moved_credentials(copy)
+        except OSError as exc:
+            logger.warning("db_backup_config_scrub_failed file=%s err=%s", copy, exc)
 
 
 def _date_str(today: str | None) -> str:

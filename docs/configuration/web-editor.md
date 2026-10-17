@@ -60,6 +60,8 @@ Applied, refused and cancelled requests are kept for 180 days with their redacte
 
 Every write goes through the same TOML writer `istota apply` uses, so comments in a hand-written `config.toml` are not kept. The page warns when the file has comments. The previous text is in the newest `config.toml.bak.<timestamp>`.
 
+A credential moved to its secret file is removed from every `config.toml.bak.<timestamp>` and from `config.toml.pre-localize` on the next write, and from the daily copies in `Backups/config/<date>/` on the next database backup. Copying one of those back on the same stack still loads the credential, because the secret file wins over a value in `config.toml`. A restore onto a new VM never had the secret files, so you enter those credentials again there, as the restore already tells you. On a Nextcloud workspace, Nextcloud's own file versions and trash may keep an older copy of `Backups/config/`; delete those versions if that matters to you.
+
 ## When something goes wrong
 
 - A request still waiting after two minutes: check `systemctl status istota-config-apply.path istota-config-apply.timer` on the host, or run `istota-stack config-apply` by hand. `istota doctor --only web.config_applier` warns about a request pending for ten minutes or taken for an hour.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import stat
 import sys
+import tomllib
 from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
@@ -488,6 +489,29 @@ class TestTheConfigCopy:
 
         kept = sorted(p.name for p in root.iterdir())
         assert kept == [(start + timedelta(days=offset)).isoformat() for offset in (1, 4, 5)]
+
+    def test_a_moved_credential_is_scrubbed_from_the_older_copies(
+        self, tmp_path, config_files, monkeypatch,
+    ):
+        """ISSUE-769: an older day's copy of config.toml keeps a credential
+        moved to its secret file since, unless the copy is scrubbed."""
+        cfg = self._cfg(tmp_path, config_files)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+        monkeypatch.delenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", raising=False)
+        live = config_files / "config.toml"
+        live.write_text('bot_name = "Zed"\n\n[nextcloud]\napp_password = "s3cret-moved"\n')
+        start = _date.fromisoformat(FIXED_DAY)
+        db_backup.backup_databases(cfg, today=FIXED_DAY)
+
+        live.write_text('bot_name = "Zed"\n')
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", "s3cret-moved")
+        db_backup.backup_databases(cfg, today=(start + timedelta(days=1)).isoformat())
+
+        root = tmp_path / "mount" / "Backups" / "config"
+        older = root / FIXED_DAY / "config.toml"
+        assert "s3cret-moved" not in older.read_text()
+        assert tomllib.loads(older.read_text()) == {"bot_name": "Zed"}
+        assert stat.S_IMODE(older.stat().st_mode) == 0o600
 
 
 class TestMountLiveness:

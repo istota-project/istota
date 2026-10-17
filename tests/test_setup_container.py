@@ -1364,6 +1364,19 @@ class TestARerunStartsFromTheStack:
         assert _mode(backups[-1]) == 0o600
         assert not config.with_name("config.toml.bak.20260101T000000.000000Z").exists()
 
+    def test_a_rerun_leaves_a_backups_credentials_alone(self, tmp_path, monkeypatch):
+        """Setup reads its answers from the variables the scrub would read, so a
+        set variable says nothing about a secret file (ISSUE-769)."""
+        setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
+        config = tmp_path / "data" / "config" / "config.toml"
+        older = config.with_name("config.toml.bak.20260101T000000.000000Z")
+        older.write_text('[nextcloud]\napp_password = "old"\n')
+        monkeypatch.setenv("ISTOTA_NEXTCLOUD_APP_PASSWORD", "new")
+
+        assert setup_wizard.run_setup(_args(tmp_path, force=True), out=lambda *_: None) == 0
+
+        assert older.read_text() == '[nextcloud]\napp_password = "old"\n'
+
     def test_a_first_run_writes_no_backup(self, tmp_path):
         setup_wizard.run_setup(_args(tmp_path), out=lambda *_: None)
         assert not list((tmp_path / "data" / "config").glob("config.toml.bak.*"))
