@@ -85,8 +85,8 @@
   /* The count itself is in the owning link's accessible name and title. */
   .count-pill.mark {
     position: absolute;
-    left: calc(100% + 1px);
-    top: 0;
+    left: calc(100% - 1px);
+    top: 2px;
     min-width: 0;
     width: 0.7em;
     height: 0.7em;
