@@ -90,6 +90,9 @@ Thumbs.db
 tests/fixtures/cm_traces/*.jsonl
 .claude/scheduled_tasks.lock
 
+# Local link to shared Claude/Codex project memory; may contain private notes.
+/.claude/project-memory
+
 # Local dev feed preview data (seeded by scripts/dev/seed_feed_preview.py)
 web/dev-feed-data.json
 
