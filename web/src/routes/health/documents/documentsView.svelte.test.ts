@@ -72,10 +72,13 @@ import Page from './+page.svelte';
 import { page } from '../../../../vitest-stubs/app-state.svelte';
 import { __history } from '../../../../vitest-stubs/app-navigation';
 import { viewer } from '$lib/fileViewer/store.svelte';
+import { get } from 'svelte/store';
+import { notices, clearNotices } from '$lib/stores/notices';
 
 afterEach(() => {
   cleanup();
   viewer.close();
+  clearNotices();
 });
 
 function doc(id: number, name: string, links: DocumentLink[]): HealthDocument {
@@ -158,12 +161,15 @@ describe('the Documents view', () => {
     expect(screen.getByText('Visit')).toBeTruthy();
   });
 
-  it('says where a document came from, under its name rather than in a column', async () => {
+  it('shows each document source as a compact badge', async () => {
     render(Page);
     await waitFor(() => expect(screen.getByText('discharge.pdf')).toBeTruthy());
     // Both fixtures are `manual`, so this is one label per row and the count
     // is what says it is on the row rather than in a header somewhere.
     expect(screen.getAllByText('Uploaded')).toHaveLength(2);
+    for (const badge of screen.getAllByText('Uploaded')) {
+      expect(badge).toHaveClass('badge-sm');
+    }
     // The column it used to share with the MIME chip is gone with the chip.
     expect(screen.queryByText('PDF')).toBeNull();
   });
@@ -207,12 +213,15 @@ describe('the Documents view', () => {
 
     screen.getByLabelText('Detach from Anaemia').click();
 
-    await waitFor(() => expect(screen.getByText('nope')).toBeTruthy());
+    await waitFor(() =>
+      expect(get(notices)).toEqual([
+        expect.objectContaining({ message: 'nope', severity: 'error' }),
+      ]),
+    );
     // A load failure replaces the pane; an action failure must not, because
     // everything on screen is still correct.
     expect(screen.getByText('discharge.pdf')).toBeTruthy();
-    const banner = screen.getByText('nope');
-    expect(banner.className).toContain('banner');
+    expect(screen.queryByText('nope')).toBeNull();
   });
 
   it('replaces the pane when the load itself fails', async () => {
@@ -396,8 +405,26 @@ describe('the Documents view', () => {
   });
 });
 
-describe('document list image links', () => {
-  it('opens an image from its title and menu while PDFs still download', async () => {
+describe('document previews', () => {
+  it('opens a PDF from the action menu and keeps an original download link', async () => {
+    render(Page);
+    const row = (await screen.findByText('discharge.pdf')).closest('tr')!;
+    await fireEvent.keyDown(within(row).getByRole('button', { name: /actions/i }), {
+      key: 'Enter',
+    });
+    const download = await screen.findByRole('menuitem', { name: 'Download' });
+    expect(download).toHaveAttribute('href', attached.url);
+    expect(download).toHaveAttribute('download', 'discharge.pdf');
+    await fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }));
+    expect(viewer.state).toEqual({
+      mode: 'file',
+      path: attached.url,
+      source: { kind: 'url', url: attached.url, name: 'discharge.pdf', mime: 'application/pdf' },
+    });
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('previews images and PDFs while preserving modified clicks and downloads', async () => {
     const image = { ...loose, mime: 'image/png', filename: 'scan.png' };
     vi.mocked(listDocuments).mockResolvedValue({ documents: [attached, image] });
     render(Page);
@@ -409,13 +436,18 @@ describe('document list image links', () => {
     viewer.close();
     const pdfClick = new MouseEvent('click', { bubbles: true, cancelable: true });
     await fireEvent(screen.getByRole('link', { name: 'discharge.pdf' }), pdfClick);
-    expect(pdfClick.defaultPrevented).toBe(false);
-    expect(viewer.state.mode).toBe('closed');
+    expect(pdfClick.defaultPrevented).toBe(true);
+    expect(viewer.state).toEqual({
+      mode: 'file',
+      path: attached.url,
+      source: { kind: 'url', url: attached.url, name: 'discharge.pdf', mime: 'application/pdf' },
+    });
+    viewer.close();
     const row = title.closest('tr')!;
     await fireEvent.keyDown(within(row).getByRole('button', { name: /actions/i }), {
       key: 'Enter',
     });
-    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Open' }));
+    await fireEvent.click(await screen.findByRole('menuitem', { name: 'Preview' }));
     expect(viewer.state).toEqual({ mode: 'images', images: [image.url], index: 0 });
     expect(screen.queryByRole('menu')).toBeNull();
   });
@@ -447,5 +479,9 @@ it('fetches a search target outside the loaded list and reports a stale link', a
   vi.mocked(getDocument).mockRejectedValueOnce(new Error('Not found'));
   page.url = new URL('http://localhost/istota/health/documents/?id=100');
   page.state = {};
-  expect(await screen.findByText("Couldn't locate that document.")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(get(notices)).toEqual([
+      expect.objectContaining({ message: "Couldn't locate that document.", severity: 'error' }),
+    ]),
+  );
 });
