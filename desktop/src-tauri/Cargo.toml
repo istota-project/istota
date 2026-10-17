@@ -36,6 +36,9 @@ m9-negative-control = []
 # The negative control for row M6: the master key written to the Keychain with
 # it on an argv (testhooks.rs). Built only by `scripts/test-desktop.sh --control m6`.
 m6-negative-control = ["desktop-test-hooks"]
+# The negative control for the per-profile website data stores: every remote
+# window on the default store. Built only by `scripts/test-desktop.sh --control stores`.
+stores-negative-control = []
 # The desktop tier's hooks (testhooks.rs): a first run started from the
 # environment. Built only by scripts/test-desktop.sh; no release build has it.
 desktop-test-hooks = []

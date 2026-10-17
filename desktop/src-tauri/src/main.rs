@@ -251,7 +251,9 @@ fn open_current(app: &AppHandle) -> Result<(), String> {
         Some((id, Kind::Remote { url })) => {
             let url = profiles::remote_url(&url)?;
             let store = profiles::data_store_id(&shared.paths.instance, &id);
-            open_web_window(app, &format!("web-{id}"), &format!("Istota — {id}"), url, Some(store));
+            // The tier's control for test_profiles.py: one shared store.
+            let store = (!cfg!(feature = "stores-negative-control")).then_some(store);
+            open_web_window(app, &format!("web-{id}"), &format!("Istota — {id}"), url, store);
             Ok(())
         }
         _ => open_local(app),

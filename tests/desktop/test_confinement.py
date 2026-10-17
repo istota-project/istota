@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from tests.desktop.stores import data_store_id, remove
 from tests.support import parity
 
 pytestmark = pytest.mark.desktop
@@ -145,6 +146,8 @@ def probe_run(app_executable: Path):
         "lima_home": sorted(p.name for p in (state_dir / "lima").iterdir()) if (state_dir / "lima").exists() else [],
     }
     shutil.rmtree(state_dir, ignore_errors=True)
+    # The probe's own website data store, outside the state directory.
+    remove(data_store_id("istota", "probe"))
     return result
 
 

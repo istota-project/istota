@@ -202,7 +202,7 @@ class TestTheBundle:
         assert pins["MACOSX_DEPLOYMENT_TARGET"] == "14.0"
 
 
-TEST_FEATURES = ("desktop-test-hooks", "m6-negative-control", "m9-negative-control")
+TEST_FEATURES = ("desktop-test-hooks", "m6-negative-control", "m9-negative-control", "stores-negative-control")
 
 
 class TestTestBuildsStayOutOfReleases:

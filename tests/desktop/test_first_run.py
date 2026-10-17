@@ -221,6 +221,7 @@ def first_run(app_bundle: Path, app_executable: Path):
     # from it, as it does on a re-run.
     (state / "config" / "istota-stack" / f"{INSTANCE}.env").write_text(
         f"SIGNING_KEY={signing_key}\nPORT={port}\n")
+    shim_dir = root / "bin"
     opened = root / "opened"
     opener = root / "opener"
     opener.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{opened}"\n')
@@ -233,6 +234,7 @@ def first_run(app_bundle: Path, app_executable: Path):
         "ISTOTA_DESKTOP_INSTANCE": INSTANCE,
         "ISTOTA_DESKTOP_OPENER": str(opener),
         "ISTOTA_DESKTOP_FIRST_RUN_FOLDER": str(workspace),
+        "ISTOTA_DESKTOP_SHIM_DIR": str(shim_dir),
     })
     cli = _Cli(app_bundle, state)
     sampler = _Sampler()
@@ -276,6 +278,7 @@ def first_run(app_bundle: Path, app_executable: Path):
         logs = cli.run("compose", "logs", "--no-color", "nginx", timeout=120).stdout
         result["login_requests"] = [
             m.group(1) for m in re.finditer(r'"((?:GET|POST) /istota/auth/local HTTP/1\.1" \d{3})', logs)]
+        result["shims"] = _through_the_shims(shim_dir)
         # The control writes the key on an argv after the first run; give the
         # sampler the same few seconds in every build.
         time.sleep(8)
@@ -299,6 +302,26 @@ def first_run(app_bundle: Path, app_executable: Path):
               f"{len(sampler.lines)} distinct command lines, login requests {result.get('login_requests')}")
         _teardown(cli, root)
     return result
+
+
+STATUS = "grep -E '^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):' /proc/self/status"
+
+
+def _through_the_shims(shim_dir: Path) -> dict:
+    """Row L4 again, through the command-line tools the app wrote: run with
+    nothing of the app's environment, as from a Terminal."""
+    env = {"HOME": os.environ["HOME"], "PATH": "/usr/bin:/bin", "LANG": "C"}
+    runs = {}
+    for name, argv in (("exec", ["istota-stack", "exec", "sh", "-c", STATUS]),
+                       ("users", ["istota", "user", "list"])):
+        script = shim_dir / argv[0]
+        if not script.is_file():
+            runs[name] = None
+            continue
+        out = subprocess.run([str(script), *argv[1:]], env=env, capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=300)
+        runs[name] = {"rc": out.returncode, "stdout": out.stdout, "stderr": out.stderr[-2000:]}
+    return runs
 
 
 def _teardown(cli: _Cli, root: Path) -> None:
@@ -328,6 +351,30 @@ class TestTheFirstRunReachesASignedInWebUI:
 
     def test_the_master_key_went_to_the_scratch_keychain_item(self, first_run):
         assert len(first_run["master_key"]) >= 32
+
+
+class TestTheCommandLineToolsReachTheAppsVm:
+    """Row L4 through the app's `istota-stack` and `istota`: they set the
+    app's LIMA_HOME, state and instance themselves, and the CLI they run
+    execs as uid 10001 with every capability set empty."""
+
+    def test_the_app_wrote_them(self, first_run):
+        assert first_run["shims"]["exec"] is not None, first_run["log"][-2000:]
+
+    def test_exec_runs_as_10001_with_no_capabilities(self, first_run):
+        run = first_run["shims"]["exec"]
+        assert run["rc"] == 0, run
+        fields = dict(
+            (key.strip(), value.split()[0]) for key, _, value in
+            (line.partition(":") for line in run["stdout"].splitlines()) if value.split())
+        assert fields.get("Uid") == "10001" and fields.get("Gid") == "10001", fields
+        for cap in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            assert fields.get(cap) == "0000000000000000", f"{cap} is {fields.get(cap)}"
+
+    def test_istota_reaches_the_cli(self, first_run):
+        run = first_run["shims"]["users"]
+        assert run["rc"] == 0, run
+        assert "desktop" in run["stdout"], run
 
 
 @parity.witness("M6")

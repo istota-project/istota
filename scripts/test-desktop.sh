@@ -5,6 +5,7 @@
 #   scripts/test-desktop.sh tests/desktop/test_confinement.py
 #   scripts/test-desktop.sh --control m9     # row M9's negative control: must go red
 #   scripts/test-desktop.sh --control m6     # row M6's negative control: must go red
+#   scripts/test-desktop.sh --control stores # one website data store for every profile: must go red
 #
 # The build is desktop/build-app.sh, signed with ISTOTA_DESKTOP_IDENTITY (a
 # codesign identity; ad hoc when unset), with the desktop-test-hooks feature
@@ -52,7 +53,12 @@ if [ "${1:-}" = --control ]; then
             witness="tests/desktop/test_first_run.py::TestKeysStayOffTheMac::test_no_argv_held_a_key"
             red="the sampler found the master key on security's argv"
             ;;
-        *) echo "test-desktop.sh: the controls are: m6, m9" >&2; exit 64 ;;
+        stores)
+            app="$(build stores-negative-control desktop/src-tauri/target/stores-control)"
+            witness="tests/desktop/test_profiles.py::TestEachRemoteProfileHasItsOwnStore::test_the_second_install_sees_no_cookie_of_the_first"
+            red="the second install's window sent the first install's cookie"
+            ;;
+        *) echo "test-desktop.sh: the controls are: m6, m9, stores" >&2; exit 64 ;;
     esac
     out="$(mktemp)"
     trap 'rm -f "$out"' EXIT
