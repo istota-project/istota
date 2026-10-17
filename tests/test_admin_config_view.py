@@ -667,10 +667,29 @@ class TestRemovableProblems:
         assert "also set in config.toml" in inline[0]["message"]
         assert "INLINE-PASSWORD-SENTINEL" not in str(problems)
 
-    def test_no_inline_warning_when_the_secrets_file_is_empty(self, monkeypatch):
+    def test_an_inline_credential_with_an_empty_file_can_be_moved(self, monkeypatch):
         monkeypatch.delenv("ISTOTA_EMAIL_IMAP_PASSWORD", raising=False)
+        monkeypatch.delenv("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", raising=False)
         problems = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)["problems"]
-        assert problems == []
+        assert sorted((p["path"], p["action"]) for p in problems) == [
+            (["brain", "native", "extra_headers"], "move"),
+            (["email", "imap_password"], "move"),
+        ]
+        assert all(p["kind"] == "warning" and not p["blocking"] for p in problems)
+        assert "istota_email_imap_password" in str(problems)
+        assert "INLINE-PASSWORD-SENTINEL" not in str(problems)
+        assert "HEADER-VALUE-SENTINEL" not in str(problems)
+
+    @pytest.mark.parametrize("managed", ["config", "secrets"])
+    def test_no_move_action_when_a_plan_manages_either_side(self, monkeypatch, managed):
+        monkeypatch.delenv("ISTOTA_EMAIL_IMAP_PASSWORD", raising=False)
+        document = '[email]\nimap_password = "INLINE-PASSWORD-SENTINEL"\n'
+        problems = view.build_config_view(
+            Config(), document=document,
+            managed={managed: {"managed": True, "source": "ansible", "at": "t"}},
+        )["problems"]
+        assert len(problems) == 1
+        assert "action" not in problems[0]
 
 
 class TestManaged:

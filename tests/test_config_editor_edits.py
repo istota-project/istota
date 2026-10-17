@@ -219,7 +219,10 @@ class TestPreview:
         assert found.blocked
         assert [problem["path"] for problem in found.blocking] == [["scheduler", "talk_poll_timeout"]]
         assert found.blocking[0]["pre_existing"] is True
-        assert [problem["kind"] for problem in found.warnings] == ["retired"]
+        # CURRENT's inline extra_headers has a secret file, so it is also a move.
+        assert [(problem["kind"], problem.get("action")) for problem in found.warnings] == [
+            ("retired", None), ("warning", "move"),
+        ]
 
     def test_a_discard_the_change_caused_is_not_pre_existing(self):
         result = CheckResult(problems=[
@@ -398,6 +401,59 @@ class TestPreview:
             conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (task_id,))
         found, _ = _preview(CURRENT, {"ops": []}, config=Config(admin_users={"alice"}, db_path=db_path))
         assert found.running_tasks == 1
+
+
+class TestFileCredentialProblems:
+    def test_an_inline_credential_with_an_empty_file_is_a_move(self):
+        document = {"sms": {"twilio": {"auth_token": "INLINE-TOKEN-SENTINEL"}}}
+        found = edits.file_credential_problems(document, {})
+        assert found == [{
+            "kind": "warning",
+            "path": ["sms", "twilio", "auth_token"],
+            "message": (
+                "sms.twilio.auth_token is stored in config.toml in plain text; "
+                "move it to the secret file istota_sms_twilio_auth_token"
+            ),
+            "blocking": False,
+            "pre_existing": False,
+            "action": "move",
+        }]
+
+    def test_an_inline_table_credential_is_a_move(self):
+        document = {"brain": {"native": {"extra_headers": {"X-Key": "HEADER-SENTINEL"}}}}
+        found = edits.file_credential_problems(document, {})
+        assert [(p["path"], p["action"]) for p in found] == [
+            (["brain", "native", "extra_headers"], "move"),
+        ]
+        assert "HEADER-SENTINEL" not in str(found)
+
+    def test_a_credential_set_in_both_places_stays_an_unset(self):
+        document = {"sms": {"twilio": {"auth_token": "INLINE-TOKEN-SENTINEL"}}}
+        found = edits.file_credential_problems(
+            document, {"ISTOTA_SMS_TWILIO_AUTH_TOKEN": "from-the-file"},
+        )
+        assert [(p["path"], p["action"]) for p in found] == [
+            (["sms", "twilio", "auth_token"], "unset"),
+        ]
+        assert "where it is ignored" in found[0]["message"]
+
+    @pytest.mark.parametrize("value", ["", "   ", {}])
+    def test_an_empty_inline_value_is_nothing_to_move(self, value):
+        document = {"sms": {"twilio": {"auth_token": value}}}
+        assert edits.file_credential_problems(document, {}) == []
+
+    def test_a_credential_with_no_file_is_not_reported(self):
+        document = {"web": {"map": {"api_key": "browser-visible"}}}
+        assert edits.file_credential_problems(document, {}) == []
+
+    def test_preview_reads_a_file_set_in_the_same_change_set(self):
+        text = CURRENT + '\n[caldav]\npassword = "old-inline"\n'
+        found, _ = _preview(text, {"secrets": {"istota_caldav_password": "new-file-value"}})
+        actions = {
+            tuple(p["path"]): p.get("action") for p in found.warnings
+            if p["path"] == ["caldav", "password"]
+        }
+        assert actions == {("caldav", "password"): "unset"}
 
 
 class TestLoggableNames:

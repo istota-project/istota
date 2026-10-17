@@ -427,13 +427,17 @@ def _problems(check: Any) -> list[dict]:
 _REMOVABLE_KINDS = frozenset({"unknown", "retired"})
 
 
-def _file_problems(check: Any, document: dict | None, *, config_managed: bool) -> list[dict]:
-    """The current file's problems, with a remove action where one works.
+def _file_problems(
+    check: Any, document: dict | None, *, config_managed: bool, secrets_managed: bool = False,
+) -> list[dict]:
+    """The current file's problems, with a remove or move action where one works.
 
     An unknown or retired key, and a file credential also set inline, carry
     `action: "unset"` when the file holds the key through tables alone, which
     is what an `unset` op can reach; one inside an array of tables is removed
-    in the raw editor. A managed config offers no action.
+    in the raw editor. A file credential held only inline carries
+    `action: "move"`, which writes both the config and the secrets, so either
+    being managed drops it. A managed config offers no action.
     """
     import os
 
@@ -445,8 +449,14 @@ def _file_problems(check: Any, document: dict | None, *, config_managed: bool) -
     found += file_credential_problems(document, os.environ)
     for problem in found:
         path = tuple(problem.get("path") or ())
+        held = bool(path) and not config_managed and _lookup(document, path)[0]
+        if problem.get("action") == "move":
+            if held and not secrets_managed:
+                continue
+            problem.pop("action")
+            continue
         removable = problem.get("action") == "unset" or problem.get("kind") in _REMOVABLE_KINDS
-        if removable and path and not config_managed and _lookup(document, path)[0]:
+        if removable and held:
             problem["action"] = "unset"
         else:
             problem.pop("action", None)
@@ -586,6 +596,7 @@ def build_config_view(
         "started_at": started_at,
         "problems": _file_problems(
             check, parsed, config_managed=ctx["managed_reasons"]["config"] is not None,
+            secrets_managed=ctx["managed_reasons"]["secrets"] is not None,
         ),
         "raw_toml": _raw_document(ctx["redacted"]),
         "has_comments": edits.has_comments(document) if document is not None else False,

@@ -514,25 +514,66 @@ def _read_admins(raw: Any) -> list[str] | None:
     return admins
 
 
-def file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict]:
-    """A file credential also set in `config.toml`, where the set file wins."""
+def _holds_value(value: Any) -> bool:
+    """Whether a leaf holds something: a blank string or an empty table does not."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list)):
+        return bool(value)
+    return True
+
+
+def inline_file_credentials(document: dict) -> list[tuple[tuple[str, ...], str]]:
+    """Each credential with a secret file that `document` holds a value for
+    inline, with the file's name. Never the value itself."""
     from istota.config_editor import schema
 
     found = []
     for path, name in schema.file_credentials().items():
-        present, _ = secrets.lookup(new, path)
-        if present and environ.get(name.upper(), "").strip():
-            found.append({
-                "kind": "warning",
-                "path": list(path),
-                "message": (
-                    f"{secrets.label(path)} is also set in config.toml, where it is "
-                    f"ignored: the credential {name} wins"
-                ),
-                "blocking": False,
-                "pre_existing": False,
-                "action": "unset",
-            })
+        present, value = secrets.lookup(document, path)
+        if present and _holds_value(value):
+            found.append((path, name))
+    return found
+
+
+def file_credential_problems(new: dict, environ: Mapping[str, str]) -> list[dict]:
+    """A file credential also held in `config.toml`.
+
+    Set in its file as well, the file wins and the inline copy is ignored
+    (`action: "unset"`). With the file empty, the inline value is the one in
+    use, in plain text, and can be moved into the file (`action: "move"`).
+    """
+    from istota.config_editor import schema
+
+    found = []
+    for path, name in schema.file_credentials().items():
+        present, value = secrets.lookup(new, path)
+        if not present:
+            continue
+        if environ.get(name.upper(), "").strip():
+            message = (
+                f"{secrets.label(path)} is also set in config.toml, where it is "
+                f"ignored: the credential {name} wins"
+            )
+            action = "unset"
+        elif _holds_value(value):
+            message = (
+                f"{secrets.label(path)} is stored in config.toml in plain text; "
+                f"move it to the secret file {name}"
+            )
+            action = "move"
+        else:
+            continue
+        found.append({
+            "kind": "warning",
+            "path": list(path),
+            "message": message,
+            "blocking": False,
+            "pre_existing": False,
+            "action": action,
+        })
     return found
 
 
@@ -725,7 +766,7 @@ async def preview(
     for problem in problems:
         path = tuple(problem.get("path") or ())
         problem["pre_existing"] = bool(path) and not any(_related(path, item) for item in changed)
-    problems += file_credential_problems(new, environ)
+    problems += file_credential_problems(new, {**environ, **overlay})
 
     risky = {secrets.label(path) for path in schema.RISKY_KEYS if _differs(new, base, path)}
     for name in file_secrets:
