@@ -203,15 +203,25 @@
   {badge}
 >
   {#if connection.status === 'disabled'}
-    <p class="summary">
+    <p class="summary wide">
       This install has no arr apps for the servarr skill: no <code>[servarr.apps]</code> table is set.
     </p>
+  {:else if form}
+    <!-- The editor takes the read view's place rather than stacking under a
+         copy of what it edits. -->
+    <div class="wide">
+      <ServarrEditForm bind:form {problems} {users} />
+    </div>
   {:else}
     {#if noneAnswered}
-      <NoticeBanner title="None of the apps passed the last check" variant="warn" />
+      <div class="wide">
+        <NoticeBanner title="None of the apps passed the last check" variant="warn" />
+      </div>
     {/if}
 
-    <ul class="apps">
+    <!-- One tile per app, configured or not: a missing app is a dashed tile
+         in its place rather than a name in a list further down. -->
+    <ul class="apps wide">
       {#each connection.apps as app (app.app)}
         <li class="app" data-testid={`servarr-app-${app.app}`}>
           <div class="app-head">
@@ -246,27 +256,29 @@
               />
             {/if}
             {#if app.check?.at}
-              <p class="caption">checked {formatRelative(app.check.at)}</p>
+              <p class="caption app-foot">checked {formatRelative(app.check.at)}</p>
             {/if}
           {/if}
         </li>
       {/each}
+      {#each connection.missing as app (app)}
+        <li class="app app-missing" data-testid={`servarr-missing-${app}`}>
+          <h3 class="app-name">{app}</h3>
+          <p class="caption">Not configured</p>
+        </li>
+      {/each}
     </ul>
 
-    <dl class="kv">
-      {#if connection.missing.length > 0}
-        <dt>Not configured</dt>
-        <dd>{connection.missing.join(', ')}</dd>
-      {/if}
-      <dt>Requesters</dt>
-      <dd>
+    <div class="panel">
+      <h3 class="micro-label">Who can request</h3>
+      <p class="value">
         {connection.requesters.length > 0 ? connection.requesters.join(', ') : 'Admins only'}
-      </dd>
-    </dl>
+      </p>
+    </div>
 
     {#if defaults.length > 0}
-      <div class="group">
-        <h3 class="micro-label">Add defaults, as configured</h3>
+      <div class="panel">
+        <h3 class="micro-label">Add defaults</h3>
         <dl class="kv">
           {#each defaults as [app, table] (app)}
             <dt class="app-label">{app}</dt>
@@ -277,7 +289,7 @@
     {/if}
 
     {#if unanswered}
-      <p class="caption">
+      <p class="banner warn wide">
         The daemon has not answered the request yet, so the results shown are from its last run.
         Check that it is running.
       </p>
@@ -285,48 +297,47 @@
   {/if}
 
   {#if readOnly}
-    <NoticeBanner title="Not changed from here" variant="info" collapsed={false}>
-      <p>{readOnly}</p>
-    </NoticeBanner>
+    <div class="wide">
+      <NoticeBanner title="Not changed from here" variant="info" collapsed={false}>
+        <p>{readOnly}</p>
+      </NoticeBanner>
+    </div>
   {/if}
 
   {#if notice}
-    <p class="banner warn" role="status">{notice}</p>
+    <p class="banner warn wide" role="status">{notice}</p>
   {/if}
 
   {#if requestId !== null}
-    {#key requestId}
-      <RequestProgress
-        {requestId}
-        onApplied={() => void onchecked()}
-        onDismiss={() => {
-          requestId = null;
-          notice = '';
-          void onchecked();
-        }}
-      />
-    {/key}
+    <div class="wide">
+      {#key requestId}
+        <RequestProgress
+          {requestId}
+          onApplied={() => void onchecked()}
+          onDismiss={() => {
+            requestId = null;
+            notice = '';
+            void onchecked();
+          }}
+        />
+      {/key}
+    </div>
   {/if}
 
-  {#if form}
-    <div class="group">
-      <h3 class="micro-label">Edit the connection</h3>
-      <ServarrEditForm bind:form {problems} {users} />
+  {#snippet meta()}
+    {#if form}
       <p class="caption">
         Changes go through the same review, confirmation and host applier as the Configuration page,
         and Istota restarts to load them. A new key is sealed until the host writes it.
       </p>
-    </div>
-  {:else if connection.status !== 'disabled'}
-    <p class="caption">
-      Configured is no claim that the keys work; each app's check says that. The web interface never
-      calls an arr app.
-    </p>
-  {/if}
-
-  {#snippet meta()}
-    {#if stale && !form}
-      <span class="stale">the daemon's last report is old</span>
+    {:else if connection.status !== 'disabled'}
+      {#if stale}
+        <span class="stale">the daemon's last report is old</span>
+      {/if}
+      <p class="caption">
+        Configured is no claim that the keys work; each app's check says that. The web interface
+        never calls an arr app.
+      </p>
     {/if}
   {/snippet}
 
@@ -384,23 +395,54 @@
     color: var(--status-warn-fg);
   }
 
-  /* The apps read as one list, divided rather than boxed, so a card with
-     four of them stays a card and not a stack of cards. */
+  /* One tile per app, as many across as the card is wide. */
   .apps {
     list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-    border-top: 1px solid var(--border-subtle);
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
+    gap: var(--space-3);
   }
 
   .app {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    padding: var(--space-3) 0;
-    border-bottom: 1px solid var(--border-subtle);
+    min-width: 0;
+    padding: var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+  }
+
+  /* The stamp sits on each tile's bottom edge, so a row of tiles reads level
+     whichever of them carries a remedy. */
+  .app-foot {
+    margin-top: auto;
+  }
+
+  .app-missing {
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    background: none;
+    border-style: dashed;
+  }
+
+  .app-missing .app-name {
+    color: var(--text-muted);
+  }
+
+  .value {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+  }
+
+  /* An app tile is narrower than a panel, so its labels take their own width. */
+  .app :global(.kv) {
+    grid-template-columns: max-content minmax(0, 1fr);
   }
 
   .app-head {
@@ -425,16 +467,6 @@
   .app-problem {
     margin: 0;
     overflow-wrap: anywhere;
-  }
-
-  .group {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .group h3 {
-    margin: 0;
   }
 
   code {

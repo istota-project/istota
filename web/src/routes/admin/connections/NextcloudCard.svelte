@@ -67,55 +67,58 @@
   {badge}
 >
   {#if connection.configured}
-    <dl class="kv">
-      <dt>Server</dt>
-      <dd>
-        {#if linkable}
-          <a href={connection.url} target="_blank" rel="noopener noreferrer">{connection.url}</a>
-        {:else}
-          {connection.url}
-        {/if}
-      </dd>
-      <dt>Bot account</dt>
-      <dd>{connection.username || '—'}</dd>
-      <dt>Talk</dt>
-      <dd>
-        {connection.talk_enabled ? `On, as ${connection.talk_bot_username || '—'}` : 'Off'}
-      </dd>
-      <dt>Storage</dt>
-      <dd>
-        {connection.storage === 'nextcloud'
-          ? 'Nextcloud files, through the mount'
-          : 'Local workspace'}
-      </dd>
-    </dl>
+    <div class="panel">
+      <h3 class="micro-label">Account</h3>
+      <dl class="kv">
+        <dt>Server</dt>
+        <dd>
+          {#if linkable}
+            <a href={connection.url} target="_blank" rel="noopener noreferrer">{connection.url}</a>
+          {:else}
+            {connection.url}
+          {/if}
+        </dd>
+        <dt>Bot account</dt>
+        <dd>{connection.username || '—'}</dd>
+        <dt>Talk</dt>
+        <dd>
+          {connection.talk_enabled ? `On, as ${connection.talk_bot_username || '—'}` : 'Off'}
+        </dd>
+        <dt>Storage</dt>
+        <dd>
+          {connection.storage === 'nextcloud'
+            ? 'Nextcloud files, through the mount'
+            : 'Local workspace'}
+        </dd>
+      </dl>
+    </div>
 
-    <CheckResult
-      {check}
-      empty="The daemon has not recorded a check of this connection yet."
-      remedyTestid="nextcloud-remedy"
-    />
+    <div class="panel">
+      <h3 class="micro-label">Last check</h3>
+      <CheckResult
+        {check}
+        empty="The daemon has not recorded a check of this connection yet."
+        remedyTestid="nextcloud-remedy"
+      />
+      {#if check?.at}
+        <p class="caption stamp">checked {formatRelative(check.at)}</p>
+      {/if}
+      {#if check?.stale}
+        <p class="stale">the daemon's last report is old</p>
+      {/if}
+    </div>
 
     {#if error}
-      <div class="banner error">{error}</div>
+      <div class="banner error wide">{error}</div>
     {/if}
     {#if notice}
-      <div class="banner warn">{notice}</div>
+      <div class="banner warn wide">{notice}</div>
     {/if}
   {:else}
-    <p class="summary">
+    <p class="summary wide">
       This install has no Nextcloud: <code>[nextcloud] url</code> is not set, and the workspace is local.
     </p>
   {/if}
-
-  {#snippet meta()}
-    {#if check?.at}
-      <span class="caption">checked {formatRelative(check.at)}</span>
-    {/if}
-    {#if connection.configured && check?.stale}
-      <span class="stale">the daemon's last report is old</span>
-    {/if}
-  {/snippet}
 
   {#snippet actions()}
     <Button variant="secondary" href={`${base}/admin/config`}>Configure</Button>
@@ -134,7 +137,12 @@
     color: var(--text-secondary);
   }
 
+  .stamp {
+    margin: 0;
+  }
+
   .stale {
+    margin: 0;
     font-size: var(--text-xs);
     color: var(--status-warn-fg);
   }

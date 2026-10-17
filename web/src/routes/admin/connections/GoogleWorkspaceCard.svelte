@@ -40,27 +40,30 @@
   {badge}
 >
   {#if connection.missing.length > 0}
-    <ul class="banner warn missing">
+    <ul class="banner warn missing wide">
       {#each connection.missing as field (field)}
         <li>{MISSING[field]}</li>
       {/each}
     </ul>
   {/if}
 
-  <dl class="kv">
-    <dt>Client ID</dt>
-    <dd class:unset={!connection.client_id.trim()}>
-      {connection.client_id.trim() ? connection.client_id : 'Not set'}
-    </dd>
-    <dt>Client secret</dt>
-    <dd class:unset={!connection.client_secret_set}>
-      {connection.client_secret_set ? 'Set' : 'Not set'}
-    </dd>
-    <dt>Callback URL</dt>
-    <dd class:unset={!connection.redirect_uri}>{connection.redirect_uri ?? 'Not set'}</dd>
-  </dl>
+  <div class="panel">
+    <h3 class="micro-label">OAuth app</h3>
+    <dl class="kv">
+      <dt>Client ID</dt>
+      <dd class:unset={!connection.client_id.trim()}>
+        {connection.client_id.trim() ? connection.client_id : 'Not set'}
+      </dd>
+      <dt>Client secret</dt>
+      <dd class:unset={!connection.client_secret_set}>
+        {connection.client_secret_set ? 'Set' : 'Not set'}
+      </dd>
+      <dt>Callback URL</dt>
+      <dd class:unset={!connection.redirect_uri}>{connection.redirect_uri ?? 'Not set'}</dd>
+    </dl>
+  </div>
 
-  <div class="group">
+  <div class="panel">
     <h3 class="micro-label">Maximum service access</h3>
     <dl class="kv">
       {#each connection.services as service (service.service)}
@@ -74,22 +77,26 @@
   </div>
 
   {#if connection.additional_scopes.length > 0}
-    <div class="group">
-      <h3 class="micro-label">Additional scopes requested on connection</h3>
+    <div class="panel">
+      <h3 class="micro-label">Additional scopes</h3>
       <ul class="scopes">
         {#each connection.additional_scopes as scope (scope)}
           <li><code>{scope}</code></li>
         {/each}
       </ul>
-      <p class="caption">These scopes have no per-user service picker control.</p>
+      <p class="caption">
+        Requested on every connection. These scopes have no per-user service picker control.
+      </p>
     </div>
   {/if}
 
-  <p class="caption">
-    Each user connects their own Google account in Settings → Connections. Configuration presence
-    does not verify credentials, enabled APIs or Google consent settings. This card reflects the
-    loaded configuration after the normal configuration restart.
-  </p>
+  {#snippet meta()}
+    <p class="caption">
+      Each user connects their own Google account in Settings → Connections. Configuration presence
+      does not verify credentials, enabled APIs or Google consent settings. This card reflects the
+      loaded configuration after the normal configuration restart.
+    </p>
+  {/snippet}
 
   {#snippet actions()}
     <Button
@@ -117,16 +124,6 @@
 
   .unset {
     color: var(--text-muted);
-  }
-
-  .group {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .group h3 {
-    margin: 0;
   }
 
   .missing {

@@ -15,14 +15,7 @@
     type AdminServarrConnection,
     type AdminWhatsAppConnection,
   } from '$lib/api';
-  import {
-    Button,
-    CardGrid,
-    ConfirmDialog,
-    EmptyState,
-    NoticeBanner,
-    PageLoading,
-  } from '$lib/components/ui';
+  import { Button, ConfirmDialog, EmptyState, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';
@@ -703,9 +696,11 @@
       <div class="banner info">{notice}</div>
     {/if}
 
-    <!-- Two columns in plain rows: the cards in a row share a height, so
-         their footers line up. Masonry was tried and read as jumbled. -->
-    <CardGrid columns={2}>
+    <!-- Full-width cards, one under another; each card's body is the grid
+         that puts its sections side by side on a wide pane. Two-up grids, in
+         rows and in masonry, were tried first and left the shorter card of
+         each pair padded with empty space. -->
+    <div class="connection-list">
       {#if nextcloud}
         <NextcloudCard connection={nextcloud} onchecked={() => load({ quiet: true })} />
       {/if}
@@ -718,87 +713,95 @@
           icon={MessageCircle}
           {badge}
         >
-          <dl class="kv">
-            <dt>Adapter</dt>
-            <dd>{whatsapp.provider}</dd>
-            {#if whatsapp.number}
-              <dt>Number</dt>
-              <dd>{whatsapp.number}</dd>
-            {/if}
-            {#if link}
-              <dt>Restarts</dt>
-              <dd>{link.restarts ?? '—'}</dd>
-            {/if}
-          </dl>
-
-          {#if knownDead || (link && link.connection_replaced_latched && !link.ready)}
-            <p class="banner danger summary-problem">{linkSummary}</p>
-          {:else}
-            <p class="summary">{linkSummary}</p>
-          {/if}
-
           {#if whatsapp.credential_errors.length}
-            <div class="banner warn">
+            <div class="banner warn wide">
               The active adapter reports missing configuration: {whatsapp.credential_errors.join(
                 '; ',
               )}.
             </div>
           {/if}
 
-          {#if whatsapp.pairing_supported && whatsapp.enabled && !whatsapp.pairing_enabled}
-            <p class="caption" data-testid="pairing-disabled">
-              Re-pairing from the browser is switched off here (<code
-                >[whatsapp.baileys] pairing_enabled</code
-              >). Pair from a terminal with
-              <code>istota whatsapp pair</code>.
-            </p>
-          {/if}
-
           {#if whatsapp.pairing_blocked_reason}
-            <div class="banner warn" data-testid="pairing-blocked">
+            <div class="banner warn wide" data-testid="pairing-blocked">
               A pairing code cannot be written on this deployment: the relay would land inside a
               directory the task sandbox binds ({whatsapp.pairing_blocked_reason}). Point
               <code>[whatsapp.baileys] pairing_relay_path</code> outside it, or pair from a terminal.
             </div>
           {/if}
 
-          {#if pairing}
-            <div class="pairing" data-testid="pairing-state">
-              <div class="pairing-head">
-                <span class="micro-label">{pairing.state.replace(/_/g, ' ')}</span>
-                {#if remaining !== null}
-                  <span class="caption" data-testid="pairing-remaining"
-                    >expires in {countdown(remaining)}</span
-                  >
+          <div class="panel">
+            <h3 class="micro-label">Session</h3>
+            <dl class="kv">
+              <dt>Adapter</dt>
+              <dd>{whatsapp.provider}</dd>
+              {#if whatsapp.number}
+                <dt>Number</dt>
+                <dd>{whatsapp.number}</dd>
+              {/if}
+              {#if link}
+                <dt>Restarts</dt>
+                <dd>{link.restarts ?? '—'}</dd>
+              {/if}
+            </dl>
+          </div>
+
+          <!-- The right-hand column, as on every card: what state the link is
+               in, and the pairing window when one is open. -->
+          <div class="panel">
+            <h3 class="micro-label">Status</h3>
+            {#if knownDead || (link && link.connection_replaced_latched && !link.ready)}
+              <p class="banner danger summary-problem">{linkSummary}</p>
+            {:else}
+              <p class="summary">{linkSummary}</p>
+            {/if}
+
+            {#if whatsapp.pairing_supported && whatsapp.enabled && !whatsapp.pairing_enabled}
+              <p class="caption" data-testid="pairing-disabled">
+                Re-pairing from the browser is switched off here (<code
+                  >[whatsapp.baileys] pairing_enabled</code
+                >). Pair from a terminal with
+                <code>istota whatsapp pair</code>.
+              </p>
+            {/if}
+
+            {#if pairing}
+              <div class="pairing" data-testid="pairing-state">
+                <div class="pairing-head">
+                  <span class="micro-label">{pairing.state.replace(/_/g, ' ')}</span>
+                  {#if remaining !== null}
+                    <span class="caption" data-testid="pairing-remaining"
+                      >expires in {countdown(remaining)}</span
+                    >
+                  {/if}
+                </div>
+                {#if pairingSummary}
+                  <p class="summary">{pairingSummary}</p>
+                {/if}
+                {#if pairing.message}
+                  <p class="caption pairing-message" data-testid="pairing-message">
+                    {pairing.message}
+                  </p>
+                {/if}
+                {#if qrSrc && !qrFetchFailed}
+                  <img
+                    class="qr"
+                    src={qrSrc}
+                    alt="WhatsApp pairing code"
+                    data-testid="pairing-qr"
+                    onerror={onQrError}
+                  />
+                {:else if qrSrc}
+                  <!-- The image is the operator's only route to the code, so a
+                     failed fetch says so in words rather than leaving a broken
+                     image with no text. One retry has already been spent. -->
+                  <p class="caption" data-testid="pairing-qr-error">
+                    The pairing code could not be fetched. It is redrawn about every twenty seconds,
+                    so the next rotation should bring it back.
+                  </p>
                 {/if}
               </div>
-              {#if pairingSummary}
-                <p class="summary">{pairingSummary}</p>
-              {/if}
-              {#if pairing.message}
-                <p class="caption pairing-message" data-testid="pairing-message">
-                  {pairing.message}
-                </p>
-              {/if}
-              {#if qrSrc && !qrFetchFailed}
-                <img
-                  class="qr"
-                  src={qrSrc}
-                  alt="WhatsApp pairing code"
-                  data-testid="pairing-qr"
-                  onerror={onQrError}
-                />
-              {:else if qrSrc}
-                <!-- The image is the operator's only route to the code, so a
-                   failed fetch says so in words rather than leaving a broken
-                   image with no text. One retry has already been spent. -->
-                <p class="caption" data-testid="pairing-qr-error">
-                  The pairing code could not be fetched. It is redrawn about every twenty seconds,
-                  so the next rotation should bring it back.
-                </p>
-              {/if}
-            </div>
-          {/if}
+            {/if}
+          </div>
 
           {#snippet actions()}
             {#if inProgress}
@@ -851,7 +854,7 @@
       {#if servarr}
         <ServarrCard connection={servarr} onchecked={() => load({ quiet: true })} />
       {/if}
-    </CardGrid>
+    </div>
   {:else}
     <!-- Each card reads its own entry by id rather than iterating, so an
          entry this page has no card for is not drawn. -->
@@ -864,6 +867,12 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
+  }
+
+  .connection-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
   }
 
   .summary-problem {

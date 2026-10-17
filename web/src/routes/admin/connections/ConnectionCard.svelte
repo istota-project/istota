@@ -24,8 +24,8 @@
 <!--
   The shell every Connections card shares, so the four read as one set: an
   identifying head, a body, and a footer that is always the card's last row.
-  The footer sits at the bottom of the card even when a neighbour in the same
-  grid row is taller, so action rows line up across the row.
+  The cards stack full width; the body is the grid, so a wide pane fits
+  more of a card's sections side by side.
 -->
 <section class="card connection" data-testid={testid}>
   <header class="connection-head">
@@ -92,18 +92,42 @@
     margin: 0;
   }
 
+  /* The cards run full width, so the body packs its panels side by side as
+     the card widens and stacks them on a phone. A caller marks a child
+     `panel` for one column of the body and `wide` for a full-width row (a
+     notice, a closing caption, a form). */
   .connection-body {
     flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+    align-items: start;
+    gap: var(--space-4) var(--space-6);
     min-width: 0;
   }
 
-  /* One label column for every card, so the values start at the same inset
-     down the page rather than wherever each card's longest label put them. */
+  .connection-body > :global(*) {
+    min-width: 0;
+    margin: 0;
+  }
+
+  .connection-body > :global(.wide) {
+    grid-column: 1 / -1;
+  }
+
+  .connection-body > :global(.panel) {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .connection-body :global(.panel > h3) {
+    margin: 0;
+  }
+
+  /* One label column across a card's panels, so the values start at the
+     same inset rather than wherever each panel's longest label put them. */
   .connection-body :global(.kv) {
-    grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr);
+    grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
   }
 
   @container settings (max-width: 30rem) {
@@ -128,11 +152,15 @@
     border-top: 1px solid var(--border-subtle);
   }
 
+  /* The footer's left end takes the room the buttons leave, and a long note
+     wraps there at a readable measure rather than running under them. */
   .connection-meta {
+    flex: 1 1 20rem;
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
     min-width: 0;
+    max-width: 72ch;
   }
 
   .connection-meta :global(.caption) {
