@@ -11,7 +11,7 @@
   import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
   import { buildChangeSet, changeCount } from '$lib/admin/config/changeSet';
-  import { Badge, Button, NoticeBanner } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, NoticeBanner } from '$lib/components/ui';
   import { formatRelative } from '$lib/dateFormat';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { notifyError } from '$lib/stores/notices';
@@ -54,6 +54,8 @@
   let notice = $state('');
 
   let draft = $derived(form && initial ? servarrDraft(form, initial) : null);
+  /** Nothing stops the editor opening: no change in flight, no known refusal. */
+  let canEdit = $derived(requestId === null && readOnly === null);
   let pendingCount = $derived(draft ? changeCount(draft) : 0);
 
   const STATUS = {
@@ -202,15 +204,22 @@
   icon={Clapperboard}
   {badge}
 >
-  {#if connection.status === 'disabled'}
-    <p class="summary wide">
-      This install has no arr apps for the servarr skill: no <code>[servarr.apps]</code> table is set.
-    </p>
-  {:else if form}
+  <!-- The form comes first: it is how an install with no apps gets one. -->
+  {#if form}
     <!-- The editor takes the read view's place rather than stacking under a
          copy of what it edits. -->
     <div class="wide">
-      <ServarrEditForm bind:form {problems} {users} />
+      <ServarrEditForm bind:form bind:problems {users} />
+    </div>
+  {:else if connection.status === 'disabled'}
+    <div class="wide" data-testid="servarr-empty">
+      <EmptyState
+        actionLabel={canEdit ? 'Add apps' : undefined}
+        onaction={canEdit ? openEditor : undefined}
+      >
+        No arr apps are connected. Add Sonarr, Radarr, Lidarr or Prowlarr so the servarr skill can
+        search for and request media.
+      </EmptyState>
     </div>
   {:else}
     {#if noneAnswered}
@@ -354,8 +363,14 @@
         >Review changes</Button
       >
     {:else}
+      <Button
+        variant="secondary"
+        href="https://istota.cynium.com/docs/features/servarr/"
+        target="_blank"
+        rel="noopener noreferrer">Setup guide</Button
+      >
       <Button variant="secondary" href={`${base}/admin/config?section=servarr`}>Configure</Button>
-      {#if requestId === null}
+      {#if canEdit && connection.status !== 'disabled'}
         <Button variant="secondary" onclick={openEditor} loading={opening} loadingLabel="Loading…"
           >Edit</Button
         >
@@ -380,12 +395,6 @@
 {/if}
 
 <style>
-  .summary {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-  }
-
   .caption {
     margin: 0;
   }
@@ -467,10 +476,5 @@
   .app-problem {
     margin: 0;
     overflow-wrap: anywhere;
-  }
-
-  code {
-    overflow-wrap: anywhere;
-    user-select: text;
   }
 </style>

@@ -97,6 +97,15 @@ class TestValueRendering:
         field = _fields(view.build_config_view(cfg), "general")["admin_users"]
         assert field["value"] == ["alice", "zoe"]
 
+    def test_loader_state_inside_a_section_is_not_listed(self):
+        """`[servarr]` lists its settings, not what the loader recorded (ISSUE-767)."""
+        cfg = Config()
+        cfg.servarr.incomplete_apps = ["radarr"]
+        fields = _fields(view.build_config_view(cfg), "servarr")
+        assert "incomplete_apps" not in fields
+        assert "keyless_apps" not in fields
+        assert {"apps", "requesters", "private_hosts", "defaults"} <= set(fields)
+
     def test_every_value_is_json_serializable(self):
         import json
 
@@ -446,18 +455,24 @@ class TestTables:
         assert "HEADER-VALUE-SENTINEL" not in field["toml"]
 
     def test_an_absent_table_is_an_empty_snippet(self):
-        field = _field(view.build_config_view(Config(), document=_EDITOR_DOCUMENT), "default_briefings")
-        assert field["toml"] == ""
+        payload = view.build_config_view(Config(), document=_EDITOR_DOCUMENT)
+        assert _field(payload, "briefing_shared_blocks")["toml"] == ""
 
     def test_an_empty_list_of_tables_stays_distinct_from_absent(self):
         payload = view.build_config_view(Config(), document="briefing_shared_blocks = []\n")
         assert _field(payload, "briefing_shared_blocks")["toml"] == "briefing_shared_blocks = []\n"
 
     def test_a_list_of_tables_renders_as_an_array_of_tables(self):
-        document = '[[default_briefings]]\nname = "morning"\ncron = "0 7 * * *"\n'
-        field = _field(view.build_config_view(Config(), document=document), "default_briefings")
-        assert field["toml"].startswith("[[default_briefings]]\n")
+        document = '[[briefing_shared_blocks]]\nname = "markets"\nprompt = "Summarise"\n'
+        field = _field(view.build_config_view(Config(), document=document), "briefing_shared_blocks")
+        assert field["toml"].startswith("[[briefing_shared_blocks]]\n")
         assert field["value"] == 0  # the loaded config's count, unchanged
+
+    def test_a_read_only_table_carries_no_snippet(self):
+        document = '[[default_briefings]]\nname = "morning"\n'
+        field = _field(view.build_config_view(Config(), document=document), "default_briefings")
+        assert field["editor"] == "readonly"
+        assert "toml" not in field
 
 
 class TestTopLevel:

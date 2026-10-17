@@ -193,7 +193,7 @@ describe('the servarr card', () => {
     expect(configure.getAttribute('href')).toBe('/istota/admin/config?section=servarr');
   });
 
-  it('says a disabled install has no apps, with no Check now', async () => {
+  it('offers to add apps on an install with none, with no Check now or Edit', async () => {
     const card = await mount({
       status: 'disabled',
       apps: [],
@@ -203,9 +203,12 @@ describe('the servarr card', () => {
     });
     const q = within(card);
     expect(q.getByText('Disabled')).toBeTruthy();
-    expect(q.getByText(/no arr apps/)).toBeTruthy();
+    expect(q.getByText(/No arr apps are connected/)).toBeTruthy();
+    expect(q.getByRole('button', { name: 'Add apps' })).toBeTruthy();
+    expect(q.queryByRole('button', { name: 'Edit' })).toBeNull();
     expect(q.queryByRole('button', { name: 'Check now' })).toBeNull();
     expect(q.getByRole('link', { name: 'Configure' })).toBeTruthy();
+    expect(q.getByRole('link', { name: 'Setup guide' }).getAttribute('target')).toBe('_blank');
   });
 });
 
@@ -283,7 +286,19 @@ describe('editing', () => {
     );
   }
 
-  async function openEditor(view: AdminConfigView = servarrView()) {
+  const DISABLED: Partial<AdminServarrConnection> = {
+    status: 'disabled',
+    apps: [],
+    missing: ['sonarr', 'radarr', 'lidarr', 'prowlarr'],
+    requesters: [],
+    defaults: {},
+  };
+
+  async function openEditor(
+    view: AdminConfigView = servarrView(),
+    over: Partial<AdminServarrConnection> = {},
+    button = 'Edit',
+  ) {
     api.getAdminConfig.mockResolvedValue(view);
     api.getAdminUsers.mockResolvedValue({
       users: [
@@ -305,8 +320,8 @@ describe('editing', () => {
       orphans: [],
       email_enabled: true,
     });
-    const card = await mount();
-    await fireEvent.click(within(card).getByRole('button', { name: 'Edit' }));
+    const card = await mount(over);
+    await fireEvent.click(within(card).getByRole('button', { name: button }));
     return card;
   }
 
@@ -316,7 +331,7 @@ describe('editing', () => {
 
   async function typeUrl(card: HTMLElement, url: string) {
     const radarr = await form(card);
-    await fireEvent.input(radarr.getByLabelText('URL'), { target: { value: url } });
+    await fireEvent.input(radarr.getByLabelText(/^URL/), { target: { value: url } });
     return radarr;
   }
 
@@ -337,12 +352,12 @@ describe('editing', () => {
     const card = await openEditor();
     const radarr = await form(card);
     expect(radarr.getByText('set')).toBeTruthy();
-    expect(radarr.queryByLabelText('New API key')).toBeNull();
+    expect(radarr.queryByLabelText(/^New API key/)).toBeNull();
     await fireEvent.click(radarr.getByRole('button', { name: 'Replace key' }));
-    const input = radarr.getByLabelText<HTMLInputElement>('New API key');
+    const input = radarr.getByLabelText<HTMLInputElement>(/^New API key/);
     expect(input.value).toBe('');
     expect(input.type).toBe('password');
-    expect(radarr.getByLabelText<HTMLInputElement>('URL').value).toBe('http://10.0.0.5:7878');
+    expect(radarr.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7878');
   });
 
   it('sends an untouched key as no credential, and the change to the shared review', async () => {
@@ -368,7 +383,7 @@ describe('editing', () => {
     const card = await openEditor();
     const radarr = await form(card);
     await fireEvent.click(radarr.getByRole('button', { name: 'Replace key' }));
-    await fireEvent.input(radarr.getByLabelText('New API key'), {
+    await fireEvent.input(radarr.getByLabelText(/^New API key/), {
       target: { value: 'fixture-arr-key-9' },
     });
     await review(card);
@@ -464,7 +479,7 @@ describe('editing', () => {
     await review(card);
     expect(await within(card).findByText(/changed on the host/)).toBeTruthy();
     const kept = await form(card);
-    expect(kept.getByLabelText<HTMLInputElement>('URL').value).toBe('http://10.0.0.5:7879');
+    expect(kept.getByLabelText<HTMLInputElement>(/^URL/).value).toBe('http://10.0.0.5:7879');
     await review(card);
     await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalledTimes(2));
     expect(api.previewConfigChange.mock.calls[1][0]).toMatchObject({
@@ -487,5 +502,85 @@ describe('editing', () => {
     await review(card);
     expect(await within(card).findByText(/managed by ansible/)).toBeTruthy();
     expect(within(card).queryByTestId('servarr-edit-radarr')).toBeNull();
+  });
+
+  it('opens the form on an install with no apps (ISSUE-767)', async () => {
+    const card = await openEditor(servarrView(), DISABLED, 'Add apps');
+    const sonarr = await form(card, 'sonarr');
+    expect(sonarr.getByLabelText('Enabled')).toBeTruthy();
+    expect(within(card).queryByText(/no arr apps/i)).toBeNull();
+  });
+
+  it('adds a first app as its URL and a key file, from an empty card', async () => {
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    const card = await openEditor(servarrView(), DISABLED, 'Add apps');
+    const sonarr = await form(card, 'sonarr');
+    await fireEvent.click(sonarr.getByLabelText('Enabled'));
+    const url = sonarr.getByLabelText<HTMLInputElement>(/^URL/);
+    expect(url.placeholder).toBe('http://192.168.1.10:8989');
+    await fireEvent.input(url, { target: { value: 'https://sonarr.example.com' } });
+    await fireEvent.input(sonarr.getByLabelText(/^API key/), {
+      target: { value: 'fixture-arr-key-1' },
+    });
+    await review(card);
+    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
+    const changeSet = api.previewConfigChange.mock.calls[0][0];
+    expect(changeSet.ops).toEqual([
+      {
+        op: 'set',
+        path: ['servarr', 'apps', 'sonarr', 'url'],
+        value: 'https://sonarr.example.com',
+      },
+    ]);
+    expect(changeSet.secrets).toEqual({ istota_servarr_sonarr_api_key: 'fixture-arr-key-1' });
+  });
+
+  it('offers to add a plain-HTTP host to the private hosts before review', async () => {
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    const card = await openEditor();
+    const radarr = await typeUrl(card, 'http://10.0.0.9:7878');
+    expect(radarr.getByText(/not in the private hosts/)).toBeTruthy();
+    await fireEvent.click(radarr.getByRole('button', { name: 'Add 10.0.0.9 to private hosts' }));
+    expect(radarr.queryByText(/not in the private hosts/)).toBeNull();
+    await review(card);
+    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
+    expect(api.previewConfigChange.mock.calls[0][0].ops).toContainEqual({
+      op: 'set',
+      path: ['servarr', 'private_hosts'],
+      value: ['10.0.0.5', '10.0.0.9'],
+    });
+  });
+
+  it('clears the refused URL once the quick fix answers it', async () => {
+    const card = await openEditor();
+    const radarr = await typeUrl(card, 'http://10.0.0.9:7878');
+    await review(card);
+    expect(api.previewConfigChange).not.toHaveBeenCalled();
+    await fireEvent.click(radarr.getByRole('button', { name: 'Add 10.0.0.9 to private hosts' }));
+    expect(radarr.queryByText(/not in the private hosts/)).toBeNull();
+  });
+
+  it('keeps Add defaults open while its last value is cleared', async () => {
+    const card = await openEditor(servarrView(), DISABLED, 'Add apps');
+    const sonarr = await form(card, 'sonarr');
+    await fireEvent.click(sonarr.getByLabelText('Enabled'));
+    const details = sonarr.getByText('Add defaults').closest('details')!;
+    details.open = true;
+    const profile = sonarr.getByLabelText(/^Quality profile/);
+    await fireEvent.input(profile, { target: { value: 'x' } });
+    await fireEvent.input(profile, { target: { value: '' } });
+    expect(details.open).toBe(true);
+  });
+
+  it('withdraws Add apps and says why when the card cannot change [servarr]', async () => {
+    const reason = 'This install has no config applier; changes are made on the host.';
+    const card = await openEditor(
+      servarrView({ editable: false, applier: { kind: 'none', available: false, reason } }),
+      DISABLED,
+      'Add apps',
+    );
+    expect(await within(card).findByText(reason)).toBeTruthy();
+    expect(within(card).queryByRole('button', { name: 'Add apps' })).toBeNull();
+    expect(within(card).queryByTestId('servarr-edit-sonarr')).toBeNull();
   });
 });

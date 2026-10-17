@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { base } from '$app/paths';
   import { page } from '$app/state';
   import {
     getAdminConfig,
@@ -37,6 +38,11 @@
     withSecret,
     type ConfigDraft,
   } from '$lib/admin/config/changeSet';
+
+  /** Sections whose Connections card has a guided form for the same keys. */
+  const CARD_SECTIONS: Record<string, { card: string; covers: string }> = {
+    servarr: { card: 'Servarr', covers: "each arr app's URL, API key and add defaults" },
+  };
 
   const current = getCurrentUser();
   let self = $derived(current.user.username);
@@ -457,6 +463,13 @@
     {#each sections as section (section.key)}
       <section class="card">
         <header class="section-header"><h2>{section.label}</h2></header>
+        {#if CARD_SECTIONS[section.key]}
+          {@const card = CARD_SECTIONS[section.key]}
+          <p class="banner info card-pointer">
+            The {card.card} card in Connections has a form for {card.covers}.
+            <a href={`${base}/admin/connections`}>Open Connections</a>
+          </p>
+        {/if}
         {#each section.fields as field (field.key)}
           <FieldControl
             {field}
@@ -522,6 +535,10 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     white-space: nowrap;
+  }
+
+  .card-pointer {
+    margin: 0 0 var(--space-3);
   }
 
   .problem-list {

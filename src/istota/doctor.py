@@ -8140,7 +8140,8 @@ def check_servarr_connection(
                 name, FAIL, problem,
                 remedy=(f"Set [servarr.apps.{app}] url to the app's address, such as "
                         f"https://{app}.example.com, with no user name, password or query; "
-                        f"plain HTTP needs its host in [servarr] private_hosts."),
+                        f"plain HTTP or a private address needs its host in "
+                        f"[servarr] private_hosts."),
                 scope=DEPLOYMENT,
             ))
             continue

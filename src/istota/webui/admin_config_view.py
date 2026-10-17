@@ -392,12 +392,18 @@ def _walk(
     the editor addresses every field by one path. ``default`` is the same
     section of a default ``Config``, or ``None``.
     """
+    from istota import config as config_module
+
     fields: list[dict] = []
     nested: list[tuple[str, Any, Any]] = []
     hints = _type_hints(type(obj))
 
     for f in dataclasses.fields(obj):
         if prefix == "" and f.name in _EXCLUDED_TOP_LEVEL:
+            continue
+        # Loader output inside a section (`servarr.incomplete_apps`) is no
+        # setting; the surface that reports it is the section's own card.
+        if prefix and f"{prefix}.{f.name}" in config_module._NOT_CONFIGURATION:
             continue
         value = getattr(obj, f.name, None)
         default_value = getattr(default, f.name, _MISSING) if default is not None else _MISSING
