@@ -852,19 +852,6 @@ class TestSecretSources:
         finally:
             secret.chmod(0o600)
 
-    def test_every_entry_names_what_uses_it(self, tmp_path, secret_env):
-        entries = _secret_entries(Config(), tmp_path)
-        for name, entry in entries.items():
-            assert entry["used_by"], name
-            assert not entry["used_by"].startswith("["), (
-                f"{name} has no section title in admin_config_view._SECTION_TITLES"
-            )
-        assert entries[self.TWILIO]["used_by"] == "SMS (Twilio)"
-        assert entries["istota_whatsapp_access_token"]["used_by"] == "WhatsApp Cloud API"
-        assert entries["istota_brain_native_extra_headers"]["used_by"] == "Native brain"
-        assert entries["istota_servarr_radarr_api_key"]["used_by"] == "Servarr"
-        assert entries["istota_nextcloud_app_password"]["used_by"] == "Nextcloud"
-
 
 class TestManaged:
     def test_a_managed_config_makes_config_fields_read_only(self):

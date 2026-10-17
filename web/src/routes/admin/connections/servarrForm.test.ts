@@ -61,7 +61,6 @@ function secretFiles(over: Partial<ConfigSecretFile> = {}): ConfigSecretFile[] {
       config_key: `servarr.apps.${name}.api_key`,
       set: name === 'radarr',
       source: name === 'radarr' ? 'file' : 'none',
-      used_by: 'Servarr',
       ...over,
     }),
   );

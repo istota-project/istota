@@ -709,8 +709,6 @@ export interface ConfigSecretFile {
   config_key: string | null;
   set: boolean;
   source: ConfigSecretSource;
-  /** The title of the config section that reads it, for grouping. */
-  used_by: string;
   /** Why a new value cannot be set here; a move may still be offered. */
   read_only_reason: string | null;
   /** Held inline with nothing managed, so it can move to its secret file. */

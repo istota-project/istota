@@ -14,7 +14,7 @@
     type ConfigRequest,
     type ConfigResource,
   } from '$lib/api';
-  import { Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
@@ -24,6 +24,7 @@
   import RequestProgress from '$lib/admin/config/RequestProgress.svelte';
   import ReviewDialog from '$lib/admin/config/ReviewDialog.svelte';
   import ConfigSecretField from '$lib/admin/config/SecretField.svelte';
+  import { credentialStatus, secretsByConfigKey } from '$lib/admin/config/credentialStatus';
   import {
     buildChangeSet,
     changeCount,
@@ -153,6 +154,25 @@
   /** File credentials no config key reads, so no section field shows them. */
   let standaloneSecrets = $derived(view ? view.secrets.filter((s) => !s.config_key) : []);
 
+  let secretByKey = $derived(secretsByConfigKey(view));
+
+  let inlineSecrets = $derived(view ? view.secrets.filter((s) => s.source === 'inline') : []);
+  /** The inline credentials this page can move; a managed plan keeps the rest. */
+  let movableLabels = $derived(
+    editable ? inlineSecrets.flatMap((s) => (s.movable && s.config_key ? [s.config_key] : [])) : [],
+  );
+  let unmovableCount = $derived(editable ? inlineSecrets.length - movableLabels.length : 0);
+  let allMovesPending = $derived(
+    movableLabels.length > 0 && movableLabels.every((l) => draft.move_to_file.includes(l)),
+  );
+  let unmovableReason = $derived(
+    view?.managed.config.managed
+      ? `a plan (${view.managed.config.source ?? 'unknown'}) manages config.toml`
+      : view?.managed.secrets.managed
+        ? `a plan (${view.managed.secrets.source ?? 'unknown'}) manages the deployment credentials`
+        : null,
+  );
+
   function matches(field: AdminConfigField, needle: string): boolean {
     return (
       field.key.toLowerCase().includes(needle) ||
@@ -214,6 +234,14 @@
 
   function toggleMove(problem: ConfigProblem) {
     draft = withMove(draft, problem.path.join('.'), !movePending(problem));
+  }
+
+  /** Every movable inline credential into its file, or all of them back. */
+  function toggleMoveAll() {
+    const move = !allMovesPending;
+    let next = draft;
+    for (const label of movableLabels) next = withMove(next, label, move);
+    draft = next;
   }
 
   async function restore(id: number) {
@@ -355,6 +383,37 @@
       </NoticeBanner>
     {/if}
 
+    {#if inlineSecrets.length}
+      <NoticeBanner
+        title={inlineSecrets.length === 1
+          ? '1 credential is stored in config.toml in plain text'
+          : `${inlineSecrets.length} credentials are stored in config.toml in plain text`}
+        variant="warn"
+        collapsed={false}
+      >
+        <p>
+          They work, but anyone who can read config.toml can read them. Moving one to its secret
+          file is done by the host, so the value never reaches this page.
+        </p>
+        {#if unmovableCount}
+          <p>
+            {unmovableCount === inlineSecrets.length
+              ? 'None of them can'
+              : `${unmovableCount} of them cannot`} be moved from here{unmovableReason
+              ? `, because ${unmovableReason}`
+              : ''}.
+          </p>
+        {/if}
+        {#if movableLabels.length}
+          <div class="banner-actions">
+            <Button variant="secondary" size="sm" disabled={!formEditable} onclick={toggleMoveAll}
+              >{allMovesPending ? 'Keep all in config.toml' : 'Move all to secret files'}</Button
+            >
+          </div>
+        {/if}
+      </NoticeBanner>
+    {/if}
+
     {#if pageNotice}
       <p class="banner warn" role="status">{pageNotice}</p>
     {/if}
@@ -435,17 +494,22 @@
         <section class="card">
           <header class="section-header"><h2>Credentials</h2></header>
           {#each standaloneSecrets as secret (secret.name)}
+            {@const status = credentialStatus(secret.set, secret.source)}
             {#if editable && !secret.read_only_reason}
-              <ConfigSecretField
-                label={secret.label}
-                configured={secret.set}
-                pending={draft.secrets[secret.name]}
-                onChange={(value) => setSecret(secret.name, value)}
-              />
+              <div class="standalone-row">
+                <ConfigSecretField
+                  label={secret.label}
+                  configured={secret.set}
+                  pending={draft.secrets[secret.name]}
+                  onChange={(value) => setSecret(secret.name, value)}
+                />
+                <Badge size="sm" variant={status.variant}>{status.label}</Badge>
+              </div>
             {:else}
               <ConfigSecretField
                 label={secret.label}
                 configured={secret.set}
+                {status}
                 pending={undefined}
                 readOnlyReason={secret.read_only_reason ?? 'Read-only'}
                 onChange={() => {}}
@@ -475,6 +539,7 @@
             {field}
             op={draft.ops[pathKey(field.path)]}
             secretPending={field.credential ? draft.secrets[field.credential.name] : undefined}
+            secretSource={secretByKey.get(field.key)?.source}
             editable={formEditable}
             problem={problemByKey.get(field.path.join('.'))}
             onOp={setOp}
@@ -535,6 +600,23 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     white-space: nowrap;
+  }
+
+  .banner-actions {
+    margin-top: var(--space-2);
+  }
+
+  /* The status sits after the input, as it does on a section's credential. */
+  .standalone-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-2);
+    row-gap: var(--space-1);
+  }
+
+  .standalone-row > :global(.field) {
+    flex: 0 1 calc(var(--field-label-width) + var(--space-3) + 24rem);
   }
 
   .card-pointer {

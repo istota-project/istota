@@ -259,7 +259,6 @@ describe('editing', () => {
         config_key: `servarr.apps.${name}.api_key`,
         set: name === 'radarr',
         source: name === 'radarr' ? 'file' : 'none',
-        used_by: 'Servarr',
         read_only_reason: readOnlyReason,
       }),
     );

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { CircleDashed } from '@lucide/svelte';
-  import type { AdminConfigField, ConfigOp } from '$lib/api';
+  import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
   import { Badge, Button, Chip, Field, Input, Select, TextArea } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
   import TableEditor from './TableEditor.svelte';
   import { displayValue, formatValue, opFor, parseList, parseNumber } from './changeSet';
+  import { credentialStatus } from './credentialStatus';
 
   interface Props {
     field: AdminConfigField;
@@ -12,6 +13,8 @@
     op: ConfigOp | undefined;
     /** A credential field's pending value: `""` clears, undefined is unchanged. */
     secretPending?: string;
+    /** Where a credential's value is held, from the view's `secrets` entry. */
+    secretSource?: ConfigSecretSource;
     /** False when nothing on the page can be changed (no applier); the banner
      *  says why, so the field shows its value and no reason of its own. */
     editable: boolean;
@@ -21,7 +24,8 @@
     onSecret: (name: string, value: string | null) => void;
   }
 
-  let { field, op, secretPending, editable, problem, onOp, onSecret }: Props = $props();
+  let { field, op, secretPending, secretSource, editable, problem, onOp, onSecret }: Props =
+    $props();
 
   // What the admin typed into a number or list input, held while it does not
   // parse (a number) or while it is being typed (a list, whose blank lines
@@ -33,6 +37,8 @@
   let hint = $derived(field.doc ?? undefined);
   let showMeta = $derived(editable && field.editor !== 'readonly' && field.editor !== 'secret');
   let shown = $derived(displayValue(field, op));
+  let status = $derived(credentialStatus(field.set, secretSource));
+  let editableSecret = $derived(kind === 'secret' && !!field.credential);
   let pendingSet = $derived(op?.op === 'set' || op?.op === 'set_toml');
   let pendingUnset = $derived(op?.op === 'unset');
   let numericList = $derived(
@@ -156,7 +162,7 @@
 {/snippet}
 
 <div class="config-field" class:pending={!!op || secretPending !== undefined} title={field.key}>
-  <div class="field-row" class:inline-meta={showMeta && kind !== 'table'}>
+  <div class="field-row" class:inline-meta={(showMeta && kind !== 'table') || editableSecret}>
     {#if kind === 'secret' && field.credential}
       <ConfigSecretField
         label={field.name}
@@ -256,9 +262,7 @@
       <Field label={field.name} {hint} {badge} inline error={problem} labelled={false}>
         {#if field.secret || field.editor === 'secret'}
           <span class="value-badge">
-            <Badge variant={field.set ? 'success' : 'partial'}
-              >{field.set ? 'set' : 'not set'}</Badge
-            >
+            <Badge size="sm" variant={status.variant}>{status.label}</Badge>
           </span>
         {:else}
           <span class="config-value" class:dim={formatValue(field.value) === '—'}
@@ -266,6 +270,14 @@
           >
         {/if}
       </Field>
+    {/if}
+
+    {#if editableSecret}
+      <div class="field-meta control-row">
+        <span class="changed-badge"
+          ><Badge size="sm" variant={status.variant}>{status.label}</Badge></span
+        >
+      </div>
     {/if}
 
     {#if showMeta}

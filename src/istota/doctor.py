@@ -3405,7 +3405,7 @@ def check_inline_credentials(config: "Config", probe: bool) -> CheckResult:
     return CheckResult(
         name, WARN,
         f"{len(inline)} installation credential(s) stored in config.toml in plain text: {listed}",
-        remedy="Move each one into its secret file: Admin > Secrets, Move to secret file. "
+        remedy="Move each one into its secret file: Admin > Configuration, Move to secret file. "
                "A copy whose secret file is already set is ignored and can be removed.",
         scope=DEPLOYMENT,
     )

@@ -9,7 +9,13 @@ import {
   configSecret,
   configView,
 } from '$lib/test/adminConfig';
-import type { AdminConfigView, ConfigRequest, User } from '$lib/api';
+import type {
+  AdminConfigView,
+  ConfigProblem,
+  ConfigRequest,
+  ConfigSecretFile,
+  User,
+} from '$lib/api';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -180,7 +186,6 @@ describe('the change set', () => {
             name: 'anthropic_api_key',
             label: 'Anthropic API key',
             config_key: null,
-            used_by: 'Claude Code',
           }),
         ],
       }),
@@ -570,4 +575,192 @@ describe('Google configuration review', () => {
       expect(api.previewConfigChange).not.toHaveBeenCalled();
     },
   );
+});
+
+function credentialField(path: string[], set: boolean) {
+  return configField({
+    path,
+    secret: true,
+    set,
+    value: null,
+    editor: 'secret',
+    credential: { kind: 'file', name: `istota_${path.join('_')}` },
+  });
+}
+
+function fileSecret(path: string[], overrides: Partial<ConfigSecretFile> = {}): ConfigSecretFile {
+  return configSecret({
+    name: `istota_${path.join('_')}`,
+    label: path.join('.'),
+    config_key: path.join('.'),
+    ...overrides,
+  });
+}
+
+function moveProblem(path: string[]): ConfigProblem {
+  return {
+    kind: 'warning',
+    path,
+    message: `${path.join('.')} is stored in config.toml in plain text`,
+    blocking: false,
+    action: 'move',
+  };
+}
+
+const imapPath = ['email', 'imap_password'];
+const smtpPath = ['email', 'smtp_password'];
+const twilioPath = ['sms', 'twilio', 'auth_token'];
+const nativePath = ['brain', 'native', 'api_key'];
+
+function fieldRow(label: string): HTMLElement {
+  return screen.getByText(label).closest('.config-field') as HTMLElement;
+}
+
+describe('credential status', () => {
+  it('badges each credential field with where its value is held', async () => {
+    mount(
+      configView(
+        [
+          credentialField(imapPath, true),
+          credentialField(smtpPath, false),
+          credentialField(twilioPath, true),
+          credentialField(nativePath, true),
+        ],
+        {
+          secrets: [
+            fileSecret(imapPath, { set: true, source: 'file' }),
+            fileSecret(smtpPath),
+            fileSecret(twilioPath, { set: true, source: 'inline' }),
+            fileSecret(nativePath, { set: true, source: 'environment' }),
+            configSecret({
+              name: 'anthropic_api_key',
+              label: 'Anthropic API key',
+              config_key: null,
+              set: true,
+              source: 'file',
+            }),
+          ],
+        },
+      ),
+    );
+    await screen.findByLabelText('imap_password');
+    expect(within(fieldRow('imap_password')).getByText('Set')).toBeInTheDocument();
+    expect(within(fieldRow('smtp_password')).getByText('Not set')).toBeInTheDocument();
+    expect(within(fieldRow('auth_token')).getByText('In config.toml')).toBeInTheDocument();
+    expect(within(fieldRow('api_key')).getByText('Set outside the stack')).toBeInTheDocument();
+    const standalone = screen.getByText('Anthropic API key').closest('.standalone-row');
+    expect(within(standalone as HTMLElement).getByText('Set')).toBeInTheDocument();
+  });
+
+  it('keeps the badge on a read-only page, with no input', async () => {
+    mount(
+      configView([credentialField(twilioPath, true)], {
+        editable: false,
+        applier: { kind: 'none', available: false, reason: 'No applier.' },
+        secrets: [fileSecret(twilioPath, { set: true, source: 'inline' })],
+      }),
+    );
+    expect(await screen.findByText('In config.toml')).toBeInTheDocument();
+    expect(screen.queryByLabelText('auth_token')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Move all to secret files' })).toBeNull();
+  });
+});
+
+describe('credentials held in config.toml', () => {
+  const inlineView = (overrides: Partial<AdminConfigView> = {}) =>
+    configView([imapHost, credentialField(twilioPath, true), credentialField(smtpPath, true)], {
+      secrets: [
+        fileSecret(twilioPath, { set: true, source: 'inline' }),
+        fileSecret(smtpPath, { set: true, source: 'inline' }),
+        fileSecret(imapPath, { set: true, source: 'file' }),
+      ],
+      problems: [moveProblem(twilioPath), moveProblem(smtpPath)],
+      ...overrides,
+    });
+
+  it('counts them and moves them all by label, with nothing under secrets', async () => {
+    mount(inlineView());
+    expect(
+      await screen.findByText('2 credentials are stored in config.toml in plain text'),
+    ).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('button', { name: 'Move all to secret files' }));
+    expect(screen.getByText('2 changes')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Keep in config.toml' })).toHaveLength(2);
+
+    api.previewConfigChange.mockResolvedValue(configPreview());
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
+    const sent = api.previewConfigChange.mock.calls[0][0];
+    expect(sent.move_to_file).toEqual(['sms.twilio.auth_token', 'email.smtp_password']);
+    expect(sent.secrets).toEqual({});
+    expect(sent.ops).toEqual([]);
+  });
+
+  it('takes the moves back with Keep all', async () => {
+    mount(inlineView());
+    await fireEvent.click(await screen.findByRole('button', { name: 'Move all to secret files' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Keep all in config.toml' }));
+    expect(screen.getByRole('button', { name: 'Move all to secret files' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
+  });
+
+  it('shows no notice when every credential is in its file', async () => {
+    mount(
+      configView([imapHost], { secrets: [fileSecret(imapPath, { set: true, source: 'file' })] }),
+    );
+    await screen.findByLabelText('imap_host');
+    expect(screen.queryByText(/stored in config.toml in plain text/)).toBeNull();
+  });
+
+  it('says why none can move when a plan manages the credentials', async () => {
+    const view = inlineView({
+      secrets: [
+        fileSecret(twilioPath, { set: true, source: 'inline', movable: false }),
+        fileSecret(smtpPath, { set: true, source: 'inline', movable: false }),
+      ],
+      problems: [],
+    });
+    view.managed.secrets = { managed: true, source: 'ansible', at: null };
+    mount(view);
+    expect(
+      await screen.findByText(
+        /None of them can be moved from here, because a plan \(ansible\) manages the deployment credentials/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Move all to secret files' })).toBeNull();
+  });
+
+  it('keeps the moves that still apply when the file changed underneath', async () => {
+    mount(inlineView());
+    await fireEvent.click(await screen.findByRole('button', { name: 'Move all to secret files' }));
+    api.previewConfigChange.mockRejectedValue(
+      new api.ConfigChangeError('changed', 409, 'config_changed', { digest: 'digest-2' }),
+    );
+    // The Twilio token was moved by someone else meanwhile.
+    api.getAdminConfig.mockResolvedValue(
+      inlineView({
+        document_digest: 'digest-2',
+        secrets: [
+          fileSecret(twilioPath, { set: true, source: 'file' }),
+          fileSecret(smtpPath, { set: true, source: 'inline' }),
+        ],
+        problems: [moveProblem(smtpPath)],
+      }),
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    expect(await screen.findByText(/1 of your changes no longer apply/)).toBeInTheDocument();
+    expect(screen.getByText('1 change')).toBeInTheDocument();
+
+    api.previewConfigChange.mockResolvedValue(configPreview({ base_digest: 'digest-2' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
+    await waitFor(() =>
+      expect(api.previewConfigChange).toHaveBeenLastCalledWith({
+        base_digest: 'digest-2',
+        ops: [],
+        raw: null,
+        secrets: {},
+        move_to_file: ['email.smtp_password'],
+      }),
+    );
+  });
 });
