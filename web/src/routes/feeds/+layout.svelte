@@ -16,6 +16,8 @@
     sortBy,
     viewMode,
     feedsRefreshNonce,
+    feedCounts,
+    refreshFeedCounts,
   } from '$lib/stores/feeds';
   import {
     AppShell,
@@ -26,6 +28,7 @@
     Chip,
     Select,
     ConfirmDialog,
+    CountPill,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from '@lucide/svelte';
@@ -190,6 +193,7 @@
     try {
       await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
       invalidateNavUnreadCounts();
+      void refreshFeedCounts();
       feedsRefreshNonce.update((n) => n + 1);
     } catch (e) {
       console.error('mark-all-read failed', e);
@@ -222,6 +226,7 @@
   onMount(() => {
     mounted = true;
     void loadFeeds();
+    void refreshFeedCounts();
     return () => {
       mounted = false;
       loadGeneration++;
@@ -324,6 +329,7 @@
           >
             <Circle size={12} />
             <span class="view-name">Unread</span>
+            <CountPill count={$feedCounts.unread} title={`${$feedCounts.unread} unread`} />
           </button>
           <button
             class="view-btn"
@@ -333,6 +339,11 @@
           >
             <Star size={12} />
             <span class="view-name">Starred</span>
+            <CountPill
+              count={$feedCounts.starred}
+              tone="muted"
+              title={`${$feedCounts.starred} starred`}
+            />
           </button>
         </div>
         {#each groupedFeeds as [category, catFeeds] (category)}
@@ -348,6 +359,7 @@
               <button
                 class="feed-btn"
                 class:active={$selectedFeedId === feed.id}
+                class:has-unread={($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}
                 onclick={() => handleFeedClick(feed.id)}
                 type="button"
               >
@@ -413,6 +425,11 @@
 	   from web/src/lib/styles/sidebar.css, shared with the chat sidebar. */
   .feed-btn:hover {
     background: var(--surface-raised);
+  }
+
+  .feed-btn.has-unread {
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .feed-btn.active {

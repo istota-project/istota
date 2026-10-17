@@ -1668,6 +1668,14 @@ def count_entries(
     return int(row["c"])
 
 
+def count_unread_by_feed(conn: sqlite3.Connection) -> dict[int, int]:
+    rows = conn.execute(
+        "SELECT feed_id, COUNT(*) AS c FROM feed_entries"
+        " WHERE status = 'unread' GROUP BY feed_id"
+    ).fetchall()
+    return {int(r["feed_id"]): int(r["c"]) for r in rows}
+
+
 def update_entry_status(
     conn: sqlite3.Connection, entry_ids: list[int], status: str,
 ) -> int:

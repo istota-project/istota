@@ -1466,6 +1466,17 @@ export async function getFeeds(params?: Record<string, string>): Promise<FeedsRe
   return apiFetch<FeedsResponse>(`/feeds${qs}`);
 }
 
+export interface FeedCounts {
+  unread: number;
+  starred: number;
+  /** Unread entries per feed id; a feed with none is absent. */
+  unread_by_feed: Record<string, number>;
+}
+
+export function getFeedCounts(): Promise<FeedCounts> {
+  return apiFetch<FeedCounts>('/feeds/counts');
+}
+
 export async function getFeedEntry(id: number): Promise<FeedEntry> {
   return apiFetch<FeedEntry>(`/feeds/entries/${id}`);
 }
