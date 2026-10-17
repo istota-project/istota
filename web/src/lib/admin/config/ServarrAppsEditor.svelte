@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { ServarrApp } from '$lib/api';
-  import { Badge, Button, Field, Input } from '$lib/components/ui';
+  import { Button, Field, Input } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
+  import FieldRow from './FieldRow.svelte';
   import { credentialStatus } from './credentialStatus';
   import {
     APP_LABELS,
@@ -82,20 +83,20 @@
             <span class="config-value">{app.url || '—'}</span>
           </Field>
         {/if}
-        <div class="key-row">
+        <FieldRow>
           {#if editable && !app.keyReadOnly}
             <ConfigSecretField
               label="API key"
               configured={app.keySet === true}
               pending={app.clearKey ? '' : app.key === '' ? undefined : app.key}
               hint={`In ${label}, under Settings → General → Security.`}
+              {status}
               inline
               onChange={(value) => {
                 form[name].clearKey = value === '';
                 form[name].key = value ?? '';
               }}
             />
-            <Badge size="sm" variant={status.variant}>{status.label}</Badge>
           {:else}
             <ConfigSecretField
               label="API key"
@@ -107,12 +108,9 @@
               onChange={() => {}}
             />
           {/if}
-        </div>
+        </FieldRow>
         {#if problems[`${name}.key`]}
           <p class="caption problem" role="alert">{problems[`${name}.key`]}</p>
-        {/if}
-        {#if editable && app.keyReadOnly}
-          <p class="caption">{app.keyReadOnly}</p>
         {/if}
       {:else}
         <p class="caption">Not connected.</p>
@@ -155,19 +153,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
-  }
-
-  /* The status sits after the input, as it does on a section's credential. */
-  .key-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    column-gap: var(--space-2);
-    row-gap: var(--space-1);
-  }
-
-  .key-row > :global(.field) {
-    flex: 0 1 calc(var(--field-label-width) + var(--space-3) + 24rem);
   }
 
   .config-value {

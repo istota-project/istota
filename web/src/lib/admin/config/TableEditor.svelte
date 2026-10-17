@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import type { AdminConfigField, ConfigOp } from '$lib/api';
   import { Field, TextArea } from '$lib/components/ui';
   import { SENTINEL } from './changeSet';
@@ -8,12 +9,13 @@
     /** This table's pending `set_toml`, if any. */
     op: ConfigOp | undefined;
     badge?: string;
+    labelMark?: Snippet;
     hint?: string;
     problem?: string;
     onOp: (op: ConfigOp | null, path: string[]) => void;
   }
 
-  let { field, op, badge, hint, problem, onOp }: Props = $props();
+  let { field, op, badge, labelMark, hint, problem, onOp }: Props = $props();
 
   let original = $derived(field.toml ?? '');
   let text = $derived(op?.op === 'set_toml' ? op.toml : original);
@@ -21,6 +23,26 @@
   let holdsSentinel = $derived(text.includes(`"${SENTINEL}"`));
   let sharedBlocks = $derived(
     field.path.length === 1 && field.path[0] === 'briefing_shared_blocks',
+  );
+
+  // Behind the label's "?", as every other field's guidance is, so the row
+  // holds only the control and what acts on it.
+  let fullHint = $derived(
+    [
+      hint,
+      `The TOML defines ${field.name} and nothing else: a [${field.name}] table, ` +
+        `[[${field.name}]] entries, or ${field.name} = […].`,
+      holdsSentinel
+        ? `"${SENTINEL}" stands for a stored credential and keeps it. Replace it to set a new value.`
+        : '',
+      sharedBlocks
+        ? 'A shared block saved from the Briefings settings with the same name wins over one ' +
+          'here. Without this key the shipped default blocks apply; ' +
+          'briefing_shared_blocks = [] means none.'
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
   );
 
   function onInput(value: string) {
@@ -47,7 +69,7 @@
   different edits. The server parses it; a snippet that does not parse comes
   back from the review as a refusal with the parser's message.
 -->
-<Field label={field.name} {hint} {badge} inline error={emptyError || problem}>
+<Field label={field.name} hint={fullHint} {badge} {labelMark} inline error={emptyError || problem}>
   <TextArea
     monospace
     rows={Math.min(Math.max(text.split('\n').length + 1, 4), 16)}
@@ -57,33 +79,3 @@
     oninput={(e: Event) => onInput((e.currentTarget as HTMLTextAreaElement).value)}
   />
 </Field>
-<p class="caption table-note">
-  The TOML defines <code>{field.name}</code> and nothing else: a <code>[{field.name}]</code> table,
-  <code>[[{field.name}]]</code> entries, or <code>{field.name} = […]</code>.
-</p>
-{#if holdsSentinel}
-  <p class="caption table-note">
-    <code>"{SENTINEL}"</code> stands for a stored credential and keeps it. Replace it to set a new value.
-  </p>
-{/if}
-{#if sharedBlocks}
-  <p class="caption table-note">
-    A shared block saved from the Briefings settings with the same name wins over one here. Without
-    this key the shipped default blocks apply; <code>briefing_shared_blocks = []</code> means none.
-  </p>
-{/if}
-
-<style>
-  /* The settings hint's measure, so a note does not run the page's width. */
-  .table-note {
-    margin: var(--space-1) 0 0;
-    max-width: 60ch;
-  }
-
-  /* Under the control, in its column, as FieldControl's notes are. */
-  @media (min-width: 641px) {
-    .table-note {
-      margin-left: calc(var(--field-label-width) + var(--space-3));
-    }
-  }
-</style>

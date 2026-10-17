@@ -29,8 +29,11 @@ whose name does not match the patterns fails those tests rather than shipping.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from istota.config import Config
@@ -275,6 +278,13 @@ _MISSING = object()
 _SECRET_LABELS = {
     "anthropic_api_key": "Anthropic API key",
     "claude_code_oauth_token": "Claude Code OAuth token",
+}
+
+# The section a file no config key reads belongs with: both are the Claude
+# Code CLI's, which the claude_code and tmux brains run.
+_STANDALONE_SECTIONS = {
+    "anthropic_api_key": "brain.claude_code",
+    "claude_code_oauth_token": "brain.claude_code",
 }
 
 
@@ -545,6 +555,20 @@ def _secret_source(
     return "none"
 
 
+def _admin_candidates(config: "Config") -> list[str]:
+    """Who may be picked as an admin: every user with a live sign-in identity,
+    the rule `edits.check_admins` holds a submitted list to. Empty when the
+    table cannot be read; the editor then still shows the current admins."""
+    from istota.webui import auth as web_auth
+
+    try:
+        identities = web_auth.list_identities(config.db_path)
+    except Exception as exc:
+        logger.warning("admin candidates unavailable: %s", type(exc).__name__)
+        return []
+    return [identity.user_id for identity in identities if not identity.disabled]
+
+
 def _secret_files(config: "Config", ctx: dict) -> list[dict]:
     """One entry per stack secrets file: whether it is set, where from, and
     never its value."""
@@ -581,6 +605,7 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
             "name": name,
             "label": dotted or _SECRET_LABELS.get(name, name),
             "config_key": dotted,
+            "section": None if dotted else _STANDALONE_SECTIONS.get(name),
             "set": is_set,
             "source": source,
             "read_only_reason": reason,
@@ -678,6 +703,7 @@ def build_config_view(
         "secrets": _secret_files(config, ctx),
         "admins": {
             "users": sorted(str(user) for user in (getattr(config, "admin_users", None) or ())),
+            "candidates": _admin_candidates(config),
             "read_only_reason": ctx["managed_reasons"]["admins"],
         },
     }

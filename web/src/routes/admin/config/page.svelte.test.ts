@@ -185,10 +185,32 @@ describe('the change set', () => {
         ],
       }),
     );
-    await fireEvent.input(await screen.findByLabelText(/^Anthropic API key/), {
+    await fireEvent.input(await screen.findByLabelText(/^anthropic_api_key/), {
       target: { value: 'k' },
     });
     expect(screen.getByText('1 change')).toBeInTheDocument();
+  });
+
+  it('shows a credential no config key reads in the section it belongs to', async () => {
+    const model = configField({ path: ['brain', 'claude_code', 'model'], value: 'sonnet' });
+    mount(
+      configView([imapHost, model], {
+        secrets: [
+          configSecret({
+            name: 'claude_code_oauth_token',
+            label: 'Claude Code OAuth token',
+            config_key: null,
+            section: 'brain.claude_code',
+          }),
+        ],
+      }),
+    );
+    const input = await screen.findByLabelText(/^claude_code_oauth_token/);
+    const section = input.closest('section') as HTMLElement;
+    expect(
+      within(section).getByRole('heading', { name: '[brain.claude_code]' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Credentials' })).toBeNull();
   });
 });
 
@@ -643,7 +665,7 @@ describe('credential status', () => {
     expect(within(fieldRow('smtp_password')).getByText('Not set')).toBeInTheDocument();
     expect(within(fieldRow('auth_token')).getByText('In config.toml')).toBeInTheDocument();
     expect(within(fieldRow('api_key')).getByText('Set outside the stack')).toBeInTheDocument();
-    const standalone = screen.getByText('Anthropic API key').closest('.standalone-row');
+    const standalone = screen.getByText('anthropic_api_key').closest('.standalone-field');
     expect(within(standalone as HTMLElement).getByText('Set')).toBeInTheDocument();
   });
 

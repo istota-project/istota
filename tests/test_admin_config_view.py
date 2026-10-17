@@ -540,6 +540,13 @@ class TestTopLevel:
         assert entries["anthropic_api_key"]["config_key"] is None
         assert entries["anthropic_api_key"]["label"] == "Anthropic API key"
         assert entries["claude_code_oauth_token"]["set"] is False
+        # The Claude Code CLI's two files belong with its brain's section; a
+        # file a config key reads is shown by that key's field instead.
+        assert entries["anthropic_api_key"]["section"] == "brain.claude_code"
+        assert entries["claude_code_oauth_token"]["section"] == "brain.claude_code"
+        assert entries["istota_email_imap_password"]["section"] is None
+        sections = {section["key"] for section in payload["sections"]}
+        assert "brain.claude_code" in sections
         assert entries["istota_email_imap_password"]["set"] is True
         assert entries["istota_email_imap_password"]["config_key"] == "email.imap_password"
         assert entries["istota_brain_native_api_key"]["config_key"] == "brain.native.api_key"
@@ -904,3 +911,24 @@ class TestManaged:
             assert payload["managed"][resource]["managed"] is True
             assert payload["managed"][resource]["source"] == "unreadable"
         assert "istota-stack apply" in _field(payload, "bot_name")["read_only_reason"]
+
+
+def test_admin_candidates_are_the_users_with_a_live_sign_in_identity(tmp_path):
+    from istota import db
+    from istota.webui import auth
+
+    db_path = tmp_path / "istota.db"
+    db.init_db(db_path)
+    auth.upsert_identity(db_path, "alice", "alice@example.com", create_profile=True)
+    auth.upsert_identity(db_path, "bob", "bob@example.com", create_profile=True)
+    auth.upsert_identity(db_path, "carol", "carol@example.com", create_profile=True)
+    auth.set_disabled(db_path, "carol", True)
+    cfg = Config()
+    cfg.db_path = db_path
+    assert view.build_config_view(cfg)["admins"]["candidates"] == ["alice", "bob"]
+
+
+def test_admin_candidates_are_empty_when_the_table_cannot_be_read(tmp_path):
+    cfg = Config()
+    cfg.db_path = tmp_path / "missing" / "istota.db"
+    assert view.build_config_view(cfg)["admins"]["candidates"] == []

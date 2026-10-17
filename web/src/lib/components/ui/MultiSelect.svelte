@@ -31,6 +31,8 @@
   let anchor = $state<HTMLElement | null>(null);
 
   const labels = $derived(new Map(options.map((o) => [o.value, o.label])));
+  /** A disabled option that is picked stays picked: no remove button. */
+  const locked = $derived(new Set(options.filter((o) => o.disabled).map((o) => o.value)));
   const filtered = $derived.by(() => {
     const query = search.trim().toLowerCase();
     if (!query) return options;
@@ -63,7 +65,7 @@
     {#each value as item (item)}
       <span class="pick">
         <span class="pick-label">{labels.get(item) ?? item}</span>
-        {#if !disabled}<button
+        {#if !disabled && !locked.has(item)}<button
             type="button"
             class="pick-remove"
             aria-label="Remove {labels.get(item) ?? item}"
