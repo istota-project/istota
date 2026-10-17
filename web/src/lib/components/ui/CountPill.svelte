@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Sparkle } from '@lucide/svelte';
+  import { Asterisk } from '@lucide/svelte';
 
   /**
    * A numeric badge, capped at `99+`.
@@ -54,7 +54,7 @@
 -->
 {#if count > 0}
   {#if shape === 'mark'}
-    <span class="count-pill mark" {title}><Sparkle size="100%" fill="currentColor" /></span>
+    <span class="count-pill mark" {title}><Asterisk size="100%" strokeWidth={3.5} /></span>
   {:else}
     <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
   {/if}
