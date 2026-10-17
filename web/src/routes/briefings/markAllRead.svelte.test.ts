@@ -288,6 +288,21 @@ describe('briefing bulk read in the real layout', () => {
     expect(screen.queryByText("Couldn't mark these as read.")).toBeNull();
   });
 
+  it.each([
+    ['all', '', allLabel],
+    ['one name', named, nameLabel],
+  ])('clears the archive rows unread marks after a %s bulk read', async (_scope, name, label) => {
+    archive = archive.map((item) => ({ ...item, read_at: null }));
+    await openReader(false, name);
+    expect(screen.queryAllByText(', unread').length).toBeGreaterThan(0);
+    await fireEvent.click(screen.getByRole('button', { name: label }));
+    await confirm();
+    await waitFor(() => expect(bulkRequests()).toHaveLength(1));
+    await settle();
+    // The fake archive still says unread, so only a local update can clear these.
+    expect(screen.queryAllByText(', unread')).toHaveLength(0);
+  });
+
   it('leaving the layout cancels an unconfirmed action', async () => {
     const view = await openReader();
     await fireEvent.click(screen.getByRole('button', { name: allLabel }));

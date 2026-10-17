@@ -27,6 +27,7 @@
     briefingArchiveCount,
     briefingArchiveError,
     briefingsRefreshNonce,
+    briefingReadAck,
   } from '$lib/stores/briefings';
   import {
     AppShell,
@@ -107,6 +108,19 @@
     deleteTarget = request;
     briefingDeleteRequest.set(null);
   });
+  $effect(() => {
+    const ack = $briefingReadAck;
+    if (!ack) return;
+    briefingReadAck.set(null);
+    markItemsRead((item) => item.id === ack.id, ack.read_at);
+  });
+
+  function markItemsRead(match: (item: BriefingArchiveItem) => boolean, readAt: string) {
+    if (!items.some((item) => !item.read_at && match(item))) return;
+    items = items.map((item) =>
+      !item.read_at && match(item) ? { ...item, read_at: readAt } : item,
+    );
+  }
   let deleteError = $state('');
   let markAllTarget = $state<{ name: string; username: string } | null>(null);
   let markingAllRead = $state(false);
@@ -174,6 +188,10 @@
     try {
       await markBriefingArchiveAsRead(target.name ? 'briefing' : 'all', target.name || undefined);
       invalidateNavUnreadCounts();
+      markItemsRead(
+        (item) => !target.name || item.briefing_name === target.name,
+        new Date().toISOString(),
+      );
     } catch {
       if (mounted && onReader && identity.user.username === target.username) {
         notifyError("Couldn't mark these as read.");
