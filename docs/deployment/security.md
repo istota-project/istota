@@ -258,6 +258,20 @@ A devbox gets neither exception. The rules fail closed: an allow-list entry that
 
 **The master key leaves the VM once, for the Keychain.** `create` reads `/data/.secret_key` and stores it in the login Keychain (service `istota.local`, account `secret-key-<instance>`) through `security -i`, which reads its command on stdin, so the key is on no command line another local user could see with `ps`. It reads the item back and compares. The snapshots and config copies in the workspace folder hold no key and no credential (`secrets/` is never copied there), so the folder, and a Time Machine backup of it, cannot decrypt the stored credentials alone. The Keychain item is in the file-based login keychain, which iCloud Keychain does not sync.
 
+## The Mac app
+
+The [Mac app](../getting-started/mac-app.md) is the local VM with a window, so everything in the section above holds for it. What it adds:
+
+**Signing in without a password is for the Mac user who owns the app.** The app asks the VM for a one-use code (`istota web login-code`, through the Mac CLI's `exec`), valid for 60 seconds, and loads it in the URL fragment, which no server log sees. The `local_code` method is refused outside `local` ingress and for any `[site] hostname` but `localhost:<port>` or `127.0.0.1:<port>`, and the web app answers only at those names. Whoever can run `limactl` against the app's Lima directory can mint a code; that is the macOS user who owns it, who could reach the VM as root anyway.
+
+**Web content cannot reach the app.** The web UI's windows hold a plain WebKit view with no bridge into the app: no Tauri IPC, no message handler, no file or custom scheme. A link to another site opens in the default browser. The app's own pages, in a separate window, are the only ones with commands.
+
+**Remote installs do not share a cookie jar.** Each remote profile's window has a website data store of its own, so a session cookie one install sets never reaches another install's window, even on the same host.
+
+**Keys stay off the Mac's command lines and files.** The model's key is entered in the web setup page, which runs in the VM. The master key's copy goes to the login Keychain through `security -i`'s stdin, as the command-line install does.
+
+**The command-line tools run the bundled CLI and nothing else.** "Install command-line tools" writes two short scripts that set the app's Lima directory, state and instance and run the CLI inside the app. `/usr/local/bin` is written by `/usr/bin/install` through macOS's administrator prompt, from a directory only the user can read; `~/.local/bin` needs no prompt. Neither replaces or removes a file the app did not write. The scripts point into this macOS user's app state, so on a Mac with several accounts the copies in `/usr/local/bin` serve the account that installed them.
+
 ## Deferred DB operations
 
 With no database reachable from inside the sandbox at all, skills write JSON request files to the always-writable temp dir. The scheduler (unsandboxed) processes them after successful completion:
