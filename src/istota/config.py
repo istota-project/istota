@@ -1,6 +1,7 @@
 """Configuration loading for istota."""
 
 import copy
+import json
 import logging
 import math
 import os
@@ -1927,7 +1928,8 @@ class NativeBrainConfig:
     - ``model`` — explicit model id (``openai_compat`` does no aliasing).
     - ``base_url`` / ``api_key`` / ``extra_headers`` — for ``openai_compat``.
       ``api_key`` is populated from the ``ISTOTA_BRAIN_NATIVE_API_KEY`` env
-      override (kept out of the TOML file).
+      override (kept out of the TOML file), and ``extra_headers`` is replaced
+      by ``ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`` (a JSON object) when it is set.
     - ``context_window`` — 0 resolves from the live-fetched (OpenRouter) catalog
       or the conservative 200k default; set to override per deployment (the
       documented contract for a non-OpenRouter native endpoint).
@@ -4426,6 +4428,32 @@ def _servarr_apps(raw: object, key: str) -> object:
     return apps
 
 
+def _apply_native_extra_headers(config: Config, raw: str) -> None:
+    """`[brain.native] extra_headers` from `ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`.
+
+    The stack secret file `istota_brain_native_extra_headers` holds a JSON
+    object of header name to string value. A valid one replaces the inline
+    table whole, so a header has one source; anything else is discarded,
+    naming the variable and never the value, and the inline table stays.
+    """
+    if not raw:
+        return
+    try:
+        headers = json.loads(raw)
+    except ValueError:
+        headers = None
+    if not isinstance(headers, dict) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in headers.items()
+    ):
+        report_problem(
+            "discarded", ("brain", "native", "extra_headers"),
+            "ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS is not a JSON object of header names to "
+            "string values; keeping [brain.native.extra_headers] from the config file",
+        )
+        return
+    config.brain.native.extra_headers = headers
+
+
 def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str]) -> None:
     """Give each app its key from the environment, then drop the incomplete.
 
@@ -4710,8 +4738,8 @@ SECRET_ENV_OVERRIDES: tuple[tuple[str, str, str], ...] = (
 )
 """``(env var, section, field)``: credentials the environment sets over the file.
 
-``ISTOTA_BRAIN_NATIVE_API_KEY`` and ``servarr_key_variable(app)`` are read
-beside this table, not in it.
+``ISTOTA_BRAIN_NATIVE_API_KEY``, ``ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS`` and
+``servarr_key_variable(app)`` are read beside this table, not in it.
 """
 
 
@@ -5171,6 +5199,7 @@ def load_config(
     _native_key = os.environ.get("ISTOTA_BRAIN_NATIVE_API_KEY")
     if _native_key:
         config.brain.native.api_key = _native_key
+    _apply_native_extra_headers(config, os.environ.get("ISTOTA_BRAIN_NATIVE_EXTRA_HEADERS", ""))
     # The arr keys are keyed by app, so they don't fit the table either; and an
     # app is only judged complete once its key could have come from here.
     _settle_servarr_apps(data, config, os.environ)
