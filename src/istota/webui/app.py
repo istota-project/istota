@@ -1015,8 +1015,6 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
     Unauthenticated, so it names no version: an exact version tells a visitor
     which advisories apply (ISSUE-569). `/admin` carries it instead.
     """
-    from istota.groups.system import ACCOUNT_HISTORY_DISCLOSURE
-    body += f'<p class="muted">{escape(ACCOUNT_HISTORY_DISCLOSURE)}</p>'
     name = escape(bot_name)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -8145,7 +8143,38 @@ def _assistant_message_dict(row, text: str, status: str, *, confirmation: bool =
     mail = _outgoing_mail_field(_row_get(row, "outgoing_mail"))
     if mail is not None:
         out["mail"] = mail
+    shares = _location_shares_field(_row_get(row, "location_shares"))
+    if shares is not None:
+        out["location_shares"] = shares
     return out
+
+
+_LOCATION_SHARE_KEYS = (
+    "card_id", "owner_user_id", "owner_label", "precision", "lat", "lon",
+    "accuracy_m", "observed_at", "freshness", "map_url",
+)
+
+
+def _location_shares_field(raw) -> list[dict] | None:
+    """A row's location share cards as the web card reads them.
+
+    Only the listed keys pass, so anything a later writer adds stays
+    server-side. None for a row with no cards or a record that cannot be read,
+    which then renders as a plain answer.
+    """
+    if not raw:
+        return None
+    try:
+        shares = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    if not isinstance(shares, list):
+        logger.debug("location_shares: unreadable record omitted")
+        return None
+    out = [{key: share.get(key) for key in _LOCATION_SHARE_KEYS}
+           for share in shares if isinstance(share, dict)]
+    return out or None
 
 
 _MAIL_STATES = frozenset({"sent", "held", "failed", "discarded"})
@@ -8422,11 +8451,13 @@ _SPINE_COLUMNS = (
     # about what a reader sees.
     "  m.origin_surface AS origin_surface, "
     "  m.about_room_token AS about_room_token, m.outgoing_mail AS outgoing_mail, "
-    "  m.received_mail AS received_mail, "
+    "  m.received_mail AS received_mail, m.location_shares AS location_shares, "
     # Truncated here rather than in the dict builder, matching the cross-room
     # fragment: no read path needs more of the parent than the excerpt cap.
     # The literal must track `_REPLY_EXCERPT_CHARS` below.
-    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body, "
+    "  p.author_user_id AS reply_author_user_id, "
+    "  p.author_label AS reply_author_label "
     "FROM messages m LEFT JOIN tasks t ON t.id = m.task_id "
     "LEFT JOIN message_stars s ON s.message_id = m.id AND s.user_id = ? "
     # The cited parent, joined live rather than snapshotted. The one edit to a
@@ -8528,7 +8559,18 @@ _AUX_COLUMNS = (
 _AUX_ROOM_SCOPE = _db.TASK_ROOM_SCOPE_SQL
 
 
-def _row_reply_to(row) -> dict | None:
+def _author_name(author_label, author_user_id, viewer: str | None) -> str | None:
+    """Who wrote a `role='user'` row, as the reader should see it, or None for
+    the reader's own row. A turn's header and a citation of it share this, so
+    the two cannot name one row differently (#764)."""
+    if author_label:
+        return author_label
+    if author_user_id and author_user_id != viewer:
+        return _display_name_for(author_user_id)
+    return None
+
+
+def _row_reply_to(row, viewer: str | None) -> dict | None:
     """The rendered citation for a history row, or None when it isn't a reply.
 
     Two shapes, and the client distinguishes them on `deleted`: a live parent
@@ -8545,12 +8587,19 @@ def _row_reply_to(row) -> dict | None:
         return None
     if row["reply_role"] is None:
         return {"msg_id": parent_id, "deleted": True}
-    return {
+    cited = {
         "msg_id": parent_id,
         "role": row["reply_role"],
         "excerpt": (row["reply_body"] or "")[:_REPLY_EXCERPT_CHARS],
         "deleted": False,
     }
+    if row["reply_role"] == "user" and "reply_author_user_id" in keys:
+        author = _author_name(
+            row["reply_author_label"], row["reply_author_user_id"], viewer,
+        )
+        if author is not None:
+            cited["author"] = author
+    return cited
 
 
 def _row_attachment_names(row, *, message_column: bool = True) -> list[str] | None:
@@ -8737,10 +8786,10 @@ def _user_row_display(
     except (IndexError, KeyError):
         return out  # a producer that predates the columns (the dev mock)
 
-    if author_label:
-        out["author"] = author_label
-    elif author_user_id and author_user_id != viewer:
-        out["author"] = _display_name_for(author_user_id)
+    author = _author_name(author_label, author_user_id, viewer)
+    if author is not None:
+        out["author"] = author
+    if not author_label and author_user_id and author_user_id != viewer:
         # The label names the writer; this is the writer, as the avatar
         # endpoint keys them. It rides only in this branch, which is the label
         # rule restated rather than a second one: an `author_label` is an
@@ -9069,7 +9118,7 @@ def _chat_room_messages(
         else:  # assistant — a stored assistant row is by definition a completed turn
             d = _assistant_message_dict(r, r["body"], r["status"] or "completed")
             _decorate_outgoing_mail(d, mail_view)
-        cited = _row_reply_to(r)
+        cited = _row_reply_to(r, username)
         if cited is not None:
             d["reply_to"] = cited
         about = _about_room_field(r["about_room_token"], about_names)
@@ -11203,7 +11252,7 @@ def _cross_room_message_dict(
             d["task_id"] = parked_task
         _apply_noted(d, (noted or {}).get(r["msg_id"]))
         d.update((note_parts or {}).get(r["msg_id"], {}))
-    cited = _row_reply_to(r)
+    cited = _row_reply_to(r, username)
     if cited is not None:
         d["reply_to"] = cited
     about = _about_room_field(
@@ -16621,43 +16670,7 @@ async def api_map_basemap(user: dict = Depends(_require_api_auth)):
     """
     from . import map_basemap
 
-    # `getattr` rather than attribute access, matching `check_basemap`: a Config
-    # with `web` unset would otherwise raise here and 500, which is the blank
-    # rectangle this endpoint promises never to produce.
-    web_cfg = getattr(_config, "web", None) if _config else None
-    cfg = getattr(web_cfg, "map", None)
-    user_key = ""
-    if _config is not None:
-        try:
-            from istota.credentials import store as secrets_store
-
-            # Stripped once, at the read, so `select_provider` and the
-            # `api_key=` below cannot disagree about whether this user has a
-            # key. They used to: one tested `.strip()` and the other bare
-            # truthiness, so a stored "  " selected the configured provider
-            # while overriding its working key with whitespace.
-            user_key = (
-                secrets_store.get_secret(
-                    _config.db_path, user["username"], "carto", "api_key"
-                )
-                or ""
-            ).strip()
-        except Exception:  # noqa: BLE001 - a map must render without the store
-            logger.warning("basemap: could not read the stored carto key", exc_info=True)
-            user_key = ""
-
-    if cfg is None:
-        return map_basemap.resolve_basemap().as_dict()
-
-    provider = map_basemap.select_provider(cfg.provider, user_api_key=user_key)
-    spec = map_basemap.resolve_basemap(
-        provider=provider,
-        api_key=user_key or cfg.api_key,
-        dark_style=cfg.dark_style,
-        light_style=cfg.light_style,
-        attribution=cfg.attribution,
-    )
-    return spec.as_dict()
+    return map_basemap.basemap_for_user(_config, user["username"]).as_dict()
 
 
 @api_router.get("/location/settings-info")

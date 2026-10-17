@@ -84,6 +84,7 @@ class TestTheDirectoryIsFullyAccountedFor:
             "docker/devbox/lib/istota_forge_cli.py",
             "docker/devbox/lib/istota_devbox_exec_protocol.py",
             "docker/browser/lib/istota_user_scope.py",
+            "docker/browser/lib/istota_net_guard.py",
         }, (
             "either the parser stopped matching, or a sync pair was added or "
             "removed and this set needs the same edit"
@@ -268,7 +269,10 @@ def test_browser_scope_import_from_image_layout(tmp_path):
          "import sys; sys.path.insert(0, sys.argv[1]); "
          "from lib.istota_user_scope import scoped_user_dir; "
          "assert str(scoped_user_dir('/profiles/users', 'alice')) == '/profiles/users/alice'; "
-         "assert scoped_user_dir('/profiles/users', '../bob') is None",
+         "assert scoped_user_dir('/profiles/users', '../bob') is None; "
+         "from lib.istota_net_guard import ip_is_public; import ipaddress; "
+         "assert ip_is_public(ipaddress.ip_address('93.184.216.34')); "
+         "assert not ip_is_public(ipaddress.ip_address('172.18.0.3'))",
          str(tmp_path)],
         capture_output=True, text=True,
     )

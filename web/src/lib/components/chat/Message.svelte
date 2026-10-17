@@ -20,6 +20,7 @@
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
   import MailCard from './MailCard.svelte';
+  import LocationShareCard from './LocationShareCard.svelte';
   import { receivedCard, sentCard } from './mailCard';
   import SearchResults from './SearchResults.svelte';
 
@@ -468,7 +469,11 @@
   const cited = $derived(message.replyTo);
   const citedDeleted = $derived(!!cited?.deleted);
   const citedLabel = $derived(
-    cited?.role === 'user' ? userName : cited?.role === 'assistant' ? botName : '',
+    cited?.role === 'user'
+      ? (cited.author ?? userName)
+      : cited?.role === 'assistant'
+        ? botName
+        : '',
   );
   const citedClickable = $derived(!!cited && !citedDeleted && !!onJumpToMessage);
   // ---- Send lifecycle (ISSUE-200) -------------------------------------------
@@ -1160,6 +1165,16 @@
           {/if}
         {/each}
 
+        {#if message.role === 'assistant' && message.locationShares?.length}
+          <!-- The maps of the location shares this answer's text discloses
+               (location share map thumbnails, stage 4). -->
+          <div class="location-shares">
+            {#each message.locationShares as share, i (i)}
+              <LocationShareCard {share} />
+            {/each}
+          </div>
+        {/if}
+
         {#if message.streaming && currentRunGroups.every((g) => g.kind === 'notice')}
           <!-- Work-phase cue: the ack verb + pulsing dot, shown while the
 					     model reasons / before the first tool or answer text.
@@ -1671,6 +1686,13 @@
   /* A mail card under the bot's prose gets the same gap as a chip between
      paragraphs; the card has no outer margin of its own. */
   .content > .body + :global(.mail-card) {
+    margin-top: var(--space-3);
+  }
+  /* Location share cards under the answer, spaced like a mail card under it. */
+  .location-shares {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
     margin-top: var(--space-3);
   }
   /* An email note stacks the received mail and the sent reply as siblings;

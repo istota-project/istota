@@ -8,11 +8,6 @@ from istota.groups.service import _event, _finish, _transaction
 logger = logging.getLogger(__name__)
 
 ALL_USERS = "all_users"
-ACCOUNT_HISTORY_DISCLOSURE = (
-    "Your account joins All users automatically. You can read its retained briefing history, "
-    "including editions published before you joined. Its notebook and files are shared "
-    "with everyone currently using this installation and anyone who joins later."
-)
 
 
 def sync_account_membership(conn, user_id: str, *, enabled: bool = True) -> None:

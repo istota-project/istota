@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Your own email in a briefing.** A personal briefing can now have a My email block that reads your mail from one connected account: your bot address, or Gmail once you allow Gmail access. By default it lists the five most pressing action items from the past 24 hours. Group briefings and shared blocks cannot use it.
 - **Scheduled jobs in the admin pane.** Every user's scheduled jobs now have their own page in the admin sidebar instead of a card on Status. An admin can disable, enable or delete a user's job from there, and the change is written to that user's CRON.md so it sticks. Deleting asks for the job's name and a confirmation code. Module pollers can be disabled but not deleted. The job's owner gets a notification whenever an admin changes one of their jobs.
 - Admin → Briefings lists every personal, group and All users briefing with its owner, schedule, delivery and state. Administrators can pause a briefing so it does not run until an administrator resumes it, and delete one after typing its name and confirming with a code or password. Owners are notified; deleted group briefings keep their published editions in the reader.
+- **A map with a shared location in web chat.** When someone shares their location in a web room, or the bot answers where a member is under a timed share, the answer now shows a small map you can pan and zoom: a pin with its accuracy circle, or a shaded square for an approximate area, with the time it was observed. The map shows only what the answer's text already says, and if it cannot load you still get the text and the map link. Ask for no map to leave it out.
+- **The same map on Talk and WhatsApp.** In a Talk room the shared location's map now follows the answer as a picture, and in a WhatsApp group it arrives as an image with the answer as its caption, approved location posts included. It needs the browser service; without it, or when drawing fails, the text and map link go out as before.
 - Group owners can now delete a group briefing from its settings menu once it is turned off, so an abandoned draft no longer sits in the list for good. Editions it already published stay readable.
 
 - Operators can import publishing prompts into disabled group briefings, review dependent consumers, and retire the old job after a successful preview and confirmed cutover. Retirement survives schedule reloads and restarts; existing shared content and personal archives remain available for rollback.
@@ -51,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Shorter location approvals.** Approving a timed location share is now two short paragraphs naming the room, how long and who can ask, and a location post reads as one line plus its map link. On WhatsApp a plain YES or NO answers a question a shared room asked you in your private chat, as it already did on web and Talk.
 - The file viewer header fits a phone. The file name gets its own row with Close, up to two lines, and the actions move to a row below it; the size and modified time stay on one line. Rendered, Source, Download and Open in Nextcloud are icon buttons at every width, named on hover.
 - Clients are now edited in money Settings → Invoicing, beside entities and services, and the Business section is Work and Invoices. Clients are listed as a table there, and the old Clients address redirects to the new page.
 - The Add block dialog in briefing settings shows each preset as a card with an icon, grouped into News, Your day and More. The whole card is clickable, and a preset that cannot be used yet says why in place of its description.
@@ -71,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reply quote in a shared room names the person who wrote the quoted message. It used to show the viewer's own name on any quoted user message, so in a WhatsApp group or a shared web room another member's words were attributed to you.
 - Group briefings can use the shared newsletter pool. Duplicating a personal briefing to a group used to leave its Newsletters source out as if it were personal, though the pool holds only mail addressed to no user.
 - Admin › Briefings shows the right "Last run" time for personal and group briefings. Runs were read as the viewer's local time instead of UTC, so a recent run west of UTC showed as "just now" and older ones hours off.
 - Upgrades with legacy default briefings can initialize the database and start the container. Startup now creates the migration journal before preserving the old schedules.

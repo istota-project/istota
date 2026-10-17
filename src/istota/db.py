@@ -1219,6 +1219,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "messages", {"received_mail": "TEXT"})
     # ISSUE-644. An earlier note keeps rendering from its body alone.
     _add_columns(conn, "messages", {"email_note": "TEXT"})
+    # Location share map cards. An earlier answer carries no card.
+    _add_columns(conn, "messages", {"location_shares": "TEXT"})
     # Email on rooms, stage 2. Nothing to backfill: no earlier task was asked
     # whether its host was on the message.
     _add_columns(conn, "tasks", {"host_absent": "INTEGER NOT NULL DEFAULT 0"})
@@ -6162,6 +6164,7 @@ def add_message(
     delivery_reference: str | None = None,
     author_participant_id: int | None = None,
     about_room_token: str | None = None,
+    location_shares: list[dict] | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
@@ -6184,8 +6187,8 @@ def add_message(
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
         " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
         " author_user_id, author_label, delivery_reference, author_participant_id, "
-        " about_room_token) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " about_room_token, location_shares) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -6206,6 +6209,7 @@ def add_message(
             delivery_reference or None,
             author_participant_id,
             about_room_token or None,
+            json.dumps(location_shares) if location_shares else None,
         ),
     ).fetchone()
     return int(row["id"])
@@ -6328,6 +6332,7 @@ def store_turn_message(
     origin_surface: str,
     about_room_token: str | None = None,
     reply_to_message_id: int | None = None,
+    location_shares: list[dict] | None = None,
 ) -> int | None:
     """Idempotently store a turn's user/assistant message. Returns the new id,
     or None if a row for (room_token, role, task_id) already exists — so a retry
@@ -6347,6 +6352,7 @@ def store_turn_message(
         origin_surface=origin_surface, task_id=task_id,
         about_room_token=about_room_token,
         reply_to_message_id=reply_to_message_id,
+        location_shares=location_shares,
     )
 
 
@@ -7215,6 +7221,8 @@ _CROSS_ROOM_COLUMNS = (
     # The mail a user row received in a mail room (hidden email threads,
     # stage 3), for the incoming-mail card.
     "  m.received_mail AS received_mail, "
+    # The answer's location share cards, in both views like the mail card.
+    "  m.location_shares AS location_shares, "
     # A private park's question names its task here; the room stream marks
     # such a row as a confirmation while that task waits (#624).
     "  m.delivery_reference AS delivery_reference, "
@@ -7223,7 +7231,10 @@ _CROSS_ROOM_COLUMNS = (
     # a long answer would otherwise carry that whole answer a second time.
     # The literal must track `web_app._REPLY_EXCERPT_CHARS`, which the dict
     # builder still slices at — shorten this and that slice quietly no-ops.
-    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body "
+    "  p.role AS reply_role, substr(p.body, 1, 200) AS reply_body, "
+    # Who wrote the parent, for the citation's author label (#764).
+    "  p.author_user_id AS reply_author_user_id, "
+    "  p.author_label AS reply_author_label "
 )
 _CROSS_ROOM_FROM = (
     "FROM messages m "

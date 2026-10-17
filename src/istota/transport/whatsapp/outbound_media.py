@@ -124,6 +124,23 @@ def stage_image(
     except Exception:
         logger.warning("whatsapp.outbound.media_refused reason=encode", exc_info=True)
         return None
+    return _stage_encoded(config, encoded)
+
+
+def stage_image_bytes(config: "Config", data: bytes) -> WhatsAppOutboundMedia | None:
+    """`stage_image` for an image the daemon made, such as a location share's map.
+
+    The same sniff, re-encode and staging, minus the workspace resolution:
+    the bytes are not anybody's file. `None` for anything `stage_image` would
+    refuse. Never raises.
+    """
+    return _stage_encoded(config, reencode_bytes(data))
+
+
+def _stage_encoded(
+    config: "Config", encoded: tuple[bytes, str, str] | None,
+) -> WhatsAppOutboundMedia | None:
+    """Write one re-encoded copy into the media staging directory, or None."""
     if encoded is None:
         return None
     data, mimetype, extension = encoded
@@ -155,14 +172,31 @@ def _reencode(handle) -> tuple[bytes, str, str] | None:
     takes JPEG ringing on every edge; anything else becomes a JPEG unless it
     carries transparency.
     """
-    from PIL import Image, ImageOps  # noqa: PLC0415
-
-    from ...image_attachments import JPEG_QUALITY, MAX_SOURCE_PIXELS  # noqa: PLC0415
-
     size = os.fstat(handle.fileno()).st_size
     if size > media_rules.MAX_MEDIA_BYTES:
         logger.warning("whatsapp.outbound.media_refused reason=over_cap bytes=%d", size)
         return None
+    return _reencode_stream(handle)
+
+
+def reencode_bytes(data: bytes) -> tuple[bytes, str, str] | None:
+    """`_reencode` for bytes already in memory, such as a rendered map. Never raises."""
+    if len(data) > media_rules.MAX_MEDIA_BYTES:
+        logger.warning("whatsapp.outbound.media_refused reason=over_cap bytes=%d", len(data))
+        return None
+    try:
+        return _reencode_stream(io.BytesIO(data))
+    except Exception:
+        logger.warning("whatsapp.outbound.media_refused reason=encode", exc_info=True)
+        return None
+
+
+def _reencode_stream(handle) -> tuple[bytes, str, str] | None:
+    """The sniff, decode and save behind both entry points; the size is checked."""
+    from PIL import Image, ImageOps  # noqa: PLC0415
+
+    from ...image_attachments import JPEG_QUALITY, MAX_SOURCE_PIXELS  # noqa: PLC0415
+
     head = handle.read(image_sniff.SNIFF_BYTES)
     source_type = image_sniff.sniff_raster(head)
     if source_type not in _SOURCE_FORMATS:
@@ -235,4 +269,7 @@ def discard(config: "Config", staged: WhatsAppOutboundMedia | None) -> None:
         logger.warning("whatsapp.outbound.media_discard_failed", exc_info=True)
 
 
-__all__ = ["ImageSplit", "OUTBOUND_MAX_EDGE", "discard", "split_image", "stage_image"]
+__all__ = [
+    "ImageSplit", "OUTBOUND_MAX_EDGE", "discard", "reencode_bytes", "split_image",
+    "stage_image", "stage_image_bytes",
+]

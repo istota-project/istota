@@ -985,10 +985,6 @@ def cmd_talk_share_file(args):
     return {"status": "ok", "token": args.token, "path": path, "share_id": result.get("id")}
 
 
-#: How many numbered names an upload tries before giving up.
-_MAX_UPLOAD_NAMES = 100
-
-
 def _share_local_file(config: Config, token: str, path: str):
     """Upload a workspace file into the bot's ``Talk/<token>/<day>/``, then share it.
 
@@ -998,9 +994,8 @@ def _share_local_file(config: Config, token: str, path: str):
     on a 412), so a second post of the same name leaves the first one as it
     was. A later edit of the workspace file does not reach the posted copy.
     """
-    from datetime import datetime, timezone
-
-    from istota.lib.filenames import filename_parts, numbered_name, safe_filename
+    from istota.lib.filenames import safe_filename
+    from istota.nextcloud.talk_files import MAX_UPLOAD_NAMES, NamesExhausted, upload_copy
     from istota.sandbox.host_paths import memory_refusal, resolve_in_roots
     from istota.skills._hostpath import egress_roots
     from istota.storage import validate_conversation_token
@@ -1032,24 +1027,15 @@ def _share_local_file(config: Config, token: str, path: str):
             "only a regular file can be posted", reason="host_path_refused", path=path,
         )
 
-    folder = f"Talk/{token}/{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
-    dav_mod.ensure_dirs(config, folder, prefixed=False)
     supports_chunking = _supports_chunking(config, resolved.stat().st_size, False)
-    stem, ext = filename_parts(safe_filename(resolved.name))
-    for n in range(1, _MAX_UPLOAD_NAMES + 1):
-        remote = f"/{folder}/{numbered_name(stem, ext, n)}"
-        try:
-            dav_mod.upload(
-                config, resolved, remote, supports_chunking=supports_chunking,
-                prefixed=False, overwrite=False,
-            )
-            break
-        except OcsError as e:
-            if e.http_status != 412:
-                raise
-    else:
+    try:
+        remote = upload_copy(
+            config, token, resolved, safe_filename(resolved.name),
+            supports_chunking=supports_chunking,
+        )
+    except NamesExhausted as exc:
         return error_envelope(
-            f"{folder} already holds {_MAX_UPLOAD_NAMES} files with this name",
+            f"{exc.folder} already holds {MAX_UPLOAD_NAMES} files with this name",
             reason="name_exhausted", path=path,
         )
 

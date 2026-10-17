@@ -36,19 +36,28 @@ it ships to every browser that loads a map and appears in every request they
 make. It is deployment config, never a repo literal, and it is treated as
 public throughout — the spec this module returns is meant for the browser.
 
-stdlib-only leaf: imports nothing from the package, reads no config file and
-opens no socket. Everything it needs arrives as an argument.
+The resolver is a stdlib-only leaf: it imports nothing from the package at
+module level, reads no config file and opens no socket, and everything it
+needs arrives as an argument. ``basemap_for_user`` is the one exception: it
+reads a user's stored key, importing the secrets store inside the call, so the
+web endpoint and the location-share PNG renderer resolve a user's basemap the
+same way rather than each assembling it.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
+from typing import Any
 from urllib.parse import quote, urlsplit
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_PROVIDER",
     "PROVIDERS",
     "BasemapSpec",
+    "basemap_for_user",
     "provider_names",
     "resolve_basemap",
     "select_provider",
@@ -186,6 +195,45 @@ def select_provider(configured_provider: str, *, user_api_key: str) -> str:
     if (user_api_key or "").strip():
         return "carto"
     return (configured_provider or "").strip().lower() or DEFAULT_PROVIDER
+
+
+def basemap_for_user(config: Any, user_id: str) -> BasemapSpec:
+    """The basemap `user_id`'s maps use: deployment config plus their stored key.
+
+    Never raises. A map must render without the secrets store, so a failed
+    read is logged and treated as no key, and a config with no ``web.map``
+    section resolves the default.
+    """
+    # `getattr` rather than attribute access, matching `check_basemap`: a
+    # Config with `web` unset must resolve the default, not raise.
+    web_cfg = getattr(config, "web", None) if config is not None else None
+    cfg = getattr(web_cfg, "map", None)
+    user_key = ""
+    if config is not None:
+        try:
+            from istota.credentials import store as secrets_store
+
+            # Stripped once, at the read, so `select_provider` and `api_key=`
+            # below cannot disagree about whether this user has a key.
+            user_key = (
+                secrets_store.get_secret(config.db_path, user_id, "carto", "api_key")
+                or ""
+            ).strip()
+        except Exception:  # noqa: BLE001 - a map must render without the store
+            logger.warning("basemap: could not read the stored carto key", exc_info=True)
+            user_key = ""
+
+    if cfg is None:
+        return resolve_basemap()
+
+    provider = select_provider(cfg.provider, user_api_key=user_key)
+    return resolve_basemap(
+        provider=provider,
+        api_key=user_key or cfg.api_key,
+        dark_style=cfg.dark_style,
+        light_style=cfg.light_style,
+        attribution=cfg.attribution,
+    )
 
 
 def _resolve_known(name: str, *, api_key: str) -> BasemapSpec:

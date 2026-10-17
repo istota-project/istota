@@ -322,6 +322,8 @@ Not everything client-local is a preference. `stores/drafts.ts` — unsent chat 
 
 A new build is surfaced, not forced: the root layout watches SvelteKit's `updated` state and shows a toast with a Reload button. It is a tap rather than an automatic reload because reloading discards a half-typed message. It also re-checks on `visibilitychange`, since the poll timer is throttled in a background tab and stopped outright in a suspended PWA — without that, a phone returning to the app after a day would be running whatever it had.
 
+**Render bundles are a second build.** `src/render/<name>/main.ts` entries are built by `vite.render.config.ts` into self-contained `build-render/<name>.html` files the daemon sends to the browser service to turn into an image (the location share map for Talk and WhatsApp). They are not routes and the web never serves them. An entry calls `registerRenderer` from `src/render/host.ts` and mounts app components with `mount`; it makes no API call, since everything it draws arrives in the payload. The contract is in `.claude/rules/leaf-modules.md` under `browser/document_render.py`.
+
 `static/` holds the manifest and the four icons. Manifest paths stay **relative** and head links go through `%sveltekit.assets%`, because the whole app is served under the `/istota` base and at varying route depths.
 
 ## Checks

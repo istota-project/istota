@@ -36,7 +36,8 @@ def _dispatch(args):
         now = datetime.now(timezone.utc)
         if args.command == "location":
             return sharing.read_room_location(config, actor_user_id=actor, task_id=int(task),
-                                              subject_user_id=args.user, now=now)
+                                              subject_user_id=args.user, now=now,
+                                              map_card=args.map != "off")
         if args.command == "locations":
             return sharing.read_room_locations(config, actor_user_id=actor, task_id=int(task), now=now)
         with db.get_db(config.db_path) as conn:
@@ -75,6 +76,7 @@ def build_parser():
     commands.add_parser("answer-privately")
     location = commands.add_parser("location")
     location.add_argument("--user", required=True)
+    location.add_argument("--map", choices=["auto", "off"], default="auto")
     commands.add_parser("locations")
     stop = commands.add_parser("location-stop")
     stop.add_argument("--all", action="store_true")

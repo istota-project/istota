@@ -258,6 +258,7 @@ function readReplyTo(value: unknown): MessageReply | undefined {
     msgId: r.msgId as number,
     ...(role ? { role } : {}),
     ...(typeof r.excerpt === 'string' ? { excerpt: r.excerpt } : {}),
+    ...(typeof r.author === 'string' ? { author: r.author } : {}),
     ...(r.deleted === true ? { deleted: true } : {}),
   };
 }

@@ -406,11 +406,6 @@ describe('Back', () => {
 });
 
 describe('the Your account screen', () => {
-  it('discloses automatic membership and retained history', async () => {
-    await openAt('account');
-    expect(await screen.findByText(/Your account joins All users automatically/)).toBeTruthy();
-    expect(screen.getByText(/anyone who joins later/)).toBeTruthy();
-  });
   it('refuses two different passwords without saving either', async () => {
     await openAt('account');
     await screen.findByLabelText(/^Password/);

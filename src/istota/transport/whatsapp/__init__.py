@@ -186,6 +186,7 @@ class WhatsAppTransport:
         user_id: str | None = None, reference_id: str | None = None,
         buttons: tuple[tuple[str, str], ...] = (),
         ignore_opt_out: bool = False,
+        generated_image: bytes | None = None,
     ) -> "WhatsAppDeliveryRecord | None":
         """`deliver`, returning the ledger record instead of a message id.
 
@@ -206,6 +207,9 @@ class WhatsAppTransport:
         and a failure then writes a fresh alert row and fires a fresh push. It
         is logged rather than refused, because refusing would turn a caller's
         oversight into a lost answer; no shipped caller takes that branch.
+
+        `generated_image` is passed through to `deliver_whatsapp`: a picture
+        the daemon made for this answer, which needs no `attach_media`.
         """
         import logging  # noqa: PLC0415
 
@@ -267,6 +271,7 @@ class WhatsAppTransport:
             group_room=group_room,
             attach_media=_answers_own_turn(task, user_id, logical_key),
             reply_to_message_id=reply_to_message_id,
+            generated_image=generated_image,
         )
 
     async def edit(self, target: str, message_id: int, text: str) -> None:

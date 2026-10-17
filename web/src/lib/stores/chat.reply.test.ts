@@ -230,6 +230,27 @@ describe('chat store — reply to a message', () => {
     expect(dead.replyTo).toEqual({ msgId: 12, deleted: true });
   });
 
+  it("carries a cited parent's author onto the history row (#764)", async () => {
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
+    api.getRoomMessages.mockResolvedValue(
+      page([
+        userTurn(2, 'about that', {
+          reply_to: {
+            msg_id: 11,
+            role: 'user',
+            excerpt: 'Eruption is blah',
+            author: 'Carol',
+            deleted: false,
+          },
+        }),
+      ]),
+    );
+    const s = await freshSession();
+    await s.init();
+
+    expect(get(s.messages).find((m) => m.taskId === 2)!.replyTo?.author).toBe('Carol');
+  });
+
   it('jumpToMsgId scrolls to a canonical id in the window', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomMessages.mockResolvedValue(page([userTurn(2, 'q2'), asstTurn(2, 'a2')]));
