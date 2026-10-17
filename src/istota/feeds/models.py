@@ -571,6 +571,19 @@ def safe_http_url(url: str | None) -> str | None:
     return candidate
 
 
+def http_image_url(url: str | None) -> str | None:
+    """``safe_http_url`` for an image, with a protocol-relative ``//host/...``
+    src read as https.
+
+    Feed bodies often write their images that way, and feedparser is given no
+    base URL to resolve them against, so without this a lead image would be
+    hoisted out of the body and then refused.
+    """
+    if isinstance(url, str) and url.strip().startswith("//"):
+        url = "https:" + url.strip()
+    return safe_http_url(url)
+
+
 def is_http_url(url: str) -> bool:
     """Whether a URL is one we are willing to put in a browser ``src``.
 

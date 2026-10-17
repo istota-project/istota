@@ -55,6 +55,7 @@ from istota.feeds.models import (
     FetchedItem,
     FetchResult,
     detect_source_type,
+    http_image_url,
     is_http_url,
     media_type_for_url,
     poll_host,
@@ -323,7 +324,10 @@ def _rss_entry_to_item(entry) -> FetchedItem:
             untyped="image",
         )
 
-    lead_body_image = body_images[:1]  # 0 or 1 element
+    # Only a lead image the hero can show is hoisted; any other (a `data:`
+    # src the sanitizer admitted) stays in the body rather than vanishing.
+    lead = http_image_url(body_images[0]) if body_images else None
+    lead_body_image = [lead] if lead else []
     image_urls = dedupe_image_variants(lead_body_image + media_images)
 
     # Drop the hero image(s) from the body so the reader doesn't paint it twice
@@ -581,7 +585,9 @@ def _persist_poll(
                 author=item.author,
                 content_html=item.content_html,
                 content_text=item.content_text,
-                image_urls=[u for u in item.image_urls if is_http_url(u)],
+                image_urls=[
+                    url for url in map(http_image_url, item.image_urls) if url
+                ],
                 embed_url=safe_http_url(item.embed_url),
                 file_url=safe_http_url(item.file_url),
                 media_url=safe_http_url(item.media_url),

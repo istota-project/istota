@@ -884,3 +884,22 @@ class TestStoredUnsafeLinksAreNotPassedOn:
         text = export_opml(ctx)
         assert "https://x.test/feed" in text
         assert "script" not in text.lower()
+
+    def test_entries_reads_a_protocol_relative_image_as_https(self, ctx):
+        from istota.feeds.models import EntryRecord
+
+        _seed_db(ctx, feeds=[{"url": "https://x.test/feed"}])
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
+            feeds_db.insert_entries(conn, feed.id, [
+                EntryRecord(id=0, feed_id=feed.id, guid="r", title="R",
+                            url=None, author=None, content_html=None,
+                            content_text=None,
+                            image_urls=["//cdn.example.com/a.jpg"],
+                            published_at="2026-01-01T00:00:00+00:00",
+                            fetched_at="2026-01-01T00:00:00+00:00",
+                            status="unread"),
+            ])
+            conn.commit()
+        out = json.loads(_invoke(ctx, ["entries"]).output)
+        assert out["entries"][0]["image_urls"] == ["https://cdn.example.com/a.jpg"]

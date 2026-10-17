@@ -32,7 +32,7 @@ from istota.feeds.models import (
     FeedsContext,
     default_poll_interval_for,
     detect_source_type,
-    is_http_url,
+    http_image_url,
     normalize_feed_url,
     safe_http_url,
 )
@@ -88,8 +88,10 @@ def _map_entry(
     cat = cat_by_id.get(feed.category_id) if feed else None
     hidden = suppressed or set()
     # Only http(s) images, for rows stored before ingestion checked (ISSUE-774).
-    stored = [url for url in (entry.image_urls or []) if is_http_url(url)]
-    images = [url for url in stored if url not in hidden]
+    # Suppression is keyed on the stored spelling, so it is checked before a
+    # protocol-relative URL is resolved.
+    stored = [raw for raw in (entry.image_urls or []) if http_image_url(raw)]
+    images = [http_image_url(raw) for raw in stored if raw not in hidden]
     return {
         "id": entry.id,
         "title": entry.title or "",

@@ -25,7 +25,7 @@ from istota.feeds.models import (
     default_poll_interval_for,
     FeedsContext,
     detect_source_type,
-    is_http_url,
+    http_image_url,
     normalize_feed_url,
     safe_http_url,
 )
@@ -188,7 +188,9 @@ def cmd_entries(
             "title": e.title,
             "url": safe_http_url(e.url),
             "author": e.author,
-            "image_urls": [u for u in e.image_urls or [] if is_http_url(u)],
+            "image_urls": [
+                url for url in map(http_image_url, e.image_urls or []) if url
+            ],
             # An mp4 attachment used to appear here as an image_url. Naming it
             # for what it is keeps the model's view of an entry honest, and it
             # is the only place a video shows at all now (ISSUE-356).

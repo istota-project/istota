@@ -174,6 +174,30 @@ class TestGetFeeds:
         assert entry["media_url"] == ""
         assert entry["media_type"] == ""
 
+    def test_a_stored_protocol_relative_image_is_served_as_https(self, ctx, client):
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.get_feed_by_url(
+                conn, "https://example.com/feed.xml",
+            ).id
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="rss-pr", title="Relative",
+                    url="https://example.com/post/3", author=None,
+                    content_html="<p>x</p>", content_text="x",
+                    image_urls=["//cdn.example.com/a.jpg"],
+                    published_at="2026-05-03T08:00:00+00:00",
+                    fetched_at="2026-05-03T09:00:00+00:00",
+                    status="unread",
+                ),
+            ])
+            conn.commit()
+
+        body = client.get("/istota/api/feeds").json()
+        entry = next(e for e in body["entries"] if e["title"] == "Relative")
+        assert entry["images"] == ["https://cdn.example.com/a.jpg"]
+        assert entry["duplicate_image_count"] == 0
+
     def test_a_stored_unsafe_link_is_served_blank(self, ctx, client):
         """ISSUE-774. Rows stored before ingestion checked a scheme still hold
         ``javascript:`` URLs; the serializer must not hand them to an href."""

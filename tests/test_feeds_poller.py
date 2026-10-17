@@ -1433,3 +1433,53 @@ class TestUnsafeLinksAreNotStored:
             )
             conn.commit()
             assert feeds_db.list_feeds(conn)[0].site_url is None
+
+
+def _rss_with_body(body: str) -> bytes:
+    from xml.sax.saxutils import escape
+
+    return (
+        '<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>'
+        "<link>https://example.com</link><item><title>Post</title>"
+        "<link>https://example.com/p</link><guid>p-1</guid>"
+        f"<description>{escape(body)}</description>"
+        "</item></channel></rss>"
+    ).encode()
+
+
+class TestLeadImageSchemes:
+    """ISSUE-774 follow-up. The lead body image is hoisted out of the body
+    into the hero, so one the scheme check would refuse must not be hoisted,
+    or it ends up in neither place."""
+
+    def _poll(self, tmp_path, body):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="https://example.com/feed.xml", title=None,
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            conn.commit()
+        resp = _StubResponse(status_code=200, content=_rss_with_body(body))
+        now = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=_stub_get_factory(resp), now=now)
+            return feeds_db.list_entries(conn)[0]
+
+    def test_a_protocol_relative_lead_image_becomes_an_https_hero(self, tmp_path):
+        entry = self._poll(
+            tmp_path,
+            '<p>Intro</p><img src="//cdn.example.com/a.jpg"><p>Body</p>',
+        )
+        assert entry.image_urls == ["https://cdn.example.com/a.jpg"]
+        assert "<img" not in (entry.content_html or "")
+
+    def test_a_data_lead_image_stays_in_the_body(self, tmp_path):
+        entry = self._poll(
+            tmp_path,
+            '<p>Intro</p><img src="data:image/png;base64,iVBORw0KGgo="><p>Body</p>',
+        )
+        assert entry.image_urls == []
+        assert 'src="data:image/png;base64,iVBORw0KGgo="' in (entry.content_html or "")
