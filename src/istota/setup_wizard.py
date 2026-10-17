@@ -2258,7 +2258,7 @@ def adopt_desktop_app(data_dir: Path, vm_dir: Path, *, out) -> None:
     cookies = {"ISTOTA_WEB_INSECURE_COOKIES": web_insecure_cookies(ingress)}
     env_path.write_text(merge_env_text(env_text, cookies, _STACK_ENV_HEADER), encoding="utf-8")
     out(f"  .env: ISTOTA_WEB_INSECURE_COOKIES={cookies['ISTOTA_WEB_INSECURE_COOKIES']}")
-    _add_login_codes(document, config_path, data_dir, out=out)
+    _add_login_codes(document, config_path, data_dir, forwarded_port(vm_dir), out=out)
 
 
 def _login_code_user_refusal(document: dict, data_dir: Path) -> str | None:
@@ -2283,7 +2283,31 @@ def _login_code_user_refusal(document: dict, data_dir: Path) -> str | None:
     return None
 
 
-def _add_login_codes(document: dict, config_path: Path, data_dir: Path, *, out) -> None:
+def _login_code_hostname(document: dict, port: int) -> tuple[str | None, str | None]:
+    """The `[site] hostname` the codes need, and why there is none.
+
+    An older local install has a bare `localhost`, or a port other than the
+    one Lima forwards; the app opens `localhost:<forwarded port>`, so that is
+    the hostname. Any other name is left alone.
+    """
+    from istota.config import local_login_hosts  # noqa: PLC0415
+
+    site = document.get("site", {})
+    hostname = site.get("hostname", "") if isinstance(site, dict) else None
+    if not isinstance(hostname, str):
+        return None, "[site] hostname is not a string"
+    lowered = hostname.strip().lower()
+    if port and (lowered == "localhost" or lowered.startswith("localhost:")):
+        return f"localhost:{port}", None
+    if local_login_hosts(hostname):
+        return hostname, None
+    why = f"[site] hostname is {hostname!r} and the codes need localhost:<port>, the address the app opens"
+    if lowered == "localhost":
+        why += "; host.env has no LOCAL_FORWARD_PORT to give it"
+    return None, why
+
+
+def _add_login_codes(document: dict, config_path: Path, data_dir: Path, port: int, *, out) -> None:
     from istota import apply  # noqa: PLC0415
     from istota.config import WEB_AUTH_METHODS  # noqa: PLC0415
 
@@ -2305,6 +2329,13 @@ def _add_login_codes(document: dict, config_path: Path, data_dir: Path, *, out) 
     if refusal:
         out(f"  Not turning on the app's login codes: {refusal}; {keeps}.")
         return
+    hostname, refusal = _login_code_hostname(document, port)
+    if refusal:
+        out(f"  Not turning on the app's login codes: {refusal}; {keeps}.")
+        return
+    site = document.setdefault("site", {})
+    renamed = site.get("hostname") != hostname
+    site["hostname"] = hostname
     web["auth"] = ["local_code", *methods]
     try:
         section = apply.plan_config(document, config_path, backup=RERUN_CONFIG_BACKUPS)
@@ -2313,6 +2344,8 @@ def _add_login_codes(document: dict, config_path: Path, data_dir: Path, *, out) 
         return
     if section.changed and section.write is not None:
         section.write()
+    if renamed:
+        out(f"  [site] hostname: {hostname}")
     out(f"  [web] auth: {web['auth']}")
 
 

@@ -2084,6 +2084,42 @@ class TestAnInstallMovedIntoTheApp:
         assert setup_wizard.desktop_app(stack / "vm")
         assert _env((stack / "vm" / ".env").read_text())["ISTOTA_WEB_INSECURE_COOKIES"] == "1"
 
+    @staticmethod
+    def _forwarding(stack: Path, port: str) -> None:
+        host = stack / "vm" / "host.env"
+        host.write_text(host.read_text() + f"LOCAL_FORWARD_PORT={port}\n")
+
+    @pytest.mark.parametrize("hostname", ["localhost", "localhost:8181"])
+    def test_a_localhost_hostname_takes_the_forwarded_port(self, stack, monkeypatch, hostname):
+        """An older install's `[site] hostname` is a bare `localhost`, or names
+        a port other than the one Lima forwards; the app opens the forwarded
+        one, so that is the address the codes are for."""
+        config = self._config(stack)
+        config.write_text(config.read_text().replace('"localhost:8181"', f'"{hostname}"'))
+        self._forwarding(stack, "8080")
+        assert self._run(stack) == 0
+        loaded = _load(stack, config.read_text(), monkeypatch)
+        assert loaded.site.hostname == "localhost:8080"
+        assert loaded.web.auth == ["local_code", "email"]
+
+    def test_a_bare_localhost_with_no_forwarded_port_says_why(self, stack):
+        config = self._config(stack)
+        config.write_text(config.read_text().replace('"localhost:8181"', '"localhost"'))
+        before = config.read_bytes()
+        said: list[str] = []
+        assert self._run(stack, out=said.append) == 0
+        assert config.read_bytes() == before
+        assert any("Not turning on the app's login codes" in line and "hostname" in line for line in said), said
+
+    def test_a_hostname_that_is_not_localhost_says_why(self, stack):
+        config = self._config(stack)
+        config.write_text(config.read_text().replace('"localhost:8181"', '"bot.example.test"'))
+        self._forwarding(stack, "8080")
+        said: list[str] = []
+        assert self._run(stack, out=said.append) == 0
+        assert any("bot.example.test" in line and "hostname" in line for line in said), said
+        assert "bot.example.test" in config.read_text()
+
     @pytest.mark.parametrize("case", ["no database", "two users", "no web identity"])
     def test_codes_wait_for_one_user_with_a_web_identity(self, stack, case):
         """`istota web login-code` with no --user signs in the one user with a

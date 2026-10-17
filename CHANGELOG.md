@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Restoring a local install onto a new VM no longer leaves the web app stuck on "Starting up". The restore now creates the web sign-in key the backups do not hold, so the web app starts; everyone signs in again once.
+- Moving an older command-line install into the Mac app now turns on the app's login codes when the install's site address is a plain `localhost`. The address is set to the port the app opens, and when the codes still cannot be turned on, the message says why.
 - A mail the bot sends as HTML no longer shows as raw markup in its web chat email room. It now goes out with a plain-text version beside the HTML, links kept, and the room shows that text. Mail recorded before this keeps its HTML.
 - Signing in to an install on this Mac (`http://localhost`) now works in Safari. Safari dropped the session cookie there, so every sign-in form answered "This form expired". Run `istota-stack setup --web --force` once on an existing local install to pick up the change.
 - A reply quote in a shared room names the person who wrote the quoted message. It used to show the viewer's own name on any quoted user message, so in a WhatsApp group or a shared web room another member's words were attributed to you.
