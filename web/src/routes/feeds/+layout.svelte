@@ -417,7 +417,9 @@
   .feed-btn {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    /* The row holds the name and its unread mark only; the mark sits against
+       the name, as the nav's does. */
+    gap: 2px;
     width: 100%;
     background: none;
     border: none;
