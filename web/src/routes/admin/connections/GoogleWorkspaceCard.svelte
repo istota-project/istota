@@ -1,7 +1,9 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminGoogleWorkspaceConnection } from '$lib/api';
-  import { Badge, Button } from '$lib/components/ui';
+  import { Button } from '$lib/components/ui';
+  import { KeyRound } from '@lucide/svelte';
+  import ConnectionCard from './ConnectionCard.svelte';
 
   let { connection }: { connection: AdminGoogleWorkspaceConnection } = $props();
 
@@ -30,63 +32,77 @@
   );
 </script>
 
-<section class="card" data-testid="google-workspace-card">
-  <div class="card-head">
-    <h2>{connection.label}</h2>
-    <Badge variant={badge.variant}>{badge.label}</Badge>
-  </div>
-
-  <dl class="kv">
-    <dt>Client ID</dt>
-    <dd>{connection.client_id.trim() ? connection.client_id : 'Not set'}</dd>
-    <dt>Client secret</dt>
-    <dd>{connection.client_secret_set ? 'Set' : 'Not set'}</dd>
-    <dt>Callback URL</dt>
-    <dd>{connection.redirect_uri ?? 'Not set'}</dd>
-  </dl>
-
-  <h3 class="micro-label">Maximum service access</h3>
-  <dl class="kv">
-    {#each connection.services as service (service.service)}
-      <dt>{service.label}</dt>
-      <dd>{LEVEL_LABELS[service.max_level]}</dd>
-    {/each}
-  </dl>
-  {#if noAccess}
-    <p class="summary">No services are allowed</p>
-  {/if}
-  {#if connection.additional_scopes.length > 0}
-    <h3 class="micro-label">Additional scopes requested on connection</h3>
-    <ul>
-      {#each connection.additional_scopes as scope (scope)}
-        <li><code>{scope}</code></li>
-      {/each}
-    </ul>
-    <p class="summary">These scopes have no per-user service picker control.</p>
-  {/if}
-
+<ConnectionCard
+  testid="google-workspace-card"
+  title={connection.label}
+  subtitle="The OAuth app behind each user's Google connection"
+  icon={KeyRound}
+  {badge}
+>
   {#if connection.missing.length > 0}
-    <ul>
+    <ul class="banner warn missing">
       {#each connection.missing as field (field)}
         <li>{MISSING[field]}</li>
       {/each}
     </ul>
   {/if}
 
-  <p class="summary">Each user connects their own Google account in Settings → Connections.</p>
-  <p class="summary">
-    Configuration presence does not verify credentials, enabled APIs or Google consent settings.
-    This card reflects the loaded configuration after the normal configuration restart.
+  <dl class="kv">
+    <dt>Client ID</dt>
+    <dd class:unset={!connection.client_id.trim()}>
+      {connection.client_id.trim() ? connection.client_id : 'Not set'}
+    </dd>
+    <dt>Client secret</dt>
+    <dd class:unset={!connection.client_secret_set}>
+      {connection.client_secret_set ? 'Set' : 'Not set'}
+    </dd>
+    <dt>Callback URL</dt>
+    <dd class:unset={!connection.redirect_uri}>{connection.redirect_uri ?? 'Not set'}</dd>
+  </dl>
+
+  <div class="group">
+    <h3 class="micro-label">Maximum service access</h3>
+    <dl class="kv">
+      {#each connection.services as service (service.service)}
+        <dt>{service.label}</dt>
+        <dd class:unset={service.max_level === 'off'}>{LEVEL_LABELS[service.max_level]}</dd>
+      {/each}
+    </dl>
+    {#if noAccess}
+      <p class="summary">No services are allowed</p>
+    {/if}
+  </div>
+
+  {#if connection.additional_scopes.length > 0}
+    <div class="group">
+      <h3 class="micro-label">Additional scopes requested on connection</h3>
+      <ul class="scopes">
+        {#each connection.additional_scopes as scope (scope)}
+          <li><code>{scope}</code></li>
+        {/each}
+      </ul>
+      <p class="caption">These scopes have no per-user service picker control.</p>
+    </div>
+  {/if}
+
+  <p class="caption">
+    Each user connects their own Google account in Settings → Connections. Configuration presence
+    does not verify credentials, enabled APIs or Google consent settings. This card reflects the
+    loaded configuration after the normal configuration restart.
   </p>
-  <div class="form-actions">
+
+  {#snippet actions()}
+    <Button
+      variant="secondary"
+      href="https://istota.cynium.com/docs/features/google-workspace/"
+      target="_blank"
+      rel="noopener noreferrer">Setup guide</Button
+    >
     <Button variant="secondary" href={`${base}/admin/config?section=google_workspace`}
       >Configure</Button
     >
-    <Button variant="secondary" href="https://istota.cynium.com/docs/features/google-workspace/"
-      >Setup guide</Button
-    >
-  </div>
-</section>
+  {/snippet}
+</ConnectionCard>
 
 <style>
   .summary {
@@ -95,7 +111,38 @@
     color: var(--text-secondary);
   }
 
-  dd,
+  .caption {
+    margin: 0;
+  }
+
+  .unset {
+    color: var(--text-muted);
+  }
+
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .group h3 {
+    margin: 0;
+  }
+
+  .missing {
+    margin: 0;
+    padding-left: var(--space-6);
+  }
+
+  .scopes {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
   code {
     overflow-wrap: anywhere;
     user-select: text;

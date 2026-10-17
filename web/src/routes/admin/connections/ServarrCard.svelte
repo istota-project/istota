@@ -15,6 +15,9 @@
   import { formatRelative } from '$lib/dateFormat';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { notifyError } from '$lib/stores/notices';
+  import { Clapperboard } from '@lucide/svelte';
+  import CheckResult from './CheckResult.svelte';
+  import ConnectionCard from './ConnectionCard.svelte';
   import ServarrEditForm from './ServarrEditForm.svelte';
   import {
     formProblems,
@@ -79,13 +82,6 @@
   function checkBadge(app: AdminServarrApp) {
     const check = app.check;
     return check === null || check.status === 'skip' ? CHECK.none : CHECK[check.status];
-  }
-
-  function showRemedy(app: AdminServarrApp): boolean {
-    const check = app.check;
-    return (
-      check !== null && (check.status === 'warn' || check.status === 'fail') && check.remedy !== ''
-    );
   }
 
   // The URL comes from config and is shown as typed; only an http(s) address
@@ -199,17 +195,13 @@
   }
 </script>
 
-<section class="card" data-testid="servarr-card">
-  <div class="card-head">
-    <h2>{connection.label}</h2>
-    <span class="status">
-      {#if stale}
-        <span class="caption">the daemon's last report is old</span>
-      {/if}
-      <Badge variant={badge.variant}>{badge.label}</Badge>
-    </span>
-  </div>
-
+<ConnectionCard
+  testid="servarr-card"
+  title={connection.label}
+  subtitle="Sonarr, Radarr, Lidarr and Prowlarr, for the servarr skill"
+  icon={Clapperboard}
+  {badge}
+>
   {#if connection.status === 'disabled'}
     <p class="summary">
       This install has no arr apps for the servarr skill: no <code>[servarr.apps]</code> table is set.
@@ -221,16 +213,15 @@
 
     <ul class="apps">
       {#each connection.apps as app (app.app)}
-        {@const check = app.check}
         <li class="app" data-testid={`servarr-app-${app.app}`}>
-          <div class="card-head">
+          <div class="app-head">
             <h3 class="app-name">{app.app}</h3>
             {#if !app.incomplete}
               <Badge variant={checkBadge(app).variant} size="sm">{checkBadge(app).label}</Badge>
             {/if}
           </div>
           {#if app.incomplete}
-            <p class="summary">{app.problem}</p>
+            <p class="banner warn app-problem">{app.problem}</p>
           {:else}
             <dl class="kv">
               <dt>URL</dt>
@@ -245,20 +236,17 @@
               <dd>{keyLabel(app)}</dd>
             </dl>
             {#if app.problem}
-              <p class="summary remedy">{app.problem}</p>
+              <p class="banner warn app-problem">{app.problem}</p>
             {/if}
-            {#if check}
-              <p class="summary">{check.detail}</p>
-              {#if showRemedy(app)}
-                <p class="summary remedy" data-testid={`servarr-remedy-${app.app}`}>
-                  {check.remedy}
-                </p>
-              {/if}
-              {#if check.at}
-                <p class="caption">checked {formatRelative(check.at)}</p>
-              {/if}
-            {:else if !app.problem}
-              <p class="summary">The daemon has not recorded a check of this app yet.</p>
+            {#if app.check || !app.problem}
+              <CheckResult
+                check={app.check}
+                empty="The daemon has not recorded a check of this app yet."
+                remedyTestid={`servarr-remedy-${app.app}`}
+              />
+            {/if}
+            {#if app.check?.at}
+              <p class="caption">checked {formatRelative(app.check.at)}</p>
             {/if}
           {/if}
         </li>
@@ -277,13 +265,15 @@
     </dl>
 
     {#if defaults.length > 0}
-      <h3 class="micro-label">Add defaults, as configured</h3>
-      <dl class="kv">
-        {#each defaults as [app, table] (app)}
-          <dt>{app}</dt>
-          <dd>{describeDefaults(table ?? {})}</dd>
-        {/each}
-      </dl>
+      <div class="group">
+        <h3 class="micro-label">Add defaults, as configured</h3>
+        <dl class="kv">
+          {#each defaults as [app, table] (app)}
+            <dt class="app-label">{app}</dt>
+            <dd>{describeDefaults(table ?? {})}</dd>
+          {/each}
+        </dl>
+      </div>
     {/if}
 
     {#if unanswered}
@@ -319,13 +309,29 @@
   {/if}
 
   {#if form}
-    <h3 class="micro-label">Edit the connection</h3>
-    <ServarrEditForm bind:form {problems} {users} />
-    <p class="summary">
-      Changes go through the same review, confirmation and host applier as the Configuration page,
-      and Istota restarts to load them. A new key is sealed until the host writes it.
+    <div class="group">
+      <h3 class="micro-label">Edit the connection</h3>
+      <ServarrEditForm bind:form {problems} {users} />
+      <p class="caption">
+        Changes go through the same review, confirmation and host applier as the Configuration page,
+        and Istota restarts to load them. A new key is sealed until the host writes it.
+      </p>
+    </div>
+  {:else if connection.status !== 'disabled'}
+    <p class="caption">
+      Configured is no claim that the keys work; each app's check says that. The web interface never
+      calls an arr app.
     </p>
-    <div class="form-actions">
+  {/if}
+
+  {#snippet meta()}
+    {#if stale && !form}
+      <span class="stale">the daemon's last report is old</span>
+    {/if}
+  {/snippet}
+
+  {#snippet actions()}
+    {#if form}
       <Button
         variant="secondary"
         onclick={() => {
@@ -336,13 +342,7 @@
       <Button variant="primary" onclick={review} disabled={pendingCount === 0}
         >Review changes</Button
       >
-    </div>
-  {:else}
-    <p class="summary">
-      Configured is no claim that the keys work; each app's check says that. The web interface never
-      calls an arr app.
-    </p>
-    <div class="form-actions">
+    {:else}
       <Button variant="secondary" href={`${base}/admin/config?section=servarr`}>Configure</Button>
       {#if requestId === null}
         <Button variant="secondary" onclick={openEditor} loading={opening} loadingLabel="Loading…"
@@ -354,9 +354,9 @@
           >Check now</Button
         >
       {/if}
-    </div>
-  {/if}
-</section>
+    {/if}
+  {/snippet}
+</ConnectionCard>
 
 {#if changeSet}
   <ReviewDialog
@@ -369,47 +369,74 @@
 {/if}
 
 <style>
-  .status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
-  .apps {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
-  .app {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .app-name {
-    margin: 0;
-    text-transform: capitalize;
-  }
-
   .summary {
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
   }
 
-  .remedy {
-    color: var(--text-primary);
-  }
-
   .caption {
     margin: 0;
   }
 
-  dd,
+  .stale {
+    font-size: var(--text-xs);
+    color: var(--status-warn-fg);
+  }
+
+  /* The apps read as one list, divided rather than boxed, so a card with
+     four of them stays a card and not a stack of cards. */
+  .apps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .app {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .app-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .app-name {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+    text-transform: capitalize;
+  }
+
+  .app-label {
+    text-transform: capitalize;
+  }
+
+  .app-problem {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .group h3 {
+    margin: 0;
+  }
+
   code {
     overflow-wrap: anywhere;
     user-select: text;
