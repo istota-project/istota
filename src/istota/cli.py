@@ -15,29 +15,12 @@ from .build_info import version_label
 from istota.sandbox.user_scope import is_scopable_user_id
 from .config import load_config
 from .logging_setup import setup_logging
-from .executor import execute_task
-from .scheduler import process_one_task, check_briefings, _task_heartbeat
-from istota.mail.support import get_email_config
-from .transport.email import poll_emails
-from .skills.email import list_emails, send_email
 from .storage import (
     ensure_user_directories_v2,
     user_directories_exist_v2,
     init_user_memory_v2,
     get_memory_line_count_v2,
     get_user_base_path,
-)
-from .skills.calendar import (
-    get_caldav_client,
-    list_calendars,
-    get_today_events,
-    create_event,
-    delete_event,
-    format_event_for_display,
-)
-from .tasks_file_poller import (
-    discover_tasks_files,
-    poll_user_tasks_file,
 )
 from istota.usage.window import unmeasured_window, usage_window
 from istota.usage.render import (
@@ -207,6 +190,8 @@ def cmd_doctor(args):
 
 def cmd_task(args):
     """Submit a task directly."""
+    from .executor import execute_task
+    from .scheduler import _task_heartbeat
     config = load_config(Path(args.config) if args.config else None)
     args.user = config.resolve_user_id(args.user) or args.user
 
@@ -558,6 +543,7 @@ def cmd_serve(args):
 
 def cmd_run(args):
     """Run the scheduler once (process pending tasks)."""
+    from .scheduler import check_briefings, process_one_task
     config = load_config(Path(args.config) if args.config else None)
 
     if args.briefings:
@@ -1336,6 +1322,9 @@ def _cmd_secret_retire(config, args) -> None:
 
 def cmd_email(args):
     """Email management commands."""
+    from istota.mail.support import get_email_config
+    from .skills.email import list_emails, send_email
+    from .transport.email import poll_emails
     config = load_config(Path(args.config) if args.config else None)
 
     if args.action == "poll":
@@ -3320,6 +3309,7 @@ def cmd_whatsapp_restore_session(args):
 
 def cmd_calendar_discover(args):
     """Discover calendars accessible to the istota bot."""
+    from .skills.calendar import get_caldav_client, list_calendars
     config = load_config(Path(args.config) if args.config else None)
 
     if not config.caldav_url or not config.caldav_username or not config.caldav_password:
@@ -3356,6 +3346,13 @@ def cmd_calendar_discover(args):
 
 def cmd_calendar_test(args):
     """Test calendar access."""
+    from .skills.calendar import (
+        create_event,
+        delete_event,
+        format_event_for_display,
+        get_caldav_client,
+        get_today_events,
+    )
     from datetime import datetime, timedelta
 
     config = load_config(Path(args.config) if args.config else None)
@@ -3429,6 +3426,7 @@ def cmd_calendar_test(args):
 
 def cmd_tasks_file_poll(args):
     """Poll TASKS.md files for new tasks."""
+    from .tasks_file_poller import discover_tasks_files, poll_user_tasks_file
     config = load_config(Path(args.config) if args.config else None)
 
     # Discover TASKS files
@@ -3645,6 +3643,7 @@ def cmd_chat_backfill_history(args):
 
 def cmd_tasks_file_status(args):
     """Show status of TASKS.md file tasks."""
+    from .tasks_file_poller import discover_tasks_files
     config = load_config(Path(args.config) if args.config else None)
 
     # Discover and show TASKS files
