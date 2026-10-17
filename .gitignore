@@ -102,3 +102,6 @@ web/dev-feed-data.json
 # The stack directory a checkout doubles as: host settings and the mount point.
 /docker/host.env
 /docker/mount/
+
+# The Mac app's release directories and their build scratch (scripts/build-appliance.sh).
+/desktop/build/
