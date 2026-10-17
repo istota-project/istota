@@ -466,6 +466,12 @@ class TestTheKey:
         err = refused(client, "GET", "movie")
         assert err.reason == "api_error"
 
+    def test_a_key_echoed_across_the_excerpt_cut_leaves_none_of_itself(self):
+        body = "x" * 490 + KEY
+        fake = FakeArr().on("radarr", "GET", "movie", httpx.Response(500, text=body))
+        err = refused(make(fake), "GET", "movie")
+        assert KEY[:10] not in json.dumps(envelope_for(err))
+
 
 # ---------------------------------------------------------------------------
 # Error mapping, one row each

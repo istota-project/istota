@@ -1216,7 +1216,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # the arr ports to [security.network] extra_hosts.
 # [servarr]
 # requesters = []                 # user ids besides admins who may request
-# private_hosts = []              # exact hosts allowed a private address; plain
+# private_hosts = ["192.168.1.10"]  # exact hosts allowed a private address; plain
 #                                 #   HTTP is allowed only to these
 # lookup_timeout_seconds = 30     # */lookup calls (they reach TMDB, TVDB, MusicBrainz)
 # release_search_timeout_seconds = 120  # interactive release search; keep at

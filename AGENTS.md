@@ -204,6 +204,7 @@ src/istota/
 │   ├── mountinfo.py      # Which mount covers a path: the entrypoint's rclone preflight and the cgroup root check → leaf-modules.md
 │   ├── workspace_marker.py  # The `.istota-workspace` a host folder's workspace carries, and whether the host requires it → leaf-modules.md
 │   ├── dav_xml.py        # Hardened DAV multistatus parsing, principal hrefs and path segments, for CardDAV and the web sharing module → leaf-modules.md
+│   ├── url_redact.py     # A configured URL safe to print, userinfo replaced or removed: doctor, the admin cards and the servarr skill → leaf-modules.md
 │   └── unix_connect.py   # Connecting to a Unix socket without following a symlink at its leaf → leaf-modules.md
 ├── briefings/            # Personal/group briefings — source grants, generation, edition/delivery ledger, reader/settings routes and migration → briefings.md
 ├── feeds/                # Native RSS/Atom/Tumblr/Are.na — poller, SQLite, routes, OPML, image_dedupe

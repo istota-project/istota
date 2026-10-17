@@ -11,9 +11,9 @@ as a resolution layer rather than a rewrite.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
 
 from istota.config import SERVARR_APPS, SERVARR_DEFAULT_FIELDS
+from istota.lib.url_redact import redact_userinfo
 
 
 @dataclass(frozen=True)
@@ -50,16 +50,7 @@ DEFAULT_FIELDS = SERVARR_DEFAULT_FIELDS
 
 def display_url(url: str) -> str:
     """The configured URL with any user name or password removed, for output."""
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-        port = parts.port
-    except ValueError:
-        return "(not a valid URL)"
-    if ":" in host:
-        host = f"[{host}]"
-    netloc = f"{host}:{port}" if port else host
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    return redact_userinfo(url, remove=True)
 
 
 def configured(config) -> list[str]:

@@ -137,6 +137,19 @@ class TestParsing:
         assert any(p["kind"] == "discarded" and p["path"][:2] == ("servarr", "apps")
                    for p in problems)
 
+    def test_an_array_of_apps_is_discarded_without_logging_its_keys(self, tmp_path, caplog):
+        caplog.set_level(logging.WARNING)
+        config, problems = _load(tmp_path, f"""
+            [[servarr.apps]]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+        """)
+        assert config.servarr.apps == {}
+        assert any(p["kind"] == "discarded" and p["path"] == ("servarr", "apps")
+                   for p in problems)
+        assert KEY not in caplog.text
+        assert KEY not in repr(problems)
+
     def test_an_unknown_key_inside_an_app_is_reported(self, tmp_path):
         config, problems = _load(tmp_path, f"""
             [servarr.apps.radarr]

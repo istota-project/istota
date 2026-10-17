@@ -152,8 +152,12 @@ function urlProblem(url: string, privateHosts: string[]): string | null {
     return 'The URL must start with http:// or https://.';
   }
   if (!parsed.hostname) return 'The URL has no host.';
+  if (!/^https?:\/\//i.test(text)) return 'The URL must start with http:// or https://.';
   if (parsed.username || parsed.password) {
     return 'The URL must not carry a user name or password; the API key is set below.';
+  }
+  if (parsed.search || parsed.hash || text.includes('?') || text.includes('#')) {
+    return 'The URL must not carry a query or fragment.';
   }
   if (parsed.protocol === 'http:') {
     const allowed = new Set(privateHosts.map(normalHost));

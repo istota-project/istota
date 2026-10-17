@@ -4356,7 +4356,13 @@ def _servarr_apps(raw: object, key: str) -> object:
     about by `_validate_servarr`, which owns that judgement.
     """
     if not isinstance(raw, dict):
-        return _warn(key, raw, "a table of apps")
+        # No value in the message: an `[[servarr.apps]]` array carries api_keys.
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s must be a table of [servarr.apps.<app>] tables; ignoring it",
+            key,
+        )
+        return {}
     apps: dict[str, ServarrApp] = {}
     for name, table in raw.items():
         path = (*key_path(key), str(name))

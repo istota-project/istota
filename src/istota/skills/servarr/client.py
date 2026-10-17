@@ -507,10 +507,14 @@ class ArrClient:
 
     # -- reading the answer ---------------------------------------------------
 
-    def _said(self, text: str) -> str:
-        """Server text, with the key removed in case it was echoed, then fenced."""
+    def _said(self, text: str, limit: int | None = None) -> str:
+        """Server text, with the key removed in case it was echoed, cut to
+        `limit`, then fenced. Redacting before the cut keeps an echoed key that
+        crosses it from leaving its head behind."""
         if self._key:
             text = text.replace(self._key, "<redacted>")
+        if limit is not None:
+            text = text[:limit]
         return fence(text)
 
     def _interpret(self, response: httpx.Response, raw: bytes,
@@ -565,9 +569,9 @@ class ArrClient:
             ]
             raise self._error(f"{self.app} refused the request: see problems.", "rejected",
                               http_status=status, problems=problems)
-        excerpt = raw.decode("utf-8", errors="replace")[:EXCERPT_CHARS]
+        excerpt = self._said(raw.decode("utf-8", errors="replace"), EXCERPT_CHARS)
         raise self._error(f"{self.app} answered HTTP {status}.", "api_error",
-                          http_status=status, body=self._said(excerpt))
+                          http_status=status, body=excerpt)
 
 
 def _is_validation_list(data) -> bool:

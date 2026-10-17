@@ -343,3 +343,9 @@ class TestRedactUserinfo:
     def test_remove_keeps_the_address(self):
         url = f"https://bot:{PASSWORD}@cloud.example.com:8443/nc"
         assert doctor._redact_userinfo(url, remove=True) == "https://cloud.example.com:8443/nc"
+
+    def test_the_servarr_skill_shows_urls_by_the_same_rule(self):
+        from istota.skills.servarr.apps import display_url
+
+        for url in ("https://admin:12/34@arr.example.com", "https://u:p@arr.example.com:8989/x"):
+            assert display_url(url) == doctor._redact_userinfo(url, remove=True)

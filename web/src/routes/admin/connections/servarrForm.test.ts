@@ -157,7 +157,15 @@ describe('formProblems', () => {
   });
 
   it('refuses a URL that is not http(s) with a host, or that carries userinfo', () => {
-    for (const url of ['ftp://192.0.2.10', 'radarr', 'http://admin:pw@192.0.2.10:7878', '']) {
+    for (const url of [
+      'ftp://192.0.2.10',
+      'radarr',
+      'http://admin:pw@192.0.2.10:7878',
+      '',
+      'http:192.0.2.10:7878',
+      'https://arr.example.com/?a=1',
+      'https://arr.example.com/#top',
+    ]) {
       const edited = form();
       edited.apps.radarr.url = url;
       expect(formProblems(edited)['radarr.url'], url).toBeTruthy();
