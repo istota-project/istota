@@ -790,6 +790,27 @@ class TestUnattendedUpgrades:
     def test_only_there(self):
         assert self.TEXT.count("apt_install unattended-upgrades") == 1
         assert self.TEXT.count("20auto-upgrades") == 1
+        assert self.TEXT.count("Unattended-Upgrade::Origins-Pattern") == 1
+
+    # Docker's dists/trixie/Release, as fetched 2026-10-16: no Codename field,
+    # so a pattern on n= (Debian's default form) would match nothing.
+    DOCKER_RELEASE = {"o": "Docker", "l": "Docker CE", "a": "trixie", "c": "stable"}
+
+    def test_docker_engine_and_runc_are_upgraded_there_too(self):
+        """The offline rule installs Docker once and never upgrades it, and
+        Debian's default patterns name only Debian's own origins."""
+        branch = self.TEXT.split('if [ "$(host_env INGRESS)" = "local" ]; then', 1)[1].split("\nfi\n", 1)[0]
+        block = re.search(r"Unattended-Upgrade::Origins-Pattern \{\n(.*?)\n\};", branch, re.S)
+        assert block, "no Origins-Pattern drop-in on the local VM"
+        patterns = re.findall(r'"([^"]+)";', block.group(1))
+        assert patterns
+
+        def matches(pattern: str) -> bool:
+            fields = dict(part.split("=", 1) for part in pattern.split(","))
+            fields = {k: v.replace("${distro_codename}", "trixie") for k, v in fields.items()}
+            return all(self.DOCKER_RELEASE.get(k) == v for k, v in fields.items())
+
+        assert any(matches(p) for p in patterns), patterns
 
 
 class TestUpstreamRclone:

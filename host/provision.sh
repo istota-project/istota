@@ -428,6 +428,14 @@ if [ "$(host_env INGRESS)" = "local" ]; then
     apt_install unattended-upgrades
     changed_file /etc/apt/apt.conf.d/20auto-upgrades 'APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";' || true
+    # Docker Engine and containerd.io (runc) too: apt_install never upgrades
+    # them, and Debian's patterns name only Debian. Docker's Release file has
+    # Origin, Label and Suite but no Codename, so the suite is what matches.
+    # ${distro_codename} is unattended-upgrades' own variable, not the shell's.
+    # shellcheck disable=SC2016
+    changed_file /etc/apt/apt.conf.d/51istota-docker-upgrades 'Unattended-Upgrade::Origins-Pattern {
+        "o=Docker,l=Docker CE,a=${distro_codename},c=stable";
+};' || true
 fi
 
 # --- Kernel settings ---------------------------------------------------------
