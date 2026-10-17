@@ -1,0 +1,227 @@
+"""``[servarr]``: the install-wide arr connection, as the loader reads it.
+
+The keys are full admin on each app, so two properties matter beyond parsing:
+``servarr.apps`` reaches the dataclass tree as ``ServarrApp`` instances (whose
+``repr`` hides the key), not as the raw dicts the generic walk would pass
+through, and every redaction path recognises ``api_key`` as a credential.
+Everything else here is a warning, never a refusal to start.
+"""
+
+from __future__ import annotations
+
+import logging
+import textwrap
+
+import pytest
+
+from istota.config import (
+    PRIVATE_HOST_PATTERN,
+    Config,
+    ServarrApp,
+    ServarrConfig,
+    load_config,
+)
+from istota.config_mapper import collect_problems
+from istota.webui.admin_config_view import is_secret_path
+
+KEY = "never-shown-arr-sentinel"
+
+
+def _load(tmp_path, body: str):
+    path = tmp_path / "config.toml"
+    path.write_text(textwrap.dedent(body))
+    with collect_problems() as problems:
+        config = load_config(path)
+    return config, problems
+
+
+def _messages(problems, *path):
+    return [p["message"] for p in problems if p["path"][: len(path)] == path]
+
+
+class TestParsing:
+    def test_apps_become_servarr_app_instances(self, tmp_path):
+        config, problems = _load(tmp_path, f"""
+            [servarr]
+            requesters = ["bob"]
+            private_hosts = ["10.0.0.5"]
+
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+
+            [servarr.apps.sonarr]
+            url = "http://10.0.0.5:8989"
+            api_key = "{KEY}"
+
+            [servarr.defaults.radarr]
+            quality_profile = "HD - 720p/1080p"
+            root_folder = "/data/library/content/Films"
+            minimum_availability = "released"
+        """)
+        apps = config.servarr.apps
+        assert set(apps) == {"radarr", "sonarr"}
+        assert all(isinstance(app, ServarrApp) for app in apps.values())
+        assert apps["radarr"].url == "http://10.0.0.5:7878"
+        assert apps["radarr"].api_key == KEY
+        assert config.servarr.requesters == ["bob"]
+        assert config.servarr.private_hosts == ["10.0.0.5"]
+        assert config.servarr.defaults["radarr"]["quality_profile"] == "HD - 720p/1080p"
+        assert problems == []
+
+    def test_the_defaults_are_empty(self):
+        servarr = Config().servarr
+        assert servarr.apps == {} and servarr.requesters == [] and servarr.defaults == {}
+        assert servarr.lookup_timeout_seconds == 30
+        assert servarr.release_search_timeout_seconds == 120
+
+    def test_an_empty_defaults_table_loads_without_a_warning(self, tmp_path):
+        config, problems = _load(tmp_path, f"""
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+            [servarr.defaults]
+        """)
+        assert config.servarr.defaults == {}
+        assert _messages(problems, "servarr") == []
+
+    def test_the_key_is_not_in_the_repr(self, tmp_path):
+        config, _ = _load(tmp_path, f"""
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+        """)
+        assert KEY not in repr(config.servarr)
+        assert KEY not in repr(config.servarr.apps["radarr"])
+
+    @pytest.mark.parametrize("table", [
+        'url = "http://10.0.0.5:7878"',
+        f'api_key = "{KEY}"',
+        'url = "http://10.0.0.5:7878"\napi_key = ""',
+    ])
+    def test_an_incomplete_app_is_dropped_with_a_warning(self, tmp_path, table):
+        config, problems = _load(tmp_path, f"[servarr.apps.radarr]\n{table}\n")
+        assert "radarr" not in config.servarr.apps
+        discarded = [p for p in problems if p["kind"] == "discarded"
+                     and p["path"][:3] == ("servarr", "apps", "radarr")]
+        assert len(discarded) == 1
+        assert KEY not in discarded[0]["message"]
+
+    def test_apps_that_is_not_a_table_is_discarded(self, tmp_path):
+        config, problems = _load(tmp_path, '[servarr]\napps = "radarr"\n')
+        assert config.servarr.apps == {}
+        assert any(p["kind"] == "discarded" and p["path"][:2] == ("servarr", "apps")
+                   for p in problems)
+
+    def test_an_unknown_key_inside_an_app_is_reported(self, tmp_path):
+        config, problems = _load(tmp_path, f"""
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+            apikey = "typo"
+        """)
+        assert "radarr" in config.servarr.apps
+        assert any(p["path"] == ("servarr", "apps", "radarr", "apikey") for p in problems)
+
+
+class TestValidation:
+    def test_an_unknown_app_is_a_warning_and_is_kept_out_of_the_capability(self, tmp_path, caplog):
+        caplog.set_level(logging.WARNING, logger="istota.config")
+        config, problems = _load(tmp_path, f"""
+            [servarr.apps.readarr]
+            url = "http://10.0.0.5:8787"
+            api_key = "{KEY}"
+        """)
+        assert _messages(problems, "servarr", "apps", "readarr")
+        assert "servarr" not in config.available_capabilities()
+
+    def test_bazarr_is_reserved(self, tmp_path):
+        _, problems = _load(tmp_path, f"""
+            [servarr.apps.bazarr]
+            url = "http://10.0.0.5:6767"
+            api_key = "{KEY}"
+        """)
+        [message] = _messages(problems, "servarr", "apps", "bazarr")
+        assert "reserved" in message
+
+    def test_an_unknown_defaults_app_and_a_wrong_field_warn(self, tmp_path):
+        _, problems = _load(tmp_path, """
+            [servarr.defaults.readarr]
+            quality_profile = "x"
+            [servarr.defaults.sonarr]
+            metadata_profile = "Standard"
+            minimum_availability = "released"
+            quality_profile = "HD"
+        """)
+        assert _messages(problems, "servarr", "defaults", "readarr")
+        assert _messages(problems, "servarr", "defaults", "sonarr", "metadata_profile")
+        assert _messages(problems, "servarr", "defaults", "sonarr", "minimum_availability")
+        assert not _messages(problems, "servarr", "defaults", "sonarr", "quality_profile")
+
+    def test_a_requester_who_is_not_a_configured_user_warns(self, tmp_path):
+        _, problems = _load(tmp_path, """
+            [servarr]
+            requesters = ["Alice", "nobody"]
+            [users.alice]
+            display_name = "Alice"
+            [users.bob]
+            display_name = "Bob"
+        """)
+        [message] = _messages(problems, "servarr", "requesters")
+        assert "nobody" in message
+        assert "Alice" not in message
+
+    @pytest.mark.parametrize("entry", ["http://10.0.0.5", "10.0.0.5:7878", "*.lan"])
+    def test_a_malformed_private_host_warns(self, tmp_path, entry):
+        config, problems = _load(tmp_path, f'[servarr]\nprivate_hosts = ["10.0.0.5", "{entry}"]\n')
+        [message] = _messages(problems, "servarr", "private_hosts")
+        assert repr(entry) in message
+        assert entry in config.servarr.private_hosts
+
+    def test_the_release_timeout_must_leave_a_minute_under_the_skill_timeout(self, tmp_path):
+        _, problems = _load(tmp_path, f"""
+            [security]
+            skill_proxy_timeout = 150
+            [servarr]
+            release_search_timeout_seconds = 120
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+        """)
+        [message] = _messages(problems, "servarr", "release_search_timeout_seconds")
+        assert "150" in message
+
+    def test_a_release_timeout_with_room_is_quiet(self, tmp_path):
+        _, problems = _load(tmp_path, f"""
+            [security]
+            skill_proxy_timeout = 300
+            [servarr.apps.radarr]
+            url = "http://10.0.0.5:7878"
+            api_key = "{KEY}"
+        """)
+        assert not _messages(problems, "servarr")
+
+    @pytest.mark.parametrize("name", ["lookup_timeout_seconds", "release_search_timeout_seconds"])
+    def test_a_non_positive_timeout_is_discarded(self, tmp_path, name):
+        config, problems = _load(tmp_path, f"[servarr]\n{name} = 0\n")
+        assert getattr(config.servarr, name) == getattr(ServarrConfig(), name)
+        assert any(p["kind"] == "discarded" and p["path"] == ("servarr", name) for p in problems)
+
+
+class TestSecretsAndCapability:
+    def test_the_key_path_is_a_secret_path(self):
+        assert is_secret_path(("servarr", "apps", "radarr", "api_key"))
+        assert not is_secret_path(("servarr", "apps", "radarr", "url"))
+
+    def test_the_capability_follows_the_apps(self):
+        config = Config()
+        assert "servarr" not in config.available_capabilities()
+        config.servarr.apps = {"radarr": ServarrApp(url="http://10.0.0.5:7878", api_key=KEY)}
+        assert "servarr" in config.available_capabilities()
+
+
+class TestTheSharedPattern:
+    @pytest.mark.parametrize("entry", ["10.0.0.5", "arr.lan", "fd00::5"])
+    def test_the_pattern_accepts(self, entry):
+        import re
+        assert re.match(PRIVATE_HOST_PATTERN, entry)
