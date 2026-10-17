@@ -36,7 +36,7 @@
     {/if}
   </div>
   {#if showMap}
-    <div class="location-share-frame">
+    <div class="location-share-frame embed embed-fixed">
       <ShareMap
         observation={share.observation}
         interactive
@@ -50,9 +50,10 @@
 <style>
   /* The mail card's chrome (`MailCard.svelte`), so the two cards an answer can
      carry read as one family. */
+  /* As wide as the embed box, so the map inside it is drawn at embed size. */
   .location-share-card {
     width: 100%;
-    max-width: var(--chat-body-max);
+    max-width: var(--embed-max-width);
     padding: var(--space-2);
     background: var(--surface-reading-card);
     border-left: 2px solid var(--border-hover);
@@ -82,16 +83,10 @@
   .location-share-link:hover {
     text-decoration: underline;
   }
-  /* The map's height follows the card's width, taller on a phone. */
+  /* Sized by `.embed-fixed` (primitives.css), the box every chat embed shares. */
   .location-share-frame {
-    aspect-ratio: 2 / 1;
     margin-top: var(--space-2);
     overflow: hidden;
     border-radius: var(--radius-sm);
-  }
-  @media (max-width: 768px) {
-    .location-share-frame {
-      aspect-ratio: 4 / 3;
-    }
   }
 </style>
