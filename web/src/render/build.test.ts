@@ -20,6 +20,11 @@ describe('the render build', () => {
     expect(html).not.toMatch(/<link/);
   });
 
+  it("refuses a bundle still holding Vite's preload placeholder", () => {
+    const js = 'await __vitePreload(() => Promise.resolve().then(() => m), __VITE_PRELOAD__);';
+    expect(() => renderDocument('share-map', js, '')).toThrow(/__VITE_PRELOAD__/);
+  });
+
   it('keeps a script or style literal from ending its element early', () => {
     const html = renderDocument('x', 'const s = "</script><!--";', 'a::after{content:"</style>"}');
     expect(html.match(/<\/script>/g)).toHaveLength(1);

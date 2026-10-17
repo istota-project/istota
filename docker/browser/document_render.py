@@ -12,8 +12,9 @@ shape and never reads the payload, whose meaning is the caller's.
 
 **The page is ours; everything it loads is not.** The document is served from
 `https://render.istota.invalid/` by the route handler, with a
-Content-Security-Policy allowing inline script and style, `blob:` workers,
-`data:`/`blob:` images and `https:` connections and images, and nothing else.
+Content-Security-Policy allowing the document's own scripts (by a per-render
+nonce stamped on them), inline style, `blob:` workers, `data:`/`blob:` images
+and `https:` connections and images, and nothing else.
 The sent assets are served at `/assets/<path>`; any other path on that origin
 is a 404. Every other request (a basemap's tiles, its style) must pass
 `sandbox/net_guard.py`'s public-address rule, vendored as
@@ -45,9 +46,11 @@ import hashlib
 import ipaddress
 import json
 import re
+import secrets
 import socket
 import time
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 from lib.istota_net_guard import ip_is_public
@@ -84,26 +87,78 @@ _ENVELOPE_KEYS = frozenset(("document", "document_sha256", "payload", "viewport"
                             "timeout_ms"))
 _OPTIONAL_KEYS = frozenset(("assets",))
 
-CONTENT_SECURITY_POLICY = "; ".join((
-    "default-src 'none'",
-    "script-src 'unsafe-inline'",
-    "style-src 'unsafe-inline'",
-    "worker-src blob:",
-    "img-src data: blob: https:",
-    "connect-src https:",
-    "font-src https: data:",
-    "frame-src 'none'",
-    "form-action 'none'",
-    "base-uri 'none'",
-    "object-src 'none'",
-))
+def content_security_policy(nonce):
+    """The document's CSP: its own scripts by `nonce`, and no `'unsafe-inline'` for script.
+
+    Patchright injects its init scripts into every document, and when the CSP
+    names no script nonce it adds one of its own, which makes Chrome ignore
+    `'unsafe-inline'` and block the document's inline script. Naming a nonce
+    here makes Patchright reuse it, so the two agree.
+    """
+    return "; ".join((
+        "default-src 'none'",
+        f"script-src 'nonce-{nonce}'",
+        "style-src 'unsafe-inline'",
+        "worker-src blob:",
+        "img-src data: blob: https:",
+        "connect-src https:",
+        "font-src https: data:",
+        "frame-src 'none'",
+        "form-action 'none'",
+        "base-uri 'none'",
+        "object-src 'none'",
+    ))
+
+
+class _ScriptTags(HTMLParser):
+    """Where each `<script` start tag begins in a document, as (line, column)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.positions = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self.positions.append(self.getpos())
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+
+def with_script_nonce(document, nonce):
+    """`document` (UTF-8 bytes) with `nonce="…"` on every `<script>` start tag.
+
+    Found by parsing, not by searching the text: a script body can hold the
+    string `<script`, and rewriting that would change the code.
+    """
+    text = document.decode("utf-8")
+    parser = _ScriptTags()
+    parser.feed(text)
+    parser.close()
+    line_starts = [0]
+    for index, char in enumerate(text):
+        if char == "\n":
+            line_starts.append(index + 1)
+    offsets = []
+    for line, column in parser.positions:
+        offset = line_starts[line - 1] + column
+        if text[offset:offset + 7].lower() != "<script":
+            raise ValueError("script tag not where the parser said")
+        offsets.append(offset + 7)
+    for offset in reversed(offsets):
+        text = f'{text[:offset]} nonce="{nonce}"{text[offset:]}'
+    return text.encode("utf-8")
+
 
 _RENDER_JS = """async ([payload, ms]) => {
   const timer = new Promise((resolve) =>
     setTimeout(() => resolve({ hostTimeout: true }), ms));
   return await Promise.race([window.istotaRender(payload), timer]);
 }"""
+# Polled with `evaluate`, never `wait_for_function`: Patchright evaluates a
+# wait_for_function predicate with `eval` in the page, which the CSP refuses.
 _READY_JS = "() => typeof window.istotaRender === 'function'"
+_READY_POLL_MS = 50
 
 
 @dataclass(frozen=True)
@@ -323,15 +378,15 @@ def _path_of(url):
         return None
 
 
-def _serve(route, envelope, path):
+def _serve(route, envelope, path, nonce):
     """Answer a request on the render origin: the document, a sent asset, or a 404."""
     if path == "/":
         route.fulfill(status=200, headers={
             "content-type": "text/html; charset=utf-8",
-            "content-security-policy": CONTENT_SECURITY_POLICY,
+            "content-security-policy": content_security_policy(nonce),
             "cache-control": "no-store",
             "x-content-type-options": "nosniff",
-        }, body=envelope.document)
+        }, body=with_script_nonce(envelope.document, nonce))
         return
     if path.startswith(ASSET_PREFIX) and path[len(ASSET_PREFIX):] in envelope.assets:
         content_type, body = envelope.assets[path[len(ASSET_PREFIX):]]
@@ -397,6 +452,7 @@ def render(context, envelope, *, resolve=None, clock=time.monotonic):
     resolve = resolve or _resolve
     resolved = {}
     violations = []
+    nonce = secrets.token_hex(16)
 
     def cached_resolve(host, port):
         key = (host, port)
@@ -422,7 +478,7 @@ def render(context, envelope, *, resolve=None, clock=time.monotonic):
             violations.append("navigation")
             route.abort("blockedbyclient")
         elif on_render_origin(url):
-            _serve(route, envelope, _path_of(url))
+            _serve(route, envelope, _path_of(url), nonce)
         elif destination_allowed(url, resolve=cached_resolve):
             _fetch_checked(route, url, allowed=lambda target: destination_allowed(
                 target, resolve=cached_resolve), violations=violations,
@@ -460,7 +516,10 @@ def render(context, envelope, *, resolve=None, clock=time.monotonic):
         page.on("download", on_download)
 
         page.goto(DOCUMENT_URL, wait_until="load", timeout=remaining_ms())
-        page.wait_for_function(_READY_JS, timeout=remaining_ms())
+        while page.evaluate(_READY_JS) is not True:
+            if clock() >= deadline:
+                return Outcome(None, "render_timeout")
+            page.wait_for_timeout(_READY_POLL_MS)
         result = page.evaluate(_RENDER_JS, [envelope.payload, remaining_ms()])
         if violations:
             return Outcome(None, "destination_blocked")
@@ -476,7 +535,9 @@ def render(context, envelope, *, resolve=None, clock=time.monotonic):
             return Outcome(None, "destination_blocked")
         if type(error).__name__ == "TimeoutError":
             return Outcome(None, "render_timeout")
-        return Outcome(None, "render_failed")
+        # The driver raised before the page answered; told apart from a page
+        # that answered `ok: false`, which carries its own reason.
+        return Outcome(None, "render_failed", "driver_error")
     if violations:
         return Outcome(None, "destination_blocked")
     return Outcome(bytes(image), None)

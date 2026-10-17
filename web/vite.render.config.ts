@@ -33,28 +33,34 @@ function singleFile(): Plugin {
   return {
     name: 'istota-render-single-file',
     apply: 'build',
-    generateBundle(_options, bundle) {
-      const name = nameOfEnvironment.get(this.environment.name);
-      if (!name) return;
-      const chunks = Object.values(bundle).filter(
-        (item): item is Rollup.OutputChunk => item.type === 'chunk',
-      );
-      if (chunks.length !== 1) {
-        this.error(`render bundle ${name} built ${chunks.length} chunks; it must be one`);
-      }
-      const css = Object.values(bundle)
-        .filter(
-          (item): item is Rollup.OutputAsset =>
-            item.type === 'asset' && item.fileName.endsWith('.css'),
-        )
-        .map((item) => String(item.source))
-        .join('\n');
-      for (const key of Object.keys(bundle)) delete bundle[key];
-      this.emitFile({
-        type: 'asset',
-        fileName: `${name}.html`,
-        source: renderDocument(name, chunks[0].code, css),
-      });
+    generateBundle: {
+      // Last, after Vite's import analysis has replaced its `__VITE_PRELOAD__`
+      // placeholder in its own generateBundle. Run earlier, the placeholder is
+      // inlined as an undefined name and every inlined dynamic import rejects.
+      order: 'post',
+      handler(_options, bundle) {
+        const name = nameOfEnvironment.get(this.environment.name);
+        if (!name) return;
+        const chunks = Object.values(bundle).filter(
+          (item): item is Rollup.OutputChunk => item.type === 'chunk',
+        );
+        if (chunks.length !== 1) {
+          this.error(`render bundle ${name} built ${chunks.length} chunks; it must be one`);
+        }
+        const css = Object.values(bundle)
+          .filter(
+            (item): item is Rollup.OutputAsset =>
+              item.type === 'asset' && item.fileName.endsWith('.css'),
+          )
+          .map((item) => String(item.source))
+          .join('\n');
+        for (const key of Object.keys(bundle)) delete bundle[key];
+        this.emitFile({
+          type: 'asset',
+          fileName: `${name}.html`,
+          source: renderDocument(name, chunks[0].code, css),
+        });
+      },
     },
   };
 }

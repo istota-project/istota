@@ -25,6 +25,11 @@ function inlineStyle(css: string): string {
 
 /** The document shell: the bundle's CSS and JS inline, nothing fetched. */
 export function renderDocument(name: string, js: string, css: string): string {
+  // Vite's preload placeholder, left in when this runs before Vite replaces
+  // it: every inlined dynamic import would then reject in the browser.
+  if (js.includes('__VITE_PRELOAD__')) {
+    throw new Error(`render bundle ${name} still holds Vite's __VITE_PRELOAD__ placeholder`);
+  }
   return [
     '<!doctype html>',
     '<html lang="en" data-theme="light">',

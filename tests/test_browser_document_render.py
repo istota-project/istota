@@ -12,6 +12,7 @@ import copy
 import hashlib
 import importlib.util
 import ipaddress
+import re
 import struct
 import sys
 import zlib
@@ -269,10 +270,17 @@ class _Page:
         self.script.get("after_goto", lambda page: None)(self)
 
     def wait_for_function(self, expression, **kwargs):
-        self.waited_for = expression
-        self.script.get("wait", lambda page: None)(self)
+        # Patchright evaluates this predicate with `eval` in the page, which
+        # the document's CSP refuses; the render must never call it.
+        raise AssertionError("wait_for_function is refused by the document's CSP")
+
+    def wait_for_timeout(self, ms):
+        self.waited_ms = getattr(self, "waited_ms", 0) + ms
 
     def evaluate(self, expression, arg=None):
+        if arg is None:
+            self.ready_checks = getattr(self, "ready_checks", 0) + 1
+            return self.script.get("ready", True)
         self.evaluated = arg
         self.script.get("during_render", lambda page: None)(self)
         return self.script.get("result", {"ok": True})
@@ -332,12 +340,17 @@ class _Context:
 PUBLIC = {"tiles.openfreemap.org": ["93.184.216.34"], "elsewhere.example": ["93.184.216.35"]}
 
 
-def _render(dr, script=None, envelope=None):
+def _render(dr, script=None, envelope=None, clock=None):
     checked, refusal = dr.validate_envelope(envelope or _envelope())
     assert refusal is None
     context = _Context(script)
-    outcome = dr.render(context, checked, resolve=_resolver(PUBLIC))
+    kwargs = {"clock": clock} if clock else {}
+    outcome = dr.render(context, checked, resolve=_resolver(PUBLIC), **kwargs)
     return context, outcome
+
+
+def _script_src(csp):
+    return next(part.strip() for part in csp.split(";") if part.strip().startswith("script-src"))
 
 
 class TestTheRenderOrigin:
@@ -349,15 +362,41 @@ class TestTheRenderOrigin:
         assert page.visited == [ORIGIN + "/"]
         _, status, headers, body = page.document
         assert status == 200
-        assert body == DOCUMENT.encode()
         assert headers["content-type"].startswith("text/html")
         csp = headers["content-security-policy"]
-        for directive in ("default-src 'none'", "script-src 'unsafe-inline'",
-                          "style-src 'unsafe-inline'", "worker-src blob:",
+        for directive in ("default-src 'none'", "style-src 'unsafe-inline'", "worker-src blob:",
                           "img-src data: blob: https:", "connect-src https:",
                           "frame-src 'none'", "form-action 'none'"):
             assert directive in csp, directive
         assert "http:" not in csp.replace("https:", "")
+        nonce = re.fullmatch(r"script-src 'nonce-([0-9a-f]{32})'", _script_src(csp)).group(1)
+        assert body == DOCUMENT.replace("<script ", f'<script nonce="{nonce}" ').encode()
+
+    def test_scripts_run_by_a_nonce_patchright_reuses(self, dr):
+        """Patchright adds its own script-src nonce unless one is named, and a
+        nonce makes Chrome ignore 'unsafe-inline': the document's own script
+        was blocked and the page never registered its renderer."""
+        first, _ = _render(dr)
+        second, _ = _render(dr)
+
+        csps = [context.pages[0].document[2]["content-security-policy"] for context in (first, second)]
+        for csp in csps:
+            assert "'unsafe-inline'" not in _script_src(csp)
+            assert "'unsafe-eval'" not in csp
+        assert _script_src(csps[0]) != _script_src(csps[1])
+
+    def test_readiness_is_polled_without_wait_for_function(self, dr):
+        context, outcome = _render(dr, {"ready": True})
+
+        assert outcome.reason is None
+        assert context.pages[0].ready_checks == 1
+
+    def test_a_page_that_never_registers_its_renderer_times_out(self, dr):
+        ticks = iter(range(0, 1000))
+        context, outcome = _render(dr, {"ready": False}, clock=lambda: next(ticks))
+
+        assert outcome.reason == "render_timeout"
+        assert not hasattr(context.pages[0], "screenshot_selector")
 
     def test_a_sent_asset_is_served_under_assets(self, dr):
         context, _ = _render(dr, {"during_render": lambda page: page.context.fetch(
@@ -383,7 +422,7 @@ class TestTheRenderOrigin:
         assert outcome.data == _png()
         page = context.pages[0]
         assert page.evaluated[0] == _envelope()["payload"]
-        assert "istotaRender" in page.waited_for
+        assert page.ready_checks >= 1
         assert page.screenshot_selector == "[data-render-frame]"
         assert page.screenshot_options["type"] == "png"
         url = "https://tiles.openfreemap.org/styles/positron"
@@ -483,6 +522,28 @@ class TestTheGuardDuringARender:
         assert outcome.reason == "destination_blocked"
 
 
+class TestTheScriptNonce:
+    def test_every_script_start_tag_is_stamped(self, dr):
+        document = (b"<!doctype html>\n<head><SCRIPT>a()</SCRIPT></head>\n"
+                    b"<body><script type=\"module\">b()</script></body>")
+
+        stamped = dr.with_script_nonce(document, "abc123")
+
+        assert stamped == (b"<!doctype html>\n<head><SCRIPT nonce=\"abc123\">a()</SCRIPT></head>\n"
+                           b"<body><script nonce=\"abc123\" type=\"module\">b()</script></body>")
+
+    def test_script_text_that_looks_like_a_tag_is_left_alone(self, dr):
+        document = '<body><script type="module">const s = "<script>"; f(s);</script></body>'.encode()
+
+        stamped = dr.with_script_nonce(document, "n1")
+
+        assert stamped.decode() == (
+            '<body><script nonce="n1" type="module">const s = "<script>"; f(s);</script></body>')
+
+    def test_a_document_without_script_is_unchanged(self, dr):
+        assert dr.with_script_nonce(b"<p>\xc3\xa9</p>", "n1") == b"<p>\xc3\xa9</p>"
+
+
 class TestTheOutcome:
     @pytest.mark.parametrize("result,reason,detail", [
         ({"ok": False, "reason": "tile_error"}, "render_failed", "tile_error"),
@@ -496,23 +557,23 @@ class TestTheOutcome:
         _, outcome = _render(dr, {"result": result})
         assert (outcome.data, outcome.reason, outcome.detail) == (None, reason, detail)
 
-    def test_a_document_with_no_renderer_is_a_timeout(self, dr):
+    def test_a_driver_timeout_is_a_timeout(self, dr):
         class TimeoutError(Exception):  # Patchright's own name
             pass
 
         def never(page):
-            raise TimeoutError("waiting for function failed: timeout 9000ms exceeded")
+            raise TimeoutError("page.goto: Timeout 9000ms exceeded")
 
-        context, outcome = _render(dr, {"wait": never})
+        context, outcome = _render(dr, {"after_goto": never})
         assert outcome.reason == "render_timeout"
         assert not hasattr(context.pages[0], "screenshot_selector")
 
-    def test_an_error_names_no_detail(self, dr):
+    def test_a_driver_error_is_named_but_never_quoted(self, dr):
         def boom(page):
             raise RuntimeError("https://tiles.example/{z}?api_key=secret")
 
         _, outcome = _render(dr, {"after_goto": boom})
-        assert (outcome.reason, outcome.detail) == ("render_failed", None)
+        assert (outcome.reason, outcome.detail) == ("render_failed", "driver_error")
 
     def test_the_capture_is_returned_as_taken(self, dr):
         """Whether the picture is the right one is the caller's to check."""
