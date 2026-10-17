@@ -4037,6 +4037,9 @@ const mockConfigEditor = {
   digest: 'mock-digest-1',
   hasComments: true,
   unknownRemoved: false,
+  /** Credentials held only in config.toml, so the plain-text part of the
+   *  config.toml banner and its Move to secret file have something to show. */
+  inlineHeld: new Set<string>(['sms.twilio.auth_token']),
   startedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
   restartAt: 0,
   restartedAt: '',
@@ -4202,17 +4205,26 @@ function mockAdminConfig() {
     },
     document_digest: state.digest,
     started_at: state.startedAt,
-    problems: state.unknownRemoved
-      ? []
-      : [
-          {
-            kind: 'unknown',
-            path: ['web', 'old_flag'],
-            message: '[config] web.old_flag is not a recognised key and is ignored',
-            blocking: false,
-            action: 'unset',
-          },
-        ],
+    problems: [
+      ...[...state.inlineHeld].map((key) => ({
+        kind: 'warning',
+        path: key.split('.'),
+        message: `${key} is stored in config.toml in plain text`,
+        blocking: false,
+        action: 'move',
+      })),
+      ...(state.unknownRemoved
+        ? []
+        : [
+            {
+              kind: 'unknown',
+              path: ['web', 'old_flag'],
+              message: '[config] web.old_flag is not a recognised key and is ignored',
+              blocking: false,
+              action: 'unset',
+            },
+          ]),
+    ],
     has_comments: state.hasComments,
     raw_toml: mockRawToml(sections),
     secrets: [
@@ -4221,14 +4233,15 @@ function mockAdminConfig() {
           sections.flatMap((s) => s.fields).find((f) => f.key === key)?.set ??
           state.secretsSet.get(name) ??
           false;
+        const inline = state.inlineHeld.has(key);
         return {
           name,
           label: key,
           config_key: key,
-          set,
-          source: set ? 'file' : 'none',
+          set: set || inline,
+          source: inline ? 'inline' : set ? 'file' : 'none',
           read_only_reason: null,
-          movable: false,
+          movable: inline,
           risky: false,
         };
       }),
@@ -4432,6 +4445,10 @@ function mockConfigSubmit(body: any) {
 function mockConfigApply(entry: { ops: any[]; body: any }) {
   const state = mockConfigEditor;
   state.hasComments = false;
+  for (const label of entry.body.move_to_file ?? []) {
+    state.inlineHeld.delete(label);
+    state.secretsSet.set(MOCK_FILE_CREDENTIALS[label], true);
+  }
   if (typeof entry.body.raw === 'string' && !entry.body.raw.includes('old_flag')) {
     state.unknownRemoved = true;
   }
