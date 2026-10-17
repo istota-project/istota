@@ -209,6 +209,25 @@ def deliver_talk_maps(config: "Config", *, message_id: int, talk_token: str) -> 
     return states
 
 
+def map_missing(config: "Config", *, message_id: int) -> bool:
+    """Whether a map attached to ``message_id`` ended `failed` or `skipped`.
+
+    Read from the ledger after every surface had its attempt, so a render that
+    never reached a send counts as much as a send that failed. Never raises.
+    """
+    try:
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM location_share_cards WHERE message_id = ? "
+                "AND image_state IN ('failed', 'skipped') LIMIT 1", (message_id,),
+            ).fetchone()
+    except Exception as exc:
+        logger.warning("location.share_map.state_unreadable message=%s (%s)",
+                       message_id, type(exc).__name__)
+        return False
+    return row is not None
+
+
 def _whatsapp_can_send_media(config: "Config") -> bool:
     from istota.transport.whatsapp import outbound
 
@@ -273,5 +292,5 @@ def settle_whatsapp_map(
 
 __all__ = [
     "Card", "MAP_FILENAME", "PreparedMap", "attached_cards", "deliver_talk_maps",
-    "prepare_whatsapp_map", "settle_whatsapp_map",
+    "map_missing", "prepare_whatsapp_map", "settle_whatsapp_map",
 ]

@@ -357,13 +357,19 @@ def test_a_whatsapp_group_answer_carries_the_map_as_its_image(config, renders, s
 
 def _held_talk_post(config):
     """Alice's private web room holds a location post for the Talk-bound shared room."""
+    shape = _talk_room(config)
+    _held_post(config, shape.canonical)
+    return shape
+
+
+def _held_post(config, target):
+    """Alice's private web room holds an approved location post for ``target``."""
     from istota.rooms import private_replies
 
-    shape = _talk_room(config)
     with db.get_db(config.db_path) as conn:
         private = db.create_web_chat_room(conn, "alice", "Private").token
         ident = db.create_task(conn, user_id="alice", source_type="web", prompt="Share my location",
-                               conversation_token=private, about_room_token=shape.canonical)
+                               conversation_token=private, about_room_token=target)
         conn.execute("UPDATE tasks SET status='running' WHERE id=?", (ident,))
         db.add_message(conn, private, role="user", body="Share my location", origin_surface="web",
                        task_id=ident, author_user_id="alice")
@@ -373,7 +379,6 @@ def _held_talk_post(config):
                                        require_confirmation=True)
         requests.park_question(conn, config, task=db.get_task(conn, ident))
         confirmations.approve(conn, db.get_task(conn, ident), config=config, by="web")
-    return shape
 
 
 def _drain(config):
@@ -391,6 +396,55 @@ def test_a_released_post_shares_its_map_after_the_text(config, renders, dav, tal
         assert card["image_state"] == "sent" and card["request_id"]
         assert conn.execute("SELECT count(*) FROM notifications WHERE dedup_key LIKE 'private-reply-map:%'"
                             ).fetchone()[0] == 0
+
+
+def _map_notices(config):
+    with db.get_db(config.db_path) as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT user_id, body FROM notifications WHERE dedup_key LIKE 'private-reply-map:%'")]
+
+
+def test_a_released_post_whose_map_was_skipped_tells_the_owner(config, renders, dav, talk):
+    """The approval promised a map; no browser service is still no map in Talk."""
+    renders[0].append(DocumentRender(None, "render_unavailable"))
+    _held_talk_post(config)
+    _drain(config)
+
+    (notice,) = _map_notices(config)
+    assert notice["user_id"] == "alice" and "map unavailable" in notice["body"]
+
+
+def test_a_released_post_into_a_web_room_needs_no_picture_and_no_notice(config, renders):
+    """Web draws the card itself, so the promised map is there without a render."""
+    with db.get_db(config.db_path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "Hiking").token
+        db.add_web_room_member(conn, room, "bob")
+    renders[0].append(DocumentRender(None, "render_unavailable"))
+    _held_post(config, room)
+    _drain(config)
+
+    assert renders[1] == [] and _map_notices(config) == []
+    with db.get_db(config.db_path) as conn:
+        (shares,) = conn.execute("SELECT location_shares FROM messages WHERE room_token=? "
+                                 "AND role='assistant'", (room,)).fetchone()
+    assert json.loads(shares)[0]["map_url"] == URL
+
+
+def test_a_released_post_into_a_group_whose_map_failed_tells_the_owner(config, renders, sent):
+    with db.get_db(config.db_path) as conn:
+        db.set_whatsapp_binding(conn, "bob", bootstrap_phone_number="+15557654321")
+        db.latch_whatsapp_jid(conn, "bob", jid=BOB_JID)
+    _apply(config, _roster([ALICE_JID, BOB_JID], added_by=ALICE_JID, subject="Hiking"))
+    with db.get_db(config.db_path) as conn:
+        group = db.resolve_room_token(conn, "whatsapp", GROUP)
+    renders[0].append(DocumentRender(None, "render_timeout"))
+    _held_post(config, group)
+    _drain(config)
+
+    (request,) = [r for r in sent if r.to == GROUP]
+    assert request.media is None
+    (notice,) = _map_notices(config)
+    assert notice["user_id"] == "alice"
 
 
 def test_a_released_post_whose_map_failed_tells_the_owner(config, renders, dav, talk):

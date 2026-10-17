@@ -1714,7 +1714,7 @@ async def deliver_request(config, row) -> None:
     if claim is None:
         return
     talk_id = None
-    map_states: list[str] = []
+    picture_surface = False
     if claim["kind"] == "room_post":
         from istota.location import map_delivery
 
@@ -1729,7 +1729,8 @@ async def deliver_request(config, row) -> None:
             if talk_id is not None:
                 # The approved post's map, drawn now from the observation its
                 # approval bound, after the text it goes with.
-                map_states += await asyncio.to_thread(
+                picture_surface = True
+                await asyncio.to_thread(
                     map_delivery.deliver_talk_maps, config,
                     message_id=claim["message_id"], talk_token=claim["talk_ref"])
         if claim["whatsapp_group"]:
@@ -1750,15 +1751,17 @@ async def deliver_request(config, row) -> None:
             except Exception as exc:
                 raised = True
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
-            state = await asyncio.to_thread(
+            await asyncio.to_thread(
                 map_delivery.settle_whatsapp_map, config, prepared, record, send_raised=raised)
-            if state is not None:
-                map_states.append(state)
+            picture_surface = True
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
         await send_private(config, claim["delivery"], body=claim["body"])
     await asyncio.to_thread(_settle, config, claim, talk_id)
-    if "failed" in map_states:
+    # Web draws the card itself; Talk and a WhatsApp group were promised a
+    # picture, so one that failed or could not be drawn is announced.
+    if picture_surface and await asyncio.to_thread(
+            map_delivery.map_missing, config, message_id=claim["message_id"]):
         await asyncio.to_thread(_map_unavailable, config, claim)
 
 
