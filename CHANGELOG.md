@@ -82,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opening the Mac app's window no longer flashes a sign-in form between "Signing in…" and the web UI.
 - Immunization history now fits phone screens, with the vaccine above its date and available details instead of a sideways-scrolling table. Each phone entry takes at most two lines, with notes hidden and long text truncated. Empty fields no longer show dashes, row menus line up on desktop, and the heading and filter stack on smaller screens.
 
 - Moving a credential to its secret file no longer leaves its value in the older `config.toml.bak.*` copies or in the daily config copies under `Backups/config/`. Any credential whose secret file holds a value is now removed from those copies. Copying one back on the same stack still loads the credential, because the secret file wins over a value in `config.toml`.

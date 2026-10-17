@@ -1038,7 +1038,7 @@ def _release_password_request(email: str, ip: str | None, admitted_at: float) ->
             times.remove(admitted_at)
 
 
-def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str:
+def _render_form_page(bot_name: str, headline: str, body: str, mark: str, head: str = "") -> str:
     """Shared auth card. Body is rendered HTML; scalar callers escape fields.
 
     Unauthenticated, so it names no version: an exact version tells a visitor
@@ -1051,7 +1051,7 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str
         f'<title>{escape(headline)} &middot; {name}</title>'
         '<link rel="icon" href="/istota/favicon.png">'
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
-        f'<style>{_LOGIN_PAGE_CSS}</style></head><body>'
+        f'<style>{_LOGIN_PAGE_CSS}</style>{head}</head><body>'
         f'<main class="card">{mark}<h1>{name}</h1>'
         f'<p class="tagline">{escape(headline)}</p>{body}</main>'
         f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
@@ -1202,10 +1202,10 @@ async def _run_password_work(function, *args, **kwargs):
     return await asyncio.shield(work)
 
 
-async def _auth_form(headline: str, body: str, status_code: int = 200) -> HTMLResponse:
+async def _auth_form(headline: str, body: str, status_code: int = 200, head: str = "") -> HTMLResponse:
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(
-        _render_form_page(_config.bot_name, headline, body, mark),
+        _render_form_page(_config.bot_name, headline, body, mark, head),
         status_code=status_code, headers=_AUTH_PAGE_HEADERS,
     )
 
@@ -1437,6 +1437,17 @@ _LOCAL_LOGIN_SCRIPT = (
 )
 
 
+# The page stays on screen through the POST, the redirect and the web UI's first
+# paint, so with a code to post it never draws the card: the Mac app's window
+# goes from its own "Signing in…" to this one to the web UI.
+_LOCAL_LOGIN_HANDOFF = (
+    '<style>html.handoff main,html.handoff footer{display:none}'
+    'html.handoff body{display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}'
+    'html.handoff body::before{content:"Signing in\\2026";color:var(--text-muted)}</style>'
+    '<script>if(location.hash.length>1)document.documentElement.classList.add("handoff")</script>'
+)
+
+
 @auth_router.get("/auth/local")
 async def local_login_page(request: Request):
     if not _config.web.has_method("local_code"):
@@ -1449,7 +1460,7 @@ async def local_login_page(request: Request):
         '<button class="btn btn-primary" type="submit">Sign in</button></form>'
         f'<script>{_LOCAL_LOGIN_SCRIPT}</script>'
     )
-    return await _auth_form("Signing in on this Mac", body)
+    return await _auth_form("Signing in on this Mac", body, head=_LOCAL_LOGIN_HANDOFF)
 
 
 @auth_router.post("/auth/local")
