@@ -180,6 +180,21 @@ def get_identity_by_email(db_path: Path, email: str) -> Identity | None:
         return _identity(conn.execute("SELECT * FROM web_auth_identities WHERE email = ?", (normalize_email(email),)).fetchone())
 
 
+def local_login_user(db_path: Path) -> str:
+    """The user ``istota web login-code`` signs in when none is named: the one
+    user with a profile, who needs a web identity for the code to be spent."""
+    from istota import user_profiles  # noqa: PLC0415
+
+    profiles = sorted(user_profiles.list_profiles(db_path))
+    if len(profiles) != 1:
+        named = ", ".join(profiles) if profiles else "none"
+        raise ValueError(f"name the user with --user (users with a profile: {named})")
+    identity = get_identity(db_path, profiles[0])
+    if identity is None or identity.disabled:
+        raise ValueError(f"{profiles[0]} has no web identity to sign in as; add one with `istota auth add`")
+    return profiles[0]
+
+
 def list_identities(db_path: Path) -> list[Identity]:
     with get_db(db_path) as conn:
         return [_identity(row) for row in conn.execute("SELECT * FROM web_auth_identities ORDER BY user_id")]

@@ -2009,7 +2009,19 @@ class TestAnInstallMovedIntoTheApp:
                        + "BROWSER_MEM_LIMIT=2g\n")
         host = tmp_path / "vm" / "host.env"
         host.write_text(host.read_text() + "HOST_LOOPBACK_ALLOW=11434\n")
+        self._user(tmp_path, "alice", identity=True)
         return tmp_path
+
+    @staticmethod
+    def _user(tmp_path: Path, user_id: str, *, identity: bool) -> None:
+        from istota import db, user_profiles
+        from istota.webui import auth as web_auth
+        db_path = tmp_path / "data" / "db" / "istota.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db.init_db(db_path)
+        user_profiles.ensure_profile(db_path, user_id)
+        if identity:
+            web_auth.upsert_identity(db_path, user_id, f"{user_id}@example.com")
 
     @staticmethod
     def _run(tmp_path: Path, out=None) -> int:
@@ -2064,6 +2076,27 @@ class TestAnInstallMovedIntoTheApp:
         assert any("login codes" in line for line in said), said
         assert setup_wizard.desktop_app(stack / "vm")
         assert _env((stack / "vm" / ".env").read_text())["ISTOTA_WEB_INSECURE_COOKIES"] == "1"
+
+    @pytest.mark.parametrize("case", ["no database", "two users", "no web identity"])
+    def test_codes_wait_for_one_user_with_a_web_identity(self, stack, case):
+        """`istota web login-code` with no --user signs in the one user with a
+        profile, through their web identity; without one, codes would only
+        fail, so the config keeps its login and says why."""
+        if case == "no database":
+            (stack / "data" / "db" / "istota.db").unlink()
+        elif case == "two users":
+            self._user(stack, "bob", identity=True)
+        else:
+            from istota import db
+            with db.get_db(stack / "data" / "db" / "istota.db") as conn:
+                conn.execute("DELETE FROM web_auth_identities")
+        config = self._config(stack)
+        before = config.read_bytes()
+        said: list[str] = []
+        assert self._run(stack, out=said.append) == 0
+        assert config.read_bytes() == before
+        assert any("Not turning on the app's login codes" in line for line in said), said
+        assert setup_wizard.desktop_app(stack / "vm")
 
     def test_no_login_stays_no_login(self, stack):
         config = self._config(stack)

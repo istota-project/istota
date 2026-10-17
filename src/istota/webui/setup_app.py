@@ -1068,8 +1068,7 @@ def _failed(step: str, exc: BaseException) -> FinishError:
 
 def db_path_under(data_dir: Path) -> Path:
     """The stack's database path, under ``data_dir`` rather than ``/data``."""
-    relative = Path(setup_wizard.CONTAINER_DB_PATH).relative_to(setup_wizard.CONTAINER_DATA_DIR)
-    return Path(data_dir) / relative
+    return setup_wizard.container_db_path(data_dir)
 
 
 def login_url(a: setup_wizard.ContainerAnswers) -> str:

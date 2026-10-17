@@ -1462,13 +1462,7 @@ def cmd_web(args):
             raise ValueError('[web] auth does not include "local_code"; this install takes no login codes')
         if not db_path.exists():
             raise ValueError("DB not found; run `istota init` first")
-        user_id = args.user
-        if not user_id:
-            profiles = sorted(user_profiles.list_profiles(db_path))
-            if len(profiles) != 1:
-                named = ", ".join(profiles) if profiles else "none"
-                raise ValueError(f"name the user with --user (users with a profile: {named})")
-            user_id = profiles[0]
+        user_id = args.user or web_auth.local_login_user(db_path)
         print(web_auth.issue_token(db_path, user_id, "local_login", web_auth.LOCAL_LOGIN_TTL_SECONDS))
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -55,6 +55,33 @@ pub fn codes_off(tail: &[String]) -> bool {
     tail.iter().any(|line| line.contains("does not include \"local_code\""))
 }
 
+pub const CODES_OFF_NOTICE: &str =
+    "This install signs in with its own password; login codes are off in its settings.";
+
+/// Where Open Istota goes, and why it is not signed in when it is not.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Opening {
+    pub url: String,
+    pub notice: Option<&'static str>,
+    /// For the app's log: why no code was used.
+    pub reason: Option<String>,
+}
+
+/// The login page stands in for any code `istota web login-code` did not
+/// give: codes off, several users, no web identity, or a failed call. Only
+/// codes off is worth a notice; the page itself says the rest.
+pub fn opening(port: u16, minted: Result<&str, (&str, &[String])>) -> Opening {
+    let plain = |notice, reason: String| Opening { url: plain_url(port), notice, reason: Some(reason) };
+    match minted {
+        Ok(stdout) => match parse_code(stdout) {
+            Ok(code) => Opening { url: login_url(port, &code), notice: None, reason: None },
+            Err(err) => plain(None, err),
+        },
+        Err((_, tail)) if codes_off(tail) => plain(Some(CODES_OFF_NOTICE), "login codes are off".to_string()),
+        Err((message, tail)) => plain(None, format!("{message} {}", tail.join(" ")).trim().to_string()),
+    }
+}
+
 /// The one web identity whose sessions "Sign out everywhere" ends, from
 /// `istota auth list`'s lines (`<user> email=… … live`). The local install has
 /// one; several, or none, is refused rather than guessed.
@@ -102,6 +129,35 @@ mod tests {
         let refused = vec!["Error: [web] auth does not include \"local_code\"; this install takes no login codes".to_string()];
         assert!(codes_off(&refused));
         assert!(!codes_off(&["Error: database is locked".to_string()]));
+    }
+
+    #[test]
+    fn any_refused_code_opens_the_login_page_with_the_reason_kept() {
+        let code = "Ab3_-".repeat(9);
+        let signed_in = opening(8181, Ok(&format!("{code}\n")));
+        assert_eq!(signed_in.url, login_url(8181, &code));
+        assert_eq!((signed_in.notice, signed_in.reason), (None, None));
+
+        let off = vec!["Error: [web] auth does not include \"local_code\"; this install takes no login codes".to_string()];
+        let opened = opening(8181, Err(("istota exited 1", &off)));
+        assert_eq!(opened.url, plain_url(8181));
+        assert_eq!(opened.notice, Some(CODES_OFF_NOTICE));
+
+        for tail in [
+            "Error: name the user with --user (users with a profile: alice, bob)",
+            "Error: alice has no web identity to sign in as; add one with `istota auth add`",
+            "Error: Auth database operation failed",
+        ] {
+            let lines = vec![tail.to_string()];
+            let opened = opening(8181, Err(("istota exited 1", &lines)));
+            assert_eq!(opened.url, plain_url(8181), "{tail}");
+            assert_eq!(opened.notice, None);
+            assert!(opened.reason.as_deref().is_some_and(|r| r.contains(tail)), "{tail}");
+        }
+
+        let garbled = opening(8181, Ok("not a code\n"));
+        assert_eq!(garbled.url, plain_url(8181));
+        assert!(garbled.reason.is_some());
     }
 
     #[test]

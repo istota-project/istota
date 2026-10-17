@@ -368,6 +368,15 @@ def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
 CONTAINER_DATA_DIR = Path("/data")
 CONTAINER_DB_PATH = "/data/db/istota.db"
 CONTAINER_TEMP_DIR = "/data/tmp"
+
+
+def container_db_path(data_dir: Path, configured: str = CONTAINER_DB_PATH) -> Path:
+    """A database path the config names under ``/data``, found under ``data_dir``."""
+    path = Path(configured)
+    if not path.is_relative_to(CONTAINER_DATA_DIR):
+        return path
+    return Path(data_dir) / path.relative_to(CONTAINER_DATA_DIR)
+
 CONTAINER_REPOS_DIR = "/data/repos"
 #: The devbox socket directories, one per-user volume mounted under each. Under
 #: /data because the root phase hands writable mounts there to uid 10001, and a
@@ -2227,10 +2236,32 @@ def adopt_desktop_app(data_dir: Path, vm_dir: Path, *, out) -> None:
     cookies = {"ISTOTA_WEB_INSECURE_COOKIES": web_insecure_cookies(ingress)}
     env_path.write_text(merge_env_text(env_text, cookies, _STACK_ENV_HEADER), encoding="utf-8")
     out(f"  .env: ISTOTA_WEB_INSECURE_COOKIES={cookies['ISTOTA_WEB_INSECURE_COOKIES']}")
-    _add_login_codes(document, config_path, out=out)
+    _add_login_codes(document, config_path, data_dir, out=out)
 
 
-def _add_login_codes(document: dict, config_path: Path, *, out) -> None:
+def _login_code_user_refusal(document: dict, data_dir: Path) -> str | None:
+    """Why `istota web login-code` with no --user would fail on this install,
+    which is how the app asks: the one user with a profile and a web identity."""
+    import sqlite3  # noqa: PLC0415
+
+    from istota.webui import auth as web_auth  # noqa: PLC0415
+
+    configured = document.get("db_path", CONTAINER_DB_PATH)
+    if not isinstance(configured, str):
+        return "db_path is not a path"
+    db_path = container_db_path(data_dir, configured)
+    if not db_path.is_file():
+        return f"there is no database at {db_path}"
+    try:
+        web_auth.local_login_user(db_path)
+    except ValueError as exc:
+        return str(exc)
+    except sqlite3.Error as exc:
+        return f"the database could not be read ({type(exc).__name__})"
+    return None
+
+
+def _add_login_codes(document: dict, config_path: Path, data_dir: Path, *, out) -> None:
     from istota import apply  # noqa: PLC0415
     from istota.config import WEB_AUTH_METHODS  # noqa: PLC0415
 
@@ -2247,6 +2278,10 @@ def _add_login_codes(document: dict, config_path: Path, *, out) -> None:
         return
     if "none" in methods or not set(methods) <= set(WEB_AUTH_METHODS):
         out(f"  Not turning on the app's login codes: [web] auth is {methods}; {keeps}.")
+        return
+    refusal = _login_code_user_refusal(document, data_dir)
+    if refusal:
+        out(f"  Not turning on the app's login codes: {refusal}; {keeps}.")
         return
     web["auth"] = ["local_code", *methods]
     try:

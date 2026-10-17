@@ -231,15 +231,18 @@ fn open_local(app: &AppHandle) -> Result<(), String> {
         return Err("Istota is not running on this Mac.".into());
     }
     let port = login::local_port(&shared.paths);
-    let url = match shared.supervisor.output(&Call::Istota(login::LOGIN_CODE)) {
-        Ok(stdout) => login::login_url(port, &login::parse_code(&stdout)?),
-        Err(f) if login::codes_off(&f.tail) => {
-            set_notice(app, Some("This install signs in with its own password; login codes are off in its settings.".into()));
-            login::plain_url(port)
-        }
-        Err(f) => return Err(format!("{} {}", f.message, f.tail.join(" ")).trim().to_string()),
+    let minted = shared.supervisor.output(&Call::Istota(login::LOGIN_CODE));
+    let opening = match &minted {
+        Ok(stdout) => login::opening(port, Ok(stdout)),
+        Err(f) => login::opening(port, Err((&f.message, &f.tail))),
     };
-    let url = Url::parse(&url).map_err(|err| err.to_string())?;
+    if let Some(reason) = &opening.reason {
+        (shared.log)(&format!("opening the login page, no login code: {reason}"));
+    }
+    if let Some(notice) = opening.notice {
+        set_notice(app, Some(notice.into()));
+    }
+    let url = Url::parse(&opening.url).map_err(|err| err.to_string())?;
     open_web_window(app, LOCAL_WINDOW, LOCAL_TITLE, url, None);
     Ok(())
 }
