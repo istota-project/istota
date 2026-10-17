@@ -1,0 +1,30 @@
+{
+  "name": "istota-desktop",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "ui:dev": "cd ui && vite dev",
+    "ui:build": "cd ui && vite build",
+    "prepare": "cd ui && svelte-kit sync || echo ''",
+    "check": "cd ui && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "format": "prettier --write ui/src ui/*.js package.json",
+    "format:check": "prettier --check ui/src ui/*.js package.json",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.50.2",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tauri-apps/cli": "^2.0.0",
+    "prettier": "^3.9.6",
+    "prettier-plugin-svelte": "^3.5.2",
+    "svelte": "^5.54.0",
+    "svelte-check": "^4.4.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  }
+}

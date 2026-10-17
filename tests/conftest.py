@@ -730,7 +730,7 @@ SERIAL_TIER_MARKERS = ("smoke", "full", "testbed")
 #: missing here, which would have an incremental run building Docker images.
 DISCRETIONARY_MARKERS = (
     "integration", "live", "linux", "image", "smoke", "full", "testbed",
-    "vm", "ml",
+    "vm", "desktop", "ml",
 )
 
 #: Every compose project these tiers create starts with it, which is what makes

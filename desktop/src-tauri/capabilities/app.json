@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "app",
+  "description": "The app's own window and its bundled pages. No web UI window is listed: those hold no Tauri webview at all (src/web.rs).",
+  "windows": ["app"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-app-status",
+    "allow-open-web",
+    "allow-open-setup",
+    "allow-vm-start",
+    "allow-show-log-files",
+    "allow-quit-app"
+  ]
+}

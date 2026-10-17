@@ -15,6 +15,13 @@ indent_size = 4
 [web/**]
 indent_size = 2
 
+# The Mac app: Rust and TOML at rustfmt's 4, its Svelte UI and JSON at 2
+[*.{rs,toml}]
+indent_size = 4
+
+[desktop/{ui/**,*.json,src-tauri/*.json,src-tauri/capabilities/*.json}]
+indent_size = 2
+
 # Markdown: keep trailing whitespace (hard line breaks) and don't hard-wrap
 [*.md]
 trim_trailing_whitespace = false
