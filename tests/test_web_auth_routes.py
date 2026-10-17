@@ -863,11 +863,13 @@ async def test_recovery_codes_need_step_up_on_an_email_session(client, configure
     for body in ({"confirm": True}, {"confirm": True, "password": "wrong password"}):
         refused = await client.post(url, json=body, headers=origin)
         assert refused.status_code == 403
-        assert refused.json()["field"] == "code"
+        # The account has a password, so that is the method a bare refusal names.
+        assert refused.json()["field"] == "password"
         assert "fixture-rc" not in refused.text
     sent = []
     monkeypatch.setattr(configured.web_auth_mail, "send_auth_email", lambda *args: sent.append(args))
-    request = await client.post("/istota/api/settings/step-up", json={"action": "recovery_reveal"}, headers=origin)
+    request = await client.post("/istota/api/settings/step-up",
+                                json={"action": "recovery_reveal", "method": "email"}, headers=origin)
     code = re.search(r"[0-9]{6}", sent[-1][2])[0]
     response = await client.post(url, json={"step_up": {"request_id": request.json()["request_id"], "code": code}}, headers=origin)
     assert response.status_code == 200, response.text

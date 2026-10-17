@@ -79,6 +79,7 @@ NON_SECRET_KEYS = frozenset({
     "web.auth_throttle_max_email",
     "web.auth_throttle_max_ip",
     "web.auth_mail_link_max_email",
+    "web.auth_step_up_mail_max",
 
     "web.token_storage",              # "ephemeral" | "encrypted" — a mode, not a token
     "web.oauth2_token_endpoint",      # a URL

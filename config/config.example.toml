@@ -1293,6 +1293,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # auth_throttle_max_email = 10
 # auth_throttle_max_ip = 30
 # auth_mail_link_max_email = 3  # mails per address per hour, reset links and sign-in codes together
+# auth_step_up_mail_max = 20  # confirmation codes per signed-in user per hour, apart from the budget above
 # trusted_proxy_hops = 0  # Set only when the backend is restricted to trusted proxies.
 # oauth2_provider = "https://cloud.example.com"   # public NC URL the browser hits
 # oauth2_client_id = "istota-web"

@@ -79,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Confirming a sensitive action, such as saving a configuration change, now asks for your account password when you have one, with a button to email a code instead. Codes no longer share the three-an-hour limit of the sign-in form: they have their own, more generous limit, and when it runs out the dialog says when to try again instead of claiming a code was sent.
 - With Sonarr or another arr app configured, skill commands no longer warn that the app has no API key, and the servarr skill's instructions load inside a task instead of being refused as disabled. A skill that cannot run because its service is not configured is now called unavailable rather than disabled.
 - Restoring a local install onto a new VM no longer leaves the web app stuck on "Starting up". The restore now creates the web sign-in key the backups do not hold, so the web app starts; everyone signs in again once.
 - Moving an older command-line install into the Mac app now turns on the app's login codes when the install's site address is a plain `localhost`. The address is set to the port the app opens, and when the codes still cannot be turned on, the message says why.

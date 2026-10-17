@@ -14556,12 +14556,8 @@ async def _credential_json(request: Request) -> dict:
     return body
 
 
-def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
+def _send_step_up(config, user_id, action, code, name, ip):
     try:
-        issued = web_auth.start_step_up(config.db_path, web_auth.policy_from_config(config),
-                                       user_id, action, session_key, request_id=request_id)
-        if issued is None:
-            return
         identity = web_auth.get_identity(config.db_path, user_id)
         profile = user_profiles.get_profile(config.db_path, user_id)
         if identity is None or profile is None:
@@ -14569,7 +14565,7 @@ def _send_step_up(config, user_id, action, session_key, request_id, name, ip):
         label = _STEP_UP_LABELS[action]
         if name:
             label += f" for {name}"
-        message = web_auth_mail.build_step_up_email(config.bot_name, profile.display_name, issued[1], label,
+        message = web_auth_mail.build_step_up_email(config.bot_name, profile.display_name, code, label,
                                                    config.web.auth_step_up_ttl_minutes, ip)
         web_auth_mail.send_auth_email(config, identity.email, *message)
     except Exception:
@@ -14590,25 +14586,39 @@ def _no_step_up_method(user_id: str) -> str:
             "or to set up mail for confirmation codes.")
 
 
-def _step_up_method(identity) -> str | None:
-    """How this install confirms a sensitive action for this identity.
+def _step_up_methods(identity) -> list[str]:
+    """How this identity may confirm a sensitive action, the default first.
 
-    A mailed code wherever the install can mail one; otherwise the account
-    password; ``None`` when the identity has no password either. The one rule
-    both issuing and redeeming read, so the client never picks.
+    The account password where it has one, then a mailed code where the install
+    can mail. Either proves more than the session cookie, which is what a step-up
+    asks; the password first because it spends no mail.
     """
-    if web_auth_mail.can_send(_config):
-        return "email"
+    methods = []
     if identity.password_hash:
-        return "password"
-    return None
+        methods.append("password")
+    if web_auth_mail.can_send(_config):
+        methods.append("email")
+    return methods
+
+
+def _email_hint(email: str) -> str:
+    return email[0] + "•••@" + email.rsplit("@", 1)[-1]
+
+
+def _step_up_mail_refusal(retry_after_seconds: int) -> JSONResponse:
+    minutes = max(1, -(-retry_after_seconds // 60))
+    unit = "minute" if minutes == 1 else "minutes"
+    return JSONResponse(
+        {"detail": f"Too many confirmation codes requested. Try again in {minutes} {unit}.",
+         "reason": "mail_budget", "retry_after": retry_after_seconds},
+        status_code=429, headers={"Cache-Control": "no-store", "Retry-After": str(retry_after_seconds)})
 
 
 @api_router.post("/settings/step-up")
 async def settings_step_up(request: Request, user: dict = Depends(_require_api_auth),
                            _csrf: None = Depends(_verify_origin)):
     body = await _credential_json(request)
-    action, name = body.get("action"), body.get("name")
+    action, name, requested = body.get("action"), body.get("name"), body.get("method")
     if action in _ADMIN_STEP_UP_ACTIONS:
         # These codes guard no vault, so the vault's isolation gate does not
         # apply; being an admin does.
@@ -14622,26 +14632,40 @@ async def settings_step_up(request: Request, user: dict = Depends(_require_api_a
     identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
     if identity is None or identity.disabled:
         raise HTTPException(status_code=403, detail="step_up_unavailable")
-    method = _step_up_method(identity)
-    expires_at = web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)
+    methods = _step_up_methods(identity)
+    if not methods:
+        raise HTTPException(status_code=403, detail=_no_step_up_method(user["username"]))
+    if requested is None:
+        method = methods[0]
+    elif requested in methods:
+        method = requested
+    else:
+        raise HTTPException(status_code=400, detail="That confirmation method is not available.")
+    policy = web_auth.policy_from_config(_config)
+    session_key = _step_up_session(request)
+    payload = {"method": method, "methods": methods}
+    if "email" in methods:
+        payload["email_hint"] = _email_hint(identity.email)
     if method == "password":
-        issued = await asyncio.to_thread(
-            web_auth.start_password_step_up, _config.db_path, web_auth.policy_from_config(_config),
-            user["username"], action, _step_up_session(request))
+        issued = await asyncio.to_thread(web_auth.start_password_step_up, _config.db_path, policy,
+                                         user["username"], action, session_key)
         if issued is None:
             raise HTTPException(status_code=403, detail=_no_step_up_method(user["username"]))
-        request_id, expires_at = issued
-        return JSONResponse({"method": "password", "request_id": request_id, "expires_at": expires_at},
-                            headers={"Cache-Control": "no-store"})
-    if method is None:
-        raise HTTPException(status_code=403, detail=_no_step_up_method(user["username"]))
-    request_id = secrets.token_urlsafe(18)
-    email_hint = identity.email[0] + "•••@" + identity.email.rsplit("@", 1)[-1]
-    response = JSONResponse({"method": "email", "request_id": request_id, "email_hint": email_hint,
-                             "expires_at": expires_at},
-                            headers={"Cache-Control": "no-store"})
-    response.background = BackgroundTask(_send_step_up, _config, user["username"], action,
-                                         _step_up_session(request), request_id, name, _client_ip(request))
+        payload["request_id"], payload["expires_at"] = issued
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+    try:
+        issued = await asyncio.to_thread(web_auth.start_step_up, _config.db_path, policy,
+                                         user["username"], action, session_key)
+    except web_auth.StepUpMailBudgetSpent as spent:
+        return _step_up_mail_refusal(spent.retry_after_seconds)
+    if issued is None:
+        raise HTTPException(status_code=403, detail="step_up_unavailable")
+    request_id, code = issued
+    payload["request_id"] = request_id
+    payload["expires_at"] = web_auth._timestamp(_config.web.auth_step_up_ttl_minutes * 60)
+    response = JSONResponse(payload, headers={"Cache-Control": "no-store"})
+    response.background = BackgroundTask(_send_step_up, _config, user["username"], action, code, name,
+                                         _client_ip(request))
     return response
 
 
@@ -14686,7 +14710,14 @@ async def _require_step_up(request: Request, body: dict, action: str) -> JSONRes
         proof = body.get("step_up")
         if not isinstance(proof, dict):
             proof = {}
-        method = _step_up_method(identity)
+        methods = _step_up_methods(identity)
+        # The proof names its method; a request row answers only its own.
+        if "code" in proof and "email" in methods:
+            method = "email"
+        elif "password" in proof and "password" in methods:
+            method = "password"
+        else:
+            method = methods[0] if methods else None
         if method == "password":
             reason = await _redeem_password_step_up(request, identity, action, proof)
         elif method == "email":

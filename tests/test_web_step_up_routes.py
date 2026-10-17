@@ -40,8 +40,11 @@ def recovery(configured, monkeypatch):
         generated.set_recovery(conn, "alice", "generated_acme", "fixture-rc-1111-aaaa")
 
 
-async def _start(client):
-    response = await client.post(STEP_UP, json={"action": "recovery_reveal"}, headers=ORIGIN)
+async def _start(client, method=None):
+    payload = {"action": "recovery_reveal"}
+    if method:
+        payload["method"] = method
+    response = await client.post(STEP_UP, json=payload, headers=ORIGIN)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -49,7 +52,7 @@ async def _start(client):
 async def test_the_method_is_email_where_the_install_can_mail(client, configured, mail):
     configured._config.email.enabled = True
     assert (await sign_in(client)).status_code == 302
-    body = await _start(client)
+    body = await _start(client, "email")
     assert body["method"] == "email"
     assert body["email_hint"] == "a•••@example.com"
     assert len(mail) == 1
@@ -61,8 +64,76 @@ async def test_the_method_is_password_without_mail_and_no_mail_is_attempted(clie
     assert (await sign_in(client)).status_code == 302
     body = await _start(client)
     assert body["method"] == "password"
-    assert set(body) == {"method", "request_id", "expires_at"}
+    assert body["methods"] == ["password"]
+    assert set(body) == {"method", "methods", "request_id", "expires_at"}
     assert mail == [] and calls == []
+
+
+async def test_with_mail_and_a_password_the_password_is_offered_first_and_nothing_is_mailed(
+    client, configured, mail,
+):
+    configured._config.email.enabled = True
+    assert (await sign_in(client)).status_code == 302
+    body = await _start(client)
+    assert body["method"] == "password"
+    assert body["methods"] == ["password", "email"]
+    assert body["email_hint"] == "a•••@example.com"
+    assert mail == []
+
+
+async def test_either_method_confirms_the_same_action(client, configured, mail, recovery):
+    configured._config.email.enabled = True
+    assert (await sign_in(client)).status_code == 302
+    body = await _start(client)
+    response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "password": PASSWORD}},
+                                 headers=ORIGIN)
+    assert response.status_code == 200, response.text
+    body = await _start(client, "email")
+    code = re.search(r"[0-9]{6}", mail[-1][2])[0]
+    response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "code": code}},
+                                 headers=ORIGIN)
+    assert response.status_code == 200, response.text
+
+
+async def test_an_email_only_account_is_mailed_a_code_at_once(client, configured, mail):
+    configured._config.email.enabled = True
+    assert (await sign_in(client)).status_code == 302
+    with db.get_db(configured._config.db_path) as conn:
+        conn.execute("UPDATE web_auth_identities SET password_hash='' WHERE user_id='alice'")
+    body = await _start(client)
+    assert body["method"] == "email" and body["methods"] == ["email"]
+    assert len(mail) == 1
+
+
+async def test_a_method_the_account_lacks_is_refused(client, configured, mail):
+    assert (await sign_in(client)).status_code == 302
+    response = await client.post(STEP_UP, json={"action": "recovery_reveal", "method": "email"}, headers=ORIGIN)
+    assert response.status_code == 400
+    assert mail == []
+
+
+async def test_a_spent_public_mail_budget_does_not_block_a_confirmation_code(client, configured, mail):
+    configured._config.email.enabled = True
+    assert (await sign_in(client)).status_code == 302
+    with db.get_db(configured._config.db_path) as conn:
+        for _ in range(configured._config.web.auth_mail_link_max_email):
+            conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('mail_link', ?, ?)",
+                         ("alice@example.com", web_auth._timestamp()))
+    await _start(client, "email")
+    assert len(mail) == 1
+
+
+async def test_a_spent_code_budget_is_said_and_mails_nothing(client, configured, mail):
+    configured._config.email.enabled = True
+    configured._config.web.auth_step_up_mail_max = 1
+    assert (await sign_in(client)).status_code == 302
+    await _start(client, "email")
+    response = await client.post(STEP_UP, json={"action": "recovery_reveal", "method": "email"}, headers=ORIGIN)
+    assert response.status_code == 429
+    assert response.json()["reason"] == "mail_budget"
+    assert "Try again" in response.json()["detail"]
+    assert response.json()["retry_after"] > 0
+    assert len(mail) == 1
 
 
 async def test_a_right_password_reveals_and_a_wrong_one_is_refused(client, configured, mail, recovery, caplog):
@@ -97,11 +168,11 @@ async def test_a_code_is_not_accepted_on_a_password_request(client, configured, 
 async def test_a_password_is_not_accepted_on_an_email_request(client, configured, mail, recovery):
     configured._config.email.enabled = True
     assert (await sign_in(client)).status_code == 302
-    body = await _start(client)
+    body = await _start(client, "email")
     response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "password": PASSWORD}},
                                  headers=ORIGIN)
     assert response.status_code == 403
-    assert response.json()["field"] == "code"
+    assert response.json()["reason"] == "dead"
     code = re.search(r"[0-9]{6}", mail[-1][2])[0]
     response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "code": code}},
                                  headers=ORIGIN)

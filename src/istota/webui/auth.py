@@ -63,6 +63,7 @@ class Policy:
     sign_in_code_ttl_seconds: int
     mail_link_max_email: int
     step_up_ttl_seconds: int = 600
+    step_up_mail_max: int = 20
 
 
 def policy_from_config(config) -> Policy:
@@ -77,6 +78,7 @@ def policy_from_config(config) -> Policy:
         sign_in_code_ttl_seconds=web.auth_sign_in_code_ttl_minutes * 60,
         mail_link_max_email=web.auth_mail_link_max_email,
         step_up_ttl_seconds=web.auth_step_up_ttl_minutes * 60,
+        step_up_mail_max=web.auth_step_up_mail_max,
     )
 
 
@@ -730,19 +732,47 @@ def _check_step_up_request(policy: Policy, action: str, session_key: str) -> Non
         raise ValueError("invalid step-up request")
 
 
+class StepUpMailBudgetSpent(Exception):
+    """The user has been mailed ``step_up_mail_max`` codes in the last hour."""
+
+    def __init__(self, retry_after_seconds: int):
+        super().__init__("step-up mail budget spent")
+        self.retry_after_seconds = retry_after_seconds
+
+
+_STEP_UP_MAIL_WINDOW = 3600
+
+
+def _spend_step_up_mail(conn: sqlite3.Connection, policy: Policy, user_id: str) -> None:
+    """Spend one unit of the user's hourly confirmation-code budget, or raise.
+
+    Apart from the public forms' `mail_link` budget, and keyed by user id: only
+    a signed-in user can ask, and the code goes to their own address, so there
+    is no stranger's inbox to protect and no account to hide by refusing quietly.
+    """
+    since = _timestamp(-_STEP_UP_MAIL_WINDOW)
+    conn.execute("DELETE FROM web_auth_attempts WHERE kind = 'step_up_mail' AND at <= ?", (since,))
+    rows = conn.execute("SELECT at FROM web_auth_attempts WHERE kind = 'step_up_mail' AND key = ? AND at > ? "
+                        "ORDER BY at", (user_id, since)).fetchall()
+    if len(rows) >= policy.step_up_mail_max:
+        oldest = datetime.strptime(rows[0]["at"], "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
+        frees = oldest + timedelta(seconds=_STEP_UP_MAIL_WINDOW) - datetime.now(timezone.utc)
+        raise StepUpMailBudgetSpent(max(1, int(frees.total_seconds()) + 1))
+    conn.execute("INSERT INTO web_auth_attempts (kind, key, at) VALUES ('step_up_mail', ?, ?)",
+                 (user_id, _timestamp()))
+
+
 def start_step_up(db_path, policy, user_id: str, action: str, session_key: str,
                   *, request_id: str | None = None) -> tuple[str, str] | None:
-    # The HTTP caller reserves an id before replying; minting and mail budget
-    # work happen in its BackgroundTask, identically on sent and refused mail.
+    """``(request_id, code)`` for a mailed code, ``None`` for an identity that
+    cannot have one; raises `StepUpMailBudgetSpent` with no request opened."""
     _check_step_up_request(policy, action, session_key)
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         identity = _get_identity(conn, user_id)
-        if identity is None:
+        if identity is None or identity.disabled or not _has_profile(conn, user_id):
             return None
-        identity = _mailable_identity(conn, policy, identity.email)
-        if identity is None:
-            return None
+        _spend_step_up_mail(conn, policy, user_id)
         request_id = request_id or secrets.token_urlsafe(18)
         code = f"{secrets.randbelow(10**6):06d}"
         _open_step_up(conn, policy, identity, action, session_key, request_id, "email",
