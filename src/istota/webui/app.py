@@ -831,8 +831,10 @@ footer a:hover { color: var(--accent-amber); border-bottom-color: var(--accent-a
 # Reads the same localStorage key the SvelteKit theme store writes (a JSON
 # string), so the login page matches the app the user is about to enter. Runs
 # before first paint — keep it in <head>.
+# No stored choice follows the OS, as the web UI's pre-paint script does.
 _LOGIN_PAGE_THEME_SCRIPT = (
-    "try{if(JSON.parse(localStorage.getItem('theme'))==='light')"
+    "try{var t=JSON.parse(localStorage.getItem('theme'));"
+    "if(t==='light'||(t!=='dark'&&window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches))"
     "document.documentElement.setAttribute('data-theme','light')}catch(e){}"
 )
 

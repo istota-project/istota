@@ -24,7 +24,8 @@
     <!-- Mobile browser chrome. Content is --surface-base for the active theme;
          the pre-paint script below seeds it and applyTheme() keeps it in step
          with the toggle. Deliberately not a prefers-color-scheme pair — the
-         theme is a stored preference that can disagree with the OS. -->
+         theme follows the OS only until one is chosen, and the stored choice
+         can disagree with it. -->
     <meta name="theme-color" content="#111111" />
     <meta name="apple-mobile-web-app-title" content="Istota" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -45,7 +46,14 @@
             return fallback;
           }
         }
-        var theme = read('theme', 'dark') === 'light' ? 'light' : 'dark';
+        // No stored choice follows the OS, as lib/stores/theme.ts does.
+        var stored = read('theme', null);
+        var theme =
+          stored === 'light' || stored === 'dark'
+            ? stored
+            : window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark';
         root.setAttribute('data-theme', theme);
         var chrome = document.querySelector('meta[name="theme-color"]');
         if (chrome) chrome.setAttribute('content', theme === 'light' ? '#ffffff' : '#111111');

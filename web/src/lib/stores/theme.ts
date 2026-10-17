@@ -9,8 +9,15 @@ function normalize(value: unknown): Theme {
   return value === 'light' ? 'light' : 'dark';
 }
 
+/** The OS's light or dark setting, for someone who has not chosen a theme. */
+function systemTheme(): Theme {
+  if (typeof window === 'undefined') return 'dark';
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches === true ? 'light' : 'dark';
+}
+
 function initialTheme(): Theme {
-  return normalize(loadSetting<Theme>(STORAGE_KEY, 'dark'));
+  const stored = loadSetting<unknown>(STORAGE_KEY, null);
+  return stored === 'light' || stored === 'dark' ? stored : systemTheme();
 }
 
 /** Current theme. Mirrors the `data-theme` attribute on <html>. */

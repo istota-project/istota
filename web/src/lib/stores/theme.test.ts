@@ -43,9 +43,23 @@ afterEach(() => {
 });
 
 describe('theme store', () => {
-  it('defaults to dark when nothing is persisted', async () => {
+  it('defaults to dark when nothing is persisted and the OS gives no light setting', async () => {
     const { theme } = await load();
     expect(get(theme)).toBe('dark');
+  });
+
+  it('follows the OS when nothing is persisted, and a stored choice outranks it', async () => {
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === '(prefers-color-scheme: light)',
+    })) as unknown as typeof window.matchMedia;
+    try {
+      expect(get((await load()).theme)).toBe('light');
+      localStorage.setItem('theme', JSON.stringify('dark'));
+      expect(get((await load()).theme)).toBe('dark');
+    } finally {
+      window.matchMedia = original;
+    }
   });
 
   it('seeds from the persisted value', async () => {
