@@ -52,7 +52,16 @@
             invalid={!!problems[`${name}.url`]}
           />
         </Field>
-        {#if app.keySet === true && !replacing[name]}
+        {#if app.keyReadOnly}
+          <Field label="API key" labelled={false}>
+            <div class="key-state">
+              <Badge variant={app.keySet === true ? 'success' : 'warn'}
+                >{app.keySet === true ? 'set' : 'not set'}</Badge
+              >
+              <span class="caption">{app.keyReadOnly}</span>
+            </div>
+          </Field>
+        {:else if app.keySet === true && !replacing[name]}
           <Field label="API key" labelled={false}>
             <div class="key-state">
               <Badge variant="success">set</Badge>

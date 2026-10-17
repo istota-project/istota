@@ -239,7 +239,19 @@ describe('Check now', () => {
 });
 
 describe('editing', () => {
-  const KEY_LABEL = 'servarr.apps.radarr.api_key';
+  const KEY_FILE = 'istota_servarr_radarr_api_key';
+
+  /** The view's secrets entries for the four keys, as `GET /admin/config` lists them. */
+  function keyFiles(readOnlyReason: string | null = null) {
+    return ['sonarr', 'radarr', 'lidarr', 'prowlarr'].map((name) => ({
+      name: `istota_servarr_${name}_api_key`,
+      label: `servarr.apps.${name}.api_key`,
+      config_key: `servarr.apps.${name}.api_key`,
+      set: name === 'radarr',
+      read_only_reason: readOnlyReason,
+      risky: false,
+    }));
+  }
   const UNMANAGED = { managed: false, source: null, at: null };
   const MANAGED = {
     config: { managed: true, source: 'ansible', at: null },
@@ -258,7 +270,7 @@ describe('editing', () => {
           in_file: true,
         }),
       ],
-      over,
+      { secrets: keyFiles(), ...over },
     );
   }
 
@@ -343,7 +355,7 @@ describe('editing', () => {
   });
 
   it('sends a replaced key as one credential value and in no set op', async () => {
-    api.previewConfigChange.mockResolvedValue(configPreview({ secret_names: [KEY_LABEL] }));
+    api.previewConfigChange.mockResolvedValue(configPreview({ secret_names: [KEY_FILE] }));
     const card = await openEditor();
     const radarr = await form(card);
     await fireEvent.click(radarr.getByRole('button', { name: 'Replace key' }));
@@ -353,20 +365,28 @@ describe('editing', () => {
     await review(card);
     await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
     const changeSet = api.previewConfigChange.mock.calls[0][0];
-    expect(changeSet.secrets).toEqual({ [KEY_LABEL]: 'fixture-arr-key-9' });
+    expect(changeSet.secrets).toEqual({ [KEY_FILE]: 'fixture-arr-key-9' });
     expect(changeSet.ops).toEqual([]);
   });
 
-  it('removes the table of an app turned off', async () => {
+  it('removes the table of an app turned off and clears its key file', async () => {
     api.previewConfigChange.mockResolvedValue(configPreview());
     const card = await openEditor();
     const radarr = await form(card);
     await fireEvent.click(radarr.getByLabelText('Enabled'));
     await review(card);
     await waitFor(() => expect(api.previewConfigChange).toHaveBeenCalled());
-    expect(api.previewConfigChange.mock.calls[0][0].ops).toEqual([
-      { op: 'unset', path: ['servarr', 'apps', 'radarr'] },
-    ]);
+    const changeSet = api.previewConfigChange.mock.calls[0][0];
+    expect(changeSet.ops).toEqual([{ op: 'unset', path: ['servarr', 'apps', 'radarr'] }]);
+    expect(changeSet.secrets).toEqual({ [KEY_FILE]: '' });
+  });
+
+  it('shows a read-only key file with its reason and no way to replace it', async () => {
+    const reason = 'Managed by ansible. Change it there.';
+    const card = await openEditor(servarrView({ secrets: keyFiles(reason) }));
+    const radarr = await form(card);
+    expect(radarr.getByText(reason)).toBeTruthy();
+    expect(radarr.queryByRole('button', { name: 'Replace key' })).toBeNull();
   });
 
   it('refuses plain HTTP to a host not in the private hosts before any preview', async () => {

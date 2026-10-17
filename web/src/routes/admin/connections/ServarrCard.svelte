@@ -146,7 +146,7 @@
       const [view, listed] = await Promise.all([loadConfig(), getAdminUsers().catch(() => null)]);
       users = listed ? listed.users.map((user) => user.user_id) : [];
       if (readOnly) return;
-      const start = servarrForm(connection, viewPrivateHosts(view));
+      const start = servarrForm(connection, viewPrivateHosts(view), view.secrets);
       initial = start;
       form = structuredClone(start);
     } catch (e) {
@@ -178,7 +178,7 @@
       return;
     }
     if (!form || !edited || !before) return;
-    const after = servarrForm(connection, viewPrivateHosts(view));
+    const after = servarrForm(connection, viewPrivateHosts(view), view.secrets);
     initial = after;
     form = rebaseForm(edited, before, after);
     notice =
