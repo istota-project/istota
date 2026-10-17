@@ -1047,6 +1047,7 @@ async def deliver_whatsapp(
     relay_return_id: str | None = None,
     group_room: str | None = None,
     attach_media: bool = False,
+    generated_image: bytes | None = None,
 ) -> WhatsAppDeliveryRecord:
     """Claim and perform one logical send. At most one Cloud API call.
 
@@ -1057,6 +1058,13 @@ async def deliver_whatsapp(
     and wherever the adapter cannot send media, every embed is replaced by its
     alt text, since a relative URL is not a link on a phone. Either way it is
     still one claim and one provider call.
+
+    `generated_image` is a picture the daemon made for this text (a location
+    share's map, which shows what the text's own map link already discloses),
+    sent with the text as its caption wherever the adapter can send media.
+    It needs no `attach_media`, since it is nobody's workspace file, and it
+    takes the one image slot ahead of an embed, which then goes as alt text.
+    The returned record's `media_staged` says whether it rode the request.
 
     `group_room` sends into the WhatsApp group that room is bound to rather
     than to `user_id`'s own chat; `user_id` is then who the ledger row and any
@@ -1101,13 +1109,16 @@ async def deliver_whatsapp(
     may_attach = bool(
         attach_media and caps is not None and caps.outbound_media and not buttons
     )
+    may_attach_generated = bool(
+        generated_image and caps is not None and caps.outbound_media and not buttons
+    )
     media_plan: tuple[str, str] | None = None
     if request_id is None:
         from .outbound_media import split_image  # noqa: PLC0415
 
         split = split_image(text)
         text = split.with_alt
-        if may_attach and split.path:
+        if may_attach and split.path and not may_attach_generated:
             media_plan = (
                 split.path,
                 render_whatsapp(split.without, limit=_body_budget(caps, interactive=False)),
@@ -1150,14 +1161,17 @@ async def deliver_whatsapp(
 
         split = split_image(body)
         body = split.with_alt
-        if may_attach and split.path:
+        if may_attach and split.path and not may_attach_generated:
             media_plan = (split.path, split.without)
+    generated = generated_image if may_attach_generated else None
     if record.send_kind != "service":
         media_plan = None
+        generated = None
     try:
         return await _send_claimed(
             config, logical_key=logical_key, user_id=user_id,
             body=body, send_kind=record.send_kind, media_plan=media_plan,
+            generated_image=generated,
             task_id=task_id, buttons=buttons,
             reply_to_message_id=reply_to_message_id, adapter=adapter, request_id=request_id, relay_return_id=relay_return_id,
             group_room=group_room,
@@ -1196,6 +1210,7 @@ async def _send_claimed(
     relay_return_id: str | None = None,
     group_room: str | None = None,
     media_plan: tuple[str, str] | None = None,
+    generated_image: bytes | None = None,
 ) -> WhatsAppDeliveryRecord:
     """The body of :func:`deliver_whatsapp` from a claimed row onwards.
 
@@ -1216,6 +1231,7 @@ async def _send_claimed(
     pre-send half, and a refusal there is not a failure: the claimed `body`
     already carries the image's alt text and goes out alone. The staged copy
     is removed once the send has an answer, whatever the answer.
+    `generated_image` is staged the same way, captioned with the whole body.
     """
     staged = None
     try:
@@ -1259,6 +1275,12 @@ async def _send_claimed(
             )
             if staged is not None:
                 staged = replace(staged, caption=media_plan[1])
+        elif generated_image is not None:
+            from .outbound_media import stage_image_bytes  # noqa: PLC0415
+
+            staged = await asyncio.to_thread(stage_image_bytes, config, generated_image)
+            if staged is not None:
+                staged = replace(staged, caption=body)
         request = _request(config, destination, body, send_kind, buttons,
                            reply_to_message_id)
         if staged is not None:
@@ -1295,16 +1317,17 @@ async def _send_claimed(
         # parked statuses are waiting on. A status that beat the write may have
         # taken the row straight to `failed`, so `record` is what the row says
         # now rather than the `accepted` this branch asked for.
-        return await _settle_async(
+        record = await _settle_async(
             config, logical_key, "accepted", meta_message_id=result.message_id,
         )
+        return replace(record, media_staged=staged is not None)
     definite = bool(getattr(result, "definite", False))
     record = await _settle_async(
         config, logical_key, "failed" if definite else "unknown",
         error_code=getattr(result, "error_code", None),
     )
     await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
-    return record
+    return replace(record, media_staged=staged is not None)
 
 
 def _discard_media(config: Config, staged) -> None:

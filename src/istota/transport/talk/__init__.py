@@ -602,6 +602,15 @@ class TalkTransport:
         await client.delete_message(target, message_id)
         return None
 
+    async def share_file(self, target: str, remote_path: str) -> dict:
+        """Post a file already in the bot's Nextcloud files into a conversation.
+
+        Raises on API error, like `edit`: the caller decides what an
+        unanswered share means (`location.map_delivery` records it).
+        """
+        client = get_talk_client(self._config)
+        return await client.share_file(target, remote_path)
+
     async def resolve_channel_name(self, token: str) -> str:
         """Resolve a Talk room token to its display name, falling back to the
         token on any OCS error / missing config. Houses the last log-path OCS

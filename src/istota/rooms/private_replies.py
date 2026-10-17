@@ -1714,7 +1714,10 @@ async def deliver_request(config, row) -> None:
     if claim is None:
         return
     talk_id = None
+    map_states: list[str] = []
     if claim["kind"] == "room_post":
+        from istota.location import map_delivery
+
         if claim["talk_ref"]:
             from istota.transport.talk import TalkTransport
             try:
@@ -1723,19 +1726,61 @@ async def deliver_request(config, row) -> None:
                     reply_to=_talk_id(claim.get("talk_reply_to")))
             except Exception as exc:
                 logger.warning("room post %s: Talk post failed: %s", claim["request_id"], exc)
+            if talk_id is not None:
+                # The approved post's map, drawn now from the observation its
+                # approval bound, after the text it goes with.
+                map_states += await asyncio.to_thread(
+                    map_delivery.deliver_talk_maps, config,
+                    message_id=claim["message_id"], talk_token=claim["talk_ref"])
         if claim["whatsapp_group"]:
             # The group itself (multiplayer D6). Like the Talk half, a failed
             # send does not fail the post: the canonical row is the post, and
             # the ledger row and its alert say what happened to the group.
             from istota.transport.whatsapp.outbound import deliver_whatsapp
+            prepared = await asyncio.to_thread(
+                map_delivery.prepare_whatsapp_map, config,
+                message_id=claim["message_id"], room_token=claim["parent"])
+            record, raised = None, False
             try:
-                await deliver_whatsapp(
+                record = await deliver_whatsapp(
                     config, logical_key=claim["reference"], user_id=claim["user_id"],
                     text=claim["body"], group_room=claim["parent"],
-                    reply_to_message_id=claim.get("whatsapp_reply_to"))
+                    reply_to_message_id=claim.get("whatsapp_reply_to"),
+                    generated_image=prepared.data if prepared else None)
             except Exception as exc:
+                raised = True
                 logger.warning("room post %s: WhatsApp post failed: %s", claim["request_id"], exc)
+            state = await asyncio.to_thread(
+                map_delivery.settle_whatsapp_map, config, prepared, record, send_raised=raised)
+            if state is not None:
+                map_states.append(state)
     else:
         # Never raises; a whisper that reached nobody becomes a bell row there.
         await send_private(config, claim["delivery"], body=claim["body"])
     await asyncio.to_thread(_settle, config, claim, talk_id)
+    if "failed" in map_states:
+        await asyncio.to_thread(_map_unavailable, config, claim)
+
+
+def _map_unavailable(config, claim: dict) -> None:
+    """Tell the owner their approved post went out without its map.
+
+    The one place a missing map is announced, since the approval promised
+    one. The post itself stands. Never raises.
+    """
+    from istota.notifications.resolvers import task_alert
+    from istota.notifications.store import deliver_pending
+
+    request_id = claim["request_id"]
+    try:
+        with db.get_db(config.db_path) as conn:
+            notice = task_alert.write(
+                conn, claim["user_id"], dedup_key=f"private-reply-map:{request_id}",
+                title="Room post map unavailable",
+                body=f"Room post {request_id} was posted; map unavailable.",
+                params={"request_id": request_id, "status": "map_unavailable"},
+            )
+        if notice is not None:
+            deliver_pending(config, [notice])
+    except Exception as exc:
+        logger.warning("room post %s: map notice failed (%s)", request_id, type(exc).__name__)

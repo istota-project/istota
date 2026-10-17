@@ -5001,6 +5001,14 @@ def process_one_task(
         except Exception as e:
             logger.debug("Failed to record talk external_id for task %d: %s", task_id, e)
 
+    # A location share's map, after the text it belongs to has landed. Only
+    # the cards attached to this answer's row, only into their own room.
+    if (response_msg_id and talk_token and success and not dry_run
+            and not is_failure_notify and not shared_room_notice
+            and stored_assistant_msg_id is not None):
+        from .location.map_delivery import deliver_talk_maps
+        deliver_talk_maps(config, message_id=stored_assistant_msg_id, talk_token=talk_token)
+
     # Cache the result so it's immediately available for context building.
     # The result is always posted as its own message, so its real Talk ID is
     # the cache key. The upsert preserves :result tags so the poller won't
@@ -5121,6 +5129,19 @@ def process_one_task(
             # Outside the `try`, so an import failure is not swallowed and
             # reported as a delivery failure.
             from .transport.whatsapp._types import REACHED_META
+            from .location.map_delivery import prepare_whatsapp_map, settle_whatsapp_map
+            # A location share's map rides the answer as its image, only on
+            # the task's own result into the room the card was recorded for.
+            whatsapp_map = None
+            if (success and not dry_run and post_whatsapp_reference_id is None
+                    and not is_failure_notify and task.source_type == "whatsapp"
+                    and stored_assistant_msg_id is not None and task.conversation_token):
+                whatsapp_map = prepare_whatsapp_map(
+                    config, message_id=stored_assistant_msg_id,
+                    room_token=task.conversation_token,
+                )
+            whatsapp_record = None
+            whatsapp_raised = False
             try:
                 whatsapp_record = run_coro(whatsapp_transport.send_record(
                     whatsapp_dest.channel or "", post_whatsapp_message, task=task,
@@ -5128,6 +5149,7 @@ def process_one_task(
                         post_whatsapp_reference_id or f"task-result:{task_id}"
                     ),
                     buttons=post_whatsapp_buttons,
+                    generated_image=whatsapp_map.data if whatsapp_map else None,
                 ))
                 whatsapp_undelivered = (
                     whatsapp_record is None
@@ -5139,6 +5161,9 @@ def process_one_task(
                     exc_info=True,
                 )
                 whatsapp_undelivered = True
+                whatsapp_raised = True
+            settle_whatsapp_map(config, whatsapp_map, whatsapp_record,
+                                send_raised=whatsapp_raised)
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"

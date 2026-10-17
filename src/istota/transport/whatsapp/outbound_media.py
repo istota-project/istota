@@ -124,6 +124,23 @@ def stage_image(
     except Exception:
         logger.warning("whatsapp.outbound.media_refused reason=encode", exc_info=True)
         return None
+    return _stage_encoded(config, encoded)
+
+
+def stage_image_bytes(config: "Config", data: bytes) -> WhatsAppOutboundMedia | None:
+    """`stage_image` for an image the daemon made, such as a location share's map.
+
+    The same sniff, re-encode and staging, minus the workspace resolution:
+    the bytes are not anybody's file. `None` for anything `stage_image` would
+    refuse. Never raises.
+    """
+    return _stage_encoded(config, reencode_bytes(data))
+
+
+def _stage_encoded(
+    config: "Config", encoded: tuple[bytes, str, str] | None,
+) -> WhatsAppOutboundMedia | None:
+    """Write one re-encoded copy into the media staging directory, or None."""
     if encoded is None:
         return None
     data, mimetype, extension = encoded
@@ -252,4 +269,7 @@ def discard(config: "Config", staged: WhatsAppOutboundMedia | None) -> None:
         logger.warning("whatsapp.outbound.media_discard_failed", exc_info=True)
 
 
-__all__ = ["ImageSplit", "OUTBOUND_MAX_EDGE", "discard", "split_image", "stage_image"]
+__all__ = [
+    "ImageSplit", "OUTBOUND_MAX_EDGE", "discard", "reencode_bytes", "split_image",
+    "stage_image", "stage_image_bytes",
+]
