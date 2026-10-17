@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Settings → Preferences now lists registered iOS push devices with a remove action, and saves choices for chat alerts and message previews. Device registration and delivery in the iOS app will follow.
+
 - The Feeds sidebar shows how many entries are unread and how many are starred next to Unread and Starred, and sources with unread entries are in bold. The counts update as you read, star and mark entries read.
 - **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation.
 - **Request films, shows and albums from chat.** The new `servarr` skill works with the operator's Sonarr, Radarr, Lidarr and Prowlarr: ask for something, see what is stuck and why, and list your requests. Admins can do everything; listed requesters request with the stack's defaults. Asking for a film or show the library holds unmonitored monitors it, tags it as your request and searches for it. It cannot delete media. Admin > Connections shows each app and whether it answers with its key, and the `[servarr]` section of Admin > Configuration has a block per app for its URL and API key. The API keys are secret files on the stack, like the other deployment credentials, and never sit in `config.toml`. See docs/features/servarr.md.

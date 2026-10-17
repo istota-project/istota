@@ -2197,6 +2197,8 @@ export interface UserProfile {
   // it overwrites the timezone the user chose above.
   timezone_follow_location: boolean;
   show_nav_unread_badges: boolean;
+  push_chat_alerts?: 'alerts' | 'badge' | 'off';
+  push_preview?: boolean;
   // How much of a turn that arrived from outside the room (today, mirrored
   // email) the transcript shows. The row is always there whatever this says —
   // `hidden` withholds the body, never the turn.
@@ -5310,6 +5312,7 @@ export interface ResolvedNotification {
 }
 
 export interface NotificationCounts {
+  chat_unread?: number;
   open: number;
   actionable: number;
 }
@@ -6896,4 +6899,32 @@ export function saveGroupDeliveryPreferences(
 }
 export function groupBriefingDownloadUrl(group: string, name: string, run: number): string {
   return `${base}/api${groupBriefingPath(group, name)}/runs/${run}/download`;
+}
+
+export interface PushDevice {
+  id: number;
+  platform: string;
+  app_version: string;
+  environment: 'production' | 'sandbox';
+  token_tail: string;
+  created_at: string;
+  last_seen_at: string | null;
+  last_error: string | null;
+}
+
+export function listPushDevices(): Promise<{ devices: PushDevice[] }> {
+  return apiFetch('/push/devices');
+}
+
+export function registerPushDevice(device: {
+  token: string;
+  environment: 'production' | 'sandbox';
+  platform: 'ios';
+  app_version: string;
+}): Promise<{ id: number }> {
+  return apiFetch('/push/devices', { method: 'POST', body: JSON.stringify(device) });
+}
+
+export function deletePushDevice(id: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/push/devices/${id}`, { method: 'DELETE' });
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Button, ConfirmDialog, Field, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import { SettingsLayout, SettingsCard, SettingsField, PushCard } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import { shellAtLeast } from '$lib/platform/native';
   import { clearOfflineData } from '$lib/offline/clear';
@@ -227,6 +227,10 @@
        fetch is the first thing that fails when the app cannot reach the
        server, and a cache gone wrong is a reason it might not. A row that
        disappears exactly when it is needed is not an escape hatch. -->
+  {#if profile}
+    <PushCard />
+  {/if}
+
   {#if offlineDataClearable}
     <SettingsCard
       title="Offline data"

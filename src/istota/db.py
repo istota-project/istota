@@ -690,6 +690,8 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # inferred, and an existing row must not start following on upgrade.
         "timezone_follow_location": "INTEGER NOT NULL DEFAULT 0",
         "show_nav_unread_badges": "INTEGER NOT NULL DEFAULT 0",
+        "push_chat_alerts": "TEXT NOT NULL DEFAULT 'alerts'",
+        "push_preview": "INTEGER NOT NULL DEFAULT 1",
         # Per-user Google Workspace scope selection (ISSUE-240). JSON object
         # {service -> off|readonly|full}, bounded by the operator's
         # [google_workspace] scopes ceiling. Empty means "unset", which
@@ -1297,6 +1299,8 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
+    _migrate_push_tables(conn)
+    _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
     _migrate_profile_generation(conn)
     # Same shape again.
@@ -6919,16 +6923,37 @@ def initialize_room_read_state(
     return True
 
 
+def total_unread_messages(
+    conn: sqlite3.Connection, user_id: str, surface: str,
+) -> int:
+    """Count unread messages in visible member rooms, without moving cursors."""
+    hidden = hidden_room_tokens_for_member(conn, user_id)
+    sql = """
+        SELECT COUNT(*) FROM messages m
+        JOIN rooms r ON r.token = m.room_token
+        JOIN room_members rm ON rm.room_token = r.token AND rm.user_id = ?
+        LEFT JOIN room_read_state rs ON rs.room_token = r.token
+            AND rs.user_id = rm.user_id AND rs.surface = ?
+        WHERE r.archived = 0 AND m.role != 'user'
+          AND m.id > COALESCE(rs.last_read_message_id, 0)
+          AND NOT EXISTS (SELECT 1 FROM room_dismissals d
+                          WHERE d.room_token = r.token AND d.user_id = rm.user_id)
+    """
+    params = [user_id, surface]
+    if hidden:
+        sql += " AND r.token NOT IN (" + ",".join("?" for _ in hidden) + ")"
+        params.extend(sorted(hidden))
+    return int(conn.execute(sql, params).fetchone()[0])
+
+
 def count_user_web_unread_messages(conn: sqlite3.Connection, user_id: str) -> int:
     """Sum visible rooms using the web sidebar's cursors and unread rules."""
     hidden = hidden_room_tokens_for_member(conn, user_id)
-    total = 0
     for room in list_member_rooms(conn, user_id):
         if room.token in hidden:
             continue
         initialize_room_read_state(conn, room.token, "web", user_id)
-        total += count_unread_messages(conn, room.token, "web", user_id)
-    return total
+    return total_unread_messages(conn, user_id, "web")
 
 
 # ---------------------------------------------------------------------------
@@ -9215,6 +9240,38 @@ def _migrate_user_profile_managed_fields(conn: sqlite3.Connection) -> None:
         logger.warning("user_profile_managed_fields migration failed: %s", e)
 
 
+def _migrate_push_tables(conn: sqlite3.Connection) -> None:
+    """Create push state without committing the caller's transaction."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'ios',
+            token TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            app_version TEXT NOT NULL DEFAULT '',
+            last_badge INTEGER NOT NULL DEFAULT -1,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            last_seen_at TEXT,
+            UNIQUE (token, environment)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_state (
+            user_id TEXT PRIMARY KEY,
+            last_pushed_message_id INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+    """)
+
+
+def _migrate_notifications_push_pending(conn: sqlite3.Connection) -> None:
+    _add_columns(conn, "notifications", {"push_pending": "INTEGER NOT NULL DEFAULT 0"})
+
+
 def _migrate_notifications(conn: sqlite3.Connection) -> None:
     """Create the `notifications` inbox table and its indexes on existing DBs.
 
@@ -9233,6 +9290,7 @@ def _migrate_notifications(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
+                push_pending INTEGER NOT NULL DEFAULT 0,
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           TEXT NOT NULL,
                 source            TEXT NOT NULL,

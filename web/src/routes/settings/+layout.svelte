@@ -59,6 +59,8 @@
         next.default_room = next.default_room || '';
         next.relay_delivery = next.relay_delivery || '';
         next.show_nav_unread_badges = next.show_nav_unread_badges ?? false;
+        next.push_chat_alerts = next.push_chat_alerts ?? 'alerts';
+        next.push_preview = next.push_preview ?? true;
       }
       profile = next;
       initialProfileJson = next ? JSON.stringify(next) : '';
@@ -89,6 +91,8 @@
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
         show_nav_unread_badges: profile.show_nav_unread_badges,
+        push_chat_alerts: profile.push_chat_alerts,
+        push_preview: profile.push_preview,
         external_turn_display: profile.external_turn_display || 'collapsed',
         relay_delivery: profile.relay_delivery || '',
       };

@@ -920,6 +920,8 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     show_nav_unread_badges INTEGER NOT NULL DEFAULT 0,
+    push_chat_alerts TEXT NOT NULL DEFAULT 'alerts',
+    push_preview INTEGER NOT NULL DEFAULT 1,
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)
     google_scopes TEXT NOT NULL DEFAULT '{}',            -- JSON object: Google service -> off|readonly|full (bounded by the operator's ceiling; {} = unset = the whole ceiling)
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1925,6 +1927,7 @@ CREATE INDEX IF NOT EXISTS idx_task_usage_models_model  ON task_usage_models(mod
 -- fan-out needs text without loading a resolver. The rich render comes from
 -- `params` through the source's resolver at read time.
 CREATE TABLE IF NOT EXISTS notifications (
+    push_pending INTEGER NOT NULL DEFAULT 0,
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id           TEXT NOT NULL,
     source            TEXT NOT NULL,      -- registered producer id
@@ -2656,4 +2659,26 @@ CREATE TABLE IF NOT EXISTS group_briefing_migrations (
     state TEXT NOT NULL,
     data_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Native push registrations and the per-user chat watermark.
+CREATE TABLE IF NOT EXISTS push_devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'ios',
+    token TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    app_version TEXT NOT NULL DEFAULT '',
+    last_badge INTEGER NOT NULL DEFAULT -1,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_seen_at TEXT,
+    UNIQUE (token, environment)
+);
+CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id);
+CREATE TABLE IF NOT EXISTS push_state (
+    user_id TEXT PRIMARY KEY,
+    last_pushed_message_id INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

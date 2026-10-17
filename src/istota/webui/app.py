@@ -12495,7 +12495,13 @@ def _notification_counts(username: str) -> dict:
     from istota.notifications import store as notification_store  # noqa: PLC0415
 
     with db.get_db(_config.db_path) as conn:
-        return notification_store.counts(conn, username)
+        result = notification_store.counts(conn, username)
+        profile = user_profiles.get_profile(_config.db_path, username, conn=conn)
+        result["chat_unread"] = (
+            0 if profile and profile.push_chat_alerts == "off"
+            else db.total_unread_messages(conn, username, "web")
+        )
+        return result
 
 
 def _notification_list(username: str, filter_: str, limit) -> dict:
@@ -12530,9 +12536,78 @@ def _notification_mark_seen(username: str, seen: list[tuple[int, str]]) -> None:
         notification_store.mark_seen(conn, username, seen)
 
 
+def _push_devices_list(username: str) -> dict:
+    from istota import db
+    from istota.push import devices
+
+    with db.get_db(_config.db_path) as conn:
+        return {"devices": devices.list_devices(conn, username)}
+
+
+def _push_device_register(username: str, body: dict) -> int | None:
+    from istota import db
+    from istota.push import devices
+
+    with db.get_db(_config.db_path) as conn:
+        return devices.register_device(conn, username, **body)
+
+
+def _push_device_delete(username: str, device_id: int) -> bool:
+    from istota import db
+    from istota.push import devices
+
+    with db.get_db(_config.db_path) as conn:
+        return devices.delete_device(conn, device_id, username)
+
+
+@api_router.get("/push/devices")
+async def push_devices_list(user: dict = Depends(_require_api_auth)):
+    return await asyncio.to_thread(_push_devices_list, user["username"])
+
+
+@api_router.post("/push/devices")
+async def push_devices_register(request: Request, user: dict = Depends(_require_api_auth)):
+    _verify_origin(request)
+    try:
+        raw = await read_bounded_body(request, 4096)
+    except BodyError as exc:
+        raise HTTPException(exc.status, "invalid device registration body") from None
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise HTTPException(400, "invalid JSON") from None
+    if not isinstance(body, dict) or set(body) - {"token", "environment", "platform", "app_version"}:
+        raise HTTPException(400, "invalid device registration")
+    token = body.get("token")
+    environment = body.get("environment")
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64,200}", token):
+        raise HTTPException(400, "invalid device token")
+    if environment not in ("production", "sandbox"):
+        raise HTTPException(400, "invalid push environment")
+    if body.get("platform", "ios") != "ios":
+        raise HTTPException(400, "unsupported push platform")
+    version = body.get("app_version", "")
+    if not isinstance(version, str) or len(version) > 100 or any(ord(c) < 32 for c in version):
+        raise HTTPException(400, "invalid app version")
+    device_id = await asyncio.to_thread(_push_device_register, user["username"], body)
+    if device_id is None:
+        raise HTTPException(503, "could not register device")
+    return {"id": device_id}
+
+
+@api_router.delete("/push/devices/{device_id}")
+async def push_devices_delete(
+    device_id: int, request: Request, user: dict = Depends(_require_api_auth),
+):
+    _verify_origin(request)
+    if not await asyncio.to_thread(_push_device_delete, user["username"], device_id):
+        raise HTTPException(404, "device not found")
+    return {"ok": True}
+
+
 @api_router.get("/notifications/count")
 async def notifications_count(user: dict = Depends(_require_api_auth)):
-    """`{"open": N, "actionable": M}` — what the bell renders.
+    """Inbox counts for the bell, plus preference-filtered chat unread for the app badge.
 
     Plain SQL, no resolvers: the root layout polls this every thirty seconds
     from every route, and a resolver pass on a timer would open per-user module
@@ -15343,6 +15418,8 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
     "show_nav_unread_badges": {"type": "bool", "strict": True},
+    "push_chat_alerts": {"type": "enum", "values": user_profiles.PUSH_CHAT_ALERTS_VALUES},
+    "push_preview": {"type": "bool", "strict": True},
     "external_turn_display":  {
         "type": "enum", "values": user_profiles.EXTERNAL_TURN_DISPLAY_VALUES,
     },
@@ -16206,6 +16283,8 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
         "show_nav_unread_badges": profile.show_nav_unread_badges,
+        "push_chat_alerts": profile.push_chat_alerts,
+        "push_preview": profile.push_preview,
         "external_turn_display": profile.external_turn_display or "collapsed",
         "relay_delivery": profile.relay_delivery,
         "relay_delivery_options": _relay_delivery_options(user["username"]),
