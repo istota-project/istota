@@ -37,7 +37,9 @@
     type Immunization,
   } from '$lib/api';
   import {
+    Badge,
     Button,
+    NoticeBanner,
     Chip,
     ConfirmDialog,
     EmptyState,
@@ -65,6 +67,9 @@
     type TruncationFlags,
   } from '$lib/health/documents';
   import { formatDate } from '$lib/dateFormat';
+  import { isPlainClick } from '$lib/fileViewer/links';
+  import { viewer } from '$lib/fileViewer/store.svelte';
+  import { notifyError, notifyWarning } from '$lib/stores/notices';
 
   const entityTypes: SelectOption[] = [
     { value: 'encounter', label: 'Visit' },
@@ -78,10 +83,7 @@
   // the row-level busy state below unreachable and the page flash.
   let loading = $state(true);
   let refreshing = $state(false);
-  // Two error slots, because they are two states. A load failure replaces the
-  // pane; an action failure sits above a table that is still correct.
   let loadError = $state('');
-  let actionError = $state('');
   let documents = $state<HealthDocument[]>([]);
   // Which of the four walks ran out of pages before it ran out of records, one
   // flag each. On `documents` it means the header must not state a total and
@@ -118,7 +120,6 @@
   urlSelection.start();
 
   async function revealDocument(id: number) {
-    actionError = '';
     selectedDocumentId = null;
     try {
       if (!byId.has(id)) {
@@ -135,7 +136,7 @@
         ?.querySelector(`[data-document-id="${id}"]`)
         ?.scrollIntoView({ block: 'center' });
     } catch {
-      if (requestedDocumentId === id) actionError = "Couldn't locate that document.";
+      if (requestedDocumentId === id) notifyError("Couldn't locate that document.");
     }
   }
 
@@ -270,13 +271,12 @@
 
   /** Run a mutation on one row, then re-read. Owns the per-row busy guard. */
   async function mutate(id: number, action: () => Promise<void>, failure: string) {
-    actionError = '';
     busy.add(id);
     try {
       await action();
       await load({ quiet: true });
     } catch (e) {
-      actionError = e instanceof Error ? e.message : failure;
+      notifyError(e instanceof Error ? e.message : failure);
     } finally {
       busy.delete(id);
     }
@@ -320,7 +320,7 @@
       // seeing one means the pool was stale — say so rather than reporting a
       // change that did not happen.
       if (!out.created) {
-        actionError = 'That document was already attached to this record.';
+        notifyWarning('That document was already attached to this record.');
       }
     } catch (e) {
       attachError = e instanceof Error ? e.message : 'Failed to attach';
@@ -336,9 +336,33 @@
     await mutate(doc.id, () => deleteDocument(doc.id).then(() => {}), 'Failed to delete');
   }
 
+  function previewDocument(event: MouseEvent, doc: HealthDocument) {
+    if (!isPlainClick(event)) return;
+    if (doc.mime === 'application/pdf') {
+      event.preventDefault();
+      viewer.openFile(doc.url, {
+        kind: 'url',
+        url: doc.url,
+        name: documentName(doc),
+        mime: 'application/pdf',
+      });
+    } else {
+      openDocumentImage(event, doc);
+    }
+  }
+
   function menu(doc: HealthDocument): KebabItem[] {
     return [
-      { label: 'Open', href: doc.url, onClick: (event) => openDocumentImage(event, doc) },
+      ...(doc.mime === 'application/pdf' || doc.mime.startsWith('image/')
+        ? [
+            {
+              label: 'Preview',
+              href: doc.url,
+              onClick: (event: MouseEvent) => previewDocument(event, doc),
+            },
+          ]
+        : []),
+      { label: 'Download', href: doc.url, download: documentName(doc) },
       { label: 'Attach to a record', onSelect: () => openAttach(doc) },
       { label: 'Delete', danger: true, onSelect: () => (deleteTargetId = doc.id) },
     ];
@@ -386,14 +410,11 @@
      replaces the pane, so there is no table and no picker for this to be
      about, and the flags are whatever the last successful load left. -->
 {#if pageNotice && !loadError}
-  <div class="banner warn">{pageNotice}</div>
-{/if}
-
-{#if actionError}
-  <!-- An attach, detach or delete that failed. Separate from `loadError`: the
-       table is still on screen and still correct, so this sits above it rather
-       than replacing it with a whole-pane failure. -->
-  <div class="banner error">{actionError}</div>
+  <div class="page-notice">
+    <NoticeBanner title="Some records are not shown" variant="warn" collapsed={false}
+      >{pageNotice}</NoticeBanner
+    >
+  </div>
 {/if}
 
 {#if loading}
@@ -409,41 +430,51 @@
   <EmptyState>Every document is attached to a record.</EmptyState>
 {:else}
   <div class="table-scroll" class:refreshing bind:this={documentList}>
-    <table class="grid">
-      <thead>
-        <tr>
-          <th>Document</th>
-          <th class="num">Size</th>
-          <th>Added</th>
-          <th>Attached to</th>
-          <th></th>
+    <table class="grid documents-grid" aria-label="Health documents" role="table">
+      <thead role="rowgroup">
+        <tr role="row">
+          <th scope="col" class="document-column">Document</th>
+          <th scope="col" class="size-column">Size</th>
+          <th scope="col" class="added-column">Added</th>
+          <th scope="col" class="links-column">Attached to</th>
+          <th scope="col" class="actions"><span class="visually-hidden">Actions</span></th>
         </tr>
       </thead>
-      <tbody>
+      <tbody role="rowgroup">
         {#each rows as doc (doc.id)}
           <tr
+            role="row"
             data-document-id={doc.id}
             class:search-target={selectedDocumentId === doc.id}
             class:busy={busy.has(doc.id)}
           >
-            <td>
-              <a
-                class="name"
-                href={doc.url}
-                onclick={(event) => openDocumentImage(event, doc)}
-                title={documentName(doc)}>{documentName(doc)}</a
-              >
-              <p class="source">{sourceLabel(doc.source)}</p>
-              {#if doc.notes}<p class="notes">{doc.notes}</p>{/if}
+            <td class="document-column">
+              <div class="document-title">
+                <a
+                  class="name"
+                  href={doc.url}
+                  onclick={(event) => previewDocument(event, doc)}
+                  title={documentName(doc)}>{documentName(doc)}</a
+                >
+                <Badge size="sm">{sourceLabel(doc.source)}</Badge>
+                <span class="mobile-meta caption"
+                  >{formatBytes(doc.byte_size)}<span aria-hidden="true"> · </span><time
+                    datetime={doc.created_at}>{formatDate(doc.created_at)}</time
+                  ></span
+                >
+              </div>
+              {#if doc.notes}<p class="notes" title={doc.notes}>{doc.notes}</p>{/if}
             </td>
-            <td class="num">{formatBytes(doc.byte_size)}</td>
-            <td class="nowrap">{formatDate(doc.created_at)}</td>
-            <td>
+            <td class="size-column">{formatBytes(doc.byte_size)}</td>
+            <td class="added-column"
+              ><time datetime={doc.created_at}>{formatDate(doc.created_at)}</time></td
+            >
+            <td class="links-column">
               <div class="links">
                 {#each links(doc) as link (`${link.entity_type}:${link.entity_id}`)}
                   <span class="link-chip">
                     <span class="link-kind">{entityTypeLabel(link.entity_type)}</span>
-                    <span class="link-label">{link.label}</span>
+                    <span class="link-label" title={link.label}>{link.label}</span>
                     <button
                       type="button"
                       class="detach touch-target"
@@ -453,14 +484,16 @@
                     >
                   </span>
                 {/each}
-                <button
-                  type="button"
-                  class="attach"
-                  disabled={busy.has(doc.id)}
-                  onclick={() => openAttach(doc)}
-                >
-                  + Attach
-                </button>
+                {#if links(doc).length === 0}
+                  <button
+                    type="button"
+                    class="attach touch-target"
+                    disabled={busy.has(doc.id)}
+                    onclick={() => openAttach(doc)}
+                  >
+                    + Attach
+                  </button>
+                {/if}
               </div>
             </td>
             <td class="actions">
@@ -511,7 +544,7 @@
         />
       </Field>
       {#if attachError}
-        <div class="banner error">{attachError}</div>
+        <p class="form-error" role="alert">{attachError}</p>
       {/if}
     </div>
     {#snippet footer()}
@@ -547,7 +580,8 @@
 
   .header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
+    flex-wrap: wrap;
     justify-content: space-between;
     gap: var(--space-3);
     margin-bottom: var(--space-4);
@@ -569,39 +603,90 @@
     color: var(--accent-blue);
     text-decoration: none;
     font-weight: 500;
-    /* A scanner-generated filename must wrap rather than widen the column. */
-    overflow-wrap: anywhere;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .name:hover {
     text-decoration: underline;
   }
 
-  .source {
-    margin: var(--space-1) 0 0;
-    font-size: var(--text-2xs);
-    color: var(--text-dim);
-    line-height: 1.4;
+  .document-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .document-title :global(.badge) {
+    flex-shrink: 0;
+  }
+
+  .mobile-meta {
+    display: none;
+  }
+  .mobile-meta > span {
+    margin-inline: var(--space-1);
+  }
+
+  .page-notice {
+    margin-bottom: var(--space-3);
   }
 
   .notes {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     margin: var(--space-1) 0 0;
     font-size: var(--text-xs);
     color: var(--text-muted);
     line-height: 1.4;
   }
 
-  .num {
+  .documents-grid {
+    display: block;
+  }
+  .documents-grid thead {
+    display: block;
+  }
+  .documents-grid tbody {
+    display: grid;
+    grid-auto-rows: 1fr;
+  }
+  .documents-grid tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 5rem 8rem minmax(12rem, 24%) 2rem;
+  }
+  .grid.documents-grid td {
+    min-width: 0;
+    align-content: center;
+  }
+
+  .grid.documents-grid th:first-child,
+  .grid.documents-grid td:first-child {
+    padding-left: 0;
+  }
+
+  .grid.documents-grid th:last-child,
+  .grid.documents-grid td:last-child {
+    padding-right: 0;
+  }
+
+  .grid.documents-grid .size-column {
     text-align: right;
     font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
   }
 
-  .nowrap {
+  .added-column {
     white-space: nowrap;
   }
-
+  td.added-column {
+    color: var(--text-muted);
+  }
   .actions {
-    width: 1%;
+    text-align: right;
   }
 
   .links {
@@ -619,11 +704,14 @@
     background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-pill);
-    padding: var(--space-1) var(--space-1) var(--space-1) var(--space-2);
-    max-width: 22rem;
+    padding: 0 var(--space-1) 0 var(--space-2);
+    min-height: var(--control-height-sm);
+    max-width: 100%;
+    min-width: 0;
   }
 
   .link-kind {
+    flex-shrink: 0;
     color: var(--text-dim);
     font-size: var(--text-2xs);
     text-transform: uppercase;
@@ -639,6 +727,7 @@
 
   .detach,
   .attach {
+    flex-shrink: 0;
     font: inherit;
     background: none;
     border: none;
@@ -683,5 +772,53 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+  @media (max-width: 768px) {
+    .documents-grid thead {
+      display: none;
+    }
+    .documents-grid tr {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--space-2) var(--space-3);
+      padding: var(--space-3) 0;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .grid.documents-grid tbody tr td {
+      width: auto;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+    }
+    .grid.documents-grid tbody tr .size-column,
+    .grid.documents-grid tbody tr .added-column {
+      display: none;
+    }
+    .document-title {
+      flex-wrap: wrap;
+    }
+    .name {
+      flex-basis: 100%;
+    }
+    .mobile-meta {
+      display: inline;
+    }
+    .links-column {
+      grid-column: 1 / -1;
+    }
+    .actions {
+      grid-column: 2;
+      grid-row: 1;
+      align-self: start;
+    }
+    .links {
+      gap: var(--space-2);
+    }
+    .link-chip {
+      border-radius: var(--radius-sm);
+    }
+    .header {
+      margin-bottom: var(--space-2);
+    }
   }
 </style>
