@@ -18,8 +18,16 @@ The sent assets are served at `/assets/<path>`; any other path on that origin
 is a 404. Every other request (a basemap's tiles, its style) must pass
 `sandbox/net_guard.py`'s public-address rule, vendored as
 `lib/istota_net_guard.py`. A navigation anywhere but the document, a popup, a
-download, or a request the route never saw (a redirect hop) fails the render:
-no image leaves.
+download, or a request the route never saw fails the render: no image leaves.
+
+**Redirects never reach the network unchecked.** Chrome follows a redirect
+itself, and a route handler sees only the first request, so the route fetches
+an allowed destination with `route.fetch(max_redirects=0)` and fulfills the
+page with the answer rather than continuing it. A 3xx with a `Location` is
+followed here, one hop at a time, each target checked by the same rule before
+it is fetched; a target that fails it, more than `MAX_REDIRECTS` hops, or a
+redirected request that is not a GET or HEAD fails the render. The fetch is
+made by the Patchright driver in this container, on the network Chrome uses.
 
 Residual: the guard resolves a host and Chrome resolves it again, so a DNS
 answer that changes between the two (rebinding) is not caught here. The
@@ -40,7 +48,7 @@ import re
 import socket
 import time
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from lib.istota_net_guard import ip_is_public
 
@@ -55,6 +63,8 @@ MAX_ASSET_BYTES = 2 * 1024 * 1024
 MAX_ASSETS = 64
 MAX_VIEWPORT = 2000
 MAX_TIMEOUT_MS = 15_000
+#: Redirect hops followed for one request, each checked before it is fetched.
+MAX_REDIRECTS = 5
 #: The whole request body: a full document, base64 assets and the payload.
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 OUTPUTS = ("png",)
@@ -334,6 +344,36 @@ def _serve(route, envelope, path):
     route.fulfill(status=404, headers={"content-type": "text/plain"}, body=b"not found")
 
 
+def _fetch_checked(route, url, *, allowed, violations, timeout_ms):
+    """Fetch `url` for `route` with no redirect followed blind, and fulfill it."""
+    method = str(getattr(route.request, "method", "GET") or "GET").upper()
+    target = url
+    for _hop in range(MAX_REDIRECTS + 1):
+        try:
+            response = route.fetch(url=target, max_redirects=0, timeout=timeout_ms)
+        except Exception:
+            route.abort("failed")
+            return
+        location = _redirect_location(response)
+        if location is None:
+            route.fulfill(response=response)
+            return
+        target = urljoin(target, location)
+        if method not in ("GET", "HEAD") or not allowed(target):
+            break
+    violations.append("redirect")
+    route.abort("blockedbyclient")
+
+
+def _redirect_location(response):
+    status = getattr(response, "status", 0)
+    if not isinstance(status, int) or not 300 <= status < 400:
+        return None
+    headers = getattr(response, "headers", None) or {}
+    location = headers.get("location")
+    return location if isinstance(location, str) and location else None
+
+
 def _close_quietly(page):
     try:
         page.close()
@@ -384,7 +424,9 @@ def render(context, envelope, *, resolve=None, clock=time.monotonic):
         elif on_render_origin(url):
             _serve(route, envelope, _path_of(url))
         elif destination_allowed(url, resolve=cached_resolve):
-            route.continue_()
+            _fetch_checked(route, url, allowed=lambda target: destination_allowed(
+                target, resolve=cached_resolve), violations=violations,
+                timeout_ms=remaining_ms())
         else:
             violations.append("route")
             route.abort("blockedbyclient")

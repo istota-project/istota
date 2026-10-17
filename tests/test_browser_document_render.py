@@ -221,8 +221,10 @@ class TestTheDestinationGuard:
 
 
 class _Route:
-    def __init__(self, url, navigation=False):
-        self.request = SimpleNamespace(url=url, is_navigation_request=lambda: navigation)
+    def __init__(self, url, navigation=False, context=None):
+        self.request = SimpleNamespace(url=url, method="GET",
+                                       is_navigation_request=lambda: navigation)
+        self.context = context
         self.outcome = None
 
     def continue_(self):
@@ -231,8 +233,18 @@ class _Route:
     def abort(self, reason="failed"):
         self.outcome = ("abort", reason)
 
-    def fulfill(self, status=200, headers=None, body=b""):
-        self.outcome = ("fulfill", status, headers or {}, body)
+    def fetch(self, url=None, max_redirects=None, timeout=None, method=None):
+        """The network, as far as the render can reach it: every call is recorded."""
+        target = url or self.request.url
+        self.context.network.append((target, max_redirects))
+        status, headers = self.context.script.get("responses", {}).get(target, (200, {}))
+        return SimpleNamespace(url=target, status=status, headers=headers)
+
+    def fulfill(self, status=200, headers=None, body=b"", response=None):
+        if response is not None:
+            self.outcome = ("fulfill_response", response.url, response.status)
+        else:
+            self.outcome = ("fulfill", status, headers or {}, body)
 
 
 class _Page:
@@ -288,6 +300,7 @@ class _Context:
         self.routes = []
         self.handlers = {}
         self.fetched = []
+        self.network = []
         self.pages = []
 
     def route(self, pattern, handler):
@@ -309,7 +322,7 @@ class _Context:
     def fetch(self, url, navigation=False):
         for handler in self.handlers.get("request", []):
             handler(SimpleNamespace(url=url, is_navigation_request=lambda: navigation))
-        route = _Route(url, navigation)
+        route = _Route(url, navigation, self)
         for _pattern, handler in self.routes:
             handler(route)
         self.fetched.append((url, route.outcome))
@@ -373,7 +386,9 @@ class TestTheRenderOrigin:
         assert "istotaRender" in page.waited_for
         assert page.screenshot_selector == "[data-render-frame]"
         assert page.screenshot_options["type"] == "png"
-        assert context.fetched[-1] == ("https://tiles.openfreemap.org/styles/positron", ("continue",))
+        url = "https://tiles.openfreemap.org/styles/positron"
+        assert context.fetched[-1] == (url, ("fulfill_response", url, 200))
+        assert context.network == [(url, 0)]
 
 
 class TestTheGuardDuringARender:
@@ -412,8 +427,53 @@ class TestTheGuardDuringARender:
         _, outcome = _render(dr, {"during_render": download})
         assert outcome.reason == "destination_blocked"
 
+    def test_a_redirect_to_a_private_address_is_never_fetched(self, dr):
+        tile = "https://tiles.openfreemap.org/t/1.png"
+        context, outcome = _render(dr, {
+            "responses": {tile: (302, {"location": "https://10.0.0.5/secret"})},
+            "during_render": lambda page: page.context.fetch(tile)})
+
+        assert (outcome.data, outcome.reason) == (None, "destination_blocked")
+        assert context.network == [(tile, 0)]
+        assert context.fetched[-1] == (tile, ("abort", "blockedbyclient"))
+
+    def test_a_redirect_between_public_hosts_is_followed_hop_by_hop(self, dr):
+        tile = "https://tiles.openfreemap.org/t/1.png"
+        moved = "https://elsewhere.example/t/1.png"
+        context, outcome = _render(dr, {
+            "responses": {tile: (301, {"location": "//elsewhere.example/t/1.png"})},
+            "during_render": lambda page: page.context.fetch(tile)})
+
+        assert outcome.reason is None
+        assert context.network == [(tile, 0), (moved, 0)]
+        assert context.fetched[-1] == (tile, ("fulfill_response", moved, 200))
+
+    def test_a_redirect_chain_past_the_cap_fails_the_render(self, dr):
+        hops = {f"https://elsewhere.example/{n}": (302, {"location": f"/{n + 1}"})
+                for n in range(20)}
+        context, outcome = _render(dr, {
+            "responses": hops,
+            "during_render": lambda page: page.context.fetch("https://elsewhere.example/0")})
+
+        assert outcome.reason == "destination_blocked"
+        assert len(context.network) == dr.MAX_REDIRECTS + 1
+        assert context.fetched[-1][1] == ("abort", "blockedbyclient")
+
+    def test_a_failed_fetch_is_a_network_error_not_a_violation(self, dr):
+        class _Unreachable(_Route):
+            def fetch(self, **kwargs):
+                raise RuntimeError("net::ERR_CONNECTION_REFUSED")
+
+        context = _Context({"during_render": lambda page: None})
+        checked, _ = dr.validate_envelope(_envelope())
+        dr.render(context, checked, resolve=_resolver(PUBLIC))
+        (_pattern, handler) = context.routes[0]
+        route = _Unreachable("https://elsewhere.example/x", False, context)
+        handler(route)
+        assert route.outcome == ("abort", "failed")
+
     def test_a_request_the_route_never_saw_still_fails_the_render(self, dr):
-        """A redirect hop: the request event fires, the route handler does not."""
+        """The request event is the backstop for a request no route handler saw."""
         def unrouted(page):
             for handler in page.context.handlers["request"]:
                 handler(SimpleNamespace(url="http://192.168.1.1/",
