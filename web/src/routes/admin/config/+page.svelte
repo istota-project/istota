@@ -7,6 +7,7 @@
     listConfigRequests,
     restoreConfigRequest,
     type AdminConfigField,
+    type ConfigSecretFile,
     type AdminConfigView,
     type AdminServarrConnection,
     type ConfigOp,
@@ -16,11 +17,12 @@
     type ConfigResource,
     type ServarrApp,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyWarning } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import AdminsEditor from '$lib/admin/config/AdminsEditor.svelte';
+  import FieldRow from '$lib/admin/config/FieldRow.svelte';
   import FieldControl from '$lib/admin/config/FieldControl.svelte';
   import HistoryList from '$lib/admin/config/HistoryList.svelte';
   import RawEditor from '$lib/admin/config/RawEditor.svelte';
@@ -188,6 +190,17 @@
   /** File credentials no config key reads, so no section field shows them. */
   let standaloneSecrets = $derived(view ? view.secrets.filter((s) => !s.config_key) : []);
 
+  /** Those with no section in the view keep a card of their own. */
+  let orphanSecrets = $derived(
+    standaloneSecrets.filter((s) => !view?.sections.some((section) => section.key === s.section)),
+  );
+
+  function secretMatches(secret: ConfigSecretFile, needle: string): boolean {
+    return (
+      secret.name.toLowerCase().includes(needle) || secret.label.toLowerCase().includes(needle)
+    );
+  }
+
   let secretByKey = $derived(secretsByConfigKey(view));
 
   let inlineSecrets = $derived(view ? view.secrets.filter((s) => s.source === 'inline') : []);
@@ -217,13 +230,21 @@
   let sections = $derived.by(() => {
     if (!view) return [];
     const needle = filter.trim().toLowerCase();
-    if (!needle) return view.sections;
-    return view.sections
-      .map((s) => ({ ...s, fields: s.fields.filter((f) => matches(f, needle)) }))
-      .filter((s) => s.fields.length > 0);
+    const all = view.sections.map((s) => ({
+      ...s,
+      secrets: standaloneSecrets.filter((secret) => secret.section === s.key),
+    }));
+    if (!needle) return all;
+    return all
+      .map((s) => ({
+        ...s,
+        fields: s.fields.filter((f) => matches(f, needle)),
+        secrets: s.secrets.filter((secret) => secretMatches(secret, needle)),
+      }))
+      .filter((s) => s.fields.length + s.secrets.length > 0);
   });
 
-  let matchCount = $derived(sections.reduce((n, s) => n + s.fields.length, 0));
+  let matchCount = $derived(sections.reduce((n, s) => n + s.fields.length + s.secrets.length, 0));
 
   async function load() {
     loading = true;
@@ -541,6 +562,7 @@
         <header class="section-header"><h2>Admins</h2></header>
         <AdminsEditor
           users={view.admins.users}
+          candidates={view.admins.candidates ?? []}
           pending={draft.admins}
           {self}
           {editable}
@@ -585,31 +607,11 @@
         </section>
       {/if}
 
-      {#if standaloneSecrets.length}
+      {#if orphanSecrets.length}
         <section class="card">
           <header class="section-header"><h2>Credentials</h2></header>
-          {#each standaloneSecrets as secret (secret.name)}
-            {@const status = credentialStatus(secret.set, secret.source)}
-            {#if editable && !secret.read_only_reason}
-              <div class="standalone-row">
-                <ConfigSecretField
-                  label={secret.label}
-                  configured={secret.set}
-                  pending={draft.secrets[secret.name]}
-                  onChange={(value) => setSecret(secret.name, value)}
-                />
-                <Badge size="sm" variant={status.variant}>{status.label}</Badge>
-              </div>
-            {:else}
-              <ConfigSecretField
-                label={secret.label}
-                configured={secret.set}
-                {status}
-                pending={undefined}
-                readOnlyReason={secret.read_only_reason ?? 'Read-only'}
-                onChange={() => {}}
-              />
-            {/if}
+          {#each orphanSecrets as secret (secret.name)}
+            {@render standaloneSecret(secret)}
           {/each}
         </section>
       {/if}
@@ -644,6 +646,9 @@
               onSecret={setSecret}
             />
           {/if}
+        {/each}
+        {#each section.secrets as secret (secret.name)}
+          {@render standaloneSecret(secret)}
         {/each}
       </section>
     {/each}
@@ -681,6 +686,38 @@
   {/if}
 </div>
 
+<!-- A secret file no config key reads, laid out as a section's own credential
+     field: the name in the label column, the status at the row's far end. -->
+{#snippet standaloneSecret(secret: ConfigSecretFile)}
+  {@const status = credentialStatus(secret.set, secret.source)}
+  <div class="standalone-field">
+    {#if editable && !secret.read_only_reason}
+      <FieldRow>
+        <ConfigSecretField
+          label={secret.name}
+          hint={secret.label}
+          inline
+          configured={secret.set}
+          {status}
+          pending={draft.secrets[secret.name]}
+          onChange={(value) => setSecret(secret.name, value)}
+        />
+      </FieldRow>
+    {:else}
+      <ConfigSecretField
+        label={secret.name}
+        hint={secret.label}
+        inline
+        configured={secret.set}
+        {status}
+        pending={undefined}
+        readOnlyReason={secret.read_only_reason ?? 'Read-only'}
+        onChange={() => {}}
+      />
+    {/if}
+  </div>
+{/snippet}
+
 <style>
   .config-toolbar {
     display: flex;
@@ -706,16 +743,13 @@
   }
 
   /* The status sits after the input, as it does on a section's credential. */
-  .standalone-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    column-gap: var(--space-2);
-    row-gap: var(--space-1);
+  .standalone-field {
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--border-subtle);
   }
 
-  .standalone-row > :global(.field) {
-    flex: 0 1 calc(var(--field-label-width) + var(--space-3) + 24rem);
+  .standalone-field:last-child {
+    border-bottom: none;
   }
 
   .problem-list {

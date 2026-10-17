@@ -4000,6 +4000,11 @@ function mockAdminConfigBase() {
         ],
       },
       {
+        key: 'brain.claude_code',
+        label: '[brain.claude_code]',
+        fields: [f('model', 'sonnet', 'str'), f('effort', '', 'str')],
+      },
+      {
         key: 'servarr',
         label: '[servarr]',
         fields: [
@@ -4231,6 +4236,7 @@ function mockAdminConfig() {
         name: 'anthropic_api_key',
         label: 'Anthropic API key',
         config_key: null,
+        section: 'brain.claude_code',
         set: state.secretsSet.get('anthropic_api_key') ?? false,
         source: state.secretsSet.get('anthropic_api_key') ? 'file' : 'none',
         read_only_reason: null,
@@ -4241,6 +4247,7 @@ function mockAdminConfig() {
         name: 'claude_code_oauth_token',
         label: 'Claude Code OAuth token',
         config_key: null,
+        section: 'brain.claude_code',
         set: state.secretsSet.get('claude_code_oauth_token') ?? true,
         source: (state.secretsSet.get('claude_code_oauth_token') ?? true) ? 'file' : 'none',
         read_only_reason: null,
@@ -4264,7 +4271,11 @@ function mockAdminConfig() {
         risky: false,
       })),
     ],
-    admins: { users: [...state.admins], read_only_reason: null },
+    admins: {
+      users: [...state.admins],
+      candidates: ['alice', 'bob', 'carol', 'dave'],
+      read_only_reason: null,
+    },
   };
 }
 

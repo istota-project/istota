@@ -83,7 +83,7 @@ export function configView(
     has_comments: false,
     raw_toml: '',
     secrets: [],
-    admins: { users: ['alice'], read_only_reason: null },
+    admins: { users: ['alice'], candidates: ['alice', 'bob'], read_only_reason: null },
     ...overrides,
   };
 }

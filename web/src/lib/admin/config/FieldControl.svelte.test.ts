@@ -48,8 +48,10 @@ describe('the field doc', () => {
   it('puts Reset on the control row', () => {
     const { container } = mount(configField({ in_file: true }));
     const reset = screen.getByRole('button', { name: 'Reset' });
-    expect(reset.closest('.field-row.inline-meta')).toBe(container.querySelector('.field-row'));
-    expect(container.querySelector('.field-row .field.inline')).not.toBeNull();
+    const row = container.querySelector('.config-row');
+    expect(reset.closest('.config-row')).toBe(row);
+    expect(row!.querySelector(':scope > .field.inline')).not.toBeNull();
+    expect(row!.querySelector(':scope > .field')!.contains(reset)).toBe(false);
   });
 
   it('puts the default mark inside the control, not in the row beside it', () => {
@@ -301,6 +303,14 @@ describe('credentials', () => {
     expect(onSecret).toHaveBeenLastCalledWith('istota_email_imap_password', 's3cret');
     await fireEvent.click(screen.getByRole('button', { name: 'Clear stored imap_password' }));
     expect(onSecret).toHaveBeenLastCalledWith('istota_email_imap_password', '');
+  });
+
+  it('draw Clear beside the field, outside its width, as Reset is', () => {
+    const { container } = mount(secret);
+    const field = container.querySelector('.field');
+    const clear = screen.getByRole('button', { name: 'Clear stored imap_password' });
+    expect(field).not.toBeNull();
+    expect(field!.contains(clear)).toBe(false);
   });
 
   it('show a pending clear as a state with undo', async () => {

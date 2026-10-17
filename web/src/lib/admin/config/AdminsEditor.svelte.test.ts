@@ -9,6 +9,7 @@ function mount(extra: { pending?: string[] | null; readOnlyReason?: string | nul
   render(AdminsEditor, {
     props: {
       users: ['alice', 'bob'],
+      candidates: ['alice', 'bob', 'carol'],
       pending: extra.pending ?? null,
       self: 'alice',
       editable: true,
@@ -19,39 +20,30 @@ function mount(extra: { pending?: string[] | null; readOnlyReason?: string | nul
   return onChange;
 }
 
-it('adds an id and removes another, but never the acting admin', async () => {
+it('removes another admin, but never the acting one', async () => {
   const onChange = mount();
-  expect(screen.queryByRole('button', { name: 'Remove alice' })).toBeNull();
+  expect(screen.getByText('alice (you)')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Remove alice (you)' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Remove bob' }));
   expect(onChange).toHaveBeenLastCalledWith(['alice']);
-
-  await fireEvent.input(screen.getByPlaceholderText('user id'), { target: { value: 'carol' } });
-  await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-  expect(onChange).toHaveBeenLastCalledWith(['alice', 'bob', 'carol']);
 });
 
-it('reports a list equal to the current one as unchanged', async () => {
+it('says what a pending list removes, and undoes it', async () => {
   const onChange = mount({ pending: ['alice'] });
   expect(screen.getByText('Removed: bob')).toBeInTheDocument();
-  await fireEvent.input(screen.getByPlaceholderText('user id'), { target: { value: 'bob' } });
-  await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
   expect(onChange).toHaveBeenLastCalledWith(null);
 });
 
-it('refuses a malformed id and a duplicate without changing the list', async () => {
-  const onChange = mount();
-  await fireEvent.input(screen.getByPlaceholderText('user id'), { target: { value: 'a b' } });
-  await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-  expect(screen.getByText(/letters, digits/)).toBeInTheDocument();
-  await fireEvent.input(screen.getByPlaceholderText('user id'), { target: { value: 'bob' } });
-  await fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-  expect(screen.getByText('bob is already an admin.')).toBeInTheDocument();
-  expect(onChange).not.toHaveBeenCalled();
+it('reports a list equal to the current one as unchanged', async () => {
+  const onChange = mount({ pending: ['alice', 'bob', 'carol'] });
+  await fireEvent.click(screen.getByRole('button', { name: 'Remove carol' }));
+  expect(onChange).toHaveBeenLastCalledWith(null);
 });
 
 it('is read-only with the reason when a plan manages the list', () => {
   mount({ readOnlyReason: 'Managed by ansible, whose next run would revert a change made here.' });
   expect(screen.getByText(/Managed by ansible/)).toBeInTheDocument();
-  expect(screen.queryByPlaceholderText('user id')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Remove bob' })).toBeNull();
+  expect(screen.queryByRole('combobox')).toBeNull();
 });
