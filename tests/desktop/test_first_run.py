@@ -321,11 +321,9 @@ class TestTheFirstRunReachesASignedInWebUI:
     def test_the_app_minted_a_login_code_once_set_up(self, first_run):
         assert "$ istota-stack exec istota web login-code" in first_run["log"]
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "the session cookie is Secure on local ingress (ISTOTA_WEB_INSECURE_COOKIES=0), and the app's "
-        "WKWebView keeps no Secure cookie from http://localhost, so the login form's CSRF check fails: "
-        "GET /istota/auth/local 200, POST 403. Open; see the Stage 9 verification result"))
     def test_the_window_signed_in_with_it(self, first_run):
+        """WKWebView keeps no Secure cookie from http://localhost, so this holds
+        only while local ingress writes ISTOTA_WEB_INSECURE_COOKIES=1."""
         assert first_run["signed_in"], f"the window's requests: {first_run['login_requests']}"
 
     def test_the_master_key_went_to_the_scratch_keychain_item(self, first_run):
