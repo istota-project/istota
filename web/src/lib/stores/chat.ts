@@ -1722,6 +1722,7 @@ function createSession(): ChatSession {
           // reconnect and this reconciler is the only thing that would catch
           // it (ISSUE-433). `?? null` because the key is optional on the wire.
           color: fresh.color ?? null,
+          push_notifications: fresh.push_notifications ?? 'default',
           // A host leaving, a member added, a guest arriving: the hostless
           // notice and the settings lock read these, so they follow the poll.
           phone_surface: fresh.phone_surface ?? null,
@@ -2322,6 +2323,7 @@ function createSession(): ChatSession {
         // from this list is not merely stale — it is erased on the next frame,
         // which a rename in a busy room produces (ISSUE-433).
         color: fresh.color ?? null,
+        push_notifications: fresh.push_notifications ?? 'default',
         // The snapshot sends both on every room, so the frame is authoritative.
         phone_surface: fresh.phone_surface ?? null,
         read_only: fresh.read_only ?? false,

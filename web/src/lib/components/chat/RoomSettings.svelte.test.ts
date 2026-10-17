@@ -937,3 +937,124 @@ describe('RoomSettings — add a member', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+describe('RoomSettings — personal notifications', () => {
+  const NOTIFICATIONS = 'Room notifications';
+
+  it('starts with the account default and no pending edit', async () => {
+    await mountSettled(room());
+    expect(screen.getByRole('button', { name: NOTIFICATIONS })).toHaveTextContent(
+      'Use account default',
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it.each([
+    ['alerts', 'Alerts and badge'],
+    ['badge', 'Badge only'],
+    ['off', 'Off'],
+  ] as const)('shows and saves the %s override alone', async (value, label) => {
+    const onSave = vi.fn();
+    await mountSettled(room({ push_notifications: 'default' }), onSave);
+    await pick(NOTIFICATIONS, label);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ push_notifications: value });
+    cleanup();
+    await mountSettled(room({ push_notifications: value }));
+    expect(screen.getByRole('button', { name: NOTIFICATIONS })).toHaveTextContent(label);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it('lets a non-host member restore the account default without changing shared settings', async () => {
+    const onSave = vi.fn();
+    await mountSettled(
+      room({
+        push_notifications: 'off',
+        shared: true,
+        policy: {
+          host: 'alice',
+          is_host: false,
+          guest_reply: 'held',
+          settings_refusal: 'Only the host can change shared settings.',
+        },
+      }),
+      onSave,
+    );
+    expect(screen.getByRole('button', { name: 'Room model default' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: NOTIFICATIONS })).not.toBeDisabled();
+    await pick(NOTIFICATIONS, 'Use account default');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ push_notifications: 'default' });
+  });
+
+  it('omits an untouched notification preference from an unrelated edit', async () => {
+    const onSave = vi.fn();
+    await mountSettled(room({ push_notifications: 'badge' }), onSave);
+    await fireEvent.input(screen.getByDisplayValue('general'), { target: { value: 'renamed' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onSave).toHaveBeenCalledWith({ name: 'renamed' });
+  });
+
+  it('reseeds the selection when the modal changes rooms', async () => {
+    const view = await mountSettled(room({ push_notifications: 'off' }));
+    await pick(NOTIFICATIONS, 'Badge only');
+    await view.rerender({ room: room({ id: 2, push_notifications: 'alerts' }) });
+    expect(screen.getByRole('button', { name: NOTIFICATIONS })).toHaveTextContent(
+      'Alerts and badge',
+    );
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it('keeps a rejected edit for retry through the real room store and PATCH client', async () => {
+    const { get } = await import('svelte/store');
+    const { getChatSession } = await import('$lib/stores/chat');
+    const realApi = await vi.importActual<typeof import('$lib/api')>('$lib/api');
+    const s = getChatSession();
+    const original = room({ push_notifications: 'default', unread_count: 4 });
+    const other = room({ id: 2, push_notifications: 'alerts', unread_count: 3 });
+    s.rooms.set([original, other]);
+    api.updateChatRoom.mockImplementation(realApi.updateChatRoom);
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: 'Room membership required' }), { status: 403 }),
+      );
+    vi.stubGlobal('fetch', request);
+    const failed = vi.fn();
+    const saved = vi.fn();
+    const onSave = vi.fn((patch: RoomPatch) => s.updateRoomSettings(1, patch).then(saved, failed));
+    try {
+      await mountSettled(original, onSave);
+      await pick(NOTIFICATIONS, 'Off');
+      await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() =>
+        expect(failed).toHaveBeenCalledWith(
+          expect.objectContaining({ message: 'Room membership required' }),
+        ),
+      );
+      expect(saved).not.toHaveBeenCalled();
+      expect(get(s.rooms)).toEqual([original, other]);
+      expect(screen.getByRole('button', { name: NOTIFICATIONS })).toHaveTextContent('Off');
+      expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled();
+      request.mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...original, push_notifications: 'off' })),
+      );
+      await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+      expect(request).toHaveBeenLastCalledWith(
+        '/api/chat/rooms/1',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ push_notifications: 'off' }),
+          credentials: 'same-origin',
+        }),
+      );
+      expect(get(s.rooms)).toEqual([{ ...original, push_notifications: 'off' }, other]);
+      expect(api.markRoomRead).not.toHaveBeenCalled();
+    } finally {
+      api.updateChatRoom.mockReset();
+      vi.unstubAllGlobals();
+      s.rooms.set([]);
+    }
+  });
+});

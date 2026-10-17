@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Room settings now lets each member choose alerts and badge, badge only, off, or the account default. This personal choice leaves other members’ preferences and the room’s unread count unchanged.
+
 - iOS push preferences can filter inbox categories and override chat notifications for individual rooms without changing the inbox or room unread counts. Signing out removes the device enrolled in that session; disabled or revoked account credentials stop further sends.
 
 - Registered iOS devices can receive inbox alerts and delayed chat alerts, with a badge that follows unread items across devices. Chat alerts and message previews have separate preferences; native registration requires a compatible app build and operator push setup.

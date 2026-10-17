@@ -6,6 +6,7 @@
     ChatRoom,
     GuestReply,
     RoomPatch,
+    RoomNotifications,
     SelectableBrain,
     SpeechDisposition,
     SpeechMode,
@@ -52,7 +53,7 @@
   // In a shared room the name, model, effort, brain and the Talk conversation
   // apply to every member's turn, so they are the host's (multiplayer Stage
   // 16). The server's own refusal says why, and the controls show the values
-  // without offering to change them; colour is per member and stays live.
+  // without offering to change them; personal settings stay editable.
   const lockedReason = $derived(room.policy?.settings_refusal ?? null);
   const locked = $derived(!!lockedReason);
 
@@ -287,6 +288,15 @@
   // An email thread sits in the sidebar's "Email threads" group unless this
   // is set. Per member, like the colour, so the host lock does not apply.
   let listedValue = $state(untrack(() => !!room.listed));
+  const NOTIFICATION_OPTIONS: SelectOption[] = [
+    { value: 'default', label: 'Use account default' },
+    { value: 'alerts', label: 'Alerts and badge' },
+    { value: 'badge', label: 'Badge only' },
+    { value: 'off', label: 'Off' },
+  ];
+  let notificationsValue = $state<RoomNotifications>(
+    untrack(() => room.push_notifications ?? 'default'),
+  );
   let showDeleteConfirm = $state(false);
   // A member add waiting on its confirmation, and why the last one failed.
   let pendingAdd = $state<AddRequest | null>(null);
@@ -303,6 +313,7 @@
       name = room.name;
       colorValue = paletteValue(room.color);
       listedValue = !!room.listed;
+      notificationsValue = room.push_notifications ?? 'default';
       modelValue = room.model ?? '';
       effortValue = room.effort ?? '';
       brainValue = room.brain ?? '';
@@ -332,10 +343,14 @@
   const colorChanged = $derived(colorValue !== paletteValue(room.color));
   // Gated on `email_thread`: the server refuses `listed` on any other room.
   const listedChanged = $derived(!!room.email_thread && listedValue !== !!room.listed);
+  const notificationsChanged = $derived(
+    notificationsValue !== (room.push_notifications ?? 'default'),
+  );
   // Saveable when anything changed, and the name is never blanked.
   const canSave = $derived(
     trimmed.length > 0 &&
-      (colorChanged ||
+      (notificationsChanged ||
+        colorChanged ||
         listedChanged ||
         guestReplyChanged ||
         speechModeChanged ||
@@ -371,6 +386,7 @@
     }
     if (colorChanged) patch.color = colorValue || null;
     if (listedChanged) patch.listed = listedValue;
+    if (notificationsChanged) patch.push_notifications = notificationsValue;
     if (guestReplyChanged) patch.guest_reply = guestReplyValue;
     if (speechModeChanged) patch.speech_mode = (speechModeValue || null) as SpeechMode | null;
     if (dispositionChanged)
@@ -493,6 +509,21 @@
       </p>
     </div>
   {/if}
+
+  <div class="field">
+    <span>Notifications</span>
+    <Select
+      value={notificationsValue}
+      options={NOTIFICATION_OPTIONS}
+      onValueChange={(v) => (notificationsValue = v as RoomNotifications)}
+      ariaLabel="Room notifications"
+      fullWidth
+    />
+    <p class="caption">
+      Applies only to you. The account default is in Settings → Notifications. Off excludes this
+      room from alerts and the app badge; its unread count stays visible in chat.
+    </p>
+  </div>
 
   {#if showBrain}
     <div class="field">

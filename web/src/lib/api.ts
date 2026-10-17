@@ -3339,6 +3339,8 @@ export async function syncGarmin(days_back = 7): Promise<GarminSyncResponse> {
 
 // ---- Web chat ----
 
+export type RoomNotifications = 'default' | 'alerts' | 'badge' | 'off';
+
 export interface ChatRoom {
   id: number;
   token: string;
@@ -3361,6 +3363,8 @@ export interface ChatRoom {
    * the model/effort/brain trio below — it lives on this user's room handle,
    * so the two members of a shared Talk room can tint it differently. */
   color?: string | null;
+  /** Personal notification override. Absent follows the account default. */
+  push_notifications?: RoomNotifications;
   /** Standing per-room model default (canonical model id), shared across Talk
    * and web. null / absent → inherit the instance default. */
   model?: string | null;
@@ -3918,6 +3922,8 @@ export interface RoomPatch {
   brain?: string | null;
   /** A `ROOM_COLORS` name, or null to clear. Absent leaves it untouched. */
   color?: string | null;
+  /** Personal override; default restores inheritance, absent leaves it unchanged. */
+  push_notifications?: RoomNotifications;
   /** Host only, like the other room-wide settings. */
   guest_reply?: GuestReply;
   /** Show an email thread in the main room list. The server refuses it (400)
