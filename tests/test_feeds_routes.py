@@ -193,7 +193,8 @@ class TestGetFeeds:
                 EntryRecord(
                     id=0, feed_id=feed_id, guid="evil", title="Click me",
                     url=" javascript:alert(document.cookie)", author=None,
-                    content_html="<p>x</p>", content_text="x", image_urls=[],
+                    content_html="<p>x</p>", content_text="x",
+                    image_urls=["javascript:alert(2)", "https://img.example.com/a.jpg"],
                     embed_url="vbscript:msgbox(1)",
                     file_url="data:text/html,<script>alert(1)</script>",
                     media_url="java\tscript:alert(1)", media_type="video/mp4",
@@ -210,9 +211,16 @@ class TestGetFeeds:
         assert entry["embed_url"] == ""
         assert entry["file_url"] == ""
         assert entry["media_url"] == ""
+        assert entry["media_type"] == ""
+        assert entry["images"] == ["https://img.example.com/a.jpg"]
+        assert entry["duplicate_image_count"] == 0
         assert entry["feed"]["site_url"] == ""
         feed = next(f for f in body["feeds"] if f["title"] == "Hostile")
         assert feed["site_url"] == ""
+
+        config = client.get("/istota/api/feeds/config").json()["config"]
+        hostile = next(f for f in config["feeds"] if f["title"] == "Hostile")
+        assert "site_url" not in hostile
 
     def test_status_filter(self, ctx, client):
         _seed(ctx)

@@ -25,7 +25,9 @@ from istota.feeds.models import (
     default_poll_interval_for,
     FeedsContext,
     detect_source_type,
+    is_http_url,
     normalize_feed_url,
+    safe_http_url,
 )
 from istota.feeds.workspace import synthesize_feeds_context
 
@@ -116,7 +118,7 @@ def cmd_list(ctx: FeedsContext) -> None:
             "id": f.id,
             "url": f.url,
             "title": f.title,
-            "site_url": f.site_url,
+            "site_url": safe_http_url(f.site_url),
             "source_type": f.source_type,
             "category": cats[f.category_id].title if f.category_id and f.category_id in cats else None,
             "category_slug": cats[f.category_id].slug if f.category_id and f.category_id in cats else None,
@@ -184,14 +186,14 @@ def cmd_entries(
             "feed_id": e.feed_id,
             "guid": e.guid,
             "title": e.title,
-            "url": e.url,
+            "url": safe_http_url(e.url),
             "author": e.author,
-            "image_urls": e.image_urls,
+            "image_urls": [u for u in e.image_urls or [] if is_http_url(u)],
             # An mp4 attachment used to appear here as an image_url. Naming it
             # for what it is keeps the model's view of an entry honest, and it
             # is the only place a video shows at all now (ISSUE-356).
-            "media_url": e.media_url,
-            "media_type": e.media_type,
+            "media_url": safe_http_url(e.media_url),
+            "media_type": e.media_type if safe_http_url(e.media_url) else None,
             "published_at": e.published_at,
             "fetched_at": e.fetched_at,
             "status": e.status,
@@ -280,7 +282,7 @@ def cmd_starred(
             "id": e.id,
             "feed_id": e.feed_id,
             "title": e.title,
-            "url": e.url,
+            "url": safe_http_url(e.url),
             "published_at": e.published_at,
             "starred_at": e.starred_at,
             "status": e.status,

@@ -1407,6 +1407,21 @@ class TestUnsafeLinksAreNotStored:
             entry = feeds_db.list_entries(conn)[0]
         assert getattr(entry, field) is None
 
+    def test_a_provider_image_url_is_dropped(self, tmp_path, monkeypatch):
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        path = self._db(tmp_path, "arena:c", "arena")
+        item = FetchedItem(
+            guid="1", title="Block", url="https://www.are.na/block/1",
+            image_urls=["javascript:alert(1)", "https://cdn.example.com/a.jpg"],
+        )
+        monkeypatch.setattr(arena_provider, "fetch", lambda ident, **kw: [item])
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn)
+            entry = feeds_db.list_entries(conn)[0]
+        assert entry.image_urls == ["https://cdn.example.com/a.jpg"]
+
     def test_upsert_feed_drops_an_unsafe_site_url(self, tmp_path):
         path = tmp_path / "feeds.db"
         feeds_db.init_db(path)

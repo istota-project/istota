@@ -581,7 +581,7 @@ def _persist_poll(
                 author=item.author,
                 content_html=item.content_html,
                 content_text=item.content_text,
-                image_urls=item.image_urls,
+                image_urls=[u for u in item.image_urls if is_http_url(u)],
                 embed_url=safe_http_url(item.embed_url),
                 file_url=safe_http_url(item.file_url),
                 media_url=safe_http_url(item.media_url),

@@ -32,6 +32,7 @@ from istota.feeds.models import (
     FeedsContext,
     default_poll_interval_for,
     detect_source_type,
+    is_http_url,
     normalize_feed_url,
     safe_http_url,
 )
@@ -86,7 +87,9 @@ def _map_entry(
     feed = feed_by_id.get(entry.feed_id)
     cat = cat_by_id.get(feed.category_id) if feed else None
     hidden = suppressed or set()
-    images = [url for url in (entry.image_urls or []) if url not in hidden]
+    # Only http(s) images, for rows stored before ingestion checked (ISSUE-774).
+    stored = [url for url in (entry.image_urls or []) if is_http_url(url)]
+    images = [url for url in stored if url not in hidden]
     return {
         "id": entry.id,
         "title": entry.title or "",
@@ -96,7 +99,7 @@ def _map_entry(
         # Images dropped because a newer entry already showed them. Reported
         # rather than silently omitted so the reader can still treat the entry
         # as an image post and say what it hid (ISSUE-162).
-        "duplicate_image_count": len(entry.image_urls or []) - len(images),
+        "duplicate_image_count": len(stored) - len(images),
         # Set for playable media (an Are.na Embed block). The reader turns it
         # into an inline player; empty for everything else.
         "embed_url": safe_http_url(entry.embed_url) or "",
@@ -729,8 +732,9 @@ def _config_payload_from_db(
         entry: dict = {"url": f.url}
         if f.title:
             entry["title"] = f.title
-        if f.site_url:
-            entry["site_url"] = f.site_url
+        site_url = safe_http_url(f.site_url)
+        if site_url:
+            entry["site_url"] = site_url
         if f.category_id and f.category_id in cat_by_id:
             entry["category"] = cat_by_id[f.category_id].slug
         if f.poll_interval_minutes != default_poll_interval_for(f.source_type):

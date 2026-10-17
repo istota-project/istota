@@ -549,7 +549,8 @@ def safe_http_url(url: str | None) -> str | None:
 
     Every feed-supplied URL that can become an ``href`` or a ``src`` passes
     through here, on the way in (the poller) and on the way out (the routes'
-    serializer, for rows stored before this check). The scheme is parsed
+    serializer, the CLI and the OPML export, for rows stored before this
+    check). The scheme is parsed
     rather than prefix-matched, and a URL holding any control character is
     refused outright: browsers drop tabs and newlines anywhere in a URL, so
     ``java\tscript:`` is ``javascript:`` to them.
