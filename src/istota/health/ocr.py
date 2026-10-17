@@ -26,8 +26,10 @@ so a partial / empty extraction is still useful.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,17 +48,30 @@ logger = logging.getLogger(__name__)
 _TEXT_NATIVE_MIN_CHARS = 200
 
 
-def _resolve_source_file(ctx: HealthContext, panel: Panel) -> Path | None:
-    if not panel.source_file:
-        return None
-    candidate = (ctx.uploads_dir / panel.source_file).resolve()
-    try:
-        candidate.relative_to(ctx.uploads_dir.resolve())
-    except ValueError:
-        return None
-    if not candidate.is_file():
-        return None
-    return candidate
+@contextlib.contextmanager
+def _staged_source(ctx: HealthContext, panel: Panel, config=None):
+    """A daemon-side copy of the panel's source, or None when there is none.
+
+    The source is opened once through the no-follow walk and copied out of
+    the user's tree, so ``pdftotext`` and the extractor's bind read bytes a
+    task can no longer swap (ISSUE-781).
+    """
+    from istota.health.documents import open_upload  # noqa: PLC0415
+    from istota.health.extract_requests import staged_copy  # noqa: PLC0415
+
+    fd = None
+    if panel.source_file:
+        try:
+            fd = open_upload(ctx, panel.source_file)
+        except ValueError:
+            fd = None
+    if fd is None:
+        yield None
+        return
+    with os.fdopen(fd, "rb") as fh:
+        raw = fh.read()
+    with staged_copy(config, raw, Path(panel.source_file).suffix) as path:
+        yield path
 
 
 def _pdftotext(path: Path) -> str | None:
@@ -130,9 +145,13 @@ def extract_text(ctx: HealthContext, panel: Panel) -> str:
     Empty string when nothing usable could be extracted. Caller should
     decide whether to surface a warning to the user.
     """
-    source = _resolve_source_file(ctx, panel)
-    if source is None:
-        return ""
+    with _staged_source(ctx, panel) as source:
+        if source is None:
+            return ""
+        return _extract_text_from(source, panel)
+
+
+def _extract_text_from(source: Path, panel: Panel) -> str:
     mime = (panel.source_mime or "").lower()
 
     if mime.startswith("image/"):
@@ -434,7 +453,13 @@ def extract_from_panel(ctx: HealthContext, panel: Panel, *, config=None) -> dict
     pick it up off the panel's environment via the same mechanism the
     routes use; falling back to "no extraction" if unavailable.
     """
-    source_path = _resolve_source_file(ctx, panel)
+    with _staged_source(ctx, panel, config) as source_path:
+        return _extract_from_source(ctx, panel, source_path, config)
+
+
+def _extract_from_source(
+    ctx: HealthContext, panel: Panel, source_path: Path | None, config,
+) -> dict:
     mime = (panel.source_mime or "").lower()
 
     # Decide between text-mode and vision-mode extraction. Text-mode wins

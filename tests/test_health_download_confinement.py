@@ -209,3 +209,54 @@ def test_a_range_request_is_served_from_the_open_file(placed):
     resp = client.get(url, headers={"Range": "bytes=0-3"})
     assert resp.status_code == 206
     assert resp.content == INSIDE[:4]
+
+
+def _panel_with_source(ctx, name: str, raw: bytes, mime: str) -> str:
+    with health_db.connect(ctx.db_path) as conn:
+        pid = health_db.insert_panel(
+            conn, drawn_at="2026-05-08", source_file=f"9/{name}", source_mime=mime,
+        )
+        conn.commit()
+    leaf = ctx.uploads_dir / "9" / name
+    leaf.parent.mkdir(parents=True, exist_ok=True)
+    leaf.write_bytes(raw)
+    return f"{PREFIX}/panels/{pid}/source"
+
+
+@pytest.fixture
+def source_client(make_config):
+    return handoff_app(handoff_config(make_config))
+
+
+def test_an_html_panel_source_is_an_attachment(source_client):
+    """A source a task registered keeps the type its name guessed, so an
+    .html one would be script on the app's origin if served inline."""
+    client, ctx = source_client
+    url = _panel_with_source(ctx, "x.html", b"<script>alert(1)</script>", "text/html")
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"].startswith("attachment")
+    assert resp.headers["x-content-type-options"] == "nosniff"
+
+
+def test_an_html_source_labelled_pdf_is_an_attachment(source_client):
+    client, ctx = source_client
+    url = _panel_with_source(ctx, "x.pdf", b"<script>alert(1)</script>", "application/pdf")
+    resp = client.get(url)
+    assert resp.headers["content-disposition"].startswith("attachment")
+
+
+@pytest.mark.parametrize("name,raw,expected", [
+    ("a.pdf", INSIDE, "application/pdf"),
+    ("a.png", b"\x89PNG\r\n\x1a\n" + b"\0" * 16, "image/png"),
+])
+def test_a_pdf_or_raster_source_is_inline_with_its_sniffed_type(
+    source_client, name, raw, expected,
+):
+    client, ctx = source_client
+    url = _panel_with_source(ctx, name, raw, "application/octet-stream")
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"].startswith("inline")
+    assert resp.headers["content-type"].startswith(expected)
+    assert resp.headers["x-content-type-options"] == "nosniff"

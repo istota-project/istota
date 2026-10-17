@@ -303,6 +303,7 @@ class TestExtractFromPanel:
 
         def _fake_brain(prompt, config, *, read_path=None, user_id=""):
             captured["read_path"] = read_path
+            captured["bytes"] = read_path.read_bytes()
             captured["prompt"] = prompt
             return fake_response
 
@@ -310,7 +311,9 @@ class TestExtractFromPanel:
             result = health_ocr.extract_from_panel(ctx, panel)
 
         assert result["mode"] == "vision"
-        assert captured["read_path"] == health_ocr._resolve_source_file(ctx, panel)
+        # A daemon-side copy of the source, never the workspace path (ISSUE-781).
+        assert captured["bytes"] == (ctx.uploads_dir / panel.source_file).read_bytes()
+        assert not captured["read_path"].is_relative_to(ctx.workspace_root)
         # Vision prompt references the source path so the brain knows what
         # to Read.
         assert "Read the lab report" in captured["prompt"]

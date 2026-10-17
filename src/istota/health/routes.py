@@ -14,7 +14,6 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -32,6 +31,7 @@ from fastapi import Form
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from istota.lib.filenames import filename_parts
+from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.workspace.listing import ListingError
 from istota.workspace.writes import open_or_create_dirs, write_new_file
 from istota.health import db as health_db
@@ -678,8 +678,6 @@ async def api_delete_panel(
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
-    panel_dir = ctx.uploads_dir / str(panel_id)
-
     def _delete():
         with health_db.connect(ctx.db_path) as conn:
             panel = health_db.get_panel(conn, panel_id)
@@ -689,12 +687,8 @@ async def api_delete_panel(
             health_db.delete_stats_for_panel(conn, panel_id)
             health_db.delete_panel(conn, panel_id)  # CASCADE -> biomarkers
             conn.commit()
-        # On-disk uploads — best effort.
-        if panel_dir.exists():
-            try:
-                shutil.rmtree(panel_dir)
-            except OSError:
-                pass
+        # On-disk uploads, best effort, through the no-follow walk.
+        health_documents.remove_upload_dir(ctx, str(panel_id))
         return True
 
     ok = await asyncio.to_thread(_delete)
@@ -882,8 +876,8 @@ async def api_panel_upload(
         # write, so every directory from the workspace root down and the file
         # follow no link, and a name already there (a rolled-back panel's
         # leftover) is numbered, not replaced.
-        root, walk = health_documents.uploads_walk(ctx, str(pid))
         try:
+            root, walk = health_documents.uploads_walk(ctx, str(pid))
             os.close(open_or_create_dirs(root, walk))
             name = write_new_file(
                 root, walk, f"original{suffix}", [raw], max_bytes=len(raw),
@@ -997,13 +991,43 @@ async def api_panel_source(
     if not panel.source_file:
         raise HTTPException(404, "no source file")
     fd = await _open_upload_or_raise(ctx, panel.source_file)
+    try:
+        inline_type = _inline_source_type(os.pread(fd, SNIFF_BYTES, 0))
+    except BaseException:
+        os.close(fd)
+        raise
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if inline_type is None:
+        return fd_file_response(
+            fd,
+            filename=Path(panel.source_file).name,
+            media_type=panel.source_mime or "application/octet-stream",
+            headers=headers,
+            request_headers=request.headers,
+        )
+    if inline_type != "application/pdf":
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
     return fd_file_response(
         fd,
         filename=Path(panel.source_file).name,
-        media_type=panel.source_mime or "application/octet-stream",
+        media_type=inline_type,
         disposition_type="inline",
+        headers=headers,
         request_headers=request.headers,
     )
+
+
+def _inline_source_type(head: bytes) -> str | None:
+    """The type a panel source may be served inline as, from its bytes.
+
+    A source a task registered carries whatever type its name guessed, so an
+    ``.html`` one would run on the app's origin inline (ISSUE-781). Inline is
+    for a PDF or a raster ``sniff_raster`` admits, the rule ``/chat/files``
+    uses, with the sniffed type sent explicitly; anything else is a download.
+    """
+    if head.startswith(b"%PDF-"):
+        return "application/pdf"
+    return sniff_raster(head)
 
 
 async def _open_upload_or_raise(ctx: HealthContext, rel: str) -> int:

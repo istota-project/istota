@@ -104,6 +104,22 @@ def stage_upload(config: "Config", raw: bytes, suffix: str) -> str:
     return Path(tmp.name).name
 
 
+@contextlib.contextmanager
+def staged_copy(config: "Config | None", raw: bytes, suffix: str):
+    """A daemon-side copy of ``raw`` for the extractor to read by name.
+
+    For a source the daemon read from a descriptor out of the user's tree:
+    ``pdftotext`` and the extractor's bind take a path, and a path into that
+    tree could be swapped after the open (ISSUE-781). The copy is removed when
+    the block ends.
+    """
+    name = stage_upload(config, raw, suffix)
+    try:
+        yield _staging_dir(config) / name
+    finally:
+        discard_staged(config, name)
+
+
 def discard_staged(config: "Config", name: str) -> None:
     """Remove a staged upload no request will name. Never raises."""
     with contextlib.suppress(OSError, RuntimeError):
