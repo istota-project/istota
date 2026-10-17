@@ -1,0 +1,51 @@
+{
+  "page": 1,
+  "pageSize": 200,
+  "sortKey": "timeleft",
+  "sortDirection": "ascending",
+  "totalRecords": 1,
+  "records": [
+    {
+      "seriesId": 5,
+      "episodeId": 501,
+      "seasonNumber": 2,
+      "series": {
+        "id": 5,
+        "title": "Quiet Harbour",
+        "tags": [
+          2
+        ],
+        "monitored": true
+      },
+      "episode": {
+        "id": 501,
+        "seriesId": 5,
+        "seasonNumber": 2,
+        "episodeNumber": 3,
+        "title": "Low Tide"
+      },
+      "languages": [],
+      "quality": {
+        "quality": {
+          "id": 3,
+          "name": "WEBDL-1080p"
+        }
+      },
+      "size": 1500000000,
+      "title": "Quiet.Harbour.S02E03.1080p.WEB.h264-GRP",
+      "sizeleft": 375000000,
+      "timeleft": "00:05:00",
+      "estimatedCompletionTime": "2026-10-16T12:05:00Z",
+      "added": "2026-10-16T11:50:00Z",
+      "status": "downloading",
+      "trackedDownloadStatus": "ok",
+      "trackedDownloadState": "downloading",
+      "statusMessages": [],
+      "downloadId": "G7H8I9",
+      "protocol": "torrent",
+      "downloadClient": "qBittorrent",
+      "indexer": "Indexer A",
+      "id": 701
+    }
+  ]
+}

@@ -12,6 +12,7 @@
     type AdminGoogleWorkspaceConnection,
     type AdminNextcloudConnection,
     type AdminPairingState,
+    type AdminServarrConnection,
     type AdminWhatsAppConnection,
   } from '$lib/api';
   import {
@@ -24,6 +25,7 @@
   } from '$lib/components/ui';
   import NextcloudCard from './NextcloudCard.svelte';
   import GoogleWorkspaceCard from './GoogleWorkspaceCard.svelte';
+  import ServarrCard from './ServarrCard.svelte';
 
   /** The five small fields the stream carries. Never the pairing code. */
   interface PairingFrame {
@@ -75,6 +77,9 @@
   let google = $derived(
     connections?.find((c): c is AdminGoogleWorkspaceConnection => c.id === 'google_workspace') ??
       null,
+  );
+  let servarr = $derived(
+    connections?.find((c): c is AdminServarrConnection => c.id === 'servarr') ?? null,
   );
   let link = $derived(whatsapp?.link ?? null);
 
@@ -661,7 +666,7 @@
     <PageLoading label="Loading connections…" />
   {:else if error && !connections}
     <div class="center-msg error">{error}</div>
-  {:else if nextcloud || whatsapp || google}
+  {:else if nextcloud || whatsapp || google || servarr}
     <NoticeBanner
       title="Deployment-level connections"
       variant="info"
@@ -832,6 +837,9 @@
     {/if}
     {#if google}
       <GoogleWorkspaceCard connection={google} />
+    {/if}
+    {#if servarr}
+      <ServarrCard connection={servarr} onchecked={() => load({ quiet: true })} />
     {/if}
   {:else}
     <!-- Each card reads its own entry by id rather than iterating, so an

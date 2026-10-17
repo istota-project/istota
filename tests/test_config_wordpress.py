@@ -16,7 +16,7 @@ import textwrap
 
 import pytest
 
-from istota.config import WORDPRESS_PRIVATE_HOST_PATTERN, load_config
+from istota.config import PRIVATE_HOST_PATTERN, load_config
 
 
 def _load(tmp_path, body: str):
@@ -67,8 +67,8 @@ class TestTheLoader:
 class TestThePattern:
     @pytest.mark.parametrize("entry", GOOD)
     def test_the_pattern_accepts(self, entry):
-        assert re.match(WORDPRESS_PRIVATE_HOST_PATTERN, entry)
+        assert re.match(PRIVATE_HOST_PATTERN, entry)
 
     @pytest.mark.parametrize("entry", BAD)
     def test_the_pattern_refuses(self, entry):
-        assert not re.match(WORDPRESS_PRIVATE_HOST_PATTERN, entry)
+        assert not re.match(PRIVATE_HOST_PATTERN, entry)

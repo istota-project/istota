@@ -32,7 +32,7 @@ _ON_THE_HOST = "Change it on the host with `istota-stack setup --force`."
 def _read_only() -> dict[tuple[str, ...], str]:
     found: dict[tuple[str, ...], str] = {}
     for name in config_module._NOT_CONFIGURATION:
-        found[(name,)] = "Not a setting: istota sets this itself."
+        found[tuple(name.split("."))] = "Not a setting: istota sets this itself."
     found[("default_briefings",)] = "default_briefings is migration input only; use istota briefings migrate report/import."
     # `*` is any user id. Retired: imported once, so it may be removed but not written.
     found[("users", "*", "briefings")] = (

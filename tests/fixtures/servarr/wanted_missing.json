@@ -1,0 +1,66 @@
+{
+  "page": 1,
+  "pageSize": 10,
+  "sortDirection": "descending",
+  "totalRecords": 3,
+  "records": [
+    {
+      "id": 42,
+      "title": "The Glass Orchard",
+      "originalTitle": "The Glass Orchard",
+      "sortTitle": "glass orchard",
+      "sizeOnDisk": 0,
+      "status": "released",
+      "overview": "Two sisters inherit an orchard that only grows in winter.",
+      "images": [],
+      "year": 2024,
+      "path": "/data/library/content/Films/The Glass Orchard (2024)",
+      "qualityProfileId": 4,
+      "hasFile": false,
+      "monitored": true,
+      "minimumAvailability": "released",
+      "isAvailable": true,
+      "runtime": 104,
+      "imdbId": "tt9900001",
+      "tmdbId": 800001,
+      "titleSlug": "800001",
+      "rootFolderPath": "/data/library/content/Films",
+      "genres": [
+        "Drama"
+      ],
+      "tags": [
+        1
+      ],
+      "added": "2026-10-10T09:00:00Z"
+    },
+    {
+      "id": 44,
+      "title": "Salt and Clockwork",
+      "originalTitle": "The Glass Orchard",
+      "sortTitle": "glass orchard",
+      "sizeOnDisk": 0,
+      "status": "inCinemas",
+      "overview": "Two sisters inherit an orchard that only grows in winter.",
+      "images": [],
+      "year": 2023,
+      "path": "/data/library/content/Films/The Glass Orchard (2024)",
+      "qualityProfileId": 4,
+      "hasFile": false,
+      "monitored": true,
+      "minimumAvailability": "released",
+      "isAvailable": false,
+      "runtime": 104,
+      "imdbId": "tt9900001",
+      "tmdbId": 800003,
+      "titleSlug": "800001",
+      "rootFolderPath": "/data/library/content/Films",
+      "genres": [
+        "Drama"
+      ],
+      "tags": [
+        1
+      ],
+      "added": "2026-10-10T09:00:00Z"
+    }
+  ]
+}

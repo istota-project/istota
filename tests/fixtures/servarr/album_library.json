@@ -1,0 +1,52 @@
+[
+  {
+    "title": "Harbour Lights",
+    "disambiguation": "",
+    "overview": "",
+    "artistId": 3,
+    "foreignAlbumId": "a1b2c3d4-0000-4000-8000-000000000004",
+    "monitored": false,
+    "anyReleaseOk": true,
+    "profileId": 1,
+    "duration": 2400000,
+    "albumType": "Album",
+    "secondaryTypes": [],
+    "mediumCount": 1,
+    "ratings": {
+      "votes": 0,
+      "value": 0.0
+    },
+    "releaseDate": "2025-09-12T00:00:00Z",
+    "releases": [
+      {
+        "id": 0,
+        "albumId": 0,
+        "foreignReleaseId": "a1b2c3d4-0000-4000-8000-000000009999",
+        "title": "Harbour Lights",
+        "status": "Official",
+        "duration": 2400000,
+        "trackCount": 9,
+        "media": [],
+        "mediumCount": 1,
+        "disambiguation": "",
+        "country": [],
+        "label": [],
+        "format": "Digital Media",
+        "monitored": true
+      }
+    ],
+    "genres": [],
+    "media": [],
+    "images": [],
+    "links": [],
+    "grabbed": false,
+    "id": 21,
+    "statistics": {
+      "trackFileCount": 0,
+      "trackCount": 9,
+      "totalTrackCount": 9,
+      "sizeOnDisk": 0,
+      "percentOfTracks": 0.0
+    }
+  }
+]

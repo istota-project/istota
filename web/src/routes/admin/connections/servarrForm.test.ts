@@ -1,0 +1,291 @@
+import { describe, expect, it } from 'vitest';
+
+import type {
+  AdminConfigView,
+  AdminServarrApp,
+  AdminServarrConnection,
+  ConfigManagedEntry,
+} from '$lib/api';
+import { buildChangeSet } from '$lib/admin/config/changeSet';
+import {
+  formProblems,
+  keyLabel,
+  rebaseForm,
+  servarrDraft,
+  servarrForm,
+  servarrReadOnlyReason,
+  viewPrivateHosts,
+  type ServarrForm,
+} from './servarrForm';
+
+/**
+ * The servarr card's form as plain data: built from the connection payload,
+ * checked before review, and turned into a config-editor change set.
+ */
+
+function app(over: Partial<AdminServarrApp> = {}): AdminServarrApp {
+  return {
+    app: 'radarr',
+    url: 'http://192.0.2.10:7878',
+    api_key_set: true,
+    incomplete: false,
+    problem: null,
+    check: null,
+    ...over,
+  };
+}
+
+function connection(over: Partial<AdminServarrConnection> = {}): AdminServarrConnection {
+  return {
+    id: 'servarr',
+    label: 'Servarr',
+    status: 'configured',
+    apps: [app()],
+    missing: ['sonarr', 'lidarr', 'prowlarr'],
+    requesters: ['bob'],
+    defaults: { radarr: { root_folder: '/films' } },
+    ...over,
+  };
+}
+
+const HOSTS = ['192.0.2.10'];
+
+function form(over: Partial<AdminServarrConnection> = {}): ServarrForm {
+  return servarrForm(connection(over), HOSTS);
+}
+
+function draftOf(edited: ServarrForm, initial: ServarrForm = form()) {
+  return buildChangeSet(servarrDraft(edited, initial), 'digest');
+}
+
+describe('servarrForm', () => {
+  it('starts every key empty, whatever is stored', () => {
+    const initial = form();
+    expect(initial.apps.radarr).toMatchObject({
+      enabled: true,
+      url: 'http://192.0.2.10:7878',
+      key: '',
+      keySet: true,
+    });
+    expect(initial.apps.sonarr).toMatchObject({ enabled: false, url: '', key: '', keySet: false });
+    expect(initial.requesters).toEqual(['bob']);
+    expect(initial.privateHosts).toBe('192.0.2.10');
+    expect(initial.defaults.radarr.root_folder).toBe('/films');
+    expect(initial.defaults.radarr.quality_profile).toBe('');
+  });
+});
+
+describe('servarrDraft', () => {
+  it('is empty for an untouched form', () => {
+    const changeSet = draftOf(form());
+    expect(changeSet.ops).toEqual([]);
+    expect(changeSet.secrets).toEqual({});
+  });
+
+  it('sends no credential for an untouched key', () => {
+    const edited = form();
+    edited.apps.radarr.url = 'http://192.0.2.10:7879';
+    const changeSet = draftOf(edited);
+    expect(changeSet.secrets).toEqual({});
+    expect(changeSet.ops).toEqual([
+      { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://192.0.2.10:7879' },
+    ]);
+  });
+
+  it('sends a replaced key as one credential and in no op', () => {
+    const edited = form();
+    edited.apps.radarr.key = 'fixture-arr-key-1';
+    const changeSet = draftOf(edited);
+    expect(changeSet.secrets).toEqual({ [keyLabel('radarr')]: 'fixture-arr-key-1' });
+    expect(keyLabel('radarr')).toBe('servarr.apps.radarr.api_key');
+    expect(JSON.stringify(changeSet.ops)).not.toContain('fixture-arr-key-1');
+  });
+
+  it('adds a new app as its URL and a credential', () => {
+    const edited = form();
+    edited.apps.sonarr = { ...edited.apps.sonarr, enabled: true, url: 'http://192.0.2.10:8989' };
+    edited.apps.sonarr.key = 'fixture-arr-key-2';
+    const changeSet = draftOf(edited);
+    expect(changeSet.ops).toEqual([
+      { op: 'set', path: ['servarr', 'apps', 'sonarr', 'url'], value: 'http://192.0.2.10:8989' },
+    ]);
+    expect(changeSet.secrets).toEqual({ [keyLabel('sonarr')]: 'fixture-arr-key-2' });
+  });
+
+  it('removes the table of an app turned off, and sends nothing else for it', () => {
+    const edited = form();
+    edited.apps.radarr.enabled = false;
+    edited.apps.radarr.key = 'typed-then-turned-off';
+    const changeSet = draftOf(edited);
+    expect(changeSet.ops).toEqual([{ op: 'unset', path: ['servarr', 'apps', 'radarr'] }]);
+    expect(changeSet.secrets).toEqual({});
+  });
+
+  it('sets requesters, private hosts and defaults, and unsets what is emptied', () => {
+    const edited = form();
+    edited.requesters = [];
+    edited.privateHosts = '192.0.2.10\narr.example.com\n';
+    edited.defaults.radarr.root_folder = '';
+    edited.defaults.radarr.quality_profile = ' HD ';
+    const changeSet = draftOf(edited);
+    expect(changeSet.ops).toEqual([
+      { op: 'unset', path: ['servarr', 'requesters'] },
+      { op: 'set', path: ['servarr', 'private_hosts'], value: ['192.0.2.10', 'arr.example.com'] },
+      { op: 'set', path: ['servarr', 'defaults', 'radarr', 'quality_profile'], value: 'HD' },
+      { op: 'unset', path: ['servarr', 'defaults', 'radarr', 'root_folder'] },
+    ]);
+  });
+
+  it('rewrites the URL of an incomplete table, whose stored URL is unknown', () => {
+    const initial = form({
+      apps: [app({ url: '', api_key_set: null, incomplete: true, problem: 'dropped' })],
+    });
+    const edited = structuredClone(initial);
+    edited.apps.radarr.url = 'http://192.0.2.10:7878';
+    edited.apps.radarr.key = 'fixture-arr-key-3';
+    const changeSet = draftOf(edited, initial);
+    expect(changeSet.ops).toEqual([
+      { op: 'set', path: ['servarr', 'apps', 'radarr', 'url'], value: 'http://192.0.2.10:7878' },
+    ]);
+    expect(changeSet.secrets).toEqual({ [keyLabel('radarr')]: 'fixture-arr-key-3' });
+  });
+});
+
+describe('formProblems', () => {
+  it('passes a stored app as it is', () => {
+    expect(formProblems(form())).toEqual({});
+  });
+
+  it('refuses a URL that is not http(s) with a host, or that carries userinfo', () => {
+    for (const url of [
+      'ftp://192.0.2.10',
+      'radarr',
+      'http://admin:pw@192.0.2.10:7878',
+      '',
+      'http:192.0.2.10:7878',
+      'https://arr.example.com/?a=1',
+      'https://arr.example.com/#top',
+    ]) {
+      const edited = form();
+      edited.apps.radarr.url = url;
+      expect(formProblems(edited)['radarr.url'], url).toBeTruthy();
+    }
+  });
+
+  it('refuses plain HTTP to a host not in the private hosts, as the skill does', () => {
+    const edited = form();
+    edited.apps.radarr.url = 'http://arr.example.com:7878';
+    expect(formProblems(edited)['radarr.url']).toMatch(/private hosts/);
+    edited.privateHosts = '192.0.2.10\nARR.example.com.';
+    expect(formProblems(edited)).toEqual({});
+    edited.apps.radarr.url = 'https://arr.example.org';
+    expect(formProblems(edited)).toEqual({});
+  });
+
+  it('asks for a key for an app with none stored', () => {
+    const edited = form();
+    edited.apps.sonarr = { ...edited.apps.sonarr, enabled: true, url: 'http://192.0.2.10:8989' };
+    expect(formProblems(edited)['sonarr.key']).toBeTruthy();
+    edited.apps.sonarr.key = 'fixture-arr-key-4';
+    expect(formProblems(edited)).toEqual({});
+  });
+
+  it('ignores an app turned off', () => {
+    const edited = form();
+    edited.apps.radarr = { ...edited.apps.radarr, enabled: false, url: 'nonsense' };
+    expect(formProblems(edited)).toEqual({});
+  });
+});
+
+describe('rebaseForm', () => {
+  it('keeps what the admin changed and takes the new file for the rest', () => {
+    const before = form();
+    const edited = structuredClone(before);
+    edited.apps.radarr.key = 'fixture-arr-key-5';
+    edited.defaults.radarr.quality_profile = 'HD';
+    const after = servarrForm(
+      connection({ requesters: ['bob', 'carol'], defaults: { radarr: { root_folder: '/new' } } }),
+      HOSTS,
+    );
+    const rebased = rebaseForm(edited, before, after);
+    expect(rebased.apps.radarr.key).toBe('fixture-arr-key-5');
+    expect(rebased.defaults.radarr.quality_profile).toBe('HD');
+    expect(rebased.defaults.radarr.root_folder).toBe('/new');
+    expect(rebased.requesters).toEqual(['bob', 'carol']);
+  });
+});
+
+function view(over: Partial<AdminConfigView> = {}): AdminConfigView {
+  const unmanaged: ConfigManagedEntry = { managed: false, source: null, at: null };
+  return {
+    config_path: '/data/config/config.toml',
+    editable: true,
+    sections: [
+      {
+        key: 'servarr',
+        label: '[servarr]',
+        fields: [
+          {
+            key: 'servarr.private_hosts',
+            name: 'private_hosts',
+            value: ['192.0.2.10'],
+            type: 'list[str]',
+            secret: false,
+            set: true,
+            path: ['servarr', 'private_hosts'],
+            in_file: true,
+            choices: null,
+            multi_choices: null,
+            doc: null,
+            credential: null,
+            env_override: null,
+            editor: 'list',
+            read_only_reason: null,
+            risky: false,
+          },
+        ],
+      },
+    ],
+    applier: { kind: 'host', available: true, reason: '' },
+    managed: { config: unmanaged, secrets: unmanaged, admins: unmanaged },
+    document_digest: 'digest',
+    started_at: null,
+    problems: [],
+    has_comments: false,
+    raw_toml: '',
+    secrets: [],
+    admins: { users: ['alice'], read_only_reason: null },
+    ...over,
+  };
+}
+
+describe('servarrReadOnlyReason', () => {
+  it('is null for an editable, unmanaged config', () => {
+    expect(servarrReadOnlyReason(view())).toBeNull();
+    expect(viewPrivateHosts(view())).toEqual(['192.0.2.10']);
+  });
+
+  it('gives the applier reason when there is no applier', () => {
+    const reason = 'This install has no config applier.';
+    expect(
+      servarrReadOnlyReason(
+        view({ editable: false, applier: { kind: 'none', available: false, reason } }),
+      ),
+    ).toBe(reason);
+  });
+
+  it('names the plan that manages config.toml', () => {
+    const unmanaged: ConfigManagedEntry = { managed: false, source: null, at: null };
+    const reason = servarrReadOnlyReason(
+      view({
+        managed: {
+          config: { managed: true, source: 'ansible', at: null },
+          secrets: unmanaged,
+          admins: unmanaged,
+        },
+      }),
+    );
+    expect(reason).toMatch(/ansible/);
+    expect(reason).toMatch(/settings plan/);
+  });
+});

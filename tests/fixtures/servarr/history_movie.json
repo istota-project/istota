@@ -1,0 +1,43 @@
+[
+  {
+    "movieId": 42,
+    "sourceTitle": "The.Glass.Orchard.2024.720p.WEB-OTHER",
+    "quality": {
+      "quality": {
+        "id": 4,
+        "name": "WEBDL-720p"
+      }
+    },
+    "customFormats": [],
+    "customFormatScore": 0,
+    "qualityCutoffNotMet": false,
+    "date": "2026-10-15T07:00:00Z",
+    "downloadId": "Z9Y8X7",
+    "eventType": "downloadFailed",
+    "data": {
+      "message": "Download client reported the torrent as stalled"
+    },
+    "id": 5000
+  },
+  {
+    "movieId": 42,
+    "sourceTitle": "The.Glass.Orchard.2024.1080p.BluRay.x264-GRP",
+    "quality": {
+      "quality": {
+        "id": 7,
+        "name": "Bluray-1080p"
+      }
+    },
+    "customFormats": [],
+    "customFormatScore": 0,
+    "qualityCutoffNotMet": false,
+    "date": "2026-10-16T07:00:00Z",
+    "downloadId": "A1B2C3",
+    "eventType": "grabbed",
+    "data": {
+      "indexer": "Indexer A",
+      "releaseGroup": "GRP"
+    },
+    "id": 5001
+  }
+]

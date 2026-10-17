@@ -284,13 +284,72 @@ class WordPressConfig:
     max_upload_mb: int = 25
 
 
-# What a `[wordpress] private_hosts` entry may look like: a host name (with an
-# optional trailing dot) or an IP literal. The skill matches entries by exact
-# name, so a URL, a port or a wildcard matches nothing. The Ansible role asserts
-# with this same string; tests/test_config_wordpress.py holds the two equal.
-WORDPRESS_PRIVATE_HOST_PATTERN = (
+# What a `private_hosts` entry (`[wordpress]`, `[servarr]`) may look like: a
+# host name (with an optional trailing dot) or an IP literal. The skills match
+# entries by exact name, so a URL, a port or a wildcard matches nothing. The
+# Ansible role asserts with this same string.
+PRIVATE_HOST_PATTERN = (
     r"^([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$"
 )
+
+
+# The arr apps the `servarr` skill knows, in the order every multi-app verb
+# visits them, and the add defaults each one takes. Authoritative here so the
+# loader can validate `[servarr]` without importing the skill package;
+# `skills/servarr/apps.py` builds its API table on these and a test holds the
+# two equal.
+SERVARR_APPS = ("sonarr", "radarr", "lidarr", "prowlarr")
+SERVARR_RESERVED_APPS = ("bazarr",)
+SERVARR_DEFAULT_FIELDS: dict[str, tuple[str, ...]] = {
+    "sonarr": ("quality_profile", "root_folder", "monitor"),
+    # Films are always added monitored, so radarr takes no `monitor` default.
+    "radarr": ("quality_profile", "root_folder", "minimum_availability"),
+    "lidarr": ("quality_profile", "root_folder", "metadata_profile", "monitor"),
+    "prowlarr": (),
+}
+
+
+@dataclass
+class ServarrApp:
+    """One arr app of the install-wide connection: where it is and its key.
+
+    The key is full admin on the app, so it is kept out of ``repr``; it is read
+    only by the skill CLI, host-side, into one request header.
+    """
+    url: str
+    api_key: str = field(repr=False)
+
+
+@dataclass
+class ServarrConfig:
+    """Operator settings for the `servarr` skill.
+
+    ``apps``: the install-wide connection, keyed by app name, each with
+    ``url`` and ``api_key`` (secret). An app with no entry is not configured.
+
+    ``requesters``: user ids, besides admins, who get the requester tier.
+    Admins never need listing. Empty means only admins can use the skill.
+
+    ``private_hosts``: exact host names or IP literals an app may resolve to a
+    non-public address. Operator-only, same reasoning as WordPressConfig.
+    Plain HTTP is allowed only to a host in this list.
+
+    ``defaults``: per-app add defaults, keyed by app name, each a table with any
+    of quality_profile, root_folder, metadata_profile (lidarr only),
+    minimum_availability (radarr only), monitor.
+
+    ``incomplete_apps``: set by the loader, never from the file. The names of
+    ``[servarr.apps.<app>]`` tables the loader dropped for a missing ``url`` or
+    ``api_key``, so doctor and the admin card can say so; the skill never
+    reads it.
+    """
+    apps: dict[str, ServarrApp] = field(default_factory=dict)
+    requesters: list[str] = field(default_factory=list)
+    private_hosts: list[str] = field(default_factory=list)
+    defaults: dict[str, dict[str, str]] = field(default_factory=dict)
+    lookup_timeout_seconds: int = 30
+    release_search_timeout_seconds: int = 120
+    incomplete_apps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2225,6 +2284,7 @@ class Config:
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
     wordpress: WordPressConfig = field(default_factory=WordPressConfig)
+    servarr: ServarrConfig = field(default_factory=ServarrConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     briefings: BriefingsModuleConfig = field(default_factory=BriefingsModuleConfig)
     health: HealthModuleConfig = field(default_factory=HealthModuleConfig)
@@ -2819,6 +2879,10 @@ class Config:
         # Without a Nextcloud every verb of the nextcloud skill would fail.
         if self.nextcloud_enabled:
             caps.add("nextcloud")
+        # An app name the skill does not know is ignored, so it alone turns
+        # nothing on.
+        if any(name in SERVARR_APPS for name in self.servarr.apps):
+            caps.add("servarr")
         return caps
 
     def is_admin(self, user_id: str) -> bool:
@@ -3752,6 +3816,8 @@ _NOT_CONFIGURATION = frozenset({
     "_profile_user_ids",
     "_configured_user_ids",
     "_user_registry_complete",
+    # What the `servarr.apps` hook dropped, recorded after the walk.
+    "servarr.incomplete_apps",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -4280,6 +4346,71 @@ def _review_section(raw: object, key: str) -> object:
     return review
 
 
+def _servarr_apps(raw: object, key: str) -> object:
+    """`[servarr.apps.<app>]` tables as `ServarrApp` instances.
+
+    The generic walk passes a dict field through as raw dicts, so without this
+    `apps["radarr"]` would be a plain dict and the key would show in its repr.
+    An entry with no `url` or no `api_key` is dropped with a warning naming the
+    missing field, never the value. Unknown app names are kept here and warned
+    about by `_validate_servarr`, which owns that judgement.
+    """
+    if not isinstance(raw, dict):
+        # No value in the message: an `[[servarr.apps]]` array carries api_keys.
+        report_problem(
+            "discarded", key_path(key),
+            "[config] %s must be a table of [servarr.apps.<app>] tables; ignoring it",
+            key,
+        )
+        return {}
+    apps: dict[str, ServarrApp] = {}
+    for name, table in raw.items():
+        path = (*key_path(key), str(name))
+        if not isinstance(table, dict):
+            report_problem(
+                "discarded", path,
+                "[config] [servarr.apps.%s] must be a table with url and api_key; ignoring it",
+                name,
+            )
+            continue
+        for extra in sorted(set(table) - {"url", "api_key"}):
+            report_problem(
+                "unknown", (*path, str(extra)),
+                "[config] servarr.apps.%s.%s is not a recognised key and is ignored",
+                name, extra,
+            )
+        url = table.get("url")
+        api_key = table.get("api_key")
+        missing = [
+            field_name for field_name, value in (("url", url), ("api_key", api_key))
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if missing:
+            report_problem(
+                "discarded", path,
+                "[config] [servarr.apps.%s] needs a non-empty %s; ignoring the app",
+                name, " and ".join(missing),
+            )
+            continue
+        apps[str(name)] = ServarrApp(url=url.strip(), api_key=api_key.strip())
+    return apps
+
+
+def _record_incomplete_servarr_apps(data: dict, config: Config) -> None:
+    """Name each `[servarr.apps.<app>]` table the `servarr.apps` hook dropped.
+
+    The hook is the one judge of a usable table; this only records what it
+    left out, so doctor and the admin card can report it as incomplete.
+    """
+    section = data.get("servarr")
+    raw = section.get("apps") if isinstance(section, dict) else None
+    if not isinstance(raw, dict):
+        return
+    config.servarr.incomplete_apps = [
+        str(name) for name in raw if str(name) not in config.servarr.apps
+    ]
+
+
 def _forge_cli_list(raw: object, key: str) -> object:
     """A forge-CLI policy list, tolerating the bare-string hand-edit."""
     if isinstance(raw, str):
@@ -4391,6 +4522,11 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # the loop can schedule it — which is the one thing the jittered floor is
     # there to prevent.
     "talk.signaling.reconnect_backoff_max": _positive_int,
+    "servarr.apps": _servarr_apps,
+    # A zero timeout would refuse every lookup or release search before it
+    # started, which reads as the arr being down.
+    "servarr.lookup_timeout_seconds": _positive_int,
+    "servarr.release_search_timeout_seconds": _positive_int,
     "advisor_model": _advisor_model,
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
@@ -4576,6 +4712,7 @@ def _map_document(data: dict, config: Config) -> list[str]:
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
     _migrate_workspace_fields(data, config, old_mount_spelling=old_mount_spelling)
+    _record_incomplete_servarr_apps(data, config)
     if config.workspace_path is None:
         config.workspace_path = config.workspace_mount_path
     _apply_renamed_keys(data, config)
@@ -5081,6 +5218,7 @@ def load_config(
     _validate_brain_fallback(config)
     _validate_room_selectable(config)
     _validate_wordpress_private_hosts(config)
+    _validate_servarr(config)
     _validate_claude_code_brain(config)
     _validate_configured_model_references(config)
     _validate_advisor_model(config)
@@ -5989,18 +6127,123 @@ def _validate_wordpress_private_hosts(config: "Config") -> None:
     Left on the field rather than dropped: it already grants nothing, and the
     admin config view should show what the operator wrote.
     """
+    _warn_malformed_private_hosts("wordpress", config.wordpress.private_hosts, "site")
+
+
+def _warn_malformed_private_hosts(section: str, entries, target: str) -> None:
+    """The one `private_hosts` shape warning, for each section that has the list."""
     malformed = [
-        entry for entry in (config.wordpress.private_hosts or [])
-        if not re.match(WORDPRESS_PRIVATE_HOST_PATTERN, str(entry).strip())
+        entry for entry in (entries or [])
+        if not re.match(PRIVATE_HOST_PATTERN, str(entry).strip())
     ]
     if malformed:
         report_problem(
-            "warning", ("wordpress", "private_hosts"),
-            "[wordpress] private_hosts entry %s is not a bare host name or IP "
+            "warning", (section, "private_hosts"),
+            "[%s] private_hosts entry %s is not a bare host name or IP "
             "address; entries are matched by exact name, so it lifts the "
-            "private-address refusal for no site (write the host alone, with "
+            "private-address refusal for no %s (write the host alone, with "
             "no scheme, port, path or wildcard)",
-            ", ".join(repr(entry) for entry in malformed),
+            section, ", ".join(repr(entry) for entry in malformed), target,
+        )
+
+
+def _validate_servarr(config: "Config") -> None:
+    """Warn about `[servarr]` values the skill will ignore or cannot use.
+
+    Warnings only, never a refusal to start: an unknown app is ignored, a
+    default that does not apply to its app is never read, and an unknown
+    requester is a user who simply never calls the skill.
+    """
+    servarr = config.servarr
+    _warn_malformed_private_hosts("servarr", servarr.private_hosts, "app")
+
+    for name in servarr.apps:
+        if name in SERVARR_APPS:
+            continue
+        if name in SERVARR_RESERVED_APPS:
+            report_problem(
+                "warning", ("servarr", "apps", name),
+                "[servarr.apps.%s] is reserved and not supported yet; the skill ignores it",
+                name,
+            )
+        else:
+            report_problem(
+                "warning", ("servarr", "apps", name),
+                "[servarr.apps.%s] is not an app the skill knows (%s); it is ignored",
+                name, ", ".join(SERVARR_APPS),
+            )
+
+    for name, table in servarr.defaults.items():
+        if name not in SERVARR_APPS:
+            report_problem(
+                "warning", ("servarr", "defaults", name),
+                "[servarr.defaults.%s] is not an app the skill knows (%s); it is ignored",
+                name, ", ".join(SERVARR_APPS),
+            )
+            continue
+        if not isinstance(table, dict):
+            report_problem(
+                "warning", ("servarr", "defaults", name),
+                "[servarr.defaults.%s] must be a table; it is ignored", name,
+            )
+            continue
+        allowed = SERVARR_DEFAULT_FIELDS[name]
+        for field_name, value in table.items():
+            path = ("servarr", "defaults", name, str(field_name))
+            if field_name not in allowed:
+                report_problem(
+                    "warning", path,
+                    "[servarr.defaults.%s] %s does not apply to %s (it takes %s); it is ignored",
+                    name, field_name, name, ", ".join(allowed) or "nothing",
+                )
+            elif not isinstance(value, str) or not value.strip():
+                report_problem(
+                    "warning", path,
+                    "[servarr.defaults.%s] %s must be a non-empty string; it is ignored",
+                    name, field_name,
+                )
+
+    # Only when the document names users: with every user in the database and
+    # overlays off, an empty `users` says nothing about who exists.
+    if config.users and servarr.requesters:
+        known = {user_id.casefold() for user_id in config.users}
+        unknown = [r for r in servarr.requesters if str(r).casefold() not in known]
+        if unknown:
+            report_problem(
+                "warning", ("servarr", "requesters"),
+                "[servarr] requesters %s are not configured users; they get nothing",
+                ", ".join(repr(r) for r in unknown),
+            )
+
+    if any(name in SERVARR_APPS for name in servarr.apps):
+        _warn_servarr_release_timeout(config)
+
+
+def _warn_servarr_release_timeout(config: "Config") -> None:
+    """A release search must leave a minute of the skill's own budget.
+
+    The proxy kills a skill CLI at its timeout and returns nothing it built, so
+    a release search that can run to the ceiling loses the whole answer.
+    """
+    # Deferred: only an install with an arr stack pays for the import.
+    from istota.sandbox.skill_proxy import resolve_skill_timeout
+
+    security = config.security
+    try:
+        ceiling = resolve_skill_timeout(
+            security.skill_proxy_timeout, security.skill_proxy_timeouts, "servarr",
+            security.skill_client_wait_seconds,
+        )
+    except Exception:  # noqa: BLE001 — a malformed security setting warns elsewhere
+        return
+    release = config.servarr.release_search_timeout_seconds
+    if release > ceiling - 60:
+        report_problem(
+            "warning", ("servarr", "release_search_timeout_seconds"),
+            "[servarr] release_search_timeout_seconds=%s leaves less than 60s of the "
+            "servarr skill's %ss timeout; a slow release search will be cut short "
+            "(lower it, or raise security.skill_proxy_timeouts.servarr)",
+            release, ceiling,
         )
 
 

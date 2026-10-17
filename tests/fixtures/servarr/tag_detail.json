@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1,
+    "label": "req-alice",
+    "delayProfileIds": [],
+    "importListIds": [],
+    "notificationIds": [],
+    "restrictionIds": [],
+    "indexerIds": [],
+    "downloadClientIds": [],
+    "autoTagIds": [],
+    "movieIds": [12, 42]
+  },
+  {
+    "id": 3,
+    "label": "4k",
+    "delayProfileIds": [],
+    "importListIds": [],
+    "notificationIds": [],
+    "restrictionIds": [],
+    "indexerIds": [],
+    "downloadClientIds": [],
+    "autoTagIds": [],
+    "movieIds": [12]
+  },
+  {
+    "id": 5,
+    "label": "req-bob",
+    "delayProfileIds": [],
+    "importListIds": [],
+    "notificationIds": [],
+    "restrictionIds": [],
+    "indexerIds": [],
+    "downloadClientIds": [],
+    "autoTagIds": [],
+    "movieIds": [7]
+  }
+]
