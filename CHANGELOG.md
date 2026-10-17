@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Registered iOS devices can receive inbox alerts and delayed chat alerts, with a badge that follows unread items across devices. Chat alerts and message previews have separate preferences; native registration requires a compatible app build and operator push setup.
+
 - Operators can send a test iOS notification to a user’s registered devices and see whether Apple accepted it. The doctor command checks the signing key’s presence and permissions without reading it.
 
 - Settings → Preferences now lists registered iOS push devices with a remove action, and saves choices for chat alerts and message previews. Device registration and delivery in the iOS app will follow.

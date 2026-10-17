@@ -99,6 +99,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("host-pressure-breadcrumb", "host_pressure_breadcrumb_interval_seconds"),
     ("host-pressure-sample", "host_pressure_sample_interval_seconds"),
     ("heartbeats", "heartbeat_check_interval"),
+    ("push-dispatch", None),
 ]
 
 # The four that read a briefing key for something that is not a briefing. Named
@@ -115,6 +116,7 @@ KNOWN_FIELD_MISMATCHES = {
 # (`background_check_still_running name=%s`) and key the in-flight registry, so
 # they are not free to change.
 EXPECTED_BACKGROUND = {
+    "push-dispatch",
     "credential-backup",
     "credential-maintenance",
     "whatsapp-requests",
@@ -137,6 +139,7 @@ EXPECTED_BACKGROUND = {
 }
 
 EXPECTED_OVERLAP_EXPECTED = {
+    "push-dispatch",
     "browser-instances",
     "sleep-cycles",
     "travel-timezone",

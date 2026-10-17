@@ -22,6 +22,7 @@ Subsystems:
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
 - `search.md` — unified web search: source scope, query matching, deadlines, result links and the search dialog
 - `notifications.md` — the notifications table, the resolver seam, and the shipped sources
+- `push.md` — native APNs registration, delayed chat alerts, inbox dispatch and app badges
 - `briefings.md` — personal/group briefings, source grants, common editions and delivery, All users/default/publisher migration, shared blocks and HTML email
 - `health.md` — health module schema, documents store, OCR/explainer, serialisers, surfaces
 - `location.md` — GPS pings, place detection, visits, Overland/Garmin ingest

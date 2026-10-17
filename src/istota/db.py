@@ -6946,6 +6946,33 @@ def total_unread_messages(
     return int(conn.execute(sql, params).fetchone()[0])
 
 
+def unread_rooms_since(
+    conn: sqlite3.Connection, user_id: str, surface: str, floor: int, ceiling: int,
+) -> list[dict]:
+    """Unread candidates in the same visible rooms as the badge aggregate."""
+    hidden = hidden_room_tokens_for_member(conn, user_id)
+    sql = """
+        SELECT m.*, r.name AS room_name,
+               (SELECT w.id FROM web_chat_rooms w
+                WHERE w.token = r.token AND w.user_id = rm.user_id LIMIT 1) AS room_id
+        FROM messages m
+        JOIN rooms r ON r.token = m.room_token
+        JOIN room_members rm ON rm.room_token = r.token AND rm.user_id = ?
+        LEFT JOIN room_read_state rs ON rs.room_token = r.token
+            AND rs.user_id = rm.user_id AND rs.surface = ?
+        WHERE r.archived = 0 AND m.role != 'user'
+          AND m.id > ? AND m.id <= ?
+          AND m.id > COALESCE(rs.last_read_message_id, 0)
+          AND NOT EXISTS (SELECT 1 FROM room_dismissals d
+                          WHERE d.room_token = r.token AND d.user_id = rm.user_id)
+    """
+    params = [user_id, surface, floor, ceiling]
+    if hidden:
+        sql += " AND r.token NOT IN (" + ",".join("?" for _ in hidden) + ")"
+        params.extend(sorted(hidden))
+    return [dict(row) for row in conn.execute(sql + " ORDER BY m.id", params)]
+
+
 def count_user_web_unread_messages(conn: sqlite3.Connection, user_id: str) -> int:
     """Sum visible rooms using the web sidebar's cursors and unread rules."""
     hidden = hidden_room_tokens_for_member(conn, user_id)

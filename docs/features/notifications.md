@@ -97,9 +97,24 @@ What varies is whether a producer sends at all, and that is decided per producer
 
 ## Configuration
 
-**There are none.** No config fields, no environment variables, no CLI verbs. The retention windows above, the 500-row scan ceiling and the panel's 50-row page are constants in the code.
+The inbox itself has no configuration. The retention windows above, the 500-row scan ceiling and the panel's 50-row page are constants in the code. Native push has deployment settings described below.
 
 The bell polls every 30 seconds from whatever page you are on, backing off after repeated failures. On a page that already holds a room's event stream open, the count also rides that stream, so an item parked while you are reading a room lights the bell in about a second rather than up to thirty. That fast path is an optimization, not the contract: turning the room stream's tick off (`room_stream_room_check_seconds = 0`) leaves the 30-second poll doing the job.
+
+## Push notifications
+
+Native push adds iOS alerts alongside your existing Talk, email or ntfy routing. A new or reopened inbox item can reach each registered device. Unread chat messages wait briefly before sending, so a message you read in the open room usually needs no alert. Messages arriving together produce one alert per room, with a count and the newest text. Archived, dismissed and hidden email rooms do not alert.
+
+The app badge counts open inbox items plus unread chat messages. Reading on another device causes a quiet badge update on the next sweep. Old messages after a scheduler outage update the badge without a burst of banners. A failed alert is not retried; the next sweep can still repair the badge.
+
+Settings → Push notifications has two preferences:
+
+- **Chat notifications:** alerts and badge, badge only, or off. Off removes chat from the badge too; inbox alerts continue.
+- **Show message previews:** when enabled, Apple receives the title and a short body as part of the APNs payload. APNs is not end-to-end encrypted. Turning previews off replaces the text with a generic notice or room label and an empty body; the badge and navigation data remain.
+
+Registration requires an iOS shell with native push support (0.11.0 or newer). In that app, use Register in the settings card and allow notifications when iOS asks. If permission is denied, change it in iOS Settings. Browsers and older shells show a stand-in message. Remove a device from the card to stop further pushes to it. APNs accepting a request does not establish that iOS displayed it: notification settings and focus modes can suppress it.
+
+Operators must enable Push Notifications on the app's Apple App ID, provision the shell, install the server's `push` extra and configure `[push]` with an APNs auth key before enabling dispatch. The default dispatch interval is five seconds, chat delay is fifteen seconds and maximum alert age is five minutes. Keep the key file private to the service account. `istota doctor` checks its presence and permissions; `istota push test --user U` sends a diagnostic to that user's registered devices. Debug builds use sandbox tokens and TestFlight uses production tokens.
 
 ## Safety notes
 

@@ -10136,6 +10136,11 @@ def build_interval_gates(
 
         sync_operator_persona(config)
 
+    def _push_dispatch(now: float) -> None:
+        from istota.push import run_push_dispatch
+
+        run_push_dispatch(config)
+
     def _heartbeats(now: float) -> None:
         _run_heartbeat_checks(config)
 
@@ -10577,6 +10582,14 @@ def build_interval_gates(
             one_shot=True,
             # `_run_heartbeat_checks` guards itself.
             one_shot_on_error=None,
+        ),
+        IntervalGate(
+            name="push-dispatch",
+            run=_push_dispatch,
+            fixed_interval=config.push.dispatch_interval_seconds,
+            enabled=lambda c: c.push.dispatch_interval_seconds > 0,
+            background=True,
+            overlap_expected=True,
         ),
     ]
 
