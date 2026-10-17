@@ -358,10 +358,7 @@ def _editor_keys(
 
     reason = schema.read_only_reason(path)
     if reason is None and env_override:
-        reason = (
-            f"Set by the environment variable {env_override}, which wins over "
-            "config.toml, so an edit here would do nothing. Change it on the host."
-        )
+        reason = _env_override_reason(env_override)
     if reason is None:
         resource = "secrets" if credential and credential["kind"] == "file" else "config"
         reason = ctx["managed_reasons"][resource]
@@ -485,10 +482,80 @@ def _value_at(config: Any, path: tuple[str, ...]) -> Any:
     return node
 
 
-def _secret_files(config: "Config", ctx: dict) -> list[dict]:
-    """One entry per stack secrets file: whether it is set, never its value."""
+#: Where the stack mounts its secret files, in every container.
+STACK_SECRETS_DIR = Path("/run/secrets")
+
+#: What reads each secret file, by its config section, for grouping a list of
+#: them. Every file's section has a title; a test holds that.
+_SECTION_TITLES = {
+    "nextcloud": "Nextcloud",
+    "web": "Web UI",
+    "email": "Email",
+    "caldav": "CalDAV",
+    "developer": "Developer",
+    "google_workspace": "Google Workspace",
+    "sms.telnyx": "SMS (Telnyx)",
+    "sms.twilio": "SMS (Twilio)",
+    "whatsapp.cloud": "WhatsApp Cloud API",
+    "brain.native": "Native brain",
+    "servarr": "Servarr",
+}
+
+#: The same, for the files no config key reads.
+_STANDALONE_USED_BY = {
+    "anthropic_api_key": "Claude Code",
+    "claude_code_oauth_token": "Claude Code",
+}
+
+
+def _env_override_reason(variable: str) -> str:
+    return (
+        f"Set by the environment variable {variable}, which wins over "
+        "config.toml, so an edit here would do nothing. Change it on the host."
+    )
+
+
+def _file_holds_value(secrets_dir: Path, name: str) -> bool:
+    """Whether the stack's secret file `name` is non-empty, by its size alone."""
+    try:
+        return (secrets_dir / name).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _secret_source(
+    name: str, path: tuple[str, ...] | None, document: dict | None, secrets_dir: Path,
+) -> str:
+    """Where the credential in secret file `name` comes from, without reading it.
+
+    `file` when `/run/secrets/<name>` is non-empty. `environment` when it is
+    not and the variable is set anyway: `istota-secrets` exports every
+    non-empty file as the uppercase variable in this process too, so a set
+    variable over an empty file came from outside the stack. `inline` when
+    neither holds it and `config.toml` has a value at `path`; `none` otherwise.
+    The file is checked with `stat` for its size and never opened.
+    """
     import os
 
+    from istota.config_editor import edits, secrets
+
+    if _file_holds_value(secrets_dir, name):
+        return "file"
+    if os.environ.get(name.upper(), "").strip():
+        return "environment"
+    if path is not None and document is not None:
+        present, value = secrets.lookup(document, path)
+        if present and edits._holds_value(value):
+            return "inline"
+    return "none"
+
+
+def _secret_files(config: "Config", ctx: dict) -> list[dict]:
+    """One entry per stack secrets file: whether it is set, where from, what
+    reads it, and never its value."""
+    import os
+
+    from istota.config_editor.edits import section_of
     from istota.config_editor.reference import credential_files
     from istota.setup_wizard import SECRET_NAMES
 
@@ -500,19 +567,26 @@ def _secret_files(config: "Config", ctx: dict) -> list[dict]:
         if dotted:
             path = tuple(dotted.split("."))
             is_set = _is_set(_value_at(config, path))
-            reason = schema.READ_ONLY.get(path)
+            section = section_of(path)
+            used_by = _SECTION_TITLES.get(section, f"[{section}]")
         else:
+            path = None
             # No config key reads it; `istota-secrets` exports each file as
             # the uppercase variable, in the web process too.
-            path = None
             is_set = bool(os.environ.get(name.upper(), "").strip())
-            reason = None
+            used_by = _STANDALONE_USED_BY.get(name, "[stack]")
+        source = _secret_source(name, path, ctx["document"], ctx["secrets_dir"])
+        reason = (schema.READ_ONLY.get(path) if path else None) or ctx["managed_reasons"]["secrets"]
+        if reason is None and source == "environment":
+            reason = _env_override_reason(name.upper())
         entries.append({
             "name": name,
             "label": dotted or _SECRET_LABELS.get(name, name),
             "config_key": dotted,
             "set": is_set,
-            "read_only_reason": reason or ctx["managed_reasons"]["secrets"],
+            "source": source,
+            "used_by": used_by,
+            "read_only_reason": reason,
             "risky": path in schema.RISKY_KEYS if path else False,
         })
     return entries
@@ -527,6 +601,7 @@ def build_config_view(
     applier: dict | None = None,
     managed: dict | None = None,
     started_at: str | None = None,
+    secrets_dir: Path = STACK_SECRETS_DIR,
 ) -> dict:
     """Render the loaded config as ordered, redacted sections.
 
@@ -534,7 +609,8 @@ def build_config_view(
     sha256; ``check`` the ``apply.CheckResult`` of a check of it; ``managed``
     what ``apply.read_managed(..., fail_closed=True)`` returned; ``applier``
     the applier's ``{kind, available, reason}``. Each is optional, and the
-    view is the read-only one without it.
+    view is the read-only one without it. ``secrets_dir`` is where the stack's
+    secret files are, whose sizes alone decide a credential's ``source``.
     """
     import tomllib
 
@@ -562,6 +638,7 @@ def build_config_view(
         "managed_reasons": {
             resource: _managed_reason(entry) for resource, entry in managed_by.items()
         },
+        "secrets_dir": secrets_dir,
     }
     try:
         default_config = type(config)()
