@@ -34,12 +34,14 @@ from tests.support.fake_arr import APP_BY_PORT, HOST, KEY, FakeArr, api_path, fi
 NAME = "servarr.connection"
 
 
-def _config(apps=("radarr",), *, urls=None, private_hosts=(HOST,), incomplete=()) -> Config:
+def _config(apps=("radarr",), *, urls=None, private_hosts=(HOST,), incomplete=(),
+            keyless=()) -> Config:
     urls = urls or {}
     return Config(servarr=ServarrConfig(
         apps={app: ServarrApp(url=urls.get(app, url(app)), api_key=KEY) for app in apps},
         private_hosts=list(private_hosts),
         incomplete_apps=list(incomplete),
+        keyless_apps=list(keyless),
     ))
 
 
@@ -124,6 +126,28 @@ class TestConfigProblems:
         assert "url" in by_app["radarr"].remedy and "api_key" in by_app["radarr"].remedy
         assert by_app["sonarr"].status == OK
         assert [doctor_path(r) for r in fake.requests] == ["sonarr system/status"]
+
+    def test_a_missing_key_outside_the_daemon_skips(self, monkeypatch):
+        """The key arrives in the daemon's environment; a task or a cron
+        command shell never holds it, so its absence there is no verdict
+        about the daemon (`_non_daemon_env_markers`, as
+        `security.skill_model_credential.value` reads it)."""
+        monkeypatch.setenv("ISTOTA_TASK_ID", "7")
+        results, _ = _run(_config(apps=(), incomplete=("radarr",), keyless=("radarr",)))
+        radarr = _by_app(results)["radarr"]
+        assert radarr.status == SKIP
+        assert "ISTOTA_TASK_ID" in radarr.detail
+
+    def test_a_missing_key_in_the_daemon_fails(self, monkeypatch):
+        for name in ("ISTOTA_TASK_ID", "ISTOTA_SANDBOXED", "PRECOMMIT_SCANS_REQUIRED"):
+            monkeypatch.delenv(name, raising=False)
+        results, _ = _run(_config(apps=(), incomplete=("radarr",), keyless=("radarr",)))
+        assert _by_app(results)["radarr"].status == FAIL
+
+    def test_a_missing_url_fails_anywhere(self, monkeypatch):
+        monkeypatch.setenv("ISTOTA_TASK_ID", "7")
+        results, _ = _run(_config(apps=(), incomplete=("radarr",)))
+        assert _by_app(results)["radarr"].status == FAIL
 
     def test_config_problems_fail_even_with_probe_off(self):
         results, _ = _run(_config(urls={"radarr": "ftp://x"}, apps=("radarr", "sonarr")),

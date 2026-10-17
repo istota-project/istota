@@ -2714,6 +2714,20 @@ class TestSkillModelCredential:
         # Nothing to say about a credential for a skill that does not resolve.
         assert self.VALUE not in results
 
+    def test_a_renamed_daemon_credential_skill_fails_the_wiring(self, make_config, monkeypatch):
+        """`SKILL_DAEMON_CREDENTIAL_VARS` is keyed by skill name the same way,
+        so a renamed servarr directory would stop its keys with nothing to say
+        so; the same half reports it."""
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test")
+        monkeypatch.setattr(
+            doctor_executor, "SKILL_DAEMON_CREDENTIAL_VARS",
+            {"servar": frozenset({"ISTOTA_SERVARR_RADARR_API_KEY"})},
+        )
+        wiring = self._run(make_config())[self.WIRING]
+        assert wiring.status == FAIL
+        assert "servar" in wiring.detail
+        assert "SKILL_DAEMON_CREDENTIAL_VARS" in wiring.remedy
+
     @pytest.mark.parametrize(
         "extra_env",
         [

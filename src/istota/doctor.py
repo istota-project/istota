@@ -2889,6 +2889,7 @@ def check_skill_model_credential(
 
     try:
         from .executor import (  # noqa: PLC0415
+            SKILL_DAEMON_CREDENTIAL_VARS,
             SKILL_MODEL_CALLERS,
             SKILL_MODEL_CREDENTIAL_VARS,
         )
@@ -2919,23 +2920,32 @@ def check_skill_model_credential(
         disabled = set()
 
     missing = sorted(n for n in SKILL_MODEL_CALLERS if n not in index)
+    # Keyed by skill name the same way, so the same drift stops them silently.
+    missing_daemon = sorted(n for n in SKILL_DAEMON_CREDENTIAL_VARS if n not in index)
     turned_off = sorted(n for n in SKILL_MODEL_CALLERS if n in disabled)
     live = sorted(
         n for n in SKILL_MODEL_CALLERS if n in index and n not in disabled
     )
 
-    if missing:
+    if missing or missing_daemon:
+        named = []
+        if missing:
+            named.append(f"SKILL_MODEL_CALLERS names {', '.join(missing)}")
+        if missing_daemon:
+            named.append(
+                f"SKILL_DAEMON_CREDENTIAL_VARS names {', '.join(missing_daemon)}"
+            )
         results.append(
             CheckResult(
                 f"{prefix}.wiring",
                 FAIL,
-                f"SKILL_MODEL_CALLERS names {', '.join(missing)}, which the "
-                f"skill index does not have — the proxy injects no model "
-                f"credential for a name that does not resolve, so that skill's "
-                f"model calls fail unauthenticated",
+                f"{'; '.join(named)}, which the skill index does not have — "
+                f"the proxy injects no credential for a name that does not "
+                f"resolve, so that skill's calls fail unauthenticated",
                 remedy=(
                     "A skill was renamed or removed without updating "
-                    "SKILL_MODEL_CALLERS in executor.py."
+                    "SKILL_MODEL_CALLERS or SKILL_DAEMON_CREDENTIAL_VARS in "
+                    "executor.py."
                 ),
             )
         )
@@ -8057,6 +8067,23 @@ def check_servarr_connection(
     for app in apps:
         name = f"{SERVARR_CHECK_NAME}.{app}"
         connection = servarr.apps.get(app)
+        if connection is None and app in servarr.keyless_apps and (
+            markers := _non_daemon_env_markers()
+        ):
+            # The key is in the daemon's environment, which a task or a cron
+            # command shell never holds, so its absence here is no verdict
+            # (`security.skill_model_credential.value`'s rule).
+            results.append(CheckResult(
+                name, SKIP,
+                f"[servarr.apps.{app}] has no API key in this process, which carries "
+                f"{', '.join(markers)}, so its environment is not the daemon's and "
+                f"the key is not visible from here",
+                remedy=("Run the check in the daemon's environment (on the VM, "
+                        "`istota doctor`), or read it from the admin dashboard's "
+                        "Health pane."),
+                scope=DEPLOYMENT,
+            ))
+            continue
         if connection is None:
             results.append(CheckResult(
                 name, FAIL, f"[servarr.apps.{app}] has no url or no API key, so the skill "

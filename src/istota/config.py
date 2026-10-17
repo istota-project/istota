@@ -351,6 +351,11 @@ class ServarrConfig:
     ``[servarr.apps.<app>]`` tables the loader dropped for a missing ``url`` or
     API key (from ``servarr_key_variable(app)`` or an inline ``api_key``), so
     doctor and the admin card can say so; the skill never reads it.
+
+    ``keyless_apps``: set by the loader, never from the file. Those of
+    ``incomplete_apps`` that had a URL and lacked only the key, which lives in
+    the daemon's environment; doctor reads absence there as a verdict only
+    where the environment could have held it.
     """
     apps: dict[str, ServarrApp] = field(default_factory=dict)
     requesters: list[str] = field(default_factory=list)
@@ -359,6 +364,7 @@ class ServarrConfig:
     lookup_timeout_seconds: int = 30
     release_search_timeout_seconds: int = 120
     incomplete_apps: list[str] = field(default_factory=list)
+    keyless_apps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3825,8 +3831,9 @@ _NOT_CONFIGURATION = frozenset({
     "_profile_user_ids",
     "_configured_user_ids",
     "_user_registry_complete",
-    # What the `servarr.apps` hook dropped, recorded after the walk.
+    # What `_settle_servarr_apps` dropped, recorded once the environment is read.
     "servarr.incomplete_apps",
+    "servarr.keyless_apps",
 })
 """Declared fields that are not settings, and must not be writable from TOML.
 
@@ -4379,7 +4386,7 @@ def _servarr_apps(raw: object, key: str) -> object:
         if not isinstance(table, dict):
             report_problem(
                 "discarded", path,
-                "[config] [servarr.apps.%s] must be a table with url and api_key; ignoring it",
+                "[config] [servarr.apps.%s] must be a table with a url; ignoring it",
                 name,
             )
             continue
@@ -4406,14 +4413,18 @@ def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str])
     an app with no key is left out with a warning, not discarded, because a
     process checking a plan may not have the secrets file the key is in yet.
     Every dropped table, and any raw table the hook refused, is recorded in
-    `incomplete_apps`. Messages name the app and the file, never a value.
+    `incomplete_apps`, and one dropped for its key alone in `keyless_apps`.
+    Messages name the app and the file, never a value. A name outside
+    `SERVARR_APPS` has no secrets file and is left for `_validate_servarr`.
     """
     apps = config.servarr.apps
-    for name, app in apps.items():
+    known = [name for name in apps if name in SERVARR_APPS]
+    for name in known:
         value = environ.get(servarr_key_variable(name), "").strip()
         if value:
-            app.api_key = value
-    for name in list(apps):
+            apps[name].api_key = value
+    keyless: list[str] = []
+    for name in known:
         app = apps[name]
         path = ("servarr", "apps", name)
         if not app.url:
@@ -4428,9 +4439,11 @@ def _settle_servarr_apps(data: dict, config: Config, environ: Mapping[str, str])
                 "(the variable %s); the app is ignored until then",
                 name, servarr_key_variable(name).lower(), servarr_key_variable(name),
             )
+            keyless.append(name)
         else:
             continue
         del apps[name]
+    config.servarr.keyless_apps = keyless
     section = data.get("servarr")
     raw = section.get("apps") if isinstance(section, dict) else None
     config.servarr.incomplete_apps = (

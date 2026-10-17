@@ -139,14 +139,19 @@ class TestTheServarrKeys:
         assert names <= executor._PROXY_LOOKUP_BLOCKED
 
     def test_a_lookup_over_the_socket_is_refused(self, tmp_path):
-        """The endpoint half, through a real proxy: even a name the lookup
-        allowlist omitted by mistake is refused by `_PROXY_LOOKUP_BLOCKED`."""
+        """Through a real proxy, with the allowlist the task runtime builds:
+        even a skill that declared the key `sensitive` in its manifest would
+        not make it fetchable, because `derive_lookup_allowlist` subtracts
+        `_PROXY_LOOKUP_BLOCKED`, and the endpoint serves only that allowlist."""
         import json
         import socket
         import tempfile
 
-        allowed = executor.derive_lookup_allowlist([], {}) | {self.VAR}
-        allowed -= executor._PROXY_LOOKUP_BLOCKED
+        declares_it = _skill("declares_it", EnvSpec(
+            var=self.VAR, source="config", config_path="servarr", sensitive=True,
+        ))
+        allowed = executor.derive_lookup_allowlist(["declares_it"], {"declares_it": declares_it})
+        assert self.VAR not in allowed
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             sock_path = Path(directory) / "s"
             with skill_proxy.SkillProxy(

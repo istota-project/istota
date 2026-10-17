@@ -117,6 +117,20 @@ class TestParsing:
         found = [p for p in problems if p["path"][:3] == ("servarr", "apps", "radarr")]
         assert [p["kind"] for p in found] == ["warning"]
         assert "istota_servarr_radarr_api_key" in found[0]["message"]
+        assert config.servarr.keyless_apps == ["radarr"]
+
+    def test_an_app_without_a_url_is_not_keyless(self, tmp_path):
+        config, _ = _load(tmp_path, f'[servarr.apps.radarr]\napi_key = "{KEY}"\n')
+        assert config.servarr.keyless_apps == []
+
+    @pytest.mark.parametrize("name", ["bazarr", "readarr"])
+    def test_a_name_the_skill_does_not_know_is_left_to_validation(self, tmp_path, name):
+        """No secret file exists for it, so no warning names one; the
+        reserved or unknown warning is the one it gets."""
+        _, problems = _load(tmp_path, f'[servarr.apps.{name}]\nurl = "http://10.0.0.5:6767"\n')
+        [message] = _messages(problems, "servarr", "apps", name)
+        assert "api_key" not in message
+        assert ("reserved" if name == "bazarr" else "not an app the skill knows") in message
 
     def test_a_complete_app_is_not_recorded_as_incomplete(self, tmp_path):
         config, _ = _load(tmp_path, f"""
