@@ -150,6 +150,46 @@ class TestHtmlToMarkdown:
         assert "Manage your preferences" in out
 
 
+class TestUncurated:
+    """``curate=False``: the text part of a mail the bot wrote, not a newsletter.
+
+    Every http(s) link is kept as written, so the plain part of a sent mail
+    goes to the same places its HTML part does (ISSUE-770).
+    """
+
+    def test_noise_links_and_redirect_wrappers_are_kept_as_written(self):
+        out = html_to_markdown(_NEWSLETTER, curate=False)
+        assert (
+            "[Iran tensions escalate](https://link.semafor.com/click/abc?url="
+            "https%3A%2F%2Fsemafor.com%2Fa%2Firan)" in out
+        )
+        assert "[Unsubscribe](https://link.semafor.com/unsubscribe/xyz)" in out
+        assert "twitter.com/intent" in out
+
+    def test_a_repeated_link_is_kept_each_time(self):
+        out = html_to_markdown(
+            '<a href="https://x.com/a">one</a> <a href="https://x.com/a">again</a>',
+            curate=False,
+        )
+        assert "[one](https://x.com/a)" in out
+        assert "[again](https://x.com/a)" in out
+
+    def test_a_link_labelled_with_its_own_url_is_written_once(self):
+        out = html_to_markdown(
+            '<a href="https://x.com/a">https://x.com/a</a>', curate=False,
+        )
+        assert out == "https://x.com/a"
+
+    def test_a_mailto_link_keeps_its_address(self):
+        out = html_to_markdown(
+            '<a href="mailto:ed@example.com?subject=hi">write to us</a> '
+            '<a href="mailto:ed@example.com">ed@example.com</a>',
+            curate=False,
+        )
+        assert "write to us <ed@example.com>" in out
+        assert out.count("ed@example.com") == 2
+
+
 class TestUnwrapRedirect:
     def test_url_param(self):
         assert unwrap_redirect(
