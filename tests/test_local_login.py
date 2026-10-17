@@ -211,6 +211,17 @@ class TestTheRoutes:
         assert page.headers["cache-control"] == "no-store"
         assert page.headers["referrer-policy"] == "no-referrer"
 
+    async def test_with_a_code_the_page_draws_no_card_before_it_posts(self, local):
+        """The Mac app's window shows this page through the POST and the
+        redirect; the card would flash between two "Signing in…" screens."""
+        async with _client(local) as client:
+            page = await client.get("/istota/auth/local")
+            login = await client.get("/istota/login")
+        head, _, body = page.text.partition("</head>")
+        assert 'classList.add("handoff")' in head and "html.handoff main" in head
+        assert 'id="local-login"' in body, "without a code the form is still there to type one into"
+        assert "handoff" not in login.text
+
     async def test_a_wrong_form_token_is_refused_and_spends_nothing(self, local):
         code = mint(local._config.db_path)
         async with _client(local) as client:
