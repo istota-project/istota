@@ -205,6 +205,26 @@ async def api_feeds(
     }
 
 
+@router.get("/counts")
+async def api_counts(ctx: FeedsContext = Depends(get_user_context)):
+    """Totals behind the sidebar's Unread and Starred views, unfiltered by
+    the current selection, plus each feed's unread count for its row."""
+
+    def _query():
+        with feeds_db.connect(ctx.db_path) as conn:
+            unread = feeds_db.count_entries(conn, status="unread")
+            starred = feeds_db.count_entries(conn, starred=True)
+            by_feed = feeds_db.count_unread_by_feed(conn)
+        return unread, starred, by_feed
+
+    unread, starred, by_feed = await asyncio.to_thread(_query)
+    return {
+        "unread": unread,
+        "starred": starred,
+        "unread_by_feed": {str(k): v for k, v in by_feed.items()},
+    }
+
+
 def _plan_image_suppression(
     conn,
     entries: list,

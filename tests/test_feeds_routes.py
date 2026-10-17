@@ -361,6 +361,32 @@ class TestStarring:
         body_all = client.get("/istota/api/feeds").json()
         assert body_all["total"] == 3
 
+    def test_counts_are_unread_and_starred_totals(self, ctx, client):
+        ids = _seed(ctx)
+        assert client.get("/istota/api/feeds/counts").json() == {
+            "unread": 2, "starred": 0,
+            "unread_by_feed": {
+                str(ids["tumblr_feed_id"]): 1, str(ids["rss_feed_id"]): 1,
+            },
+        }
+
+        with feeds_db.connect(ctx.db_path) as conn:
+            read_id = conn.execute(
+                "SELECT id FROM feed_entries WHERE status = 'read'"
+            ).fetchone()["id"]
+            feeds_db.update_entry_starred(conn, [read_id], True)
+            conn.commit()
+        client.post(
+            "/istota/api/feeds/mark-as-read",
+            json={"scope": "feed", "id": ids["rss_feed_id"]},
+        )
+
+        # Starred counts a read entry; neither total follows the reader's filter.
+        assert client.get("/istota/api/feeds/counts").json() == {
+            "unread": 1, "starred": 1,
+            "unread_by_feed": {str(ids["tumblr_feed_id"]): 1},
+        }
+
 
 # ---------------------------------------------------------------------------
 # POST /feeds/mark-as-read

@@ -16,7 +16,7 @@ vi.mock('$app/navigation', async (original) => ({
 }));
 await fillApiDouble(api);
 
-import { getFeeds, type Feed, type FeedEntry, type User } from '$lib/api';
+import { getFeedCounts, getFeeds, type Feed, type FeedEntry, type User } from '$lib/api';
 import {
   feedsList,
   selectedFeedId,
@@ -24,6 +24,7 @@ import {
   showStarred,
   showUnseen,
   feedsRefreshNonce,
+  feedCounts,
 } from '$lib/stores/feeds';
 import Layout from './+layout.svelte';
 import Page from './+page.svelte';
@@ -56,6 +57,8 @@ beforeEach(() => {
   showStarred.set(false);
   showUnseen.set(false);
   feedsRefreshNonce.set(0);
+  feedCounts.set({ unread: 0, starred: 0, unread_by_feed: {} });
+  vi.mocked(getFeedCounts).mockResolvedValue({ unread: 0, starred: 0, unread_by_feed: {} });
   vi.mocked(getFeeds).mockResolvedValue(response);
   vi.stubGlobal(
     'IntersectionObserver',
@@ -82,6 +85,24 @@ function navigate(url: string) {
   page.url = new URL(window.location.href);
   page.state = {};
 }
+
+describe('view counts', () => {
+  it('badges Unread and Starred with the totals, and re-reads them after mark-all-read', async () => {
+    vi.mocked(getFeedCounts).mockResolvedValue({ unread: 5, starred: 2, unread_by_feed: { 2: 5 } });
+    await openReader();
+    expect(await screen.findByTitle('5 unread')).toHaveTextContent('5');
+    expect(screen.getByTitle('2 starred')).toHaveTextContent('2');
+    expect(screen.getByRole('button', { name: 'Example art' })).toHaveClass('has-unread');
+    expect(screen.getByRole('button', { name: 'Example news' })).not.toHaveClass('has-unread');
+
+    vi.mocked(getFeedCounts).mockResolvedValue({ unread: 0, starred: 2, unread_by_feed: {} });
+    await fireEvent.click(screen.getByTitle('Mark every feed as read'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Mark all read' }));
+    await waitFor(() => expect(screen.queryByTitle('5 unread')).toBeNull());
+    expect(screen.getByTitle('2 starred')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Example art' })).not.toHaveClass('has-unread');
+  });
+});
 
 describe('feed selection history', () => {
   it('pushes a feed and toggles it back to All, with Back and Forward restoration', async () => {

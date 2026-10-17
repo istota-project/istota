@@ -9049,6 +9049,17 @@ const handlers: MockHandler[] = [
     if (path !== '/istota/api/feeds') return undefined;
     return feedsListResponse(new URLSearchParams(query ?? ''));
   },
+  ({ url, method }) => {
+    if (url !== '/istota/api/feeds/counts' || method !== 'GET') return undefined;
+    return {
+      unread: mockReaderEntries.filter((e) => e.status === 'unread').length,
+      starred: mockReaderEntries.filter((e) => e.starred).length,
+      unread_by_feed: mockReaderEntries.reduce<Record<string, number>>((acc, e) => {
+        if (e.status === 'unread') acc[e.feed.id] = (acc[e.feed.id] ?? 0) + 1;
+        return acc;
+      }, {}),
+    };
+  },
 
   // Reader mutations — accept and acknowledge.
   ({ url, method, body }) => {
