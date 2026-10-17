@@ -1,0 +1,87 @@
+{
+  "page": 1,
+  "pageSize": 200,
+  "sortKey": "timeleft",
+  "sortDirection": "ascending",
+  "totalRecords": 2,
+  "records": [
+    {
+      "movieId": 42,
+      "movie": {
+        "id": 42,
+        "title": "The Glass Orchard",
+        "year": 2024,
+        "tags": [
+          1
+        ],
+        "monitored": true
+      },
+      "languages": [],
+      "quality": {
+        "quality": {
+          "id": 7,
+          "name": "Bluray-1080p"
+        }
+      },
+      "customFormats": [],
+      "customFormatScore": 0,
+      "size": 8000000000,
+      "title": "The.Glass.Orchard.2024.1080p.BluRay.x264-GRP",
+      "sizeleft": 0,
+      "timeleft": "00:00:00",
+      "estimatedCompletionTime": "2026-10-16T09:00:00Z",
+      "added": "2026-10-16T07:00:00Z",
+      "status": "completed",
+      "trackedDownloadStatus": "warning",
+      "trackedDownloadState": "importBlocked",
+      "statusMessages": [
+        {
+          "title": "The.Glass.Orchard.2024.1080p.BluRay.x264-GRP",
+          "messages": [
+            "Not a Custom Format upgrade for existing movie file(s)"
+          ]
+        }
+      ],
+      "downloadId": "A1B2C3",
+      "protocol": "torrent",
+      "downloadClient": "qBittorrent",
+      "indexer": "Indexer A",
+      "outputPath": "/data/downloads/movies/The.Glass.Orchard",
+      "id": 901
+    },
+    {
+      "movieId": 43,
+      "movie": {
+        "id": 43,
+        "title": "Paper Lanterns",
+        "year": 2025,
+        "tags": [],
+        "monitored": true
+      },
+      "languages": [],
+      "quality": {
+        "quality": {
+          "id": 3,
+          "name": "WEBDL-1080p"
+        }
+      },
+      "customFormats": [],
+      "customFormatScore": 0,
+      "size": 4000000000,
+      "title": "Paper.Lanterns.2025.1080p.WEB-DL-OTHER",
+      "sizeleft": 1000000000,
+      "timeleft": "00:20:00",
+      "estimatedCompletionTime": "2026-10-16T12:30:00Z",
+      "added": "2026-10-16T11:00:00Z",
+      "status": "downloading",
+      "trackedDownloadStatus": "ok",
+      "trackedDownloadState": "downloading",
+      "statusMessages": [],
+      "downloadId": "D4E5F6",
+      "protocol": "torrent",
+      "downloadClient": "qBittorrent",
+      "indexer": "Indexer B",
+      "id": 902
+    }
+  ]
+}

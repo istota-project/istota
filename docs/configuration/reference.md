@@ -808,6 +808,42 @@ Operator settings for the [`wordpress` skill](../features/wordpress.md). Sites a
 | `private_hosts` | `[]` | Exact host names a site may resolve to a private, loopback or reserved address (a local development site, an internal backend). Everything else that resolves non-public is refused. Operator-only, since it is the rule that stops a user-chosen URL reaching the daemon's own network |
 | `max_upload_mb` | `25` | Largest file one media upload may send |
 
+## `[servarr]`
+
+Operator settings for the [`servarr` skill](../features/servarr.md): one install-wide connection per arr app. The skill is offered only when at least one of `sonarr`, `radarr`, `lidarr` or `prowlarr` has a table under `apps`. Problems in this section are warnings; none stops the daemon.
+
+| Setting | Default | Description |
+|---|---|---|
+| `requesters` | `[]` | User ids, besides admins, who get the requester tier: search, request with the defaults below, see the queue and their requests. Matched ignoring case. Empty leaves the skill to admins |
+| `private_hosts` | `[]` | Exact host names or IP addresses an app may resolve to a private, loopback or reserved address. Plain HTTP is allowed only to a host listed here; everything else must be public HTTPS. Same rule as `[wordpress] private_hosts` |
+| `lookup_timeout_seconds` | `30` | Timeout for the `*/lookup` calls, which reach TMDB, TVDB or MusicBrainz through the app |
+| `release_search_timeout_seconds` | `120` | Timeout for an interactive release search (`why --releases`) and an indexer test (`indexers --test`). Warned about when it leaves less than 60 seconds under the skill's own proxy timeout |
+
+### `[servarr.apps.<app>]`
+
+One table per app, named `sonarr`, `radarr`, `lidarr` or `prowlarr`. An app with no table is not configured. `bazarr` is reserved and ignored; any other name is warned about and ignored, and so is a table missing either field.
+
+| Setting | Default | Description |
+|---|---|---|
+| `url` | | The app's base URL, including any URL base, e.g. `http://192.168.1.10:7878`. Never shown with userinfo |
+| `api_key` | | The app's API key (Settings > General > Security). A credential: redacted everywhere, and in a settings plan supplied through the private sidecar's `config` section, not the plan |
+
+**Do not add the arr ports to `[security.network] extra_hosts`.** The skill's CLI reaches the apps host-side; without an entry the sandbox has no route to them.
+
+### `[servarr.defaults.<app>]`
+
+What an add uses when no flag names a value, which is always the case for a requester. A configured name the app does not have is reported as `stale_default` rather than replaced.
+
+| Setting | Apps | Description |
+|---|---|---|
+| `quality_profile` | sonarr, radarr, lidarr | Quality profile name |
+| `root_folder` | sonarr, radarr, lidarr | Root folder path on the app's machine |
+| `metadata_profile` | lidarr | Metadata profile name |
+| `minimum_availability` | radarr | `tba`, `announced`, `inCinemas` or `released`; default `released`. No command-line flag sets it |
+| `monitor` | sonarr, lidarr | Sonarr: the episodes a new show monitors (`all`, `future`, `missing`, `existing`, `firstSeason`, `lastSeason`, `pilot`, `none`). Lidarr: the albums a whole-artist add monitors (`all`, `future`, `missing`, `existing`, `latest`, `first`, `none`). Default `all` |
+
+With no default and no flag, an app with exactly one profile or root folder uses it; otherwise the add answers `choice_required`. A field that does not apply to its app is warned about and ignored.
+
 ## `[devbox]`
 
 A persistent per-user Linux container. It is where the agent installs packages and compiles things. With `[developer] enabled` and a `repos_dir` set, `enabled` below is also what routes project builds into it over the [exec transport](#developercontainer) rather than onto the host.

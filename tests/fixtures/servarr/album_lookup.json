@@ -1,0 +1,152 @@
+[
+  {
+    "title": "Northern Static",
+    "disambiguation": "",
+    "overview": "",
+    "artistId": 0,
+    "foreignAlbumId": "a1b2c3d4-0000-4000-8000-000000000001",
+    "monitored": false,
+    "anyReleaseOk": true,
+    "profileId": 0,
+    "duration": 2400000,
+    "albumType": "Album",
+    "secondaryTypes": [],
+    "mediumCount": 1,
+    "ratings": {
+      "votes": 0,
+      "value": 0.0
+    },
+    "releaseDate": "2024-03-01T00:00:00Z",
+    "releases": [
+      {
+        "id": 0,
+        "albumId": 0,
+        "foreignReleaseId": "a1b2c3d4-0000-4000-8000-000000009999",
+        "title": "Northern Static",
+        "status": "Official",
+        "duration": 2400000,
+        "trackCount": 10,
+        "media": [],
+        "mediumCount": 1,
+        "disambiguation": "",
+        "country": [],
+        "label": [],
+        "format": "Digital Media",
+        "monitored": true
+      }
+    ],
+    "genres": [],
+    "media": [],
+    "artist": {
+      "artistName": "Lantern Field",
+      "foreignArtistId": "5b11f4ce-a62d-471e-81fc-a69a8278c7da",
+      "artistType": "Group",
+      "disambiguation": "",
+      "status": "continuing",
+      "tags": []
+    },
+    "images": [],
+    "links": [],
+    "grabbed": false
+  },
+  {
+    "title": "Low Tide",
+    "disambiguation": "",
+    "overview": "",
+    "artistId": 0,
+    "foreignAlbumId": "a1b2c3d4-0000-4000-8000-000000000002",
+    "monitored": false,
+    "anyReleaseOk": true,
+    "profileId": 0,
+    "duration": 2400000,
+    "albumType": "EP",
+    "secondaryTypes": [],
+    "mediumCount": 1,
+    "ratings": {
+      "votes": 0,
+      "value": 0.0
+    },
+    "releaseDate": "2022-06-10T00:00:00Z",
+    "releases": [
+      {
+        "id": 0,
+        "albumId": 0,
+        "foreignReleaseId": "a1b2c3d4-0000-4000-8000-000000009999",
+        "title": "Low Tide",
+        "status": "Official",
+        "duration": 2400000,
+        "trackCount": 4,
+        "media": [],
+        "mediumCount": 1,
+        "disambiguation": "",
+        "country": [],
+        "label": [],
+        "format": "Digital Media",
+        "monitored": true
+      }
+    ],
+    "genres": [],
+    "media": [],
+    "artist": {
+      "artistName": "Lantern Field",
+      "foreignArtistId": "5b11f4ce-a62d-471e-81fc-a69a8278c7da",
+      "artistType": "Group",
+      "disambiguation": "",
+      "status": "continuing",
+      "tags": []
+    },
+    "images": [],
+    "links": [],
+    "grabbed": false
+  },
+  {
+    "title": "Northern Lights",
+    "disambiguation": "",
+    "overview": "",
+    "artistId": 0,
+    "foreignAlbumId": "a1b2c3d4-0000-4000-8000-000000000003",
+    "monitored": false,
+    "anyReleaseOk": true,
+    "profileId": 0,
+    "duration": 2400000,
+    "albumType": "Album",
+    "secondaryTypes": [],
+    "mediumCount": 1,
+    "ratings": {
+      "votes": 0,
+      "value": 0.0
+    },
+    "releaseDate": "2019-01-01T00:00:00Z",
+    "releases": [
+      {
+        "id": 0,
+        "albumId": 0,
+        "foreignReleaseId": "a1b2c3d4-0000-4000-8000-000000009999",
+        "title": "Northern Lights",
+        "status": "Official",
+        "duration": 2400000,
+        "trackCount": 8,
+        "media": [],
+        "mediumCount": 1,
+        "disambiguation": "",
+        "country": [],
+        "label": [],
+        "format": "Digital Media",
+        "monitored": true
+      }
+    ],
+    "genres": [],
+    "media": [],
+    "artist": {
+      "artistName": "Other Band",
+      "foreignArtistId": "3e4f5a6b-7c8d-4e9f-a0b1-c2d3e4f5a6b7",
+      "artistType": "Group",
+      "disambiguation": "",
+      "status": "continuing",
+      "tags": []
+    },
+    "images": [],
+    "links": [],
+    "grabbed": false
+  }
+]

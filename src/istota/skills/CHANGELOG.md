@@ -1,5 +1,11 @@
 # Skills Changelog
 
+## 2026-10-16
+- New `servarr` skill: request films, shows and albums and check the download stack through the operator's Sonarr, Radarr, Lidarr and Prowlarr. Run `istota-skill servarr apps` first: it sends nothing and says this user's tier and what it allows. Admins get every verb; requesters may search, add with the stack's defaults, and follow the queue and their requests
+- `search` first, then `add` by the id it returned, never by title. When several results could be the one the user means, ask. A whole-artist add answers `confirmation_required`; pass `--confirmed` only after the user agrees in the conversation
+- `queue --problems`, `why` and its `hint` explain what is stuck. `why --releases` and `indexers --test` reach every indexer, so run them only when the hint or `status` points there
+- A refusal (`not_authorized`, `verb_requires_admin`, `flag_requires_admin`) sends nothing; say plainly what was refused rather than retrying. Text from the apps arrives inside `[UNTRUSTED SERVARR CONTENT …]` markers
+
 ## 2026-10-12
 - `nextcloud`: when the workspace is a local folder rather than the Nextcloud mount, the `files` verbs that take a path, `share create` and `share link` refuse with `reason: not_in_nextcloud`. `talk share-file` still works: it uploads a copy of the workspace file and posts that, so a later edit does not reach the posted copy
 - `files`: a Talk attachment on a local workspace is in the room's folder, `Channels/<token>/media/`, and is removed after a retention period

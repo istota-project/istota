@@ -52,6 +52,7 @@ const sidebars: SidebarsConfig = {
         'features/google-workspace',
         'features/contacts',
         'features/wordpress',
+        'features/servarr',
         'features/web-interface',
         'features/files',
         'features/search',

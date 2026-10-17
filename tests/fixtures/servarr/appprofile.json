@@ -1,0 +1,6 @@
+[
+  {"id": 1, "name": "Standard", "enableRss": true, "enableAutomaticSearch": true,
+   "enableInteractiveSearch": true, "minimumSeeders": 1},
+  {"id": 2, "name": "Interactive only", "enableRss": false, "enableAutomaticSearch": false,
+   "enableInteractiveSearch": true, "minimumSeeders": 1}
+]

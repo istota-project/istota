@@ -1239,9 +1239,42 @@ export interface AdminGoogleWorkspaceConnection {
   status: 'disabled' | 'incomplete' | 'configured';
 }
 
-/** Deployment connections in order: Nextcloud, WhatsApp, Google Workspace. */
+export type ServarrApp = 'sonarr' | 'radarr' | 'lidarr' | 'prowlarr';
+
+/** One arr app of the install connection. Never carries the API key. */
+export interface AdminServarrApp {
+  app: ServarrApp;
+  /** The configured URL with any userinfo removed; empty for an incomplete table. */
+  url: string;
+  /** Null for a table the loader dropped, where it is unknown. */
+  api_key_set: boolean | null;
+  /** The table is missing its url or api_key, so the skill ignores it. */
+  incomplete: boolean;
+  /** A config problem doctor reports without a request, or null. */
+  problem: string | null;
+  /** The daemon's last `servarr.connection.<app>` row; null when none is recorded. */
+  check: AdminNextcloudCheck | null;
+}
+
+/** The servarr skill's install-wide connection; configured is no claim the keys work. */
+export interface AdminServarrConnection {
+  id: 'servarr';
+  label: string;
+  status: 'disabled' | 'incomplete' | 'configured';
+  apps: AdminServarrApp[];
+  /** Known apps with no table. */
+  missing: ServarrApp[];
+  requesters: string[];
+  /** The add defaults per app, as configured. */
+  defaults: Partial<Record<ServarrApp, Record<string, string>>>;
+}
+
+/** Deployment connections in order: Nextcloud, WhatsApp, Google Workspace, Servarr. */
 export type AdminConnection =
-  AdminNextcloudConnection | AdminWhatsAppConnection | AdminGoogleWorkspaceConnection;
+  | AdminNextcloudConnection
+  | AdminWhatsAppConnection
+  | AdminGoogleWorkspaceConnection
+  | AdminServarrConnection;
 
 export interface AdminBrowsers {
   status: 'ok' | 'disabled' | 'unavailable';

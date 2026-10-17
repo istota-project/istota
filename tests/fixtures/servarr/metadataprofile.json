@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "name": "Standard",
+    "primaryAlbumTypes": [],
+    "secondaryAlbumTypes": [],
+    "releaseStatuses": []
+  },
+  {
+    "id": 2,
+    "name": "None",
+    "primaryAlbumTypes": [],
+    "secondaryAlbumTypes": [],
+    "releaseStatuses": []
+  }
+]
