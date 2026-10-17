@@ -26,7 +26,8 @@ setup's admin an email identity, and the password form signs in. Step-up: the
 local mode has no mail, so `webui.app._step_up_methods` offers the account
 password alone, and the proof is the request id and the password the case
 signed in with. The case asserts that method, so a mode that gains mail is
-noticed rather than silently switching paths. The mailed-code path is kept for
+noticed rather than silently switching paths: it asserts the methods offered
+as well, since the password comes first for an admin action either way. The mailed-code path is kept for
 that case: it asks for the code by name, reads the row's `code_hash` (sha256 of
 `request_id:code`, `webui.auth._code_digest`) and finds the six digits offline,
 clearing the confirmation-code budget first. The session cookie is `Secure`, which httpx keeps
@@ -198,6 +199,9 @@ def _step_up(vm: lima.Vm, web: WebSession, *, method: str = "password") -> dict:
     assert response.status_code == 200, response.text[:2000]
     issued = response.json()
     assert issued["method"] == method, issued
+    if method == "password":
+        # A mode that gains mail would list the code too.
+        assert issued["methods"] == ["password"], issued
     request_id = issued["request_id"]
     if method == "password":
         return {"request_id": request_id, "password": web.password}

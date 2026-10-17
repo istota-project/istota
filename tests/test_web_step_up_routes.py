@@ -40,8 +40,8 @@ def recovery(configured, monkeypatch):
         generated.set_recovery(conn, "alice", "generated_acme", "fixture-rc-1111-aaaa")
 
 
-async def _start(client, method=None):
-    payload = {"action": "recovery_reveal"}
+async def _start(client, method=None, action="recovery_reveal"):
+    payload = {"action": action}
     if method:
         payload["method"] = method
     response = await client.post(STEP_UP, json=payload, headers=ORIGIN)
@@ -69,26 +69,43 @@ async def test_the_method_is_password_without_mail_and_no_mail_is_attempted(clie
     assert mail == [] and calls == []
 
 
-async def test_with_mail_and_a_password_the_password_is_offered_first_and_nothing_is_mailed(
-    client, configured, mail,
-):
+async def test_an_admin_action_offers_the_password_first_and_mails_nothing(client, configured, mail):
     configured._config.email.enabled = True
     assert (await sign_in(client)).status_code == 302
-    body = await _start(client)
+    body = await _start(client, action="admin_config_change")
     assert body["method"] == "password"
     assert body["methods"] == ["password", "email"]
     assert body["email_hint"] == "a•••@example.com"
     assert mail == []
+    body = await _start(client, "email", action="admin_config_change")
+    assert body["method"] == "email" and len(mail) == 1
 
 
-async def test_either_method_confirms_the_same_action(client, configured, mail, recovery):
+@pytest.mark.parametrize("action", ["export", "recovery_reveal", "backup_recipient",
+                                    "history_restore", "history_purge"])
+async def test_a_credential_action_needs_the_mailed_code_wherever_mail_can_send(
+    client, configured, mail, action,
+):
+    """The mailbox is the second factor for the vault: a phished password must
+    not be enough to export or reveal (credentials-single-store's decision)."""
+    configured._config.email.enabled = True
+    assert (await sign_in(client)).status_code == 302
+    body = await _start(client, action=action)
+    assert body["method"] == "email" and body["methods"] == ["email"]
+    assert len(mail) == 1
+    refused = await client.post(STEP_UP, json={"action": action, "method": "password"}, headers=ORIGIN)
+    assert refused.status_code == 400
+
+
+async def test_a_password_does_not_reveal_recovery_codes_where_mail_can_send(client, configured, mail, recovery):
     configured._config.email.enabled = True
     assert (await sign_in(client)).status_code == 302
     body = await _start(client)
-    response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "password": PASSWORD}},
-                                 headers=ORIGIN)
-    assert response.status_code == 200, response.text
-    body = await _start(client, "email")
+    refused = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "password": PASSWORD}},
+                                headers=ORIGIN)
+    assert refused.status_code == 403
+    assert refused.json()["field"] == "code"
+    assert "fixture-rc" not in refused.text
     code = re.search(r"[0-9]{6}", mail[-1][2])[0]
     response = await client.post(RECOVERY, json={"step_up": {"request_id": body["request_id"], "code": code}},
                                  headers=ORIGIN)

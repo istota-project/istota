@@ -754,6 +754,8 @@ def _spend_step_up_mail(conn: sqlite3.Connection, policy: Policy, user_id: str) 
     conn.execute("DELETE FROM web_auth_attempts WHERE kind = 'step_up_mail' AND at <= ?", (since,))
     rows = conn.execute("SELECT at FROM web_auth_attempts WHERE kind = 'step_up_mail' AND key = ? AND at > ? "
                         "ORDER BY at", (user_id, since)).fetchall()
+    if not rows and policy.step_up_mail_max < 1:
+        raise StepUpMailBudgetSpent(_STEP_UP_MAIL_WINDOW)
     if len(rows) >= policy.step_up_mail_max:
         oldest = datetime.strptime(rows[0]["at"], "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=timezone.utc)
         frees = oldest + timedelta(seconds=_STEP_UP_MAIL_WINDOW) - datetime.now(timezone.utc)

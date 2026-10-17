@@ -14520,6 +14520,12 @@ _STEP_UP_LABELS = {
 }
 # Codes that guard no vault: an admin may ask for one without the vault gate.
 _ADMIN_STEP_UP_ACTIONS = frozenset({"admin_config_change", "admin_briefing_delete", "admin_cron_delete"})
+# Actions the account password may confirm where the install can mail a code.
+# Opt-in, so a new action takes the code: for the vault the mailbox is the
+# second factor, since a phished password must not export or reveal it
+# (credentials-single-store's decision). Without mail every action takes the
+# password, the only proof left.
+_PASSWORD_STEP_UP_ACTIONS = _ADMIN_STEP_UP_ACTIONS
 
 
 def _step_up_session(request: Request) -> str:
@@ -14586,17 +14592,18 @@ def _no_step_up_method(user_id: str) -> str:
             "or to set up mail for confirmation codes.")
 
 
-def _step_up_methods(identity) -> list[str]:
-    """How this identity may confirm a sensitive action, the default first.
+def _step_up_methods(identity, action: str) -> list[str]:
+    """How this identity may confirm ``action``, the default first.
 
-    The account password where it has one, then a mailed code where the install
-    can mail. Either proves more than the session cookie, which is what a step-up
-    asks; the password first because it spends no mail.
+    Where the install can mail, a code, plus the password ahead of it for an
+    action in `_PASSWORD_STEP_UP_ACTIONS`; without mail, the password alone.
+    The one rule issuing and redeeming both read.
     """
+    can_mail = web_auth_mail.can_send(_config)
     methods = []
-    if identity.password_hash:
+    if identity.password_hash and (action in _PASSWORD_STEP_UP_ACTIONS or not can_mail):
         methods.append("password")
-    if web_auth_mail.can_send(_config):
+    if can_mail:
         methods.append("email")
     return methods
 
@@ -14632,7 +14639,7 @@ async def settings_step_up(request: Request, user: dict = Depends(_require_api_a
     identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user["username"])
     if identity is None or identity.disabled:
         raise HTTPException(status_code=403, detail="step_up_unavailable")
-    methods = _step_up_methods(identity)
+    methods = _step_up_methods(identity, action)
     if not methods:
         raise HTTPException(status_code=403, detail=_no_step_up_method(user["username"]))
     if requested is None:
@@ -14710,7 +14717,7 @@ async def _require_step_up(request: Request, body: dict, action: str) -> JSONRes
         proof = body.get("step_up")
         if not isinstance(proof, dict):
             proof = {}
-        methods = _step_up_methods(identity)
+        methods = _step_up_methods(identity, action)
         # The proof names its method; a request row answers only its own.
         if "code" in proof and "email" in methods:
             method = "email"

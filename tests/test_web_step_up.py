@@ -59,6 +59,13 @@ def test_a_spent_code_budget_says_when_it_frees_up(db_path, identity):
     assert auth.start_step_up(db_path, policy, "alice", "admin_config_change", "session-a") is not None
 
 
+def test_a_budget_of_zero_refuses_every_code_rather_than_failing(db_path, identity):
+    policy = replace(identity, step_up_mail_max=0)
+    with pytest.raises(auth.StepUpMailBudgetSpent) as spent:
+        auth.start_step_up(db_path, policy, "alice", "export", "session-a")
+    assert spent.value.retry_after_seconds > 0
+
+
 def test_the_code_budget_is_per_user(db_path, identity):
     policy = replace(identity, step_up_mail_max=1)
     user_profiles.ensure_profile(db_path, "bob", display_name="Bob")
