@@ -12,6 +12,7 @@
   } from '$lib/api';
   import {
     feedsRefreshNonce,
+    refreshFeedCounts,
     selectedFeedId,
     selectedCategoryId,
     showImages,
@@ -184,7 +185,10 @@
       flushMaxTimer = null;
     }
     updateEntriesStatus(ids, 'read')
-      .then(invalidateNavUnreadCounts)
+      .then(() => {
+        invalidateNavUnreadCounts();
+        void refreshFeedCounts();
+      })
       .catch(() => {});
   }
 
@@ -366,6 +370,12 @@
     }
   }
 
+  // FeedCard and FeedReader call back only once the server has the write.
+  function handleStarConfirmed(id: number, starred: boolean) {
+    handleStarToggle(id, starred);
+    void refreshFeedCounts();
+  }
+
   // Keyboard shortcut: A marks every visible entry read (scope-aware).
   // f toggles star on the focused entry — left to Tranche B's full
   // shortcut layer; for now A is the highest-leverage one.
@@ -391,6 +401,7 @@
       try {
         await markAsRead(scope, opts);
         invalidateNavUnreadCounts();
+        void refreshFeedCounts();
         feedsRefreshNonce.update((n) => n + 1);
       } catch {
         // non-fatal
@@ -405,6 +416,7 @@
       handleStarToggle(target.id, next);
       try {
         await updateEntryStarred(target.id, next);
+        void refreshFeedCounts();
       } catch {
         handleStarToggle(target.id, !next);
         notifyError("Couldn't update star.");
@@ -447,7 +459,7 @@
                 lightboxIndex = idx;
               }}
               onViewed={handleViewed}
-              onStarToggle={handleStarToggle}
+              onStarToggle={handleStarConfirmed}
               onOpen={() => entrySel.push({ id: entry.id })}
             />
           </div>
@@ -473,7 +485,7 @@
   hasMore={detachedEntry ? false : hasMore}
   onClose={() => entrySel.push({ id: null })}
   onView={handleViewed}
-  onStarToggle={handleStarToggle}
+  onStarToggle={handleStarConfirmed}
   onNeedMore={loadMore}
   onImageClick={(imgs, idx) => {
     lightboxImages = imgs;

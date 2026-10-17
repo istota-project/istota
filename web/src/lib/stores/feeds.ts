@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import type { Feed } from '$lib/api';
+import { getFeedCounts, type Feed, type FeedCounts } from '$lib/api';
 import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
 /** Shared feeds list, loaded once by the feeds layout. */
@@ -17,6 +17,29 @@ export const showStarred = writable(false);
 
 /** Bumped to ask the entries page to reload — used after bulk mutations. */
 export const feedsRefreshNonce = writable(0);
+
+/** Totals behind the sidebar's Unread and Starred views. */
+export const feedCounts = writable<FeedCounts>({ unread: 0, starred: 0, unread_by_feed: {} });
+
+let countsGeneration = 0;
+
+/** Re-read the totals. Call after a write the server has confirmed; a
+ *  response overtaken by a later request is dropped. */
+export async function refreshFeedCounts(): Promise<void> {
+  const mine = ++countsGeneration;
+  try {
+    const next = await getFeedCounts();
+    if (mine !== countsGeneration) return;
+    if (!next || !Number.isSafeInteger(next.unread) || !Number.isSafeInteger(next.starred)) return;
+    const byFeed: Record<string, number> = {};
+    for (const [id, n] of Object.entries(next.unread_by_feed ?? {})) {
+      if (Number.isSafeInteger(n) && n > 0) byFeed[id] = n;
+    }
+    feedCounts.set({ unread: next.unread, starred: next.starred, unread_by_feed: byFeed });
+  } catch {
+    // Cosmetic: the badges keep their last value.
+  }
+}
 
 /** Filter/view state shared between layout (chips) and page (filtering). */
 function persistedWritable<T>(key: string, fallback: T) {
