@@ -78,7 +78,7 @@ describe('the Nextcloud card', () => {
     expect(q.getByText(/checked 12m ago/)).toBeTruthy();
     expect(q.queryByTestId('nextcloud-remedy')).toBeNull();
     expect(q.queryByText(/last report is old/)).toBeNull();
-    const edit = q.getByRole('link', { name: /configuration/i });
+    const edit = q.getByRole('link', { name: 'Configure' });
     expect(edit.getAttribute('href')).toMatch(/\/admin\/config$/);
   });
 
@@ -157,7 +157,7 @@ describe('the Nextcloud card', () => {
     const q = within(card);
     expect(q.getByText(/has no Nextcloud/)).toBeTruthy();
     expect(q.queryByRole('button', { name: 'Check now' })).toBeNull();
-    expect(q.getByRole('link', { name: /configuration/i })).toBeTruthy();
+    expect(q.getByRole('link', { name: 'Configure' })).toBeTruthy();
   });
 });
 

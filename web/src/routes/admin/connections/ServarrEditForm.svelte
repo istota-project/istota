@@ -108,25 +108,41 @@
 </div>
 
 <style>
+  /* The four app fieldsets sit side by side as the card widens, matching the
+     tiles they edit; the install-wide fields under them run full width. */
   .servarr-form {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
     gap: var(--space-3);
+  }
+
+  .servarr-form > :global(:not(.app)) {
+    grid-column: 1 / -1;
   }
 
   .app {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    min-width: 0;
     margin: 0;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3);
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
   }
 
+  /* Floated so the name sits inside the tile like the read view's, rather
+     than on the fieldset's border line. */
   .app-name {
-    text-transform: capitalize;
+    float: left;
+    width: 100%;
+    padding: 0;
+    margin-bottom: var(--space-1);
+    font-size: var(--text-sm);
     font-weight: 600;
+    color: var(--text-primary);
+    text-transform: capitalize;
   }
 
   .key-state {
