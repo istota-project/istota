@@ -124,6 +124,14 @@ if name == "git":
     out(state.get("ls_remote", ""))
     sys.exit(state.get("ls_remote_rc", 0))
 
+if name == "zstd":
+    # The appliance disk unpacked: a sparse file of the image's virtual size.
+    if state.get("zstd_rc"):
+        sys.exit(state["zstd_rc"])
+    with open(argv[argv.index("-o") + 1], "wb") as fh:
+        fh.truncate(state.get("raw_size", 40 * 1024 ** 3))
+    sys.exit(0)
+
 if name == "security":
     keychain = state.setdefault("keychain", {})
     if argv[:1] == ["-i"]:
@@ -243,7 +251,9 @@ if verb == "shell":
         sys.stdout.write("building\n" * 30)
         rc = state.get("update_rc", 0)
         if rc == 0:
-            vm["tag"] = stack[-1]
+            words = [w for i, w in enumerate(stack[1:], 1)
+                     if not w.startswith("--") and stack[i - 1] not in ("--bundle", "--images")]
+            vm["tag"] = words[-1] if words else stack[-1]
             vm["unsigned"] = "1" if "--unsigned" in stack else ""
         save()
         sys.exit(rc)
@@ -393,7 +403,7 @@ def mac(tmp_path) -> Mac:
     stub = stubs / "stub"
     stub.write_text(STUB.replace("{python}", sys.executable))
     stub.chmod(0o755)
-    for name in ("limactl", "security", "lsof", "open", "uname", "git", "curl", "sysctl", "df"):
+    for name in ("limactl", "security", "lsof", "open", "uname", "git", "curl", "sysctl", "df", "zstd"):
         (stubs / name).symlink_to(stub)
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"key": KEY}))
@@ -681,6 +691,10 @@ class TestCreate:
         assert ".portForwards[0].guestPort = 8181" in expression
         assert ".portForwards[0].hostPort = 8181" in expression
         assert 'del(.mounts[] | select(.mountPoint == "/mnt/istota-repo"))' in expression
+        # A release is cloned, not mounted: no release directory crosses either.
+        assert 'del(.mounts[] | select(.mountPoint == "/mnt/istota-release"))' in expression
+        assert ".images" not in expression
+        assert not any(a.startswith(("--param=IMAGE=", "--param=RELEASE_DIR=")) for a in create)
         assert create[-1] == str(TEMPLATE)
         assert ["start", "--tty=false", "istota"] in mac.calls("limactl")
 
@@ -936,6 +950,7 @@ class TestCreate:
         assert f"--param=ISTOTA_REPO={REPO.resolve()}" in create
         assert not any(a.startswith("--param=ISTOTA_TAG=") for a in create)
         assert "istota-repo" not in create[create.index("--set") + 1]
+        assert 'del(.mounts[] | select(.mountPoint == "/mnt/istota-release"))' in create[create.index("--set") + 1]
         assert ["update", "--unsigned", "latest"] in mac.stack_calls()
 
     def test_a_failed_step_names_itself_and_passes_its_status(self, mac):
@@ -2251,3 +2266,421 @@ class TestInstallLocal:
         assert result.returncode != 0
         assert mac.calls("limactl") == []
         assert not (mac.bin_dir / "istota-stack").exists()
+
+
+# --- appliance mode: a VM from a release directory ------------------------------
+
+APPLIANCE_TAG = "v1.3.0"
+RELEASE_MOUNT = "/mnt/istota-release"
+APPLIANCE_RAW_NAME = f"istota-appliance-{APPLIANCE_TAG}.raw"
+
+
+def _canonical(doc: dict) -> str:
+    return json.dumps(doc, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _ssh_keygen(*args: str) -> None:
+    subprocess.run(["ssh-keygen", "-q", *args], check=True, capture_output=True, timeout=30)
+
+
+@dataclass
+class ReleaseDir:
+    """A release directory as the app unpacks one, `release/<tag>/`, inside
+    the release root the VM mounts read-only."""
+
+    root: Path
+    dir: Path
+    key: Path
+    public: str
+
+    def file(self, name: str) -> Path:
+        return self.dir / name.replace("TAG", self.dir.name)
+
+    def sign(self, doc: dict, key: Path | None = None) -> None:
+        manifest = self.file("images-TAG.json")
+        manifest.write_text(_canonical(doc))
+        Path(f"{manifest}.sig").unlink(missing_ok=True)
+        _ssh_keygen("-Y", "sign", "-f", str(key or self.key), "-n", "istota-images", str(manifest))
+
+    def manifest(self) -> dict:
+        return {
+            "tag": self.dir.name,
+            "archive_sha256": _sha256(self.file("images-TAG.tar")),
+            "appliance_sha256": _sha256(self.file("istota-appliance-TAG.raw.zst")),
+            "images": [],
+            "claude_code_version": "2.1.296",
+        }
+
+
+def _release_dir(tmp_path: Path, tag: str = APPLIANCE_TAG) -> ReleaseDir:
+    key = tmp_path / "release_key"
+    if not key.exists():
+        _ssh_keygen("-t", "ed25519", "-N", "", "-C", "releases", "-f", str(key))
+    root = tmp_path / "app" / "release"
+    directory = root / tag
+    directory.mkdir(parents=True)
+    release = ReleaseDir(root, directory, key, Path(f"{key}.pub").read_text().strip())
+    release.file("istota-TAG.bundle").write_bytes(b"a git bundle\n")
+    release.file("istota-appliance-TAG.raw.zst").write_bytes(b"the appliance disk, compressed\n")
+    release.file("images-TAG.tar").write_bytes(b"docker save output\n")
+    release.sign(release.manifest())
+    return release
+
+
+@pytest.fixture
+def release(tmp_path) -> ReleaseDir:
+    return _release_dir(tmp_path)
+
+
+def _appliance_create(mac: Mac, release: ReleaseDir, *args: str, **extra_env: str) -> subprocess.CompletedProcess:
+    return mac.run("create", "--appliance", str(release.dir), "--signing-key", release.public, *args, **extra_env)
+
+
+def _staged_raw(mac: Mac) -> Path:
+    return mac.home / ".lima" / "_istota-appliance" / APPLIANCE_RAW_NAME
+
+
+def _made_vm(mac: Mac) -> bool:
+    return any(c[:1] == ["create"] for c in mac.calls("limactl"))
+
+
+def _state_text(mac: Mac) -> str:
+    return (mac.home / ".config" / "istota-stack" / "istota.env").read_text()
+
+
+class TestCreateFromARelease:
+    """`create --appliance DIR`: the VM from the release directory's appliance
+    disk, with no network. The disk is unpacked here, sparse, after the signed
+    manifest vouches for it; the VM mounts the release root read-only and
+    installs the release from its bundle and images archive."""
+
+    def test_it_makes_the_vm_from_the_appliance_disk(self, mac, release):
+        result = _appliance_create(mac, release, "--port", "8181", "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        raw = _staged_raw(mac)
+        (unpack,) = mac.calls("zstd")
+        assert unpack[unpack.index("-o") + 1] == str(raw)
+        assert _resolved(release.file("istota-appliance-TAG.raw.zst")) in unpack
+        assert "--sparse" in unpack
+
+        create = _limactl_create(mac)
+        assert f"--param=IMAGE={raw}" in create
+        assert f"--param=RELEASE_DIR={_resolved(release.root)}" in create
+        assert f"--param=ISTOTA_TAG={APPLIANCE_TAG}" in create
+        assert f"--param=RELEASE_SIGNING_KEY={release.public}" in create
+        expression = create[create.index("--set") + 1]
+        # The appliance alone: base's Debian images would be downloaded beside it.
+        assert f'.images = [{{"location": "{raw}", "arch": "aarch64"}}]' in expression
+        assert 'del(.mounts[] | select(.mountPoint == "/mnt/istota-repo"))' in expression
+        assert "/mnt/istota-release" not in expression
+        assert create[-1] == str(TEMPLATE)
+        # Lima copies the disk into the instance; the unpacked copy goes.
+        assert not raw.exists()
+
+    def test_it_asks_no_network(self, mac, release):
+        assert _appliance_create(mac, release, "--no-setup").returncode == 0
+        assert mac.calls("git") == []
+
+    def test_the_release_is_installed_from_the_mounted_directory(self, mac, release):
+        result = _appliance_create(mac, release, "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert mac.stack_calls()[2] == [
+            "update", APPLIANCE_TAG,
+            "--bundle", f"{RELEASE_MOUNT}/{APPLIANCE_TAG}/istota-{APPLIANCE_TAG}.bundle",
+            "--images", f"{RELEASE_MOUNT}/{APPLIANCE_TAG}",
+        ]
+
+    def test_host_env_marks_the_desktop_app(self, mac, release):
+        assert _appliance_create(mac, release, "--port", "8181", "--no-setup").returncode == 0
+        (written,) = [c for c in mac.stack_calls() if c[:1] == ["host-env"] and len(c) > 2]
+        assert written[1:] == [
+            "STORAGE=host-folder", "INGRESS=local", "HOST_LOOPBACK_BLOCK=1",
+            "HOST_GATEWAY_ADDR=192.168.5.2", "LOCAL_FORWARD_PORT=8181",
+            "ISTOTA_DESKTOP_APP=1", f"RELEASE_SIGNING_KEY={release.public}",
+        ]
+
+    def test_a_rerun_takes_the_recorded_release_directory(self, mac, release):
+        assert _appliance_create(mac, release, "--no-setup").returncode == 0
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(mac)
+        mac.set(instance=None)
+        mac.calls_path.unlink()
+        result = mac.run("create", "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(a.startswith("--param=IMAGE=") for a in _limactl_create(mac))
+        assert mac.calls("git") == []
+
+    def test_a_disk_below_the_appliances_size_is_raised_to_it(self, mac, release):
+        """Lima grows a raw disk to `--disk` and refuses to shrink one
+        (measured, Lima 2.2.1: "disk shrinking is not supported")."""
+        mac.set(raw_size=40 * 1024 ** 3)
+        result = _appliance_create(mac, release, "--disk", "20", "--no-setup")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _size(_limactl_create(mac))[2] == "40"
+        assert "40 GiB" in result.stdout
+
+    def test_a_larger_disk_is_left_for_lima_to_grow(self, mac, release):
+        mac.set(raw_size=40 * 1024 ** 3)
+        assert _appliance_create(mac, release, "--disk", "80", "--no-setup").returncode == 0
+        assert _size(_limactl_create(mac))[2] == "80"
+
+
+class TestAReleaseThatDoesNotVerify:
+    """The disk is booted only when the release's manifest, signed by the key
+    this VM will trust, names this tag and this disk's digest. Each refusal
+    comes before anything is unpacked or made."""
+
+    def _refused(self, mac: Mac, result: subprocess.CompletedProcess, code: int = 65) -> None:
+        assert result.returncode == code, result.stdout + result.stderr
+        assert mac.calls("zstd") == []
+        assert not _made_vm(mac)
+        assert not _staged_raw(mac).exists()
+
+    def test_a_manifest_signed_by_another_key_is_refused(self, mac, release, tmp_path):
+        other = tmp_path / "other_key"
+        _ssh_keygen("-t", "ed25519", "-N", "", "-C", "other", "-f", str(other))
+        release.sign(release.manifest(), key=other)
+        self._refused(mac, _appliance_create(mac, release))
+
+    def test_a_manifest_for_another_tag_is_refused(self, mac, release):
+        release.sign({**release.manifest(), "tag": "v9.9.9"})
+        self._refused(mac, _appliance_create(mac, release))
+
+    def test_a_disk_that_is_not_the_manifests_is_refused(self, mac, release):
+        release.file("istota-appliance-TAG.raw.zst").write_bytes(b"another disk\n")
+        self._refused(mac, _appliance_create(mac, release))
+
+    def test_a_manifest_naming_no_disk_is_refused(self, mac, release):
+        doc = release.manifest()
+        del doc["appliance_sha256"]
+        release.sign(doc)
+        self._refused(mac, _appliance_create(mac, release))
+
+    def test_an_unsigned_manifest_is_refused(self, mac, release):
+        Path(f"{release.file('images-TAG.json')}.sig").unlink()
+        self._refused(mac, _appliance_create(mac, release), code=78)
+
+    @pytest.mark.parametrize("missing", [
+        "istota-TAG.bundle", "istota-appliance-TAG.raw.zst", "images-TAG.tar", "images-TAG.json",
+    ])
+    def test_a_directory_missing_a_file_is_refused(self, mac, release, missing):
+        release.file(missing).unlink()
+        result = _appliance_create(mac, release)
+        self._refused(mac, result, code=78)
+        assert missing.replace("TAG", APPLIANCE_TAG) in result.stderr
+
+    def test_no_zstd_is_refused_first(self, mac, release):
+        import shutil
+
+        if shutil.which("zstd", path="/usr/bin:/bin:/usr/sbin:/sbin"):
+            pytest.skip("this machine has a zstd in the system directories")
+        (mac.root / "stubs" / "zstd").unlink()
+        self._refused(mac, _appliance_create(mac, release), code=69)
+
+    def test_a_failed_unpack_makes_no_vm(self, mac, release):
+        mac.set(zstd_rc=1)
+        result = _appliance_create(mac, release)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not _made_vm(mac)
+
+
+class TestTheReleaseDirectorysOptions:
+    def test_a_checkout_and_a_release_directory_are_not_both_taken(self, mac, release):
+        result = _appliance_create(mac, release, "--repo", str(REPO))
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert not _made_vm(mac)
+
+    def test_a_tag_that_is_not_the_directorys_is_refused(self, mac, release):
+        result = _appliance_create(mac, release, "--tag", "v1.2.0")
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert not _made_vm(mac)
+
+    def test_the_same_tag_is_accepted(self, mac, release):
+        assert _appliance_create(mac, release, "--tag", APPLIANCE_TAG, "--no-setup").returncode == 0
+
+    def test_a_directory_not_named_for_a_tag_is_refused(self, mac, tmp_path):
+        release = _release_dir(tmp_path, tag="latest build")
+        result = _appliance_create(mac, release)
+        assert result.returncode == 64, result.stdout + result.stderr
+        assert not _made_vm(mac)
+
+    def test_a_release_root_that_is_the_home_is_refused(self, mac, release):
+        """The VM mounts the directory above the release, read-only; the home
+        would hand it every Mac file."""
+        moved = mac.home / APPLIANCE_TAG
+        release.dir.rename(moved)
+        result = mac.run("create", "--appliance", str(moved), "--signing-key", release.public)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not _made_vm(mac)
+
+    def test_a_workspace_inside_the_release_root_is_refused(self, mac, release):
+        result = _appliance_create(mac, release, "--workspace", str(release.root / "ws"))
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert not _made_vm(mac)
+
+    def test_a_newer_release_already_deployed_is_refused(self, mac, release):
+        """A VM made again from an older release would meet a database a newer
+        one migrated (SchemaTooNew)."""
+        state = mac.home / ".config" / "istota-stack" / "istota.env"
+        state.parent.mkdir(parents=True)
+        state.write_text(f"WORKSPACE={mac.home / 'Istota'}\nDEPLOYED_TAG=v1.4.0\nDEPLOYED_UNSIGNED=\n")
+        result = _appliance_create(mac, release)
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "v1.4.0" in result.stderr
+        assert not _made_vm(mac)
+
+
+class TestOtherSourcesMountNoRelease:
+    def test_a_server_vm_has_no_desktop_app_marker(self, mac):
+        assert _create(mac, "--no-setup").returncode == 0
+        assert "ISTOTA_DESKTOP_APP" not in json.dumps(mac.stack_calls())
+        assert "APPLIANCE=\n" in _state_text(mac)
+
+
+class TestUpdateFromARelease:
+    """`update --appliance DIR`: the VM's own update, from the bundle and
+    images of a newer release directory in the root the VM already mounts."""
+
+    @pytest.fixture
+    def made(self, mac, release):
+        assert _appliance_create(mac, release, "--no-setup").returncode == 0
+        mac.calls_path.unlink()
+        return mac
+
+    @staticmethod
+    def _another(directory: Path) -> Path:
+        directory.mkdir(parents=True)
+        tag = directory.name
+        for name in (f"istota-{tag}.bundle", f"images-{tag}.tar", f"images-{tag}.json",
+                     f"images-{tag}.json.sig"):
+            (directory / name).write_text("x")
+        return directory
+
+    def test_it_installs_the_newer_release_from_the_mount(self, made, release):
+        newer = self._another(release.root / "v1.4.0")
+        result = made.run("update", "--appliance", str(newer))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert made.stack_calls()[0] == [
+            "update", "v1.4.0",
+            "--bundle", f"{RELEASE_MOUNT}/v1.4.0/istota-v1.4.0.bundle",
+            "--images", f"{RELEASE_MOUNT}/v1.4.0",
+        ]
+        state = _state_text(made)
+        assert f"APPLIANCE={_resolved(newer)}\n" in state
+        assert "DEPLOYED_TAG=v1.4.0\n" in state
+
+    def test_a_directory_outside_the_mounted_root_is_refused(self, made, tmp_path):
+        elsewhere = self._another(tmp_path / "elsewhere" / "v1.4.0")
+        result = made.run("update", "--appliance", str(elsewhere))
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert made.stack_calls() == []
+
+    def test_a_failed_update_records_nothing(self, made, release):
+        newer = self._another(release.root / "v1.4.0")
+        made.set(update_rc=65)
+        result = made.run("update", "--appliance", str(newer))
+        assert result.returncode == 65
+        assert f"APPLIANCE={_resolved(release.dir)}\n" in _state_text(made)
+
+    def test_a_vm_made_from_a_release_tag_has_no_release_mount(self, mac, release):
+        assert _create(mac, "--no-setup").returncode == 0
+        mac.calls_path.unlink()
+        result = mac.run("update", "--appliance", str(release.dir))
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert mac.stack_calls() == []
+
+
+class TestRestoreFromARelease:
+    @pytest.fixture
+    def made(self, mac, release):
+        assert _appliance_create(mac, release).returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        return mac
+
+    def test_the_new_vm_is_made_from_the_release_directory(self, made):
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(a.startswith("--param=IMAGE=") for a in _limactl_create(made))
+        assert made.calls("git") == []
+
+    def test_restore_takes_the_option_too(self, mac, release):
+        assert _create(mac).returncode == 0
+        _back_up(mac)
+        mac.calls_path.unlink()
+        result = mac.run("restore", "--appliance", str(release.dir), "--signing-key", release.public,
+                         stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert any(a.startswith("--param=IMAGE=") for a in _limactl_create(mac))
+
+    def test_a_config_that_needs_claude_code_gets_the_local_layer(self, made):
+        """No rebuild of the release: its images came from the archive, and
+        Claude Code is the layer the VM installs on top of them."""
+        made.set(check_image_rcs=[2])
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = made.stack_calls()
+        check = calls.index(["check-image"])
+        assert calls[check + 1] == ["local-layers"]
+        assert [c for c in calls[check:] if c[:1] == ["update"]] == []
+
+    def test_a_release_that_does_not_verify_is_refused_before_the_old_vm_goes(self, made, release):
+        release.file("istota-appliance-TAG.raw.zst").write_bytes(b"another disk\n")
+        result = made.run("restore", stdin="istota\n")
+        assert result.returncode == 65, result.stdout + result.stderr
+        assert not any(c[:1] in (["delete"], ["create"]) for c in made.calls("limactl"))
+
+
+class TestImportStandaloneTakesARelease:
+    def test_the_option_is_one_of_creates(self, mac, release):
+        result = mac.run("import-standalone", "--appliance", str(release.dir), "--signing-key", release.public)
+        # No standalone install here: refused before any VM, and not for the option.
+        assert result.returncode == 78, result.stdout + result.stderr
+        assert "no standalone install" in result.stderr
+
+
+class TestTheSetupInTheApp:
+    """`--web-setup-in-app`: the app shows the setup page in its own window,
+    so create prints its address on a line of its own once the page answers,
+    and opens no browser."""
+
+    def test_the_address_is_printed_once_the_page_answers(self, mac, release):
+        mac.set(page_states=["", "locked"], setup_web_sleep=4)
+        result = _appliance_create(mac, release, "--web-setup-in-app")
+        assert result.returncode == 0, result.stdout + result.stderr
+        lines = [line for line in result.stdout.splitlines() if line.startswith("ISTOTA_SETUP_URL=")]
+        assert lines == ["ISTOTA_SETUP_URL=http://localhost:8080/istota/setup#code=ABCDE-FGHJK-MNPQR-STVWX"]
+        assert mac.calls("open") == []
+
+    def test_a_terminal_is_not_a_reason_to_open_a_browser(self, mac, release):
+        # A login already made, so the enrolment step asks nothing on the terminal.
+        mac.set(page_states=["locked"], setup_web_sleep=4,
+                auth_list="alice email=alice@example.com password_set=True disabled=False last_login=- live\n")
+        rc, output = _run_in_terminal(
+            mac, "create", "--appliance", str(release.dir), "--signing-key", release.public,
+            "--web-setup-in-app", "--cpus", "4", "--memory", "4", "--disk", "40")
+        assert rc == 0, output
+        assert mac.calls("open") == []
+        assert "ISTOTA_SETUP_URL=http://localhost:8080/istota/setup#code=" in output
+
+    def test_without_it_no_address_line_is_printed(self, mac, release):
+        mac.set(page_states=["locked"], setup_web_sleep=2)
+        result = _appliance_create(mac, release)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ISTOTA_SETUP_URL=" not in result.stdout
+
+
+class TestTheStateDirectoryFollowsXdg:
+    def test_the_app_keeps_its_state_apart(self, mac, tmp_path):
+        """The app runs the CLI with XDG_CONFIG_HOME under its own Application
+        Support directory, so the command-line install's state is not touched."""
+        app_config = tmp_path / "app-config"
+        result = _create(mac, "--port", "9090", "--no-setup", XDG_CONFIG_HOME=str(app_config))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "PORT=9090\n" in (app_config / "istota-stack" / "istota.env").read_text()
+        assert not (mac.home / ".config" / "istota-stack").exists()

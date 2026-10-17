@@ -1639,7 +1639,27 @@ class TestTheLimaTemplate:
         assert doc["mounts"] == [
             {"location": "{{.Param.ISTOTA_REPO}}", "mountPoint": "/mnt/istota-repo", "writable": False},
             {"location": "{{.Param.WORKSPACE}}", "mountPoint": "/srv/mount/host-folder", "writable": True},
+            # Appliance mode: the release root, which only the VM's update reads.
+            {"location": "{{.Param.RELEASE_DIR}}", "mountPoint": "/mnt/istota-release", "writable": False},
         ]
+
+    def test_every_create_it_documents_drops_the_mounts_it_does_not_use(self):
+        """A Lima mount cannot be empty, so each source drops the others':
+        a create that kept the release mount with no RELEASE_DIR is refused."""
+        text = (HOST / "lima" / "istota.yaml").read_text()
+        header = text.split("minimumLimaVersion:", 1)[0]
+        creates = header.split("limactl create")[1:]
+        assert len(creates) == 3, "the release, appliance and checkout examples"
+        drops = {mount: ["del(.mounts[]" in c and f'.mountPoint == "{mount}"' in c for c in creates]
+                 for mount in ("/mnt/istota-repo", "/mnt/istota-release", "/srv/mount/host-folder")}
+        release, appliance, checkout = range(3)
+        assert drops["/mnt/istota-repo"][release] and drops["/mnt/istota-release"][release]
+        assert drops["/mnt/istota-repo"][appliance] and not drops["/mnt/istota-release"][appliance]
+        assert drops["/mnt/istota-release"][checkout]
+
+    def test_the_vm_tier_drops_the_release_mount_too(self):
+        lima = (REPO / "tests" / "vm" / "lima.py").read_text()
+        assert "/mnt/istota-release" in lima
 
     def test_the_workspace_mount_is_where_the_host_folder_storage_reads_it(self, doc):
         workspace = doc["mounts"][1]["mountPoint"]
@@ -1663,11 +1683,51 @@ class TestTheLimaTemplate:
         """Lima refuses a declared param nothing reads, and a mount a caller
         drops at create stops reading its location param."""
         script = self._script(doc)
-        assert set(doc["param"]) == {"ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO_URL", "ISTOTA_REPO", "WORKSPACE"}
+        assert set(doc["param"]) == {
+            "ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO_URL", "ISTOTA_REPO", "WORKSPACE",
+            "IMAGE", "RELEASE_DIR",
+        }
         for name in doc["param"]:
             assert f"PARAM_{name}" in script, name
         assert doc["param"]["ISTOTA_REPO_URL"] == "https://github.com/istota-project/istota.git"
-        assert all(doc["param"][name] == "" for name in ("ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO", "WORKSPACE"))
+        assert all(doc["param"][name] == "" for name in (
+            "ISTOTA_TAG", "RELEASE_SIGNING_KEY", "ISTOTA_REPO", "WORKSPACE", "IMAGE", "RELEASE_DIR"))
+
+    @staticmethod
+    def _appliance(script: str) -> str:
+        start = script.index('if [ -n "$APPLIANCE" ]; then\n    bundle=')
+        return script[start:script.index("elif ", start)]
+
+    def test_an_appliance_installs_the_bundles_verified_tag(self, doc):
+        """Appliance mode: no clone and no network. The tag comes from the
+        bundle in the read-only release mount into the disk's own checkout,
+        and is verified before anything from it runs, as a release's is."""
+        script = self._script(doc)
+        appliance = self._appliance(script)
+        assert 'bundle="/mnt/istota-release/${TAG}/istota-${TAG}.bundle"' in appliance
+        assert 'verified_git fetch --quiet "$bundle" "refs/tags/${TAG}:refs/tags/${TAG}"' in appliance
+        assert "origin" not in appliance and "clone" not in appliance
+        fetch = script.index('verified_git fetch --quiet "$bundle"')
+        assert fetch < script.index('object="$(verify_release_tag "$TAG")"') < script.index('"${SRC}/host/provision.sh"')
+
+    def test_an_appliance_asks_apt_for_nothing(self, doc):
+        """The disk already has git; `apt-get update` offline spends minutes
+        on DNS retries (Stage 1)."""
+        script = self._script(doc)
+        apt = script.index("apt-get update")
+        guard = script.rindex('if [ -z "$APPLIANCE" ]; then', 0, apt)
+        assert script[guard:apt].count("\n") == 1
+
+    def test_an_appliance_and_a_checkout_are_not_both_taken(self, doc):
+        script = self._script(doc)
+        checkout = script[script.index('if [ -n "${PARAM_ISTOTA_REPO:-}" ]; then'):script.index("STACK=/srv/app/istota")]
+        assert '${PARAM_IMAGE:-}${PARAM_RELEASE_DIR:-}' in checkout
+        assert checkout.index("${PARAM_IMAGE:-}") < checkout.index("exec ")
+
+    def test_an_appliance_needs_its_release_directory(self, doc):
+        script = self._script(doc)
+        release = script[script.index("STACK=/srv/app/istota"):]
+        assert 'if [ -n "$APPLIANCE" ] && [ -z "${PARAM_RELEASE_DIR:-}" ]; then' in release
 
     def test_a_checkout_provisions_from_the_read_only_mount(self, doc):
         script = self._script(doc)
@@ -1708,6 +1768,103 @@ class TestTheLimaTemplate:
         path.write_text(self._script(doc))
         result = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="needs ssh-keygen")
+class TestTheTemplatesApplianceProvision:
+    """The template's provision script run in appliance mode, against a fake
+    stack directory and release mount: the disk's checkout, a git bundle of
+    a signed tag, and a provision.sh that only records it ran."""
+
+    TAG = "v1.0.0"
+
+    @staticmethod
+    def _keygen(path: Path) -> str:
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "releases", "-f", str(path)],
+                       check=True, capture_output=True)
+        return Path(f"{path}.pub").read_text().strip()
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> None:
+        env = {"PATH": os.environ["PATH"], "HOME": str(cwd), "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_AUTHOR_NAME": "r", "GIT_AUTHOR_EMAIL": "r@example.invalid",
+               "GIT_COMMITTER_NAME": "r", "GIT_COMMITTER_EMAIL": "r@example.invalid"}
+        subprocess.run(["git", "-c", "init.defaultBranch=main", *args], cwd=cwd, env=env,
+                       check=True, capture_output=True)
+
+    def _world(self, tmp_path: Path, signing_key: Path) -> dict:
+        origin = tmp_path / "origin"
+        (origin / "host").mkdir(parents=True)
+        self._git(origin, "init", "-q")
+        provision = origin / "host" / "provision.sh"
+        provision.write_text('#!/bin/bash\necho "provision ran from $(git -C "$(dirname "$0")" describe --tags)" > "$PROVISION_MARK"\n')
+        provision.chmod(0o755)
+        self._git(origin, "add", "-A")
+        self._git(origin, "commit", "-q", "-m", "release")
+        stack = tmp_path / "srv"
+        stack.mkdir()
+        # The disk's checkout, made before the tag: the bundle brings it.
+        self._git(tmp_path, "clone", "-q", "--no-checkout", str(origin), str(stack / "src"))
+        self._git(origin, "-c", "gpg.format=ssh", "-c", f"user.signingkey={signing_key}",
+                  "tag", "-s", "-m", self.TAG, self.TAG)
+        release = tmp_path / "release"
+        (release / self.TAG).mkdir(parents=True)
+        self._git(origin, "bundle", "create", "-q", str(release / self.TAG / f"istota-{self.TAG}.bundle"),
+                  f"refs/tags/{self.TAG}")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "apt-get").write_text(f'#!/bin/sh\necho "apt-get $*" >> {tmp_path}/apt-calls\nexit 1\n')
+        (bindir / "apt-get").chmod(0o755)
+        return {"stack": stack, "release": release, "bin": bindir, "mark": tmp_path / "provisioned"}
+
+    def _run(self, tmp_path: Path, world: dict, key: str) -> subprocess.CompletedProcess:
+        doc = yaml.safe_load((HOST / "lima" / "istota.yaml").read_text())
+        (entry,) = doc["provision"]
+        script = (entry["script"].replace("/srv/app/istota", str(world["stack"]))
+                  .replace("/mnt/istota-release", str(world["release"])))
+        path = tmp_path / "lima-provision.sh"
+        path.write_text(script)
+        env = {
+            "PATH": f"{world['bin']}:{os.environ['PATH']}", "HOME": str(tmp_path),
+            "PROVISION_MARK": str(world["mark"]),
+            "PARAM_ISTOTA_TAG": self.TAG, "PARAM_RELEASE_SIGNING_KEY": key,
+            "PARAM_ISTOTA_REPO_URL": "https://github.com/istota-project/istota.git",
+            "PARAM_ISTOTA_REPO": "", "PARAM_WORKSPACE": str(tmp_path / "ws"),
+            "PARAM_IMAGE": "/Users/someone/Library/istota-appliance.raw",
+            "PARAM_RELEASE_DIR": "/Users/someone/Library/release",
+        }
+        return subprocess.run(["bash", str(path)], env=env, capture_output=True, text=True, timeout=60)
+
+    def test_the_bundles_signed_tag_is_provisioned_offline(self, tmp_path):
+        key = tmp_path / "release_key"
+        public = self._keygen(key)
+        world = self._world(tmp_path, key)
+        result = self._run(tmp_path, world, public)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert world["mark"].read_text() == f"provision ran from {self.TAG}\n"
+        assert not (tmp_path / "apt-calls").exists()
+        assert (world["stack"] / ".lima-bootstrapped").exists()
+        assert f"RELEASE_SIGNING_KEY={public}\n" in (world["stack"] / "host.env").read_text()
+
+    def test_a_tag_signed_by_another_key_is_refused(self, tmp_path):
+        key, other = tmp_path / "release_key", tmp_path / "other_key"
+        public = self._keygen(key)
+        self._keygen(other)
+        world = self._world(tmp_path, other)
+        result = self._run(tmp_path, world, public)
+        assert result.returncode == 65, result.stdout + result.stderr
+        assert "not signed by the key" in result.stderr
+        assert not world["mark"].exists()
+        assert not (world["stack"] / ".lima-bootstrapped").exists()
+
+    def test_a_missing_bundle_is_refused(self, tmp_path):
+        key = tmp_path / "release_key"
+        public = self._keygen(key)
+        world = self._world(tmp_path, key)
+        (world["release"] / self.TAG / f"istota-{self.TAG}.bundle").unlink()
+        result = self._run(tmp_path, world, public)
+        assert result.returncode != 0
+        assert not world["mark"].exists()
 
 
 RELEASE_KEY_FILE = HOST / "release-signing-key.pub"

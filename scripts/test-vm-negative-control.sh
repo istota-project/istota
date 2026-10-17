@@ -30,6 +30,8 @@
 #              localize-stops-mount-at-once (istota-stack localize-workspace)
 #   host-folder: no-workspace-marker (row L1), host-loopback-unblocked (row L2),
 #              default-mounts-in-template (row L3), mac-shim-without-drop (row L4)
+#   appliance: appliance-default-mounts (row L3 for the release directory;
+#              needs ISTOTA_VM_APPLIANCE_DIR, tests/vm/test_appliance.py)
 #   proxied:   no-allow-list, no-docker-user-rule (row 18),
 #              role-user-settings-unchecked (the management role's --check)
 #
@@ -173,6 +175,11 @@ control default-mounts-in-template \
     "row L3: the template with template:_default/mounts in its base, so the Mac home is mounted" \
     "$M::test_the_vm_mounts_the_read_only_checkout_and_the_folder_alone" \
     "$M::test_the_vm_reads_nothing_of_the_mac_outside_the_folder"
+A="$VM/test_appliance.py::TestOnlyTheFolderAndTheReleasesCrossFromTheMac"
+control appliance-default-mounts \
+    "row L3, appliance mode: the template with template:_default/mounts in its base, so the Mac home is mounted" \
+    "$A::test_the_vm_mounts_the_folder_and_the_read_only_releases_alone" \
+    "$A::test_the_vm_reads_nothing_of_the_mac_home_outside_them"
 control mac-shim-without-drop \
     "row L4: the Mac CLI's exec sent to compose exec daemon, past istota-drop" \
     "$VM/test_host_folder.py::TestTheMacCliExecsAsTheDaemon::test_the_mac_cli_execs_as_10001_with_no_capabilities"

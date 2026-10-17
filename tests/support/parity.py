@@ -63,7 +63,7 @@ ROWS: dict[int | str, str] = {
     # The local-VM spec's rows, each added with its witness.
     "L1": "the daemon never writes into a workspace that is not the user's folder",
     "L2": "no container reaches a host loopback service unless its port is allowed",
-    "L3": "only the workspace folder, and in developer mode the read-only checkout, crosses from the Mac",
+    "L3": "only the workspace folder, and read-only the checkout in developer mode or the releases directory in appliance mode, crosses from the Mac",
     "L4": "the Mac shims run as uid 10001 with no capabilities",
     # The Mac app spec's rows, numbered as that spec numbers them.
     "M5": "a stack update from a release bundle installs only a tag signed by the pinned key",
