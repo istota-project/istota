@@ -110,6 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A timed location share or a card purchase asked for in a WhatsApp group no longer fails with `invalid_preview` when you have a private WhatsApp chat with the bot. The approval now reaches that chat as expected.
 - Files uses your assistant's own name in the robot icon's tooltips, the "How … reaches your files" panel and its notes, instead of always saying "Istota".
 - Downloading an invoice PDF from the web app no longer follows a link placed in the invoice folder (ISSUE-775). A link there could serve a file from outside your workspace, including the web app's own keys. The PDF is now read only from a real file inside the invoice folder, and an invoice folder setting that points outside the money folder is refused.
+- A file opened or downloaded from web chat is now always the file that was checked (ISSUE-776). A task could swap the file for a link just after the check and be served a file from outside your workspace. A link inside your workspace is no longer followed either, and audio and video still seek.
 
 ## [0.46.0] - 2026-10-14
 

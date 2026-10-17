@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import math
+import mimetypes
 import os
 import platform
 import re
@@ -51,7 +52,6 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import (
-    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -69,7 +69,8 @@ from istota.webui import shutdown as web_shutdown
 from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
 from istota.brain import make_brain
-from .chat_files import ChatFileError, resolve_chat_file
+from .chat_files import ChatFileError, open_chat_file
+from .fd_response import fd_file_response
 from istota.config import Config, load_config, local_login_hosts, refresh_user_profiles_if_changed
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.lib.workspace_marker import storage_mode
@@ -12757,64 +12758,23 @@ async def chat_upload_attachment(
 # back to being for giving a file to *someone else*.
 
 
-def _resolve_chat_file(username: str, path: str) -> Path:
-    """`chat_files.resolve_chat_file` against this process's config.
-
-    Kept as a module-level name because the download path and its tests reach
-    it here; the rule itself lives in `chat_files`, which the scheduler also
-    asks when it stores an answer (ISSUE-559).
-    """
-    return resolve_chat_file(_config, username, path)
-
-
-def _read_chat_file_head(
+def _open_chat_file_head(
     username: str, path: str, limit: int,
-) -> tuple[Path, bytes, os.stat_result]:
-    """Confine and read up to limit bytes, with metadata from the open file.
+) -> tuple[int, Path, bytes, os.stat_result]:
+    """Confine and open the file, and read up to limit bytes through that fd.
 
-    One threaded hop for both, and the order is the point: every confinement
-    check in `_resolve_chat_file` runs to completion before anything opens the
-    file, so a refused path is never read at all. The head read is inside the
-    same `ChatFileError` contract — a file whose first bytes cannot be read is
-    not going to serve, so it is the 404 the caller already handles rather than
-    a 500 on the way past.
-
-    **The three open flags are each load-bearing, because this open is a
-    *second* resolution of a path the workspace's owner can rewrite between the
-    two.** `_resolve_chat_file` hands back a realpath whose final component was
-    a regular file when it looked; by the time this runs it need not be. So:
-    `O_NOFOLLOW` refuses a symlink swapped in for that component, which is the
-    one shape that would otherwise take the read back out of the workspace the
-    check just confined it to; `O_NONBLOCK` means a FIFO put there returns
-    instead of blocking forever on a worker from the process-wide
-    `asyncio.to_thread` pool, which the SSE ticks and the attachment save share
-    — a hang there costs the web process rather than this request; and the
-    `S_ISREG` test on the *descriptor* is what actually refuses that FIFO, and
-    refuses it before `FileResponse` opens the path again by name and blocks on
-    it with no flags of its own.
-
-    What this does **not** claim is that the bytes sniffed are the bytes sent:
-    `FileResponse` opens the path a third time to stream it. Measured, a full
-    swap in that window still comes back `image/png` with `nosniff` and the
-    CSP, because the type is our explicit one rather than a guess — so the
-    window is an integrity question and cannot produce the outcome the header
-    exists to prevent.
+    `chat_files.open_chat_file` walks from the authorized root with
+    ``O_NOFOLLOW`` at every component and hands back the descriptor, so the
+    check and the open are one operation and a refused path never yields a
+    readable fd (ISSUE-776). Everything after reads that descriptor and never
+    the name: the head, the metadata and, for a download, the body. A link
+    swapped in after the open changes nothing served. A head that cannot be
+    read is the 404 the caller already handles rather than a 500. The caller
+    owns the returned fd.
     """
-    target = _resolve_chat_file(username, path)
-    try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError as e:
-        # 404 rather than a 500: the spec's rule is that a file whose head
-        # cannot be read is not going to serve. Logged with its errno so a
-        # genuine disk fault or fd exhaustion is not silently a "not found".
-        logger.warning(
-            "chat file head read failed for %s: %s", target.name, e,
-        )
-        raise ChatFileError(404, "file could not be read") from e
+    fd, target = open_chat_file(_config, username, path)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise ChatFileError(400, "path is not a regular file")
         head = bytearray()
         while len(head) < limit:
             chunk = os.read(fd, limit - len(head))
@@ -12822,26 +12782,35 @@ def _read_chat_file_head(
                 break
             head.extend(chunk)
     except OSError as e:
+        os.close(fd)
+        # Logged with its errno so a disk fault or fd exhaustion is not
+        # silently a "not found".
         logger.warning(
             "chat file head read failed for %s: %s", target.name, e,
         )
         raise ChatFileError(404, "file could not be read") from e
-    finally:
+    except BaseException:
         os.close(fd)
-    return target, bytes(head), info
+        raise
+    return fd, target, bytes(head), info
 
 
-def _resolve_chat_file_for_download(
+def _open_chat_file_for_download(
     username: str, path: str,
-) -> tuple[Path, str | None]:
-    """Resolve the target and decide whether its bytes may render inline."""
-    target, head, _ = _read_chat_file_head(username, path, SNIFF_BYTES)
-    return target, sniff_raster(head)
+) -> tuple[int, Path, str | None]:
+    """The open fd, its path, and whether its bytes may render inline."""
+    fd, target, head, _ = _open_chat_file_head(username, path, SNIFF_BYTES)
+    try:
+        return fd, target, sniff_raster(head)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _preview_chat_file(username: str, path: str) -> dict:
     """Read and classify in the same worker hop as the confinement checks."""
-    target, head, info = _read_chat_file_head(username, path, PREVIEW_MAX_BYTES)
+    fd, target, head, info = _open_chat_file_head(username, path, PREVIEW_MAX_BYTES)
+    os.close(fd)
     modified = _iso_z(datetime.fromtimestamp(info.st_mtime, tz=timezone.utc))
     return classify_preview(
         target.name, info.st_size, modified, head, truncated=info.st_size > PREVIEW_MAX_BYTES,
@@ -12863,6 +12832,7 @@ async def chat_preview_file(
 
 @api_router.get("/chat/files")
 async def chat_download_file(
+    request: Request,
     path: str = Query(..., description="Workspace path of the file to download"),
     user: dict = Depends(_require_api_auth),
 ):
@@ -12893,11 +12863,16 @@ async def chat_download_file(
     The CSP is defence behind the media type rather than instead of it: if the
     type were ever wrong, `sandbox` with `default-src 'none'` leaves the
     document with no origin, no scripts and no subresources.
+
+    **The body is the descriptor the check opened** (ISSUE-776). Handing the
+    path to `FileResponse` let a workspace writer swap in a link after the
+    check and be served a file from outside the workspace. Range requests are
+    served from the same fd, since the viewer's media players seek with them.
     """
     username = user["username"]
     try:
-        target, inline_type = await asyncio.to_thread(
-            _resolve_chat_file_for_download, username, path,
+        fd, target, inline_type = await asyncio.to_thread(
+            _open_chat_file_for_download, username, path,
         )
     except ChatFileError as e:
         return JSONResponse({"error": e.message}, status_code=e.status)
@@ -12907,22 +12882,26 @@ async def chat_download_file(
         "X-Content-Type-Options": "nosniff",
     }
     if inline_type is None:
-        return FileResponse(
-            target,
+        return fd_file_response(
+            fd,
             filename=target.name,
-            content_disposition_type="attachment",
+            # `FileResponse`'s guess from the name, safe beside `attachment`.
+            media_type=mimetypes.guess_type(target.name)[0] or "text/plain",
+            disposition_type="attachment",
             headers=headers,
+            request_headers=request.headers,
         )
 
     headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
-    return FileResponse(
-        target,
+    return fd_file_response(
+        fd,
         filename=target.name,
         # Explicit, never Starlette's guess from the filename — the extension
         # is a caller-supplied string on a file the model wrote.
         media_type=inline_type,
-        content_disposition_type="inline",
+        disposition_type="inline",
         headers=headers,
+        request_headers=request.headers,
     )
 
 
