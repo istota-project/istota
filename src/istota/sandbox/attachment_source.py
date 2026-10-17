@@ -217,11 +217,18 @@ def open_attachment(
     return fd, source
 
 
-def copy_fd(src_fd: int, dst_fd: int) -> None:
-    """Copy all of `src_fd` into `dst_fd` by offset, leaving `src_fd`'s position alone."""
+def copy_fd(src_fd: int, dst_fd: int, *, limit: int | None = None) -> None:
+    """Copy all of `src_fd` into `dst_fd` by offset, leaving `src_fd`'s position alone.
+
+    `limit` stops after that many bytes, for a source somebody else can grow
+    while it is being copied.
+    """
     offset = 0
     while True:
-        chunk = os.pread(src_fd, _COPY_CHUNK, offset)
+        want = _COPY_CHUNK if limit is None else min(_COPY_CHUNK, limit - offset)
+        if want <= 0:
+            return
+        chunk = os.pread(src_fd, want, offset)
         if not chunk:
             return
         view = memoryview(chunk)

@@ -43,6 +43,10 @@ from istota.health.models import HealthContext, Panel
 logger = logging.getLogger(__name__)
 
 
+# The most of a panel source the daemon copies out for extraction, whatever
+# `[health] max_document_bytes` says, since 0 there means unlimited.
+PANEL_SOURCE_CEILING_BYTES = 100 * 1024 * 1024
+
 # Below this many extracted chars from text-native PDF parsing we assume
 # the PDF is a scan and fall back to OCR.
 _TEXT_NATIVE_MIN_CHARS = 200
@@ -54,9 +58,15 @@ def _staged_source(ctx: HealthContext, panel: Panel, config=None):
 
     The source is opened once through the no-follow walk and copied out of
     the user's tree, so ``pdftotext`` and the extractor's bind read bytes a
-    task can no longer swap (ISSUE-781).
+    task can no longer swap (ISSUE-781). A source over the cap raises
+    :class:`DocumentTooLarge` before anything is copied: a task can make it a
+    sparse file of any size.
     """
-    from istota.health.documents import open_upload  # noqa: PLC0415
+    from istota.health.documents import (  # noqa: PLC0415
+        DocumentTooLarge,
+        max_document_bytes,
+        open_upload,
+    )
     from istota.health.extract_requests import staged_copy  # noqa: PLC0415
 
     fd = None
@@ -68,10 +78,16 @@ def _staged_source(ctx: HealthContext, panel: Panel, config=None):
     if fd is None:
         yield None
         return
-    with os.fdopen(fd, "rb") as fh:
-        raw = fh.read()
-    with staged_copy(config, raw, Path(panel.source_file).suffix) as path:
-        yield path
+    try:
+        size = os.fstat(fd).st_size
+        configured = max_document_bytes(config)
+        cap = min(configured, PANEL_SOURCE_CEILING_BYTES) if configured else PANEL_SOURCE_CEILING_BYTES
+        if size > cap:
+            raise DocumentTooLarge(f"panel source is {size} bytes, over {cap}")
+        with staged_copy(config, fd, size, Path(panel.source_file).suffix) as path:
+            yield path
+    finally:
+        os.close(fd)
 
 
 def _pdftotext(path: Path) -> str | None:

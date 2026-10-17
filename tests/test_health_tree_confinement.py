@@ -188,3 +188,63 @@ class TestTheAnchorWithAUserRoot:
             assert served != BOB
         with pytest.raises(ValueError):
             health_documents.uploads_walk(odd, "1")
+
+
+class TestTheExtractionCopyIsBounded:
+    """A task can make a panel source a sparse file of any size; reading it
+    whole put that much into the daemon's memory, and a request is kept until
+    answered, so the crash repeated on every tick."""
+
+    def test_an_oversized_source_is_refused_and_the_request_answered(
+        self, two_users,
+    ):
+        from istota.health import extract_requests
+
+        config, alice, _bob = two_users
+        pid = _panel(alice, "1/original.pdf", ALICE)
+        leaf = alice.uploads_dir / "1" / "original.pdf"
+        with open(leaf, "r+b") as fh:
+            fh.truncate(1 << 30)
+        request_id = extract_requests.request_extract(
+            config, "alice", extract_requests.PANEL, panel_id=pid,
+        )
+        staged = []
+        real_stage = extract_requests.stage_upload
+
+        def watching(*args, **kwargs):
+            staged.append(args)
+            return real_stage(*args, **kwargs)
+
+        with patch.object(extract_requests, "stage_upload", side_effect=watching), \
+                patch.object(health_ocr, "_call_brain", return_value=None):
+            extract_requests.answer_pending(config)
+        state = extract_requests.extract_state(config, "alice", request_id)
+        assert state["state"] == extract_requests.ANSWERED
+        assert "error" in state["result"]
+        assert staged == []
+
+    def test_the_copy_is_streamed_not_read_whole(self, two_users):
+        config, alice, _bob = two_users
+        pid = _panel(alice, "1/original.png", ALICE, "image/png")
+        with health_db.connect(alice.db_path) as conn:
+            panel = health_db.get_panel(conn, pid)
+        seen = {}
+
+        def brain(prompt, cfg, *, read_path=None, user_id=""):
+            seen["bytes"] = Path(read_path).read_bytes()
+            return None
+
+        real_fdopen = os.fdopen
+
+        def no_whole_read(fd, *args, **kwargs):
+            fh = real_fdopen(fd, *args, **kwargs)
+            if "r" in (args[0] if args else kwargs.get("mode", "r")):
+                def refuse(*a, **k):
+                    raise AssertionError("the source was read whole")
+                fh.read = refuse
+            return fh
+
+        with patch.object(health_ocr.os, "fdopen", side_effect=no_whole_read), \
+                patch.object(health_ocr, "_call_brain", side_effect=brain):
+            health_ocr.extract_from_panel(alice, panel, config=config)
+        assert seen["bytes"] == ALICE
