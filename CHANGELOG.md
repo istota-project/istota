@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Images and location maps in web chat are drawn at one size, the same however tall the window is, and keep their shape on a phone. Before, an image's size followed the window's height and a map stretched across the whole chat column.
 - The web UI follows your device's light or dark setting until you choose a theme in Preferences. A theme you already chose stays.
 - The Mac app signs you in about two seconds sooner when you open its window, and other quick `istota` commands start faster too, because the command line no longer loads the task, email and calendar machinery for commands that do not use it.
 - Health Documents has equal-height rows, compact source badges beside desktop titles, and a stacked mobile layout with consistent spacing between titles, metadata and attachments. Attachment chips use distinct colors for visits, conditions and vaccinations, with compact record labels. Preview opens PDFs and images in the shared viewer, with a separate Download action.

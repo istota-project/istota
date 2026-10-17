@@ -329,6 +329,13 @@
 	   text-scale setting, which is the setting picked to make lines easier to
 	   follow. */
   --chat-body-max: 900px;
+  /* The box every embed in a reading column fits inside: an inline image, a
+	   location map, and whatever comes next (a video, a PDF page). `.embed` in
+	   primitives.css is the one rule that reads them. Fixed rather than in `vh`,
+	   so an embed is the same size however tall the window is. `px` for the
+	   reason `--chat-body-max` is. */
+  --embed-max-width: 576px;
+  --embed-max-height: 432px;
   /* Device safe-area insets — the rounded screen corners, the notch, and the
 	   home-indicator strip. Non-zero only because app.html opts into
 	   `viewport-fit=cover`; without that the browser letterboxes the page for us

@@ -166,21 +166,22 @@ describe('LocationShareCard geometry', () => {
       resolve(dirname(fileURLToPath(import.meta.url)), 'LocationShareCard.svelte'),
       'utf8',
     ).match(/<style>([\s\S]*)<\/style>/)?.[1] ?? '';
-  const body = (selector: string, media = '') => {
-    const scope = media ? (style.split(media)[1] ?? '') : style.split('@media')[0];
-    return scope.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+  const body = (selector: string) => {
+    return style.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
   };
 
-  it('spans the chat body width', () => {
-    expect(body('.location-share-card')).toMatch(/max-width:\s*var\(--chat-body-max\);/);
+  it('is as wide as the embed box', () => {
+    expect(body('.location-share-card')).toMatch(/max-width:\s*var\(--embed-max-width\);/);
   });
 
-  it('sizes the map by aspect ratio: 2:1 on desktop, 4:3 on a phone', () => {
-    const frame = body('.location-share-frame');
-    expect(frame).toMatch(/aspect-ratio:\s*2\s*\/\s*1;/);
-    expect(frame).not.toMatch(/(^|[;\s])height:/);
-    expect(body('.location-share-frame', '@media (max-width: 768px)')).toMatch(
-      /aspect-ratio:\s*4\s*\/\s*3;/,
+  it('sizes the map through the shared embed box, with no ratio or height of its own', () => {
+    const source = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), 'LocationShareCard.svelte'),
+      'utf8',
     );
+    expect(source).toMatch(/class="location-share-frame embed embed-fixed"/);
+    const frame = body('.location-share-frame');
+    expect(frame).not.toMatch(/aspect-ratio|(^|[;\s])height:/);
+    expect(style).not.toMatch(/@media/);
   });
 });
