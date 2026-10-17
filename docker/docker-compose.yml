@@ -110,7 +110,7 @@ x-logging: &logging
 services:
   daemon:
     build: *istota_build
-    image: istota:${ISTOTA_TAG:-local}
+    image: ${ISTOTA_IMAGE:-istota:${ISTOTA_TAG:-local}}
     # The run contract. Every task runs in a bubblewrap sandbox inside this
     # container, and bwrap needs what Docker's defaults refuse: creating a user
     # namespace (seccomp), mounting inside it (seccomp and AppArmor), and
@@ -221,7 +221,7 @@ services:
   web:
     <<: *dropped_service
     build: *istota_build
-    image: istota:${ISTOTA_TAG:-local}
+    image: ${ISTOTA_IMAGE:-istota:${ISTOTA_TAG:-local}}
     # Healthy, not started: the daemon service's healthcheck is the `tasks`
     # table, so this starts on a migrated database. The config is an input and
     # exists before either starts.

@@ -1,6 +1,6 @@
 # A Lima VM dedicated to one istota install, on a Mac.
 #
-# The code comes from one of two sources, chosen by the params:
+# The code comes from one of three sources, chosen by the params:
 #
 #   Release (ISTOTA_TAG and RELEASE_SIGNING_KEY): the first boot clones
 #   ISTOTA_REPO_URL into /srv/app/istota/src, verifies the tag's signature
@@ -11,7 +11,25 @@
 #     limactl create --name istota \
 #       --param ISTOTA_TAG=vX.Y.Z --param RELEASE_SIGNING_KEY='ssh-ed25519 AAAA... releases' \
 #       --param WORKSPACE="$HOME/Istota" \
-#       --set 'del(.mounts[] | select(.mountPoint == "/mnt/istota-repo"))' \
+#       --set 'del(.mounts[] | select(.mountPoint == "/mnt/istota-repo" or .mountPoint == "/mnt/istota-release"))' \
+#       host/lima/istota.yaml
+#
+#   Appliance (IMAGE and RELEASE_DIR, with ISTOTA_TAG and RELEASE_SIGNING_KEY;
+#   `istota-stack create --appliance` on the Mac): the VM boots a prebuilt
+#   disk that already holds Docker, the host packages and a checkout at
+#   /srv/app/istota/src. RELEASE_DIR, the directory of unpacked releases, is
+#   mounted read-only at /mnt/istota-release. The first boot fetches the tag
+#   from its git bundle (/mnt/istota-release/<tag>/istota-<tag>.bundle) into
+#   that checkout, verifies it as a release's is verified, and runs its
+#   provision.sh, with no clone and no apt-get. Lima takes no image from a
+#   param, and `base:` would add Debian's downloads beside one, so the disk
+#   is given with `--set '.images = [...]'`, which replaces the whole list;
+#   IMAGE names the same file and is what turns appliance mode on here.
+#
+#     limactl create --name istota \
+#       --param ISTOTA_TAG=vX.Y.Z --param RELEASE_SIGNING_KEY='ssh-ed25519 AAAA... releases' \
+#       --param WORKSPACE="$HOME/Istota" --param RELEASE_DIR="$RELEASES" --param IMAGE="$DISK" \
+#       --set '.images = [{"location": "'"$DISK"'", "arch": "aarch64"}] | del(.mounts[] | select(.mountPoint == "/mnt/istota-repo"))' \
 #       host/lima/istota.yaml
 #
 #   Checkout (ISTOTA_REPO, for development and the vm test tier): the
@@ -20,15 +38,16 @@
 #   `istota-stack update` fetches tags from there.
 #
 #     limactl create --name istota --param ISTOTA_REPO="$PWD" \
-#       --set 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder"))' \
+#       --set 'del(.mounts[] | select(.mountPoint == "/srv/mount/host-folder" or .mountPoint == "/mnt/istota-release"))' \
 #       host/lima/istota.yaml
 #
 # The mounts below are everything that may cross from the Mac
-# (tests/test_host_units.py holds the list): the checkout, read-only, and
-# WORKSPACE, the Mac folder that is the workspace (STORAGE=host-folder),
-# writable at /srv/mount/host-folder. A Lima mount cannot be optional, since
-# an empty location is refused, so a VM that has no use for one drops it at
-# create with the `--set` shown above, which can only narrow the list.
+# (tests/test_host_units.py holds the list): the checkout, read-only; WORKSPACE,
+# the Mac folder that is the workspace (STORAGE=host-folder), writable at
+# /srv/mount/host-folder; and RELEASE_DIR, read-only. A Lima mount cannot be
+# optional, since an empty location is refused, so a VM that has no use for
+# one drops it at create with the `--set` shown above, which can only narrow
+# the list.
 #
 # cpus, memory and the forwarded port cannot be params (Lima reads them as
 # numbers before it expands one). Give them at create instead:
@@ -92,6 +111,10 @@ param:
   ISTOTA_REPO: ""
   # The Mac folder that is the workspace.
   WORKSPACE: ""
+  # Appliance: the disk image on the Mac (handed to Lima with --set; set
+  # here, it turns appliance mode on), and the directory of unpacked releases.
+  IMAGE: ""
+  RELEASE_DIR: ""
 
 mounts:
   - location: "{{.Param.ISTOTA_REPO}}"
@@ -100,6 +123,9 @@ mounts:
   - location: "{{.Param.WORKSPACE}}"
     mountPoint: /srv/mount/host-folder
     writable: true
+  - location: "{{.Param.RELEASE_DIR}}"
+    mountPoint: /mnt/istota-release
+    writable: false
 
 mountType: virtiofs
 
@@ -115,6 +141,10 @@ provision:
               echo "[istota-lima] give ISTOTA_REPO or ISTOTA_TAG, not both" >&2
               exit 64
           fi
+          if [ -n "${PARAM_IMAGE:-}${PARAM_RELEASE_DIR:-}" ]; then
+              echo "[istota-lima] give ISTOTA_REPO or an appliance (IMAGE, RELEASE_DIR), not both" >&2
+              exit 64
+          fi
           exec /mnt/istota-repo/host/provision.sh
       fi
 
@@ -125,6 +155,9 @@ provision:
       TAG="${PARAM_ISTOTA_TAG:-}"
       REPO_URL="${PARAM_ISTOTA_REPO_URL:-}"
       SIGNING_KEY="${PARAM_RELEASE_SIGNING_KEY:-}"
+      # Appliance mode: a prebuilt disk, and the release from the read-only
+      # release mount, so nothing is fetched from the network.
+      APPLIANCE="${PARAM_IMAGE:-}"
       refuse_tag() { echo "[istota-lima] REFUSE: $*" >&2; exit 65; }
 
       # The first provision from the verified tag is done; from here on the
@@ -134,6 +167,10 @@ provision:
       fi
       if [ -z "$TAG" ] || [ -z "$SIGNING_KEY" ] || [ -z "$REPO_URL" ]; then
           echo "[istota-lima] give ISTOTA_TAG and RELEASE_SIGNING_KEY (a release), or ISTOTA_REPO (a checkout)" >&2
+          exit 64
+      fi
+      if [ -n "$APPLIANCE" ] && [ -z "${PARAM_RELEASE_DIR:-}" ]; then
+          echo "[istota-lima] an appliance needs RELEASE_DIR, the releases its tag comes from" >&2
           exit 64
       fi
 
@@ -206,12 +243,24 @@ provision:
           exit 78
       fi
 
-      apt-get update -qq
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
+      # The appliance has git already, and no network to ask for it.
+      if [ -z "$APPLIANCE" ]; then
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
+      fi
       # The file provision.sh writes from host.env, in the same form.
-      printf 'releases namespaces="git" %s\n' "$SIGNING_KEY" > "$ALLOWED_SIGNERS"
+      printf 'releases namespaces="git,istota-images" %s\n' "$SIGNING_KEY" > "$ALLOWED_SIGNERS"
       chmod 0644 "$ALLOWED_SIGNERS"
-      if [ -d "${SRC}/.git" ]; then
+      if [ -n "$APPLIANCE" ]; then
+          bundle="/mnt/istota-release/${TAG}/istota-${TAG}.bundle"
+          if [ ! -d "$SRC" ] || [ ! -f "$bundle" ]; then
+              echo "[istota-lima] an appliance needs its checkout at ${SRC} and ${bundle}" >&2
+              exit 66
+          fi
+          # A tag the disk already holds is not replaced by a different one:
+          # git refuses to move an existing tag without --force.
+          verified_git fetch --quiet "$bundle" "refs/tags/${TAG}:refs/tags/${TAG}"
+      elif [ -d "${SRC}/.git" ]; then
           verified_git fetch --quiet --tags origin
       else
           git clone --quiet --no-checkout "$REPO_URL" "$SRC"

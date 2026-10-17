@@ -64,7 +64,10 @@ def _instructions(dockerfile: Path) -> list[str]:
 
 
 def _apt_runs(dockerfile: Path) -> list[str]:
-    return [i for i in _instructions(dockerfile) if i.startswith("RUN ") and "apt-get" in i]
+    """The steps that fetch from Debian. The browser's chrome stage runs only
+    `dpkg -i` and `apt-get check`, which read dpkg's status and fetch nothing."""
+    return [i for i in _instructions(dockerfile)
+            if i.startswith("RUN ") and re.search(r"apt-get (update|install)", i)]
 
 
 def _mirror_line(dockerfile: Path) -> str:
@@ -218,4 +221,6 @@ class TestTheHost:
 
     def test_provision_sets_the_mirror_before_its_first_apt_call(self):
         call = self.TEXT.index('use_apt_mirror "$(host_env APT_MIRROR)" "${STACK}/.apt-mirror" ""')
-        assert call < self.TEXT.index("apt-get update -qq")
+        # apt-get update lives inside apt_install (the offline rule), so the
+        # first apt call is the first apt_install invocation, not the definition.
+        assert call < self.TEXT.index("\napt_install ")

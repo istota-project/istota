@@ -351,7 +351,7 @@ run_server() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git openssh-client ca-certificates
 
     # The file provision.sh writes from host.env, in the same form.
-    printf 'releases namespaces="git" %s\n' "$SIGNING_KEY" > "$ALLOWED_SIGNERS"
+    printf 'releases namespaces="git,istota-images" %s\n' "$SIGNING_KEY" > "$ALLOWED_SIGNERS"
     chmod 0644 "$ALLOWED_SIGNERS"
     if [ -d "${SRC}/.git" ]; then
         info "Fetching tags into ${SRC}"

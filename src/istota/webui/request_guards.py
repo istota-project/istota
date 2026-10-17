@@ -1,10 +1,11 @@
-"""The origin check and the bounded body reader, shared by the two web apps.
+"""The origin and host checks and the bounded body reader, for the two web apps.
 
 ``web_app`` and the first-run setup server both need them, and the setup
 server must run with no config, so it cannot import ``web_app`` (which loads
 config at import). Each app keeps its own policy around these: ``web_app``
 compares the origin with ``[site] hostname`` and skips the check in no-auth
-mode; the setup server compares it with the request's own ``Host``.
+mode; the setup server compares it with the request's own ``Host``. The
+``Host`` check is ``web_app``'s alone, on an install with local login codes.
 
 Stdlib only at import; Starlette's ``ClientDisconnect`` is imported where it
 is caught.
@@ -41,6 +42,21 @@ def origin_refusal(headers, hostname: str) -> str | None:
         return "missing origin"
     if urlsplit(origin).hostname != _hostname(hostname):
         return "origin mismatch"
+    return None
+
+
+def host_refusal(headers, allowed: frozenset[str]) -> str | None:
+    """Why the request's ``Host`` is not one of ``allowed``, or None when it is.
+
+    Against DNS rebinding: a page on another name that resolves to loopback
+    reaches the listener with its own name in ``Host``. The comparison is
+    exact, port included, and case-insensitive.
+    """
+    host = (headers.get("host") or "").strip().lower()
+    if not host:
+        return "missing host"
+    if host not in allowed:
+        return "unknown host"
     return None
 
 

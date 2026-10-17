@@ -344,6 +344,8 @@ def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
     """Run the setup wizard. Returns a process exit code (0 = success)."""
     if getattr(args, "snapshot", None) or getattr(args, "restore", None):
         return run_rerun_snapshot(args, out=out)
+    if getattr(args, "desktop_app", False):
+        return run_desktop_app(args, out=out)
     if getattr(args, "web", False) or getattr(args, "local", False):
         from .webui import setup_app  # noqa: PLC0415 - FastAPI only for the web setup
 
@@ -366,6 +368,15 @@ def run_setup(args, *, input_fn=input, out=print, getpass_fn=None) -> int:
 CONTAINER_DATA_DIR = Path("/data")
 CONTAINER_DB_PATH = "/data/db/istota.db"
 CONTAINER_TEMP_DIR = "/data/tmp"
+
+
+def container_db_path(data_dir: Path, configured: str = CONTAINER_DB_PATH) -> Path:
+    """A database path the config names under ``/data``, found under ``data_dir``."""
+    path = Path(configured)
+    if not path.is_relative_to(CONTAINER_DATA_DIR):
+        return path
+    return Path(data_dir) / path.relative_to(CONTAINER_DATA_DIR)
+
 CONTAINER_REPOS_DIR = "/data/repos"
 #: The devbox socket directories, one per-user volume mounted under each. Under
 #: /data because the root phase hands writable mounts there to uid 10001, and a
@@ -509,6 +520,10 @@ class ContainerAnswers:
     #: which only the Mac writes), 0 off the local VM. Read, never asked, and
     #: written nowhere: it only holds a `local` hostname to that port.
     forwarded_port: int = 0
+    #: The Mac app's VM (host.env's ISTOTA_DESKTOP_APP=1, which only the Mac
+    #: writes). Read, never asked, written nowhere: under `local` ingress it
+    #: adds the app's login codes to the login methods.
+    desktop_app: bool = False
 
     @property
     def disabled_modules(self) -> list[str]:
@@ -545,9 +560,11 @@ class ContainerAnswers:
     @property
     def web_auth(self) -> list[str]:
         methods = []
+        if self.desktop_app and self.ingress == "local":
+            methods.append("local_code")
         if self.uses_nextcloud and self.oauth_client_id:
             methods.append("nextcloud")
-        if self.email_login or not methods:
+        if self.email_login or methods in ([], ["local_code"]):
             methods.append("email")
         return methods
 
@@ -810,10 +827,18 @@ def stack_env_values(a: ContainerAnswers) -> dict[str, str]:
         "ISTOTA_SECRETS_DIR": "./secrets",
         "NGINX_PUBLISH": plain,
         "NGINX_PUBLISH_TLS": tls,
-        # Secure in every mode: `local` is http://localhost, which browsers
-        # treat as a secure context. Owned here so a re-run resets an older 1.
-        "ISTOTA_WEB_INSECURE_COOKIES": "0",
+        "ISTOTA_WEB_INSECURE_COOKIES": web_insecure_cookies(a.ingress),
     }
+
+
+def web_insecure_cookies(ingress: str) -> str:
+    """``.env``'s ISTOTA_WEB_INSECURE_COOKIES for an ingress mode.
+
+    `local` is plain http on loopback: Secure protects nothing there, and
+    Safari and WKWebView drop a Secure cookie from http://localhost. Derived on
+    every run, so a move off `local` writes 0 again.
+    """
+    return "1" if ingress == "local" else "0"
 
 
 #: The remote's name in the ``rclone.conf`` setup stages, and ``host.env``'s
@@ -899,6 +924,14 @@ def forwarded_port(vm_dir: Path | None) -> int:
     if not (value.isascii() and value.isdigit()) or value.startswith("0") or int(value) > 65535:
         return 0
     return int(value)
+
+
+def desktop_app(vm_dir: Path | None) -> bool:
+    """host.env's ISTOTA_DESKTOP_APP: the Mac app's VM, written by the Mac's
+    ``create --appliance``."""
+    if vm_dir is None or not (vm_dir / "host.env").is_file():
+        return False
+    return _host_env_value((vm_dir / "host.env").read_text(encoding="utf-8"), "ISTOTA_DESKTOP_APP") == "1"
 
 
 class PriorConfigUnreadable(SetupError):
@@ -1043,6 +1076,7 @@ def prior_answers(data_dir: Path, vm_dir: Path | None) -> ContainerAnswers | Non
     a.hostname = string(table("site"), "hostname", a.hostname)
 
     host_env = _env_file_values(vm_dir / "host.env") if vm_dir is not None else {}
+    a.desktop_app = desktop_app(vm_dir)
     if host_env.get("INGRESS"):
         a.ingress = host_env["INGRESS"]
     elif web.get("trusted_proxy_hops") == INGRESS_HOPS["proxied"]:
@@ -1206,6 +1240,13 @@ def validate_container_answers(a: ContainerAnswers) -> list[FieldError]:
         refuse(
             "hostname",
             f"This VM's port forward is {a.forwarded_port}; use {local_address(a.forwarded_port)}.",
+        )
+    from .config import local_login_hosts  # noqa: PLC0415 - keep the import graph lean
+
+    if "local_code" in a.web_auth and not local_login_hosts(a.hostname):
+        refuse(
+            "hostname",
+            f"The Mac app opens Istota at localhost:<port>; use {local_address(a.forwarded_port or DEFAULT_LOCAL_PORT)}.",
         )
     if a.ingress == "direct" and a.tls_cert_source == "self-signed":
         refuse(
@@ -1508,7 +1549,7 @@ def _follow(prior_value: str, prior_source: str, new_source: str) -> str:
 
 def collect_container_answers(
     args, *, input_fn, out, getpass_fn, current_storage: str = "",
-    prior: ContainerAnswers | None = None, forwarded_port: int = 0,
+    prior: ContainerAnswers | None = None, forwarded_port: int = 0, on_desktop_app: bool = False,
 ) -> ContainerAnswers:
     """Build ``ContainerAnswers`` from flags and (unless ``--yes``) prompts.
 
@@ -1532,10 +1573,13 @@ def collect_container_answers(
     ``forwarded_port`` is host.env's LOCAL_FORWARD_PORT (``forwarded_port()``):
     with no prior it is the hostname's default, and a ``local`` hostname on
     another port is refused.
+
+    ``on_desktop_app`` is host.env's ISTOTA_DESKTOP_APP (``desktop_app()``).
     """
     interactive = not getattr(args, "yes", False)
     a = dataclasses.replace(prior) if prior is not None else ContainerAnswers()
     a.forwarded_port = forwarded_port
+    a.desktop_app = on_desktop_app
     if prior is None and forwarded_port:
         a.hostname = local_address(forwarded_port)
 
@@ -1907,6 +1951,7 @@ def run_container_setup(args, *, input_fn, out, getpass_fn) -> int:
     a = collect_container_answers(
         args, input_fn=input_fn, out=out, getpass_fn=getpass_fn,
         current_storage=current_storage(vm_dir), prior=prior, forwarded_port=forwarded_port(vm_dir),
+        on_desktop_app=desktop_app(vm_dir),
     )
     write_container_setup(a, data_dir=data_dir, vm_dir=vm_dir, out=out, backup=RERUN_CONFIG_BACKUPS)
 
@@ -2145,4 +2190,119 @@ def run_rerun_snapshot(args, *, out) -> int:
     else:
         restore_rerun_snapshot(Path(restore), data_dir, secrets_dir)
         out(f"Put the setup files back from {restore}.")
+    return 0
+
+
+# ===========================================================================
+# An install moved into the Mac app
+# ===========================================================================
+
+
+def adopt_desktop_app(data_dir: Path, vm_dir: Path, *, out) -> None:
+    """Give a local install moved into the Mac app what the app's own setup
+    writes, added to what is there.
+
+    The Mac's `istota-stack restore` and `import-standalone`, made from an
+    appliance, run this once the backup or the standalone install is in
+    place: host.env's ISTOTA_DESKTOP_APP, `.env`'s session-cookie value for
+    local ingress (`web_insecure_cookies`), and `local_code` added to
+    `[web] auth` (`ContainerAnswers.web_auth`'s rule for a new install). The
+    config goes through apply's planner, so it is validated by loading it and
+    the old file is kept as a backup. A config that cannot take the codes is
+    left as it is and the reason printed: the install keeps its own sign-in,
+    and the env files still change, since neither needs the codes.
+    """
+    host_path, env_path = vm_dir / "host.env", vm_dir / ".env"
+    host_text = host_path.read_text(encoding="utf-8") if host_path.is_file() else ""
+    ingress = _host_env_value(host_text, "INGRESS")
+    if ingress != "local":
+        raise SetupError(
+            f"host.env's INGRESS is {ingress or 'not set'}; only a local install, on this Mac's "
+            "loopback, can be the Mac app's. Nothing was changed."
+        )
+    config_path = data_dir / "config" / "config.toml"
+    if not config_path.is_file():
+        raise SetupError(f"There is no {config_path}: no install to move into the Mac app. Nothing was changed.")
+    import tomllib  # noqa: PLC0415
+
+    try:
+        document = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise SetupError(f"{config_path} does not parse ({exc}). Nothing was changed.") from None
+
+    host_path.write_text(merge_env_text(host_text, {"ISTOTA_DESKTOP_APP": "1"}, _HOST_ENV_HEADER), encoding="utf-8")
+    out("  host.env: ISTOTA_DESKTOP_APP=1")
+    env_text = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    cookies = {"ISTOTA_WEB_INSECURE_COOKIES": web_insecure_cookies(ingress)}
+    env_path.write_text(merge_env_text(env_text, cookies, _STACK_ENV_HEADER), encoding="utf-8")
+    out(f"  .env: ISTOTA_WEB_INSECURE_COOKIES={cookies['ISTOTA_WEB_INSECURE_COOKIES']}")
+    _add_login_codes(document, config_path, data_dir, out=out)
+
+
+def _login_code_user_refusal(document: dict, data_dir: Path) -> str | None:
+    """Why `istota web login-code` with no --user would fail on this install,
+    which is how the app asks: the one user with a profile and a web identity."""
+    import sqlite3  # noqa: PLC0415
+
+    from istota.webui import auth as web_auth  # noqa: PLC0415
+
+    configured = document.get("db_path", CONTAINER_DB_PATH)
+    if not isinstance(configured, str):
+        return "db_path is not a path"
+    db_path = container_db_path(data_dir, configured)
+    if not db_path.is_file():
+        return f"there is no database at {db_path}"
+    try:
+        web_auth.local_login_user(db_path)
+    except ValueError as exc:
+        return str(exc)
+    except sqlite3.Error as exc:
+        return f"the database could not be read ({type(exc).__name__})"
+    return None
+
+
+def _add_login_codes(document: dict, config_path: Path, data_dir: Path, *, out) -> None:
+    from istota import apply  # noqa: PLC0415
+    from istota.config import WEB_AUTH_METHODS  # noqa: PLC0415
+
+    keeps = "this install keeps its own sign-in"
+    web = document.setdefault("web", {})
+    raw = web.get("auth", ["nextcloud"]) if isinstance(web, dict) else None
+    methods = raw.split(",") if isinstance(raw, str) else raw
+    if not isinstance(methods, list) or not all(isinstance(m, str) for m in methods):
+        out(f"  Not turning on the app's login codes: [web] auth is not a list of methods; {keeps}.")
+        return
+    methods = [m.strip().lower() for m in methods if m.strip()]
+    if "local_code" in methods:
+        out("  [web] auth already has local_code.")
+        return
+    if "none" in methods or not set(methods) <= set(WEB_AUTH_METHODS):
+        out(f"  Not turning on the app's login codes: [web] auth is {methods}; {keeps}.")
+        return
+    refusal = _login_code_user_refusal(document, data_dir)
+    if refusal:
+        out(f"  Not turning on the app's login codes: {refusal}; {keeps}.")
+        return
+    web["auth"] = ["local_code", *methods]
+    try:
+        section = apply.plan_config(document, config_path, backup=RERUN_CONFIG_BACKUPS)
+    except apply.PlanError as exc:
+        out(f"  Not turning on the app's login codes: {exc}; {keeps}.")
+        return
+    if section.changed and section.write is not None:
+        section.write()
+    out(f"  [web] auth: {web['auth']}")
+
+
+def run_desktop_app(args, *, out) -> int:
+    """``istota setup --desktop-app --vm-dir /vm``, run as uid 10001 by
+    ``istota-stack setup --desktop-app``, which installs the staged files."""
+    if getattr(args, "web", False) or getattr(args, "force", False):
+        raise SetupError("--desktop-app changes an existing install by itself; it takes no --web or --force.")
+    setup_shape(args)
+    if not getattr(args, "vm_dir", None):
+        raise SetupError("--desktop-app needs --vm-dir, whose host.env and .env it changes.")
+    data_dir = Path(getattr(args, "data_dir", None) or CONTAINER_DATA_DIR)
+    out("Making this install the Mac app's:")
+    adopt_desktop_app(data_dir, Path(args.vm_dir), out=out)
     return 0

@@ -10,8 +10,7 @@
 # config.toml is an input. `istota setup` writes it once and the operator owns
 # it after that; this script reads it and never writes it. What it does:
 #
-#   1. refuses to start without a config, or with one it must not run
-#      (see the preflight below);
+#   1. refuses to start without a config, or with one it must not run (the preflight);
 #   2. resolves the secrets store's master key and the web-only token key;
 #   3. runs `istota init`, the only migration runner;
 #   4. ensures the first admin when there are no users at all;
@@ -45,19 +44,17 @@ fi
 
 # --- Preflight: a config this stack must not run ---
 #
-# Before anything is written. Five refusals, each naming the fix:
-#   - it names the compose Nextcloud (`http://nextcloud`), which the shipped
-#     compose file no longer runs, and no such host resolves;
+# Before anything is written. Six refusals, each naming the fix:
+#   - it names the compose Nextcloud (`http://nextcloud`), no longer shipped, and it does not resolve;
 #   - the workspace mount is not the one the host provides: a daemon writing into an
 #     unmounted /mnt/shared writes into the container, and those files never reach
 #     Nextcloud (parity row 9) or the Mac. ISTOTA_WORKSPACE_FSTYPE names the type
 #     (fuse.rclone when unset under Nextcloud); a mount with neither is refused;
 #   - a host folder (ISTOTA_WORKSPACE_MARKER_REQUIRED) without .istota-workspace, or a
 #     config not using it: an empty stand-in for a folder that went away (L1);
-#   - a URL and a workspace on the rclone mount without workspace_mount_path, which
-#     would run as a local workspace with the mount checks off;
-#   - behind TLS, `[site] hostname` is not the stack's DOMAIN, which is a login
-#     that fails its origin check.
+#   - a URL and a workspace on the rclone mount without workspace_mount_path (no mount checks);
+#   - behind TLS, `[site] hostname` is not DOMAIN, a login that fails its origin check;
+#   - the Mac app's password-free `local_code` login under any ingress but `local` (row M1).
 # ISTOTA_TESTBED_SHARED_VOLUME_WORKSPACE is the full test tier's concession: its Nextcloud is
 # a shared Docker volume, so a mount point of any type passes. No operator sets it.
 python3 - "$CONFIG_FILE" <<'PY' || exit 78
@@ -122,6 +119,9 @@ if ingress in ("direct", "proxied") and config.site.hostname != domain:
     refusals.append(
         f"[site] hostname is {config.site.hostname!r} and the stack's DOMAIN is {domain!r}; "
         "behind TLS they must be the same name, or every login fails its origin check.")
+if config.web.has_method("local_code") and ingress not in ("", "local"):
+    refusals.append(f'[web] auth has "local_code", the Mac app\'s login without a password, under '
+                    f"INGRESS={ingress}; it is safe only on local ingress. Remove it from [web] auth.")
 for refusal in refusals:
     print(f"[istota] REFUSE: {refusal}", file=sys.stderr)
 sys.exit(1 if refusals else 0)

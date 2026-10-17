@@ -1982,3 +1982,141 @@ class TestTheRerunSnapshot:
         snapshot = str(stack / "snap")
         with pytest.raises(setup_wizard.SetupError, match="--snapshot"):
             self._run(stack, snapshot=snapshot, restore=snapshot)
+
+
+class TestAnInstallMovedIntoTheApp:
+    """`istota setup --desktop-app`: a local install moved into the Mac app
+    (`restore` or `import-standalone` with `--appliance`) gets what a new app
+    install's setup writes, added to what is there: host.env's
+    ISTOTA_DESKTOP_APP, the session-cookie value `stack_env_values` derives for
+    local ingress, and `local_code` in `[web] auth`, written through apply's
+    config planner. Everything else in the three files is kept."""
+
+    ANSWERS = dict(user_id="alice", hostname="localhost:8181", ingress="local", host_folder=True,
+                   brain_kind="native", native_base_url="https://llm.example.test/v1",
+                   native_model="model-x", native_api_key="native-key")
+
+    @pytest.fixture
+    def stack(self, tmp_path, monkeypatch, _no_credentials_in_env):
+        monkeypatch.delenv("ISTOTA_SETUP_SHAPE", raising=False)
+        setup_wizard.write_container_setup(
+            ContainerAnswers(**self.ANSWERS), data_dir=tmp_path / "data", vm_dir=tmp_path / "vm",
+            out=lambda *_: None,
+        )
+        env = tmp_path / "vm" / ".env"
+        # A command-line install set up before local ingress wrote 1, and a line of the operator's.
+        env.write_text(env.read_text().replace("ISTOTA_WEB_INSECURE_COOKIES=1", "ISTOTA_WEB_INSECURE_COOKIES=0")
+                       + "BROWSER_MEM_LIMIT=2g\n")
+        host = tmp_path / "vm" / "host.env"
+        host.write_text(host.read_text() + "HOST_LOOPBACK_ALLOW=11434\n")
+        self._user(tmp_path, "alice", identity=True)
+        return tmp_path
+
+    @staticmethod
+    def _user(tmp_path: Path, user_id: str, *, identity: bool) -> None:
+        from istota import db, user_profiles
+        from istota.webui import auth as web_auth
+        db_path = tmp_path / "data" / "db" / "istota.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db.init_db(db_path)
+        user_profiles.ensure_profile(db_path, user_id)
+        if identity:
+            web_auth.upsert_identity(db_path, user_id, f"{user_id}@example.com")
+
+    @staticmethod
+    def _run(tmp_path: Path, out=None) -> int:
+        args = SimpleNamespace(shape="container", vm_dir=str(tmp_path / "vm"),
+                               data_dir=str(tmp_path / "data"), desktop_app=True)
+        return setup_wizard.run_setup(args, out=out or (lambda *_: None))
+
+    @staticmethod
+    def _config(tmp_path: Path) -> Path:
+        return tmp_path / "data" / "config" / "config.toml"
+
+    def test_it_gets_what_a_new_app_install_has(self, stack, monkeypatch):
+        assert self._run(stack) == 0
+        new_install = ContainerAnswers(**self.ANSWERS, desktop_app=True)
+        loaded = _load(stack, self._config(stack).read_text(), monkeypatch)
+        assert loaded.web.auth == new_install.web_auth == ["local_code", "email"]
+        assert setup_wizard.desktop_app(stack / "vm")
+        env = _env((stack / "vm" / ".env").read_text())
+        assert env["ISTOTA_WEB_INSECURE_COOKIES"] == setup_wizard.stack_env_values(new_install)[
+            "ISTOTA_WEB_INSECURE_COOKIES"] == "1"
+        assert env["BROWSER_MEM_LIMIT"] == "2g"
+        host = _env((stack / "vm" / "host.env").read_text())
+        assert host["HOST_LOOPBACK_ALLOW"] == "11434" and host["INGRESS"] == "local"
+        assert list(self._config(stack).parent.glob("config.toml.bak.*")), "the old config was not kept"
+
+    def test_a_setting_setup_does_not_own_is_kept(self, stack, monkeypatch):
+        config = self._config(stack)
+        config.write_text(config.read_text() + "\n[briefings]\nnewsletter_max_links_per_source = 7\n")
+        assert self._run(stack) == 0
+        loaded = _load(stack, config.read_text(), monkeypatch)
+        assert loaded.briefings.newsletter_max_links_per_source == 7
+        assert loaded.web.auth == ["local_code", "email"]
+
+    def test_a_second_run_changes_nothing(self, stack):
+        assert self._run(stack) == 0
+        files = [self._config(stack), stack / "vm" / ".env", stack / "vm" / "host.env"]
+        before = [path.read_bytes() for path in files]
+        backups = sorted(self._config(stack).parent.glob("config.toml.bak.*"))
+        assert self._run(stack) == 0
+        assert [path.read_bytes() for path in files] == before
+        assert sorted(self._config(stack).parent.glob("config.toml.bak.*")) == backups
+
+    def test_a_config_that_cannot_take_codes_keeps_its_login(self, stack):
+        """A hostname the codes are refused for: the config stays as it was and
+        says why; the env files still change, since neither needs the codes."""
+        config = self._config(stack)
+        config.write_text(config.read_text().replace('"localhost:8181"', '"bot.example.test"'))
+        before = config.read_bytes()
+        said: list[str] = []
+        assert self._run(stack, out=said.append) == 0
+        assert config.read_bytes() == before
+        assert any("login codes" in line for line in said), said
+        assert setup_wizard.desktop_app(stack / "vm")
+        assert _env((stack / "vm" / ".env").read_text())["ISTOTA_WEB_INSECURE_COOKIES"] == "1"
+
+    @pytest.mark.parametrize("case", ["no database", "two users", "no web identity"])
+    def test_codes_wait_for_one_user_with_a_web_identity(self, stack, case):
+        """`istota web login-code` with no --user signs in the one user with a
+        profile, through their web identity; without one, codes would only
+        fail, so the config keeps its login and says why."""
+        if case == "no database":
+            (stack / "data" / "db" / "istota.db").unlink()
+        elif case == "two users":
+            self._user(stack, "bob", identity=True)
+        else:
+            from istota import db
+            with db.get_db(stack / "data" / "db" / "istota.db") as conn:
+                conn.execute("DELETE FROM web_auth_identities")
+        config = self._config(stack)
+        before = config.read_bytes()
+        said: list[str] = []
+        assert self._run(stack, out=said.append) == 0
+        assert config.read_bytes() == before
+        assert any("Not turning on the app's login codes" in line for line in said), said
+        assert setup_wizard.desktop_app(stack / "vm")
+
+    def test_no_login_stays_no_login(self, stack):
+        config = self._config(stack)
+        config.write_text(re.sub(r"(?m)^auth = .*$", 'auth = ["none"]', config.read_text()))
+        before = config.read_bytes()
+        said: list[str] = []
+        assert self._run(stack, out=said.append) == 0
+        assert config.read_bytes() == before
+        assert any("login codes" in line for line in said), said
+
+    def test_only_a_local_install_is_the_apps(self, stack):
+        host = stack / "vm" / "host.env"
+        host.write_text(host.read_text().replace("INGRESS=local", "INGRESS=direct"))
+        files = [self._config(stack), stack / "vm" / ".env", host]
+        before = [path.read_bytes() for path in files]
+        with pytest.raises(setup_wizard.SetupError, match="local"):
+            self._run(stack)
+        assert [path.read_bytes() for path in files] == before
+
+    def test_without_a_config_there_is_nothing_to_move(self, stack):
+        self._config(stack).unlink()
+        with pytest.raises(setup_wizard.SetupError, match="config.toml"):
+            self._run(stack)

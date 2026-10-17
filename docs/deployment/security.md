@@ -258,6 +258,14 @@ A devbox gets neither exception. The rules fail closed: an allow-list entry that
 
 **The master key leaves the VM once, for the Keychain.** `create` reads `/data/.secret_key` and stores it in the login Keychain (service `istota.local`, account `secret-key-<instance>`) through `security -i`, which reads its command on stdin, so the key is on no command line another local user could see with `ps`. It reads the item back and compares. The snapshots and config copies in the workspace folder hold no key and no credential (`secrets/` is never copied there), so the folder, and a Time Machine backup of it, cannot decrypt the stored credentials alone. The Keychain item is in the file-based login keychain, which iCloud Keychain does not sync.
 
+## The Mac app
+
+The Mac app, a separate project (istota-mac), is the local VM with a window, so everything in the section above holds for it. This section covers what istota provides for it; the app's own confinement (its web windows, per-install cookie stores, the command-line tools it writes) is described in that project's documentation.
+
+**Signing in without a password is for the Mac user who owns the app.** The app asks the VM for a one-use code (`istota web login-code`, through the Mac CLI's `exec`), valid for 60 seconds, and loads it in the URL fragment, which no server log sees. The `local_code` method is refused under any ingress but `local` or unset (a stack started with no `host.env`) and for any `[site] hostname` but `localhost:<port>`, the address the app opens, and the web app answers only at `localhost` and `127.0.0.1` on that port. Whoever can run `limactl` against the app's Lima directory can mint a code; that is the macOS user who owns it, who could reach the VM as root anyway.
+
+**Keys stay off the Mac's command lines and files.** The model's key is entered in the web setup page, which runs in the VM. The master key's copy goes to the login Keychain through `security -i`'s stdin, as the command-line install does.
+
 ## Deferred DB operations
 
 With no database reachable from inside the sandbox at all, skills write JSON request files to the always-writable temp dir. The scheduler (unsandboxed) processes them after successful completion:
