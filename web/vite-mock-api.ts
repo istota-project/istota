@@ -410,6 +410,7 @@ const BIOMARKER_REFS: Array<{
 const user = {
   username: 'carol',
   display_name: 'Carol',
+  show_nav_unread_badges: true,
   bot_name: 'Istota',
   is_admin: true,
   // How the bot is reachable outside the web UI. `email` is null on an
@@ -7314,6 +7315,15 @@ const handlers: MockHandler[] = [
   searchHandler,
   ({ url, method, body }) => mockWalletRoutes(url, method, body),
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
+  ({ url }) =>
+    url === '/istota/api/nav/unread'
+      ? {
+          enabled: true,
+          chat: mockChatRooms.reduce((n, r) => n + mockUnreadCount(r.token), 0),
+          briefings: 3,
+          feeds: 66,
+        }
+      : undefined,
   avatarsHandler,
   chatFilePreviewHandler,
   chatFilesHandler,

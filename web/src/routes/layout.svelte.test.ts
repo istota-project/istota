@@ -555,6 +555,8 @@ describe('navigation badge presentation', () => {
           const pill = link.querySelector('.count-pill');
           if (count) {
             expect(pill).toHaveTextContent(count > 99 ? '99+' : String(count));
+            // Only the inline row takes the out-of-flow superscript; the menu keeps the pill.
+            expect(pill?.classList.contains('superscript')).toBe(role === 'link');
             expect(link).toHaveAttribute('title', label);
             expect(pill).toHaveAttribute('title', label);
             expect(link.closest('[aria-live]')).toBeNull();

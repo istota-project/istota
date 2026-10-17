@@ -26,9 +26,15 @@
      * and a copy would drift on the next sizing change.
      */
     tone?: 'accent' | 'muted';
+    /**
+     * `pill` sits in the row's flow. `superscript` is the inline app nav's:
+     * small amber digits taken out of flow past the end of the parent, which
+     * must be positioned, so a count appearing or changing moves no link.
+     */
+    shape?: 'pill' | 'superscript';
   }
 
-  let { count, title, tone = 'accent' }: Props = $props();
+  let { count, title, tone = 'accent', shape = 'pill' }: Props = $props();
 
   const shown = $derived(count > 99 ? '99+' : String(count));
 </script>
@@ -45,7 +51,12 @@
   its button's own `aria-label`, which overrides descendant content entirely.
 -->
 {#if count > 0}
-  <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
+  <span
+    class="count-pill"
+    class:muted={tone === 'muted'}
+    class:superscript={shape === 'superscript'}
+    {title}>{shown}</span
+  >
 {/if}
 
 <style>
@@ -69,5 +80,19 @@
   .count-pill.muted {
     background: var(--surface-badge);
     color: var(--text-muted);
+  }
+  .count-pill.superscript {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    min-width: 0;
+    height: auto;
+    padding: 0 0 0 0.1em;
+    border-radius: 0;
+    background: none;
+    color: var(--accent-amber);
+    font-size: 0.7em;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
   }
 </style>

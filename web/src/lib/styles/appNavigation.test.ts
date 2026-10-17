@@ -47,3 +47,14 @@ it('lets inline links wrap when badges and large text outgrow the desktop row', 
   const controls = blockAfter(stripComments(readLayer('app-shell')), '.app-nav .nav-right {') ?? '';
   expect(controls).toMatch(/flex-shrink:\s*0;/);
 });
+
+it('positions inline links so an unread count sits out of flow and moves nothing', () => {
+  const link = blockAfter(stripComments(readLayer('app-shell')), '.app-nav .nav-links a {') ?? '';
+  expect(link).toMatch(/position:\s*relative;/);
+  const pill = readFileSync(
+    resolve(process.cwd(), 'src/lib/components/ui/CountPill.svelte'),
+    'utf8',
+  );
+  const style = stripComments(pill.slice(pill.indexOf('<style>')));
+  expect(blockAfter(style, '.count-pill.superscript {') ?? '').toMatch(/position:\s*absolute;/);
+});

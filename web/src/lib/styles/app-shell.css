@@ -58,10 +58,12 @@
   display: flex;
   flex-wrap: wrap;
   min-width: 0;
-  gap: var(--space-1) var(--space-3);
+  /* The column gap is wide enough for an unread count's out-of-flow digits. */
+  gap: var(--space-1) var(--space-4);
 }
 
 .app-nav .nav-links a {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
