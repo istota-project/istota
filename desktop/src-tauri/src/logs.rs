@@ -82,8 +82,11 @@ pub fn write_bundle(logs_dir: &Path, status: &str, app_log: &Path) -> std::io::R
     Ok(dir)
 }
 
+/// Shows `dir` in Finder, through the same opener as external links
+/// (`ISTOTA_DESKTOP_OPENER` in the desktop tier).
 pub fn reveal(dir: &Path) {
-    let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(dir).status();
+    let opener = std::env::var_os("ISTOTA_DESKTOP_OPENER").unwrap_or_else(|| "/usr/bin/open".into());
+    let _ = std::process::Command::new(opener).arg("-R").arg(dir).status();
 }
 
 #[cfg(test)]

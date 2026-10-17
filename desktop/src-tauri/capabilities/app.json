@@ -11,6 +11,18 @@
     "allow-open-setup",
     "allow-vm-start",
     "allow-show-log-files",
-    "allow-quit-app"
+    "allow-quit-app",
+    "allow-first-run-info",
+    "allow-pick-folder",
+    "allow-begin-setup",
+    "allow-resume-setup",
+    "allow-cancel-setup",
+    "allow-settings-info",
+    "allow-retry-layers",
+    "allow-set-claude-code",
+    "allow-set-host-port",
+    "allow-restore-backup",
+    "allow-remove-istota",
+    "allow-locate-folder"
   ]
 }

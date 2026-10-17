@@ -31,6 +31,14 @@ pub struct AppState {
     /// The profile the window last showed.
     #[serde(default)]
     pub last_profile: Option<String>,
+    /// The local VM's first run finished: a VM found without it is one a
+    /// cancelled or crashed first run left, which is resumed, not started.
+    #[serde(default)]
+    pub local_ready: bool,
+    /// The job that makes the local VM while it has not finished, so Resume
+    /// after a relaunch runs the same one (a move resumes as a restore).
+    #[serde(default)]
+    pub pending_job: Option<crate::firstrun::Job>,
 }
 
 impl Default for AppState {
@@ -38,6 +46,8 @@ impl Default for AppState {
         AppState {
             profiles: vec![Profile { id: LOCAL_ID.into(), kind: Kind::Local }],
             last_profile: Some(LOCAL_ID.into()),
+            local_ready: false,
+            pending_job: None,
         }
     }
 }
@@ -60,6 +70,16 @@ impl AppState {
             }
         }
         Ok(state)
+    }
+
+    /// Writes the state file through a temporary file and a rename, so a
+    /// crash leaves the old file or the new one.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(self).map_err(|err| err.to_string())?;
+        let partial = path.with_extension("json.partial");
+        std::fs::write(&partial, text + "\n")
+            .and_then(|()| std::fs::rename(&partial, path))
+            .map_err(|err| format!("could not write {}: {err}", path.display()))
     }
 
     pub fn current(&self) -> Option<&Profile> {
@@ -121,9 +141,14 @@ mod tests {
                 kind: Kind::Remote { url: "https://istota.example.org/istota/".into() },
             }],
             last_profile: Some("work".into()),
+            local_ready: true,
+            pending_job: Some(crate::firstrun::Job::Move),
         };
-        std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+        state.save(&path).unwrap();
         assert_eq!(AppState::load(&path).unwrap(), state);
+        // A Stage 8 state file has no local_ready: its VM's first run is not known to have finished.
+        std::fs::write(&path, r#"{"profiles":[{"id":"local","kind":"local"}],"last_profile":"local"}"#).unwrap();
+        assert!(!AppState::load(&path).unwrap().local_ready);
 
         std::fs::write(&path, r#"{"profiles":[{"id":"x","kind":"remote","url":"http://evil.example/"}]}"#)
             .unwrap();

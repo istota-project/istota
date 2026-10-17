@@ -4,7 +4,7 @@
 
 ## Layout
 
-- `src-tauri/`: the Tauri 2 shell, in Rust. `stack.rs` is the app's contract with the stack: every Mac CLI verb and option it calls, held to the scripts' usage text by `tests/test_desktop_contract.py`. `vm.rs` is the VM's state machine, `web.rs` the web UI's windows and what confines them, `login.rs` the one-use login code handoff.
+- `src-tauri/`: the Tauri 2 shell, in Rust. `stack.rs` is the app's contract with the stack: every Mac CLI verb and option it calls, held to the scripts' usage text by `tests/test_desktop_contract.py`. `vm.rs` is the VM's state machine, `web.rs` the web UI's windows and what confines them, `login.rs` the one-use login code handoff, `firstrun.rs` the first run (requirements, the move and import offers, the release copied out of the app, the progress screen's steps), `settings.rs` the background installs and local model servers.
 - `ui/`: the app's own pages (status, errors), SvelteKit with `adapter-static`. It reads the web UI's design tokens from `web/src/lib/styles/tokens.css` rather than a copy.
 - `lima/`: `VERSION` pins Lima's and zstd's source tarballs by SHA-256; `build.sh` builds `limactl`, the aarch64 guest agent and zstd from them for macOS 14 and later, into `lima/build/` (gitignored).
 - `build-app.sh`: builds and signs `Istota.app`.
@@ -33,4 +33,4 @@ scripts/test-desktop.sh --control m9                      # row M9's negative co
 
 ## Where the app keeps things
 
-`~/Library/Application Support/Istota/` holds `state.json` (the profiles), `lima/` (the app's own `LIMA_HOME`, excluded from Time Machine), `config/` (the Mac CLI's `XDG_CONFIG_HOME`) and `logs/`. `ISTOTA_DESKTOP_STATE_DIR` moves it, which the desktop tier uses. A command-line install's `~/.lima` and `~/.config/istota-stack` are never read or written.
+`~/Library/Application Support/Istota/` holds `state.json` (the profiles, and whether the local VM's first run finished), `release/<tag>/` (the release copied out of the app, which the VM mounts read-only), `lima/` (the app's own `LIMA_HOME`, excluded from Time Machine), `config/` (the Mac CLI's `XDG_CONFIG_HOME`) and `logs/`. `ISTOTA_DESKTOP_STATE_DIR` moves it, which the desktop tier uses. A command-line install's `~/.lima` and `~/.config/istota-stack` are never read or written.

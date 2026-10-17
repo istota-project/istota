@@ -1529,6 +1529,7 @@ name = "istota-desktop"
 version = "0.0.1"
 dependencies = [
  "block2",
+ "libc",
  "notify",
  "objc2",
  "objc2-foundation",

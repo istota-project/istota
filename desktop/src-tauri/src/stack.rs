@@ -10,7 +10,8 @@
 //! and to `istota`'s own parser, so a renamed verb fails the default suite
 //! rather than the app on a user's Mac.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -47,7 +48,14 @@ pub const VERBS: &[Verb] = &[
     Verb::mac("start", &[]),
     Verb::mac("stop", &[]),
     Verb::mac("status", &[]),
+    Verb::mac("restore", &["--date", "--appliance", "--workspace"]),
+    Verb::mac("import-standalone", &["--appliance", "--workspace"]),
+    Verb::mac("destroy", &[]),
+    Verb::mac("allow-host-port", &[]),
+    Verb::mac("deny-host-port", &[]),
     Verb::vm("exec", &[]),
+    Verb::vm("local-layers", &["--status"]),
+    Verb::vm("host-env", &[]),
 ];
 
 /// The `istota` commands the app runs through `exec`, with their options.
@@ -67,6 +75,10 @@ pub const EXIT_MESSAGES: &[(i32, &str)] = &[
 ];
 // --- end contract ---
 
+/// The `host.env` keys the app reads or sets through `host-env`.
+pub const HOST_LOOPBACK_ALLOW: &str = "HOST_LOOPBACK_ALLOW";
+pub const LOCAL_LAYERS: &str = "ISTOTA_LOCAL_LAYERS";
+
 /// One call the app makes.
 #[derive(Clone, Debug)]
 pub enum Call<'a> {
@@ -74,6 +86,19 @@ pub enum Call<'a> {
     Start,
     Stop,
     Status,
+    /// A new VM from the workspace's backups and the Keychain's key; the
+    /// app's own VM, if there is one, is deleted first.
+    Restore { appliance: &'a Path, workspace: &'a Path, date: Option<&'a str> },
+    /// A standalone install (`~/.istota`) moved into a new VM.
+    ImportStandalone { appliance: &'a Path, workspace: &'a Path },
+    Destroy,
+    AllowHostPort(u16),
+    DenyHostPort(u16),
+    /// Build what the release leaves out (Claude Code, Chrome); long.
+    LocalLayers,
+    LocalLayersStatus,
+    HostEnvGet(&'a str),
+    HostEnvSet(&'a str, &'a str),
     /// An `istota` command in the daemon container, through the VM's `exec`.
     Istota(&'a [&'a str]),
 }
@@ -98,6 +123,33 @@ impl Call<'_> {
             Call::Start => vec!["start".into()],
             Call::Stop => vec!["stop".into()],
             Call::Status => vec!["status".into()],
+            Call::Restore { appliance, workspace, date } => {
+                let mut argv = vec!["restore".to_string()];
+                if let Some(date) = date {
+                    argv.extend(["--date".to_string(), date.to_string()]);
+                }
+                argv.extend([
+                    "--appliance".to_string(),
+                    appliance.display().to_string(),
+                    "--workspace".to_string(),
+                    workspace.display().to_string(),
+                ]);
+                argv
+            }
+            Call::ImportStandalone { appliance, workspace } => vec![
+                "import-standalone".into(),
+                "--appliance".into(),
+                appliance.display().to_string(),
+                "--workspace".into(),
+                workspace.display().to_string(),
+            ],
+            Call::Destroy => vec!["destroy".into()],
+            Call::AllowHostPort(port) => vec!["allow-host-port".into(), port.to_string()],
+            Call::DenyHostPort(port) => vec!["deny-host-port".into(), port.to_string()],
+            Call::LocalLayers => vec!["local-layers".into()],
+            Call::LocalLayersStatus => vec!["local-layers".into(), "--status".into()],
+            Call::HostEnvGet(key) => vec!["host-env".into(), key.to_string()],
+            Call::HostEnvSet(key, value) => vec!["host-env".into(), format!("{key}={value}")],
             Call::Istota(args) => {
                 debug_assert!(istota_listed(args), "{args:?} is not in ISTOTA_COMMANDS");
                 let mut argv = vec!["exec".to_string(), "istota".to_string()];
@@ -114,7 +166,23 @@ impl Call<'_> {
             Call::Start => "start",
             Call::Stop => "stop",
             Call::Status => "status",
+            Call::Restore { .. } => "restore",
+            Call::ImportStandalone { .. } => "import",
+            Call::Destroy => "remove",
+            Call::AllowHostPort(_) | Call::DenyHostPort(_) => "host port",
+            Call::LocalLayers | Call::LocalLayersStatus => "background installs",
+            Call::HostEnvGet(_) | Call::HostEnvSet(..) => "host.env",
             Call::Istota(_) => "istota",
+        }
+    }
+
+    /// What the call reads on stdin. `destroy`, and `restore` over an
+    /// existing VM, ask for the instance's name before deleting it; the app
+    /// asked its own confirmation first and answers for the user.
+    pub fn stdin(&self) -> Option<String> {
+        match self {
+            Call::Destroy | Call::Restore { .. } => Some(format!("{INSTANCE}\n")),
+            _ => None,
         }
     }
 
@@ -129,7 +197,7 @@ impl Call<'_> {
                 skip_value = false;
                 continue;
             }
-            skip_value = arg == "--appliance" || arg == "--workspace";
+            skip_value = arg == "--appliance" || arg == "--workspace" || arg == "--date";
             shown.push(arg);
         }
         shown.join(" ")
@@ -189,6 +257,53 @@ pub fn command(paths: &Paths, call: &Call) -> Command {
     command
 }
 
+/// `PATH` for a command-line install's own `istota-stack`, which finds the
+/// `limactl` it was installed with (Homebrew's).
+const CLI_INSTALL_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// `istota-stack stop` for the command-line install, in the default
+/// `LIMA_HOME` and config directory: the user's own `~/.local/bin/istota-stack`
+/// when it is there, else the bundled one with the bundled `limactl`.
+pub fn cli_install_stop(paths: &Paths, home: &Path) -> Command {
+    let own = home.join(".local/bin/istota-stack");
+    let (program, search_path) = if own.is_file() {
+        (own, CLI_INSTALL_PATH.to_string())
+    } else {
+        (paths.mac_cli(), paths.search_path())
+    };
+    let mut command = Command::new(program);
+    command.env_clear();
+    command.envs(cli_install_environment(home, &search_path));
+    command.stdin(Stdio::null());
+    command.arg("stop");
+    command
+}
+
+/// `limactl list --json` over the command-line install's `~/.lima`, read only.
+pub fn cli_install_list(paths: &Paths, home: &Path) -> Command {
+    let mut command = Command::new(paths.limactl());
+    command.env_clear();
+    command.envs(cli_install_environment(home, &paths.search_path()));
+    command.stdin(Stdio::null());
+    command.args(["list", "--json"]);
+    command
+}
+
+fn cli_install_environment(home: &Path, search_path: &str) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("PATH".to_string(), search_path.to_string()),
+        ("HOME".to_string(), home.display().to_string()),
+        ("LIMA_HOME".to_string(), home.join(".lima").display().to_string()),
+        ("ISTOTA_LIMA_INSTANCE".to_string(), INSTANCE.to_string()),
+    ];
+    for key in ["USER", "LOGNAME", "TMPDIR", "LANG"] {
+        if let Some(value) = std::env::var_os(key) {
+            env.push((key.to_string(), value.to_string_lossy().into_owned()));
+        }
+    }
+    env
+}
+
 /// `limactl list --json`, the one `limactl` call the app makes itself.
 pub fn limactl_list(paths: &Paths) -> Command {
     let mut command = base_command(&paths.limactl(), paths);
@@ -215,8 +330,24 @@ pub const TAIL_LINES: usize = 20;
 
 /// Runs a command, handing each line of stdout and stderr to `on_line` as it
 /// arrives. A command that cannot start is an outcome with no code.
-pub fn run(mut command: Command, mut on_line: impl FnMut(&str)) -> Outcome {
+pub fn run(command: Command, on_line: impl FnMut(&str)) -> Outcome {
+    run_with(command, None, |_| {}, on_line)
+}
+
+/// `run`, with `stdin` written to the command and closed, and the child's
+/// process id handed to `on_spawn`. The child leads a process group of its
+/// own, so a cancel reaches everything it started (`cancel`).
+pub fn run_with(
+    mut command: Command,
+    stdin: Option<String>,
+    on_spawn: impl FnOnce(u32),
+    mut on_line: impl FnMut(&str),
+) -> Outcome {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.process_group(0);
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -225,6 +356,11 @@ pub fn run(mut command: Command, mut on_line: impl FnMut(&str)) -> Outcome {
             return Outcome { code: None, stdout: String::new(), tail: vec![line] };
         }
     };
+    on_spawn(child.id());
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        // A short answer fits the pipe's buffer; the pipe closes when dropped.
+        let _ = pipe.write_all(text.as_bytes());
+    }
     let (sender, receiver) = mpsc::channel::<(bool, String)>();
     let readers: Vec<_> = [
         (true, child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>)),
@@ -265,6 +401,17 @@ pub fn run(mut command: Command, mut on_line: impl FnMut(&str)) -> Outcome {
     Outcome { code, stdout, tail }
 }
 
+/// Ends a call started by `run_with`: SIGTERM to its process group, which
+/// the Mac CLI's own traps turn into a clean stop of what it was doing.
+pub fn cancel(pid: u32) {
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// The fixed message for a documented exit code; any other code shows the output.
 pub fn exit_message(code: Option<i32>) -> String {
     match code {
@@ -292,6 +439,16 @@ mod tests {
             Call::Start,
             Call::Stop,
             Call::Status,
+            Call::Restore { appliance, workspace, date: Some("2026-10-01") },
+            Call::Restore { appliance, workspace, date: None },
+            Call::ImportStandalone { appliance, workspace },
+            Call::Destroy,
+            Call::AllowHostPort(11434),
+            Call::DenyHostPort(1234),
+            Call::LocalLayers,
+            Call::LocalLayersStatus,
+            Call::HostEnvGet(HOST_LOOPBACK_ALLOW),
+            Call::HostEnvSet(LOCAL_LAYERS, "chrome"),
             Call::Istota(&["web", "login-code"]),
         ];
         for call in calls {
@@ -321,6 +478,79 @@ mod tests {
             call.display(),
             "istota-stack create --appliance … --workspace … --web-setup-in-app"
         );
+    }
+
+    #[test]
+    fn a_restore_hides_its_date_and_paths_and_answers_the_name_prompt() {
+        let call = Call::Restore {
+            appliance: Path::new("/s/release/v1.0.0"),
+            workspace: Path::new("/Users/a/Istota"),
+            date: Some("2026-10-01"),
+        };
+        assert_eq!(
+            call.argv(),
+            ["restore", "--date", "2026-10-01", "--appliance", "/s/release/v1.0.0", "--workspace", "/Users/a/Istota"]
+        );
+        assert_eq!(call.display(), "istota-stack restore --date … --appliance … --workspace …");
+        assert_eq!(call.stdin().as_deref(), Some("istota\n"));
+        assert_eq!(Call::Destroy.stdin().as_deref(), Some("istota\n"));
+        assert_eq!(Call::Start.stdin(), None);
+        assert_eq!(Call::HostEnvSet(LOCAL_LAYERS, "").argv(), ["host-env", "ISTOTA_LOCAL_LAYERS="]);
+    }
+
+    #[test]
+    fn stdin_reaches_the_command_and_is_closed() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "read -r a; read -r b || echo \"got $a, then end\""]);
+        let mut pid = 0;
+        let outcome = run_with(command, Some("istota\n".into()), |p| pid = p, |_| {});
+        assert!(outcome.ok(), "{outcome:?}");
+        assert_eq!(outcome.stdout, "got istota, then end\n");
+        assert!(pid > 0);
+    }
+
+    #[test]
+    fn a_cancel_ends_the_whole_process_group() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let started = std::time::Instant::now();
+        let outcome = run_with(
+            command,
+            None,
+            |pid| {
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    cancel(pid);
+                });
+            },
+            |_| {},
+        );
+        assert!(!outcome.ok());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_command_line_install_is_stopped_with_its_own_cli_when_there_is_one() {
+        let home = std::env::temp_dir().join(format!("istota-cli-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let paths = Paths::new("/s".into(), "/A/Contents/Resources".into());
+        let env_of = |command: &Command, key: &str| {
+            command
+                .get_envs()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let bundled = cli_install_stop(&paths, &home);
+        assert_eq!(bundled.get_program(), "/A/Contents/Resources/bin/istota-stack");
+        assert_eq!(env_of(&bundled, "LIMA_HOME"), Some(home.join(".lima").display().to_string()));
+        assert_eq!(env_of(&bundled, "XDG_CONFIG_HOME"), None);
+        std::fs::write(home.join(".local/bin/istota-stack"), "#!/bin/sh\n").unwrap();
+        let own = cli_install_stop(&paths, &home);
+        assert_eq!(own.get_program(), home.join(".local/bin/istota-stack").as_os_str());
+        assert!(env_of(&own, "PATH").unwrap().starts_with("/opt/homebrew/bin:"));
+        assert_eq!(own.get_args().collect::<Vec<_>>(), ["stop"]);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

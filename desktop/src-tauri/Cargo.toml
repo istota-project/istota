@@ -27,6 +27,7 @@ objc2-foundation = "0.3"
 objc2-web-kit = "0.3"
 objc2-service-management = "0.3"
 block2 = "0.6"
+libc = "0.2"
 
 [features]
 # The negative control for row M9: the web UI in a stock Tauri webview, which

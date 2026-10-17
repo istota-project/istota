@@ -110,8 +110,22 @@ class TestMacVerbs:
     def test_the_mac_cli_documents_the_verb_and_its_options(self, name, options):
         entries = _usage_entries(MAC_CLI)
         assert name in entries, f"host/mac/istota-stack's usage has no `istota-stack {name}`"
+        documented = entries[name]
+        # `restore` and `import-standalone` take "[create's options]".
+        if "[create's options]" in documented:
+            documented += entries["create"]
         for option in options:
-            assert _mentions(entries[name], option), f"`istota-stack {name}` documents no {option}"
+            assert _mentions(documented, option), f"`istota-stack {name}` documents no {option}"
+
+    def test_create_s_options_are_what_restore_and_import_parse(self):
+        # The usage's "[create's options]" is held to what each verb's parser
+        # passes on, for the options the app gives them.
+        text = MAC_CLI.read_text()
+        for function in ("cmd_restore", "cmd_import_standalone"):
+            body = text[text.index(f"\n{function}() {{"):]
+            body = body[: body.index("\n}\n")]
+            for option in ("--appliance", "--workspace"):
+                assert _mentions(body, option), f"{function} parses no {option}"
 
     @pytest.mark.parametrize("name", [n for s, n, _ in _verbs() if s == "mac"])
     def test_the_mac_cli_handles_the_verb_itself(self, name):

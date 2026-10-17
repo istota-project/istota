@@ -2,23 +2,28 @@
 //! the bundled Mac CLI and shows the web UI in a window of its own.
 //!
 //! Two kinds of window. `app` is a Tauri webview holding the bundled pages
-//! (status, errors, the login handoff) and the only place Tauri's IPC exists;
-//! `capabilities/app.json` grants it the commands below. Each web UI window
-//! (`web-<profile>`) is a plain wry webview with no IPC at all (`web.rs`).
+//! (first run, progress, status, errors, settings) and the only place Tauri's
+//! IPC exists; `capabilities/app.json` grants it the commands below. Each web
+//! UI window (`web-<profile>`) is a plain wry webview with no IPC at all
+//! (`web.rs`).
 
+mod firstrun;
 mod health;
 mod lifecycle;
 mod logs;
 mod login;
 mod paths;
 mod profiles;
+mod settings;
 mod stack;
 mod vm;
 mod watch;
 mod web;
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::image::Image;
@@ -27,8 +32,10 @@ use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+use firstrun::{Job, Progress};
 use paths::Paths;
 use profiles::{AppState, Kind};
+use settings::Layer;
 use stack::Call;
 use vm::{Supervisor, VmState};
 
@@ -36,15 +43,20 @@ type Log = Arc<dyn Fn(&str) + Send + Sync>;
 
 struct Menus {
     status: MenuItem<Wry>,
+    layers: MenuItem<Wry>,
     login: CheckMenuItem<Wry>,
 }
 
 struct Shared {
     paths: Paths,
+    home: PathBuf,
     supervisor: Arc<Supervisor>,
     profiles: Mutex<AppState>,
     healthy: Mutex<Option<bool>>,
     notice: Mutex<Option<String>>,
+    progress: Mutex<Option<Progress>>,
+    layers: Mutex<Vec<Layer>>,
+    layers_running: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
     tray: Mutex<Option<TrayIcon<Wry>>>,
     menus: Mutex<Option<Menus>>,
@@ -61,6 +73,14 @@ struct Status {
     remote: bool,
     launch_at_login: bool,
     notice: Option<String>,
+    /// The local VM's first run finished.
+    local_ready: bool,
+    progress: Option<Progress>,
+    /// A failed step the app offers to resume (a VM-making call).
+    resumable: bool,
+    layers: Vec<Layer>,
+    layers_running: bool,
+    layers_hint: Option<&'static str>,
 }
 
 const LOCAL_WINDOW: &str = "web-local";
@@ -72,13 +92,21 @@ fn shared(app: &AppHandle) -> Arc<Shared> {
 fn status(shared: &Shared) -> Status {
     let profiles = shared.profiles.lock().unwrap();
     let current = profiles.current();
+    let vm = shared.supervisor.state();
+    let layers = shared.layers.lock().unwrap().clone();
     Status {
-        vm: shared.supervisor.state(),
+        resumable: matches!(&vm, VmState::Error(f) if vm::resumable(f)),
+        vm,
         healthy: *shared.healthy.lock().unwrap(),
         profile: current.map(|p| p.id.clone()),
         remote: matches!(current.map(|p| &p.kind), Some(Kind::Remote { .. })),
         launch_at_login: lifecycle::launch_at_login_enabled(),
         notice: shared.notice.lock().unwrap().clone(),
+        local_ready: profiles.local_ready,
+        progress: shared.progress.lock().unwrap().clone(),
+        layers_hint: settings::filter_hint(&layers),
+        layers,
+        layers_running: shared.layers_running.load(Ordering::SeqCst),
     }
 }
 
@@ -94,9 +122,25 @@ fn status_line(state: &VmState, healthy: Option<bool>) -> String {
         VmState::Running => "running",
         VmState::Stopping => "stopping",
         VmState::Stopped => "stopped",
+        VmState::Removing => "removing",
         VmState::Error(_) => "stopped with an error",
     };
     format!("Istota: {text}")
+}
+
+/// The menu's line for the background installs.
+fn layers_line(layers: &[Layer], running: bool) -> String {
+    if layers.is_empty() {
+        return if running { "Background installs: running".into() } else { "Background installs: not checked".into() };
+    }
+    let parts: Vec<String> = layers
+        .iter()
+        .map(|l| {
+            let name = if l.layer == "claude-code" { "Claude Code" } else { "Chrome" };
+            format!("{name} {}", l.state)
+        })
+        .collect();
+    format!("Background installs: {}", parts.join(", "))
 }
 
 /// The menu-bar icon: the logo as a template, or tinted red when unhealthy.
@@ -124,6 +168,7 @@ fn publish(app: &AppHandle) {
     }
     if let Some(menus) = shared.menus.lock().unwrap().as_ref() {
         let _ = menus.status.set_text(status_line(&current.vm, current.healthy));
+        let _ = menus.layers.set_text(layers_line(&current.layers, current.layers_running));
         let _ = menus.login.set_checked(current.launch_at_login);
     }
     let _ = app.emit("status", current);
@@ -135,6 +180,14 @@ fn set_notice(app: &AppHandle, notice: Option<String>) {
     }
     *shared(app).notice.lock().unwrap() = notice;
     publish(app);
+}
+
+fn save_profiles(shared: &Shared, change: impl FnOnce(&mut AppState)) {
+    let mut profiles = shared.profiles.lock().unwrap();
+    change(&mut profiles);
+    if let Err(err) = profiles.save(&shared.paths.state_file()) {
+        (shared.log)(&err);
+    }
 }
 
 fn show_app_window(app: &AppHandle) {
@@ -164,19 +217,24 @@ fn open_web_window(app: &AppHandle, label: &str, title: &str, url: Url) {
     });
 }
 
-/// The login handoff: a one-use code minted in the VM, loaded at once.
+/// The login handoff: a one-use code minted in the VM, loaded at once. An
+/// install whose config takes no codes (one moved in from the command line
+/// keeps its own sign-in) opens at its login page instead.
 fn open_local(app: &AppHandle) -> Result<(), String> {
     let shared = shared(app);
     if !matches!(shared.supervisor.state(), VmState::Running) {
         return Err("Istota is not running on this Mac.".into());
     }
-    let stdout = shared
-        .supervisor
-        .output(&Call::Istota(login::LOGIN_CODE))
-        .map_err(|f| format!("{} {}", f.message, f.tail.join(" ")).trim().to_string())?;
-    let code = login::parse_code(&stdout)?;
     let port = login::local_port(&shared.paths);
-    let url = Url::parse(&login::login_url(port, &code)).map_err(|err| err.to_string())?;
+    let url = match shared.supervisor.output(&Call::Istota(login::LOGIN_CODE)) {
+        Ok(stdout) => login::login_url(port, &login::parse_code(&stdout)?),
+        Err(f) if login::codes_off(&f.tail) => {
+            set_notice(app, Some("This install signs in with its own password; login codes are off in its settings.".into()));
+            login::plain_url(port)
+        }
+        Err(f) => return Err(format!("{} {}", f.message, f.tail.join(" ")).trim().to_string()),
+    };
+    let url = Url::parse(&url).map_err(|err| err.to_string())?;
     open_web_window(app, LOCAL_WINDOW, "Istota", url);
     Ok(())
 }
@@ -215,6 +273,13 @@ fn on_vm_state(app: &AppHandle, state: &VmState) {
     if matches!(state, VmState::Error(_)) {
         show_app_window(app);
     }
+    // The web setup is the first-run form: it opens in the app's own window.
+    if let VmState::Setup { url } = state {
+        match Url::parse(url) {
+            Ok(url) => open_web_window(app, LOCAL_WINDOW, "Istota setup", url),
+            Err(err) => (shared.log)(&format!("the setup address did not parse: {err}")),
+        }
+    }
     publish(app);
 }
 
@@ -240,7 +305,7 @@ fn ensure_watch(app: &AppHandle) {
     }
 }
 
-fn shared_folder_gone(app: &AppHandle, path: &std::path::Path) {
+fn shared_folder_gone(app: &AppHandle, path: &Path) {
     let shared = shared(app);
     *shared.watcher.lock().unwrap() = None;
     let handle = app.clone();
@@ -318,12 +383,178 @@ fn restart(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the command-line install's VM is running on `folder`: the app
+/// must not start a second VM on it. Lists `~/.lima` read-only.
+fn shared_workspace_refusal(shared: &Shared, folder: &Path) -> Result<(), String> {
+    if !firstrun::offers(&shared.home).cli_install {
+        return Ok(());
+    }
+    let cli_folder = firstrun::cli_install_workspace(&shared.home);
+    if cli_folder != folder {
+        return Ok(());
+    }
+    let listed = stack::run(stack::cli_install_list(&shared.paths, &shared.home), |_| {});
+    let running = listed.ok() && vm::parse_list(&listed.stdout) == vm::Listed::Running;
+    if firstrun::shares_a_running_workspace(&cli_folder, folder, running) {
+        return Err(firstrun::SHARED_WORKSPACE.into());
+    }
+    Ok(())
+}
+
+/// The bundled release, copied to where the VM mounts it.
+fn staged_release(shared: &Shared) -> Result<PathBuf, String> {
+    let (tag, source) = firstrun::bundled_release(&shared.paths.resources)
+        .ok_or("This copy of Istota carries no release to install. Download Istota again.")?;
+    firstrun::stage_release(&tag, &source, &shared.paths.release_root())
+        .map_err(|err| format!("Could not copy the release out of the app: {err}"))
+}
+
+fn requirement_refusals(shared: &Shared) -> Vec<String> {
+    let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+    firstrun::refusals(
+        std::env::consts::ARCH,
+        version.majorVersion as u64,
+        firstrun::free_bytes(&shared.paths.state_dir),
+    )
+}
+
+/// One run of a job that makes the local VM, with the progress screen.
+fn make_local(app: &AppHandle, job: Job, folder: &Path, date: Option<String>) -> Result<(), String> {
+    let shared = shared(app);
+    let refusals = requirement_refusals(&shared);
+    if !refusals.is_empty() {
+        return Err(refusals.join(" "));
+    }
+    // A move stops the command-line install's VM on that folder itself.
+    if job != Job::Move {
+        shared_workspace_refusal(&shared, folder)?;
+    }
+    let release = staged_release(&shared)?;
+    if job == Job::Move {
+        stop_cli_install(&shared)?;
+    }
+    // From here the job has a progress screen; a refusal above leaves the
+    // first-run screen up with the reason.
+    save_profiles(&shared, |p| {
+        p.pending_job = Some(job);
+        if job != Job::Restore {
+            p.local_ready = false;
+        }
+    });
+    *shared.progress.lock().unwrap() = Some(Progress::new(job, firstrun::now_ms()));
+    set_notice(app, None);
+    let call = match job {
+        Job::Create => Call::Create { appliance: &release, workspace: folder },
+        Job::Import => Call::ImportStandalone { appliance: &release, workspace: folder },
+        Job::Move | Job::Restore => Call::Restore { appliance: &release, workspace: folder, date: date.as_deref() },
+    };
+    let handle = app.clone();
+    let state = shared.supervisor.make(&call, |line| {
+        if let Some(progress) = shared.progress.lock().unwrap().as_mut() {
+            progress.advance(line, firstrun::now_ms());
+        }
+        publish(&handle);
+    });
+    let ok = matches!(state, VmState::Running);
+    if let Some(progress) = shared.progress.lock().unwrap().as_mut() {
+        progress.end(ok, firstrun::now_ms());
+    }
+    if !ok {
+        publish(app);
+        return Ok(());
+    }
+    *shared.progress.lock().unwrap() = None;
+    let first = !shared.profiles.lock().unwrap().local_ready;
+    save_profiles(&shared, |p| {
+        p.local_ready = true;
+        p.pending_job = None;
+    });
+    if job == Job::Move {
+        set_notice(
+            app,
+            Some("Your command-line Istota is stopped and left as it was. Once Istota works here, delete it with `istota-stack destroy` in Terminal.".into()),
+        );
+    }
+    start_layers(app);
+    open_local(app)?;
+    if first && !lifecycle::launch_at_login_enabled() {
+        offer_launch_at_login(app);
+    }
+    Ok(())
+}
+
+fn stop_cli_install(shared: &Shared) -> Result<(), String> {
+    firstrun::stop_cli_install(&shared.paths, &shared.home, &*shared.log)
+}
+
+/// Offered at the end of the first run, on by default.
+fn offer_launch_at_login(app: &AppHandle) {
+    let yes = app
+        .dialog()
+        .message("Open Istota when you log in? It starts Istota on this Mac and opens no window.")
+        .title("Open at login")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom("Open at login".into(), "Not now".into()))
+        .blocking_show();
+    if yes {
+        if let Err(err) = lifecycle::set_launch_at_login(true) {
+            set_notice(app, Some(err));
+        }
+    }
+    publish(app);
+}
+
+/// The background installs (Claude Code, Chrome): `local-layers` in the VM,
+/// with its status polled into the menu and Settings while it runs.
+fn start_layers(app: &AppHandle) {
+    if shared(app).layers_running.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    publish(app);
+    let poller = app.clone();
+    std::thread::spawn(move || {
+        while shared(&poller).layers_running.load(Ordering::SeqCst) {
+            refresh_layers(&poller);
+            std::thread::sleep(Duration::from_secs(15));
+        }
+    });
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let shared = shared(&handle);
+        shared.supervisor.alongside(&Call::LocalLayers);
+        shared.layers_running.store(false, Ordering::SeqCst);
+        refresh_layers(&handle);
+    });
+}
+
+fn refresh_layers(app: &AppHandle) {
+    let shared = shared(app);
+    if !matches!(shared.supervisor.state(), VmState::Running) {
+        return;
+    }
+    if let Ok(stdout) = shared.supervisor.output_alongside(&Call::LocalLayersStatus) {
+        *shared.layers.lock().unwrap() = settings::parse_layers(&stdout);
+    }
+    publish(app);
+}
+
+fn confirm(app: &AppHandle, title: &str, message: &str, yes: &str) -> bool {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(yes.into(), "Cancel".into()))
+        .blocking_show()
+}
+
 /// "Quit Istota": stops the stack and the VM, after asking when tasks run.
 fn quit(app: &AppHandle) -> Result<(), String> {
     let shared = shared(app);
     if shared.quitting.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
+    // A first run in flight is cancelled; Resume picks it up at the next launch.
+    shared.supervisor.cancel();
     let local_running = matches!(shared.supervisor.state(), VmState::Running);
     if local_running {
         let running = shared
@@ -337,14 +568,7 @@ fn quit(app: &AppHandle) -> Result<(), String> {
                 if running == 1 { " is" } else { "s are" },
                 if running == 1 { "it" } else { "them" }
             );
-            let stop = app
-                .dialog()
-                .message(message)
-                .title("Quit Istota?")
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom("Quit".into(), "Cancel".into()))
-                .blocking_show();
-            if !stop {
+            if !confirm(app, "Quit Istota?", &message, "Quit") {
                 shared.quitting.store(false, Ordering::SeqCst);
                 return Ok(());
             }
@@ -360,7 +584,9 @@ fn quit(app: &AppHandle) -> Result<(), String> {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let status = MenuItem::with_id(app, "status", "Istota: checking", false, None::<&str>)?;
+    let layers = MenuItem::with_id(app, "layers", "Background installs: not checked", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "Open Istota", true, None::<&str>)?;
+    let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let restart_item = MenuItem::with_id(app, "restart", "Restart Istota", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "Show logs", true, None::<&str>)?;
     let sign_out = MenuItem::with_id(app, "sign-out", "Sign out everywhere", true, None::<&str>)?;
@@ -370,8 +596,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         app,
         &[
             &status,
+            &layers,
             &PredefinedMenuItem::separator(app)?,
             &open,
+            &settings_item,
             &restart_item,
             &logs,
             &sign_out,
@@ -388,6 +616,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => background(app, open_current),
+            "settings" => {
+                show_app_window(app);
+                let _ = app.emit("show-settings", ());
+            }
             "restart" => background(app, restart),
             "logs" => background(app, show_logs),
             "sign-out" => background(app, sign_out_everywhere),
@@ -402,14 +634,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
     let shared = shared(app);
     *shared.tray.lock().unwrap() = Some(tray);
-    *shared.menus.lock().unwrap() = Some(Menus { status, login });
+    *shared.menus.lock().unwrap() = Some(Menus { status, layers, login });
     Ok(())
 }
 
 fn build_app_window(app: &AppHandle) -> tauri::Result<()> {
     let window = WebviewWindowBuilder::new(app, "app", WebviewUrl::App("index.html".into()))
         .title("Istota")
-        .inner_size(560.0, 460.0)
+        .inner_size(620.0, 560.0)
         .resizable(true)
         .visible(false)
         // The bundled pages, and the dev server in a debug build; nothing else.
@@ -454,7 +686,11 @@ fn open_setup(app: AppHandle) -> Result<(), String> {
 fn vm_start(app: AppHandle) {
     set_notice(&app, None);
     background(&app, |app| {
-        if matches!(shared(app).supervisor.start(), VmState::Running) {
+        let shared = shared(app);
+        if let Some(folder) = login::local_workspace(&shared.paths) {
+            shared_workspace_refusal(&shared, &folder)?;
+        }
+        if matches!(shared.supervisor.start(), VmState::Running) {
             open_local(app)?;
         }
         Ok(())
@@ -471,6 +707,217 @@ fn quit_app(app: AppHandle) {
     background(&app, quit);
 }
 
+/// What the first-run screen needs to know before the user picks anything.
+#[derive(Serialize)]
+struct FirstRun {
+    refusals: Vec<String>,
+    offers: firstrun::Offers,
+    default_folder: String,
+    release: Option<String>,
+}
+
+#[tauri::command]
+fn first_run_info(app: AppHandle) -> FirstRun {
+    let shared = shared(&app);
+    FirstRun {
+        refusals: requirement_refusals(&shared),
+        offers: firstrun::offers(&shared.home),
+        default_folder: shared.home.join("Istota").display().to_string(),
+        release: firstrun::bundled_release(&shared.paths.resources).map(|(tag, _)| tag),
+    }
+}
+
+/// The folder picker. The Mac CLI's refusals of a folder apply when the
+/// setup starts, and are shown as it words them.
+#[tauri::command]
+async fn pick_folder(app: AppHandle, current: String) -> Option<String> {
+    let start = Path::new(&current).parent().map(Path::to_path_buf).unwrap_or_else(|| shared(&app).home.clone());
+    app.dialog()
+        .file()
+        .set_title("Choose the folder Istota keeps its files in")
+        .set_directory(start)
+        .blocking_pick_folder()
+        .and_then(|path| path.into_path().ok())
+        .map(|path| path.display().to_string())
+}
+
+#[tauri::command]
+fn begin_setup(app: AppHandle, job: Job, folder: String) -> Result<(), String> {
+    if job == Job::Restore {
+        return Err("A restore starts from Settings.".into());
+    }
+    let folder = PathBuf::from(folder);
+    if !folder.is_absolute() {
+        return Err("Choose a folder.".into());
+    }
+    background(&app, move |app| make_local(app, job, &folder, None));
+    Ok(())
+}
+
+/// Resume: the job that did not finish, run again; the CLI's verbs resume
+/// where they stopped.
+#[tauri::command]
+fn resume_setup(app: AppHandle) {
+    background(&app, |app| {
+        let shared = shared(app);
+        let job = shared.profiles.lock().unwrap().pending_job.unwrap_or(Job::Create);
+        // A move whose old VM is already stopped resumes as the restore it is.
+        let job = if job == Job::Move { Job::Restore } else { job };
+        let folder = login::local_workspace(&shared.paths).unwrap_or_else(|| shared.home.join("Istota"));
+        make_local(app, job, &folder, None)
+    });
+}
+
+#[tauri::command]
+fn cancel_setup(app: AppHandle) {
+    shared(&app).supervisor.cancel();
+}
+
+/// Settings' data: the background installs and the local model servers.
+#[derive(Serialize)]
+struct SettingsInfo {
+    running: bool,
+    claude_code_wanted: bool,
+    models: Vec<settings::LocalModel>,
+    workspace: Option<String>,
+}
+
+#[tauri::command]
+async fn settings_info(app: AppHandle) -> SettingsInfo {
+    let shared = shared(&app);
+    let running = matches!(shared.supervisor.state(), VmState::Running);
+    let workspace = login::local_workspace(&shared.paths).map(|p| p.display().to_string());
+    if !running {
+        return SettingsInfo { running, claude_code_wanted: true, models: settings::local_models(&[], settings::listening), workspace };
+    }
+    refresh_layers(&app);
+    let allowed = shared
+        .supervisor
+        .output_alongside(&Call::HostEnvGet(stack::HOST_LOOPBACK_ALLOW))
+        .map(|out| settings::allowed_ports(&out))
+        .unwrap_or_default();
+    let layers = shared.layers.lock().unwrap().clone();
+    SettingsInfo {
+        running,
+        claude_code_wanted: settings::claude_code_wanted(&layers),
+        models: settings::local_models(&allowed, settings::listening),
+        workspace,
+    }
+}
+
+#[tauri::command]
+fn retry_layers(app: AppHandle) {
+    start_layers(&app);
+}
+
+#[tauri::command]
+fn set_claude_code(app: AppHandle, wanted: bool) {
+    background(&app, move |app| {
+        let shared = shared(app);
+        shared
+            .supervisor
+            .output(&Call::HostEnvSet(stack::LOCAL_LAYERS, settings::local_layers_value(wanted)))
+            .map_err(|f| format!("{} {}", f.message, f.tail.join(" ")))?;
+        start_layers(app);
+        Ok(())
+    });
+}
+
+#[tauri::command]
+fn set_host_port(app: AppHandle, port: u16, allow: bool) -> Result<(), String> {
+    if !settings::known_port(port) {
+        return Err(format!("{port} is not a local model server's port the app knows."));
+    }
+    background(&app, move |app| {
+        let call = if allow { Call::AllowHostPort(port) } else { Call::DenyHostPort(port) };
+        shared(app).supervisor.output(&call).map_err(|f| format!("{} {}", f.message, f.tail.join(" ")))?;
+        set_notice(
+            app,
+            Some(if allow {
+                format!("Istota can now reach port {port} on this Mac.")
+            } else {
+                format!("Istota can no longer reach port {port} on this Mac.")
+            }),
+        );
+        Ok(())
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn restore_backup(app: AppHandle, date: Option<String>) -> Result<(), String> {
+    let date = date.filter(|d| !d.trim().is_empty());
+    if let Some(d) = &date {
+        if !firstrun::valid_date(d) {
+            return Err(format!("{d} is not a date in the form 2026-10-01."));
+        }
+    }
+    background(&app, move |app| {
+        let shared = shared(app);
+        let folder = login::local_workspace(&shared.paths).ok_or("Istota has no workspace folder on record to restore from.")?;
+        let when = date.as_deref().map(|d| format!("the backup of {d}")).unwrap_or_else(|| "the newest backup".into());
+        let message = format!(
+            "This makes Istota on this Mac again from {when} in {}. Anything newer than that backup is lost, and the model's key and other credentials must be entered again.",
+            folder.display()
+        );
+        if !confirm(app, "Restore from backup?", &message, "Restore") {
+            return Ok(());
+        }
+        make_local(app, Job::Restore, &folder, date.clone())
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_istota(app: AppHandle) {
+    background(&app, |app| {
+        let shared = shared(app);
+        let folder = login::local_workspace(&shared.paths)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "your workspace folder".into());
+        let message = format!(
+            "This deletes Istota's VM on this Mac: its database, its settings and the credentials stored in it. Your files and backups in {folder} and the master key in your login Keychain stay, so a restore can bring it back."
+        );
+        if !confirm(app, "Remove Istota?", &message, "Remove") {
+            return Ok(());
+        }
+        let _ = app.run_on_main_thread({
+            let handle = app.clone();
+            move || web::close_all(&handle)
+        });
+        if matches!(shared.supervisor.remove(), VmState::Absent) {
+            save_profiles(&shared, |p| {
+                p.local_ready = false;
+                p.pending_job = None;
+            });
+            *shared.layers.lock().unwrap() = Vec::new();
+            set_notice(app, Some(format!("Istota is removed. {folder} and the Keychain's key are still there.")));
+        }
+        Ok(())
+    });
+}
+
+/// "Locate folder", after the workspace went away: the VM mounts the folder
+/// at the place it was made with, so it must come back there (a reconnected
+/// disk); the app checks it and starts Istota again.
+#[tauri::command]
+fn locate_folder(app: AppHandle) {
+    background(&app, |app| {
+        let shared = shared(app);
+        let folder = login::local_workspace(&shared.paths).ok_or("Istota has no workspace folder on record.")?;
+        if !watch::folder_present(&folder) {
+            return Err(format!(
+                "Istota keeps its files in {}, and it is still not there. Connect its disk, or put the folder back at that place, then try again.",
+                folder.display()
+            ));
+        }
+        if matches!(shared.supervisor.start(), VmState::Running) {
+            open_local(app)?;
+        }
+        Ok(())
+    });
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
     let handle = app.handle().clone();
@@ -484,6 +931,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Ok(state) => (state, None),
         Err(err) => (AppState::default(), Some(err)),
     };
+    let ready = profiles.local_ready;
     let notify_handle = handle.clone();
     let line_log = log.clone();
     let supervisor = Supervisor::new(
@@ -493,10 +941,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     );
     app.manage(Arc::new(Shared {
         paths,
+        home: paths::home(),
         supervisor,
         profiles: Mutex::new(profiles),
         healthy: Mutex::new(None),
         notice: Mutex::new(notice.clone()),
+        progress: Mutex::new(None),
+        layers: Mutex::new(Vec::new()),
+        layers_running: AtomicBool::new(false),
         watcher: Mutex::new(None),
         tray: Mutex::new(None),
         menus: Mutex::new(None),
@@ -524,9 +976,19 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             show_app_window(&handle);
         }
         background(&handle, move |app| {
-            let state = shared(app).supervisor.adopt_or_start();
-            if matches!(state, VmState::Running) && !at_login {
-                open_local(app)?;
+            let shared = shared(app);
+            if ready {
+                if let Some(folder) = login::local_workspace(&shared.paths) {
+                    shared_workspace_refusal(&shared, &folder)?;
+                }
+            }
+            let state = shared.supervisor.adopt_or_start(ready);
+            if matches!(state, VmState::Running) {
+                // A layer that failed for want of a network is tried again now.
+                start_layers(app);
+                if !at_login {
+                    open_local(app)?;
+                }
             }
             Ok(())
         });
@@ -546,7 +1008,19 @@ fn main() {
             open_setup,
             vm_start,
             show_log_files,
-            quit_app
+            quit_app,
+            first_run_info,
+            pick_folder,
+            begin_setup,
+            resume_setup,
+            cancel_setup,
+            settings_info,
+            retry_layers,
+            set_claude_code,
+            set_host_port,
+            restore_backup,
+            remove_istota,
+            locate_folder
         ])
         .setup(setup)
         .build(tauri::generate_context!())
@@ -557,4 +1031,18 @@ fn main() {
                 api.prevent_exit();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_names_each_background_install() {
+        assert_eq!(layers_line(&[], false), "Background installs: not checked");
+        let layers = settings::parse_layers(
+            "{\"layer\":\"claude-code\",\"state\":\"ready\",\"detail\":\"\"}\n{\"layer\":\"chrome\",\"state\":\"building\",\"detail\":\"\"}\n",
+        );
+        assert_eq!(layers_line(&layers, true), "Background installs: Claude Code ready, Chrome building");
+    }
 }

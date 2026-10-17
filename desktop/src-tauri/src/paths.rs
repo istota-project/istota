@@ -47,6 +47,12 @@ impl Paths {
         self.cli_config_home().join("istota-stack").join(format!("{INSTANCE}.env"))
     }
 
+    /// `release/<tag>/`: the releases the VM mounts read-only, copied out of
+    /// the app so the VM does not depend on where the app is.
+    pub fn release_root(&self) -> PathBuf {
+        self.state_dir.join("release")
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.state_dir.join("logs")
     }

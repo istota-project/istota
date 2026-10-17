@@ -43,6 +43,18 @@ pub fn login_url(port: u16, code: &str) -> String {
     format!("http://localhost:{port}/istota/auth/local#{code}")
 }
 
+/// The web UI with no code, for an install whose config takes none.
+pub fn plain_url(port: u16) -> String {
+    format!("http://localhost:{port}/istota/")
+}
+
+/// Whether `istota web login-code` refused because the install's `[web]
+/// auth` has no `local_code`: one moved in from the command line, or
+/// imported, keeps the sign-in it had.
+pub fn codes_off(tail: &[String]) -> bool {
+    tail.iter().any(|line| line.contains("does not include \"local_code\""))
+}
+
 /// The one web identity whose sessions "Sign out everywhere" ends, from
 /// `istota auth list`'s lines (`<user> email=… … live`). The local install has
 /// one; several, or none, is refused rather than guessed.
@@ -82,6 +94,14 @@ mod tests {
     #[test]
     fn the_code_goes_in_the_fragment() {
         assert_eq!(login_url(8181, "abc"), "http://localhost:8181/istota/auth/local#abc");
+        assert_eq!(plain_url(8181), "http://localhost:8181/istota/");
+    }
+
+    #[test]
+    fn an_install_without_login_codes_is_told_apart_from_a_failure() {
+        let refused = vec!["Error: [web] auth does not include \"local_code\"; this install takes no login codes".to_string()];
+        assert!(codes_off(&refused));
+        assert!(!codes_off(&["Error: database is locked".to_string()]));
     }
 
     #[test]
