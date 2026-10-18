@@ -26,6 +26,8 @@ import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import type { User } from '$lib/api';
 import { base } from '$app/paths';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const SHELL_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.10.0';
 
@@ -122,7 +124,7 @@ describe('the dashboard with no connection', () => {
     // also nav links, so the title alone would pass on a page body that painted
     // nothing at all — which is the bug.
     expect(await screen.findByText('Talk to Istota in the app')).toBeTruthy();
-    expect(screen.getByText('Your generated briefings and archive')).toBeTruthy();
+    expect(screen.getByText('Briefings and archive')).toBeTruthy();
   });
 
   it('shows only the tiles the identity carries', async () => {
@@ -131,7 +133,7 @@ describe('the dashboard with no connection', () => {
 
     // `money` is false on this record, and a tile is a link into a module the
     // deployment may not have.
-    expect(screen.queryByText('Accounts, transactions, and reports')).toBeNull();
+    expect(screen.queryByText('Accounts and reports')).toBeNull();
   });
 
   it('draws the welcome card even though the timezone request cannot answer', async () => {
@@ -188,12 +190,12 @@ describe('the dashboard when the connection returns', () => {
 
     render(DashboardInLayout);
     await screen.findByText('Talk to Istota in the app');
-    expect(screen.queryByText('Accounts, transactions, and reports')).toBeNull();
+    expect(screen.queryByText('Accounts and reports')).toBeNull();
 
     getMe.mockResolvedValue(person({ money: true }));
     online.set(true);
 
-    expect(await screen.findByText('Accounts, transactions, and reports')).toBeTruthy();
+    expect(await screen.findByText('Accounts and reports')).toBeTruthy();
   });
 });
 
@@ -214,7 +216,7 @@ describe('the files dashboard card', () => {
     render(DashboardInLayout);
 
     const card = await screen.findByRole('link', {
-      name: 'Files Browse your files and pinned items',
+      name: 'Files Your files and pins',
     });
     expect(card.getAttribute('href')).toBe(`${base}/files`);
   });
@@ -224,7 +226,7 @@ describe('the files dashboard card', () => {
     render(DashboardInLayout);
     await screen.findByText('Talk to Istota in the app');
 
-    expect(screen.queryByText('Browse your files and pinned items')).toBeNull();
+    expect(screen.queryByText('Your files and pins')).toBeNull();
   });
 
   it('shows the card from a cached offline identity', async () => {
@@ -234,9 +236,7 @@ describe('the files dashboard card', () => {
     readUser.mockResolvedValue(person({ workspace: true }));
     render(DashboardInLayout);
 
-    expect(
-      await screen.findByRole('link', { name: 'Files Browse your files and pinned items' }),
-    ).toBeTruthy();
+    expect(await screen.findByRole('link', { name: 'Files Your files and pins' })).toBeTruthy();
   });
 });
 
@@ -246,10 +246,10 @@ describe('the groups dashboard card', () => {
     render(DashboardInLayout);
 
     const card = await screen.findByRole('link', {
-      name: 'Groups Shared notebooks, members and rooms',
+      name: 'Groups Notebooks, members, rooms',
     });
     expect(card.getAttribute('href')).toBe(`${base}/groups/`);
-    const files = screen.getByRole('link', { name: 'Files Browse your files and pinned items' });
+    const files = screen.getByRole('link', { name: 'Files Your files and pins' });
     expect(files.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
@@ -258,6 +258,19 @@ describe('the groups dashboard card', () => {
     render(DashboardInLayout);
     await screen.findByText('Talk to Istota in the app');
 
-    expect(screen.queryByText('Shared notebooks, members and rooms')).toBeNull();
+    expect(screen.queryByText('Notebooks, members, rooms')).toBeNull();
+  });
+});
+
+/* jsdom does no layout, so the phone grid is held by the rule itself: the
+   shared auto-fit wall would put one tile per row below about 430px. */
+describe('dashboard grid on a phone', () => {
+  const source = readFileSync(join(process.cwd(), 'src/routes/+page.svelte'), 'utf8');
+
+  it('holds the tiles at two per row at phone width', () => {
+    const block = source.match(/@media \(max-width: 640px\) \{([\s\S]*?)\n {2}\}/)?.[1] ?? '';
+    expect(block).toMatch(
+      /\.feature-grid \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
+    );
   });
 });
