@@ -23,7 +23,7 @@ from istota.webui.chat_files import servable_roots
 from istota.workspace.pins import validate_pin, workspace_pin_kind
 from istota.webui.router_stubs import require_auth, verify_origin
 from istota.workspace.listing import ListingError, list_dir, list_file
-from istota.workspace.places import list_places
+from istota.workspace.places import list_places, place_anchor
 from istota.workspace.reach import deployment_notes, place_reach
 from istota.workspace import config_files, scripts, text_files
 from istota.workspace.writes import delete_entry, make_folder, write_new_file
@@ -69,13 +69,16 @@ async def api_workspace_list(
             selected = next((p for p in places if p.id == place), None)
             if selected is None or not selected.browsable or selected.root is None:
                 raise ListingError(404, "Place not found.")
+            # Both branches walk from the trusted anchor with no link followed;
+            # `is_file` only picks which one to take.
+            anchor, walk = place_anchor(selected)
             file_root = selected.root.is_file()
             if file_root:
-                if parts:
+                if parts or not walk:
                     raise ListingError(404, "Folder not found.")
-                listing = list_file(selected.root)
+                listing = list_file(anchor, walk)
             else:
-                listing = list_dir(selected.root, parts)
+                listing = list_dir(anchor, [*walk, *parts])
         payload = {"place": selected.id, "path": "/".join(parts), **asdict(listing)}
         if file_root:
             payload["entries"][0]["view_path"] = selected.view_root

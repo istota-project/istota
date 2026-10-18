@@ -17,12 +17,12 @@ def workspace_pin_kind(config, username, ref, roots) -> bool:
     except ChatFileError as exc:
         if exc.status != 400:
             raise ListingError(404, "File or folder not found.") from exc
-    matching = [(view, root) for view, root in roots if ref == view or ref.startswith(view.rstrip("/") + "/")]
+    matching = [root for root in roots if ref == root[0] or ref.startswith(root[0].rstrip("/") + "/")]
     if matching:
-        view, root = max(matching, key=lambda item: len(item[0]))
+        view, anchor, prefix = max(matching, key=lambda item: len(item[0]))
         parts = ref[len(view):].lstrip("/").split("/") if ref != view else []
         try:
-            fd = open_overlay_dir(root, *parts)
+            fd = open_overlay_dir(anchor, *prefix, *parts)
         except OSError:
             fd = None
         if fd is not None:

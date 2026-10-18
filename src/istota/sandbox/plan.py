@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from . import credential_shim
+from .host_paths import linked_resource_parts
 from .user_scope import is_within, scoped_user_dir
 
 if TYPE_CHECKING:
@@ -373,8 +374,12 @@ def user_data_mounts(
         for r in user_resources:
             if not r.resource_path:
                 continue
-            rpath = (mount / r.resource_path.lstrip("/")).resolve()
-            if not rpath.exists():
+            # No link followed below the mount, and the home skip read off
+            # the spelling (ISSUE-782): a resource under the user's own home is
+            # a path their tasks control, and resolving it let one swap in a
+            # link to another user's directory and have it bound here.
+            parts = linked_resource_parts(mount, r.resource_path)
+            if parts is None:
                 continue
             # Skip if already covered by the user dir bind above. `user_dir` is
             # that bind's own source, not a second derivation of it: with a
@@ -383,14 +388,12 @@ def user_data_mounts(
             # is not emitted at all. None means no bind was emitted from a
             # scoped id. (Not the same as "no bind was emitted": a scoped
             # `user_dir` that does not exist emits none either and still skips
-            # here. Harmless — the loop has already refused a `rpath` that does
-            # not exist, and a resource under a missing directory cannot.)
-            if user_dir is not None:
-                try:
-                    rpath.relative_to(user_dir.resolve())
-                    continue  # Already inside user dir
-                except ValueError:
-                    pass
+            # here. Harmless — `linked_resource_parts` has already refused a
+            # resource that does not exist, and one under a missing directory
+            # cannot.)
+            if user_dir is not None and parts[:2] == ("Users", user_id):
+                continue
+            rpath = mount.joinpath(*parts)
             if r.permissions == "readwrite":
                 _rw(rpath, "user_resource", user_data=True)
             else:

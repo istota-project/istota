@@ -91,6 +91,7 @@ question as a read whose bytes stay in it.
 """
 
 import os
+import stat
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -689,6 +690,40 @@ def owner_path_parts(path: str, user_id: str) -> list[str] | None:
     if any(not p or p in (".", "..") or "\0" in p for p in rest):
         return None
     return rest
+
+
+def linked_resource_parts(workspace: Path, resource_path: object) -> tuple[str, ...] | None:
+    """The components of a `folder` or `shared_file` resource below the workspace
+    root, when no component is a link and the last is a directory or a regular
+    file; otherwise None (ISSUE-782).
+
+    A resource row names a path somebody else's tasks may control: the
+    organizer writes `/Users/{owner}/shared/{item}`, and a task in that home can
+    swap the item for a link to another user's directory. Resolving the path
+    made the link's target the reader's root, so the walk refuses a link at
+    every component, from the workspace root down, and callers open the
+    resource by walking these parts from that same root again rather than by
+    the name this returns.
+    """
+    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cost
+
+    if not isinstance(resource_path, str):
+        return None
+    parts = tuple(resource_path.strip("/").split("/"))
+    if any(not p or p in (".", "..") or "\0" in p for p in parts):
+        return None
+    dir_fd = open_overlay_dir(workspace, *parts[:-1])
+    if dir_fd is None:
+        return None
+    try:
+        info = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    finally:
+        os.close(dir_fd)
+    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+        return None
+    return parts
 
 
 def path_under_roots(resolved: Path, roots: Sequence[Path]) -> bool:

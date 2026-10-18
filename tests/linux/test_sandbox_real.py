@@ -285,6 +285,36 @@ class TestMountScoping:
         # asserted the result, which would have passed either way.
         assert "users=[alice]" in out, out
 
+    def test_a_resource_swapped_for_a_link_binds_nothing_of_bob(self, layout, task, user_temp):
+        """ISSUE-782: a shared item in alice's home replaced by a link to bob's
+        directory used to be resolved and bound read-only for her next task.
+        The real resource beside it is the control that resource binds happen."""
+        mount = layout.workspace_path
+        (mount / "Users" / "alice" / "shared").mkdir()
+        (mount / "Users" / "alice" / "shared" / "Doc").symlink_to(mount / "Users" / "bob")
+        (mount / "projects" / "Doc").mkdir(parents=True)
+        (mount / "projects" / "Doc" / "notes.txt").write_text("project notes")
+        resources = [
+            db.UserResource(id=n, user_id="alice", resource_type="folder", resource_path=path,
+                            display_name=None, permissions="read")
+            for n, path in ((1, "/Users/alice/shared/Doc"), (2, "projects/Doc"))
+        ]
+        cmd = build_bwrap_cmd(
+            ["/bin/sh", "-c",
+             f'cat {_q(f"{mount}/projects/Doc/notes.txt")}; '
+             f'cat {_q(f"{mount}/Users/bob/secret.txt")} 2>/dev/null || echo BOB_UNREADABLE; '
+             f'cat {_q(f"{mount}/Users/alice/shared/Doc/secret.txt")} 2>/dev/null '
+             f'|| echo LINK_UNREADABLE'],
+            layout, task, False, resources, user_temp, profile=SandboxProfile.CLAUDE,
+        )
+        assert cmd[0] == "bwrap", "sandbox unavailable — probe would have run unsandboxed"
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        out = result.stdout
+        assert "project notes" in out, result.stderr
+        assert "BOB_UNREADABLE" in out, out
+        assert "LINK_UNREADABLE" in out, out
+        assert "bob's file" not in out, out
+
 
 class TestCustomSystemPrompt:
     def test_bound_read_only_when_configured(self, layout, tmp_path, task, user_temp):

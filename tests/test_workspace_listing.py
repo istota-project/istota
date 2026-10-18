@@ -130,8 +130,15 @@ def test_file_listing_refuses_link_and_special_file(tmp_path):
     link = tmp_path / "link"
     link.symlink_to(target)
     with pytest.raises(OSError):
-        list_file(link)
+        list_file(tmp_path, ["link"])
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)
     with pytest.raises(listing.ListingError):
-        list_file(fifo)
+        list_file(tmp_path, ["pipe"])
+    # ISSUE-782: a link above the leaf is not followed either.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "f.txt").write_text("x")
+    (tmp_path / "alias").symlink_to(tmp_path / "real")
+    assert list_file(tmp_path, ["real", "f.txt"]).entries[0].name == "f.txt"
+    with pytest.raises(listing.ListingError):
+        list_file(tmp_path, ["alias", "f.txt"])
