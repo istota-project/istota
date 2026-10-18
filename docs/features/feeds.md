@@ -8,7 +8,7 @@ The `feeds` module is on by default. Opt out per user with `disabled_modules = [
 
 The **Feeds** tab is a masonry card grid with an image/text filter, sort by published or added, grid and list views, a navigable image lightbox, and a click-to-expand reader overlay showing a card's full un-clipped content with `←`/`→` navigation between posts.
 
-The sidebar scopes the view to everything, unread only, a single feed, or a whole category. Per-entry starring is bound to `f`; bulk mark-as-read (`Shift-A`) honours whatever scope is active rather than clearing the whole account. Entries mark themselves read after 1.5 seconds in the viewport.
+The sidebar scopes the view to everything, unread only, a single feed, or a whole category. The Unread and Starred views show their totals across the whole reader, and a feed with unread entries is set in bold with an unread mark beside its name. Per-entry starring is bound to `f`; bulk mark-as-read (`Shift-A`) honours whatever scope is active rather than clearing the whole account. Entries mark themselves read after 1.5 seconds in the viewport.
 
 Feed, category, All, Unread and Starred selections are saved in the URL and browser history. Back and Forward restore earlier selections, and reloading or sharing the URL opens the same selection. Clicking the active feed or category returns to All and adds a history entry. Returning from settings keeps the selection; a feed or category that no longer exists falls back to All.
 
