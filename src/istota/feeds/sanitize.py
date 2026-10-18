@@ -1,13 +1,15 @@
 """HTML sanitization for feed entry content.
 
-Prefer ``bleach`` when available; fall back to a minimal regex-based
-stripper so the module imports without the extra dep installed (the
-``feeds`` extra pulls bleach in).
+``bleach`` does the sanitising. Without it (an install lacking the ``feeds``
+extra) no HTML is kept at all: the body is reduced to escaped text, because
+a regex blacklist cannot be made safe (ISSUE-780).
 """
 
 from __future__ import annotations
 
+import html as html_module
 import re
+from functools import lru_cache
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -45,23 +47,71 @@ ALLOWED_ATTRS = {
     "th": ["scope"],
 }
 
+# Checked by bleach on every URL attribute. `data:` is here for the media
+# tags only; `_allow_attribute` keeps it off a link.
 ALLOWED_PROTOCOLS = ["http", "https", "mailto", "data"]
+
+LINK_PROTOCOLS = frozenset({"http", "https", "mailto"})
+
+# What a browser ignores inside a URL scheme: C0 controls, space, DEL.
+_URL_IGNORED_RE = re.compile(r"[\x00-\x20\x7f]+")
+
+
+def _link_scheme_allowed(value: str) -> bool:
+    """Whether an ``<a href>`` value is relative or uses a link protocol.
+
+    bleach hands the value over with its character references intact, so
+    they are decoded first. bleach's own protocol check still runs after.
+    """
+    normalized = _URL_IGNORED_RE.sub("", html_module.unescape(value)).lower()
+    scheme, sep, _ = normalized.partition(":")
+    if not sep or any(ch in scheme for ch in "/?#"):
+        return True
+    return scheme in LINK_PROTOCOLS
+
+
+def _allow_attribute(tag: str, name: str, value: str) -> bool:
+    if name not in ALLOWED_ATTRS.get(tag, ()):
+        return False
+    if tag == "a" and name == "href":
+        return _link_scheme_allowed(value)
+    return True
 
 
 def sanitize_html(html: str | None) -> str | None:
-    """Sanitise HTML for storage. Returns None for empty input."""
+    """Sanitise HTML for storage and for serving. Returns None for empty input.
+
+    Without bleach the result is escaped text with no markup at all.
+    """
     if not html:
         return None
-    if _HAS_BLEACH:
-        cleaned = bleach.clean(
-            html,
-            tags=ALLOWED_TAGS,
-            attributes=ALLOWED_ATTRS,
-            protocols=ALLOWED_PROTOCOLS,
-            strip=True,
-        )
-        return _ensure_video_controls(cleaned)
-    return _ensure_video_controls(_fallback_sanitize(html))
+    if not _HAS_BLEACH:
+        return _text_only(html)
+    if len(html) > _CACHED_BODY_MAX_CHARS:
+        return _bleach_clean(html)
+    return _bleach_clean_cached(html)
+
+
+# The feeds API re-sanitises every stored body it serves, and the web
+# reader's page of entries is mostly the bodies its last request served.
+# Large bodies (inline `data:` media) stay out so the cache stays small.
+_CACHED_BODY_MAX_CHARS = 64 * 1024
+
+
+@lru_cache(maxsize=256)
+def _bleach_clean_cached(html: str) -> str:
+    return _bleach_clean(html)
+
+
+def _bleach_clean(html: str) -> str:
+    cleaned = bleach.clean(
+        html,
+        tags=ALLOWED_TAGS,
+        attributes=_allow_attribute,
+        protocols=ALLOWED_PROTOCOLS,
+        strip=True,
+    )
+    return _ensure_video_controls(cleaned)
 
 
 _VIDEO_TAG_RE = re.compile(r"<video\b([^>]*)>", re.IGNORECASE)
@@ -89,25 +139,42 @@ def _ensure_video_controls(html: str) -> str:
     return _VIDEO_TAG_RE.sub(_add, html)
 
 
-_SCRIPT_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
-_STYLE_RE = re.compile(r"<\s*style\b[^>]*>.*?<\s*/\s*style\s*>", re.IGNORECASE | re.DOTALL)
-_ONEVENT_RE = re.compile(r"\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
-_JS_HREF_RE = re.compile(r"(href|src)\s*=\s*([\"'])\s*javascript:[^\"']*\2", re.IGNORECASE)
+_RAW_TEXT_OPEN_RE = re.compile(r"<\s*(script|style)\b", re.IGNORECASE)
 
 
-def _fallback_sanitize(html: str) -> str:
-    """Minimal sanitiser used when bleach isn't installed.
+def _drop_raw_text_elements(html: str) -> str:
+    """Remove ``<script>`` and ``<style>`` elements, bodies included.
 
-    Strips ``<script>`` / ``<style>``, inline event handlers, and
-    ``javascript:`` URIs. Not as thorough as bleach, but adequate for the
-    "let me preview the module without the extra installed" case. Production
-    deploys install the ``feeds`` extra and get the real thing.
+    A linear scan: a lazy regex rescans to the end of the input for every
+    unclosed opening tag, which is quadratic on hostile input. An unclosed
+    element runs to the end of the input, as it does in a browser.
     """
-    out = _SCRIPT_RE.sub("", html)
-    out = _STYLE_RE.sub("", out)
-    out = _ONEVENT_RE.sub("", out)
-    out = _JS_HREF_RE.sub(r"\1=\2#\2", out)
-    return out
+    lower = html.lower()
+    parts = []
+    pos = 0
+    while True:
+        match = _RAW_TEXT_OPEN_RE.search(html, pos)
+        if match is None:
+            parts.append(html[pos:])
+            break
+        parts.append(html[pos:match.start()])
+        close = lower.find("</" + match.group(1).lower(), match.end())
+        if close == -1:
+            break
+        end = lower.find(">", close)
+        if end == -1:
+            break
+        parts.append(" ")
+        pos = end + 1
+    return "".join(parts)
+
+
+def _text_only(html: str) -> str | None:
+    """The body as escaped text, for an install without bleach."""
+    text = html_to_text(_drop_raw_text_elements(html))
+    if not text:
+        return None
+    return html_module.escape(html_module.unescape(text), quote=False)
 
 
 def html_to_text(html: str | None) -> str | None:

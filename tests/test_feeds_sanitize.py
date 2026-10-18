@@ -207,3 +207,107 @@ class TestVideoStripping:
     def test_content_without_video_is_unchanged(self):
         html = '<p>Hello <a href="https://example.com">link</a></p>'
         assert sanitize_html(html) == html
+
+
+class TestBodyLinkProtocols:
+    """ISSUE-780. ``data:`` is for media sources, never for a link.
+
+    A navigated ``data:`` document is a phishing page in any engine that
+    still allows top-level ``data:`` navigation from page content.
+    """
+
+    def test_data_href_is_dropped(self):
+        out = sanitize_html('<a href="data:text/html,<h1>x</h1>">x</a>')
+        assert "data:" not in out
+        assert ">x</a>" in out
+
+    def test_data_href_spellings_are_dropped(self):
+        for href in (" DaTa:text/html,x", "&#100;ata:text/html,x", "da\tta:text/html,x"):
+            out = sanitize_html(f'<a href="{href}">x</a>')
+            assert "href" not in out, href
+
+    def test_ordinary_links_are_kept(self):
+        for href in ("https://example.com/a", "http://example.com/a",
+                     "mailto:a@example.com", "/relative/path", "#anchor"):
+            out = sanitize_html(f'<a href="{href}">x</a>')
+            assert f'href="{href}"' in out, href
+
+    def test_data_media_sources_are_kept(self):
+        out = sanitize_html('<img src="data:image/png;base64,AAAA" alt="a">')
+        assert 'src="data:image/png;base64,AAAA"' in out
+        out = sanitize_html(
+            '<video poster="data:image/png;base64,AAAA">'
+            '<source src="data:video/mp4;base64,AAAA"></video>'
+        )
+        assert 'poster="data:image/png;base64,AAAA"' in out
+        assert 'src="data:video/mp4;base64,AAAA"' in out
+
+    def test_other_link_attributes_survive(self):
+        out = sanitize_html('<a href="https://example.com" title="t" rel="nofollow">x</a>')
+        assert 'title="t"' in out
+        assert 'rel="nofollow"' in out
+
+    def test_resanitising_stored_output_is_stable(self):
+        html = (
+            '<p>Hi <a href="https://example.com/?a=1&amp;b=2" title="t">link</a></p>'
+            '<figure><img src="https://x.test/a.jpg" alt="a &amp; b"></figure>'
+            '<video src="https://x.test/c.mp4"></video>'
+        )
+        once = sanitize_html(html)
+        assert sanitize_html(once) == once
+
+
+class TestWithoutBleach:
+    """ISSUE-780. With bleach missing, no HTML is stored at all.
+
+    The old fallback was a regex blacklist that passed an unquoted or
+    entity-encoded ``javascript:`` href straight through.
+    """
+
+    def _no_bleach(self, monkeypatch):
+        import istota.feeds.sanitize as mod
+        monkeypatch.setattr(mod, "_HAS_BLEACH", False)
+
+    def test_unquoted_javascript_href_leaves_no_markup(self, monkeypatch):
+        self._no_bleach(monkeypatch)
+        out = sanitize_html("<a href=javascript:alert(1)>x</a>")
+        assert "<" not in out
+        assert "href" not in out
+        assert "x" in out
+
+    def test_entity_encoded_javascript_href_leaves_no_markup(self, monkeypatch):
+        self._no_bleach(monkeypatch)
+        out = sanitize_html('<a href="&#106;avascript:alert(1)">y</a>')
+        assert "<" not in out
+        assert "href" not in out
+        assert "y" in out
+
+    def test_text_is_escaped_and_script_bodies_dropped(self, monkeypatch):
+        self._no_bleach(monkeypatch)
+        out = sanitize_html(
+            "<p>1 &lt; 2 &amp; <b>bold</b></p><script>steal()</script>"
+            "<style>p{}</style>&lt;img src=x onerror=alert(1)&gt;"
+        )
+        assert "<" not in out
+        assert "steal" not in out
+        assert "1 &lt; 2 &amp; bold" in out
+        assert "&lt;img src=x onerror=alert(1)&gt;" in out
+        assert "p{}" not in out
+
+    def test_markup_only_input_is_none(self, monkeypatch):
+        self._no_bleach(monkeypatch)
+        assert sanitize_html('<img src="https://x.test/a.jpg">') is None
+
+    def test_unclosed_script_tags_are_linear(self, monkeypatch):
+        # A lazy regex over unclosed tags took about ten seconds on this.
+        import time
+        self._no_bleach(monkeypatch)
+        started = time.monotonic()
+        out = sanitize_html("<p>kept</p>" + "<script>" * 20000)
+        assert time.monotonic() - started < 2
+        assert out == "kept"
+
+    def test_closed_script_and_style_with_text_after(self, monkeypatch):
+        self._no_bleach(monkeypatch)
+        out = sanitize_html("a<SCRIPT type=x>bad()</Script >b<style>p{}</style>c")
+        assert out == "a b c"
