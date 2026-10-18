@@ -161,6 +161,8 @@ async def test_setup_state_says_configured_without_a_session(client):
     ("post", "/istota/api/setup/finish"),
 ])
 async def test_no_other_setup_route_is_served(client, method, path):
+    # Signed in, so the API's body guard lets a POST reach routing.
+    await sign_in(client)
     response = await getattr(client, method)(path)
     assert response.status_code in (404, 405)
 
@@ -738,8 +740,10 @@ async def test_account_password_guards(client, configured, case):
     response = await client.post("/istota/api/account/password",
         json=[] if case == "malformed" else payload,
         headers={} if case == "origin" else {"Origin": "https://example.com"})
+    # A session whose method was switched off is no session: the API's body
+    # guard answers 401 before the route's own 404 for a disabled method.
     expected = {"anonymous": 401, "nextcloud": 403, "origin": 403, "passwordless": 400,
-                "disabled-method": 404, "policy": 400, "malformed": 400}
+                "disabled-method": 401, "policy": 400, "malformed": 400}
     assert response.status_code == expected[case]
     assert web_auth.get_identity(configured._config.db_path, "alice") == before
 
@@ -898,8 +902,9 @@ def every_auth_method(configured):
     configured._config.site.hostname = LOCAL_HOST
 
 
-async def post_counted(app, path, body, *, content_length):
-    """POST ``body`` in chunks through raw ASGI; return (status, bytes the app took)."""
+async def post_counted(app, path, body, *, content_length, method="POST",
+                       content_type="application/x-www-form-urlencoded", cookie=None):
+    """Send ``body`` in chunks through raw ASGI; return (status, bytes the app took)."""
     chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
     taken = 0
     sent = []
@@ -915,13 +920,14 @@ async def post_counted(app, path, body, *, content_length):
     async def send(message):
         sent.append(message)
 
-    headers = [(b"host", LOCAL_HOST.encode()),
-               (b"content-type", b"application/x-www-form-urlencoded")]
+    headers = [(b"host", LOCAL_HOST.encode()), (b"content-type", content_type.encode())]
+    if cookie is not None:
+        headers.append((b"cookie", cookie.encode()))
     if content_length is not None:
         headers.append((b"content-length", str(content_length).encode()))
     scope = {
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-        "method": "POST", "scheme": "https", "path": path, "raw_path": path.encode(),
+        "method": method, "scheme": "https", "path": path, "raw_path": path.encode(),
         "root_path": "", "query_string": b"", "headers": headers,
         "client": ("127.0.0.1", 40000), "server": ("localhost", 8123),
     }
@@ -997,3 +1003,103 @@ async def test_the_largest_set_password_form_fits_under_the_limit(client, config
     })
     assert len(response.request.content) > 6 * 1024
     assert response.status_code == 302, response.text
+
+
+# ISSUE-783: FastAPI reads a declared body parameter before any dependency
+# runs, so `require_auth` used to refuse an anonymous upload only after every
+# byte of it had arrived. A guard in front of the API refuses it unread.
+BODY_ROUTES = (
+    ("POST", "/istota/api/feeds/import-opml", "multipart/form-data; boundary=x"),
+    ("POST", "/istota/api/health/panels/upload", "multipart/form-data; boundary=x"),
+    ("PUT", "/istota/api/briefings/blocks", "application/json"),
+)
+API_BODY = b"x" * (4 * 1024 * 1024)
+
+
+def session_cookie(client):
+    return f"istota_session={client.cookies.get('istota_session')}"
+
+
+@pytest.mark.parametrize("method,path,content_type", BODY_ROUTES)
+async def test_an_anonymous_api_body_is_refused_unread(configured, method, path, content_type):
+    status, taken = await post_counted(configured.app, path, API_BODY, content_length=len(API_BODY),
+                                       method=method, content_type=content_type)
+    assert status == 401
+    assert taken == 0
+
+
+async def test_an_anonymous_api_body_without_a_declared_length_is_refused_unread(configured):
+    status, taken = await post_counted(configured.app, "/istota/api/briefings/blocks", API_BODY,
+                                       content_length=None, method="PUT",
+                                       content_type="application/json")
+    assert status == 401
+    assert taken == 0
+
+
+async def test_an_api_body_under_a_revoked_session_is_refused_unread(client, configured):
+    set_session(client, configured, {"user": {"username": "alice"},
+                                     "auth": {"method": "email", "epoch": 999}})
+    status, taken = await post_counted(configured.app, "/istota/api/briefings/blocks", API_BODY,
+                                       content_length=len(API_BODY), method="PUT",
+                                       content_type="application/json",
+                                       cookie=session_cookie(client))
+    assert status == 401
+    assert taken == 0
+
+
+async def test_an_api_body_under_a_live_session_reaches_the_route(client, configured):
+    assert (await sign_in(client)).status_code == 302
+    body = b'{"reorder": {"briefing_name": "none", "ordered_ids": []}}'
+    status, taken = await post_counted(configured.app, "/istota/api/briefings/blocks", body,
+                                       content_length=len(body), method="PUT",
+                                       content_type="application/json",
+                                       cookie=session_cookie(client))
+    assert status != 401
+    assert taken == len(body)
+
+
+def _dependency_calls(app, dependant, seen):
+    from fastapi.dependencies.utils import get_dependant
+
+    for dep in dependant.dependencies:
+        call = app.dependency_overrides.get(dep.call, dep.call)
+        if call in seen:
+            continue
+        seen.add(call)
+        sub = dep if call is dep.call else get_dependant(path="", call=call)
+        _dependency_calls(app, sub, seen)
+    return seen
+
+
+def _api_routes(app):
+    from fastapi.routing import APIRoute
+
+    return [r for r in app.routes if isinstance(r, APIRoute)]
+
+
+def test_every_route_with_a_body_parameter_is_behind_the_guard(configured):
+    """A declared body is read before auth runs; only the guard's prefix stops that."""
+    # `body_field` also covers a body declared inside a dependency.
+    routes = [r for r in _api_routes(configured.app) if r.body_field is not None]
+    assert routes
+    outside = [r.path for r in routes if not r.path.startswith(configured.API_BODY_GUARD_PREFIX)]
+    assert outside == []
+
+
+# Under the guard's prefix a request with a body needs a session, so a route
+# there that takes one with no session (a webhook, a sign-in form) would be
+# refused by the guard. This one authenticates itself before reading.
+SESSIONLESS_API_WRITES = {"/istota/api/account/password"}
+
+
+def test_no_api_route_takes_a_body_without_a_session(configured):
+    app = configured.app
+    unauthenticated = set()
+    for route in _api_routes(app):
+        if not route.path.startswith(configured.API_BODY_GUARD_PREFIX):
+            continue
+        if not route.methods - {"GET", "HEAD"}:
+            continue
+        if configured._require_api_auth not in _dependency_calls(app, route.dependant, set()):
+            unauthenticated.add(route.path)
+    assert unauthenticated == SESSIONLESS_API_WRITES

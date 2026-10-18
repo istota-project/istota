@@ -343,6 +343,9 @@ async def test_code_routes_need_the_email_method(client, configured, method, rou
     ("POST", "/istota/auth/login-link/request"), ("POST", "/istota/api/admin/users/alice/login-link"),
 ])
 async def test_the_login_link_routes_are_gone(client, method, route):
+    if route.startswith("/istota/api/"):
+        # Signed in as the admin, so the API's body guard lets it reach routing.
+        assert (await routes.sign_in(client)).status_code == 302
     assert (await client.request(method, route)).status_code in (404, 405)
 
 

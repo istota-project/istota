@@ -89,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The sign-in forms no longer accept large bodies from a client with no session (ISSUE-777). The web app stops reading a form past 16 KiB and answers 413 before parsing it, and the stack's nginx caps the sign-in paths at 32k instead of the 512M upload limit.
 
+- The web app no longer reads an upload or a request body from a client with no valid session (ISSUE-783). It now answers 401 before reading any of the body, on every API route, where the upload routes used to take in the whole body first. The stack's nginx still accepts an API body up to its upload limit before passing the request on.
+
 - A subscribed feed can no longer run script in the web app through a link (ISSUE-774). Entry links, a feed's site link and attached file links are kept only when they are `http` or `https`, both when a feed is polled and when the reader shows entries already stored, so a `javascript:` link in an older entry shows as plain text.
 
 - Opening the Mac app's window no longer flashes a sign-in form between "Signing in…" and the web UI.

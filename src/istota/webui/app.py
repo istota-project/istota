@@ -270,7 +270,43 @@ _session_secret = _resolve_session_secret()
 # where Secure protects nothing and Safari and WKWebView drop the cookie.
 _https_only = os.environ.get("ISTOTA_WEB_INSECURE_COOKIES", "").strip() not in ("1", "true", "yes")
 
+API_BODY_GUARD_PREFIX = "/istota/api/"
+
+
+def _may_carry_body(scope, headers) -> bool:
+    # HTTP/2 need not declare a length, so only a bodiless read is let by.
+    if scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+        return True
+    length = headers.get("content-length")
+    return "transfer-encoding" in headers or (length is not None and length.strip() != "0")
+
+
+class _ApiBodyAuthGuard:
+    """Refuse a request to the API that may carry a body and has no live session.
+
+    FastAPI reads a declared body parameter (`UploadFile`, `Form`, `Body`)
+    before any dependency runs, so `require_auth` refused an anonymous upload
+    only once all of it had arrived (ISSUE-783). This answers 401 before the
+    body is read, for every route under the prefix, including ones not written
+    yet. It asks the question the routes ask, through `_require_api_auth`, so
+    no-auth mode passes. Added before `SessionMiddleware` so it runs inside it
+    and sees the decoded session.
+    """
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope["path"].startswith(API_BODY_GUARD_PREFIX):
+            request = Request(scope)
+            if _may_carry_body(scope, request.headers) and not await _stream_authorized(request):
+                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+                return
+        await self.inner(scope, receive, send)
+
+
 app = FastAPI(title="Istota Web", lifespan=lifespan)
+app.add_middleware(_ApiBodyAuthGuard)
 app.add_middleware(
     SessionMiddleware,
     secret_key=_session_secret,
