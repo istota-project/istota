@@ -2,6 +2,7 @@
 
 import os
 import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,14 +76,24 @@ def list_dir(root: Path, parts: list[str], *, limit: int = LIST_MAX_ENTRIES) -> 
     return Listing(entries, truncated, skipped_names)
 
 
-def list_file(root: Path) -> Listing:
-    """List one authorized file without exposing its parent directory."""
-    fd = os.open(root, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def list_file(anchor: Path, parts: Sequence[str]) -> Listing:
+    """List one authorized file without exposing its parent directory.
+
+    The file is reached by a walk from ``anchor`` with no link followed.
+    """
+    *dirs, leaf = parts
+    dir_fd = open_overlay_dir(anchor, *dirs, raise_mount_errors=True)
+    if dir_fd is None:
+        raise ListingError(404, "File not found.")
+    try:
+        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ListingError(404, "File not found.")
-        entry = Entry(root.name, "file", info.st_size, info.st_mtime, root.name.startswith("."))
+        entry = Entry(leaf, "file", info.st_size, info.st_mtime, leaf.startswith("."))
         return Listing([entry], False)
     finally:
         os.close(fd)

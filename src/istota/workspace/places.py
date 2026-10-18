@@ -10,6 +10,7 @@ from pathlib import Path
 from istota import db
 from istota.config import Config
 from istota.credentials.google_scopes import levels_from_scopes
+from istota.sandbox.host_paths import linked_resource_parts
 from istota.sandbox.user_scope import scoped_user_dir
 
 
@@ -22,6 +23,19 @@ class Place:
     browsable: bool
     view_root: str | None
     conversation_token: str | None = None
+    # A linked place is opened by walking `walk` from `anchor`, the workspace
+    # root, with no link followed (ISSUE-782); every other place from `root`.
+    anchor: Path | None = None
+    walk: tuple[str, ...] = ()
+
+
+def place_anchor(place: Place) -> tuple[Path, tuple[str, ...]]:
+    """The trusted directory a place is opened from, and the parts below it."""
+    if place.anchor is not None:
+        return place.anchor, place.walk
+    if place.root is None:
+        raise ValueError(f"place {place.id} has no root")
+    return place.root, ()
 
 
 def user_resources_for(
@@ -54,18 +68,18 @@ def list_places(config: Config, conn: sqlite3.Connection, user_id: str) -> list[
         for resource in user_resources_for(config, conn, user_id):
             if resource.resource_type not in {"folder", "shared_file"} or not resource.resource_path:
                 continue
-            root = (workspace / resource.resource_path.lstrip("/")).resolve()
-            if not root.exists() or (home is not None and root.is_relative_to(home.resolve())):
+            parts = linked_resource_parts(workspace, resource.resource_path)
+            # Home already covers a resource spelled inside it, whatever it holds.
+            if parts is None or (home is not None and parts[:2] == ("Users", user_id)):
                 continue
-            # Viewer paths name workspace files, never an arbitrary host path.
-            if not root.is_relative_to(workspace):
-                continue
+            root = workspace.joinpath(*parts)
             place_id = f"linked:{resource.id}"
             if resource.id == 0:
                 digest = hashlib.sha256(resource.resource_path.encode()).hexdigest()[:12]
                 place_id = f"linked:cfg:{digest}"
             places.append(Place(place_id, "linked", (resource.display_name or root.name)[:120],
-                                root, True, "/" + root.relative_to(workspace).as_posix()))
+                                root, True, "/" + "/".join(parts),
+                                anchor=workspace, walk=parts))
         for room in db.list_member_rooms(conn, user_id, include_dismissed=True):
             root = scoped_user_dir(workspace / "Channels", room.token)
             if root is not None and root.is_dir():

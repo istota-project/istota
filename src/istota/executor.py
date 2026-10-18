@@ -5163,8 +5163,8 @@ def native_fs_roots(
     ``plan_masks`` logs a refused mask, both of which would then happen twice
     per task. It is also the narrower catch, which matters more: a ``ValueError``
     from anywhere else in the build (``Path.resolve`` raises one on an embedded
-    NUL, and a ``user_resources`` row is row data) still propagates instead of
-    being reported as a blocklist rejection that never happened.
+    NUL) still propagates instead of being reported as a blocklist rejection
+    that never happened.
     """
     if workspace_dir is not None:
         try:

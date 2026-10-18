@@ -49,14 +49,22 @@ def chat_file_workspace(config: "Config | None", username: str) -> Path:
     return root
 
 
+ServableRoot = tuple[str, Path, tuple[str, ...]]
+
+
 def servable_roots(
     config: "Config", conn: sqlite3.Connection, username: str,
-) -> list[tuple[str, Path]]:
-    """Viewer paths and resolved roots from the user's current places."""
-    from istota.workspace.places import list_places
+) -> list[ServableRoot]:
+    """Viewer path, trusted anchor and the parts below it, per current place.
+
+    A linked place is anchored at the workspace root with its resource's
+    components as the parts (ISSUE-782), so an open walks those again with no
+    link followed rather than trusting the root as it was when listed.
+    """
+    from istota.workspace.places import list_places, place_anchor
 
     return [
-        (place.view_root, place.root.resolve())
+        (place.view_root, *place_anchor(place))
         for place in list_places(config, conn, username)
         if place.browsable and place.view_root is not None and place.root is not None
     ]
@@ -64,7 +72,7 @@ def servable_roots(
 
 def resolve_chat_file(
     config: "Config | None", username: str, path: str,
-    *, roots: list[tuple[str, Path]] | None = None,
+    *, roots: list[ServableRoot] | None = None,
 ) -> Path:
     """The path `open_chat_file` would serve, for a caller that only asks.
 
@@ -78,7 +86,7 @@ def resolve_chat_file(
 
 def open_chat_file(
     config: "Config | None", username: str, path: str,
-    *, roots: list[tuple[str, Path]] | None = None,
+    *, roots: list[ServableRoot] | None = None,
 ) -> tuple[int, Path]:
     """A read-only fd on the regular file a workspace path names, and its path.
 
@@ -107,36 +115,21 @@ def open_chat_file(
     candidate = raw if raw.startswith("/") else f"/Users/{username}/{raw}"
     scoped = posixpath.normpath(candidate)
     matching = [
-        (view_root, root) for view_root, root in roots
-        if scoped == view_root or scoped.startswith(view_root.rstrip("/") + "/")
+        root for root in roots
+        if scoped == root[0] or scoped.startswith(root[0].rstrip("/") + "/")
     ]
     if not matching:
         raise ChatFileError(403, "path is outside your workspace")
-    view_root, root = max(matching, key=lambda item: len(item[0]))
+    view_root, anchor, prefix = max(matching, key=lambda item: len(item[0]))
     relative = scoped[len(view_root):].lstrip("/")
-    if not relative and root.is_dir():
+    parts = [*prefix, *(relative.split("/") if relative else [])]
+    if not parts:
         raise ChatFileError(400, "path names the workspace itself, not a file")
 
-    parts = relative.split("/") if relative else []
-    if not parts:
-        # A linked single file is its own root, resolved by `servable_roots`.
-        try:
-            fd = os.open(root, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except OSError:
-            raise _refusal(root.parent, [root.name]) from None
-        try:
-            regular = stat.S_ISREG(os.fstat(fd).st_mode)
-            if regular:
-                os.set_blocking(fd, True)
-        except OSError:
-            regular = False
-        if not regular:
-            os.close(fd)
-            raise _refusal(root.parent, [root.name])
-        return fd, root
-
+    # One walk from the trusted anchor covers a linked file root, a linked
+    # folder and a home path alike.
     *dirs, leaf = parts
-    dir_fd = open_overlay_dir(root, *dirs)
+    dir_fd = open_overlay_dir(anchor, *dirs)
     fd = None
     if dir_fd is not None:
         try:
@@ -144,8 +137,8 @@ def open_chat_file(
         finally:
             os.close(dir_fd)
     if fd is None:
-        raise _refusal(root, parts)
-    return fd, root.joinpath(*parts)
+        raise _refusal(anchor, parts)
+    return fd, anchor.joinpath(*parts)
 
 
 def _refusal(root: Path, parts: list[str]) -> ChatFileError:
