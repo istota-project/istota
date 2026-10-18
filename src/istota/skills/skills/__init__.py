@@ -33,8 +33,7 @@ def _load_context():
     Returns a dict, or calls _output_error and exits on a fatal setup problem.
     """
     from istota.config import load_config
-    from istota.experimental import enabled_features_from_env
-    from istota.skills._loader import effective_disabled_skills, load_skill_index
+    from istota.skills._loader import load_skill_index
 
     user_id = os.environ.get("ISTOTA_USER_ID", "")
     if not user_id:
@@ -42,12 +41,23 @@ def _load_context():
 
     config = load_config()
     skill_index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    withheld = _room_withheld(config, user_id, skill_index)
+    return skill_context(config, user_id, skill_index, withheld)
+
+
+def skill_context(config, user_id: str, skill_index, withheld: frozenset[str]) -> dict:
+    """The context `_guard_skill` reads, for a caller whose withheld set is known.
+
+    `_load_context` reaches it from a CLI's environment; a `!command`, which a
+    user typed in their own turn, reaches it with nothing withheld.
+    """
+    from istota.experimental import enabled_features_from_env
+    from istota.skills._loader import effective_disabled_skills
 
     # Instance + per-user disabled, plus the capability gate (browse→browser,
     # devbox→devbox, …) and what the calling task's room withholds. Shared with
     # the executor so `skills list` / `skills show` agree with the menu the
     # model was shown.
-    withheld = _room_withheld(config, user_id, skill_index)
     disabled = effective_disabled_skills(
         config, user_id, skill_index, withheld_scopes=withheld,
     )

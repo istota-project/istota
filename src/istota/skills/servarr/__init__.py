@@ -193,23 +193,29 @@ HANDLERS = {
 }
 
 
-def _verb(verb: str):
-    """Resolve the tier, check the table, then run the handler with its clients."""
-    handler = HANDLERS[verb]
+def call_verb(verb: str, args, ctx: dict, *, budget: float | None = None) -> dict:
+    """Resolve the tier, check the table, then run the handler with its clients.
 
+    `budget` replaces the proxy-derived deadline with that many seconds, for a
+    caller (the `!arr` command) that has no proxy timeout above it.
+    """
+    tier = access.resolve_tier(ctx)
+    access.check(verb, args, tier)
+    config = ctx["config"]
+    clock = _clock
+    deadline = clock() + budget if budget is not None else run_deadline(config, clock)
+    run = Run(config=config, tier=tier, user_id=ctx["user_id"], deadline=deadline,
+              clock=clock, sleep=_sleep, now=_now, transport=_transport(),
+              resolve=_resolver())
+    try:
+        return HANDLERS[verb](run, args)
+    finally:
+        run.close()
+
+
+def _verb(verb: str):
     def run_verb(args):
-        ctx = access.load_context()
-        tier = access.resolve_tier(ctx)
-        access.check(verb, args, tier)
-        config = ctx["config"]
-        clock = _clock
-        run = Run(config=config, tier=tier, user_id=ctx["user_id"],
-                  deadline=run_deadline(config, clock), clock=clock, sleep=_sleep, now=_now,
-                  transport=_transport(), resolve=_resolver())
-        try:
-            return handler(run, args)
-        finally:
-            run.close()
+        return call_verb(verb, args, access.load_context())
 
     return run_verb
 

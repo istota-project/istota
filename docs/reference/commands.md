@@ -45,6 +45,8 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!relay cancel RELAY_ID` | Cancel a relay question you asked that has not been answered |
 | `!relay block USER_ID` / `!relay unblock USER_ID` | Stop or allow again relay questions from that user; blocking closes their unanswered ones |
 | `!relay blocked` | List who you have blocked |
+| `!arr search film\|show\|album TITLE` | Look a title up in the [arr stack](../features/servarr.md#requesting-from-a-command) and list each result with the id to add it by |
+| `!arr add film\|show\|album ID [MONITOR]` | Request a film (TMDB id), show (TVDB id, optional monitor mode) or album (MusicBrainz id) with the stack's defaults |
 
 ## Answering a held task
 

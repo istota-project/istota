@@ -4191,3 +4191,27 @@ async def cmd_relay(ctx: CommandContext):
             return f"Unblocked relay questions from {target}."
         except RequestError:
             return "Relay unavailable."
+
+
+@command("arr", "Request media without a model turn: `!arr search film <title>`, `!arr add film <tmdb-id>`, `!arr add show <tvdb-id> [monitor]`, `!arr add album <mbid>`")
+async def cmd_arr(ctx: CommandContext):
+    """Search the arr stack and add to its Wanted list, through the servarr skill.
+
+    The skill's access table decides who may: an admin or a `[servarr]
+    requesters` user, with the stack's own add defaults for a requester.
+    """
+    import asyncio
+
+    # The same reason as `!usage`: the Talk poller hands over its open write
+    # transaction, and what follows is up to a minute of network calls.
+    if ctx.conn is not None:
+        try:
+            ctx.conn.commit()
+        except sqlite3.Error:
+            logger.debug("!arr could not commit the caller's transaction", exc_info=True)
+
+    from istota.skills.servarr.chat import run_command
+
+    return await asyncio.to_thread(
+        run_command, ctx.config, ctx.user_id, _room_token(ctx), ctx.args,
+    )

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`!arr` requests media without a model turn.** `!arr search film|show|album TITLE` lists matches with their ids, and `!arr add film|show|album ID` puts one on the arr's Wanted list, monitoring it if the library holds it unmonitored. It uses the servarr skill's own tiers and defaults.
 - The Chat sidebar now shows a Starred count beside the existing Unread count, with the same badges as Feeds. It counts all starred messages in listed rooms and updates after starring, unstarring or deleting a message.
 - The Feeds sidebar shows how many entries are unread and how many are starred next to Unread and Starred, and sources with unread entries are in bold. The counts update as you read, star and mark entries read.
 - **Where each credential is kept, in Admin → Configuration.** Every credential field has a badge saying where its value is held: its secret file, in `config.toml`, set outside the stack, or not set. When some are still in `config.toml`, a notice at the top counts them, and its Move all to secret files has the host move them through the usual review and confirmation. A release from before this refuses a pending move rather than dropping the credential, and `istota-stack rollback` warns about any secret file the older release no longer reads.

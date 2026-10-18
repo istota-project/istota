@@ -116,14 +116,17 @@ def resolve_tier(ctx: dict, connection=INSTALL) -> Tier:
         return Tier(NONE, "The operator has not given this user access to the arr stack "
                           "(they are neither an admin nor in [servarr] requesters).")
 
-    if _in_email_thread(config):
+    # A `!command` names its room in the context; a CLI run has it in its env.
+    token = ctx.get("conversation_token")
+    if token is None:
+        token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "")
+    if _in_email_thread(config, token.strip()):
         return Tier(REQUESTER if base == ADMIN else base, email_thread=True)
     return Tier(base)
 
 
-def _in_email_thread(config) -> bool:
-    """Whether the task's room is an email thread; any failure says yes."""
-    token = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip()
+def _in_email_thread(config, token: str) -> bool:
+    """Whether the room `token` names is an email thread; any failure says yes."""
     if not token:
         return False
     try:

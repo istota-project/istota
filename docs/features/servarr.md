@@ -139,6 +139,12 @@ Writes are sent once. A write that ends ambiguously (the connection dropped afte
 
 Text from the apps (titles, overviews, release and indexer names, health and error messages) is returned inside untrusted-content markers.
 
+## Requesting from a command
+
+`!arr` runs `search` and `add` directly, with no model turn. `!arr search film Paris, Texas` (or just `!arr film Paris, Texas`) lists the matches, each with its id and whether it is already in the library. `!arr add film 655`, `!arr add show 70533 lastSeason` or `!arr add album <musicbrainz-id>` then requests one. `movie`, `tv` and `series` work as kinds too, and a show's monitor mode can be typed in any case. `!arr add` with a title instead of an id runs the search, since nothing is added by title.
+
+The command runs the skill's own verbs through the same access table, so the tiers above apply: a requester adds with the stack's defaults and their own tag, and a user with no tier is refused before anything is sent. Adding a whole artist is not offered from the command. A command is the sender's own turn, so nothing is withheld in a shared room; the reply is posted in the room the command was typed in. A command run gets 45 seconds, less than the CLI, so a new artist's album add can answer `artist_refreshing`; the same command finishes it.
+
 ## Not offered
 
 - Deleting anything: media, files, queue items, blocklist entries. Nothing in the skill sends a `DELETE`.
