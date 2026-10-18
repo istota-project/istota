@@ -5143,11 +5143,18 @@ class TestResourcesSettingsRemoved:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
         self._cfg = _make_config(tmp_path)
 
+    async def _login(self, client):
+        # Signed in, so the API's body guard lets the write reach routing.
+        import istota.webui.app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
+        await client.get("/istota/callback", follow_redirects=False)
+
     async def test_get_returns_404(self, client, app):
         resp = await client.get("/istota/api/settings/resources")
         assert resp.status_code == 404
 
     async def test_post_is_unhandled(self, client, app):
+        await self._login(client)
         resp = await client.post(
             "/istota/api/settings/resources",
             json={"type": "folder", "path": "/x"},
@@ -5155,6 +5162,7 @@ class TestResourcesSettingsRemoved:
         assert resp.status_code in (404, 405)
 
     async def test_delete_is_unhandled(self, client, app):
+        await self._login(client)
         resp = await client.delete("/istota/api/settings/resources/1")
         assert resp.status_code in (404, 405)
 
