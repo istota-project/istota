@@ -95,6 +95,7 @@ import stat
 from collections.abc import Sequence
 from pathlib import Path
 
+from .confined import open_dir, valid_parts
 from .user_scope import is_within, scoped_user_dir
 
 
@@ -676,7 +677,7 @@ def owner_path_parts(path: str, user_id: str) -> list[str] | None:
     id, and no component may be empty, ``.``, ``..`` or carry a NUL. A ``..``
     that would land back inside the tree is refused too, since accepting it
     means resolving it. What this returns is meant for a walk that refuses a
-    symlink at every component (``skills._loader.open_overlay_dir``), which is
+    symlink at every component (``sandbox.confined.open_dir``), which is
     the half a lexical rule cannot cover.
 
     At least one component must remain, so ``/Users/<owner>`` alone is None.
@@ -687,7 +688,7 @@ def owner_path_parts(path: str, user_id: str) -> list[str] | None:
     if len(parts) < 3 or parts[0] != "Users" or parts[1] != user_id:
         return None
     rest = parts[2:]
-    if any(not p or p in (".", "..") or "\0" in p for p in rest):
+    if not valid_parts(rest):
         return None
     return rest
 
@@ -705,14 +706,12 @@ def linked_resource_parts(workspace: Path, resource_path: object) -> tuple[str, 
     resource by walking these parts from that same root again rather than by
     the name this returns.
     """
-    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cost
-
     if not isinstance(resource_path, str):
         return None
     parts = tuple(resource_path.strip("/").split("/"))
-    if any(not p or p in (".", "..") or "\0" in p for p in parts):
+    if not valid_parts(parts):
         return None
-    dir_fd = open_overlay_dir(workspace, *parts[:-1])
+    dir_fd = open_dir(workspace, *parts[:-1])
     if dir_fd is None:
         return None
     try:

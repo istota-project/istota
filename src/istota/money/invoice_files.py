@@ -26,9 +26,11 @@ import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePosixPath
 
-from istota.sandbox.attachment_source import open_regular_at
+from istota.sandbox.confined import (
+    open_dir, open_or_create_dirs, open_regular_at, parts_below,
+)
 
 DEFAULT_INVOICE_OUTPUT = "invoices/generated"
 
@@ -42,21 +44,6 @@ def invoice_output_parts(invoice_output: str | None) -> tuple[str, ...] | None:
     if pure.is_absolute() or ".." in pure.parts or not pure.parts:
         return None
     return pure.parts
-
-
-def _parts_below(path: Path, root: Path) -> tuple[str, ...] | None:
-    target = PurePath(os.path.normpath(path))
-    spellings = [PurePath(os.path.normpath(root))]
-    try:
-        spellings.append(PurePath(root.resolve()))
-    except (OSError, RuntimeError):
-        pass
-    for spelling in spellings:
-        try:
-            return target.relative_to(spelling).parts
-        except ValueError:
-            continue
-    return None
 
 
 @dataclass
@@ -153,7 +140,7 @@ class OutputTree:
         """A row's stored ``pdf_path`` as ``(year, name)`` in this tree, by spelling."""
         if not pdf_path:
             return None
-        parts = _parts_below(Path(pdf_path), self.path)
+        parts = parts_below(Path(pdf_path), self.path)
         if parts is None or len(parts) != 2 or ".." in parts:
             return None
         return parts[0], parts[1]
@@ -182,7 +169,7 @@ class OutputTree:
 
 
 def _dir_parts(user_root: Path, directory: Path) -> tuple[str, ...]:
-    parts = _parts_below(Path(directory), Path(user_root))
+    parts = parts_below(Path(directory), Path(user_root))
     if parts is None:
         raise ValueError(f"{directory} is outside the user's tree")
     return parts
@@ -195,18 +182,14 @@ def open_dir_for_write(user_root: Path, directory: Path) -> int:
     and ``OSError`` when a component is a link or not a directory. The
     caller closes the fd.
     """
-    from istota.workspace.writes import open_or_create_dirs  # noqa: PLC0415 - import cost
-
     return open_or_create_dirs(Path(user_root), _dir_parts(user_root, directory))
 
 
 def _open_existing_dir(user_root: Path, directory: Path) -> int | None:
-    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cost
-
-    parts = _parts_below(Path(directory), Path(user_root))
+    parts = parts_below(Path(directory), Path(user_root))
     if parts is None:
         return None
-    return open_overlay_dir(Path(user_root), *parts)
+    return open_dir(Path(user_root), *parts)
 
 
 def read_file_below(user_root: Path, path: Path, *, max_bytes: int) -> bytes | None:
@@ -218,7 +201,7 @@ def read_file_below(user_root: Path, path: Path, *, max_bytes: int) -> bytes | N
     """
     from istota.skills._loader import read_overlay_bytes  # noqa: PLC0415 - import cost
 
-    parts = _parts_below(Path(path), Path(user_root))
+    parts = parts_below(Path(path), Path(user_root))
     if not parts:
         return None
     fd = _open_existing_dir(user_root, Path(path).parent)
@@ -279,14 +262,12 @@ def open_output_tree(
     user_root: Path | None, data_dir: Path | None, invoice_output: str | None,
 ) -> Iterator[OutputTree | None]:
     """The pinned output tree, or None when it is missing, linked or outside the root."""
-    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cost
-
     tree = None
     output = invoice_output_parts(invoice_output)
     if user_root is not None and data_dir is not None and output is not None:
-        below = _parts_below(Path(data_dir), Path(user_root))
+        below = parts_below(Path(data_dir), Path(user_root))
         if below is not None:
-            fd = open_overlay_dir(Path(user_root), *below, *output)
+            fd = open_dir(Path(user_root), *below, *output)
             if fd is not None:
                 tree = OutputTree(fd, Path(data_dir).joinpath(*output))
     try:
