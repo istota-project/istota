@@ -700,6 +700,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # inferred, and an existing row must not start following on upgrade.
         "timezone_follow_location": "INTEGER NOT NULL DEFAULT 0",
         "show_nav_unread_badges": "INTEGER NOT NULL DEFAULT 0",
+        "push_chat_alerts": "TEXT NOT NULL DEFAULT 'alerts'",
+        "push_preview": "INTEGER NOT NULL DEFAULT 1",
+        "push_inbox_categories": "TEXT NOT NULL DEFAULT '{}'",
         # Per-user Google Workspace scope selection (ISSUE-240). JSON object
         # {service -> off|readonly|full}, bounded by the operator's
         # [google_workspace] scopes ceiling. Empty means "unset", which
@@ -871,6 +874,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 # (hidden email threads, stage 6). 0 on every existing handle,
                 # so threads move into the collapsed group on upgrade.
                 "listed": "INTEGER NOT NULL DEFAULT 0",
+                "push_notifications": "TEXT NOT NULL DEFAULT 'default'",
             }
         )
         # Unsolicited (bot-delivered) messages posted into a web chat room —
@@ -1307,6 +1311,8 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
+    _migrate_push_tables(conn)
+    _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
     _migrate_profile_generation(conn)
     # Same shape again.
@@ -4003,6 +4009,7 @@ class WebChatRoom:
     #: Show this room in the viewer's main list although it would be hidden.
     #: Only an email thread room reads it (`hidden_room_tokens_for_member`).
     listed: bool = False
+    push_notifications: str = "default"
 
 
 def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
@@ -4025,6 +4032,7 @@ def _row_to_web_chat_room(row: sqlite3.Row) -> WebChatRoom:
         updated_at=row["updated_at"],
         # Tolerant for the same reason as `color`.
         listed=bool(row["listed"]) if "listed" in row.keys() else False,
+        push_notifications=row["push_notifications"] if "push_notifications" in row.keys() else "default",
     )
 
 
@@ -4098,6 +4106,7 @@ def update_web_chat_room(
     archived: bool | None = None,
     color: str | None = None,
     listed: bool | None = None,
+    push_notifications: str | None = None,
 ) -> WebChatRoom | None:
     """Rename, (un)archive, re-tint and/or (un)list a room. Returns the updated
     row, or None if the id is unknown.
@@ -4122,6 +4131,9 @@ def update_web_chat_room(
     if listed is not None:
         sets.append("listed = ?")
         params.append(1 if listed else 0)
+    if push_notifications is not None:
+        sets.append("push_notifications = ?")
+        params.append(push_notifications)
     if not sets:
         return get_web_chat_room(conn, room_id)
     sets.append("updated_at = datetime('now')")
@@ -6929,16 +6941,68 @@ def initialize_room_read_state(
     return True
 
 
+def total_unread_messages(
+    conn: sqlite3.Connection, user_id: str, surface: str, *, push_default: str | None = None,
+) -> int:
+    """Count unread messages in visible member rooms, without moving cursors."""
+    hidden = hidden_room_tokens_for_member(conn, user_id)
+    sql = """
+        SELECT COUNT(*) FROM messages m
+        JOIN rooms r ON r.token = m.room_token
+        JOIN room_members rm ON rm.room_token = r.token AND rm.user_id = ?
+        LEFT JOIN web_chat_rooms w ON w.token = r.token AND w.user_id = rm.user_id
+        LEFT JOIN room_read_state rs ON rs.room_token = r.token
+            AND rs.user_id = rm.user_id AND rs.surface = ?
+        WHERE r.archived = 0 AND m.role != 'user'
+          AND m.id > COALESCE(rs.last_read_message_id, 0)
+          AND NOT EXISTS (SELECT 1 FROM room_dismissals d
+                          WHERE d.room_token = r.token AND d.user_id = rm.user_id)
+    """
+    params = [user_id, surface]
+    if push_default is not None:
+        sql += " AND COALESCE(NULLIF(w.push_notifications, 'default'), ?) IN ('alerts', 'badge')"
+        params.append(push_default)
+    if hidden:
+        sql += " AND r.token NOT IN (" + ",".join("?" for _ in hidden) + ")"
+        params.extend(sorted(hidden))
+    return int(conn.execute(sql, params).fetchone()[0])
+
+
+def unread_rooms_since(
+    conn: sqlite3.Connection, user_id: str, surface: str, floor: int, ceiling: int,
+) -> list[dict]:
+    """Unread candidates in the same visible rooms as the badge aggregate."""
+    hidden = hidden_room_tokens_for_member(conn, user_id)
+    sql = """
+        SELECT m.*, r.name AS room_name, w.id AS room_id,
+               COALESCE(w.push_notifications, 'default') AS push_notifications
+        FROM messages m
+        JOIN rooms r ON r.token = m.room_token
+        JOIN room_members rm ON rm.room_token = r.token AND rm.user_id = ?
+        LEFT JOIN web_chat_rooms w ON w.token = r.token AND w.user_id = rm.user_id
+        LEFT JOIN room_read_state rs ON rs.room_token = r.token
+            AND rs.user_id = rm.user_id AND rs.surface = ?
+        WHERE r.archived = 0 AND m.role != 'user'
+          AND m.id > ? AND m.id <= ?
+          AND m.id > COALESCE(rs.last_read_message_id, 0)
+          AND NOT EXISTS (SELECT 1 FROM room_dismissals d
+                          WHERE d.room_token = r.token AND d.user_id = rm.user_id)
+    """
+    params = [user_id, surface, floor, ceiling]
+    if hidden:
+        sql += " AND r.token NOT IN (" + ",".join("?" for _ in hidden) + ")"
+        params.extend(sorted(hidden))
+    return [dict(row) for row in conn.execute(sql + " ORDER BY m.id", params)]
+
+
 def count_user_web_unread_messages(conn: sqlite3.Connection, user_id: str) -> int:
     """Sum visible rooms using the web sidebar's cursors and unread rules."""
     hidden = hidden_room_tokens_for_member(conn, user_id)
-    total = 0
     for room in list_member_rooms(conn, user_id):
         if room.token in hidden:
             continue
         initialize_room_read_state(conn, room.token, "web", user_id)
-        total += count_unread_messages(conn, room.token, "web", user_id)
-    return total
+    return total_unread_messages(conn, user_id, "web")
 
 
 # ---------------------------------------------------------------------------
@@ -7711,6 +7775,7 @@ def _migrate_web_chat_rooms_peruser(conn: sqlite3.Connection) -> None:
                 archived    INTEGER NOT NULL DEFAULT 0,
                 color       TEXT NOT NULL DEFAULT '',
                 listed      INTEGER NOT NULL DEFAULT 0,
+                push_notifications TEXT NOT NULL DEFAULT 'default',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (user_id, token)
@@ -7737,7 +7802,7 @@ def _migrate_web_chat_rooms_peruser(conn: sqlite3.Connection) -> None:
         carried = ["id", "user_id", "token", "name", "archived",
                    "created_at", "updated_at"]
         # `listed` for the same reason, and on the same old-table test.
-        for optional in ("color", "listed"):
+        for optional in ("color", "listed", "push_notifications"):
             if optional in old_cols:
                 carried.append(optional)
         cols = ", ".join(carried)  # code-owned literals, never user input
@@ -9238,6 +9303,39 @@ def _migrate_user_profile_managed_fields(conn: sqlite3.Connection) -> None:
         logger.warning("user_profile_managed_fields migration failed: %s", e)
 
 
+def _migrate_push_tables(conn: sqlite3.Connection) -> None:
+    """Create push state without committing the caller's transaction."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'ios',
+            token TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            app_version TEXT NOT NULL DEFAULT '',
+            last_badge INTEGER NOT NULL DEFAULT -1,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            last_seen_at TEXT,
+            UNIQUE (token, environment)
+        )
+    """)
+    _add_columns(conn, "push_devices", {"auth_method": "TEXT", "auth_epoch": "INTEGER", "auth_session_id": "TEXT"})
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_state (
+            user_id TEXT PRIMARY KEY,
+            last_pushed_message_id INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+    """)
+
+
+def _migrate_notifications_push_pending(conn: sqlite3.Connection) -> None:
+    _add_columns(conn, "notifications", {"push_pending": "INTEGER NOT NULL DEFAULT 0"})
+
+
 def _migrate_notifications(conn: sqlite3.Connection) -> None:
     """Create the `notifications` inbox table and its indexes on existing DBs.
 
@@ -9256,6 +9354,7 @@ def _migrate_notifications(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
+                push_pending INTEGER NOT NULL DEFAULT 0,
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id           TEXT NOT NULL,
                 source            TEXT NOT NULL,

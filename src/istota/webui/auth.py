@@ -177,6 +177,25 @@ def get_retired_epoch(db_path: Path, user_id: str) -> int:
         return _retired_epoch(conn, user_id)
 
 
+def validate_session_credential(db_path: Path, user_id: str, method: str, epoch: int, web_config) -> Identity | None:
+    """Validate a stored auth snapshot against current account authority."""
+    if method not in ("nextcloud", "email", "local_code") or not web_config.has_method(method):
+        raise ValueError("Authentication method is unavailable")
+    from istota import user_profiles
+
+    identity = get_identity(db_path, user_id)
+    current_epoch = identity.credential_epoch if identity else get_retired_epoch(db_path, user_id)
+    if method in ("email", "local_code") and (
+        identity is None or user_profiles.get_profile(db_path, user_id) is None
+    ):
+        raise ValueError("Account is unavailable")
+    if identity and identity.disabled:
+        raise ValueError("Account is disabled")
+    if epoch != current_epoch:
+        raise ValueError("Credential was revoked")
+    return identity
+
+
 def get_identity_by_email(db_path: Path, email: str) -> Identity | None:
     with get_db(db_path) as conn:
         return _identity(conn.execute("SELECT * FROM web_auth_identities WHERE email = ?", (normalize_email(email),)).fetchone())

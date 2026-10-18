@@ -14,6 +14,11 @@
 # Root writes nothing in config/ or secrets/: both are uid 10001's, and
 # `istota-stack put-files` drops to 10001 before it opens a file there.
 
+- name: Configure iOS push independently
+  ansible.builtin.import_tasks: push.yml
+  tags: [never, istota_push]
+  when: "'istota_push' in ansible_run_tags"
+
 - name: Check the variables
   tags: [istota_update]
   ansible.builtin.assert:

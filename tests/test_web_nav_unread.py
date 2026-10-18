@@ -114,7 +114,7 @@ async def test_section_failure_is_isolated(client, config, monkeypatch, caplog, 
     _seed(config, "alice", chat=2, briefings=3, feeds=5)
     await _login(client)
     target, name = {
-        "chat": (db, "count_unread_messages"),
+        "chat": (db, "total_unread_messages"),
         "briefings": (bdb, "count_unread_archive"),
         "feeds": (fdb, "count_entries"),
     }[section]

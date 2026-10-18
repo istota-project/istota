@@ -4,10 +4,10 @@ import type { UserProfile } from '$lib/api';
 const USER_SETTINGS = Symbol('user-settings');
 
 /**
- * The profile record the Account, Preferences and Delivery sections all edit,
+ * The profile record the Account, Preferences, Notifications and Delivery sections edit,
  * held by `routes/settings/+layout.svelte`.
  *
- * One record and one save across three routes: the layout persists across a
+ * One record and one save across the settings routes: the layout persists across a
  * section switch, so an edit made on Account and not yet saved is still there
  * — and still behind the app-bar Save — after a visit to Delivery. Each field
  * is a getter so the layout can back it with `$state`; `profile` is the

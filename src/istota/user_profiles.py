@@ -55,6 +55,7 @@ EXTERNAL_TURN_DISPLAY_VALUES = ("full", "collapsed", "hidden")
 # are also the destination kinds `relay_destinations` resolves, which reads
 # them from here.
 RELAY_DELIVERY_VALUES = ("", "room", "whatsapp", "sms")
+PUSH_CHAT_ALERTS_VALUES = ("alerts", "badge", "off")
 
 
 @dataclass
@@ -105,6 +106,9 @@ class UserProfile:
     # rewrites a setting the user chose, so it is opted into, not inferred.
     timezone_follow_location: bool = False
     show_nav_unread_badges: bool = False
+    push_chat_alerts: str = "alerts"
+    push_preview: bool = True
+    push_inbox_categories: dict[str, bool] = field(default_factory=dict)
     # Per-user Google Workspace scope selection: {service -> off|readonly|full},
     # clamped at connect time to the operator's [google_workspace] scopes
     # ceiling. Empty is "unset" and resolves to the whole ceiling, which is
@@ -122,11 +126,12 @@ _PROFILE_COLUMNS = (
     "outbound_approval", "external_turn_display", "relay_delivery",
     "default_briefings", "briefing_email_html",
     "timezone_follow_location", "show_nav_unread_badges",
+    "push_chat_alerts", "push_preview", "push_inbox_categories",
     "google_scopes",
 )
 
 # Columns whose value is a JSON-encoded dict (vs the JSON-list columns).
-_DICT_COLUMNS = frozenset({"routing", "google_scopes"})
+_DICT_COLUMNS = frozenset({"routing", "google_scopes", "push_inbox_categories"})
 _LIST_COLUMNS = frozenset({
     "email_addresses", "disabled_skills", "trusted_email_senders",
     "quiet_email_senders", "disabled_modules",
@@ -140,6 +145,7 @@ _BOOL_COLUMN_DEFAULTS = {
     "briefing_email_html": True,
     "timezone_follow_location": False,
     "show_nav_unread_badges": False,
+    "push_preview": True,
 }
 _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
 _E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
@@ -157,7 +163,7 @@ SELF_EDITABLE_FIELDS = (
     "disabled_skills", "disabled_modules",
     "default_destination", "default_room", "routing",
     "briefing_email_html", "timezone_follow_location", "show_nav_unread_badges",
-    "external_turn_display", "relay_delivery",
+    "external_turn_display", "relay_delivery", "push_chat_alerts", "push_preview", "push_inbox_categories",
 )
 ADMIN_EDITABLE_FIELDS = (
     "display_name", "timezone", "email_addresses",
@@ -413,11 +419,13 @@ def _connect(
 
 
 def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
+    from istota.push.preferences import stored_inbox_categories
+
     if strict:
         # A missing column reads as its default below, which strict callers would export as a setting.
         if not set(_PROFILE_COLUMNS) <= set(row.keys()):
             raise ValueError("profile table is missing a column")
-        for name in _LIST_COLUMNS | (_DICT_COLUMNS - {"google_scopes"}):
+        for name in _LIST_COLUMNS | (_DICT_COLUMNS - {"google_scopes", "push_inbox_categories"}):
             value = json.loads(row[name])
             expected = list if name in _LIST_COLUMNS else dict
             items = value if isinstance(value, list) else value.values() if isinstance(value, dict) else ()
@@ -462,6 +470,9 @@ def _row_to_profile(row: sqlite3.Row, *, strict: bool = False) -> UserProfile:
         show_nav_unread_badges=_coerce_bool(
             _row_get(row, "show_nav_unread_badges"), False,
         ),
+        push_chat_alerts=str(_row_get(row, "push_chat_alerts") or "alerts"),
+        push_preview=_coerce_bool(_row_get(row, "push_preview"), True),
+        push_inbox_categories=stored_inbox_categories(_row_get(row, "push_inbox_categories") or {}, strict=strict),
         google_scopes=_parse_json_dict(_row_get(row, "google_scopes")),
     )
 
@@ -642,6 +653,9 @@ def _seeded_profile(
         routing=dict(_attr(seed_from, "routing") or {}),
         default_destination=_attr(seed_from, "default_destination") or "talk",
         outbound_approval=str(_attr(seed_from, "outbound_approval") or ""),
+        push_chat_alerts=str(_attr(seed_from, "push_chat_alerts") or "alerts"),
+        push_preview=_coerce_bool(_attr(seed_from, "push_preview"), True),
+        push_inbox_categories=dict(_attr(seed_from, "push_inbox_categories") or {}),
         external_turn_display=(
             _attr(seed_from, "external_turn_display") or "collapsed"
         ),
@@ -1015,6 +1029,9 @@ def insert_profile(conn: sqlite3.Connection, profile: UserProfile, *, replace: b
         1 if profile.briefing_email_html else 0,
         1 if profile.timezone_follow_location else 0,
         1 if profile.show_nav_unread_badges else 0,
+        profile.push_chat_alerts or "alerts",
+        1 if profile.push_preview else 0,
+        json.dumps(_normalized_profile_value("push_inbox_categories", profile.push_inbox_categories)),
         json.dumps(dict(profile.google_scopes)),
     )
     cols_sql = ", ".join(insert_cols)
@@ -1084,6 +1101,9 @@ def import_from_user_configs(
             routing=dict(getattr(user_config, "routing", {}) or {}),
             default_destination=getattr(user_config, "default_destination", "") or "talk",
             outbound_approval=str(getattr(user_config, "outbound_approval", "") or ""),
+            push_chat_alerts=getattr(user_config, "push_chat_alerts", "alerts"),
+            push_preview=_coerce_bool(getattr(user_config, "push_preview", True), True),
+            push_inbox_categories=dict(getattr(user_config, "push_inbox_categories", {})),
             external_turn_display=(
                 getattr(user_config, "external_turn_display", "") or "collapsed"
             ),
@@ -1138,6 +1158,9 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
     setattr(user_config, "default_briefings", bool(profile.default_briefings))
     setattr(user_config, "briefing_email_html", bool(profile.briefing_email_html))
     setattr(user_config, "show_nav_unread_badges", bool(profile.show_nav_unread_badges))
+    setattr(user_config, "push_chat_alerts", profile.push_chat_alerts)
+    setattr(user_config, "push_preview", bool(profile.push_preview))
+    setattr(user_config, "push_inbox_categories", dict(profile.push_inbox_categories))
     setattr(
         user_config, "timezone_follow_location",
         bool(profile.timezone_follow_location),
@@ -1254,6 +1277,9 @@ def _normalized_profile_value(col: str, value: object) -> object:
         return normalize_sms_phone_number(value, allow_empty=True)
     if col in _LIST_COLUMNS:
         return list(value or [])
+    if col == "push_inbox_categories":
+        from istota.push.preferences import validate_inbox_categories
+        return validate_inbox_categories(value)
     if col in _DICT_COLUMNS:
         return dict(value or {})
     if col in _BOOL_COLUMNS:
@@ -1315,6 +1341,8 @@ def validate_provisioning_fields(
             f"--outbound-approval must be one of {', '.join(VALID_POLICIES)}, "
             f"or '' to follow the operator floor; got {fields['outbound_approval']!r}"
         )
+    if "push_chat_alerts" in updates and updates["push_chat_alerts"] not in PUSH_CHAT_ALERTS_VALUES:
+        raise ValueError("push_chat_alerts must be alerts, badge, or off")
     if "external_turn_display" in updates and updates["external_turn_display"] not in EXTERNAL_TURN_DISPLAY_VALUES:
         raise ValueError(
             f"--external-turn-display must be one of {', '.join(EXTERNAL_TURN_DISPLAY_VALUES)}, "

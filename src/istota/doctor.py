@@ -10007,11 +10007,33 @@ def _operator_persona_result(config: "Config", name: str, persona, persona_retir
     return CheckResult(name, OK, f"{state}; {tail}")
 
 
+def check_push_credentials(config: "Config", probe: bool) -> CheckResult:
+    """Inspect only credential metadata; never open the signing key or send."""
+    name = "push.credentials"
+    try:
+        push = config.push
+        if not push.enabled:
+            return CheckResult(name, SKIP, "Push notifications are disabled")
+        if not all((push.apns_key_path, push.apns_key_id, push.apns_team_id, push.apns_topic)):
+            return CheckResult(name, FAIL, "APNs configuration is incomplete", "Set the key path, key id, team id and topic in [push].")
+        if importlib.util.find_spec("h2") is None:
+            return CheckResult(name, FAIL, "HTTP/2 support is not installed", "Install the push extra with uv sync --extra push.")
+        metadata = Path(push.apns_key_path).stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return CheckResult(name, FAIL, "APNs key is not a regular file", "Point apns_key_path at the signing key file.")
+        if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.geteuid():
+            return CheckResult(name, FAIL, "APNs key permissions or owner differ from the service account", "Set mode 0600 and make the service account the owner of the APNs key.")
+        return CheckResult(name, OK, "APNs key exists with mode 0600 and is owned by this service account")
+    except Exception as exc:
+        return CheckResult(name, FAIL, f"APNs key metadata unavailable ({type(exc).__name__})", "Install the signing key at apns_key_path, owned by the service account with mode 0600.")
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
 # cannot afford.
 CHECKS: tuple[tuple[str, Check], ...] = (
+    ("push.credentials", check_push_credentials),
     ("runtime.platform", check_platform),
     ("runtime.bwrap", check_bwrap),
     ("runtime.model_cli", check_model_cli),
@@ -10114,6 +10136,7 @@ line for the same reason.
 # exists because it is cheap. A check's results all carry its registry scope,
 # and a unit test enforces that.
 CHECK_SCOPES: dict[str, str] = {
+    "push.credentials": DEPLOYMENT,
     "runtime.platform": IMAGE,
     "runtime.bwrap": IMAGE,
     "runtime.model_cli": IMAGE,

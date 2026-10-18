@@ -949,6 +949,9 @@ class UserConfig:
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
     show_nav_unread_badges: bool = False
+    push_chat_alerts: str = "alerts"
+    push_preview: bool = True
+    push_inbox_categories: dict[str, bool] = field(default_factory=dict)
     # The KDBX credential vault, operator-set. Empty means this user's vault is
     # whatever their `{bot_dir}/vault/` folder holds, which is the ordinary
     # route and is every user by default; a relative path resolves under
@@ -2343,6 +2346,21 @@ class ExperimentalConfig:
 
 
 @dataclass
+class PushConfig:
+    """Deployment APNs credential and push dispatch cadence."""
+
+    enabled: bool = False
+    apns_key_path: str = ""
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_topic: str = "com.cynium.istota"
+    dispatch_interval_seconds: int = 5
+    chat_delay_seconds: int = 15
+    max_age_seconds: int = 300
+    alert_batch_limit: int = 200
+
+
+@dataclass
 class Config:
     bot_name: str = "Istota"  # User-facing name (used in chat, emails, folder names)
     emissaries_enabled: bool = True  # Include config/emissaries.md in system prompt (`istota setup` writes false for local installs)
@@ -2387,6 +2405,7 @@ class Config:
     location: LocationReceiverConfig = field(default_factory=LocationReceiverConfig)
     google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    push: PushConfig = field(default_factory=PushConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     experimental: ExperimentalConfig = field(default_factory=ExperimentalConfig)
     users: dict[str, UserConfig] = field(default_factory=dict)  # nc_username -> UserConfig
@@ -3168,6 +3187,8 @@ def _parse_shared_block_specs(entries: "list | None") -> list[BriefingSharedBloc
 
 def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
     """Parse a user data dict (from main config or per-user file) into UserConfig."""
+    from istota.push.preferences import validate_inbox_categories
+
     if "default_briefings" in user_data:
         report_problem("retired", ("users", user_id, "default_briefings"),
                        "default_briefings is migration input only; use All users delivery preferences")
@@ -3269,6 +3290,9 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         ),
         briefing_email_html=bool(user_data.get("briefing_email_html", True)),
         show_nav_unread_badges=bool(user_data.get("show_nav_unread_badges", False)),
+        push_chat_alerts=str(user_data.get("push_chat_alerts", "alerts")),
+        push_preview=bool(user_data.get("push_preview", True)),
+        push_inbox_categories=validate_inbox_categories(user_data.get("push_inbox_categories", {})),
         timezone_follow_location=bool(
             user_data.get("timezone_follow_location", False)
         ),
@@ -4848,6 +4872,7 @@ ENV_OVERRIDES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ISTOTA_WEB_TOKEN_STORAGE", ("web", "token_storage")),
     # Web auth-mode override. Same validation as the TOML parse.
     ("ISTOTA_WEB_AUTH", ("web", "auth")),
+    ("ISTOTA_APNS_KEY_PATH", ("push", "apns_key_path")),
 )
 """``(env var, path)``: non-secret settings the environment sets over the file.
 
@@ -4857,6 +4882,7 @@ overrides, not an override of the file.
 """
 
 _ENV_OVERRIDE_PARSERS: dict[str, Callable[[str], object]] = {
+    "ISTOTA_APNS_KEY_PATH": lambda raw: raw.strip() or _KEEP,
     "ISTOTA_WEB_TOKEN_STORAGE": _token_storage_from_env,
     "ISTOTA_WEB_AUTH": lambda raw: normalize_auth_methods(raw, kind="warning") or _KEEP,
 }

@@ -69,7 +69,7 @@ def _tasks() -> list[dict]:
             for key in ("block", "rescue", "always"):
                 walk(item.get(key))
 
-    for name in ("tasks/main.yml", "handlers/main.yml"):
+    for name in ("tasks/main.yml", "tasks/push.yml", "handlers/main.yml"):
         walk(_load(name))
     return found
 
@@ -291,6 +291,10 @@ class TestTheVerbs:
         for task in _tasks():
             argv = _command_argv(task)
             if argv is not None and argv[0] == STACK_COMMAND:
+                continue
+            # This wrapper sources the installed stack helpers; it invokes no verb.
+            if argv == ["/bin/bash", "{{ _istota_push_stage.path }}/configure_push.sh",
+                        STACK_COMMAND, "{{ _istota_push_stage.path }}"]:
                 continue
             for module in modules:
                 body = task.get(module, task.get(f"ansible.builtin.{module}"))

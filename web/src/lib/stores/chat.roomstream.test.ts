@@ -196,6 +196,34 @@ describe('chat store — live room stream', () => {
     s.teardown();
   });
 
+  it('refreshes the filtered count after reads and personal preference saves, but not failed writes', async () => {
+    vi.useFakeTimers();
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    api.getNotificationCounts.mockResolvedValue({ open: 5, actionable: 1, push_badge: 3 });
+    const s = await freshSession();
+    const notifications = await import('./notifications');
+    notifications.startNotificationPoll();
+    await vi.advanceTimersByTimeAsync(0);
+    api.getNotificationCounts.mockClear();
+    await s.init();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(1);
+    await s.selectRoom(2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(2);
+    api.updateChatRoom.mockResolvedValue({ ...room(2), push_notifications: 'off' });
+    await s.updateRoomSettings(2, { push_notifications: 'off' });
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(3);
+    api.updateChatRoom.mockRejectedValueOnce(new Error('Save failed'));
+    await expect(s.updateRoomSettings(2, { push_notifications: 'alerts' })).rejects.toThrow(
+      'Save failed',
+    );
+    expect(api.getNotificationCounts).toHaveBeenCalledTimes(3);
+    s.teardown();
+    notifications.resetNotifications();
+  });
+
   it('seeds the cursor from the server before connecting', async () => {
     api.getChatRooms.mockResolvedValue({ rooms: [room(1)] });
     api.getRoomEvents.mockResolvedValue({ events: [], cursor: 41, gap: false });
@@ -1118,6 +1146,57 @@ describe('chat store — live room stream', () => {
   // produces one on every rename. Both directions in one test for the reason
   // the brain test above gives: a bare set-and-read passes against a store that
   // adopted the frame wholesale and could never clear anything.
+  it('adopts personal notification overrides and restores inheritance from live room frames', async () => {
+    const es = installFakeEventSource();
+    api.getChatRooms.mockResolvedValue({
+      rooms: [room(1), { ...room(2, 4), push_notifications: 'default' }, room(3, 2)],
+    });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    api.markRoomRead.mockClear();
+    const before = get(s.rooms);
+    try {
+      for (const mode of ['alerts', 'badge', 'off', 'default'] as const) {
+        es.current!.emit('room', {
+          action: 'upsert',
+          room: { ...room(2), push_notifications: mode },
+        });
+        expect(get(s.rooms).find((r) => r.id === 2)).toMatchObject({
+          push_notifications: mode,
+          unread_count: 4,
+        });
+        expect(get(s.rooms).find((r) => r.id === 3)).toEqual(before.find((r) => r.id === 3));
+      }
+      expect(api.markRoomRead).not.toHaveBeenCalled();
+    } finally {
+      s.teardown();
+    }
+  });
+
+  it('reconciles notification preferences changed in another session', async () => {
+    api.getChatRooms.mockResolvedValueOnce({
+      rooms: [room(1), { ...room(2, 4), push_notifications: 'default' }],
+    });
+    api.getRoomEvents.mockResolvedValue({ events: [], cursor: 0, gap: false });
+    const s = await freshSession();
+    await s.init();
+    try {
+      for (const mode of ['off', 'default'] as const) {
+        api.getChatRooms.mockResolvedValueOnce({
+          rooms: [room(1), { ...room(2, 4), push_notifications: mode }],
+        });
+        await s.refreshRooms();
+        expect(get(s.rooms).find((r) => r.id === 2)).toMatchObject({
+          push_notifications: mode,
+          unread_count: 4,
+        });
+      }
+    } finally {
+      s.teardown();
+    }
+  });
+
   it('applies a room colour frame, and clears it again', async () => {
     const es = installFakeEventSource();
     api.getChatRooms.mockResolvedValue({ rooms: [{ ...room(1), color: null }] });

@@ -306,8 +306,8 @@ def write_notification(
                     INSERT INTO notifications (
                         user_id, source, dedup_key, object_type, object_id,
                         severity, actionable, title, body, params, link,
-                        room_token, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        room_token, created_at, updated_at, push_pending
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                     """,
                     (
                         user_id, source, dedup_key, object_type, object_id,
@@ -360,12 +360,13 @@ def write_notification(
                    state = 'open',
                    resolved_at = NULL,
                    resolved_by = NULL,
-                   seen_at = CASE WHEN ? THEN NULL ELSE seen_at END
+                   seen_at = CASE WHEN ? THEN NULL ELSE seen_at END,
+                   push_pending = CASE WHEN ? THEN 1 ELSE push_pending END
              WHERE id = ?
             """,
             (
                 title, body or "", params_json, severity, now,
-                1 if reopening else 0, notification_id,
+                1 if reopening else 0, 1 if reopening else 0, notification_id,
             ),
         )
         return RaiseResult(
@@ -382,6 +383,37 @@ def write_notification(
             user_id, source, dedup_key, exc_info=True,
         )
         return None
+
+
+def take_pending_pushes(conn: sqlite3.Connection, limit: int = 200) -> list[dict]:
+    """Read a bounded batch; flags stay durable until each row is attempted."""
+    try:
+        return [dict(row) for row in _read(
+            conn, "SELECT * FROM notifications WHERE push_pending = 1 ORDER BY id LIMIT ?",
+            (max(1, int(limit)),),
+        )]
+    except Exception:
+        logger.warning("Reading pending native pushes failed", exc_info=True)
+        return []
+
+
+def clear_push_pending(
+    conn: sqlite3.Connection, ids: Iterable[int], *, snapshots: list[dict] | None = None,
+) -> None:
+    """Acknowledge attempts without erasing a reopen during network I/O."""
+    try:
+        if snapshots is not None:
+            for row in snapshots:
+                conn.execute(
+                    "UPDATE notifications SET push_pending = 0 WHERE id = ? "
+                    "AND updated_at = ? AND occurrences = ?",
+                    (row["id"], row["updated_at"], row["occurrences"]),
+                )
+        else:
+            conn.executemany("UPDATE notifications SET push_pending = 0 WHERE id = ?",
+                             [(int(item),) for item in ids])
+    except Exception:
+        logger.warning("Clearing pending native pushes failed", exc_info=True)
 
 
 def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> None:
@@ -1246,6 +1278,8 @@ __all__ = [
     "STATE_RESOLVED",
     "STATE_STALE",
     "counts",
+    "take_pending_pushes",
+    "clear_push_pending",
     "deliver_handed_off",
     "deliver_pending",
     "dismiss",

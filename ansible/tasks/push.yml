@@ -1,0 +1,85 @@
+---
+- name: Check push deployment inputs
+  ansible.builtin.assert:
+    that:
+      - istota_apns_key_file | length > 0
+      - istota_push_config is mapping
+      - istota_push_config.enabled is defined
+      - istota_push_config.apns_key_id is defined
+      - istota_push_config.apns_team_id is defined
+      - istota_push_config.apns_topic is defined
+    fail_msg: Set istota_apns_key_file and istota_push_config before running istota_push.
+    quiet: true
+
+- name: Refuse push deployment in check mode
+  ansible.builtin.assert:
+    that: not ansible_check_mode
+    fail_msg: Push deployment requires a normal run; no credential is staged in check mode.
+    quiet: true
+
+- name: Configure push delivery
+  block:
+    - name: Make a private push staging directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: istota-push.
+      register: _istota_push_stage
+      changed_when: false
+
+    - name: Allow the service account to traverse staging
+      ansible.builtin.file:
+        path: "{{ _istota_push_stage.path }}"
+        mode: "0711"
+      changed_when: false
+
+    - name: Stage the push deployment helpers
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ _istota_push_stage.path }}/{{ item }}"
+        mode: "0444"
+      loop: [configure_push.py, configure_push.sh]
+      changed_when: false
+
+    - name: Stage the vaulted APNs signing key
+      ansible.builtin.copy:
+        src: "{{ istota_apns_key_file }}"
+        dest: "{{ _istota_push_stage.path }}/AuthKey.p8"
+        owner: "{{ istota_uid }}"
+        group: "{{ istota_uid }}"
+        mode: "0400"
+        decrypt: true
+      no_log: true
+      diff: false
+      changed_when: false
+
+    - name: Stage the push settings
+      ansible.builtin.copy:
+        content: "{{ istota_push_config | to_json }}"
+        dest: "{{ _istota_push_stage.path }}/settings.json"
+        owner: "{{ istota_uid }}"
+        group: "{{ istota_uid }}"
+        mode: "0400"
+      no_log: true
+      diff: false
+      changed_when: false
+
+    - name: Apply push settings and restart when changed
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - "{{ _istota_push_stage.path }}/configure_push.sh"
+          - "{{ istota_stack_command }}"
+          - "{{ _istota_push_stage.path }}"
+      environment:
+        ISTOTA_STACK_DIR: "{{ istota_stack_dir }}"
+      register: _istota_push_applied
+      changed_when: _istota_push_applied.rc == 2
+      failed_when: _istota_push_applied.delta is not defined or _istota_push_applied.rc not in [0, 2]
+      no_log: true
+  always:
+    - name: Remove the push staging directory
+      ansible.builtin.file:
+        path: "{{ _istota_push_stage.path }}"
+        state: absent
+      when: _istota_push_stage.path is defined
+      changed_when: false

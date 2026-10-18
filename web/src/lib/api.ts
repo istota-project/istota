@@ -2197,6 +2197,10 @@ export interface UserProfile {
   // it overwrites the timezone the user chose above.
   timezone_follow_location: boolean;
   show_nav_unread_badges: boolean;
+  push_chat_alerts?: 'alerts' | 'badge' | 'off';
+  push_preview?: boolean;
+  // Missing category IDs remain enabled, including newly registered sources.
+  push_inbox_categories?: Record<string, boolean>;
   // How much of a turn that arrived from outside the room (today, mirrored
   // email) the transcript shows. The row is always there whatever this says —
   // `hidden` withholds the body, never the turn.
@@ -3335,6 +3339,8 @@ export async function syncGarmin(days_back = 7): Promise<GarminSyncResponse> {
 
 // ---- Web chat ----
 
+export type RoomNotifications = 'default' | 'alerts' | 'badge' | 'off';
+
 export interface ChatRoom {
   id: number;
   token: string;
@@ -3359,6 +3365,8 @@ export interface ChatRoom {
    * the model/effort/brain trio below — it lives on this user's room handle,
    * so the two members of a shared Talk room can tint it differently. */
   color?: string | null;
+  /** Personal notification override. Absent follows the account default. */
+  push_notifications?: RoomNotifications;
   /** Standing per-room model default (canonical model id), shared across Talk
    * and web. null / absent → inherit the instance default. */
   model?: string | null;
@@ -3916,6 +3924,8 @@ export interface RoomPatch {
   brain?: string | null;
   /** A `ROOM_COLORS` name, or null to clear. Absent leaves it untouched. */
   color?: string | null;
+  /** Personal override; default restores inheritance, absent leaves it unchanged. */
+  push_notifications?: RoomNotifications;
   /** Host only, like the other room-wide settings. */
   guest_reply?: GuestReply;
   /** Show an email thread in the main room list. The server refuses it (400)
@@ -5312,6 +5322,8 @@ export interface ResolvedNotification {
 }
 
 export interface NotificationCounts {
+  push_badge?: number;
+  chat_unread?: number;
   open: number;
   actionable: number;
 }
@@ -6898,4 +6910,41 @@ export function saveGroupDeliveryPreferences(
 }
 export function groupBriefingDownloadUrl(group: string, name: string, run: number): string {
   return `${base}/api${groupBriefingPath(group, name)}/runs/${run}/download`;
+}
+
+export interface PushCategory {
+  id: string;
+  label: string;
+}
+
+export function listPushCategories(): Promise<{ categories: PushCategory[] }> {
+  return apiFetch('/push/categories');
+}
+
+export interface PushDevice {
+  id: number;
+  platform: string;
+  app_version: string;
+  environment: 'production' | 'sandbox';
+  token_tail: string;
+  created_at: string;
+  last_seen_at: string | null;
+  last_error: string | null;
+}
+
+export function listPushDevices(): Promise<{ devices: PushDevice[] }> {
+  return apiFetch('/push/devices');
+}
+
+export function registerPushDevice(device: {
+  token: string;
+  environment: 'production' | 'sandbox';
+  platform: 'ios';
+  app_version: string;
+}): Promise<{ id: number }> {
+  return apiFetch('/push/devices', { method: 'POST', body: JSON.stringify(device) });
+}
+
+export function deletePushDevice(id: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/push/devices/${id}`, { method: 'DELETE' });
 }

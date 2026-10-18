@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { invalidateNotificationCounts } from '$lib/stores/notifications';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { page } from '$app/state';
@@ -16,8 +17,8 @@
 
   let sidebarOpen = $state(false);
 
-  // The profile is held here rather than by a section because three sections
-  // edit it (Account, Preferences, Delivery) and one save covers all of them.
+  // The profile is held here so Account, Preferences, Notifications and
+  // Delivery share one draft and one save.
   // This layout persists across a section switch, so an unsaved edit survives
   // a visit to another section and the app-bar Save still knows about it.
   let profile: UserProfile | null = $state(null);
@@ -59,6 +60,9 @@
         next.default_room = next.default_room || '';
         next.relay_delivery = next.relay_delivery || '';
         next.show_nav_unread_badges = next.show_nav_unread_badges ?? false;
+        next.push_chat_alerts = next.push_chat_alerts ?? 'alerts';
+        next.push_preview = next.push_preview ?? true;
+        next.push_inbox_categories = next.push_inbox_categories ?? {};
       }
       profile = next;
       initialProfileJson = next ? JSON.stringify(next) : '';
@@ -89,6 +93,9 @@
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
         show_nav_unread_badges: profile.show_nav_unread_badges,
+        push_chat_alerts: profile.push_chat_alerts,
+        push_preview: profile.push_preview,
+        push_inbox_categories: profile.push_inbox_categories,
         external_turn_display: profile.external_turn_display || 'collapsed',
         relay_delivery: profile.relay_delivery || '',
       };
@@ -102,6 +109,8 @@
         return;
       }
       await updateProfile(patch);
+      if (patch.push_chat_alerts !== undefined || patch.push_inbox_categories !== undefined)
+        invalidateNotificationCounts();
       await reload();
       info = 'Profile saved.';
     } catch (e) {

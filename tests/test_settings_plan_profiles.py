@@ -268,3 +268,21 @@ def test_nav_badge_preference_snapshot_apply(install, enabled):
     assert user_profiles.get_profile(database, "alice").show_nav_unread_badges is enabled
     context, operations = preview(install, {"alice": desired})
     assert engine.execute_plan(operations, context).exit_code == 0
+
+
+def test_push_preferences_plan_and_snapshot_preserve_booleans(install):
+    from istota.settings_plan.profiles import snapshot_profile
+    fields = {"push_inbox_categories": {"confirmation": False}, "push_chat_alerts": "off", "push_preview": False}
+    context, operations = preview(install, {"alice": {"profile": fields}})
+    assert engine.execute_plan(operations, context).exit_code == 2
+    profile = user_profiles.get_profile(install[1], "alice")
+    assert profile.push_inbox_categories == {"confirmation": False}
+    context, operations = preview(install, {"alice": snapshot_profile(profile)})
+    assert engine.execute_plan(operations, context).exit_code == 0
+
+
+@pytest.mark.parametrize("value", [{"confirmation": "false"}, {"unknown": False}, []])
+def test_push_category_plan_rejects_invalid_values(value):
+    from istota.settings_plan.schema import SchemaError
+    with pytest.raises(SchemaError):
+        parse_plan({"users": {"alice": {"profile": {"push_inbox_categories": value}}}})

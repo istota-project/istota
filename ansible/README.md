@@ -87,6 +87,29 @@ ansible-playbook site.yml --limit istota-vm --tags istota_update
 ansible-playbook site.yml --limit istota-vm --tags istota_update -e istota_update_force=true
 ```
 
+### iOS push deployment
+
+`--tags istota_push` installs an APNs signing key and updates only `[push]` in the live config. It skips the saved settings plan, user provisioning, release updates and firewall tasks. The deployed image must already include native push and HTTP/2 support. A normal role run does not select these tasks; check mode refuses before staging a credential.
+
+```yaml
+istota_apns_key_file: "{{ playbook_dir }}/files/app-keys/AuthKey.p8"
+istota_push_config:
+  enabled: true
+  apns_key_id: ABCDEFGHIJ
+  apns_team_id: KLMNOPQRST
+  apns_topic: com.example.app
+```
+
+Keep the `.p8` source vault-encrypted. The role stages it with `no_log` and diff output disabled, then uses the installed stack's container privilege drop to write `config/apns/AuthKey.p8` as the service account, mode 0600. The configured path inside the container is `/data/config/apns/AuthKey.p8`. A conflicting `ISTOTA_APNS_KEY_PATH` override refuses the change. The key's P-256 format is checked locally; matching its key ID and Apple authorization still needs an APNs send.
+
+```sh
+ansible-playbook site.yml --limit istota-vm --tags istota_push -e @push-deployment.yml
+```
+
+The helper holds the deployment lock and uses the existing settings writer's lock, validation and backups. It preserves unrelated live settings, unspecified push settings and the config-management marker. A changed config or key restarts the stack through its existing restart path; an unchanged rerun does not. A partial write records a restart owed, so a corrected rerun completes the restart. The role removes its staging directory on success or failure.
+
+Refresh the inventory settings snapshot after deployment, before the next full role run. That run still applies the saved plan and can otherwise replace the new push settings. This tag does not merge or deploy application code, send a test notification, or verify phone delivery.
+
 ### Writing the config
 
 The plan's `config` is config.toml written as YAML, key for key: a TOML table is a mapping, an array of tables (`[[briefing_shared_blocks]]`) is a list of mappings, and the key names do not change. `config/config.example.toml` documents every key. Credentials go in `istota_secrets` (the deployment's files) or `istota_plan_secrets` (inline config credentials), never in the plan. A key left out takes the code's default, and the apply validates the whole plan through the config loader before it writes anything, so an unknown key warns and a bad value is refused.
