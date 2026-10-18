@@ -30,6 +30,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | Skill | Keywords | CLI |
 |---|---|---|
 | `calendar` | calendar, event, meeting, schedule, appointment | yes -- list (alias `agenda`), create, update, delete |
+| `contacts` | contact, contacts, address book, phone number, email address, carddav, vcard | yes -- books, search, show, create, update, delete. Searches Nextcloud address books shared with the bot and Google Contacts together. See [contacts](../features/contacts.md) |
 | `todos` | todo, task, checklist, reminder, done, complete | doc-only |
 | `reminders` | remind, reminder, alert me, notify me | doc-only |
 | `rooms` | room, rooms, this room, which room, channel, post to | yes -- list (every room you are in, with the `target` descriptor that delivers into it) |
@@ -55,6 +56,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `transcribe` | transcribe, ocr, screenshot, scan, image | yes -- OCR via Tesseract |
 | `whisper` | transcribe, whisper, audio, voice, speech | yes -- transcribe, models, download (faster-whisper, CPU int8) |
 | `notes` | note, save, write, markdown | doc-only (companion to transcribe) |
+| `servarr` | sonarr, radarr, lidarr, prowlarr, servarr, arr, download, torrent, queue, film, movie, tv show, series, album, request | yes -- apps, status, describe, search, add, queue, why, wanted, search-now, requests, indexers. Admins get every verb; users in `[servarr] requesters` may search, request with the stack's defaults and follow their requests. Gated on `requires_capability: [servarr]`. See [Servarr](../features/servarr.md) |
 
 ## Development
 
@@ -137,6 +139,13 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 | Skill | Keywords | CLI |
 |---|---|---|
 | `heartbeat` | heartbeat, monitoring, health check, alert | doc-only |
+| `usage` | (none) | yes -- one command: your token usage and cost over a window (`--days`, `--since`/`--until`), grouped `--by` model, origin, source or brain. `--user` and `--by user` are admin-only. See [token usage](../features/usage.md) |
+
+## Purchases
+
+| Skill | Keywords | CLI |
+|---|---|---|
+| `wallet` | buy, purchase, order, checkout, pay for, wallet | yes -- cards (labels, last four digits and the remaining automatic budget, never a number), request (ask to use a card at a merchant for an amount; `held` waits for the user's approval), status, complete, fail, cancel. An authorized card is filled by `browse interact --fill-card` without the task reading it. See [wallet](../features/wallet.md) |
 
 ## Safety
 
@@ -144,7 +153,7 @@ Codifies a spec-driven development workflow. Specs live in `{notes_folder}/Specs
 |---|---|---|
 | `untrusted_input` | (none — never selected directly) | doc-only |
 
-`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on every skill that reads content from outside the trust boundary (`email`, `browse`, `calendar`, `transcribe`, `whisper`, `feeds`, `bookmarks`, `briefings`, `nextcloud`, `tasks`, `rooms`, `room`, `relay`, `whatsapp`, `wordpress`, `developer`, `code_review`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
+`untrusted_input` is a doc-only companion skill with no triggers. It loads via `companion_skills` declarations on every skill that reads content from outside the trust boundary (`email`, `browse`, `calendar`, `contacts`, `transcribe`, `whisper`, `feeds`, `bookmarks`, `briefings`, `nextcloud`, `tasks`, `rooms`, `room`, `relay`, `whatsapp`, `wordpress`, `developer`, `code_review`, `servarr`, `wallet`), so its inbound-content security rules ride along whenever a task processes content from outside the trust boundary. It pairs with `sensitive_actions` (outbound rules there, inbound-reading rules here).
 
 ## Selection
 
