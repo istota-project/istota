@@ -163,6 +163,13 @@ istota_secrets: {}
 # /srv/app/istota/rclone.conf (0600, uid 10001) when non-empty.
 istota_rclone_conf: ""
 
+# A vaulted controller-side .p8 file. Used only with --tags istota_push.
+istota_apns_key_file: ""
+# Explicit push settings merged into the live config, not the saved plan.
+# Set enabled, apns_key_id, apns_team_id and apns_topic. The file path is fixed
+# at /data/config/apns/AuthKey.p8 inside the container.
+istota_push_config: {}
+
 # --- Admins ------------------------------------------------------------------
 # User ids, one per line of /srv/app/istota/config/admins. Empty leaves the
 # file alone: an empty allowlist makes nobody an admin once there are two users.

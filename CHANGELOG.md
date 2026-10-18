@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Operators can configure iOS push separately from a full deployment. The dedicated Ansible tag installs the signing key, preserves other live settings and restarts the app only when needed.
+
 - Compatible iOS apps now open the room or inbox destination when a notification is tapped. The app badge follows saved notification preferences and refreshes after reads and a return to the foreground; offline counts do not clear it.
 
 - Room settings now lets each member choose alerts and badge, badge only, off, or the account default. This personal choice leaves other members’ preferences and the room’s unread count unchanged.
