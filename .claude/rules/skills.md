@@ -15,7 +15,7 @@ paths:
 - `eligible_skill_names(...)`: the menu's membership gate (excludes selected, `always_include`, disabled, admin-gated, experimental-gated, missing-deps). The `resource_types` gate survives here but no bundled skill declares the field.
 - `expand_companions(names, skill_index, *, is_admin=True, disabled_skills=None, enabled_experimental_features=frozenset())`: gate-filtered, **one level**. Shared by `select_skills` and `skills show` so the filter cannot drift.
 - `load_skills(..., user_overlay_dir=None)`, `build_disclosure_index(menu, index)` (`""` when empty).
-- Overlay primitives `contained_overlay_dir`, `open_overlay_dir`, `read_overlay_bytes`, `inspect_overlay`, `overlay_effective_body`. `inspect_overlay(...).binds` is the single bind predicate for `skills overlays` and `doctor`; neither re-derives it.
+- Overlay primitives `contained_overlay_dir`, `open_overlay_dir` (a re-export of `sandbox.confined.open_dir`, sandbox.md), `read_overlay_bytes`, `inspect_overlay`, `overlay_effective_body`. `inspect_overlay(...).binds` is the single bind predicate for `skills overlays` and `doctor`; neither re-derives it.
 
 ### Single axis: eager body vs. menu entry
 

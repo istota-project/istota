@@ -209,21 +209,14 @@ def open_upload(ctx: HealthContext, rel: str) -> int | None:
     plain relative one, or one the walk refused because a component is a
     link; None means missing or not a regular file. The caller closes the fd.
     """
-    from istota.sandbox.attachment_source import open_regular_at  # noqa: PLC0415
-    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415
+    from istota.sandbox.confined import open_regular  # noqa: PLC0415
 
     parts = (rel or "").split("/")
     if rel.startswith("/") or any(p in ("", ".", "..") for p in parts):
         raise ValueError("invalid source path")
     *dirs, leaf = parts
     root, walk = uploads_walk(ctx, *dirs)
-    dir_fd = open_overlay_dir(root, *walk)
-    fd = None
-    if dir_fd is not None:
-        try:
-            fd = open_regular_at(dir_fd, leaf)
-        finally:
-            os.close(dir_fd)
+    fd = open_regular(root, [*walk, leaf])
     if fd is None and _walk_meets_a_link(root, [*walk, leaf]):
         raise ValueError("invalid source path")
     return fd

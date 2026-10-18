@@ -10,41 +10,8 @@ from collections.abc import Iterable
 from istota.lib.filenames import (
     DEFAULT_MAX_STEM, filename_parts, numbered_name, safe_filename,
 )
-from istota.skills._loader import open_overlay_dir
+from istota.sandbox.confined import open_dir, open_or_create_dirs, valid_part
 from istota.workspace.listing import ListingError
-
-
-def _validate_parts(parts: list[str] | tuple[str, ...]) -> None:
-    for part in parts:
-        if not part or "/" in part or "\0" in part or part in (".", ".."):
-            raise ValueError("invalid path component")
-
-
-def open_or_create_dirs(root: Path, parts: list[str] | tuple[str, ...]) -> int:
-    """Open directories below a trusted root, creating missing components.
-
-    Only the configured root may follow symlinks. Every component below it is
-    opened relative to its parent descriptor with O_NOFOLLOW. The caller owns
-    the returned descriptor; ordinary filesystem refusals raise OSError.
-    """
-    _validate_parts(parts)
-    root.mkdir(parents=True, exist_ok=True)
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in parts:
-            try:
-                os.mkdir(part, 0o755, dir_fd=fd)
-            except FileExistsError:
-                pass
-            nxt = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
-            )
-            os.close(fd)
-            fd = nxt
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def open_or_create_dir_below(root: Path, path: Path) -> int:
@@ -114,7 +81,7 @@ def write_new_file(
     nothing reads it. ``max_stem`` is for a caller whose name is already
     sanitised with a wider stem (the inbox).
     """
-    dir_fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
+    dir_fd = open_dir(root, *parts, raise_mount_errors=True)
     if dir_fd is None:
         raise ListingError(404, "Folder not found.")
     try:
@@ -166,7 +133,7 @@ def write_new_file(
 
 
 def make_folder(root: Path, parts: list[str], name: str) -> str:
-    fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
+    fd = open_dir(root, *parts, raise_mount_errors=True)
     if fd is None:
         raise ListingError(404, "Folder not found.")
     try:
@@ -182,11 +149,9 @@ def make_folder(root: Path, parts: list[str], name: str) -> str:
 
 def delete_entry(root: Path, parts: list[str], name: str) -> None:
     """Remove one regular file or empty directory through its pinned parent."""
-    try:
-        _validate_parts([name])
-    except ValueError as exc:
-        raise ListingError(422, "Invalid file name.") from exc
-    fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
+    if not valid_part(name):
+        raise ListingError(422, "Invalid file name.")
+    fd = open_dir(root, *parts, raise_mount_errors=True)
     if fd is None:
         raise ListingError(404, "Folder not found.")
     try:

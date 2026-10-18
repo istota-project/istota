@@ -99,8 +99,7 @@ def open_chat_file(
     closes the fd.
     """
     from istota import db
-    from istota.sandbox.attachment_source import open_regular_at
-    from istota.skills._loader import open_overlay_dir
+    from istota.sandbox.confined import open_regular
 
     raw = (path or "").strip()
     if not raw:
@@ -128,14 +127,7 @@ def open_chat_file(
 
     # One walk from the trusted anchor covers a linked file root, a linked
     # folder and a home path alike.
-    *dirs, leaf = parts
-    dir_fd = open_overlay_dir(anchor, *dirs)
-    fd = None
-    if dir_fd is not None:
-        try:
-            fd = open_regular_at(dir_fd, leaf)
-        finally:
-            os.close(dir_fd)
+    fd = open_regular(anchor, parts)
     if fd is None:
         raise _refusal(anchor, parts)
     return fd, anchor.joinpath(*parts)
