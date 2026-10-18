@@ -15,15 +15,21 @@ after it was sent is ``outcome_unknown`` with the `search` that tells whether
 it applied. An artist add is a whole discography, so it is gated: without
 ``--confirmed`` it answers ``confirmation_required`` with a ``would`` line.
 
-**An album add is up to three writes.** Lidarr holds albums under artists. For
-an artist already in the library, the album is monitored (``PUT album/monitor``)
-and searched (``AlbumSearch``); nothing is tagged, because tags live on the
-artist and a monitored existing artist is never retagged. For a new artist, the artist is
-added with ``monitor: none``, then ``album?foreignAlbumId=`` is polled until the
-artist's refresh lists the album, bounded by `ALBUM_POLL_SECONDS` and the run's
-deadline, then the album is monitored and searched. A step that fails after
-the artist was added reports ``partial`` with what exists now, so the model
-does not repeat the add; running the same add again finishes it.
+**An album add is up to four writes.** Lidarr holds albums under artists. An
+album the library does not hold yet is added with ``POST album`` carrying the
+lookup's album object, as Lidarr's own UI adds one: under its artist when the
+artist is in the library, whether or not the artist's album list (never
+complete for Various Artists, and filtered by the metadata profile) includes
+it, and with the artist when it is not. A new artist is tagged and sent with
+``monitor: none`` and ``albumsToMonitor`` naming this album, and the add waits
+for the artist's refresh (``GET command``), bounded by `REFRESH_POLL_SECONDS`
+and the run's deadline, because that refresh stores the artist unmonitored and
+would undo an earlier write. Then the artist is monitored if it is not, the
+album if it is not (``PUT album/monitor``), and it is searched
+(``AlbumSearch``). An album under an artist already in the library carries no
+tag, because tags live on the artist and an existing artist is never retagged.
+A step that fails after a write reports ``partial`` with what exists now, so
+the model does not repeat the add blind; running the same add again finishes it.
 
 The add defaults are resolved in one place, which `describe` reports and `add`
 applies. For a quality profile, a root folder and (lidarr) a metadata
@@ -61,11 +67,13 @@ SERIES_MONITOR_MODES = ("all", "future", "missing", "existing", "firstSeason", "
 ARTIST_MONITOR_MODES = ("all", "future", "missing", "existing", "latest", "first", "none")
 MINIMUM_AVAILABILITY = ("tba", "announced", "inCinemas", "released")
 
-ALBUM_POLL_INTERVAL = 2.0
-#: How long an album add waits for a new artist's refresh to list the album.
-ALBUM_POLL_SECONDS = 60.0
-#: Kept back from the run's deadline for the monitor and search after the poll.
-ALBUM_POLL_RESERVE_SECONDS = 10.0
+REFRESH_POLL_INTERVAL = 1.0
+#: How long an album add waits for a new artist's refresh to finish.
+REFRESH_POLL_SECONDS = 60.0
+#: Kept back from the run's deadline for the monitors and search after the poll.
+REFRESH_POLL_RESERVE_SECONDS = 10.0
+#: Lidarr's command states after which a command changes nothing more.
+_COMMAND_DONE = frozenset({"completed", "failed", "aborted", "cancelled", "orphaned"})
 
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 50
@@ -441,7 +449,12 @@ def _album_artist(item: dict) -> dict:
 
 
 def _album(item: dict) -> dict:
+    """One album row. ``secondary_types`` (Soundtrack, Compilation, Live) and
+    ``release_count`` are what Lidarr's own search shows to tell a soundtrack
+    from a band's album of the same name."""
     artist = _album_artist(item)
+    types = item.get("secondaryTypes")
+    releases = item.get("releases")
     out = {
         "foreign_album_id": selector(item.get("foreignAlbumId")),
         "title": _text(item.get("title")),
@@ -449,6 +462,9 @@ def _album(item: dict) -> dict:
         "foreign_artist_id": selector(artist.get("foreignArtistId")),
         "release_date": selector(item.get("releaseDate")),
         "type": selector(item.get("albumType")),
+        "secondary_types": ([selector(t) for t in types if isinstance(t, str)]
+                            if isinstance(types, list) else []),
+        "release_count": len(releases) if isinstance(releases, list) else None,
         "track_count": _track_count(item),
     }
     has_file, counts = _track_state(item)
@@ -569,19 +585,42 @@ def _artist_brief(item: dict) -> dict:
             "in_library": _positive_id(item.get("id")) is not None}
 
 
-def _albums_by_artist(client: ArrClient, query: str, limit: int) -> dict:
-    """``search --kind album QUERY``: the query names the artist.
+def _albums_by_title(client: ArrClient, query: str, limit: int) -> dict:
+    """``search --kind album TITLE``: Lidarr's own search, as its UI runs it.
+
+    ``search?term=`` answers artists and albums mixed, each row holding one of
+    them. ``album/lookup`` is not used: it leaves out albums the search finds,
+    a Various Artists soundtrack among them (checked against Lidarr 3.1). The
+    album rows are the results, whoever they are by; the artist rows are
+    listed apart, since a title can also be a band's name.
+    """
+    data = client.request("GET", "search", params={"term": query}, kind="lookup")
+    rows = as_rows(data, client.app, "search")
+    albums = [row["album"] for row in rows if isinstance(row.get("album"), dict)]
+    artists = [row["artist"] for row in rows if isinstance(row.get("artist"), dict)]
+    out = {"status": "ok", "app": client.app, "kind": "album", "total": len(albums),
+           "results": [_album(row) for row in albums[:limit]],
+           "artists": [_artist_brief(a) for a in artists[:5]]}
+    if not albums:
+        out["note"] = ("No album matched that title. To list one artist's albums, pass "
+                       "--artist NAME.")
+    return out
+
+
+def _albums_by_artist(client: ArrClient, name: str, title: str, limit: int) -> dict:
+    """``search --kind album --artist NAME [TITLE]``: one artist's albums.
 
     The first artist the lookup returns is taken, and the others are listed so
     the model can see when that was the wrong one. A library artist's albums
     are read from the library; otherwise the album lookup is searched with the
-    same query and kept to that artist's albums.
+    artist's name and kept to that artist's albums. A title keeps the albums
+    whose title contains it.
     """
     out = {"status": "ok", "app": client.app, "kind": "album"}
-    artists = _lookup(client, "artist", query)
+    artists = _lookup(client, "artist", name)
     if not artists:
         return {**out, "artist": None, "other_artists": [], "total": 0, "results": [],
-                "note": "No artist matched; the query names the artist, not the album."}
+                "note": "No artist matched --artist."}
     artist = artists[0]
     artist_id = _positive_id(artist.get("id"))
     if artist_id is not None:
@@ -590,9 +629,13 @@ def _albums_by_artist(client: ArrClient, query: str, limit: int) -> dict:
         source = "library"
     else:
         wanted = artist.get("foreignArtistId")
-        rows = [row for row in _lookup(client, "album", query)
+        rows = [row for row in _lookup(client, "album", name)
                 if _album_artist(row).get("foreignArtistId") == wanted]
         source = "lookup"
+    if title:
+        folded = title.casefold()
+        rows = [row for row in rows
+                if isinstance(row.get("title"), str) and folded in row["title"].casefold()]
     return {**out, "artist": _artist_brief(artist),
             "other_artists": [_artist_brief(a) for a in artists[1:5]],
             "albums_from": source, "total": len(rows),
@@ -605,18 +648,25 @@ def cmd_search(run: Run, args) -> dict:
     flag = ID_FLAGS[kind]
     ident = _id_for(args, kind)
     query = (args.query or "").strip()
-    if ident is None and not query:
+    artist = (getattr(args, "artist", None) or "").strip()
+    if artist and kind != "album":
+        raise _invalid("--artist applies to --kind album.")
+    if artist and ident is not None:
+        raise _invalid(f"search takes --artist or --{flag}, not both.")
+    if ident is None and not query and not artist:
         raise _invalid(f"search needs a title or --{flag}.")
     if ident is not None and query:
         raise _invalid(f"search takes a title or --{flag}, not both.")
-    if len(query) > MAX_QUERY_CHARS:
-        raise _invalid(f"The title is longer than {MAX_QUERY_CHARS} characters.")
+    if len(query) > MAX_QUERY_CHARS or len(artist) > MAX_QUERY_CHARS:
+        raise _invalid(f"The title or artist is longer than {MAX_QUERY_CHARS} characters.")
     limit = limit_of(args)
 
     app = KIND_APP[kind]
     client = run.client(app)
+    if artist:
+        return _albums_by_artist(client, artist, query, limit)
     if kind == "album" and ident is None:
-        return _albums_by_artist(client, query, limit)
+        return _albums_by_title(client, query, limit)
     term = _term(kind, ident) if ident is not None else query
     rows = _lookup(client, kind, term)
     render = RENDER[kind]
@@ -937,7 +987,7 @@ def _add_artist(run: Run, args, ident: str) -> dict:
 
 
 def _library_album(client: ArrClient, ident: str) -> dict | None:
-    """The album's row in the library, once its artist's refresh lists it."""
+    """The album's row in the library, or None when the library lacks it."""
     try:
         data = client.request("GET", "album", params={"foreignAlbumId": ident})
     except ServarrError as exc:
@@ -950,26 +1000,53 @@ def _library_album(client: ArrClient, ident: str) -> dict | None:
     return None
 
 
-def _wait_for_album(run: Run, client: ArrClient, ident: str) -> dict | None:
-    """Poll for the album every `ALBUM_POLL_INTERVAL` seconds, until it is
-    listed or the poll's own bound or the run's deadline (less a reserve for
-    the two writes after it) would be passed."""
-    give_up = min(run.clock() + ALBUM_POLL_SECONDS,
-                  run.deadline - ALBUM_POLL_RESERVE_SECONDS)
+def _refreshes_of(client: ArrClient, artist_id: int) -> list[str]:
+    """The states of the ``RefreshArtist`` commands Lidarr holds for one artist."""
+    rows = as_rows(client.request("GET", "command"), client.app, "command")
+    states = []
+    for row in rows:
+        body = row.get("body")
+        body = body if isinstance(body, dict) else {}
+        ids = body.get("artistIds")
+        ids = ids if isinstance(ids, list) else [body.get("artistId")]
+        if row.get("name") == "RefreshArtist" and artist_id in ids:
+            states.append(row.get("status"))
+    return states
+
+
+def _wait_for_refresh(run: Run, client: ArrClient, artist_id: int) -> bool:
+    """Whether the new artist's refresh finished, polled every
+    `REFRESH_POLL_INTERVAL` seconds until the poll's own bound or the run's
+    deadline (less a reserve for the writes after it) would be passed.
+
+    The refresh is what applies ``monitor: none`` and stores the artist
+    unmonitored, so an ``artist/editor`` sent while it runs is undone; that was
+    seen against Lidarr 3.1. A refresh seen and then gone from the list has
+    finished; one never seen is waited for.
+    """
+    give_up = min(run.clock() + REFRESH_POLL_SECONDS,
+                  run.deadline - REFRESH_POLL_RESERVE_SECONDS)
+    seen = False
     while True:
-        found = _library_album(client, ident)
-        if found is not None:
-            return found
-        if run.clock() + ALBUM_POLL_INTERVAL > give_up:
-            return None
-        run.sleep(ALBUM_POLL_INTERVAL)
+        states = _refreshes_of(client, artist_id)
+        if states and all(state in _COMMAND_DONE for state in states):
+            return True
+        if seen and not states:
+            return True
+        seen = seen or bool(states)
+        if run.clock() + REFRESH_POLL_INTERVAL > give_up:
+            return False
+        run.sleep(REFRESH_POLL_INTERVAL)
 
 
 def _partial(exc: ServarrError, progress: dict) -> ServarrError:
     """A failure after part of an album add applied, saying what exists now."""
     done = []
     if progress.get("artist_added"):
-        done.append("the artist was added to lidarr with no albums monitored")
+        done.append("the album was added to lidarr with its artist, and no other album of "
+                    "the artist's is monitored")
+    elif progress.get("album_added"):
+        done.append("the album was added under its artist")
     if progress.get("artist_monitored_now"):
         done.append("the artist is monitored" if progress.get("artist_added") else
                     "the artist is monitored now, so any of its albums that were already "
@@ -986,7 +1063,7 @@ def _partial(exc: ServarrError, progress: dict) -> ServarrError:
         then = ("lidarr will grab it on its next RSS sync, or search-now --kind album "
                 f"--library-id {album_id} searches at once.")
     else:
-        then = "Running the same add again finishes it without adding the artist twice."
+        then = "Running the same add again finishes it without adding anything twice."
     extra = {k: v for k, v in exc.extra.items() if k != "app"}
     extra.update(progress, partial=True)
     return ServarrError(f"{exc} The request is partly done: {'; '.join(done)}. {then}",
@@ -1020,13 +1097,88 @@ def _album_already_present(client: ArrClient, album: dict, listed: dict,
     }
 
 
-def _add_album(run: Run, args, ident: str) -> dict:
-    """One album: monitor and search it, adding its artist first if need be.
+def _still_refreshing() -> ServarrError:
+    return ServarrError(
+        "lidarr has not finished refreshing the new artist, and monitoring it before then "
+        "would be undone. Wait a minute, then run the same add again.", "artist_refreshing",
+        app="lidarr")
 
-    Every check and read happens before the first write. A new artist is added
-    with no albums monitored (``monitor: none``) and tagged; an artist already in
-    the library is not tagged (a monitored existing artist is never retagged), so
-    such an album does not show in `requests`, and the envelope says so.
+
+def _post_album(run: Run, args, client: ArrClient, album: dict, ident: str,
+                progress: dict) -> tuple[dict, str | None, dict]:
+    """Add an album the library does not hold: ``(its row, tag, defaults)``.
+
+    Lidarr's UI adds an album from search with ``POST album`` and the lookup's
+    album object, and so does this: under an artist already in the library
+    whether or not the artist's own album list includes it, and with the
+    artist when it is new. A new artist is tagged and sent with ``monitor:
+    none`` plus ``albumsToMonitor``, which keeps this album monitored through
+    the refresh that leaves the rest alone, and the refresh is waited for.
+    """
+    foreign = _album_artist(album).get("foreignArtistId")
+    try:
+        artist_mbid = mbid(foreign)
+    except ServarrError:
+        raise ServarrError("lidarr's lookup did not say which artist this album is by; "
+                           "nothing was added.", "bad_response", app="lidarr") from None
+    artist = _single_lookup(client, "artist", artist_mbid)
+    new_artist = _positive_id(artist.get("id")) is None
+    label = None
+    names: dict = {}
+    if new_artist:
+        resolved = _resolve_listed(client, args, _app_defaults(run, "lidarr"))
+        names = _listed_names(resolved)
+        label = req_tag(run.user_id)
+        artist = _artist_body(artist, resolved, ensure_tag(client, label), monitor="none",
+                              new_items="none", search=False)
+        artist["addOptions"]["albumsToMonitor"] = [ident]
+    body = dict(album)
+    body.update(artist=artist, monitored=True, addOptions={"searchForNewAlbum": False})
+    try:
+        created = client.request("POST", "album", json=body,
+                                 lookup=f"search --kind album --mbid {ident}")
+    except ServarrError as exc:
+        if exc.reason != "already_present":
+            raise
+        # Someone added it meanwhile; it was not tagged here.
+        listed = _library_album(client, ident)
+        if listed is None:
+            raise
+        return listed, None, {}
+
+    created = created if isinstance(created, dict) else {}
+    progress["album_added"] = True
+    progress["artist_added"] = new_artist
+    progress["album_library_id"] = _positive_id(created.get("id"))
+    progress["artist_library_id"] = (_positive_id(created.get("artistId"))
+                                     or _positive_id(_album_artist(created).get("id")))
+    if not new_artist:
+        listed = created if progress["album_library_id"] else _library_album(client, ident)
+    else:
+        try:
+            if progress["artist_library_id"] is None:
+                raise ServarrError("lidarr accepted the album but did not say which artist "
+                                   "holds it.", "bad_response", app="lidarr")
+            if not _wait_for_refresh(run, client, progress["artist_library_id"]):
+                raise _still_refreshing()
+            # Re-read: the refresh is what decides the album's monitored flag.
+            listed = _library_album(client, ident)
+        except ServarrError as exc:
+            raise _partial(exc, progress) from None
+    if listed is None:
+        raise _partial(ServarrError("lidarr accepted the album but does not list it.",
+                                    "bad_response", app="lidarr"), progress)
+    return listed, label, names
+
+
+def _add_album(run: Run, args, ident: str) -> dict:
+    """One album: add it if the library lacks it, then monitor and search it.
+
+    Every check and read happens before the first write. An album the library
+    lacks is added by `_post_album`, with its artist when the artist is new;
+    a new artist is tagged. An artist already in the library is not tagged (an
+    existing artist is never retagged), so such an album does not show in
+    `requests`, and the envelope says so.
 
     Lidarr's Wanted lists an album only when its artist is monitored too, and
     it stores a new artist unmonitored under ``monitor: none`` whatever the
@@ -1036,62 +1188,14 @@ def _add_album(run: Run, args, ident: str) -> dict:
     """
     client = run.client("lidarr")
     album = _single_lookup(client, "album", ident)
-    progress = {"artist_added": False, "artist_monitored": False,
+    progress = {"album_added": False, "artist_added": False, "artist_monitored": False,
                 "artist_monitored_now": False, "album_monitored": False,
                 "search_sent": False}
     listed = _library_album(client, ident)
     label = None
     names: dict = {}
-
     if listed is None:
-        foreign = _album_artist(album).get("foreignArtistId")
-        try:
-            artist_mbid = mbid(foreign)
-        except ServarrError:
-            raise ServarrError("lidarr's lookup did not say which artist this album is by; "
-                               "nothing was added.", "bad_response", app="lidarr") from None
-        artist = _single_lookup(client, "artist", artist_mbid)
-        artist_id = _positive_id(artist.get("id"))
-        if artist_id is not None:
-            raise ServarrError(
-                "The artist is in the library but lidarr does not list this album under it. "
-                "Either lidarr is still refreshing the artist (try again in a minute), or the "
-                "artist's metadata profile leaves out this album's type (an EP, a single, a "
-                "live album), which is changed in the Lidarr UI. Nothing was added.",
-                "album_not_listed", app="lidarr", artist_library_id=artist_id,
-            )
-        defaults = _app_defaults(run, "lidarr")
-        resolved = _resolve_listed(client, args, defaults)
-        names = _listed_names(resolved)
-        label = req_tag(run.user_id)
-        tag_id = ensure_tag(client, label)
-        body = _artist_body(artist, resolved, tag_id, monitor="none", new_items="none",
-                            search=False)
-        try:
-            created = client.request("POST", "artist", json=body,
-                                     lookup=f"search --kind artist --mbid {artist_mbid}")
-            progress["artist_added"] = True
-            progress["artist_library_id"] = (_positive_id(created.get("id"))
-                                             if isinstance(created, dict) else None)
-        except ServarrError as exc:
-            if exc.reason != "already_present":
-                raise
-            label = None  # Someone else added it meanwhile; it was not tagged here.
-        try:
-            listed = _wait_for_album(run, client, ident)
-        except ServarrError as exc:
-            if progress["artist_added"]:
-                raise _partial(exc, progress) from None
-            raise
-        if listed is None:
-            exc = ServarrError(
-                "lidarr has not listed the album under the artist yet. It may still be "
-                "refreshing the artist, or the metadata profile may leave out this album's "
-                "type.", "album_not_listed", app="lidarr",
-            )
-            if progress["artist_added"]:
-                raise _partial(exc, progress) from None
-            raise exc
+        listed, label, names = _post_album(run, args, client, album, ident, progress)
 
     album_id = _positive_id(listed.get("id"))
     artist_id = (progress.get("artist_library_id")
@@ -1103,9 +1207,21 @@ def _add_album(run: Run, args, ident: str) -> dict:
     elif progress["artist_added"]:
         editor = {"artistIds": [artist_id], "monitored": True, "monitorNewItems": "none"}
     else:
+        if not progress["album_added"]:
+            # An earlier add's refresh may still be running (`artist_refreshing`); it
+            # would undo the editor below, or unmonitor the artist after it.
+            states = _refreshes_of(client, artist_id)
+            if any(state not in _COMMAND_DONE for state in states):
+                if not _wait_for_refresh(run, client, artist_id):
+                    raise _still_refreshing()
         library_artist = _library_artist(client, artist_id)
+        if label is None and library_artist.get("tags"):
+            own = req_tag(run.user_id)
+            if run.user_id and own[len(TAG_PREFIX):] in requesters_in(library_artist,
+                                                                        _tags(client)):
+                label = own
         if library_artist.get("monitored") is True:
-            if listed.get("monitored") is True:
+            if listed.get("monitored") is True and not progress["album_added"]:
                 return _album_already_present(client, album, listed, library_artist)
             progress["artist_monitored"] = True
         else:
@@ -1117,7 +1233,7 @@ def _add_album(run: Run, args, ident: str) -> dict:
                            lookup=(f"search --kind artist --mbid {foreign}" if foreign
                                    else f"search --kind album --mbid {ident}"))
         except ServarrError as exc:
-            if progress["artist_added"]:
+            if progress["album_added"]:
                 raise _partial(exc, progress) from None
             raise
         progress["artist_monitored"] = progress["artist_monitored_now"] = True
@@ -1128,7 +1244,7 @@ def _add_album(run: Run, args, ident: str) -> dict:
                                                          "monitored": True},
                            lookup=f"search --kind album --mbid {ident}")
         except ServarrError as exc:
-            if progress["artist_added"] or progress["artist_monitored_now"]:
+            if progress["album_added"] or progress["artist_monitored_now"]:
                 raise _partial(exc, progress) from None
             raise
     progress["album_monitored"] = True
