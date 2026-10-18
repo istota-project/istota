@@ -9,6 +9,11 @@ const APP_BUILT_AT = new Date().toISOString();
 
 const useMock = process.env.VITE_MOCK_API === '1';
 
+// A no-auth listener accepts a POST from this origin by port, so the Python side
+// names it too (istota.config.VITE_DEV_PORT); strictPort keeps the proxying dev
+// server from moving. The mock server has no backend and may take another port.
+const DEV_PORT = 5173;
+
 export default defineConfig({
   plugins: [pdfAssets(), sveltekit(), ...(useMock ? [mockApi()] : [])],
   define: {
@@ -18,6 +23,8 @@ export default defineConfig({
   server: useMock
     ? {}
     : {
+        port: DEV_PORT,
+        strictPort: true,
         proxy: {
           '/istota/api': {
             target: 'http://localhost:8766',

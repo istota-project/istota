@@ -1311,3 +1311,185 @@ class TestAdmission:
         # The first occurrence wins: a later copy is the same entry, and
         # taking it would make the window depend on write order.
         assert admitted[0].title is None
+
+
+# ---------------------------------------------------------------------------
+# Link schemes (ISSUE-774): only http(s) reaches storage
+# ---------------------------------------------------------------------------
+
+
+UNSAFE_URLS = [
+    "javascript:alert(document.cookie)",
+    "JaVaScRiPt:alert(1)",
+    "  javascript:alert(1)",
+    "java\tscript:alert(1)",
+    "\x01javascript:alert(1)",
+    "data:text/html,<script>alert(1)</script>",
+    "vbscript:msgbox(1)",
+    "https:no-host",
+]
+
+
+class TestSafeHttpUrl:
+    @pytest.mark.parametrize("url", UNSAFE_URLS)
+    def test_refuses_anything_but_http_with_a_host(self, url):
+        from istota.feeds.models import safe_http_url
+        assert safe_http_url(url) is None
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://example.com/post/1", "https://example.com/post/1"),
+        ("HTTP://example.com/a", "HTTP://example.com/a"),
+        ("  https://example.com/a  ", "https://example.com/a"),
+    ])
+    def test_keeps_http_and_https(self, url, expected):
+        from istota.feeds.models import safe_http_url
+        assert safe_http_url(url) == expected
+
+    def test_empty_and_none_are_none(self):
+        from istota.feeds.models import safe_http_url
+        assert safe_http_url(None) is None
+        assert safe_http_url("") is None
+
+
+SCRIPT_LINK_RSS = b"""<?xml version="1.0"?>
+<rss version="2.0">
+<channel>
+<title>Hostile</title>
+<link>JaVaScRiPt:alert(1)</link>
+<item>
+  <title>Click me</title>
+  <link> javascript:alert(document.cookie)</link>
+  <guid>evil-1</guid>
+  <description>&lt;p&gt;body&lt;/p&gt;</description>
+</item>
+</channel>
+</rss>
+"""
+
+
+class TestUnsafeLinksAreNotStored:
+    def _db(self, tmp_path, url, source_type):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url=url, title=None, site_url=None,
+                source_type=source_type, category_id=None,
+                poll_interval_minutes=30,
+            )
+            conn.commit()
+        return path
+
+    def test_an_rss_entry_link_and_the_feed_link_are_dropped(self, tmp_path):
+        path = self._db(tmp_path, "https://example.com/feed.xml", "rss")
+        resp = _StubResponse(status_code=200, content=SCRIPT_LINK_RSS)
+        now = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=_stub_get_factory(resp), now=now)
+            entries = feeds_db.list_entries(conn)
+            feed = feeds_db.list_feeds(conn)[0]
+        assert [e.guid for e in entries] == ["evil-1"]
+        assert entries[0].url is None
+        assert feed.site_url is None
+
+    @pytest.mark.parametrize("field", ["url", "file_url", "embed_url", "media_url"])
+    @pytest.mark.parametrize("bad", UNSAFE_URLS)
+    def test_a_provider_entry_url_is_dropped(self, tmp_path, monkeypatch, field, bad):
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        path = self._db(tmp_path, "arena:c", "arena")
+        item = FetchedItem(guid="1", title="Block", url="https://www.are.na/block/1")
+        setattr(item, field, bad)
+        monkeypatch.setattr(arena_provider, "fetch", lambda ident, **kw: [item])
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn)
+            entry = feeds_db.list_entries(conn)[0]
+        assert getattr(entry, field) is None
+
+    def test_a_provider_image_url_is_dropped(self, tmp_path, monkeypatch):
+        from istota.feeds.models import FetchedItem
+        from istota.feeds.providers import arena as arena_provider
+
+        path = self._db(tmp_path, "arena:c", "arena")
+        item = FetchedItem(
+            guid="1", title="Block", url="https://www.are.na/block/1",
+            image_urls=["javascript:alert(1)", "https://cdn.example.com/a.jpg"],
+        )
+        monkeypatch.setattr(arena_provider, "fetch", lambda ident, **kw: [item])
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn)
+            entry = feeds_db.list_entries(conn)[0]
+        assert entry.image_urls == ["https://cdn.example.com/a.jpg"]
+
+    def test_upsert_feed_drops_an_unsafe_site_url(self, tmp_path):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="https://example.com/feed.xml", title=None,
+                site_url="javascript:alert(1)", source_type="rss",
+                category_id=None, poll_interval_minutes=30,
+            )
+            conn.commit()
+            assert feeds_db.list_feeds(conn)[0].site_url is None
+
+
+def _rss_with_body(body: str) -> bytes:
+    from xml.sax.saxutils import escape
+
+    return (
+        '<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>'
+        "<link>https://example.com</link><item><title>Post</title>"
+        "<link>https://example.com/p</link><guid>p-1</guid>"
+        f"<description>{escape(body)}</description>"
+        "</item></channel></rss>"
+    ).encode()
+
+
+class TestLeadImageSchemes:
+    """ISSUE-774 follow-up. The lead body image is hoisted out of the body
+    into the hero, so one the scheme check would refuse must not be hoisted,
+    or it ends up in neither place."""
+
+    def _poll(self, tmp_path, body):
+        path = tmp_path / "feeds.db"
+        feeds_db.init_db(path)
+        with feeds_db.connect(path) as conn:
+            feeds_db.upsert_feed(
+                conn, url="https://example.com/feed.xml", title=None,
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            conn.commit()
+        resp = _StubResponse(status_code=200, content=_rss_with_body(body))
+        now = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+        with feeds_db.connect(path) as conn:
+            poll_due_feeds(conn, http_get=_stub_get_factory(resp), now=now)
+            return feeds_db.list_entries(conn)[0]
+
+    def test_a_protocol_relative_lead_image_becomes_an_https_hero(self, tmp_path):
+        entry = self._poll(
+            tmp_path,
+            '<p>Intro</p><img src="//cdn.example.com/a.jpg"><p>Body</p>',
+        )
+        assert entry.image_urls == ["https://cdn.example.com/a.jpg"]
+        assert "<img" not in (entry.content_html or "")
+
+    def test_an_extensionless_protocol_relative_lead_image_leaves_the_body(self, tmp_path):
+        entry = self._poll(
+            tmp_path,
+            '<p>Intro</p><img src="//images.example.com/photo-123?w=800">'
+            '<p>Mid</p><img src="https://other.example.com/b.jpg"><p>Body</p>',
+        )
+        assert entry.image_urls == ["https://images.example.com/photo-123?w=800"]
+        assert "photo-123" not in (entry.content_html or "")
+        assert "other.example.com/b.jpg" in (entry.content_html or "")
+
+    def test_a_data_lead_image_stays_in_the_body(self, tmp_path):
+        entry = self._poll(
+            tmp_path,
+            '<p>Intro</p><img src="data:image/png;base64,iVBORw0KGgo="><p>Body</p>',
+        )
+        assert entry.image_urls == []
+        assert 'src="data:image/png;base64,iVBORw0KGgo="' in (entry.content_html or "")

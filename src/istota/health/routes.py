@@ -14,7 +14,6 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -29,9 +28,10 @@ from fastapi import (
 )
 from fastapi import File as FastAPIFile
 from fastapi import Form
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from istota.lib.filenames import filename_parts
+from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.workspace.listing import ListingError
 from istota.workspace.writes import open_or_create_dirs, write_new_file
 from istota.health import db as health_db
@@ -57,6 +57,7 @@ from istota.health.units import (
 )
 from istota.notifications.resolvers import health_panel as notification_health_panel
 from istota.lib.timestamps import iso_now as _now
+from istota.webui.fd_response import fd_file_response
 from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
     require_auth,  # re-exported: `webui/app.py` keys `dependency_overrides` on it
@@ -677,8 +678,6 @@ async def api_delete_panel(
     _csrf: None = Depends(verify_origin),
     ctx: HealthContext = Depends(get_user_context),
 ):
-    panel_dir = ctx.uploads_dir / str(panel_id)
-
     def _delete():
         with health_db.connect(ctx.db_path) as conn:
             panel = health_db.get_panel(conn, panel_id)
@@ -688,12 +687,8 @@ async def api_delete_panel(
             health_db.delete_stats_for_panel(conn, panel_id)
             health_db.delete_panel(conn, panel_id)  # CASCADE -> biomarkers
             conn.commit()
-        # On-disk uploads — best effort.
-        if panel_dir.exists():
-            try:
-                shutil.rmtree(panel_dir)
-            except OSError:
-                pass
+        # On-disk uploads, best effort, through the no-follow walk.
+        health_documents.remove_upload_dir(ctx, str(panel_id))
         return True
 
     ok = await asyncio.to_thread(_delete)
@@ -881,8 +876,8 @@ async def api_panel_upload(
         # write, so every directory from the workspace root down and the file
         # follow no link, and a name already there (a rolled-back panel's
         # leftover) is numbered, not replaced.
-        root, walk = health_documents.uploads_walk(ctx, str(pid))
         try:
+            root, walk = health_documents.uploads_walk(ctx, str(pid))
             os.close(open_or_create_dirs(root, walk))
             name = write_new_file(
                 root, walk, f"original{suffix}", [raw], max_bytes=len(raw),
@@ -978,6 +973,7 @@ async def api_extract_request(
 @router.get("/panels/{panel_id}/source")
 async def api_panel_source(
     panel_id: int,
+    request: Request,
     ctx: HealthContext = Depends(get_user_context),
 ):
     """Stream the original uploaded image/PDF.
@@ -994,18 +990,55 @@ async def api_panel_source(
         raise HTTPException(404, "panel not found")
     if not panel.source_file:
         raise HTTPException(404, "no source file")
-    candidate = (ctx.uploads_dir / panel.source_file).resolve()
-    uploads_root = ctx.uploads_dir.resolve()
+    fd = await _open_upload_or_raise(ctx, panel.source_file)
     try:
-        candidate.relative_to(uploads_root)
+        inline_type = _inline_source_type(os.pread(fd, SNIFF_BYTES, 0))
+    except BaseException:
+        os.close(fd)
+        raise
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if inline_type is None:
+        return fd_file_response(
+            fd,
+            filename=Path(panel.source_file).name,
+            media_type=panel.source_mime or "application/octet-stream",
+            headers=headers,
+            request_headers=request.headers,
+        )
+    if inline_type != "application/pdf":
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return fd_file_response(
+        fd,
+        filename=Path(panel.source_file).name,
+        media_type=inline_type,
+        disposition_type="inline",
+        headers=headers,
+        request_headers=request.headers,
+    )
+
+
+def _inline_source_type(head: bytes) -> str | None:
+    """The type a panel source may be served inline as, from its bytes.
+
+    A source a task registered carries whatever type its name guessed, so an
+    ``.html`` one would run on the app's origin inline (ISSUE-781). Inline is
+    for a PDF or a raster ``sniff_raster`` admits, the rule ``/chat/files``
+    uses, with the sniffed type sent explicitly; anything else is a download.
+    """
+    if head.startswith(b"%PDF-"):
+        return "application/pdf"
+    return sniff_raster(head)
+
+
+async def _open_upload_or_raise(ctx: HealthContext, rel: str) -> int:
+    """The download routes' open: an fd on the upload, or their 400 / 404."""
+    try:
+        fd = await asyncio.to_thread(health_documents.open_upload, ctx, rel)
     except ValueError:
         raise HTTPException(400, "invalid source path")
-    if not candidate.is_file():
+    if fd is None:
         raise HTTPException(404, "source file missing")
-    return FileResponse(
-        candidate,
-        media_type=panel.source_mime or "application/octet-stream",
-    )
+    return fd
 
 
 # ---- Biomarker trends -----------------------------------------------------
@@ -2819,6 +2852,7 @@ async def api_get_document(
 @router.get("/documents/{document_id}/file")
 async def api_document_file(
     document_id: int,
+    request: Request,
     ctx: HealthContext = Depends(get_user_context),
 ):
     """Stream a document's bytes. Auth-gated; path resolved server-side.
@@ -2837,18 +2871,13 @@ async def api_document_file(
     doc = await asyncio.to_thread(_query)
     if doc is None:
         raise HTTPException(404, "document not found")
-    try:
-        candidate = health_documents.resolve_document_path(ctx, doc)
-    except ValueError:
-        raise HTTPException(400, "invalid source path")
-    if not candidate.is_file():
-        raise HTTPException(404, "source file missing")
-    return FileResponse(
-        candidate,
-        media_type=doc.mime or "application/octet-stream",
+    fd = await _open_upload_or_raise(ctx, doc.stored_path)
+    return fd_file_response(
+        fd,
         filename=doc.filename,
+        media_type=doc.mime or "application/octet-stream",
         headers={"X-Content-Type-Options": "nosniff"},
-        content_disposition_type="attachment",
+        request_headers=request.headers,
     )
 
 

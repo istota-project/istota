@@ -174,6 +174,78 @@ class TestGetFeeds:
         assert entry["media_url"] == ""
         assert entry["media_type"] == ""
 
+    def test_a_stored_protocol_relative_image_is_served_as_https(self, ctx, client):
+        _seed(ctx)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.get_feed_by_url(
+                conn, "https://example.com/feed.xml",
+            ).id
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="rss-pr", title="Relative",
+                    url="https://example.com/post/3", author=None,
+                    content_html="<p>x</p>", content_text="x",
+                    image_urls=["//cdn.example.com/a.jpg"],
+                    published_at="2026-05-03T08:00:00+00:00",
+                    fetched_at="2026-05-03T09:00:00+00:00",
+                    status="unread",
+                ),
+            ])
+            conn.commit()
+
+        body = client.get("/istota/api/feeds").json()
+        entry = next(e for e in body["entries"] if e["title"] == "Relative")
+        assert entry["images"] == ["https://cdn.example.com/a.jpg"]
+        assert entry["duplicate_image_count"] == 0
+
+    def test_a_stored_unsafe_link_is_served_blank(self, ctx, client):
+        """ISSUE-774. Rows stored before ingestion checked a scheme still hold
+        ``javascript:`` URLs; the serializer must not hand them to an href."""
+        feeds_db.init_db(ctx.db_path)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/hostile.xml", title="Hostile",
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            # Written directly, as a row predating the ingestion check would be.
+            conn.execute(
+                "UPDATE feeds SET site_url = ? WHERE id = ?",
+                ("JaVaScRiPt:alert(1)", feed_id),
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="evil", title="Click me",
+                    url=" javascript:alert(document.cookie)", author=None,
+                    content_html="<p>x</p>", content_text="x",
+                    image_urls=["javascript:alert(2)", "https://img.example.com/a.jpg"],
+                    embed_url="vbscript:msgbox(1)",
+                    file_url="data:text/html,<script>alert(1)</script>",
+                    media_url="java\tscript:alert(1)", media_type="video/mp4",
+                    published_at="2026-05-03T08:00:00+00:00",
+                    fetched_at="2026-05-03T09:00:00+00:00",
+                    status="unread",
+                ),
+            ])
+            conn.commit()
+
+        body = client.get("/istota/api/feeds").json()
+        entry = next(e for e in body["entries"] if e["title"] == "Click me")
+        assert entry["url"] == ""
+        assert entry["embed_url"] == ""
+        assert entry["file_url"] == ""
+        assert entry["media_url"] == ""
+        assert entry["media_type"] == ""
+        assert entry["images"] == ["https://img.example.com/a.jpg"]
+        assert entry["duplicate_image_count"] == 0
+        assert entry["feed"]["site_url"] == ""
+        feed = next(f for f in body["feeds"] if f["title"] == "Hostile")
+        assert feed["site_url"] == ""
+
+        config = client.get("/istota/api/feeds/config").json()["config"]
+        hostile = next(f for f in config["feeds"] if f["title"] == "Hostile")
+        assert "site_url" not in hostile
+
     def test_status_filter(self, ctx, client):
         _seed(ctx)
         body = client.get("/istota/api/feeds?status=unread").json()

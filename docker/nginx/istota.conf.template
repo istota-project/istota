@@ -62,9 +62,41 @@ location /istota/api/chat/ {
     proxy_read_timeout 3600s;
 }
 
+# The sign-in forms are posted with no session, so the upload cap above is far
+# too much for them (ISSUE-777). Twice the app's own 16 KiB limit
+# (`_AUTH_FORM_BODY_LIMIT`), so a body between the two gets the app's page and
+# nginx refuses only what no form could be. Each keeps `/istota/`'s starting
+# page and relative redirects: the Mac app opens /istota/auth/local before
+# `web` is healthy, and its code must survive the reload.
+location = /istota/login/email {
+    absolute_redirect off;
+    client_max_body_size 32k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    error_page 502 =503 /_istota_starting;
+}
+
+location /istota/auth/ {
+    absolute_redirect off;
+    client_max_body_size 32k;
+    proxy_pass http://$upstream_web;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $forwarded_proto;
+    error_page 502 =503 /_istota_starting;
+}
+
 # Email login tokens are credentials; keep their query strings out of logs.
+# No starting page: its internal redirect would log the request line there.
 location = /istota/auth/set-password {
     access_log off;
+    client_max_body_size 32k;
     proxy_pass http://$upstream_web;
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;

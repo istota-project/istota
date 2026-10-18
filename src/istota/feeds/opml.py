@@ -23,6 +23,7 @@ from istota.feeds.models import (
     default_poll_interval_for,
     detect_source_type,
     normalize_feed_url,
+    safe_http_url,
 )
 
 
@@ -209,8 +210,9 @@ def _feed_outline(parent: ET.Element, feed) -> None:
     }
     if feed.title:
         attrib["title"] = feed.title
-    if feed.site_url:
-        attrib["htmlUrl"] = feed.site_url
+    site_url = safe_http_url(feed.site_url)
+    if site_url:
+        attrib["htmlUrl"] = site_url
     ET.SubElement(parent, "outline", attrib=attrib)
 
 

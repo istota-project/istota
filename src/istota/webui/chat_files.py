@@ -16,6 +16,7 @@ import os
 import posixpath
 import re
 import sqlite3
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
@@ -29,10 +30,11 @@ logger = logging.getLogger("istota.webui.chat_files")
 class ChatFileError(Exception):
     """Refusal to serve a path, carrying the status the caller should see."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, kind: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.kind = kind
 
 
 def chat_file_workspace(config: "Config | None", username: str) -> Path:
@@ -64,13 +66,33 @@ def resolve_chat_file(
     config: "Config | None", username: str, path: str,
     *, roots: list[tuple[str, Path]] | None = None,
 ) -> Path:
-    """Match a workspace path to its most specific root, then confine realpath.
+    """The path `open_chat_file` would serve, for a caller that only asks.
 
-    Relative paths retain their home-directory meaning. Absolute viewer paths
-    can name any currently readable place; no administrator bypass applies.
-    Callers checking several links may share roots for that one check.
+    The answer is the open's, so the link checks and the endpoint cannot
+    drift. Callers checking several links may share roots for that one check.
+    """
+    fd, target = open_chat_file(config, username, path, roots=roots)
+    os.close(fd)
+    return target
+
+
+def open_chat_file(
+    config: "Config | None", username: str, path: str,
+    *, roots: list[tuple[str, Path]] | None = None,
+) -> tuple[int, Path]:
+    """A read-only fd on the regular file a workspace path names, and its path.
+
+    The path is matched to its most specific root, then opened by a walk from
+    that root with ``O_NOFOLLOW`` at every component (ISSUE-776): the open is
+    the containment check, so a link is refused wherever it points, and the
+    caller serves the fd rather than opening the name again. Relative paths
+    retain their home-directory meaning. Absolute viewer paths can name any
+    currently readable place; no administrator bypass applies. The caller
+    closes the fd.
     """
     from istota import db
+    from istota.sandbox.attachment_source import open_regular_at
+    from istota.skills._loader import open_overlay_dir
 
     raw = (path or "").strip()
     if not raw:
@@ -95,19 +117,65 @@ def resolve_chat_file(
     if not relative and root.is_dir():
         raise ChatFileError(400, "path names the workspace itself, not a file")
 
-    real_root = os.path.realpath(root)
-    real = os.path.realpath(os.path.join(real_root, relative))
-    if real != real_root and not real.startswith(real_root + os.sep):
-        raise ChatFileError(403, "path resolves outside your workspace")
+    parts = relative.split("/") if relative else []
+    if not parts:
+        # A linked single file is its own root, resolved by `servable_roots`.
+        try:
+            fd = os.open(root, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            raise _refusal(root.parent, [root.name]) from None
+        try:
+            regular = stat.S_ISREG(os.fstat(fd).st_mode)
+            if regular:
+                os.set_blocking(fd, True)
+        except OSError:
+            regular = False
+        if not regular:
+            os.close(fd)
+            raise _refusal(root.parent, [root.name])
+        return fd, root
 
-    target = Path(real)
-    if not target.exists():
-        raise ChatFileError(404, "file not found")
-    if target.is_dir():
-        raise ChatFileError(400, "path is a directory, not a file")
-    if not target.is_file():
-        raise ChatFileError(400, "path is not a regular file")
-    return target
+    *dirs, leaf = parts
+    dir_fd = open_overlay_dir(root, *dirs)
+    fd = None
+    if dir_fd is not None:
+        try:
+            fd = open_regular_at(dir_fd, leaf)
+        finally:
+            os.close(dir_fd)
+    if fd is None:
+        raise _refusal(root, parts)
+    return fd, root.joinpath(*parts)
+
+
+def _refusal(root: Path, parts: list[str]) -> ChatFileError:
+    """Why the no-follow walk from `root` over `parts` failed.
+
+    Only picks the status and message: it reads by name after the fact, so it
+    can be wrong about a path being rewritten, and it decides nothing served.
+    """
+    current = root
+    info = None
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except (FileNotFoundError, NotADirectoryError):
+            return ChatFileError(404, "file not found")
+        except (OSError, ValueError):
+            break
+        if stat.S_ISLNK(info.st_mode):
+            return ChatFileError(403, "path is a link, which is not followed", kind="link")
+        if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+            return ChatFileError(404, "file not found")
+    if info is not None and stat.S_ISDIR(info.st_mode):
+        return ChatFileError(400, "path is a directory, not a file")
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        return ChatFileError(400, "path is not a regular file")
+    # A regular file that would not open (permissions, a disk fault), or a
+    # path that changed under the walk. Logged with the name only.
+    logger.warning("chat file could not be opened: %s", current.name)
+    return ChatFileError(404, "file could not be read")
 
 
 # A markdown link or image whose destination is the chat-files endpoint. The
@@ -126,6 +194,10 @@ _REASONS = {
     400: "not a file",
     403: "outside your workspace",
     404: "file not found",
+}
+# Refusals sharing a status with a different cause, keyed by `ChatFileError.kind`.
+_KIND_REASONS = {
+    "link": "a link, which is not followed",
 }
 
 
@@ -287,7 +359,7 @@ def check_chat_file_links(
             resolve_chat_file(config, user_id, path, roots=roots)
             return match.group(0)
         except ChatFileError as e:
-            reason = _REASONS.get(e.status)
+            reason = _KIND_REASONS.get(e.kind) or _REASONS.get(e.status)
             if reason is None:
                 return match.group(0)
         except Exception:

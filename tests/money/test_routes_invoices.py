@@ -32,16 +32,21 @@ def make_client(tmp_path: Path):
             ledgers=[],
             db_path=tmp_path / "data" / "money.db",
             invoicing_config_path=invoicing_config_path,
+            user_root=tmp_path,
         )
-        ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
-        money_db.init_db(ctx.db_path)
-        app = FastAPI()
-        app.include_router(router, prefix="/api/money")
-        app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
-        app.dependency_overrides[get_user_config] = lambda: ctx
-        app.dependency_overrides[verify_origin] = lambda: None
-        return TestClient(app)
+        return _app_client(ctx)
     return _factory
+
+
+def _app_client(ctx: UserContext) -> TestClient:
+    ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
+    money_db.init_db(ctx.db_path)
+    app = FastAPI()
+    app.include_router(router, prefix="/api/money")
+    app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+    app.dependency_overrides[get_user_config] = lambda: ctx
+    app.dependency_overrides[verify_origin] = lambda: None
+    return TestClient(app)
 
 
 def _write_invoicing_config(data_dir: Path, invoice_output: str) -> Path:
@@ -185,6 +190,144 @@ class TestInvoicePdf:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/pdf"
         assert resp.content.startswith(b"%PDF")
+
+    def test_download_serves_the_bytes_and_headers(self, make_client, tmp_path):
+        pdf = self._make_pdf(tmp_path)
+        resp = make_client().get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 200
+        assert resp.content == b"%PDF-1.4 fake"
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.headers["content-length"] == str(len(b"%PDF-1.4 fake"))
+        assert resp.headers["content-disposition"] == f'attachment; filename="{pdf.name}"'
+        assert resp.headers["last-modified"]
+        assert resp.headers["etag"]
+
+
+class TestInvoicePdfConfinement:
+    """The PDF route opens the file below ``data_dir`` and follows no link.
+
+    The output tree is in the user's workspace, which a task can write, so a
+    link planted there would otherwise hand the web process's own files to
+    the browser.
+    """
+
+    SECRET = b"outside-sentinel-not-an-invoice"
+
+    @pytest.fixture
+    def outside(self, tmp_path_factory) -> Path:
+        out = tmp_path_factory.mktemp("outside")
+        (out / "secret").write_bytes(self.SECRET)
+        year = out / "2026"
+        year.mkdir()
+        (year / "Invoice-000001-04_15_2026.pdf").write_bytes(self.SECRET)
+        return out
+
+    def _refused(self, client: TestClient) -> None:
+        resp = client.get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 404
+        assert self.SECRET not in resp.content
+
+    def test_symlink_leaf_is_refused(self, make_client, tmp_path, outside):
+        year_dir = tmp_path / "invoices" / "generated" / "2026"
+        year_dir.mkdir(parents=True)
+        (year_dir / "Invoice-000001-04_15_2026.pdf").symlink_to(outside / "secret")
+        self._refused(make_client())
+
+    def test_symlinked_year_directory_is_refused(self, make_client, tmp_path, outside):
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / "2026").symlink_to(outside / "2026", target_is_directory=True)
+        self._refused(make_client())
+
+    def test_symlinked_output_directory_is_refused(self, make_client, tmp_path, outside):
+        (tmp_path / "invoices").mkdir()
+        (tmp_path / "invoices" / "generated").symlink_to(outside, target_is_directory=True)
+        self._refused(make_client())
+
+    def test_absolute_invoice_output_is_refused(self, make_client, tmp_path, outside):
+        cfg = _write_invoicing_config(tmp_path, str(outside))
+        self._refused(make_client(invoicing_config_path=cfg))
+
+    def test_parent_escape_in_invoice_output_is_refused(self, make_client, tmp_path, outside):
+        # tmp_path and `outside` share pytest's base temp dir.
+        assert outside.parent == tmp_path.parent
+        cfg = _write_invoicing_config(tmp_path, f"../{outside.name}")
+        self._refused(make_client(invoicing_config_path=cfg))
+
+    def test_a_real_pdf_beside_a_link_still_downloads(self, make_client, tmp_path, outside):
+        year_dir = tmp_path / "invoices" / "generated" / "2026"
+        year_dir.mkdir(parents=True)
+        (year_dir / "Invoice-000001-01_01_2026.pdf").symlink_to(outside / "secret")
+        (year_dir / "Invoice-000001-04_15_2026.pdf").write_bytes(b"%PDF-1.4 real")
+        resp = make_client().get("/api/money/invoices/INV-000001/pdf")
+        assert resp.status_code == 200
+        assert resp.content == b"%PDF-1.4 real"
+
+    def test_money_folder_swapped_for_a_link_is_refused(self, tmp_path, monkeypatch):
+        """The walk starts at the user root, not at ``data_dir``.
+
+        ``data_dir`` is checked when the context is built, and a task can swap
+        ``money`` for a link between that check and the read.
+        """
+        from istota.money import routes
+
+        user_root = tmp_path / "Users" / "alice"
+        data_dir = user_root / "Istota" / "money"
+        data_dir.mkdir(parents=True)
+        victim_year = tmp_path / "Users" / "bob" / "Istota" / "money" / "invoices" / "generated" / "2026"
+        victim_year.mkdir(parents=True)
+        (victim_year / "Invoice-000001-04_15_2026.pdf").write_bytes(self.SECRET)
+
+        ctx = UserContext(
+            data_dir=data_dir, ledgers=[], db_path=tmp_path / "db" / "money.db",
+            user_root=user_root,
+        )
+        client = _app_client(ctx)
+
+        def swap(_user_ctx):
+            data_dir.rename(data_dir.with_name("money.real"))
+            data_dir.symlink_to(victim_year.parents[2], target_is_directory=True)
+            return None
+
+        monkeypatch.setattr(routes, "_load_invoicing_config", swap)
+        self._refused(client)
+
+
+class TestInvoiceListConfinement:
+    """``has_pdf`` answers from the same no-follow walk as the download."""
+
+    @pytest.fixture
+    def outside(self, tmp_path_factory) -> Path:
+        out = tmp_path_factory.mktemp("outside")
+        year = out / "2026"
+        year.mkdir()
+        (year / "Invoice-000001-04_15_2026.pdf").write_bytes(b"%PDF outside")
+        return out
+
+    def _has_pdf(self, client: TestClient) -> bool:
+        rows = client.get("/api/money/invoices").json()["invoices"]
+        return {r["invoice_number"]: r["has_pdf"] for r in rows}["INV-000001"]
+
+    def test_linked_year_folder_is_no_pdf(self, make_client, tmp_path, outside):
+        _seed_invoice(tmp_path)
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / "2026").symlink_to(outside / "2026", target_is_directory=True)
+        client = make_client(_write_invoicing_config(tmp_path, "invoices/generated"))
+        assert self._has_pdf(client) is False
+
+    def test_absolute_invoice_output_is_no_pdf(self, make_client, tmp_path, outside):
+        _seed_invoice(tmp_path)
+        client = make_client(_write_invoicing_config(tmp_path, str(outside)))
+        assert self._has_pdf(client) is False
+
+    def test_a_real_pdf_is_listed(self, make_client, tmp_path):
+        _seed_invoice(tmp_path)
+        year = tmp_path / "invoices" / "generated" / "2026"
+        year.mkdir(parents=True)
+        (year / "Invoice-000001-04_15_2026.pdf").write_bytes(b"%PDF")
+        client = make_client(_write_invoicing_config(tmp_path, "invoices/generated"))
+        assert self._has_pdf(client) is True
 
 
 class TestInvoicePaymentMatches:
@@ -563,6 +706,40 @@ class TestGenerateRoute:
         assert resp.status_code == 400
         assert _invoices_in_db(tmp_path) == []
 
+    def test_a_linked_year_folder_gets_no_pdf(
+        self, make_client, tmp_path, tmp_path_factory, monkeypatch,
+    ):
+        """ISSUE-775: generation passes the user root, so the PDF goes through
+        the no-follow walk even when the output folder is outside ``accounting_path``."""
+        from tests.support import weasyprint_stub
+
+        weasyprint_stub.install(monkeypatch)
+        outside = tmp_path_factory.mktemp("outside")
+        cfg = _write_invoicing_config(tmp_path, "invoices/generated")
+        cfg.write_text(cfg.read_text().replace('accounting_path = "."', 'accounting_path = "books"'))
+        (tmp_path / "books").mkdir()
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / str(date.today().year)).symlink_to(outside, target_is_directory=True)
+        _add(tmp_path, "work", day=date.today().isoformat())
+
+        resp = make_client(cfg).post(self.URL, json={"dry_run": False})
+        assert resp.status_code == 500
+        assert list(outside.iterdir()) == []
+        assert _invoices_in_db(tmp_path) == []
+
+    @pytest.mark.parametrize("output", ["/elsewhere/invoices", "../elsewhere"])
+    def test_invoice_output_outside_the_money_folder_is_400(
+        self, make_client, tmp_path, fake_pdf, output,
+    ):
+        _add(tmp_path, "work")
+        client = make_client(_write_invoicing_config(tmp_path, output))
+        resp = client.post(self.URL, json={"dry_run": False})
+        assert resp.status_code == 400
+        assert "inside the money folder" in resp.json()["error"]
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
 
 def _issue(client, *, qty: float = 8) -> str:
     resp = client.post("/api/money/invoices", json={
@@ -612,6 +789,39 @@ class TestVoidRoute:
         assert resp.status_code == 200
         assert resp.json()["invoice"]["has_pdf"] is False
         assert list((tmp_path / "invoices").rglob("*.pdf")) == []
+
+    def _linked_invoice(self, tmp_path, outside: Path, *, stored: bool) -> Path:
+        """INV-000001 whose year folder is a link to ``outside``."""
+        from istota.money.work import create_invoice, load_work_entries, write_transaction
+
+        year_out = outside / "2026"
+        year_out.mkdir()
+        victim = year_out / "Invoice-000001-03_02_2026.pdf"
+        victim.write_bytes(b"%PDF outside")
+        (tmp_path / "invoices").mkdir()
+        (tmp_path / "invoices" / "2026").symlink_to(year_out, target_is_directory=True)
+        add_work_entry(tmp_path, "2026-03-01", "acme", "dev", qty=1, description="x")
+        uid = next(e.uid for e in load_work_entries(tmp_path) if e.description == "x")
+        pdf_path = str(tmp_path / "invoices" / "2026" / victim.name) if stored else ""
+        with write_transaction(tmp_path) as conn:
+            create_invoice(
+                conn, number="INV-000001", client="acme", entity="", group_name="",
+                issue_date=date(2026, 3, 2), total=150.0, entry_uids=[uid], pdf_path=pdf_path,
+            )
+        return victim
+
+    @pytest.mark.parametrize("stored", [False, True])
+    @pytest.mark.parametrize("delete_pdf", [False, True])
+    def test_a_pdf_through_a_linked_year_folder_is_left_alone(
+        self, make_client, tmp_path, tmp_path_factory, stored, delete_pdf,
+    ):
+        victim = self._linked_invoice(tmp_path, tmp_path_factory.mktemp("outside"), stored=stored)
+        client = self._client(make_client, tmp_path)
+        resp = client.post("/api/money/invoices/INV-000001/void", json={"delete_pdf": delete_pdf})
+        assert resp.status_code == 200
+        assert resp.json()["invoice"]["status"] == "voided"
+        assert victim.read_bytes() == b"%PDF outside"
+        assert sorted(p.name for p in victim.parent.iterdir()) == [victim.name]
 
     def test_paid_without_force_is_409(self, make_client, tmp_path, fake_pdf):
         client = self._client(make_client, tmp_path)
@@ -783,3 +993,39 @@ class TestCreateRoute:
             "client": "acme", "items": [{"description": "x", "amount": 1}],
         })
         assert resp.status_code == 400
+
+    @pytest.mark.parametrize("output", ["/elsewhere/invoices", "../elsewhere"])
+    def test_invoice_output_outside_the_money_folder_is_400(
+        self, make_client, tmp_path, fake_pdf, output,
+    ):
+        client = make_client(_write_invoicing_config(tmp_path, output))
+        resp = client.post(self.URL, json={
+            "client": "acme", "items": [{"description": "x", "amount": 1}],
+        })
+        assert resp.status_code == 400
+        assert "inside the money folder" in resp.json()["error"]
+        assert fake_pdf == []
+        assert _invoices_in_db(tmp_path) == []
+
+    def test_a_linked_year_folder_gets_no_pdf(
+        self, make_client, tmp_path, tmp_path_factory, monkeypatch,
+    ):
+        """ISSUE-775: the PDF is published through a no-follow walk from the
+        user root, even when the output folder is outside ``accounting_path``."""
+        from tests.support import weasyprint_stub
+
+        weasyprint_stub.install(monkeypatch)
+        outside = tmp_path_factory.mktemp("outside")
+        cfg = _write_invoicing_config(tmp_path, "invoices/generated")
+        cfg.write_text(cfg.read_text().replace('accounting_path = "."', 'accounting_path = "books"'))
+        (tmp_path / "books").mkdir()
+        output = tmp_path / "invoices" / "generated"
+        output.mkdir(parents=True)
+        (output / str(date.today().year)).symlink_to(outside, target_is_directory=True)
+
+        resp = make_client(cfg).post(self.URL, json={
+            "client": "acme", "items": [{"description": "x", "amount": 1}],
+        })
+        assert resp.status_code == 500
+        assert list(outside.iterdir()) == []
+        assert _invoices_in_db(tmp_path) == []

@@ -820,3 +820,86 @@ class TestPrune:
         assert out["status"] == "error"
         assert "database is locked" in out["error"]
         assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Stored unsafe links (ISSUE-774)
+# ---------------------------------------------------------------------------
+
+
+class TestStoredUnsafeLinksAreNotPassedOn:
+    """Rows stored before ingestion checked a scheme can still hold a
+    ``javascript:`` link. The CLI hands entries to the model and the OPML
+    export to another reader, so neither may pass one on."""
+
+    def _seed(self, ctx):
+        from istota.feeds.models import EntryRecord
+
+        _seed_db(ctx, feeds=[{"url": "https://x.test/feed"}])
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
+            # Written directly, as a row predating the ingestion check would be.
+            conn.execute(
+                "UPDATE feeds SET site_url = ? WHERE id = ?",
+                ("JaVaScRiPt:alert(1)", feed.id),
+            )
+            feeds_db.insert_entries(conn, feed.id, [
+                EntryRecord(id=0, feed_id=feed.id, guid="a", title="A",
+                            url=" javascript:alert(1)", author=None,
+                            content_html=None, content_text=None,
+                            image_urls=["javascript:alert(2)",
+                                        "https://img.example.com/a.jpg"],
+                            media_url="vbscript:msgbox(1)",
+                            media_type="video/mp4",
+                            published_at="2026-01-01T00:00:00+00:00",
+                            fetched_at="2026-01-01T00:00:00+00:00",
+                            status="unread"),
+            ])
+            entry_id = feeds_db.list_entries(conn)[0].id
+            feeds_db.update_entry_starred(conn, [entry_id], True)
+            conn.commit()
+
+    @pytest.mark.parametrize("args", [["entries"], ["starred"], ["list"]])
+    def test_the_cli_drops_them(self, ctx, args):
+        self._seed(ctx)
+        r = _invoke(ctx, args)
+        out = json.loads(r.output)
+        assert out["status"] == "ok"
+        assert out.get("count", len(out.get("feeds", []))) == 1
+        assert "script" not in r.output.lower()
+
+    def test_entries_keeps_the_safe_image(self, ctx):
+        self._seed(ctx)
+        out = json.loads(_invoke(ctx, ["entries"]).output)
+        entry = out["entries"][0]
+        assert entry["image_urls"] == ["https://img.example.com/a.jpg"]
+        assert entry["url"] is None
+        assert entry["media_url"] is None
+        assert entry["media_type"] is None
+
+    def test_the_opml_export_drops_them(self, ctx):
+        from istota.feeds.opml import export_opml
+
+        self._seed(ctx)
+        text = export_opml(ctx)
+        assert "https://x.test/feed" in text
+        assert "script" not in text.lower()
+
+    def test_entries_reads_a_protocol_relative_image_as_https(self, ctx):
+        from istota.feeds.models import EntryRecord
+
+        _seed_db(ctx, feeds=[{"url": "https://x.test/feed"}])
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed = feeds_db.get_feed_by_url(conn, "https://x.test/feed")
+            feeds_db.insert_entries(conn, feed.id, [
+                EntryRecord(id=0, feed_id=feed.id, guid="r", title="R",
+                            url=None, author=None, content_html=None,
+                            content_text=None,
+                            image_urls=["//cdn.example.com/a.jpg"],
+                            published_at="2026-01-01T00:00:00+00:00",
+                            fetched_at="2026-01-01T00:00:00+00:00",
+                            status="unread"),
+            ])
+            conn.commit()
+        out = json.loads(_invoke(ctx, ["entries"]).output)
+        assert out["entries"][0]["image_urls"] == ["https://cdn.example.com/a.jpg"]

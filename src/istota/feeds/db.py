@@ -30,6 +30,7 @@ from istota.feeds.models import (
     media_type_for_url,
     normalize_feed_url,
     parse_image_urls,
+    safe_http_url,
 )
 from istota.feeds.sanitize import image_identity
 from istota.lib.timestamps import iso_now
@@ -683,7 +684,10 @@ def upsert_feed(
             poll_interval_minutes = excluded.poll_interval_minutes
         RETURNING id
         """,
-        (url, title, site_url, source_type, category_id, poll_interval_minutes),
+        (
+            url, title, safe_http_url(site_url), source_type, category_id,
+            poll_interval_minutes,
+        ),
     )
     return int(cur.fetchone()["id"])
 

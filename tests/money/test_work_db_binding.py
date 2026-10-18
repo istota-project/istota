@@ -9,9 +9,7 @@ so a path that forgot the binding would pass them all.
 from __future__ import annotations
 
 import sqlite3
-import sys
 import tomllib
-import types
 from pathlib import Path
 
 import pytest
@@ -43,9 +41,9 @@ type = "hours"
 
 @pytest.fixture(autouse=True)
 def fake_weasyprint(monkeypatch):
-    fake = types.ModuleType("weasyprint")
-    fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: b"%PDF-1.4")
-    monkeypatch.setitem(sys.modules, "weasyprint", fake)
+    from tests.support import weasyprint_stub
+
+    weasyprint_stub.install(monkeypatch, render=lambda string: b"%PDF-1.4")
 
 
 def _seed_config(db_path: Path) -> None:

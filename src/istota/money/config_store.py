@@ -1071,10 +1071,12 @@ def _check_int(
 
 
 def check_invoicing_scalars(fields: dict) -> None:
-    """Validate the account/commodity-shaped invoicing scalars.
+    """Validate the account/commodity-shaped invoicing scalars, and ``invoice_output``.
 
     The instance-wide defaults every entity and client falls back to, so the
-    same shape rules apply as to the per-record ones.
+    same shape rules apply as to the per-record ones. ``invoice_output`` must
+    stay inside the money folder (ISSUE-775); a value stored before this rule
+    is refused by the readers instead.
     """
     accounts = {
         "ar_account": fields.get("default_ar_account"),
@@ -1090,6 +1092,15 @@ def check_invoicing_scalars(fields: dict) -> None:
                 "like Assets:Accounts-Receivable",
             )
     _check_currency(fields)
+    output = fields.get("invoice_output")
+    if output not in (None, ""):
+        from istota.money.invoice_files import invoice_output_parts  # noqa: PLC0415
+
+        if not isinstance(output, str) or invoice_output_parts(output) is None:
+            raise InvalidInvoiceOutputError(
+                f"invalid invoice_output: {output!r} — expected a folder inside "
+                "the money folder, such as invoices/generated",
+            )
 
 
 def _validate_company_fields(fields: dict, skip: frozenset[str] = frozenset()) -> None:
@@ -2779,6 +2790,14 @@ def delete_monarch_profile(db_path: Path | str, name: str) -> bool:
             )
             _sync_tag_skip_rules(conn, ledger, [], clear=True)
         return cur.rowcount > 0
+
+
+class InvalidInvoiceOutputError(ValueError):
+    """An ``invoice_output`` that leaves the money folder (ISSUE-775).
+
+    A ``ValueError`` for every existing handler, and its own type so the
+    legacy importer refuses the file as it refuses an ``InvalidAccountError``.
+    """
 
 
 class InvalidAccountError(ValueError):

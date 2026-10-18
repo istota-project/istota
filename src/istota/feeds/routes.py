@@ -32,7 +32,9 @@ from istota.feeds.models import (
     FeedsContext,
     default_poll_interval_for,
     detect_source_type,
+    http_image_url,
     normalize_feed_url,
+    safe_http_url,
 )
 from istota.feeds.retention import resolve_max_entries_per_feed
 from istota.feeds.sanitize import image_identity
@@ -71,7 +73,7 @@ def _map_feed(feed, cat_by_id: dict) -> dict:
     return {
         "id": feed.id,
         "title": feed.title or feed.url,
-        "site_url": feed.site_url or "",
+        "site_url": safe_http_url(feed.site_url) or "",
         "category": {
             "id": cat.id if cat else 0,
             "title": cat.title if cat else "",
@@ -85,33 +87,37 @@ def _map_entry(
     feed = feed_by_id.get(entry.feed_id)
     cat = cat_by_id.get(feed.category_id) if feed else None
     hidden = suppressed or set()
-    images = [url for url in (entry.image_urls or []) if url not in hidden]
+    # Only http(s) images, for rows stored before ingestion checked (ISSUE-774).
+    # Suppression is keyed on the stored spelling, so it is checked before a
+    # protocol-relative URL is resolved.
+    stored = [raw for raw in (entry.image_urls or []) if http_image_url(raw)]
+    images = [http_image_url(raw) for raw in stored if raw not in hidden]
     return {
         "id": entry.id,
         "title": entry.title or "",
-        "url": entry.url or "",
+        "url": safe_http_url(entry.url) or "",
         "content": entry.content_html or "",
         "images": images,
         # Images dropped because a newer entry already showed them. Reported
         # rather than silently omitted so the reader can still treat the entry
         # as an image post and say what it hid (ISSUE-162).
-        "duplicate_image_count": len(entry.image_urls or []) - len(images),
+        "duplicate_image_count": len(stored) - len(images),
         # Set for playable media (an Are.na Embed block). The reader turns it
         # into an inline player; empty for everything else.
-        "embed_url": entry.embed_url or "",
+        "embed_url": safe_http_url(entry.embed_url) or "",
         # Set for an attached document (an Are.na Attachment — usually a PDF).
         # The reader opens it instead of lightboxing the cover page.
-        "file_url": entry.file_url or "",
+        "file_url": safe_http_url(entry.file_url) or "",
         # Set for a media file the reader plays inline with a native
         # <video>/<audio> — a Mastodon video attachment, a podcast enclosure.
         # This is the field that keeps such a URL out of `images`, where it
         # rendered as an <img> that never decodes (ISSUE-356).
-        "media_url": entry.media_url or "",
-        "media_type": entry.media_type or "",
+        "media_url": safe_http_url(entry.media_url) or "",
+        "media_type": (entry.media_type or "") if safe_http_url(entry.media_url) else "",
         "feed": {
             "id": feed.id if feed else 0,
             "title": (feed.title or feed.url) if feed else "",
-            "site_url": (feed.site_url or "") if feed else "",
+            "site_url": (safe_http_url(feed.site_url) or "") if feed else "",
             "category": {
                 "id": cat.id if cat else 0,
                 "title": cat.title if cat else "",
@@ -728,8 +734,9 @@ def _config_payload_from_db(
         entry: dict = {"url": f.url}
         if f.title:
             entry["title"] = f.title
-        if f.site_url:
-            entry["site_url"] = f.site_url
+        site_url = safe_http_url(f.site_url)
+        if site_url:
+            entry["site_url"] = site_url
         if f.category_id and f.category_id in cat_by_id:
             entry["category"] = cat_by_id[f.category_id].slug
         if f.poll_interval_minutes != default_poll_interval_for(f.source_type):

@@ -173,11 +173,22 @@ def open_source(source: AttachmentSource) -> int | None:
     if dir_fd is None:
         return None
     try:
-        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-    except (OSError, ValueError):
-        return None
+        return open_regular_at(dir_fd, leaf)
     finally:
         os.close(dir_fd)
+
+
+def open_regular_at(dir_fd: int, name: str) -> int | None:
+    """A read-only fd on the regular file `name` in `dir_fd`, or None.
+
+    The leaf half of `open_source`, for a caller already holding a directory
+    fd from a no-follow walk: ``O_NOFOLLOW``, then ``S_ISREG`` on the fd.
+    The caller closes the fd.
+    """
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+    except (OSError, ValueError):
+        return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
@@ -206,11 +217,18 @@ def open_attachment(
     return fd, source
 
 
-def copy_fd(src_fd: int, dst_fd: int) -> None:
-    """Copy all of `src_fd` into `dst_fd` by offset, leaving `src_fd`'s position alone."""
+def copy_fd(src_fd: int, dst_fd: int, *, limit: int | None = None) -> None:
+    """Copy all of `src_fd` into `dst_fd` by offset, leaving `src_fd`'s position alone.
+
+    `limit` stops after that many bytes, for a source somebody else can grow
+    while it is being copied.
+    """
     offset = 0
     while True:
-        chunk = os.pread(src_fd, _COPY_CHUNK, offset)
+        want = _COPY_CHUNK if limit is None else min(_COPY_CHUNK, limit - offset)
+        if want <= 0:
+            return
+        chunk = os.pread(src_fd, want, offset)
         if not chunk:
             return
         view = memoryview(chunk)

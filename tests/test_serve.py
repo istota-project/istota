@@ -247,6 +247,27 @@ class TestRunServe:
         with pytest.raises(serve.ServeError, match="loopback"):
             serve.run_serve(cfg, host="0.0.0.0", port=8799)
 
+    def test_no_auth_refuses_an_ephemeral_port(self, tmp_path, monkeypatch):
+        # The no-auth Host guard is keyed on the port; 0 would leave it unknown.
+        # Stubbed like the orchestration test, so a regression fails, not hangs.
+        import istota.scheduler as sched
+        from istota import serve
+
+        def fake_daemon(config, *, install_signal_handlers=True, ready_event=None):
+            if ready_event is not None:
+                ready_event.set()
+            while not sched._shutdown_requested:
+                time.sleep(0.01)
+
+        monkeypatch.setattr(sched, "run_daemon", fake_daemon)
+        fake_server = _FakeServer()
+        monkeypatch.setattr(serve, "build_uvicorn_server", lambda host, port: fake_server)
+        cfg = _serve_config(tmp_path)
+        assert "none" in cfg.web.auth
+        with pytest.raises(serve.ServeError, match="--port 0"):
+            serve.run_serve(cfg, host="127.0.0.1", port=0)
+        assert not fake_server.ran
+
     def test_orchestration_starts_and_stops(self, tmp_path, monkeypatch):
         import istota.scheduler as sched
         from istota import serve
@@ -270,12 +291,14 @@ class TestRunServe:
 
         def run_with_launch_marker():
             assert web_app.app.state.local_no_auth_bind == "127.0.0.1"
+            assert web_app.app.state.local_no_auth_port == 8799
             original_run()
 
         monkeypatch.setattr(fake_server, "run", run_with_launch_marker)
         serve.run_serve(cfg, host="127.0.0.1", port=8799)
 
         assert web_app.app.state.local_no_auth_bind is None
+        assert web_app.app.state.local_no_auth_port is None
         assert fake_server.ran
         assert daemon_started.is_set()
         # run_serve requested shutdown on exit, so the fake daemon loop ended.

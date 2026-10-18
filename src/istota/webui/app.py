@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import math
+import mimetypes
 import os
 import platform
 import re
@@ -51,7 +52,6 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import (
-    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -69,8 +69,11 @@ from istota.webui import shutdown as web_shutdown
 from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
 from istota.brain import make_brain
-from .chat_files import ChatFileError, resolve_chat_file
-from istota.config import Config, load_config, local_login_hosts, refresh_user_profiles_if_changed
+from .chat_files import ChatFileError, open_chat_file
+from .fd_response import fd_file_response
+from istota.config import (
+    Config, load_config, local_login_hosts, no_auth_hosts, no_auth_origins, refresh_user_profiles_if_changed,
+)
 from istota.lib.image_sniff import SNIFF_BYTES, sniff_raster
 from istota.lib.workspace_marker import storage_mode
 from istota.workspace.preview import PREVIEW_MAX_BYTES, classify as classify_preview
@@ -110,7 +113,9 @@ _UNSET = object()
 # nested `load_config()`. Aliased under the old private names because this
 # module's own call sites and its tests use them. The bundle's cache policy and
 # mount are there too, shared with the first-run setup server.
-from .request_guards import BodyError, host_refusal, origin_refusal, read_bounded_body
+from .request_guards import (
+    BodyError, cross_site_refusal, host_refusal, origin_authority_refusal, origin_refusal, read_bounded_body,
+)
 from .static_dir import (  # noqa: F401 - re-export, see above
     cache_header_statics,
     pick_static_dir as _pick_static_dir,
@@ -277,11 +282,32 @@ app.add_middleware(
 )
 
 
-class _LocalLoginHostGuard:
-    """On an install with local login codes, answer only at its loopback names.
+def _trusted_loopback_hosts(config: Config) -> frozenset[str] | None:
+    """The ``Host`` values a loopback-only install answers at, or None for any.
 
+    ``local_code`` derives them from ``[site] hostname``; no-auth from the
+    port ``istota serve`` bound, which ``--port`` can make differ from
+    ``[web] port``.
+    """
+    if config.web.has_method("local_code"):
+        return local_login_hosts(config.site.hostname)
+    if config.web.has_method("none"):
+        return no_auth_hosts(_no_auth_port(config))
+    return None
+
+
+def _no_auth_port(config: Config) -> int:
+    port = getattr(app.state, "local_no_auth_port", None)
+    return config.web.port if port is None else port
+
+
+class _LocalLoginHostGuard:
+    """On a loopback-only install, answer only at its loopback names.
+
+    That is an install with local login codes, or no-auth on a checkout.
     Against DNS rebinding: a page on another name resolving to 127.0.0.1 would
-    otherwise reach the login code route and the API with its own ``Host``.
+    otherwise reach the login code route and the API with its own ``Host``,
+    and in no-auth mode the API as the local administrator (ISSUE-778).
     Pure ASGI rather than ``@app.middleware``, which would wrap every
     streamed response.
     """
@@ -291,11 +317,18 @@ class _LocalLoginHostGuard:
 
     async def __call__(self, scope, receive, send) -> None:
         config = _config
-        if (scope["type"] in ("http", "websocket") and config is not None
-                and config.web.has_method("local_code")):
+        allowed = None
+        if scope["type"] in ("http", "websocket") and config is not None:
+            allowed = _trusted_loopback_hosts(config)
+        if allowed is not None:
             from starlette.datastructures import Headers
 
-            if host_refusal(Headers(scope=scope), local_login_hosts(config.site.hostname)):
+            headers = Headers(scope=scope)
+            # Fetch Metadata stops a page on another site, which the Host
+            # check cannot see, firing a side-effecting GET (ISSUE-778).
+            if host_refusal(headers, allowed) or (
+                config.web.has_method("none") and cross_site_refusal(headers)
+            ):
                 if scope["type"] == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
                 else:
@@ -500,11 +533,17 @@ def _require_admin(user: dict = Depends(_require_api_auth)) -> dict:
 def _verify_origin(request: Request) -> None:
     """Check Origin/Referer header against configured hostname for CSRF protection.
 
-    No-op in no-auth mode: the loopback-only bind (enforced at startup) means
-    there is no cross-site attacker, and requiring an Origin header would 403
-    tools/curl calls with none.
+    In no-auth mode a page on any site can still POST to the loopback port, so
+    an Origin or Referer must name this listener or the Vite dev server, port
+    included (ISSUE-778). A request carrying neither is let through: curl sends
+    none, and a browser POST always sends Origin.
     """
     if _no_auth_mode():
+        if not (request.headers.get("origin") or request.headers.get("referer")):
+            return
+        refusal = origin_authority_refusal(request.headers, no_auth_origins(_no_auth_port(_config)))
+        if refusal:
+            raise _ForbiddenException(refusal)
         return
     if not (request.headers.get("origin") or request.headers.get("referer")):
         raise _ForbiddenException("missing origin")
@@ -1130,6 +1169,37 @@ async def _auth_error(headline: str, detail: str, status_code: int) -> HTMLRespo
     )
 
 
+# The largest of the sign-in forms is set-password: two passwords at
+# `web_auth`'s 1024-byte cap, percent-encoded to at most 3 KiB each, plus a
+# link token and a CSRF token. These forms are read with no session (ISSUE-777),
+# and nginx caps their locations at twice this.
+_AUTH_FORM_BODY_LIMIT = 16 * 1024
+
+
+async def _read_auth_form(request: Request):
+    """The posted sign-in form, or the page refusing it, as ``(form, refusal)``.
+
+    The body is read through `read_bounded_body` before anything parses it,
+    and Starlette's parser is then handed only those bytes.
+    """
+    try:
+        raw = await read_bounded_body(request, _AUTH_FORM_BODY_LIMIT)
+    except BodyError as exc:
+        if exc.status == 413:
+            return None, await _auth_error("This form is too large", "Reload and try again.", 413)
+        return None, await _auth_error("This form was interrupted", "Reload and try again.", 400)
+    replayed = False
+
+    async def receive():
+        nonlocal replayed
+        if replayed:
+            return {"type": "http.disconnect"}
+        replayed = True
+        return {"type": "http.request", "body": raw, "more_body": False}
+
+    return await Request(request.scope, receive).form(), None
+
+
 @auth_router.get("/login")
 async def login(request: Request):
     request.session.pop(_POST_LOGIN_KEY, None)
@@ -1156,7 +1226,9 @@ async def login_email(request: Request):
     started = time.monotonic()
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "login", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     email = form.get("email", "")
@@ -1281,7 +1353,9 @@ async def set_password_page(request: Request):
 async def set_password_submit(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     token = form.get("token", "")
     record = await _peek_auth_link(token)
     if record is None:
@@ -1362,7 +1436,9 @@ def _send_sign_in_code(config, request_id: str):
 async def sign_in_code_request(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "sign-in-code-request", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     email = form.get("email", "")
@@ -1401,7 +1477,9 @@ async def sign_in_code_page(request: Request):
 async def sign_in_code_submit(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "sign-in-code", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     pending = _pending_sign_in(request)
@@ -1469,7 +1547,9 @@ async def local_login_page(request: Request):
 async def local_login_submit(request: Request):
     if not _config.web.has_method("local_code"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "local-login", form.get("csrf_token")):
         return await _auth_error("This form expired", "Open Istota from the app again.", 403)
     try:
@@ -1535,7 +1615,9 @@ async def reset_page(request: Request):
 async def reset_submit(request: Request):
     if not _config.web.has_method("email"):
         raise HTTPException(status_code=404)
-    form = await request.form()
+    form, refused = await _read_auth_form(request)
+    if refused is not None:
+        return refused
     if not _check_csrf(request, "reset", form.get("csrf_token")):
         return await _auth_error("This form expired", "Reload and try again.", 403)
     response = await _auth_form(
@@ -12772,64 +12854,23 @@ async def chat_upload_attachment(
 # back to being for giving a file to *someone else*.
 
 
-def _resolve_chat_file(username: str, path: str) -> Path:
-    """`chat_files.resolve_chat_file` against this process's config.
-
-    Kept as a module-level name because the download path and its tests reach
-    it here; the rule itself lives in `chat_files`, which the scheduler also
-    asks when it stores an answer (ISSUE-559).
-    """
-    return resolve_chat_file(_config, username, path)
-
-
-def _read_chat_file_head(
+def _open_chat_file_head(
     username: str, path: str, limit: int,
-) -> tuple[Path, bytes, os.stat_result]:
-    """Confine and read up to limit bytes, with metadata from the open file.
+) -> tuple[int, Path, bytes, os.stat_result]:
+    """Confine and open the file, and read up to limit bytes through that fd.
 
-    One threaded hop for both, and the order is the point: every confinement
-    check in `_resolve_chat_file` runs to completion before anything opens the
-    file, so a refused path is never read at all. The head read is inside the
-    same `ChatFileError` contract — a file whose first bytes cannot be read is
-    not going to serve, so it is the 404 the caller already handles rather than
-    a 500 on the way past.
-
-    **The three open flags are each load-bearing, because this open is a
-    *second* resolution of a path the workspace's owner can rewrite between the
-    two.** `_resolve_chat_file` hands back a realpath whose final component was
-    a regular file when it looked; by the time this runs it need not be. So:
-    `O_NOFOLLOW` refuses a symlink swapped in for that component, which is the
-    one shape that would otherwise take the read back out of the workspace the
-    check just confined it to; `O_NONBLOCK` means a FIFO put there returns
-    instead of blocking forever on a worker from the process-wide
-    `asyncio.to_thread` pool, which the SSE ticks and the attachment save share
-    — a hang there costs the web process rather than this request; and the
-    `S_ISREG` test on the *descriptor* is what actually refuses that FIFO, and
-    refuses it before `FileResponse` opens the path again by name and blocks on
-    it with no flags of its own.
-
-    What this does **not** claim is that the bytes sniffed are the bytes sent:
-    `FileResponse` opens the path a third time to stream it. Measured, a full
-    swap in that window still comes back `image/png` with `nosniff` and the
-    CSP, because the type is our explicit one rather than a guess — so the
-    window is an integrity question and cannot produce the outcome the header
-    exists to prevent.
+    `chat_files.open_chat_file` walks from the authorized root with
+    ``O_NOFOLLOW`` at every component and hands back the descriptor, so the
+    check and the open are one operation and a refused path never yields a
+    readable fd (ISSUE-776). Everything after reads that descriptor and never
+    the name: the head, the metadata and, for a download, the body. A link
+    swapped in after the open changes nothing served. A head that cannot be
+    read is the 404 the caller already handles rather than a 500. The caller
+    owns the returned fd.
     """
-    target = _resolve_chat_file(username, path)
-    try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError as e:
-        # 404 rather than a 500: the spec's rule is that a file whose head
-        # cannot be read is not going to serve. Logged with its errno so a
-        # genuine disk fault or fd exhaustion is not silently a "not found".
-        logger.warning(
-            "chat file head read failed for %s: %s", target.name, e,
-        )
-        raise ChatFileError(404, "file could not be read") from e
+    fd, target = open_chat_file(_config, username, path)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise ChatFileError(400, "path is not a regular file")
         head = bytearray()
         while len(head) < limit:
             chunk = os.read(fd, limit - len(head))
@@ -12837,26 +12878,35 @@ def _read_chat_file_head(
                 break
             head.extend(chunk)
     except OSError as e:
+        os.close(fd)
+        # Logged with its errno so a disk fault or fd exhaustion is not
+        # silently a "not found".
         logger.warning(
             "chat file head read failed for %s: %s", target.name, e,
         )
         raise ChatFileError(404, "file could not be read") from e
-    finally:
+    except BaseException:
         os.close(fd)
-    return target, bytes(head), info
+        raise
+    return fd, target, bytes(head), info
 
 
-def _resolve_chat_file_for_download(
+def _open_chat_file_for_download(
     username: str, path: str,
-) -> tuple[Path, str | None]:
-    """Resolve the target and decide whether its bytes may render inline."""
-    target, head, _ = _read_chat_file_head(username, path, SNIFF_BYTES)
-    return target, sniff_raster(head)
+) -> tuple[int, Path, str | None]:
+    """The open fd, its path, and whether its bytes may render inline."""
+    fd, target, head, _ = _open_chat_file_head(username, path, SNIFF_BYTES)
+    try:
+        return fd, target, sniff_raster(head)
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _preview_chat_file(username: str, path: str) -> dict:
     """Read and classify in the same worker hop as the confinement checks."""
-    target, head, info = _read_chat_file_head(username, path, PREVIEW_MAX_BYTES)
+    fd, target, head, info = _open_chat_file_head(username, path, PREVIEW_MAX_BYTES)
+    os.close(fd)
     modified = _iso_z(datetime.fromtimestamp(info.st_mtime, tz=timezone.utc))
     return classify_preview(
         target.name, info.st_size, modified, head, truncated=info.st_size > PREVIEW_MAX_BYTES,
@@ -12878,6 +12928,7 @@ async def chat_preview_file(
 
 @api_router.get("/chat/files")
 async def chat_download_file(
+    request: Request,
     path: str = Query(..., description="Workspace path of the file to download"),
     user: dict = Depends(_require_api_auth),
 ):
@@ -12908,11 +12959,16 @@ async def chat_download_file(
     The CSP is defence behind the media type rather than instead of it: if the
     type were ever wrong, `sandbox` with `default-src 'none'` leaves the
     document with no origin, no scripts and no subresources.
+
+    **The body is the descriptor the check opened** (ISSUE-776). Handing the
+    path to `FileResponse` let a workspace writer swap in a link after the
+    check and be served a file from outside the workspace. Range requests are
+    served from the same fd, since the viewer's media players seek with them.
     """
     username = user["username"]
     try:
-        target, inline_type = await asyncio.to_thread(
-            _resolve_chat_file_for_download, username, path,
+        fd, target, inline_type = await asyncio.to_thread(
+            _open_chat_file_for_download, username, path,
         )
     except ChatFileError as e:
         return JSONResponse({"error": e.message}, status_code=e.status)
@@ -12922,22 +12978,26 @@ async def chat_download_file(
         "X-Content-Type-Options": "nosniff",
     }
     if inline_type is None:
-        return FileResponse(
-            target,
+        return fd_file_response(
+            fd,
             filename=target.name,
-            content_disposition_type="attachment",
+            # `FileResponse`'s guess from the name, safe beside `attachment`.
+            media_type=mimetypes.guess_type(target.name)[0] or "text/plain",
+            disposition_type="attachment",
             headers=headers,
+            request_headers=request.headers,
         )
 
     headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
-    return FileResponse(
-        target,
+    return fd_file_response(
+        fd,
         filename=target.name,
         # Explicit, never Starlette's guess from the filename — the extension
         # is a caller-supplied string on a file the model wrote.
         media_type=inline_type,
-        content_disposition_type="inline",
+        disposition_type="inline",
         headers=headers,
+        request_headers=request.headers,
     )
 
 

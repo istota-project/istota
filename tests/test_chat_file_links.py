@@ -219,3 +219,17 @@ def test_longest_root_confines_a_nested_linked_folder(config):
     with pytest.raises(ChatFileError) as caught:
         resolve_chat_file(config, "testuser", "/linked/nested/escape.txt")
     assert caught.value.status == 403
+
+
+def test_a_link_is_named_as_a_link_not_as_outside_the_workspace(config, workspace_png):
+    """ISSUE-776: the no-follow walk refuses a link that points back inside
+    the workspace, so "outside your workspace" would be untrue in the answer."""
+    (workspace_png.parent / "alias.png").symlink_to(workspace_png)
+    text = f"![shot]({_url('/Users/testuser/istota/exports/alias.png')})"
+    out = check_chat_file_links(config, "testuser", text)
+    assert out == "shot (image unavailable: a link, which is not followed)"
+    # Control: a path outside every root keeps its own reason.
+    outside = f"![x]({_url('/Users/bob/x.png')})"
+    assert check_chat_file_links(config, "testuser", outside) == (
+        "x (image unavailable: outside your workspace)"
+    )

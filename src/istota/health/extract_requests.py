@@ -104,6 +104,33 @@ def stage_upload(config: "Config", raw: bytes, suffix: str) -> str:
     return Path(tmp.name).name
 
 
+@contextlib.contextmanager
+def staged_copy(config: "Config | None", src_fd: int, size: int, suffix: str):
+    """A daemon-side copy of the first ``size`` bytes of ``src_fd``.
+
+    For a source opened out of the user's tree: ``pdftotext`` and the
+    extractor's bind take a path, and a path into that tree could be swapped
+    after the open (ISSUE-781). Copied in chunks, never held whole, and
+    removed when the block ends.
+    """
+    from istota.sandbox.attachment_source import copy_fd  # noqa: PLC0415
+
+    with tempfile.NamedTemporaryFile(
+        dir=_staging_dir(config), prefix="upload-", suffix=suffix or ".bin",
+        delete=False,
+    ) as tmp:
+        name = Path(tmp.name).name
+        try:
+            copy_fd(src_fd, tmp.fileno(), limit=size)
+        except BaseException:
+            discard_staged(config, name)
+            raise
+    try:
+        yield _staging_dir(config) / name
+    finally:
+        discard_staged(config, name)
+
+
 def discard_staged(config: "Config", name: str) -> None:
     """Remove a staged upload no request will name. Never raises."""
     with contextlib.suppress(OSError, RuntimeError):
@@ -353,7 +380,10 @@ def run_extract(config: "Config", request: dict) -> dict:
                 panel = health_db.get_panel(conn, request.get("panel_id"))
             if panel is None:
                 return {"error": "panel not found"}
-            return extract_from_panel(ctx, panel, config=config)
+            try:
+                return extract_from_panel(ctx, panel, config=config)
+            except health_documents.DocumentTooLarge:
+                return {"error": "the source file is too large to extract"}
 
         if kind not in (ENCOUNTER, IMMUNIZATION):
             return {"error": f"unknown extraction kind {kind!r}"}

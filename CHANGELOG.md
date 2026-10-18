@@ -85,6 +85,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The development no-auth mode of `istota serve` now answers only at `localhost`, `127.0.0.1` and `[::1]` on its own port, accepts a POST only from its own page or the Vite dev server, and refuses requests another site makes in the background, such as an image tag pointed at the API (ISSUE-778). A page on another name that resolved to loopback could otherwise reach the API as the local administrator.
+
+- The sign-in forms no longer accept large bodies from a client with no session (ISSUE-777). The web app stops reading a form past 16 KiB and answers 413 before parsing it, and the stack's nginx caps the sign-in paths at 32k instead of the 512M upload limit.
+
+- A subscribed feed can no longer run script in the web app through a link (ISSUE-774). Entry links, a feed's site link and attached file links are kept only when they are `http` or `https`, both when a feed is polled and when the reader shows entries already stored, so a `javascript:` link in an older entry shows as plain text.
+
 - Opening the Mac app's window no longer flashes a sign-in form between "Signing in…" and the web UI.
 - Immunization history now fits phone screens, with the vaccine above its date and available details instead of a sideways-scrolling table. Each phone entry takes at most two lines, with notes hidden and long text truncated. Empty fields no longer show dashes, row menus line up on desktop, and the heading and filter stack on smaller screens.
 
@@ -111,6 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The heartbeat examples no longer show a `[checks.config]` table or a `source` field on task-deadline checks. Neither was ever read, so a self-check's `execution_test` written that way had no effect, and a file copied from them could not be exported by `istota snapshot`. Put a check's settings directly under its `[[checks]]` entry.
 - A timed location share or a card purchase asked for in a WhatsApp group no longer fails with `invalid_preview` when you have a private WhatsApp chat with the bot. The approval now reaches that chat as expected.
 - Files uses your assistant's own name in the robot icon's tooltips, the "How … reaches your files" panel and its notes, instead of always saying "Istota".
+- Invoice PDFs no longer follow a link placed in your money folder (ISSUE-775). A link there let the web app serve a file from outside your workspace, including another user's invoices or the web app's own keys; let voiding an invoice, from the web app or through the assistant, rename or delete another user's PDF; and let a new invoice's PDF be written into another user's folder or carry another user's logo. Downloading, listing, voiding and creating invoices, and the logo on a new invoice, now use only real folders and files inside your money folder. A logo must be a PNG, JPEG, GIF or WebP image, and rendering a PDF loads nothing from files or the network. The money settings and the settings import refuse an invoice folder outside the money folder, and one saved before this change is not used: no PDF is found or written there.
+- A file opened or downloaded from web chat is now always the file that was checked (ISSUE-776). A task could swap the file for a link just after the check and be served a file from outside your workspace. A link inside your workspace is no longer followed either, and audio and video still seek.
+- A lab report's source file or a health document opened from the web app is now always the file that was checked (ISSUE-781). A task could swap the file, or a folder above it, for a link and be served a file from outside your workspace. A link anywhere in the health uploads folder is no longer followed, including one inside your workspace, and reading a lab report for extraction, deleting a panel and clearing leftover document folders no longer follow one either. A lab report source that is not a PDF or an image now downloads instead of opening in the page.
 
 ## [0.46.0] - 2026-10-14
 

@@ -6,9 +6,9 @@ the per-user health DB (``documents`` + ``document_links``). Kept out of
 share the same code path verbatim rather than reimplementing containment
 and sanitisation.
 
-The parent is ``uploads_dir`` — the same root ``/panels/{id}/source`` already
-guards — so one containment rule (``relative_to(uploads_dir)``) covers both
-panel sources and documents.
+The parent is ``uploads_dir``, the same tree panel sources live in, so one
+open covers both: ``open_upload``, a no-follow walk from the user root
+(ISSUE-781).
 """
 
 from __future__ import annotations
@@ -175,14 +175,102 @@ def uploads_walk(ctx: HealthContext, *parts: str) -> tuple[Path, list[str]]:
     opened without following a link: the bot directory was checked when the
     context was resolved, and a task can still swap it for a link afterwards.
     An ``uploads_dir`` configured outside the workspace is its own root.
+
+    With the configured user root known (``resolve_for_user`` sets it), the
+    walk starts there instead (ISSUE-781). The bot directory may be a link to
+    elsewhere in the user's tree, and the context resolves through it, so the
+    parent of the resolved workspace can be a directory the user writes; the
+    walk opens its anchor following links, and only the user root may be.
+    An ``uploads_dir`` outside that root is refused with :class:`ValueError`
+    rather than anchored anywhere else.
     """
     uploads = Path(ctx.uploads_dir)
     workspace = Path(ctx.workspace_root)
+    if ctx.user_root is not None:
+        try:
+            rel = uploads.relative_to(ctx.user_root)
+        except ValueError:
+            raise ValueError("uploads_dir is outside the user root") from None
+        return Path(ctx.user_root), [*rel.parts, *parts]
     try:
         rel = uploads.relative_to(workspace)
     except ValueError:
         return uploads, list(parts)
     return workspace.parent, [workspace.name, *rel.parts, *parts]
+
+
+def open_upload(ctx: HealthContext, rel: str) -> int | None:
+    """A read-only fd on the regular file at ``uploads_dir/rel``, or None.
+
+    For the download routes, which serve this fd rather than a path a second
+    open would resolve again (ISSUE-781): every directory from the walk's
+    anchor down is opened ``O_NOFOLLOW`` and the leaf is ``O_NOFOLLOW`` plus
+    ``S_ISREG``. Raises :class:`ValueError` for a stored path that is not a
+    plain relative one, or one the walk refused because a component is a
+    link; None means missing or not a regular file. The caller closes the fd.
+    """
+    from istota.sandbox.attachment_source import open_regular_at  # noqa: PLC0415
+    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415
+
+    parts = (rel or "").split("/")
+    if rel.startswith("/") or any(p in ("", ".", "..") for p in parts):
+        raise ValueError("invalid source path")
+    *dirs, leaf = parts
+    root, walk = uploads_walk(ctx, *dirs)
+    dir_fd = open_overlay_dir(root, *walk)
+    fd = None
+    if dir_fd is not None:
+        try:
+            fd = open_regular_at(dir_fd, leaf)
+        finally:
+            os.close(dir_fd)
+    if fd is None and _walk_meets_a_link(root, [*walk, leaf]):
+        raise ValueError("invalid source path")
+    return fd
+
+
+def _walk_meets_a_link(root: Path, parts: list[str]) -> bool:
+    """Whether a refused walk was refused at a link. Picks the status only."""
+    current = root
+    for part in parts:
+        current = current / part
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return True
+        except OSError:
+            return False
+    return False
+
+
+def remove_upload_dir(ctx: HealthContext, *parts: str) -> bool:
+    """Remove the directory ``uploads_dir/<parts>`` and everything below it.
+
+    The parent is reached by the no-follow walk and the tree is removed
+    relative to that descriptor, so a link anywhere on the way deletes
+    nothing outside the user's tree (ISSUE-781). ``shutil.rmtree`` with
+    ``dir_fd`` refuses a link at the leaf itself. False when there was
+    nothing to remove or the removal failed.
+    """
+    *dirs, name = parts
+    try:
+        fd = _open_document_dir(ctx, Path(*dirs) if dirs else Path(), create=False)
+    except (OSError, ValueError):
+        return False
+    if fd is None:
+        return False
+    try:
+        shutil.rmtree(name, dir_fd=fd)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        logger.warning(
+            "health_upload_dir_remove_failed path=%s error=%s",
+            "/".join(parts), getattr(e, "errno", None) or type(e).__name__,
+        )
+        return False
+    finally:
+        os.close(fd)
+    return True
 
 
 def _clear_document_dir_at(dir_fd: int) -> None:
@@ -420,7 +508,7 @@ def delete_document_fully(
                             pass
                         finally:
                             os.close(parent_fd)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             logger.error(
                 "health_document_unlink_failed id=%d path=%s error=%s",
                 doc.id, path, e,
@@ -470,34 +558,44 @@ def _sweep_stranded_dirs(
     `store_document` creates the directory before its row is committed, so a
     document being written *right now* legitimately looks stranded.
     """
-    root = Path(ctx.uploads_dir) / _DOCUMENTS_SUBDIR
-    if not root.is_dir():
+    try:
+        fd = _open_document_dir(ctx, Path(_DOCUMENTS_SUBDIR), create=False)
+    except (OSError, ValueError):
+        fd = None
+    if fd is None:
         return 0
     cutoff = time.time() - older_than_hours * 3600.0
-    removed = 0
+    stale: list[str] = []
     try:
-        children = list(root.iterdir())
+        with os.scandir(fd) as scan:
+            for entry in scan:
+                if not entry.name.isdigit() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                try:
+                    if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                        continue
+                except OSError:
+                    continue
+                stale.append(entry.name)
     except OSError as e:
         logger.warning("health_document_dir_scan_failed error=%s", e)
+        os.close(fd)
         return 0
-    for child in children:
-        if not child.is_dir() or not child.name.isdigit():
-            continue
-        try:
-            if child.stat().st_mtime >= cutoff:
+    removed = 0
+    try:
+        for name in stale:
+            if health_db.get_document(conn, int(name)) is not None:
                 continue
-        except OSError:
-            continue
-        if health_db.get_document(conn, int(child.name)) is not None:
-            continue
-        try:
-            shutil.rmtree(child)
-        except OSError as e:
-            logger.warning(
-                "health_document_dir_sweep_failed path=%s error=%s", child, e,
-            )
-            continue
-        removed += 1
+            try:
+                shutil.rmtree(name, dir_fd=fd)
+            except OSError as e:
+                logger.warning(
+                    "health_document_dir_sweep_failed id=%s error=%s", name, e,
+                )
+                continue
+            removed += 1
+    finally:
+        os.close(fd)
     if removed:
         logger.info("health_document_dir_sweep removed=%d", removed)
     return removed

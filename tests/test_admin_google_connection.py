@@ -63,9 +63,9 @@ def index(config, monkeypatch):
     oauth = MagicMock()
     monkeypatch.setattr(mod, "_oauth", oauth)
 
-    async def get(username="alice"):
+    async def get(username="alice", base_url="https://example.com"):
         async with AsyncClient(transport=ASGITransport(app=mod.app),
-                               base_url="https://example.com") as client:
+                               base_url=base_url) as client:
             if username is not None:
                 oauth.nextcloud.authorize_access_token = AsyncMock(
                     return_value={"user_id": username},
@@ -190,7 +190,9 @@ async def test_local_no_auth_user_keeps_access(config, index):
     config.users = {"alice": UserConfig()}
     config.admin_users = set()
     assert config.local_user_id == "alice"
-    assert google_entry(await index(None))["status"] == "configured"
+    # No-auth answers only at its loopback names (ISSUE-778).
+    response = await index(None, base_url="http://localhost:8766")
+    assert google_entry(response)["status"] == "configured"
 
 
 async def test_unloaded_config_retains_503(index, monkeypatch):

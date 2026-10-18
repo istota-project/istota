@@ -1,7 +1,6 @@
 """Tests for money.core.invoicing module."""
 
 import sqlite3
-import sys
 import types
 from datetime import date
 from pathlib import Path
@@ -1603,10 +1602,10 @@ class TestVoidWithCleanup:
 
         pdf = self._issue(tmp_path, monkeypatch)
 
-        def refuse(self, target):
+        def refuse(*args, **kwargs):
             raise OSError("read-only file system")
 
-        monkeypatch.setattr(Path, "rename", refuse)
+        monkeypatch.setattr("istota.money.invoice_files.os.rename", refuse)
         with pytest.raises(OSError, match="read-only"):
             self._void(tmp_path)
         monkeypatch.undo()
@@ -1729,9 +1728,9 @@ class TestConcurrentIssuers:
         )
 
         # The real publish step runs; only WeasyPrint is stood in for.
-        fake = types.ModuleType("weasyprint")
-        fake.HTML = lambda string: types.SimpleNamespace(write_pdf=lambda: string.encode())
-        monkeypatch.setitem(sys.modules, "weasyprint", fake)
+        from tests.support import weasyprint_stub
+
+        weasyprint_stub.install(monkeypatch, render=lambda string: string.encode())
         monkeypatch.setattr(
             invoicing_mod, "generate_invoice_html",
             lambda invoice, **k: f"PDF for {invoice.client.name}",
@@ -1915,8 +1914,9 @@ class TestInvoiceHtmlEscaping:
 
     def test_quotes_in_a_logo_alt_attribute_are_escaped(self, tmp_path):
         logo = tmp_path / "logo.png"
-        logo.write_bytes(b"\x89PNG\r\n")
+        logo.write_bytes(b"\x89PNG\r\n\x1a\n")
         html = generate_invoice_html(self._invoice(company_name='Co" onerror="x'), logo)
+        assert '<img class="company-logo"' in html
         assert 'onerror="x' not in html
 
     def test_ordinary_text_is_unchanged(self):
@@ -1970,3 +1970,177 @@ class TestLogoStaysInsideAccountingPath:
         from istota.money.core.invoicing import _resolve_logo
 
         assert _resolve_logo(tmp_path, "") is None
+
+
+class TestLogoIsReadThroughTheUsersTree:
+    """ISSUE-775: the logo embedded in a PDF is read once, through a no-follow
+    walk from the user root, so neither a linked ``money`` folder nor a leaf
+    swapped for a link after the check reaches another user's file."""
+
+    PNG = b"\x89PNG\r\n\x1a\n"
+    SECRET = PNG + b"bob-logo-bytes"
+    OWN = PNG + b"alice-logo-bytes"
+
+    @pytest.fixture
+    def tree(self, tmp_path, monkeypatch):
+        import base64
+
+        from istota.money.core import invoicing as invoicing_mod
+
+        from tests.support import weasyprint_stub
+
+        weasyprint_stub.install(monkeypatch)
+        rendered: list[str] = []
+
+        def capture(html, output_path, **kwargs):
+            rendered.append(html)
+
+        monkeypatch.setattr(invoicing_mod, "generate_invoice_pdf", capture)
+
+        user_root = tmp_path / "Users" / "alice"
+        data_dir = user_root / "Istota" / "money"
+        (data_dir / "branding").mkdir(parents=True)
+        bob_money = tmp_path / "Users" / "bob" / "Istota" / "money"
+        (bob_money / "branding").mkdir(parents=True)
+        (bob_money / "branding" / "logo.png").write_bytes(self.SECRET)
+        config_file = tmp_path / "invoicing.toml"
+        config_file.write_text(
+            'accounting_path = "."\ninvoice_output = "invoices"\nnext_invoice_number = 1\n\n'
+            '[company]\nname = "My Co"\nlogo = "branding/logo.png"\n\n'
+            '[clients.acme]\nname = "Acme"\nterms = 30\n'
+        )
+        encoded = {
+            name: base64.b64encode(value).decode() for name, value in
+            (("secret", self.SECRET), ("own", self.OWN))
+        }
+        return types.SimpleNamespace(
+            user_root=user_root, data_dir=data_dir, bob_money=bob_money,
+            config_file=config_file, config=parse_invoicing_config(config_file),
+            rendered=rendered, encoded=encoded,
+        )
+
+    def _create(self, t):
+        from istota.money.core.invoicing import InvoiceRecordError, create_manual_invoice
+
+        try:
+            create_manual_invoice(
+                config=t.config, data_dir=t.data_dir, accounting_path=t.data_dir,
+                invoice_output_dir=t.data_dir / "invoices", client_key="acme",
+                lines=[{"description": "x", "amount": 10}], config_path=t.config_file,
+                user_root=t.user_root,
+            )
+        except InvoiceRecordError:
+            pass
+        assert len(t.rendered) == 1
+        return t.rendered[0]
+
+    def test_an_own_logo_is_embedded(self, tree):
+        (tree.data_dir / "branding" / "logo.png").write_bytes(self.OWN)
+        assert f"data:image/png;base64,{tree.encoded['own']}" in self._create(tree)
+
+    SVG = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+        b'<image href="file:///etc/hostname" width="10" height="10"/></svg>'
+    )
+
+    def test_an_svg_logo_is_not_embedded(self, tree):
+        """WeasyPrint falls back to SVG when Pillow cannot decode the bytes, and
+        an SVG's ``<image href>`` is fetched like any other URL."""
+        import base64
+
+        (tree.data_dir / "branding" / "logo.png").write_bytes(self.SVG)
+        html = self._create(tree)
+        assert base64.b64encode(self.SVG).decode() not in html
+        assert '<img class="company-logo"' not in html
+
+    def test_the_media_type_comes_from_the_bytes(self, tree):
+        jpeg = b"\xff\xd8\xff\xe0" + b"alice"
+        (tree.data_dir / "branding" / "logo.png").write_bytes(jpeg)
+        import base64
+
+        assert f"data:image/jpeg;base64,{base64.b64encode(jpeg).decode()}" in self._create(tree)
+
+    def test_a_linked_money_folder_is_not_followed(self, tree):
+        import shutil
+
+        shutil.rmtree(tree.data_dir)
+        tree.data_dir.symlink_to(tree.bob_money, target_is_directory=True)
+        assert tree.encoded["secret"] not in self._create(tree)
+
+    def test_a_linked_logo_folder_is_not_followed(self, tree):
+        import shutil
+
+        shutil.rmtree(tree.data_dir / "branding")
+        (tree.data_dir / "branding").symlink_to(
+            tree.bob_money / "branding", target_is_directory=True,
+        )
+        assert tree.encoded["secret"] not in self._create(tree)
+
+    def test_a_linked_logo_is_not_embedded(self, tree):
+        own = tree.data_dir / "branding" / "real.png"
+        own.write_bytes(self.OWN)
+        (tree.data_dir / "branding" / "logo.png").symlink_to(own)
+        assert tree.encoded["own"] not in self._create(tree)
+
+    def test_a_logo_swapped_for_a_link_after_the_check_is_not_read(self, tree, monkeypatch):
+        from istota.money.core import invoicing as invoicing_mod
+
+        logo = tree.data_dir / "branding" / "logo.png"
+        logo.write_bytes(self.OWN)
+        real = invoicing_mod._resolve_logo
+
+        def then_swap(*args, **kwargs):
+            result = real(*args, **kwargs)
+            logo.unlink()
+            logo.symlink_to(tree.bob_money / "branding" / "logo.png")
+            return result
+
+        monkeypatch.setattr(invoicing_mod, "_resolve_logo", then_swap)
+        assert tree.encoded["secret"] not in self._create(tree)
+
+
+class TestPdfRendererFetchesOnlyDataUrls:
+    """ISSUE-775: WeasyPrint's default fetcher opens any URL the document
+    names, ``file:`` and ``http:`` included, from the host-side process. The
+    one call site hands it a fetcher that answers ``data:`` and nothing else.
+    WeasyPrint does not load on every development host, so this asserts at the
+    seam: what the renderer is given."""
+
+    @pytest.fixture
+    def rendered(self, tmp_path, monkeypatch):
+        from istota.money.core.invoicing import generate_invoice_pdf
+        from tests.support import weasyprint_stub
+
+        calls = weasyprint_stub.install(monkeypatch)
+        pdf = tmp_path / "invoices" / "2026" / "Invoice-000001-01_02_2026.pdf"
+        generate_invoice_pdf("<p>x</p>", pdf, root=tmp_path)
+        assert pdf.read_bytes() == b"%PDF"
+        (html_kwargs,) = calls["html"]
+        return {
+            "html_kwargs": html_kwargs,
+            "fetcher_kwargs": calls["fetchers"][0] if calls["fetchers"] else {},
+            "delegated": calls["fetched"],
+        }
+
+    @pytest.mark.parametrize("url", [
+        "file:///etc/hostname",
+        "FILE:///etc/hostname",
+        "http://192.0.2.1/x.png",
+        "https://example.com/x.png",
+        "ftp://example.com/x.png",
+        "logo.png",
+        "",
+    ])
+    def test_every_other_url_is_refused(self, rendered, url):
+        fetcher = rendered["html_kwargs"].get("url_fetcher")
+        assert fetcher is not None
+        with pytest.raises(Exception):
+            fetcher(url)
+        assert rendered["delegated"] == []
+
+    def test_a_data_url_is_fetched_by_a_data_only_urlfetcher(self, rendered):
+        fetcher = rendered["html_kwargs"].get("url_fetcher")
+        assert fetcher is not None
+        assert fetcher("data:image/png;base64,AAAA") == "fetched"
+        assert rendered["delegated"] == ["data:image/png;base64,AAAA"]
+        assert set(rendered["fetcher_kwargs"]["allowed_protocols"]) == {"data"}

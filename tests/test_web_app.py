@@ -3145,6 +3145,12 @@ class TestGenerateIngestToken:
         cfg.users = {"alice": UserConfig(display_name="Alice")}
         return cfg
 
+    async def _post_as_local(self, app):
+        # No-auth answers only at its loopback names (ISSUE-778).
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://localhost:8766") as local:
+            return await local.post(self._URL)
+
     async def test_generate_refuses_without_a_public_hostname(self, tmp_path, client, app):
         """A relative webhook URL is a QR the phone can only reject.
 
@@ -3152,8 +3158,7 @@ class TestGenerateIngestToken:
         device would report "not an Istota provisioning code" and blame the
         code rather than the missing config.
         """
-        _patch_app(self._standalone_config(tmp_path))
-        resp = await client.post(self._URL)
+        resp = await self._post_as_local(_patch_app(self._standalone_config(tmp_path)))
         assert resp.status_code == 409
         assert "hostname" in resp.json()["detail"]
 
@@ -3164,8 +3169,8 @@ class TestGenerateIngestToken:
         secrets_store.set_secret(
             self._db_path, "alice", "overland", "ingest_token", "still-working",
         )
-        _patch_app(self._standalone_config(tmp_path))
-        await client.post(self._URL)
+        resp = await self._post_as_local(_patch_app(self._standalone_config(tmp_path)))
+        assert resp.status_code == 409
         assert secrets_store.get_secret(
             self._db_path, "alice", "overland", "ingest_token",
         ) == "still-working"

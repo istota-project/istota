@@ -873,3 +873,127 @@ async def test_recovery_codes_need_step_up_on_an_email_session(client, configure
     response = await client.post(url, json={"step_up": {"request_id": request.json()["request_id"], "code": code}}, headers=origin)
     assert response.status_code == 200, response.text
     assert response.json() == {"codes": ["fixture-rc-1111-aaaa"], "spent": [], "format": "block"}
+
+
+# ISSUE-777: the unauthenticated auth forms read a bounded body. The form was
+# parsed before the CSRF check and the throttle, and the proxy's general limit
+# is 512 MiB, so a cookie-less client could make the app take in megabytes.
+AUTH_FORM_ROUTES = (
+    "/istota/login/email",
+    "/istota/auth/set-password",
+    "/istota/auth/sign-in-code/request",
+    "/istota/auth/sign-in-code",
+    "/istota/auth/local",
+    "/istota/auth/reset",
+)
+LOCAL_HOST = "localhost:8123"
+OVERSIZED = 2 * 1024 * 1024
+CHUNK = 16 * 1024
+# The most any reader of these forms may take in before refusing.
+READ_CEILING = 64 * 1024 + CHUNK
+
+
+def every_auth_method(configured):
+    configured._config.web.auth = ["email", "nextcloud", "local_code"]
+    configured._config.site.hostname = LOCAL_HOST
+
+
+async def post_counted(app, path, body, *, content_length):
+    """POST ``body`` in chunks through raw ASGI; return (status, bytes the app took)."""
+    chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
+    taken = 0
+    sent = []
+
+    async def receive():
+        nonlocal taken
+        if chunks:
+            chunk = chunks.pop(0)
+            taken += len(chunk)
+            return {"type": "http.request", "body": chunk, "more_body": bool(chunks)}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    headers = [(b"host", LOCAL_HOST.encode()),
+               (b"content-type", b"application/x-www-form-urlencoded")]
+    if content_length is not None:
+        headers.append((b"content-length", str(content_length).encode()))
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "https", "path": path, "raw_path": path.encode(),
+        "root_path": "", "query_string": b"", "headers": headers,
+        "client": ("127.0.0.1", 40000), "server": ("localhost", 8123),
+    }
+    await app(scope, receive, send)
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    return start["status"], taken
+
+
+def oversized_form():
+    return b"csrf_token=x&email=" + b"a" * OVERSIZED
+
+
+@pytest.mark.parametrize("path", AUTH_FORM_ROUTES)
+async def test_an_oversized_auth_form_is_refused_by_its_declared_length(configured, path):
+    every_auth_method(configured)
+    body = oversized_form()
+    status, taken = await post_counted(configured.app, path, body, content_length=len(body))
+    assert status == 413
+    assert taken == 0
+
+
+@pytest.mark.parametrize("path", AUTH_FORM_ROUTES)
+async def test_an_auth_form_longer_than_it_declared_is_not_read_to_the_end(configured, path):
+    every_auth_method(configured)
+    status, taken = await post_counted(configured.app, path, oversized_form(), content_length=100)
+    assert status == 413
+    assert taken <= READ_CEILING
+
+
+@pytest.mark.parametrize("path", AUTH_FORM_ROUTES)
+async def test_an_auth_form_without_a_declared_length_is_refused(configured, path):
+    every_auth_method(configured)
+    status, taken = await post_counted(configured.app, path, oversized_form(), content_length=None)
+    assert status == 413
+    assert taken <= READ_CEILING
+
+
+async def test_a_small_cookieless_auth_form_still_meets_the_csrf_check(configured):
+    every_auth_method(configured)
+    body = b"csrf_token=x&email=alice%40example.com&password=x"
+    status, _ = await post_counted(configured.app, "/istota/login/email", body, content_length=len(body))
+    assert status == 403
+
+
+async def test_the_bounded_form_is_parsed_field_by_field(client):
+    """A right token and a wrong password reach the password check, not the CSRF one."""
+    page = await client.get("/istota/login")
+    response = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": "not the password", "csrf_token": csrf(page),
+    })
+    assert response.status_code == 400
+    assert "Email or password was not accepted" in response.text
+
+
+async def test_a_multipart_sign_in_form_still_parses(client):
+    page = await client.get("/istota/login")
+    response = await client.post("/istota/login/email", data={
+        "email": "alice@example.com", "password": PASSWORD, "csrf_token": csrf(page),
+    }, files={"unused": ("unused.txt", b"x", "text/plain")})
+    assert response.request.headers["content-type"].startswith("multipart/form-data")
+    assert response.status_code == 302
+
+
+async def test_the_largest_set_password_form_fits_under_the_limit(client, configured):
+    """Two passwords at the 1024-byte cap, every byte percent-encoded, still sign in."""
+    token = web_auth.issue_token(configured._config.db_path, "alice", "reset", 3600)
+    page = await client.get("/istota/auth/set-password", params={"token": token})
+    password = "€" * 341 + "a"
+    assert len(password.encode()) == 1024
+    response = await client.post("/istota/auth/set-password", data={
+        "token": token, "password": password, "confirm_password": password,
+        "csrf_token": csrf(page, "/istota/auth/set-password"),
+    })
+    assert len(response.request.content) > 6 * 1024
+    assert response.status_code == 302, response.text

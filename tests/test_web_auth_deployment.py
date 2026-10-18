@@ -83,6 +83,44 @@ def test_nginx_negative_control(path, token_path):
         assert_nginx_suppression(broken)
 
 
+def nginx_location_for(text, path):
+    """The body of the location nginx picks for ``path``: exact, else longest prefix."""
+    exact, prefixes = {}, {}
+    for match in re.finditer(r"^location\s+(=\s+)?(\S+)\s*\{(.*?)^\}", text, re.M | re.S):
+        (exact if match.group(1) else prefixes)[match.group(2)] = match.group(3)
+    if path in exact:
+        return exact[path]
+    best = max((p for p in prefixes if path.startswith(p)), key=len, default=None)
+    return prefixes.get(best)
+
+
+def nginx_size(value):
+    units = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+    return int(value[:-1]) * units[value[-1].lower()] if value[-1].isalpha() else int(value)
+
+
+def test_nginx_caps_every_sign_in_form_just_above_the_app():
+    """ISSUE-777: the forms read with no session get a small proxy limit.
+
+    The paths come from the app's own router, so a new POST on it lands in
+    this check. The proxy's limit stays above the app's, so the app's page
+    answers a body between the two, and within a small multiple of it.
+    """
+    pytest.importorskip("fastapi")
+    from istota.webui import app as web_app
+
+    posts = sorted(route.path for route in web_app.auth_router.routes if "POST" in route.methods)
+    assert "/istota/login/email" in posts and "/istota/auth/set-password" in posts
+    text = nginx_render(NGINX[0])
+    limit = web_app._AUTH_FORM_BODY_LIMIT
+    for path in posts:
+        block = nginx_location_for(text, path)
+        assert block is not None, f"no location for {path}"
+        found = re.search(r"client_max_body_size\s+(\S+);", block)
+        assert found, f"{path} falls back to the upload cap"
+        assert limit < nginx_size(found.group(1)) <= 4 * limit, path
+
+
 def launcher_command(path):
     text = (REPO / path).read_text()
     return yaml.safe_load(text)["services"]["web"]["entrypoint"][-1].split("/app/.venv/bin/uvicorn", 1)[1]

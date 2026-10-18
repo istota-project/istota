@@ -382,6 +382,10 @@ def run_serve(
         assert_no_auth_bind_safe(config.web.auth, host)
     except RuntimeError as exc:
         raise ServeError(str(exc)) from exc
+    if "none" in config.web.auth and bind_port == 0:
+        # The Host guard needs the port before the first request; uvicorn
+        # would pick one only once it is already listening.
+        raise ServeError('[web] auth = ["none"] needs an explicit port; --port 0 is refused.')
 
     bootstrap_checks(config)
 
@@ -452,9 +456,12 @@ def run_serve(
     try:
         # uvicorn installs its own SIGINT/SIGTERM handlers and blocks here.
         app.state.local_no_auth_bind = host if is_loopback_host(host) else None
+        # The no-auth Host guard answers only at this port.
+        app.state.local_no_auth_port = bind_port
         server.run()
     finally:
         app.state.local_no_auth_bind = None
+        app.state.local_no_auth_port = None
         stop_supervisor.set()
         scheduler.request_shutdown()
         sched_thread.join(timeout=_SCHEDULER_JOIN_TIMEOUT_SECONDS)

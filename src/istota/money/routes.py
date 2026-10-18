@@ -21,14 +21,21 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 
 from istota.money._loader import UserNotFoundError, resolve_for_user
 from istota.money.cli import UserContext
 from istota.money.config_store import FILING_STATUSES
 from istota.money.core.tax_data import load_tax_rates
+from istota.money.invoice_files import (
+    DEFAULT_INVOICE_OUTPUT,
+    NO_OUTPUT_TREE,
+    invoice_output_parts,
+    open_output_tree,
+)
 from istota.money.work import WorkStoreBlocked
+from istota.webui.fd_response import fd_file_response
 from istota.webui.router_stubs import require_auth, verify_origin
 
 logger = logging.getLogger(__name__)
@@ -399,54 +406,57 @@ async def api_clients(user_ctx: UserContext = Depends(get_user_config)):
     return {"status": "ok", "clients": clients}
 
 
-def _invoice_output_dir(data_dir: Path, config) -> Path:
-    """Where the invoice PDFs are: the config's ``invoice_output`` under ``data_dir``."""
+def _invoice_output(config) -> str:
+    """The config's ``invoice_output``, or the default when it sets none."""
     if config is not None and getattr(config, "invoice_output", None):
-        return data_dir / config.invoice_output
-    return data_dir / "invoices" / "generated"
+        return config.invoice_output
+    return DEFAULT_INVOICE_OUTPUT
 
 
-def _invoice_pdf_flags(records, output_dir: Path) -> dict[str, bool]:
-    """Whether each invoice's PDF is on disk, by number.
+def _invoice_output_dir(data_dir: Path, config) -> Path | None:
+    """Where generation writes the PDFs, or None when ``invoice_output`` leaves ``data_dir``."""
+    parts = invoice_output_parts(_invoice_output(config))
+    return data_dir.joinpath(*parts) if parts is not None else None
 
-    A row's stored ``pdf_path`` under the output tree is checked with one
-    ``is_file``. Only a row without one costs a listing, and the output tree
-    is listed at most once per call: on a slow mount a glob per invoice was
-    the cost of the whole page. A path outside the tree is looked up by name
-    there too, which is where the PDF route looks.
+
+def _output_tree(user_ctx: UserContext, config):
+    """The pinned output tree for this user, as a context manager yielding it or None."""
+    return open_output_tree(user_ctx.user_root, user_ctx.data_dir, _invoice_output(config))
+
+
+def _invoice_pdf_flags(records, tree) -> dict[str, bool]:
+    """Whether each invoice's PDF is on disk, by number, read from the pinned tree.
+
+    The download's answer, from the download's walk: a stored ``pdf_path`` in
+    the tree must name a regular file there, and any other row is looked up
+    by name. The tree is listed at most once per call: on a slow mount a glob
+    per invoice was the cost of the whole page.
     """
     from istota.money.core.invoicing import parse_invoice_number
 
     flags: dict[str, bool] = {}
-    names: list[str] | None = None
+    names: set[tuple[str, str]] | None = None
     for record in records:
-        stored = Path(record.pdf_path) if record.pdf_path else None
-        if stored is not None and stored.is_relative_to(output_dir):
-            flags[record.number] = stored.is_file()
+        if tree is None:
+            flags[record.number] = False
             continue
         if names is None:
-            names = _invoice_pdf_names(output_dir)
+            names = set(_invoice_pdf_names(tree))
+        stored = tree.stored_parts(record.pdf_path)
+        if stored is not None:
+            flags[record.number] = stored in names
+            continue
         number = parse_invoice_number(record.number)
         prefix = f"Invoice-{number:06d}-" if number is not None else None
         flags[record.number] = prefix is not None and any(
-            name.startswith(prefix) for name in names
+            name.startswith(prefix) for _, name in names
         )
     return flags
 
 
-def _invoice_pdf_names(output_dir: Path) -> list[str]:
-    """Every ``*.pdf`` name in the output tree's year folders, read once."""
-    names: list[str] = []
-    try:
-        year_dirs = [d for d in output_dir.iterdir() if d.is_dir()]
-    except OSError:
-        return names
-    for year_dir in year_dirs:
-        try:
-            names.extend(p.name for p in year_dir.glob("*.pdf"))
-        except OSError:
-            continue
-    return names
+def _invoice_pdf_names(tree) -> list[tuple[str, str]]:
+    """Every ``(year, name)`` regular PDF in the pinned tree, read once."""
+    return tree.pdf_names()
 
 
 @router.get("/invoices")
@@ -485,7 +495,8 @@ async def api_invoices(
         for record in list_invoices(data_dir, client=client, include_voided=include_voided)
         if record.status != "paid" or show_all
     ]
-    has_pdf = _invoice_pdf_flags(records, _invoice_output_dir(data_dir, config))
+    with _output_tree(user_ctx, config) as tree:
+        has_pdf = _invoice_pdf_flags(records, tree)
     invoices = []
     for record in records:
         invoice_info = invoice_summary(record, config)
@@ -732,17 +743,15 @@ async def api_invoice_pdf(
     user_ctx: UserContext = Depends(get_user_config),
 ):
     """Stream the generated PDF for an invoice, or 404 if not on disk."""
-    from istota.money.core.invoicing import find_invoice_pdf
-
     data_dir = user_ctx.data_dir
     if not data_dir:
         return JSONResponse({"status": "error", "error": "no data dir"}, status_code=404)
 
     # Prefer the invoicing config's output dir; fall back to the conventional
     # location. config.invoice_output defaults to "invoices/generated".
-    invoice_output_dir = _invoice_output_dir(data_dir, None)
+    config = None
     try:
-        invoice_output_dir = _invoice_output_dir(data_dir, _load_invoicing_config(user_ctx))
+        config = _load_invoicing_config(user_ctx)
     except Exception:
         # Fall back to the default location, but make the miss visible — a
         # custom invoice_output we couldn't read would otherwise 404 silently.
@@ -752,15 +761,40 @@ async def api_invoice_pdf(
             exc_info=True,
         )
 
-    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
-    if pdf is None:
+    opened = await asyncio.to_thread(_open_invoice_pdf, user_ctx, config, invoice_number)
+    if opened is None:
         return JSONResponse({"status": "error", "error": "pdf not found"}, status_code=404)
 
-    return FileResponse(
-        path=str(pdf),
-        media_type="application/pdf",
-        filename=pdf.name,
-    )
+    fd, name = opened
+    return fd_file_response(fd, filename=name, media_type="application/pdf")
+
+
+def _open_invoice_pdf(user_ctx: UserContext, config, invoice_number: str) -> tuple[int, str] | None:
+    """An fd on the invoice's PDF in the pinned output tree, and its name, or None.
+
+    The row's stored ``pdf_path`` first, as the void route looks, then
+    ``find_invoice_pdf``'s lookup by name. The caller owns the fd.
+    """
+    from istota.money.core.invoicing import parse_invoice_number
+    from istota.money.work import get_invoice
+
+    number = parse_invoice_number(invoice_number)
+    if number is None:
+        return None
+    try:
+        record = get_invoice(user_ctx.data_dir, invoice_number)
+    except Exception:
+        logger.warning("invoice pdf: could not read the invoice row", exc_info=True)
+        record = None
+    stored = record.pdf_path if record is not None else None
+    with _output_tree(user_ctx, config) as tree:
+        if tree is None:
+            return None
+        pdf = tree.find(number, stored)
+        if pdf is None:
+            return None
+        fd = tree.open_pdf(pdf)
+        return (fd, pdf.name) if fd is not None else None
 
 
 async def _json_object_body(request: Request, *, empty_ok: bool) -> dict | None:
@@ -775,17 +809,21 @@ async def _json_object_body(request: Request, *, empty_ok: bool) -> dict | None:
     return body if isinstance(body, dict) else None
 
 
-def _invoice_row(data_dir: Path, number: str, config) -> dict | None:
+def _invoice_row(user_ctx: UserContext, number: str, config) -> dict | None:
     """One invoice as ``GET /invoices`` lists it."""
     from istota.money.core.invoicing import invoice_summary
     from istota.money.work import get_invoice
 
-    record = get_invoice(data_dir, number)
+    record = get_invoice(user_ctx.data_dir, number)
     if record is None:
         return None
     row = invoice_summary(record, config)
-    row["has_pdf"] = _invoice_pdf_flags([record], _invoice_output_dir(data_dir, config))[number]
+    with _output_tree(user_ctx, config) as tree:
+        row["has_pdf"] = _invoice_pdf_flags([record], tree)[number]
     return row
+
+
+_BAD_INVOICE_OUTPUT = "invoice_output must be a folder inside the money folder"
 
 
 _PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -862,6 +900,8 @@ async def api_invoices_generate(
     if config is None:
         return _error("no invoicing config", 400)
     output_dir = _invoice_output_dir(data_dir, config)
+    if output_dir is None:
+        return _error(_BAD_INVOICE_OUTPUT, 400)
     accounting_path = data_dir / config.accounting_path
 
     # The etag check and the issue are one step under the store's issuing lock.
@@ -881,6 +921,7 @@ async def api_invoices_generate(
                 entity_filter=fields["entity"], dry_run=fields["dry_run"],
                 invoice_output_dir=output_dir, db_path=user_ctx.db_path,
                 record_schedule=True, entry_uids=fields["entry_uids"],
+                user_root=user_ctx.user_root,
             )
 
     try:
@@ -946,20 +987,23 @@ async def api_invoice_void(
         logger.warning("invoice void: could not load invoicing config", exc_info=True)
         config = None
 
+    # The PDF is found, renamed and removed only through the pinned tree; with
+    # no tree the invoice is still voided and its PDF left where it is.
     try:
-        voided = void_invoice_with_cleanup(
-            data_dir, invoice_number,
-            invoice_output_dir=_invoice_output_dir(data_dir, config),
-            reason=reason.strip(), replaced_by=replaced_by, force=force,
-            delete_pdf=delete_pdf,
-        )
+        with _output_tree(user_ctx, config) as tree:
+            voided = void_invoice_with_cleanup(
+                data_dir, invoice_number,
+                invoice_output_dir=None, output_tree=tree or NO_OUTPUT_TREE,
+                reason=reason.strip(), replaced_by=replaced_by, force=force,
+                delete_pdf=delete_pdf,
+            )
     except VoidError as exc:
         status = {"not_found": 404, "unknown_replacement": 400}.get(exc.code, 409)
         return _error(str(exc), status, code=exc.code)
 
     return {
         "status": "ok",
-        "invoice": _invoice_row(data_dir, invoice_number, config),
+        "invoice": _invoice_row(user_ctx, invoice_number, config),
         "entries_released": voided["entries_voided"],
     }
 
@@ -1002,14 +1046,18 @@ async def api_invoice_create(
         return _error(str(exc), 500)
     if config is None:
         return _error("no invoicing config", 400)
+    output_dir = _invoice_output_dir(data_dir, config)
+    if output_dir is None:
+        return _error(_BAD_INVOICE_OUTPUT, 400)
 
     def run() -> dict:
         return create_manual_invoice(
             config=config, data_dir=data_dir,
             accounting_path=data_dir / config.accounting_path,
-            invoice_output_dir=_invoice_output_dir(data_dir, config),
+            invoice_output_dir=output_dir,
             client_key=client_key.strip(), lines=items, entity=entity or None,
             db_path=user_ctx.db_path, config_path=user_ctx.invoicing_config_path,
+            user_root=user_ctx.user_root,
         )
 
     try:
@@ -1023,7 +1071,7 @@ async def api_invoice_create(
 
     return {
         "status": "ok",
-        "invoice": _invoice_row(data_dir, result["invoice_number"], config),
+        "invoice": _invoice_row(user_ctx, result["invoice_number"], config),
     }
 
 

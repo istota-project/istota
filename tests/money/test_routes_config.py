@@ -61,6 +61,14 @@ class TestInvoicingScalars:
         )
         assert resp.status_code == 400
 
+    @pytest.mark.parametrize("value", ["/srv/elsewhere", "../elsewhere"])
+    def test_put_rejects_an_invoice_output_outside_the_money_folder(self, ctx, client, value):
+        before = config_store.load_invoicing(ctx.db_path).invoice_output
+        resp = client.put("/istota/api/money/config/invoicing", json={"invoice_output": value})
+        assert resp.status_code == 400
+        assert "invoice_output" in resp.json()["error"]
+        assert config_store.load_invoicing(ctx.db_path).invoice_output == before
+
 
 class TestCompanies:
     def test_create_list_delete(self, ctx, client):
@@ -1658,6 +1666,20 @@ class TestPaymentDetectionSettings:
         })
         assert response.status_code == 400
         assert "ledger" in response.json()["error"].lower()
+
+
+@pytest.mark.parametrize("dry_run", [0, 1])
+@pytest.mark.parametrize("value", ["/srv/elsewhere", "../elsewhere"])
+def test_import_rejects_an_invoice_output_outside_the_money_folder(client, ctx, dry_run, value):
+    """ISSUE-775: the import applies the settings page's rule for the folder."""
+    before = config_store.load_invoicing(ctx.db_path).invoice_output
+    response = client.post(
+        f"/istota/api/money/config/import?section=invoicing&dry_run={dry_run}",
+        json={"text": f'invoice_output = "{value}"\n'},
+    )
+    assert response.status_code == 400
+    assert "invoice_output" in response.json()["error"]
+    assert config_store.load_invoicing(ctx.db_path).invoice_output == before
 
 
 @pytest.mark.parametrize("dry_run", [0, 1])

@@ -12,14 +12,14 @@ import base64
 import errno
 import html
 import logging
-import mimetypes
 import os
 import re
 import secrets
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from istota.lib.file_lock import exclusive_lock
 
@@ -135,7 +135,33 @@ def _parse_company_data(key: str, company_data: dict) -> CompanyConfig:
 # =============================================================================
 
 
-def _resolve_logo(accounting_path: Path, logo: str) -> Path | None:
+LOGO_MAX_BYTES = 5 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class LogoImage:
+    """A logo already read, so embedding it opens nothing."""
+
+    data: bytes
+    mime_type: str
+
+
+def _raster_logo(data: bytes | None) -> LogoImage | None:
+    """``data`` as a logo when its first bytes are a raster, typed from those bytes.
+
+    Anything else is refused, SVG above all: WeasyPrint falls back to SVG when
+    Pillow cannot decode an image, and an SVG's ``<image href>`` is a URL the
+    renderer fetches (ISSUE-775). The name is never consulted.
+    """
+    from istota.lib.image_sniff import sniff_raster  # noqa: PLC0415
+
+    mime_type = sniff_raster(data) if data else None
+    return LogoImage(data, mime_type) if mime_type else None
+
+
+def _resolve_logo(
+    accounting_path: Path, logo: str, user_root: Path | None = None,
+) -> Path | LogoImage | None:
     """Resolve an entity logo, refusing anything outside the accounting folder.
 
     ``accounting_path / logo`` follows pathlib semantics, so an absolute
@@ -143,9 +169,28 @@ def _resolve_logo(accounting_path: Path, logo: str) -> Path | None:
     base64-embedded into the PDF. The store rejects such a value at write time;
     this is the read-side half, covering rows written before that check and any
     other writer.
+
+    With ``user_root`` the logo is read here, once, through a no-follow walk
+    from the user root, and its bytes are returned (ISSUE-775): a resolved
+    path read later could be reached through a ``money`` folder linked to
+    another user's, or a leaf swapped for a link after the check. Without it,
+    the resolved path, as before.
     """
     if not logo:
         return None
+    if user_root is not None:
+        from istota.money.invoice_files import read_file_below  # noqa: PLC0415
+
+        pure = PurePosixPath(logo)
+        data = None
+        if not pure.is_absolute() and ".." not in pure.parts and pure.parts:
+            data = read_file_below(
+                user_root, accounting_path.joinpath(*pure.parts), max_bytes=LOGO_MAX_BYTES,
+            )
+        image = _raster_logo(data)
+        if image is None:
+            logger.warning("invoice_logo_unreadable_or_not_raster logo=%r — ignored", logo)
+        return image
     candidate = accounting_path / logo
     try:
         root = accounting_path.resolve()
@@ -409,6 +454,7 @@ def generate_invoices_for_period(
     db_path: Path | None = None,
     record_schedule: bool = False,
     entry_uids: list[str] | None = None,
+    user_root: Path | None = None,
 ) -> list[dict]:
     """Generate invoices for uninvoiced work entries.
 
@@ -435,6 +481,8 @@ def generate_invoices_for_period(
     If ``invoice_output_dir`` is given it is used as the base directory for
     generated PDFs (a year subdirectory is appended).  Otherwise falls back to
     ``accounting_path / config.invoice_output`` for backward compatibility.
+    With ``user_root`` every PDF is written, checked and removed through a
+    no-follow walk from it (ISSUE-775).
     """
     kwargs = dict(
         config=config,
@@ -449,6 +497,7 @@ def generate_invoices_for_period(
         db_path=db_path,
         record_schedule=record_schedule,
         entry_uids=entry_uids,
+        user_root=user_root,
     )
     if dry_run:
         return _generate_invoices(**kwargs)
@@ -469,6 +518,7 @@ def _generate_invoices(
     db_path: Path | None = None,
     record_schedule: bool = False,
     entry_uids: list[str] | None = None,
+    user_root: Path | None = None,
 ) -> list[dict]:
     from istota.money.db import set_invoice_schedule_generation
     from istota.money.work import (
@@ -524,7 +574,7 @@ def _generate_invoices(
 
         entity = config.companies.get(entity_key, config.company)
 
-        logo_path = _resolve_logo(accounting_path, entity.logo)
+        logo_path = _resolve_logo(accounting_path, entity.logo, user_root)
 
         groups = group_entries_by_bundle(client_entity_entries, client_config)
 
@@ -576,8 +626,8 @@ def _generate_invoices(
                 # line index rather than being billed twice.
                 published = False
                 try:
-                    _refuse_taken_pdf_name(pdf_path)
-                    generate_invoice_pdf(html, pdf_path, root=accounting_path)
+                    _refuse_taken_pdf_name(pdf_path, user_root)
+                    generate_invoice_pdf(html, pdf_path, root=accounting_path, user_root=user_root)
                     published = True
                     with write_transaction(data_dir) as conn:
                         create_invoice(
@@ -596,7 +646,7 @@ def _generate_invoices(
                     # Only a PDF this run published; a name already taken is
                     # somebody else's file.
                     if published:
-                        pdf_path.unlink(missing_ok=True)
+                        _remove_published_pdf(pdf_path, user_root)
                     logger.error(
                         "invoice_record_failed invoice=%s client=%s error=%s published=%s",
                         number_str, client_key, exc, published,
@@ -668,14 +718,31 @@ def _issue_lock_path(data_dir: Path) -> Path:
     return db_path_for(data_dir).parent / ".invoice-issue.lock"
 
 
-def _refuse_taken_pdf_name(pdf_path: Path) -> None:
+def _refuse_taken_pdf_name(pdf_path: Path, user_root: Path | None = None) -> None:
     """Refuse before rendering when something already holds the PDF's name.
 
     ``generate_invoice_pdf`` refuses the same at publish time; checking first
-    skips a render that could not be kept.
+    skips a render that could not be kept. With ``user_root`` the question is
+    asked through the no-follow walk, so it cannot probe another user's folder.
     """
-    if os.path.lexists(pdf_path):
+    if user_root is not None:
+        from istota.money.invoice_files import name_taken  # noqa: PLC0415
+
+        taken = name_taken(user_root, pdf_path)
+    else:
+        taken = os.path.lexists(pdf_path)
+    if taken:
         raise FileExistsError(errno.EEXIST, "an invoice PDF already has this name", pdf_path.name)
+
+
+def _remove_published_pdf(pdf_path: Path, user_root: Path | None) -> None:
+    """Remove a PDF this run published, for an invoice that was not recorded."""
+    if user_root is not None:
+        from istota.money.invoice_files import remove_file  # noqa: PLC0415
+
+        remove_file(user_root, pdf_path)
+    else:
+        pdf_path.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -792,13 +859,27 @@ def update_invoice_number(config_path: Path, new_number: int) -> None:
 # =============================================================================
 
 
-def _embed_logo(logo_path: Path) -> str:
-    mime_type = mimetypes.guess_type(str(logo_path))[0] or "image/png"
-    data = base64.b64encode(logo_path.read_bytes()).decode("ascii")
-    return f"data:{mime_type};base64,{data}"
+def _logo_image(logo_path: Path | LogoImage | None) -> LogoImage | None:
+    """The logo to embed: already read, or read here from a resolved path.
+
+    A path comes only from ``_resolve_logo`` with no user root; its bytes take
+    the same raster check as the walked read.
+    """
+    if logo_path is None or isinstance(logo_path, LogoImage):
+        return logo_path
+    try:
+        data = logo_path.read_bytes()
+    except OSError:
+        return None
+    return _raster_logo(data)
 
 
-def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> str:
+def _embed_logo(logo: LogoImage) -> str:
+    data = base64.b64encode(logo.data).decode("ascii")
+    return f"data:{logo.mime_type};base64,{data}"
+
+
+def generate_invoice_html(invoice: Invoice, logo_path: Path | LogoImage | None = None) -> str:
     """Generate HTML for an invoice, suitable for PDF conversion.
 
     Every interpolated string is HTML-escaped. These are names, addresses and
@@ -807,6 +888,7 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
     rendered PDF, and a stray tag is enough to restyle it.
     """
     esc = html.escape
+    logo = _logo_image(logo_path)
     company_name = esc(invoice.company.name)
     company_address = esc(invoice.company.address)
     client_name = esc(invoice.client.name)
@@ -880,7 +962,7 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 <body>
     <div class="header">
         <div>
-            {f'<img class="company-logo" src="{_embed_logo(logo_path)}" alt="{company_name}">' if logo_path and logo_path.exists() else f'<div class="company-name">{company_name}</div>'}
+            {f'<img class="company-logo" src="{_embed_logo(logo)}" alt="{company_name}">' if logo is not None else f'<div class="company-name">{company_name}</div>'}
             <div style="white-space: pre-line; color: #666; margin-top: 4px;">{company_address}</div>
         </div>
         <div class="invoice-meta">
@@ -933,13 +1015,46 @@ def generate_invoice_html(invoice: Invoice, logo_path: Path | None = None) -> st
 </html>"""
 
 
-def generate_invoice_pdf(html: str, output_path: Path, *, root: Path | None = None) -> None:
+class _DataOnlyFetcher:
+    """A WeasyPrint URL fetcher that answers ``data:`` URLs and refuses the rest.
+
+    The document is built from text the user typed and a logo from their
+    workspace, and WeasyPrint's default fetcher opens any URL it is handed —
+    ``file:`` and ``http:`` included, from the host-side process, outside the
+    task proxy. An SVG reaches it through an ``<image href>`` (ISSUE-775).
+    The scheme is checked here before the delegate sees the URL, and the
+    delegate is itself a ``URLFetcher`` limited to ``data``.
+    """
+
+    _fail_on_errors = False
+
+    def __init__(self, delegate):
+        self._delegate = delegate
+
+    def __call__(self, url: str):
+        scheme = url.split(":", 1)[0].strip().lower() if ":" in url else ""
+        if scheme != "data":
+            raise ValueError(f"invoice rendering fetches only data: URLs, not {scheme or 'a relative'!r} ones")
+        return self._delegate(url)
+
+
+def _data_only_url_fetcher() -> _DataOnlyFetcher:
+    from weasyprint import URLFetcher
+
+    return _DataOnlyFetcher(URLFetcher(allowed_protocols={"data"}, allow_redirects=False))
+
+
+def generate_invoice_pdf(
+    html: str, output_path: Path, *, root: Path | None = None, user_root: Path | None = None,
+) -> None:
     """Convert invoice HTML to PDF using WeasyPrint, at a name nothing holds yet.
 
-    With ``root`` (the accounting folder) and an ``output_path`` under it, the
-    folders are walked from ``root`` with no link followed and the PDF is
-    published through that descriptor (ISSUE-723). An output directory
-    configured elsewhere keeps the leaf guard alone.
+    With ``user_root`` the folders are walked from the user root with no link
+    followed, ``data_dir``'s own components included, and an output path not
+    below it is refused (ISSUE-775). Without it, and with ``root`` (the
+    accounting folder) and an ``output_path`` under it, the walk starts at
+    ``root`` (ISSUE-723); an output directory configured elsewhere keeps the
+    leaf guard alone.
 
     The bytes go to a dot-prefixed staging file, which is then linked to its
     name without replacing anything: a name already taken raises
@@ -951,8 +1066,12 @@ def generate_invoice_pdf(html: str, output_path: Path, *, root: Path | None = No
 
     from istota.workspace.writes import open_or_create_dir_below, publish_new  # noqa: PLC0415
 
-    pdf = HTML(string=html).write_pdf()
-    if root is not None and output_path.parent.is_relative_to(root):
+    pdf = HTML(string=html, url_fetcher=_data_only_url_fetcher()).write_pdf()
+    if user_root is not None:
+        from istota.money.invoice_files import open_dir_for_write  # noqa: PLC0415
+
+        dir_fd = open_dir_for_write(user_root, output_path.parent)
+    elif root is not None and output_path.parent.is_relative_to(root):
         dir_fd = open_or_create_dir_below(root, output_path.parent)
     else:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1085,8 +1204,15 @@ def void_invoice_with_cleanup(
     replaced_by: tuple[str, ...] | list[str] = (),
     force: bool = False,
     delete_pdf: bool = False,
+    output_tree=None,
 ) -> dict:
     """Void an invoice, clear its DB state and set its PDF aside.
+
+    With ``output_tree`` (a pinned ``money.invoice_files.OutputTree``) the PDF
+    is looked up, renamed and removed only through that tree's descriptors,
+    and ``invoice_output_dir`` is not consulted: the web route's path, where
+    the tree is task-writable (ISSUE-775). Without it, by path, as the CLI
+    always has.
 
     One transaction voids the row, releases its entries and runs
     :func:`istota.money.db.clear_invoice_state`. A kept PDF is renamed to
@@ -1097,35 +1223,42 @@ def void_invoice_with_cleanup(
     :class:`istota.money.work.VoidError` raised before anything changes.
     """
     from istota.money.db import clear_invoice_state
+    from istota.money.invoice_files import InvoicePdf
     from istota.money.work import get_invoice, void_invoice, write_transaction
 
-    pdf: Path | None = None
-    renamed_to: Path | None = None
+    pdf: InvoicePdf | None = None
+    renamed_to: InvoicePdf | None = None
     try:
         with write_transaction(data_dir) as conn:
             record = get_invoice(data_dir, invoice_number, conn=conn)
             if record is not None:
-                if record.pdf_path and Path(record.pdf_path).is_file():
-                    pdf = Path(record.pdf_path)
-                elif invoice_output_dir is not None:
-                    pdf = find_invoice_pdf(invoice_output_dir, invoice_number)
+                if output_tree is not None:
+                    number = parse_invoice_number(invoice_number)
+                    if number is not None:
+                        pdf = output_tree.find(number, record.pdf_path)
+                else:
+                    found = None
+                    if record.pdf_path and Path(record.pdf_path).is_file():
+                        found = Path(record.pdf_path)
+                    elif invoice_output_dir is not None:
+                        found = find_invoice_pdf(invoice_output_dir, invoice_number)
+                    if found is not None:
+                        pdf = InvoicePdf(found.parent, found.name)
             new_pdf_path: str | None = None
             if pdf is not None:
-                new_pdf_path = "" if delete_pdf else str(_void_pdf_path(pdf))
+                new_pdf_path = "" if delete_pdf else str(_void_pdf_path(pdf.path))
             result = void_invoice(
                 data_dir, invoice_number, reason=reason, replaced_by=replaced_by,
                 force=force, pdf_path=new_pdf_path, conn=conn,
             )
             db_cleanup = clear_invoice_state(conn, invoice_number)
             if pdf is not None and not delete_pdf:
-                target = _void_pdf_path(pdf)
-                pdf.rename(target)
-                renamed_to = target
+                renamed_to = pdf.rename(_void_pdf_path(pdf.path).name)
     except Exception:
         # The commit failed after the rename: put the file back where the
         # still-open invoice's row says it is.
         if renamed_to is not None and pdf is not None:
-            renamed_to.rename(pdf)
+            renamed_to.rename(pdf.name)
         raise
 
     out = {
@@ -1165,14 +1298,17 @@ def record_past_void(
     reason: str = "",
     replaced_by: tuple[str, ...] | list[str] = (),
     was_paid: bool = False,
+    output_tree=None,
 ) -> dict:
     """Record a number voided before void records existed, as a voided invoice.
 
     The client and entity are checked against the config, the entity
     resolved as a manual invoice's is. A PDF still on disk under the number
     is renamed ``…-VOID.pdf``, as a live void does, and renamed back if the
-    write fails.
+    write fails. ``output_tree`` confines the lookup and the rename as it
+    does for :func:`void_invoice_with_cleanup`.
     """
+    from istota.money.invoice_files import InvoicePdf
     from istota.money.work import record_voided_invoice, write_transaction
 
     client_config = config.clients.get(client_key)
@@ -1190,9 +1326,17 @@ def record_past_void(
     if voided_on < issue_date:
         raise ValueError("The void date is before the issue date")
 
-    pdf = find_invoice_pdf(invoice_output_dir, invoice_number) if invoice_output_dir else None
-    target = _void_pdf_path(pdf) if pdf is not None else None
-    renamed = False
+    pdf: InvoicePdf | None = None
+    if output_tree is not None:
+        number = parse_invoice_number(invoice_number)
+        if number is not None:
+            pdf = output_tree.find(number)
+    elif invoice_output_dir:
+        found = find_invoice_pdf(invoice_output_dir, invoice_number)
+        if found is not None:
+            pdf = InvoicePdf(found.parent, found.name)
+    target = _void_pdf_path(pdf.path) if pdf is not None else None
+    renamed: InvoicePdf | None = None
     try:
         with write_transaction(data_dir) as conn:
             record = record_voided_invoice(
@@ -1202,11 +1346,10 @@ def record_past_void(
                 pdf_path=str(target or ""), conn=conn,
             )
             if pdf is not None:
-                pdf.rename(target)
-                renamed = True
+                renamed = pdf.rename(target.name)
     except Exception:
-        if renamed:
-            target.rename(pdf)
+        if renamed is not None:
+            renamed.rename(pdf.name)
         raise
     return {
         "invoice_number": record.number,
@@ -1261,6 +1404,7 @@ def create_manual_invoice(
     entity: str | None = None,
     db_path: Path | None = None,
     config_path: Path | None = None,
+    user_root: Path | None = None,
 ) -> dict:
     """Create a one-off invoice from line items, render its PDF and record it.
 
@@ -1294,6 +1438,7 @@ def create_manual_invoice(
             invoice_output_dir=invoice_output_dir, client_key=client_key,
             client_config=client_config, resolved_entity=resolved_entity,
             entity=entity, parsed=parsed, db_path=db_path, config_path=config_path,
+            user_root=user_root,
         )
 
 
@@ -1310,6 +1455,7 @@ def _issue_manual_invoice(
     parsed: list,
     db_path: Path | None,
     config_path: Path | None,
+    user_root: Path | None = None,
 ) -> dict:
     from istota.money.work import create_invoice, insert_entry, write_transaction
 
@@ -1349,7 +1495,7 @@ def _issue_manual_invoice(
     )
 
     html_text = generate_invoice_html(
-        inv, logo_path=_resolve_logo(accounting_path, resolved_entity.logo),
+        inv, logo_path=_resolve_logo(accounting_path, resolved_entity.logo, user_root),
     )
     pdf_path = (
         invoice_output_dir / str(invoice_date.year)
@@ -1357,8 +1503,8 @@ def _issue_manual_invoice(
     )
     published = False
     try:
-        _refuse_taken_pdf_name(pdf_path)
-        generate_invoice_pdf(html_text, pdf_path, root=accounting_path)
+        _refuse_taken_pdf_name(pdf_path, user_root)
+        generate_invoice_pdf(html_text, pdf_path, root=accounting_path, user_root=user_root)
         published = True
         with write_transaction(data_dir) as conn:
             for new_entry in inv_entries:
@@ -1375,7 +1521,7 @@ def _issue_manual_invoice(
         # Never leave a PDF behind for an invoice that was not recorded, and
         # never remove one this call did not publish.
         if published:
-            pdf_path.unlink(missing_ok=True)
+            _remove_published_pdf(pdf_path, user_root)
         raise InvoiceRecordError(f"could not record {number_str}: {exc}") from exc
 
     persist_next_invoice_number(invoice_number + 1, db_path=db_path, config_path=config_path)

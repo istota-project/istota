@@ -55,10 +55,12 @@ from istota.feeds.models import (
     FetchedItem,
     FetchResult,
     detect_source_type,
+    http_image_url,
     is_http_url,
     media_type_for_url,
     poll_host,
     retry_after_from_headers,
+    safe_http_url,
     provider_identifier,
 )
 from istota.feeds.retention import plan_admission, resolve_max_entries_per_feed
@@ -322,13 +324,19 @@ def _rss_entry_to_item(entry) -> FetchedItem:
             untyped="image",
         )
 
-    lead_body_image = body_images[:1]  # 0 or 1 element
+    # Only a lead image the hero can show is hoisted; any other (a `data:`
+    # src the sanitizer admitted) stays in the body rather than vanishing.
+    lead = http_image_url(body_images[0]) if body_images else None
+    lead_body_image = [lead] if lead else []
     image_urls = dedupe_image_variants(lead_body_image + media_images)
 
     # Drop the hero image(s) from the body so the reader doesn't paint it twice
     # (once as the hero, once at the top of the excerpt). Only images promoted
     # to image_urls are removed; every other inline image is preserved.
-    cleaned_html = remove_images(cleaned_html, image_urls)
+    # The raw lead spelling goes in too: an extensionless `//` src keys on the
+    # full URL, so its https form alone would not match the body copy.
+    hoisted_raw = [body_images[0]] if lead else []
+    cleaned_html = remove_images(cleaned_html, image_urls + hoisted_raw)
     content_text = html_to_text(cleaned_html)
 
     published_at = _published_iso(entry)
@@ -567,21 +575,26 @@ def _persist_poll(
         )
 
     if admitted:
+        # Every provider's URLs pass the same scheme check here, at the one
+        # seam they all reach, so a `javascript:` link from a hostile feed is
+        # never stored (ISSUE-774).
         records = [
             EntryRecord(
                 id=0,
                 feed_id=feed.id,
                 guid=item.guid,
                 title=item.title,
-                url=item.url,
+                url=safe_http_url(item.url),
                 author=item.author,
                 content_html=item.content_html,
                 content_text=item.content_text,
-                image_urls=item.image_urls,
-                embed_url=item.embed_url,
-                file_url=item.file_url,
-                media_url=item.media_url,
-                media_type=item.media_type,
+                image_urls=[
+                    url for url in map(http_image_url, item.image_urls) if url
+                ],
+                embed_url=safe_http_url(item.embed_url),
+                file_url=safe_http_url(item.file_url),
+                media_url=safe_http_url(item.media_url),
+                media_type=item.media_type if safe_http_url(item.media_url) else None,
                 published_at=item.published_at,
                 fetched_at=fetched_iso,
                 status="unread",
@@ -624,7 +637,7 @@ def _persist_poll(
         error_count=0,
         next_poll_at=next_poll,
         discovered_title=result.discovered_title,
-        discovered_site_url=result.discovered_site_url,
+        discovered_site_url=safe_http_url(result.discovered_site_url),
         # Cleared: a fetch that got through is the throttle having lifted, so
         # the column means "throttled now" rather than "throttled once".
         last_throttled_at=None,
