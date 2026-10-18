@@ -67,7 +67,8 @@ USER_AGENT = f"istota-servarr/{__version__}"
 _METHODS = frozenset({"GET", "POST", "PUT"})
 _KINDS = ("local", "lookup", "release")
 #: Match on the validator's code, never on its message (which is translated).
-EXISTS_CODES = frozenset({"MovieExistsValidator", "SeriesExistsValidator", "ArtistExistsValidator"})
+EXISTS_CODES = frozenset({"MovieExistsValidator", "SeriesExistsValidator", "ArtistExistsValidator",
+                          "AlbumExistsValidator"})
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ID_RE = re.compile(r"\A[1-9][0-9]{0,17}\Z")

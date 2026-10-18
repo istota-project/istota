@@ -5,6 +5,7 @@ Usage:
     python -m istota.skills.servarr status [--app A]
     python -m istota.skills.servarr describe [--app A]
     python -m istota.skills.servarr search QUERY --kind K | --kind K (--tmdb N | --tvdb N | --mbid ID)
+        | --kind album --artist NAME [QUERY]
     python -m istota.skills.servarr add --kind K (--tmdb N | --tvdb N | --mbid ID) [--profile P]
         [--root R] [--metadata-profile M] [--monitor MODE] [--no-search] [--confirmed]
     python -m istota.skills.servarr queue [--app A] [--mine] [--problems] [--limit N]
@@ -104,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("search", help="look a title up")
     p.add_argument("query", nargs="?", help="the title to look up")
     p.add_argument("--kind", choices=KINDS, required=True)
+    p.add_argument("--artist", help="albums: list this artist's albums (a title narrows them)")
     _external_id(p, library=False)
     _limit(p)
 
