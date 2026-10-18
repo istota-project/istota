@@ -231,7 +231,7 @@
           <thead
             ><tr
               ><th scope="col" class="col-owner">{ownerHeading}</th>
-              <th scope="col">Briefing</th>
+              <th scope="col" class="col-briefing">Briefing</th>
               <th scope="col" class="col-schedule">Schedule</th>
               <th scope="col" class="col-delivery">Delivery</th>
               <th scope="col" class="col-state">State</th>
@@ -246,7 +246,7 @@
                   <div class="cell-main">{row.owner}</div>
                   {#if row.owners}<div class="caption">{row.owners}</div>{/if}
                 </td>
-                <td>
+                <td class="col-briefing">
                   <div class="cell-main">{row.title}</div>
                   <div class="caption">{row.name}</div>
                 </td>
@@ -351,6 +351,11 @@
   .briefings-grid code {
     font-size: var(--text-xs);
   }
+  /* Briefing is the unsized column: the min-width reserves it 12rem past the
+     sized ones, and adminTables.test.ts holds the sum. */
+  .briefings-grid {
+    min-width: 53rem;
+  }
   .col-owner {
     width: 9rem;
   }
@@ -375,14 +380,15 @@
     width: 2.5rem;
     text-align: right;
   }
+  /* Narrow: keep every column and scroll sideways; the min-width tightens
+     with Owner and Schedule. */
   @container settings (max-width: 40rem) {
-    .col-last,
-    .col-delivery {
-      display: none;
+    .briefings-grid {
+      min-width: 50rem;
     }
     .col-owner,
     .col-schedule {
-      width: 25%;
+      width: 7.5rem;
     }
   }
 </style>

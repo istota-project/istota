@@ -218,6 +218,22 @@ const TABLES: Table[] = [
     ],
     floor: 12,
   },
+  {
+    // The Briefings page's Personal and Group tables (one snippet). The
+    // Briefing column holds the title over its name; twelve rem, as for Job.
+    page: 'src/routes/admin/briefings/+page.svelte',
+    grid: '.briefings-grid',
+    unsized: '.col-briefing',
+    sized: [
+      '.col-owner',
+      '.col-schedule',
+      '.col-delivery',
+      '.col-state',
+      '.col-last',
+      '.col-actions',
+    ],
+    floor: 12,
+  },
 ];
 
 for (const table of TABLES) {
