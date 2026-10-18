@@ -105,19 +105,19 @@
       {#if user.features.workspace}
         <a href="{base}/files" class="feature-card">
           <div class="feature-title"><FolderOpen aria-hidden="true" />Files</div>
-          <div class="feature-desc">Browse your files and pinned items</div>
+          <div class="feature-desc">Your files and pins</div>
         </a>
       {/if}
       {#if user.features.groups}
         <a href="{base}/groups/" class="feature-card">
           <div class="feature-title"><Users aria-hidden="true" />Groups</div>
-          <div class="feature-desc">Shared notebooks, members and rooms</div>
+          <div class="feature-desc">Notebooks, members, rooms</div>
         </a>
       {/if}
       {#if user.features.briefings}
         <a href="{base}/briefings" class="feature-card">
           <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
-          <div class="feature-desc">Your generated briefings and archive</div>
+          <div class="feature-desc">Briefings and archive</div>
         </a>
       {/if}
       {#if user.features.feeds}
@@ -135,13 +135,13 @@
       {#if user.features.money}
         <a href="{base}/money" class="feature-card">
           <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
-          <div class="feature-desc">Accounts, transactions, and reports</div>
+          <div class="feature-desc">Accounts and reports</div>
         </a>
       {/if}
       {#if user.features.health}
         <a href="{base}/health" class="feature-card">
           <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
-          <div class="feature-desc">Body stats, lab results, and biomarker trends</div>
+          <div class="feature-desc">Body stats and lab results</div>
         </a>
       {/if}
     </div>
@@ -227,6 +227,17 @@
   .feature-grid {
     grid-template-rows: auto;
     grid-auto-rows: 1fr;
+  }
+  /* Two tiles a row on a phone. The auto-fit wall drops to one column below
+     about 430px, where a single tile per row scrolls the module list off the
+     screen. Above 640px auto-fit already gives two or more. */
+  @media (max-width: 640px) {
+    .feature-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .feature-card {
+      padding: var(--space-4);
+    }
   }
   .feature-card {
     display: block;
