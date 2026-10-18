@@ -21,7 +21,7 @@ import pytest
 
 from istota import db
 from istota.rooms import policy as room_policy
-from istota.config import Config, SiteConfig, UserConfig, WebConfig
+from istota.config import Config, SiteConfig, SpeechGateConfig, UserConfig, WebConfig
 
 try:
     import authlib  # noqa: F401
@@ -276,6 +276,9 @@ class TestSpeechModeThroughThePatch:
                                   cookies=cookies, headers=ORIGIN)
 
     async def test_the_listing_says_the_room_follows_the_deployment(self, client, db_path):
+        import istota.webui.app as mod
+        # Not the shipped default, so the listing has to read the config.
+        mod._config.speech_gate = SpeechGateConfig(mode="mention")
         room = _shared_room(db_path)
         cookies = await _login(client, "alice")
         policy = (await _listed(client, cookies, room.token))["policy"]
@@ -329,8 +332,8 @@ class TestDispositionThroughThePatch:
         cookies = await _login(client, "alice")
         policy = (await _listed(client, cookies, room.token))["policy"]
         assert policy["disposition"] is None
-        assert policy["effective_disposition"] == "reserved"
-        assert policy["deployment_disposition"] == "reserved"
+        assert policy["effective_disposition"] == "friendly"
+        assert policy["deployment_disposition"] == "friendly"
 
     async def test_the_host_sets_it_and_clears_it(self, client, db_path):
         room = _shared_room(db_path)

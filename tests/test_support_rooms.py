@@ -161,6 +161,11 @@ NOT_THE_ROOM_MODEL = frozenset({
     "messages", "tasks", "speech_gate_decisions", "room_participants",
 })
 
+# `messages_fts` and its shadow tables are an index over `messages`, kept by
+# triggers, so they hold the producer's turn and nothing about the room.
+def _is_message_index(table: str) -> bool:
+    return table == "messages_fts" or table.startswith("messages_fts_")
+
 # Nothing chooses these, so two runs differ by construction. `applied_at` is
 # `_migration_state`'s, stamped by `db.init_db` on each database in turn — the
 # two calls land a second apart often enough to matter.
@@ -183,7 +188,7 @@ def _room_model(conn) -> dict[str, list[tuple]]:
         )
     ]
     for table in tables:
-        if table in NOT_THE_ROOM_MODEL:
+        if table in NOT_THE_ROOM_MODEL or _is_message_index(table):
             continue
         columns = [
             r[1] for r in conn.execute(f"PRAGMA table_info({table})")

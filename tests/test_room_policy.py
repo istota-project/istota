@@ -347,6 +347,9 @@ class TestEmissaryReach:
     def test_deferred_ops_from_a_guest_task_are_dropped(self, config):
         from istota.executor import task_deferred_dir
         from istota.scheduler import _drain_deferred_ops
+        # Subtasks are admin-only, and with two users an empty admin set names
+        # nobody (#745); without this the admin gate drops both files.
+        config.admin_users = {"alice"}
         with db.get_db(config.db_path) as conn:
             _group(conn)
             guest = db.get_task(conn, _guest_turn(conn, config).task_id)
