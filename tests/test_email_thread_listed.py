@@ -267,7 +267,7 @@ class TestThePayload:
         # The client merges this response over its room record, so it carries
         # every key the listing does (ISSUE-342).
         missing = set(listed[thread]) - set(body) - {"last_activity", "unread_count",
-                                                     "has_my_notes"}
+                                                     "starred_count", "has_my_notes"}
         assert missing == set()
         assert (await _rooms(client, cookies))[thread]["listed"] is True
 
