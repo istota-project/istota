@@ -246,6 +246,52 @@ class TestGetFeeds:
         hostile = next(f for f in config["feeds"] if f["title"] == "Hostile")
         assert "site_url" not in hostile
 
+    def test_stored_body_is_sanitised_on_the_way_out(self, ctx, client):
+        """ISSUE-780. ``content_html`` was sanitised when stored, under the
+        old rules: a ``data:`` link passed bleach, and an install without
+        bleach stored the regex fallback's output. Served bodies get the
+        current rules whatever the row holds."""
+        feeds_db.init_db(ctx.db_path)
+        with feeds_db.connect(ctx.db_path) as conn:
+            feed_id = feeds_db.upsert_feed(
+                conn, url="https://example.com/body.xml", title="Body",
+                site_url=None, source_type="rss", category_id=None,
+                poll_interval_minutes=30,
+            )
+            feeds_db.insert_entries(conn, feed_id, [
+                EntryRecord(
+                    id=0, feed_id=feed_id, guid="body", title="Body links",
+                    url="https://example.com/a", author=None,
+                    content_html=(
+                        '<p><a href="data:text/html,<h1>x</h1>">phish</a> '
+                        "<a href=javascript:alert(1)>bare</a> "
+                        '<a href="https://example.com/ok">ok</a>'
+                        '<img src="data:image/png;base64,AAAA"></p>'
+                    ),
+                    content_text="x",
+                    image_urls=[], embed_url=None, file_url=None,
+                    media_url=None, media_type=None,
+                    published_at="2026-05-03T08:00:00+00:00",
+                    fetched_at="2026-05-03T09:00:00+00:00",
+                    status="unread",
+                ),
+            ])
+            conn.commit()
+            entry_id = conn.execute(
+                "SELECT id FROM feed_entries WHERE guid = 'body'"
+            ).fetchone()[0]
+
+        listed = client.get("/istota/api/feeds").json()
+        single = client.get(f"/istota/api/feeds/entries/{entry_id}").json()
+        for content in (
+            next(e for e in listed["entries"] if e["title"] == "Body links")["content"],
+            single["content"],
+        ):
+            assert "data:text/html" not in content
+            assert "javascript" not in content
+            assert 'href="https://example.com/ok"' in content
+            assert 'src="data:image/png;base64,AAAA"' in content
+
     def test_status_filter(self, ctx, client):
         _seed(ctx)
         body = client.get("/istota/api/feeds?status=unread").json()

@@ -37,7 +37,7 @@ from istota.feeds.models import (
     safe_http_url,
 )
 from istota.feeds.retention import resolve_max_entries_per_feed
-from istota.feeds.sanitize import image_identity
+from istota.feeds.sanitize import image_identity, sanitize_html
 from istota.webui.router_stubs import (  # noqa: F401
     make_get_user_context,
     require_auth,  # re-exported: `webui/app.py` keys `dependency_overrides` on it
@@ -96,7 +96,9 @@ def _map_entry(
         "id": entry.id,
         "title": entry.title or "",
         "url": safe_http_url(entry.url) or "",
-        "content": entry.content_html or "",
+        # Stored bodies were sanitised under whatever rules held when they
+        # were written, so they are sanitised again here (ISSUE-780).
+        "content": sanitize_html(entry.content_html) or "",
         "images": images,
         # Images dropped because a newer entry already showed them. Reported
         # rather than silently omitted so the reader can still treat the entry
@@ -195,20 +197,20 @@ async def api_feeds(
                 category_id=category_id or None,
                 starred=starred_filter,
             )
-        return cats, feeds, entries, total, suppressed
 
-    cats, feeds, entries, total, suppressed = await asyncio.to_thread(_query)
-    cat_by_id = {c.id: c for c in cats}
-    feed_by_id = {f.id: f for f in feeds}
+        cat_by_id = {c.id: c for c in cats}
+        feed_by_id = {f.id: f for f in feeds}
+        # Mapped here, off the event loop: each body goes through bleach.
+        return {
+            "feeds": [_map_feed(f, cat_by_id) for f in feeds],
+            "entries": [
+                _map_entry(e, feed_by_id, cat_by_id, suppressed.get(e.id))
+                for e in entries
+            ],
+            "total": total,
+        }
 
-    return {
-        "feeds": [_map_feed(f, cat_by_id) for f in feeds],
-        "entries": [
-            _map_entry(e, feed_by_id, cat_by_id, suppressed.get(e.id))
-            for e in entries
-        ],
-        "total": total,
-    }
+    return await asyncio.to_thread(_query)
 
 
 @router.get("/counts")
