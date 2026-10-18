@@ -169,7 +169,7 @@
           <thead
             ><tr
               ><th scope="col" class="col-user">User</th>
-              <th scope="col">Job</th>
+              <th scope="col" class="col-job">Job</th>
               <th scope="col" class="col-schedule">Schedule</th>
               <th scope="col" class="col-state">State</th>
               <th scope="col" class="col-last">Last run</th>
@@ -182,7 +182,7 @@
               {@const state = stateOf(job)}
               <tr>
                 <td class="col-user">{job.user_id}</td>
-                <td>
+                <td class="col-job">
                   <div class="cell-main">{job.name}</div>
                   {#if job.last_error}
                     <details class="last-error">
@@ -307,6 +307,11 @@
   .failing {
     color: var(--status-danger-fg);
   }
+  /* Job is the unsized column: the min-width reserves it 12rem past the sized
+     ones, and adminTables.test.ts holds the sum. */
+  .jobs-grid {
+    min-width: 49rem;
+  }
   .col-user {
     width: 8rem;
   }
@@ -331,14 +336,17 @@
     width: 2.5rem;
     text-align: right;
   }
+  /* Narrow: keep every column and scroll sideways; the min-width tightens
+     with User and Schedule. */
   @container settings (max-width: 40rem) {
-    .col-last,
-    .col-failures {
-      display: none;
+    .jobs-grid {
+      min-width: 46.5rem;
     }
-    .col-user,
+    .col-user {
+      width: 6.5rem;
+    }
     .col-schedule {
-      width: 25%;
+      width: 7rem;
     }
   }
 </style>

@@ -100,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a phone, the Admin → Scheduled jobs and Admin → Briefings tables keep every column and scroll sideways, instead of squeezing the job or briefing name until it ran down the page one letter per line.
+
 - Feed article bodies no longer keep links to `data:` pages, while pictures and video embedded as `data:` still show. An install without the `feeds` extra now shows a feed body as plain text instead of passing it through a pattern filter that let some script links by. Bodies already stored get the same rules when they are shown (ISSUE-780).
 
 - The development no-auth mode of `istota serve` now answers only at `localhost`, `127.0.0.1` and `[::1]` on its own port, accepts a POST only from its own page or the Vite dev server, and refuses requests another site makes in the background, such as an image tag pointed at the API (ISSUE-778). A page on another name that resolved to loopback could otherwise reach the API as the local administrator.
