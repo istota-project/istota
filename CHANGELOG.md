@@ -101,6 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - On a phone, the Admin → Scheduled jobs and Admin → Briefings tables keep every column and scroll sideways, instead of squeezing the job or briefing name until it ran down the page one letter per line.
+- Admin → Configuration scrolls more smoothly on a phone: the browser now skips drawing the settings sections that are off screen.
 
 - Feed article bodies no longer keep links to `data:` pages, while pictures and video embedded as `data:` still show. An install without the `feeds` extra now shows a feed body as plain text instead of passing it through a pattern filter that let some script links by. Bodies already stored get the same rules when they are shown (ISSUE-780).
 

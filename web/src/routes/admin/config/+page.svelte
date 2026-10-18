@@ -637,7 +637,7 @@
     {/if}
 
     {#each sections as section (section.key)}
-      <section class="card">
+      <section class="card config-section">
         <header class="section-header"><h2>{section.label}</h2></header>
         {#each section.fields as field (field.key)}
           {#if field.key === 'servarr.apps' && appsForm}
@@ -791,6 +791,13 @@
      right in a settings form and wrong for a filter box. */
   .config-toolbar :global(input) {
     max-width: 22rem;
+  }
+
+  /* About 470 fields in one column made phone WebKit stutter on scroll (ISSUE-788).
+     Off-screen sections skip layout and paint; `auto` keeps each one's real height. */
+  .config-section {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 40rem;
   }
 
   .match-count {
