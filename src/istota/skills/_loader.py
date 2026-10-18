@@ -23,6 +23,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from istota.sandbox.confined import open_dir as open_overlay_dir  # noqa: F401 - re-exported for its callers
+
 from ._types import EnvSpec, SkillMeta
 
 logger = logging.getLogger("istota.skills_loader")
@@ -1063,99 +1065,6 @@ def contained_group_dir(groups_root: Path, group_id: str) -> Path | None:
     except OSError:
         return None
     return resolved if resolved == expected else None
-
-
-def open_overlay_dir(
-    user_root: Path, *parts: str, raise_mount_errors: bool = False,
-    raise_errors: bool = False,
-) -> int | None:
-    """An fd on ``{user_root}/{parts...}``, or None if any component below the
-    root is not a plain directory reached directly from the one above it.
-
-    **Deliberately stricter than ``contained_overlay_dir``**, which is the one
-    thing to know before using both. That function resolves symlinks and
-    accepts one that lands back inside ``user_root``; this refuses a symlink at
-    any component, whatever it points at, because refusing is the only answer
-    that survives the path being rewritten underneath it. A caller holding both
-    answers can therefore be told yes by one and no by the other, and that
-    divergence is worth a log line rather than a silent skip.
-
-    ``contained_overlay_dir`` answers the same question by comparing resolved
-    paths, and a comparison is only true for as long as nobody moves anything.
-    Its own docstring names the window it leaves: the check and the reads that
-    follow are separated by a directory listing and one ``open(2)`` per file,
-    and every component under ``{mount}/Users/{user_id}`` is model-writable, so
-    ``mv skills skills.real && ln -s /anywhere skills`` lands in the middle of
-    it. Measured indexing a file from outside the mount that way, with the
-    containment check passing first (ISSUE-341 item 3).
-
-    So this establishes containment **by construction** instead. Each component
-    below the root is opened with ``O_NOFOLLOW | O_DIRECTORY`` relative to the
-    one above it, which means a symlink at any level fails the open rather than
-    being followed, and the caller ends up holding an fd rather than a name.
-    The fd is pinned to an inode: whatever is renamed over the path afterwards,
-    ``scandir`` and ``openat`` through that fd still see the directory that
-    passed. What that removes is every later resolution of the components
-    *above* the leaf, which is the whole of the window — not resolution as
-    such. Each file is still opened by name relative to the fd, and what covers
-    the leaf is what always covered it, ``O_NOFOLLOW`` plus ``S_ISREG``.
-
-    ``user_root`` itself is opened following symlinks, deliberately. It is
-    ``{mount}/Users/{user_id}``, composed by the daemon out of its own config,
-    and the mount is reached through a symlink on some hosts — the same reason
-    ``contained_overlay_dir`` resolves both sides before comparing.
-
-    **Every reader of the overlay directory walks this way now** (ISSUE-344).
-    The search reindex came first, in ``7c83c2f3``, because what it indexes
-    ``!search`` reads back; the prompt loader (``_load_user_overlay``), the two
-    ``skills`` read verbs, ``doctor``'s sweep and the nightly inventory
-    followed, and the prompt path was the worse of them — the same swap put up
-    to ``OVERLAY_MAX_BYTES`` of any daemon-readable file into a skill's section
-    on every task that selected the skill. Two callers reach this function
-    directly and neither can use the helper: ``memory.search`` walks it for a
-    configured user but also needs the resolved path as the index key that
-    ``skill_overlay`` rows are reaped against, and ``doctor`` sweeps every tree
-    on the mount rather than one configured user, so it has no ``user_id`` to
-    hand over. Everything else comes through
-    ``storage.open_user_skill_overlays``, which returns the descriptor and the
-    path together or returns neither — a caller cannot take one and forget the
-    other, which is exactly how four of five callers came to be wrong.
-
-    The caller closes the fd. By default every ``OSError`` is a None.
-    ``raise_mount_errors`` preserves ENOTCONN/EIO for callers reporting a
-    disconnected mount; ``raise_errors`` preserves every directory-open error for
-    callers that must distinguish unavailable roots from unsafe ones.
-    A platform without ``dir_fd`` support would raise
-    ``NotImplementedError``, which Linux and macOS both rule out.
-    """
-    # Each part must be one ordinary component. A `/` would have its own
-    # interior walked by a single `os.open`, where `O_NOFOLLOW` covers only the
-    # last component — so the by-construction claim above would quietly not
-    # hold for the middle of it. `.` and `..` climb rather than descend, and a
-    # NUL makes `os.open` raise `ValueError`, which is not an `OSError` and so
-    # would escape the guard below carrying an open fd with it.
-    for part in parts:
-        if not part or "/" in part or "\0" in part or part in (".", ".."):
-            return None
-    try:
-        fd = os.open(user_root, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError as exc:
-        if raise_errors or (raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}):
-            raise
-        return None
-    try:
-        for part in parts:
-            nxt = os.open(
-                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
-            )
-            os.close(fd)
-            fd = nxt
-    except OSError as exc:
-        os.close(fd)
-        if raise_errors or (raise_mount_errors and exc.errno in {errno.ENOTCONN, errno.EIO}):
-            raise
-        return None
-    return fd
 
 
 def read_overlay_bytes(

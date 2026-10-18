@@ -129,7 +129,7 @@ def test_file_listing_refuses_link_and_special_file(tmp_path):
     target.write_text("private")
     link = tmp_path / "link"
     link.symlink_to(target)
-    with pytest.raises(OSError):
+    with pytest.raises(listing.ListingError):
         list_file(tmp_path, ["link"])
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)

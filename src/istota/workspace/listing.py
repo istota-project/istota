@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from istota.skills._loader import open_overlay_dir
+from istota.sandbox.confined import open_dir, open_regular
 
 LIST_MAX_ENTRIES = 2000
 
@@ -35,7 +35,7 @@ class ListingError(Exception):
 
 
 def list_dir(root: Path, parts: list[str], *, limit: int = LIST_MAX_ENTRIES) -> Listing:
-    fd = open_overlay_dir(root, *parts, raise_mount_errors=True)
+    fd = open_dir(root, *parts, raise_mount_errors=True)
     if fd is None:
         raise ListingError(404, "Folder not found.")
     entries = []
@@ -81,18 +81,12 @@ def list_file(anchor: Path, parts: Sequence[str]) -> Listing:
 
     The file is reached by a walk from ``anchor`` with no link followed.
     """
-    *dirs, leaf = parts
-    dir_fd = open_overlay_dir(anchor, *dirs, raise_mount_errors=True)
-    if dir_fd is None:
+    fd = open_regular(anchor, parts, raise_mount_errors=True)
+    if fd is None:
         raise ListingError(404, "File not found.")
     try:
-        fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-    finally:
-        os.close(dir_fd)
-    try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise ListingError(404, "File not found.")
+        leaf = parts[-1]
         entry = Entry(leaf, "file", info.st_size, info.st_mtime, leaf.startswith("."))
         return Listing([entry], False)
     finally:

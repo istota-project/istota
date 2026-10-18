@@ -11,7 +11,7 @@ any file it can open, delivered back to the task (ISSUE-610).
 Two rules decide where a source may be:
 
 - **Under one of the caller's roots.** Every component below the root is
-  opened with ``O_NOFOLLOW`` (``skills._loader.open_overlay_dir``) and the leaf
+  opened with ``O_NOFOLLOW`` (``sandbox.confined.open_dir``) and the leaf
   must be a regular file. A link is refused wherever it points, including back
   inside the roots: a resolve-then-compare check is a race the model can win.
 - **Under no root, only where the daemon itself writes an attachment**:
@@ -26,7 +26,7 @@ Two rules decide where a source may be:
   ``download_talk_attachments`` returns it only when it found the file
   nowhere.
 
-The root itself is opened following links, as ``open_overlay_dir`` does: it is
+The root itself is opened following links, as ``confined.open_dir`` does: it is
 composed by the daemon out of its own config, and a mount reached through a
 symlink is ordinary. Never raises.
 """
@@ -35,10 +35,13 @@ from __future__ import annotations
 
 import errno
 import os
-import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
+
+from istota.sandbox.confined import (  # noqa: F401 - open_regular_at is re-exported
+    open_regular, open_regular_at, parts_below, valid_parts,
+)
 
 # Where `download_talk_attachments` looks for a file Nextcloud stored in the
 # sender's data dir. One name for both, so the producer and this rule agree.
@@ -68,14 +71,8 @@ def _spellings(anchor: Path) -> list[PurePath]:
 
 
 def _parts_under(path: PurePath, anchor: Path) -> tuple[str, ...] | None:
-    for spelling in _spellings(anchor):
-        try:
-            rel = path.relative_to(spelling)
-        except ValueError:
-            continue
-        if rel.parts:
-            return rel.parts
-    return None
+    parts = parts_below(path, anchor)
+    return parts or None
 
 
 def _parts_under_resolved(path: PurePath, anchor: Path) -> tuple[str, ...] | None:
@@ -166,38 +163,7 @@ def open_source(source: AttachmentSource) -> int | None:
 
     No link is followed below the anchor. The caller closes the fd.
     """
-    from istota.skills._loader import open_overlay_dir  # noqa: PLC0415 - import cost
-
-    *dirs, leaf = source.parts
-    dir_fd = open_overlay_dir(source.anchor, *dirs)
-    if dir_fd is None:
-        return None
-    try:
-        return open_regular_at(dir_fd, leaf)
-    finally:
-        os.close(dir_fd)
-
-
-def open_regular_at(dir_fd: int, name: str) -> int | None:
-    """A read-only fd on the regular file `name` in `dir_fd`, or None.
-
-    The leaf half of `open_source`, for a caller already holding a directory
-    fd from a no-follow walk: ``O_NOFOLLOW``, then ``S_ISREG`` on the fd.
-    The caller closes the fd.
-    """
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-    except (OSError, ValueError):
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            return None
-        os.set_blocking(fd, True)
-    except OSError:
-        os.close(fd)
-        return None
-    return fd
+    return open_regular(source.anchor, source.parts)
 
 
 def open_attachment(
@@ -247,9 +213,8 @@ def write_copy(src_fd: int, parent: Path, subdir: str, name: str) -> Path | None
     not follow a link at the leaf). `parent` is daemon-composed and opened
     following links. None on any refusal or failure.
     """
-    for part in (subdir, name):
-        if not part or "/" in part or "\0" in part or part in (".", ".."):
-            return None
+    if not valid_parts((subdir, name)):
+        return None
     try:
         parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
     except OSError:
