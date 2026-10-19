@@ -1,7 +1,14 @@
 <script lang="ts">
   import type { SetupCheckResult } from '$lib/api';
-  import { Button, Field, Input, NoticeBanner, OptionCards, Checkbox } from '$lib/components/ui';
-  import { SecretField } from '$lib/components/settings';
+  import {
+    Button,
+    Field,
+    Input,
+    NoticeBanner,
+    OptionCards,
+    Checkbox,
+    SecretField,
+  } from '$lib/components/ui';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import SetupMore from './SetupMore.svelte';
   import { deriveUsername, runSetupCheck, type SetupDraftStore } from './setupDraft.svelte';

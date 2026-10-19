@@ -1,7 +1,11 @@
+<script lang="ts" module>
+  export type BadgeVariant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
+</script>
+
 <script lang="ts">
   import type { Snippet } from 'svelte';
 
-  type Variant = 'neutral' | 'danger' | 'warn' | 'success' | 'info' | 'partial';
+  type Variant = BadgeVariant;
 
   interface Props {
     variant?: Variant;

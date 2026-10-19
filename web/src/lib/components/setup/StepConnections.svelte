@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { SetupCheckResult } from '$lib/api';
-  import { Button, Field, Input } from '$lib/components/ui';
-  import { SecretField } from '$lib/components/settings';
+  import { Button, Field, Input, SecretField } from '$lib/components/ui';
   import ConnectionCard from './ConnectionCard.svelte';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import SetupMore from './SetupMore.svelte';

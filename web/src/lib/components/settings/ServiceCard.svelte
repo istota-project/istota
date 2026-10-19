@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { Card, ConfirmDialog, EmptyState } from '$lib/components/ui';
+  import { Card, ConfirmDialog, EmptyState, SecretField } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import SecretField from './SecretField.svelte';
 
   interface Props {
     service: ServiceCardData;

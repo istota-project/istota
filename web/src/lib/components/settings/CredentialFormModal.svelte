@@ -7,10 +7,9 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import { Button, Field, Input, Modal, Checkbox } from '$lib/components/ui';
+  import { Button, Field, Input, Modal, Checkbox, SecretField } from '$lib/components/ui';
   import { notifySuccess } from '$lib/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
-  import SecretField from './SecretField.svelte';
 
   /**
    * Add a credential, or edit one added in Istota.
