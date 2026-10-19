@@ -64,9 +64,6 @@
   "src/lib/components/ui/Select.svelte": {
     "off-scale-space": 2
   },
-  "src/lib/styles/moneyTable.css": {
-    "off-scale-space": 1
-  },
   "src/lib/styles/settings.css": {
     "off-scale-space": 4
   },
@@ -90,7 +87,7 @@
     "off-scale-space": 4
   },
   "src/routes/feeds/settings/+page.svelte": {
-    "off-scale-space": 4
+    "off-scale-space": 3
   },
   "src/routes/health/history/+page.svelte": {
     "off-scale-space": 8,
@@ -121,15 +118,6 @@
     "off-scale-space": 8,
     "raw-color": 7
   },
-  "src/routes/health/labs/panel/+page.svelte": {
-    "off-scale-space": 1
-  },
-  "src/routes/health/labs/upload/+page.svelte": {
-    "off-scale-space": 1
-  },
-  "src/routes/health/stats/+page.svelte": {
-    "off-scale-space": 1
-  },
   "src/routes/location/+layout.svelte": {
     "off-scale-space": 3
   },
@@ -144,9 +132,6 @@
   },
   "src/routes/money/settings/+page.svelte": {
     "off-scale-space": 2
-  },
-  "src/routes/money/taxes/+page.svelte": {
-    "off-scale-space": 1
   },
   "src/routes/money/transactions/+layout.svelte": {
     "off-scale-space": 4
