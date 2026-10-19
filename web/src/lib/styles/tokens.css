@@ -156,8 +156,8 @@
 	   Deliberately one value per severity across both themes: these are mid-tone
 	   enough to read on the dark surface and on white, so they are NOT redefined
 	   in the light block. */
-  --status-dot-ok: #1bd43d;
-  --status-dot-bad: #e8392c;
+  --status-dot-success: #1bd43d;
+  --status-dot-danger: #e8392c;
   --status-dot-warn: #eb9a09;
   --status-dot-info: #2e8fe6;
 

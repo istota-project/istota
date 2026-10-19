@@ -22,6 +22,7 @@
     StatTile,
     LoadState,
     Timestamp,
+    StatusDot,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
@@ -369,12 +370,13 @@
           {/snippet}
           {#snippet actions()}
             <span class="health">
-              <span
-                class="dot"
-                class:dot-ok={live.system.scheduler_healthy && !live.brain_status?.degraded}
-                class:dot-warn={live.system.scheduler_healthy && live.brain_status?.degraded}
-                class:dot-bad={!live.system.scheduler_healthy}
-              ></span>
+              <StatusDot
+                tone={!live.system.scheduler_healthy
+                  ? 'danger'
+                  : live.brain_status?.degraded
+                    ? 'warn'
+                    : 'success'}
+              />
               {#if !live.system.scheduler_healthy}
                 Stale
               {:else if live.brain_status?.degraded}
@@ -448,11 +450,10 @@
             {#if stats.storage.nextcloud_configured}
               <dt>Nextcloud mount</dt>
               <dd>
-                <span
-                  class="dot"
-                  class:dot-ok={stats.storage.nextcloud_mount_healthy}
-                  class:dot-bad={!stats.storage.nextcloud_mount_healthy}
-                ></span>
+                <StatusDot
+                  class="mount-dot"
+                  tone={stats.storage.nextcloud_mount_healthy ? 'success' : 'danger'}
+                />
                 {stats.storage.nextcloud_mount_healthy ? 'Healthy' : 'Unavailable'}
               </dd>
             {/if}
@@ -958,31 +959,22 @@
   .health {
     display: inline-flex;
     align-items: center;
+    gap: var(--space-1);
     font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 
-  .dot {
+  /* Categorical: the colour is the task source, so these are not StatusDots. */
+  .dot-source {
     display: inline-block;
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     border-radius: var(--radius-round);
-    background: var(--text-dim);
     margin-right: var(--space-1);
     flex-shrink: 0;
   }
-  .dot-ok {
-    background: var(--status-dot-ok);
-  }
-  .dot-bad {
-    background: var(--status-dot-bad);
-  }
-  .dot-warn {
-    background: var(--status-dot-warn);
-  }
-  .dot-source {
-    width: 6px;
-    height: 6px;
+  dd :global(.mount-dot) {
+    margin-right: var(--space-1);
   }
 
   /* The tiles themselves are `StatTile`; this sizes the wall they sit in. */

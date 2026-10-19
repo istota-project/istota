@@ -1,4 +1,5 @@
 <script lang="ts">
+  import StatusDot from './StatusDot.svelte';
   import Timestamp from './Timestamp.svelte';
   /**
    * One row in the notification panel.
@@ -55,10 +56,15 @@
 
   const actions = $derived(renderable.slice(0, INLINE_ACTIONS));
 
-  /** Severity `warning` maps to the `warn` token family — the store's vocabulary
-   *  and the token roster spell it differently, and this is the one place that
-   *  matters. */
-  const severityClass = $derived(item.severity === 'warning' ? 'warn' : item.severity);
+  /** Severity `warning` is the `warn` tone — the store's vocabulary and the
+   *  status scale spell it differently, and this is the one place that matters. */
+  const severityTone = $derived.by(() => {
+    if (item.severity === 'warning') return 'warn';
+    if (item.severity === 'danger' || item.severity === 'success' || item.severity === 'info') {
+      return item.severity;
+    }
+    return 'neutral';
+  });
 
   const variants: Record<string, 'primary' | 'secondary' | 'danger'> = {
     primary: 'primary',
@@ -74,7 +80,7 @@
     onclick={() => onOpen(item)}
     aria-label="Open notification: {item.title}"
   >
-    <span class="severity-dot severity-{severityClass}" aria-hidden="true"></span>
+    <StatusDot class="severity-dot" tone={severityTone} />
     <span class="item-text">
       <span class="item-title">{item.title}</span>
       <span class="item-meta caption">
@@ -137,10 +143,7 @@
     outline-offset: calc(-1 * var(--focus-ring-width));
   }
 
-  .severity-dot {
-    flex: none;
-    width: 0.5rem;
-    height: 0.5rem;
+  .notification-item :global(.severity-dot) {
     /* Optical alignment with the middle of the title's first line rather than
        its box top, which sits a step high at every text scale. Below --space-1
        and deliberately off the ramp: the smallest step is 0.25rem and the dot
@@ -148,21 +151,6 @@
        the other. */
     /* design-lint-allow: sub---space-1 optical nudge, centring a 0.5rem dot on a line box */
     margin-top: 0.35rem;
-    border-radius: var(--radius-round);
-    background: var(--text-dim);
-  }
-
-  .severity-danger {
-    background: var(--status-danger-fg);
-  }
-  .severity-warn {
-    background: var(--status-warn-fg);
-  }
-  .severity-success {
-    background: var(--status-success-fg);
-  }
-  .severity-info {
-    background: var(--status-info-fg);
   }
 
   .item-text {

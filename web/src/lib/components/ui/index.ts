@@ -70,4 +70,5 @@ export { default as BackLink } from './BackLink.svelte';
 export { default as LoadMore } from './LoadMore.svelte';
 export { default as Pagination } from './Pagination.svelte';
 export { default as Timestamp } from './Timestamp.svelte';
+export { default as StatusDot } from './StatusDot.svelte';
 export { default as LoadingOctopus } from './LoadingOctopus.svelte';
