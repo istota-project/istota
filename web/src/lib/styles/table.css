@@ -83,9 +83,7 @@
 
 /* Hover only on a row that does something when clicked. The card surface,
    not --hover-bg (the raised fill a button or menu item takes), so a hovered
-   row and the selected row below stay two different looks. On a table that
-   itself sits on --surface-card the hover does not show; the cursor and the
-   row's own control carry it there. */
+   row and the selected row below stay two different looks. */
 .table--interactive tbody tr:hover {
   background: var(--surface-card);
 }
@@ -94,6 +92,17 @@
    under the pointer. */
 .table tbody tr.is-selected {
   background: var(--selected-bg);
+}
+
+/* A table that sits on --surface-card would hover invisibly, so it moves one
+   step off the card: hover raised, selected one step further, still apart. */
+.table--on-card.table--interactive tbody tr:hover {
+  background: var(--hover-bg);
+}
+
+.table--on-card tbody tr.is-selected,
+.table--on-card tbody tr.is-selected:hover {
+  background: var(--surface-badge);
 }
 
 .table tr.is-danger {

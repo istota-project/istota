@@ -113,6 +113,20 @@ describe('table.css', () => {
     );
   });
 
+  it('moves an on-card table one step off the card, hover and selection apart', () => {
+    expect(blockAfter(cascade, '.table--on-card.table--interactive tbody tr:hover {')).toContain(
+      'background: var(--hover-bg)',
+    );
+    expect(blockAfter(cascade, '.table--on-card tbody tr.is-selected:hover {')).toContain(
+      'background: var(--surface-badge)',
+    );
+    for (const page of ['routes/admin/users/+page.svelte', 'routes/admin/groups/+page.svelte']) {
+      expect(readFileSync(join(SRC, page), 'utf8')).toMatch(
+        /<table\s+class="[^"]*table--interactive table--on-card/,
+      );
+    }
+  });
+
   it('has two densities and no more', () => {
     expect(blockAfter(cascade, '.table--dense {')).toContain('--table-cell-py: var(--space-1)');
     expect(cascade).not.toMatch(/\.table--roomy\b/);

@@ -52,7 +52,9 @@
 </button>
 
 <style>
-  .sort-header {
+  /* Weightless, so a page's placement rule (hiding a column below 640px)
+     always wins rather than tying on specificity and stylesheet order. */
+  :where(.sort-header) {
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);

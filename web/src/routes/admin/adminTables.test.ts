@@ -317,7 +317,7 @@ for (const table of TABLES) {
       // and not to this list drops out of the sum and inflates the leftover.
       const source = readFileSync(join(process.cwd(), table.page), 'utf8');
       const tableAt = source.search(
-        new RegExp(`<table class="table table--fixed[^"]* ${grid.slice(1)}"`),
+        new RegExp(`<table\\s+class="table table--fixed[^"]* ${grid.slice(1)}"`),
       );
       expect(tableAt, `${table.page} has no <table> for ${grid}`).toBeGreaterThan(-1);
       const head = source.slice(tableAt, source.indexOf('</thead', tableAt));

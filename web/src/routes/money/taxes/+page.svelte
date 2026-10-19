@@ -730,6 +730,13 @@
     background: var(--surface-raised);
   }
 
+  /* One column gap for the header, tree and result rows, so the fixed-width
+     figures line up whether or not the state column is shown. */
+  .breakdown-table .record-header,
+  .breakdown-table .record-row {
+    gap: var(--space-1);
+  }
+
   .breakdown-label {
     flex: 1;
     color: var(--text-secondary);

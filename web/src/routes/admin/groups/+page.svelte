@@ -255,7 +255,10 @@
           >No groups yet. Create one to choose its first owners.</EmptyState
         >
       {:else}<div class="table-scroll">
-          <table class="table table--fixed table--interactive groups-grid" aria-label="Groups">
+          <table
+            class="table table--fixed table--interactive table--on-card groups-grid"
+            aria-label="Groups"
+          >
             <thead
               ><tr
                 ><th scope="col" class="col-group">Group</th><th scope="col" class="col-kind"

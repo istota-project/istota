@@ -197,7 +197,10 @@
         <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="table table--fixed table--interactive users-grid" aria-label="Users">
+          <table
+            class="table table--fixed table--interactive table--on-card users-grid"
+            aria-label="Users"
+          >
             <thead
               ><tr
                 ><th scope="col" class="col-user">User</th>
