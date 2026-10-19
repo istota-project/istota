@@ -256,11 +256,10 @@ async def test_nextcloud_disabled_and_reconnect_revoked(client, configured):
     configured._oauth.nextcloud.authorize_redirect.assert_not_called()
 
 
-async def test_session_database_failure_denies_access(client, configured, monkeypatch):
+async def test_session_database_failure_denies_access(client, configured):
     assert (await sign_in(client)).status_code == 302
-    def unavailable(*args):
-        raise sqlite3.OperationalError("unavailable")
-    monkeypatch.setattr(web_auth, "get_identity", unavailable)
+    with db.get_db(configured._config.db_path) as conn:
+        conn.execute("DROP TABLE web_auth_identities")
     assert (await client.get("/istota/api/me")).status_code == 401
 
 

@@ -1312,6 +1312,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # nothing above it.
     _migrate_notifications(conn)
     _migrate_push_tables(conn)
+    _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
     _migrate_profile_generation(conn)
@@ -9301,6 +9302,29 @@ def _migrate_user_profile_managed_fields(conn: sqlite3.Connection) -> None:
         conn.execute(_USER_PROFILE_MANAGED_FIELDS_DDL)
     except sqlite3.OperationalError as e:
         logger.warning("user_profile_managed_fields migration failed: %s", e)
+
+
+def _migrate_mobile_auth_requests(conn: sqlite3.Connection) -> None:
+    """Add handoffs without committing the caller's transaction."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
+            request_id TEXT PRIMARY KEY,
+            challenge TEXT NOT NULL,
+            state TEXT NOT NULL,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            user_id TEXT,
+            auth_method TEXT,
+            auth_epoch INTEGER,
+            code_digest TEXT,
+            code_expires_at TEXT,
+            consumed_at TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_expiry ON web_mobile_auth_requests(expires_at)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_web_mobile_auth_code ON web_mobile_auth_requests(code_digest)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_source ON web_mobile_auth_requests(source, expires_at)")
 
 
 def _migrate_push_tables(conn: sqlite3.Connection) -> None:
