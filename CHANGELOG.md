@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- In the iOS app, the menu in the top navigation bar has a Device settings item, where you can change server, disconnect and see which account you are signed in as. The app no longer shows its own bar above the page, so this menu is how to get there from a loaded page.
+
 - In the generic iOS app (0.12.0), Log out hands over to the app, which asks once and then stops location tracking, removes the notification enrollment and clears the app's website data. Settings → Preferences has a card named for the device (iPhone or iPad) with a Device settings button, Nextcloud Reconnect and Google Connect open in the browser because those sign-ins leave the site, and the app no longer gets the offline service worker, which it cannot run. Browsers and older iOS apps are unchanged.
 
 - Notification registrations from the generic iOS app name the app's server connection, and alerts repeat it, so the app ignores a tapped alert from a server it has disconnected from. Registrations and alerts for older iOS apps are unchanged.
@@ -79,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A phone browser's toolbar now takes the color of the web UI's top navigation bar instead of the page background, so the two read as one header in light and dark themes. The iOS app colors its own top bar the same way.
+- A phone browser's toolbar now takes the color of the web UI's top navigation bar instead of the page background, so the two read as one header in light and dark themes. The iOS app takes its status bar contrast from the same color.
 - The web dashboard shows two module tiles per row on a phone instead of one, so the whole list fits on screen. The tile descriptions are shorter so they stay at two lines.
 - On a wide screen, every web dashboard tile is now as tall as the welcome card's row. Before, the tile beside the welcome card was taller than the tiles below it. Narrower layouts keep their shorter tiles.
 - Images and location maps in web chat are drawn at one size, the same however tall the window is, and keep their shape on a phone. Before, an image's size followed the window's height and a map stretched across the whole chat column.

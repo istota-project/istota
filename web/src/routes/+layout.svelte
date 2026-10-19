@@ -18,7 +18,7 @@
     PageLoader,
   } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
-  import { clearNotices } from '$lib/stores/notices';
+  import { clearNotices, notifyError } from '$lib/stores/notices';
   import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';
   import { startNotificationPoll, stopNotificationPoll } from '$lib/stores/notifications';
   import { online, startConnectivity } from '$lib/stores/connectivity';
@@ -27,6 +27,7 @@
   import { startPushBadgeSync } from '$lib/stores/pushBadge';
   import { startPushOpenHandling } from '$lib/platform/pushOpen';
   import { shellRunsServiceWorker } from '$lib/platform/native';
+  import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
   import {
     canReadCachedUser,
     forgetLastUserId,
@@ -434,6 +435,21 @@
     stopPushOpen?.();
   });
 
+  // In the app the page runs full screen with no native bar above it, so this menu is how a
+  // loaded page reaches Device settings (Change server, Disconnect). The app's home screen
+  // quick action is the route that does not need the page.
+  const appSettingsOffered = appConnectionAvailable();
+
+  async function showAppSettings() {
+    try {
+      await openAppSettings();
+    } catch {
+      notifyError(
+        'Could not open Device settings. Long-press the Istota icon and choose Device settings.',
+      );
+    }
+  }
+
   function isActive(path: string): boolean {
     const current = page.url.pathname;
     if (path === '/') return current === `${base}` || current === `${base}/`;
@@ -682,6 +698,11 @@
                 >
               {/snippet}
             </DropdownMenu.Item>
+            {#if appSettingsOffered}
+              <DropdownMenu.Item class="app-nav-menu-link" onSelect={showAppSettings}>
+                Device settings
+              </DropdownMenu.Item>
+            {/if}
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>

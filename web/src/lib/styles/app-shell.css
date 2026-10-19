@@ -167,6 +167,7 @@
   text-decoration: none;
   border-radius: var(--radius-sm);
   outline: none;
+  cursor: pointer;
 }
 
 .app-nav-menu-link:hover,
