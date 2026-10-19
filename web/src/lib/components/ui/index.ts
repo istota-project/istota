@@ -39,6 +39,8 @@ export { default as FormModal } from './FormModal.svelte';
 export { default as FormStack } from './FormStack.svelte';
 export { default as FormGrid } from './FormGrid.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';
+export { default as Menu } from './Menu.svelte';
+export type { MenuItem } from './Menu.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
 export { default as SortHeader, sortAria } from './SortHeader.svelte';
 export { default as NoticeBanner } from './NoticeBanner.svelte';
