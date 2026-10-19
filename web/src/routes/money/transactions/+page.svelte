@@ -33,11 +33,8 @@
 
   // Edit-transaction modal state.
   let editingTxn: TransactionRow | null = $state(null);
-  let editError = $state('');
-  let editSaving = $state(false);
 
   function openEdit(txn: TransactionRow) {
-    editError = '';
     editingTxn = txn;
   }
 
@@ -51,30 +48,21 @@
     if (!editingTxn) return;
     const original = editingTxn;
     if (!original.id) {
-      editError = 'This transaction has no stable id yet — run the id backfill first.';
-      return;
+      throw new Error('This transaction has no stable id yet — run the id backfill first.');
     }
-    editSaving = true;
-    editError = '';
-    try {
-      await updateTransaction({
-        ledger: $selectedLedger || undefined,
-        id: original.id,
-        old_account: original.account,
-        old_position: original.position,
-        new_payee: data.payee,
-        new_narration: data.narration,
-        new_date: data.date,
-        new_account: data.account,
-        new_position: data.position,
-      });
-      editingTxn = null;
-      await load(currentOpts(currentPage));
-    } catch (e) {
-      editError = e instanceof Error ? e.message : 'Failed to save transaction';
-    } finally {
-      editSaving = false;
-    }
+    await updateTransaction({
+      ledger: $selectedLedger || undefined,
+      id: original.id,
+      old_account: original.account,
+      old_position: original.position,
+      new_payee: data.payee,
+      new_narration: data.narration,
+      new_date: data.date,
+      new_account: data.account,
+      new_position: data.position,
+    });
+    editingTxn = null;
+    await load(currentOpts(currentPage));
   }
 
   // Track expanded transactions and their postings
@@ -328,8 +316,6 @@
   <TransactionForm
     txn={editingTxn}
     accounts={accountNames}
-    error={editError}
-    saving={editSaving}
     onSave={handleEditSave}
     onCancel={() => (editingTxn = null)}
   />

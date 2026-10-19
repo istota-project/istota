@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import WorkEntryForm from './WorkEntryForm.svelte';
+import { pressEnter } from '$lib/test/implicitSubmit';
 import type { WorkEntryRow, ClientRow, ServiceRow } from '$lib/money/api';
 
 afterEach(cleanup);
@@ -200,13 +201,18 @@ describe('WorkEntryForm', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
-  it('renders a server error', () => {
-    mount({ entry: row(), error: 'unknown service: ghost' });
-    expect(screen.getByText('unknown service: ghost')).toBeTruthy();
+  it('renders a server error and stays open', async () => {
+    const onSave = vi.fn(async () => {
+      throw new Error('unknown service: ghost');
+    });
+    mount({ entry: row(), onSave });
+    await fireEvent.click(screen.getByText('Save'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('unknown service: ghost');
   });
 
-  it('disables save while in flight', () => {
-    mount({ entry: row(), saving: true });
+  it('disables save while in flight', async () => {
+    mount({ entry: row(), onSave: vi.fn(() => new Promise(() => {})) });
+    await fireEvent.click(screen.getByText('Save'));
     expect((screen.getByText('Saving…') as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -222,15 +228,17 @@ describe('WorkEntryForm keyboard', () => {
   it('saves on Enter from a text field', async () => {
     const onSave = vi.fn();
     mount({ entry: row(), onSave });
-    await fireEvent.keyDown(screen.getByPlaceholderText('e.g. 3'), { key: 'Enter' });
+    await pressEnter(screen.getByPlaceholderText('e.g. 3'));
     expect(onSave).toHaveBeenCalled();
   });
 
-  it('does not save on Enter from the description field', async () => {
+  // The description is a single-line input, and Enter in one submits by the
+  // browser's rule; the hand-written handler this replaced had exempted it.
+  it('saves on Enter from the description field too', async () => {
     const onSave = vi.fn();
     mount({ entry: row(), onSave });
-    await fireEvent.keyDown(screen.getByLabelText('Description (optional)'), { key: 'Enter' });
-    expect(onSave).not.toHaveBeenCalled();
+    await pressEnter(screen.getByLabelText('Description (optional)'));
+    expect(onSave).toHaveBeenCalled();
   });
 
   it('does not save on Enter from a dropdown', async () => {

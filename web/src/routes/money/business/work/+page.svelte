@@ -70,8 +70,6 @@
 
   let formOpen = $state(false);
   let editing: WorkEntryRow | null = $state(null);
-  let formError = $state('');
-  let saving = $state(false);
 
   let confirmOpen = $state(false);
   let pendingDelete: WorkEntryRow | null = $state(null);
@@ -167,20 +165,17 @@
 
   function openAdd() {
     editing = null;
-    formError = '';
     formOpen = true;
   }
 
   function openEdit(entry: WorkEntryRow) {
     editing = entry;
-    formError = '';
     formOpen = true;
   }
 
   function closeForm() {
     formOpen = false;
     editing = null;
-    formError = '';
   }
 
   function errorCode(e: unknown): string {
@@ -198,8 +193,6 @@
   }
 
   async function handleSave(data: WorkEntrySavePayload) {
-    saving = true;
-    formError = '';
     const target = editing;
     try {
       if (target) {
@@ -207,18 +200,14 @@
       } else {
         await createWorkEntry(data);
       }
-      closeForm();
-      await load();
     } catch (e) {
-      if (isConflict(e)) {
-        closeForm();
-        conflict = 'This entry was changed elsewhere — your edit was not saved.';
-      } else {
-        formError = e instanceof Error ? e.message : 'Failed to save work entry';
-      }
-    } finally {
-      saving = false;
+      if (!isConflict(e)) throw e;
+      closeForm();
+      conflict = 'This entry was changed elsewhere — your edit was not saved.';
+      return;
     }
+    closeForm();
+    await load();
   }
 
   function askDelete(entry: WorkEntryRow) {
@@ -476,15 +465,7 @@
 </div>
 
 {#if formOpen}
-  <WorkEntryForm
-    entry={editing}
-    {clients}
-    {services}
-    onSave={handleSave}
-    onCancel={closeForm}
-    error={formError}
-    {saving}
-  />
+  <WorkEntryForm entry={editing} {clients} {services} onSave={handleSave} onCancel={closeForm} />
 {/if}
 
 {#if generating}

@@ -8,7 +8,7 @@
     type EntityRow,
     type EntityInput,
   } from '$lib/money/api';
-  import { Modal, Button, Select, Field, Checkbox, Input, TextArea } from '$lib/components/ui';
+  import { FormModal, Select, Field, Checkbox, Input, TextArea } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billing entity.
@@ -24,13 +24,14 @@
    */
   interface Props {
     entity?: EntityRow | null;
-    onSave: (key: string, data: EntityInput) => void;
+    onSave: (key: string, data: EntityInput) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let { entity = null, onSave, onCancel, error = '', saving = false }: Props = $props();
+  let { entity = null, onSave, onCancel }: Props = $props();
+
+  // Holds the detection controls still while a save is out.
+  let saving = $state(false);
 
   const isEdit = untrack(() => !!entity);
 
@@ -176,47 +177,38 @@
     !!name.trim() &&
       (isEdit || (!!key && !keyError)) &&
       !logoError &&
-      !saving &&
       (!detectionEnabled || detectionReady),
   );
 
-  function handleSave() {
-    if (!canSave) return;
-    onSave(isEdit ? (entity as EntityRow).key : key.trim(), {
-      name: name.trim(),
-      email: email.trim(),
-      address,
-      payment_instructions: paymentInstructions,
-      logo: logo.trim(),
-      ar_account: arAccount.trim(),
-      bank_account: bankAccount.trim(),
-      currency: currency.trim(),
-      payment_detection_enabled: detectionEnabled,
-      payment_detection_ledger: detectionLedger,
-      payment_detection_income_account: incomeAccount,
-    });
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    // Only a single-line text input commits — Enter inside a textarea is a
-    // newline, and inside any other control is that control's own business.
-    if (!(e.target instanceof HTMLInputElement) || e.target.type === 'checkbox') return;
-    handleSave();
+  async function handleSave() {
+    saving = true;
+    try {
+      await onSave(isEdit ? (entity as EntityRow).key : key.trim(), {
+        name: name.trim(),
+        email: email.trim(),
+        address,
+        payment_instructions: paymentInstructions,
+        logo: logo.trim(),
+        ar_account: arAccount.trim(),
+        bank_account: bankAccount.trim(),
+        currency: currency.trim(),
+        payment_detection_enabled: detectionEnabled,
+        payment_detection_ledger: detectionLedger,
+        payment_detection_income_account: incomeAccount,
+      });
+    } finally {
+      saving = false;
+    }
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal
+<FormModal
   bind:open
   title={isEdit ? `Edit ${entity?.name || entity?.key}` : 'Add entity'}
-  onOpenChange={handleOpenChange}
   width="420px"
+  canSubmit={canSave}
+  onSubmit={handleSave}
+  {onCancel}
 >
   <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
@@ -305,26 +297,10 @@
       </Field>
     {/if}
   </div>
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!canSave}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .key-value {
     color: var(--text-secondary);
-  }
-
-  /* Type is the global .form-error; only the space above it is this form's. */
-  .form-error {
-    margin-top: var(--space-2);
   }
 </style>

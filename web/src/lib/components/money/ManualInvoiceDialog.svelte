@@ -11,9 +11,9 @@
   import {
     Button,
     Field,
+    FormModal,
     IconButton,
     Input,
-    Modal,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
@@ -47,8 +47,6 @@
   let client = $state('');
   let entity = $state('');
   let lines: Line[] = $state([blankLine()]);
-  let submitting = $state(false);
-  let error = $state('');
 
   const clientOptions = $derived<SelectOption[]>(
     clients.map((c) => ({ value: c.key, label: c.name || c.key })),
@@ -94,9 +92,7 @@
   }
 
   const items = $derived(lines.map(itemOf));
-  const canCreate = $derived(
-    !!client && items.length > 0 && items.every((item) => item !== null) && !submitting,
-  );
+  const canCreate = $derived(!!client && items.length > 0 && items.every((item) => item !== null));
 
   function addLine() {
     lines = [...lines, blankLine()];
@@ -107,31 +103,25 @@
   }
 
   async function submit() {
-    if (!canCreate) return;
-    submitting = true;
-    error = '';
-    try {
-      const body: Parameters<typeof createInvoice>[0] = {
-        client,
-        items: items as ManualInvoiceItem[],
-      };
-      if (entity) body.entity = entity;
-      const result = await createInvoice(body);
-      open = false;
-      onCreated(result);
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to create the invoice';
-    } finally {
-      submitting = false;
-    }
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
+    const body: Parameters<typeof createInvoice>[0] = {
+      client,
+      items: items as ManualInvoiceItem[],
+    };
+    if (entity) body.entity = entity;
+    onCreated(await createInvoice(body));
   }
 </script>
 
-<Modal bind:open title="New manual invoice" onOpenChange={handleOpenChange} width="560px">
+<FormModal
+  bind:open
+  title="New manual invoice"
+  width="560px"
+  submitLabel="Create invoice"
+  busyLabel="Creating…"
+  canSubmit={canCreate}
+  onSubmit={submit}
+  {onCancel}
+>
   <div class="head">
     <Field label="Client">
       <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
@@ -179,20 +169,7 @@
   </div>
 
   <p class="caption">No email is sent to clients.</p>
-
-  {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button
-      variant="primary"
-      onclick={submit}
-      disabled={!canCreate}
-      loading={submitting}
-      loadingLabel="Creating…">Create invoice</Button
-    >
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .head {
@@ -217,10 +194,6 @@
 
   .add-line {
     margin: var(--space-3) 0;
-  }
-
-  .form-error {
-    margin: var(--space-3) 0 0;
   }
 
   @media (max-width: 640px) {

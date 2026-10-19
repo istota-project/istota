@@ -9,8 +9,7 @@
     type EntityRow,
   } from '$lib/money/api';
   import {
-    Modal,
-    Button,
+    FormModal,
     Select,
     type SelectOption,
     Field,
@@ -40,21 +39,11 @@
     entities?: EntityRow[];
     /** Named in the "use the default" entity option. */
     defaultEntity?: string;
-    onSave: (key: string, data: ClientInput) => void;
+    onSave: (key: string, data: ClientInput) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let {
-    client = null,
-    entities = [],
-    defaultEntity = '',
-    onSave,
-    onCancel,
-    error = '',
-    saving = false,
-  }: Props = $props();
+  let { client = null, entities = [], defaultEntity = '', onSave, onCancel }: Props = $props();
 
   // Mounted fresh each time it opens, so the initial props are the whole
   // story — the local fields deliberately don't track them.
@@ -122,9 +111,7 @@
     const asNumber = Number(trimmed);
     return Number.isInteger(asNumber) && asNumber < 0 ? 'Expected 0 days or more' : '';
   });
-  const canSave = $derived(
-    !!name.trim() && (isEdit || (!!key && !keyError)) && !termsError && !saving,
-  );
+  const canSave = $derived(!!name.trim() && (isEdit || (!!key && !keyError)) && !termsError);
 
   /** A blank numeric field means "leave it alone", not zero. */
   function intOrOmit(raw: string): number | undefined {
@@ -135,8 +122,6 @@
   }
 
   function handleSave() {
-    if (!canSave) return;
-
     const data: ClientInput = {
       name: name.trim(),
       // Empty string, not undefined: these are the fields a user clears.
@@ -169,32 +154,17 @@
     const overdue = intOrOmit(daysUntilOverdue);
     if (overdue !== undefined) data.days_until_overdue = overdue;
 
-    onSave(isEdit ? (client as ClientConfigRow).key : key.trim(), data);
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    const target = e.target as HTMLElement | null;
-    // Only a single-line text input commits. Enter anywhere else is that
-    // control's own business — notably confirming a dropdown option, which
-    // would otherwise select *and* save in one keystroke.
-    if (!(target instanceof HTMLInputElement)) return;
-    if (target.type === 'checkbox') return;
-    handleSave();
+    return onSave(isEdit ? (client as ClientConfigRow).key : key.trim(), data);
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal
+<FormModal
   bind:open
   title={isEdit ? `Edit ${client?.name || client?.key}` : 'Add client'}
-  onOpenChange={handleOpenChange}
   width="420px"
+  canSubmit={canSave}
+  onSubmit={handleSave}
+  {onCancel}
 >
   <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
@@ -266,18 +236,7 @@
       </div>
     </details>
   </div>
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!canSave}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .key-value {
@@ -294,10 +253,5 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
     margin-bottom: var(--space-2);
-  }
-
-  /* Type is the global .form-error; only the space above it is this form's. */
-  .form-error {
-    margin-top: var(--space-2);
   }
 </style>

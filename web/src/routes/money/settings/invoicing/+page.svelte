@@ -108,22 +108,16 @@
   // still naming a service.
   let clientFormOpen = $state(false);
   let editingClient: ClientConfigRow | null = $state(null);
-  let clientFormError = $state('');
-  let clientSaving = $state(false);
   let clientNotice = $state('');
   let busyClient = $state('');
   let pendingReferences = $state(0);
 
   let entityFormOpen = $state(false);
   let editingEntity: EntityRow | null = $state(null);
-  let entityFormError = $state('');
-  let entitySaving = $state(false);
   let entityNotice = $state('');
 
   let serviceFormOpen = $state(false);
   let editingService: ServiceRow | null = $state(null);
-  let serviceFormError = $state('');
-  let serviceSaving = $state(false);
   let serviceNotice = $state('');
 
   let confirmOpen = $state(false);
@@ -141,74 +135,46 @@
     } else {
       editingClient = null;
     }
-    clientFormError = '';
     clientFormOpen = true;
   }
 
   function closeClientForm() {
     clientFormOpen = false;
     editingClient = null;
-    clientFormError = '';
   }
 
   function openEntityForm(entity: EntityRow | null) {
     editingEntity = entity;
-    entityFormError = '';
     entityFormOpen = true;
   }
 
   function openServiceForm(service: ServiceRow | null) {
     editingService = service;
-    serviceFormError = '';
     serviceFormOpen = true;
   }
 
   async function saveClient(key: string, data: ClientInput) {
-    clientSaving = true;
-    clientFormError = '';
-    try {
-      if (editingClient) await updateClient(key, data);
-      else await createClient(key, data);
-      closeClientForm();
-      await loadClients();
-    } catch (e) {
-      clientFormError = e instanceof Error ? e.message : 'Failed to save client';
-    } finally {
-      clientSaving = false;
-    }
+    if (editingClient) await updateClient(key, data);
+    else await createClient(key, data);
+    closeClientForm();
+    await loadClients();
   }
 
   async function saveEntity(key: string, data: EntityInput) {
-    entitySaving = true;
-    entityFormError = '';
-    try {
-      if (editingEntity) await updateEntity(key, data);
-      else await createEntity(key, data);
-      entityFormOpen = false;
-      editingEntity = null;
-      // The client rows carry the entity's resolved name, so they go stale too.
-      await Promise.all([loadBusiness(), loadClients()]);
-    } catch (e) {
-      entityFormError = e instanceof Error ? e.message : 'Failed to save entity';
-    } finally {
-      entitySaving = false;
-    }
+    if (editingEntity) await updateEntity(key, data);
+    else await createEntity(key, data);
+    entityFormOpen = false;
+    editingEntity = null;
+    // The client rows carry the entity's resolved name, so they go stale too.
+    await Promise.all([loadBusiness(), loadClients()]);
   }
 
   async function saveService(key: string, data: ServiceInput) {
-    serviceSaving = true;
-    serviceFormError = '';
-    try {
-      if (editingService) await updateService(key, data);
-      else await createService(key, data);
-      serviceFormOpen = false;
-      editingService = null;
-      await loadBusiness();
-    } catch (e) {
-      serviceFormError = e instanceof Error ? e.message : 'Failed to save service';
-    } finally {
-      serviceSaving = false;
-    }
+    if (editingService) await updateService(key, data);
+    else await createService(key, data);
+    serviceFormOpen = false;
+    editingService = null;
+    await loadBusiness();
   }
 
   function askDelete(kind: DeleteKind, key: string, label: string) {
@@ -528,8 +494,6 @@
     defaultEntity={defaults?.default_entity ?? ''}
     onSave={saveClient}
     onCancel={closeClientForm}
-    error={clientFormError}
-    saving={clientSaving}
   />
 {/if}
 
@@ -541,8 +505,6 @@
       entityFormOpen = false;
       editingEntity = null;
     }}
-    error={entityFormError}
-    saving={entitySaving}
   />
 {/if}
 
@@ -554,8 +516,6 @@
       serviceFormOpen = false;
       editingService = null;
     }}
-    error={serviceFormError}
-    saving={serviceSaving}
   />
 {/if}
 

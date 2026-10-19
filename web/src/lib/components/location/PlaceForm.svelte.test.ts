@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import PlaceForm from './PlaceForm.svelte';
+import { pressEnter } from '$lib/test/implicitSubmit';
 
 afterEach(cleanup);
 
@@ -23,7 +24,7 @@ function mount() {
 describe('PlaceForm Enter to save', () => {
   it('saves on Enter in a single-line text input', async () => {
     const onSave = mount();
-    await fireEvent.keyDown(screen.getByPlaceholderText('e.g. Office, Gym...'), { key: 'Enter' });
+    await pressEnter(screen.getByPlaceholderText('e.g. Office, Gym...'));
     expect(onSave).toHaveBeenCalledOnce();
   });
 
@@ -38,7 +39,7 @@ describe('PlaceForm Enter to save', () => {
 
   it('does not save on Enter from the radius slider or the notes', async () => {
     const onSave = mount();
-    await fireEvent.keyDown(screen.getByRole('slider'), { key: 'Enter' });
+    await pressEnter(screen.getByRole('slider'));
     await fireEvent.keyDown(screen.getByPlaceholderText('Anything to remember about this place'), {
       key: 'Enter',
     });

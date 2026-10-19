@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { TransactionRow } from '$lib/money/api';
-  import { Modal, Button, Field, Input, Select, type SelectOption } from '$lib/components/ui';
+  import { FormModal, Field, Input, Select, type SelectOption } from '$lib/components/ui';
 
   interface Props {
     txn: TransactionRow;
@@ -13,13 +13,11 @@
       date: string;
       account: string;
       position: string;
-    }) => void;
+    }) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let { txn, accounts = [], onSave, onCancel, error = '', saving = false }: Props = $props();
+  let { txn, accounts = [], onSave, onCancel }: Props = $props();
 
   const focusOnMount = (el: HTMLElement) => el.focus();
 
@@ -47,8 +45,7 @@
   });
 
   function handleSave() {
-    if (!account.trim()) return;
-    onSave({
+    return onSave({
       payee: payee.trim(),
       narration: narration.trim(),
       date: date.trim(),
@@ -56,24 +53,16 @@
       position: position.trim(),
     });
   }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    // Only a single-line text input commits. Enter anywhere else is that
-    // control's own business — notably confirming an account in the dropdown,
-    // which would otherwise select *and* save in one keystroke.
-    if (!(e.target instanceof HTMLInputElement)) return;
-    handleSave();
-  }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal bind:open title="Edit transaction" onOpenChange={handleOpenChange} width="380px">
+<FormModal
+  bind:open
+  title="Edit transaction"
+  width="380px"
+  canSubmit={!!account.trim()}
+  onSubmit={handleSave}
+  {onCancel}
+>
   <div class="vstack">
     <Field label="Payee">
       <Input {@attach focusOnMount} bind:value={payee} placeholder="e.g. Acme Corp" />
@@ -91,22 +80,4 @@
       <Input bind:value={position} placeholder="e.g. -12.50 USD" />
     </Field>
   </div>
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!account.trim() || saving}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
-
-<style>
-  /* Type is the global .form-error; only the space around it is this form's. */
-  .form-error {
-    margin: var(--space-3) 0 var(--space-2);
-  }
-</style>
+</FormModal>

@@ -104,14 +104,10 @@
     category: string;
     notes: string;
   }) {
-    try {
-      await createPlace(data);
-      closeCreate();
-      await reloadPlaces();
-      bumpDiscoverDirty();
-    } catch (e) {
-      createError = e instanceof Error ? e.message : 'Failed to save place';
-    }
+    await createPlace(data);
+    closeCreate();
+    await reloadPlaces();
+    bumpDiscoverDirty();
   }
 
   async function handleDismissCluster(data: { lat: number; lon: number; radius_meters: number }) {
@@ -159,15 +155,11 @@
     notes: string;
   }) {
     if (!editingPlace) return;
-    try {
-      await updatePlace(editingPlace.id, data);
-      editingPlace = null;
-      selectedPlace = null;
-      placeStats = null;
-      await reloadPlaces();
-    } catch {
-      // ignore
-    }
+    await updatePlace(editingPlace.id, data);
+    editingPlace = null;
+    selectedPlace = null;
+    placeStats = null;
+    await reloadPlaces();
   }
 
   async function handleDeletePlace(place: Place) {

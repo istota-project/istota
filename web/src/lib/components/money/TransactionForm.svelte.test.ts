@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 import TransactionForm from './TransactionForm.svelte';
+import { pressEnter } from '$lib/test/implicitSubmit';
 import type { TransactionRow } from '$lib/money/api';
 
 afterEach(cleanup);
@@ -32,7 +33,7 @@ describe('TransactionForm keyboard', () => {
   it('saves on Enter from a text field', async () => {
     const onSave = vi.fn();
     mount({ onSave });
-    await fireEvent.keyDown(screen.getByPlaceholderText('e.g. Acme Corp'), { key: 'Enter' });
+    await pressEnter(screen.getByPlaceholderText('e.g. Acme Corp'));
     expect(onSave).toHaveBeenCalled();
   });
 
@@ -43,6 +44,16 @@ describe('TransactionForm keyboard', () => {
     mount({ onSave });
     await fireEvent.keyDown(screen.getByLabelText('Account'), { key: 'Enter' });
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('keeps the dialog open with the message when the save fails', async () => {
+    const onSave = vi.fn(async () => {
+      throw new Error('Ledger is locked');
+    });
+    mount({ onSave });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Ledger is locked');
+    expect(screen.getByRole('dialog', { name: 'Edit transaction' })).toBeInTheDocument();
   });
 
   it('ignores a key that is not Enter', async () => {

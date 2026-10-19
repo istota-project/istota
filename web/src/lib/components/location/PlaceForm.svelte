@@ -3,9 +3,9 @@
   import type { DiscoveredCluster, Place } from '$lib/api';
   import { locationPlaces } from '$lib/stores/location';
   import {
-    Modal,
     Button,
     ConfirmDialog,
+    FormModal,
     Field,
     Input,
     Select,
@@ -25,7 +25,7 @@
       radius_meters: number;
       category: string;
       notes: string;
-    }) => void;
+    }) => void | Promise<void>;
     onCancel: () => void;
     onDismiss?: (data: { lat: number; lon: number; radius_meters: number }) => void;
     onDelete?: (place: Place) => void;
@@ -88,8 +88,7 @@
   });
 
   function handleSave() {
-    if (!name.trim()) return;
-    onSave({
+    return onSave({
       name: name.trim(),
       lat,
       lon,
@@ -116,28 +115,18 @@
     onDelete(place);
   }
 
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  // Only a single-line text field commits, as in WorkEntryForm. Enter on the
-  // category trigger confirms the dropdown, and used to save in the same key.
-  const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'range', 'button', 'submit', 'file']);
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    const target = e.target;
-    if (!(target instanceof HTMLInputElement)) return;
-    if (NON_TEXT_INPUTS.has(target.type)) return;
-    handleSave();
-  }
-
   const title = $derived(editing ? 'Edit place' : manual ? 'New place' : 'Name this place');
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal bind:open {title} onOpenChange={handleOpenChange} width="320px">
+<FormModal
+  bind:open
+  {title}
+  width="320px"
+  submitLabel={editing ? 'Update' : 'Save'}
+  canSubmit={!!name.trim()}
+  onSubmit={handleSave}
+  {onCancel}
+>
   {#if cluster && !editing}
     <div class="caption">{cluster.total_pings} pings recorded here</div>
   {/if}
@@ -179,21 +168,17 @@
     </Field>
   </div>
 
-  {#snippet footer()}
+  {#snippet extraActions()}
     {#if editing && onDelete}
       <button class="delete-link" type="button" onclick={handleDelete}>Delete</button>
     {/if}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
     {#if !editing && onDismiss}
       <Button variant="secondary" onclick={handleDismiss} title="Don't show this cluster again">
         Dismiss
       </Button>
     {/if}
-    <Button variant="primary" onclick={handleSave} disabled={!name.trim()}>
-      {editing ? 'Update' : 'Save'}
-    </Button>
   {/snippet}
-</Modal>
+</FormModal>
 
 <ConfirmDialog
   bind:open={confirmDelete}

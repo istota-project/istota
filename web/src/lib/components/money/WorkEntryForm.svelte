@@ -6,15 +6,7 @@
     quantityFieldFor,
     type WorkEntrySavePayload,
   } from '$lib/money/workEntryPayload';
-  import {
-    Modal,
-    Button,
-    Field,
-    Input,
-    Select,
-    type SelectOption,
-    Checkbox,
-  } from '$lib/components/ui';
+  import { FormModal, Field, Input, Select, type SelectOption, Checkbox } from '$lib/components/ui';
   import { formatDecimal } from '$lib/format';
   import { localDateISO } from '$lib/dateFormat';
 
@@ -23,21 +15,11 @@
     entry?: WorkEntryRow | null;
     clients?: ClientRow[];
     services?: ServiceRow[];
-    onSave: (data: WorkEntrySavePayload) => void;
+    onSave: (data: WorkEntrySavePayload) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let {
-    entry = null,
-    clients = [],
-    services = [],
-    onSave,
-    onCancel,
-    error = '',
-    saving = false,
-  }: Props = $props();
+  let { entry = null, clients = [], services = [], onSave, onCancel }: Props = $props();
 
   // The form is mounted fresh each time it opens, so the initial props are
   // the whole story — the local fields below deliberately don't track them.
@@ -145,11 +127,10 @@
     return `${head}${tail} = ${formatMoney(total)}`;
   });
 
-  const canSave = $derived(!!date && !!client && !!service && !saving);
+  const canSave = $derived(!!date && !!client && !!service);
 
   function handleSave() {
-    if (!canSave) return;
-    onSave(
+    return onSave(
       buildWorkEntryPayload({
         date,
         client,
@@ -165,33 +146,15 @@
       }),
     );
   }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    const target = e.target as HTMLElement | null;
-    // Only a text/date field commits the form. Enter anywhere else is that
-    // control's own business — notably confirming a dropdown option, which
-    // would otherwise select *and* save in one keystroke, writing a
-    // half-filled entry.
-    if (!(target instanceof HTMLInputElement)) return;
-    if (target.type === 'checkbox') return;
-    // A stray Enter while typing prose shouldn't commit either.
-    if (target.dataset.multiline === 'true') return;
-    handleSave();
-  }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal
+<FormModal
   bind:open
   title={isEdit ? 'Edit work entry' : 'Add work entry'}
-  onOpenChange={handleOpenChange}
   width="400px"
+  canSubmit={canSave}
+  onSubmit={handleSave}
+  {onCancel}
 >
   <div class="vstack">
     <Field label="Date">
@@ -223,7 +186,7 @@
     </Field>
 
     <Field label="Description" optional>
-      <Input data-multiline="true" bind:value={description} />
+      <Input bind:value={description} />
     </Field>
 
     <Field
@@ -247,18 +210,7 @@
   {#if preview}
     <div class="preview">{preview}</div>
   {/if}
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!canSave}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   p {
@@ -272,11 +224,6 @@
     background: var(--surface-card);
     border-radius: var(--radius-sm);
     padding: var(--space-2) var(--space-2);
-    margin: var(--space-3) 0 var(--space-2);
-  }
-
-  /* Type is the global .form-error; only the space around it is this form's. */
-  .form-error {
     margin: var(--space-3) 0 var(--space-2);
   }
 </style>

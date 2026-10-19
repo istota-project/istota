@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { KEY_RE, KEY_HINT, type ServiceRow, type ServiceInput } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption, Field, Input } from '$lib/components/ui';
+  import { FormModal, Select, type SelectOption, Field, Input } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billable service.
@@ -14,13 +14,11 @@
    */
   interface Props {
     service?: ServiceRow | null;
-    onSave: (key: string, data: ServiceInput) => void;
+    onSave: (key: string, data: ServiceInput) => void | Promise<void>;
     onCancel: () => void;
-    error?: string;
-    saving?: boolean;
   }
 
-  let { service = null, onSave, onCancel, error = '', saving = false }: Props = $props();
+  let { service = null, onSave, onCancel }: Props = $props();
 
   const isEdit = untrack(() => !!service);
 
@@ -65,12 +63,9 @@
       ? `"${legacyType}" is not a billing type — it bills as hours. Pick one to fix it.`
       : '',
   );
-  const canSave = $derived(
-    !!displayName.trim() && (isEdit || (!!key && !keyError)) && !rateError && !saving,
-  );
+  const canSave = $derived(!!displayName.trim() && (isEdit || (!!key && !keyError)) && !rateError);
 
   function handleSave() {
-    if (!canSave) return;
     const data: ServiceInput = {
       display_name: displayName.trim(),
       type,
@@ -82,27 +77,17 @@
     // totals from live config, silently reprices every past invoice carrying
     // this service to nothing.
     if (type !== 'other' && rate.trim()) data.rate = Number(rate.trim());
-    onSave(isEdit ? (service as ServiceRow).key : key.trim(), data);
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) onCancel();
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key !== 'Enter') return;
-    if (!(e.target instanceof HTMLInputElement)) return;
-    handleSave();
+    return onSave(isEdit ? (service as ServiceRow).key : key.trim(), data);
   }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
-<Modal
+<FormModal
   bind:open
   title={isEdit ? `Edit ${service?.display_name || service?.key}` : 'Add service'}
-  onOpenChange={handleOpenChange}
   width="400px"
+  canSubmit={canSave}
+  onSubmit={handleSave}
+  {onCancel}
 >
   <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
@@ -135,18 +120,7 @@
       <Input type="text" bind:value={incomeAccount} placeholder="Income:Consulting" />
     </Field>
   </div>
-
-  {#if error}
-    <div class="form-error">{error}</div>
-  {/if}
-
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onCancel}>Cancel</Button>
-    <Button variant="primary" onclick={handleSave} disabled={!canSave}>
-      {saving ? 'Saving…' : 'Save'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .key-value {
@@ -155,10 +129,5 @@
 
   .field-note {
     margin: 0;
-  }
-
-  /* Type is the global .form-error; only the space above it is this form's. */
-  .form-error {
-    margin-top: var(--space-2);
   }
 </style>
