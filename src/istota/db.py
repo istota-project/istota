@@ -1312,6 +1312,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # nothing above it.
     _migrate_notifications(conn)
     _migrate_push_tables(conn)
+    _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
     _migrate_profile_generation(conn)
@@ -9303,6 +9304,29 @@ def _migrate_user_profile_managed_fields(conn: sqlite3.Connection) -> None:
         logger.warning("user_profile_managed_fields migration failed: %s", e)
 
 
+def _migrate_mobile_auth_requests(conn: sqlite3.Connection) -> None:
+    """Add handoffs without committing the caller's transaction."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
+            request_id TEXT PRIMARY KEY,
+            challenge TEXT NOT NULL,
+            state TEXT NOT NULL,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            user_id TEXT,
+            auth_method TEXT,
+            auth_epoch INTEGER,
+            code_digest TEXT,
+            code_expires_at TEXT,
+            consumed_at TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_expiry ON web_mobile_auth_requests(expires_at)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_web_mobile_auth_code ON web_mobile_auth_requests(code_digest)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_source ON web_mobile_auth_requests(source, expires_at)")
+
+
 def _migrate_push_tables(conn: sqlite3.Connection) -> None:
     """Create push state without committing the caller's transaction."""
     conn.execute("""
@@ -9321,7 +9345,10 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
             UNIQUE (token, environment)
         )
     """)
-    _add_columns(conn, "push_devices", {"auth_method": "TEXT", "auth_epoch": "INTEGER", "auth_session_id": "TEXT"})
+    _add_columns(conn, "push_devices", {
+        "auth_method": "TEXT", "auth_epoch": "INTEGER", "auth_session_id": "TEXT",
+        "connection_binding": "TEXT", "connection_generation": "INTEGER",
+    })
     conn.execute("CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS push_state (

@@ -637,3 +637,32 @@ describe('native push lifecycle', () => {
     expect(plugin.setBadge).not.toHaveBeenCalled();
   });
 });
+
+describe('the offline service worker', () => {
+  // Only the app-bound shells can run one. The generic shell (0.12.0) picks its
+  // server at runtime, has no worker, and must not be offered a registration.
+  let register: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    register = vi.fn(async () => ({}));
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: { register },
+      configurable: true,
+    });
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'serviceWorker');
+  });
+
+  it.each([
+    [SHELL_UA, true],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.11.0', true],
+    ['Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) IstotaApp/0.12.0', false],
+    [BROWSER_UA, false],
+  ])('%s registers: %s', async (ua, expected) => {
+    useAgent(ua);
+    getMe.mockResolvedValue(person());
+    render(Layout, { children });
+    await screen.findByText('Alice');
+    expect(register).toHaveBeenCalledTimes(expected ? 1 : 0);
+  });
+});

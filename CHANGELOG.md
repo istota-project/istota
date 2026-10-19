@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- In the generic iOS app (0.12.0), Log out hands over to the app, which asks once and then stops location tracking, removes the notification enrollment and clears the app's website data. Settings → Preferences has a card named for the device (iPhone or iPad) with a Device settings button, Nextcloud Reconnect and Google Connect open in the browser because those sign-ins leave the site, and the app no longer gets the offline service worker, which it cannot run. Browsers and older iOS apps are unchanged.
+
+- Notification registrations from the generic iOS app name the app's server connection, and alerts repeat it, so the app ignores a tapped alert from a server it has disconnected from. Registrations and alerts for older iOS apps are unchanged.
+
+- Compatible iOS apps can sign in through the browser and ask you to approve the displayed account and installation. The app receives a fresh session through a one-use exchange; existing browser and older-app sign-in behavior stays the same.
+
+- **iOS server discovery.** Installations now expose a small public compatibility response with location and push availability, so a generic app can check the server before sign-in. Existing browser and iOS login behavior is unchanged.
+
 - **`!arr` requests media without a model turn.** `!arr search film|show|album TITLE` lists matches with their ids, and `!arr add film|show|album ID` puts one on the arr's Wanted list, monitoring it if the library holds it unmonitored. It uses the servarr skill's own tiers and defaults.
 - The Chat sidebar now shows a Starred count beside the existing Unread count, with the same badges as Feeds. It counts all starred messages in listed rooms and updates after starring, unstarring or deleting a message.
 - Operators can configure iOS push separately from a full deployment. The dedicated Ansible tag installs the signing key, preserves other live settings and restarts the app only when needed.

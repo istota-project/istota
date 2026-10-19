@@ -18,8 +18,13 @@ def register_device(
     platform: str = "ios", app_version: str = "", *,
     auth_method: str | None = None, auth_epoch: int | None = None,
     auth_session_id: str | None = None,
+    connection_binding: str | None = None, connection_generation: int | None = None,
 ) -> int | None:
-    """Move a token to its current account and seed only a new user's watermark."""
+    """Move a token to its current account and seed only a new user's watermark.
+
+    A registration without a connection binding clears any earlier one: the same
+    token from an older binary is a legacy enrollment again.
+    """
     try:
         # One savepoint makes the registration and watermark atomic, including
         # when the caller has already started a transaction.
@@ -36,17 +41,21 @@ def register_device(
             now = stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
         row = conn.execute(
             """INSERT INTO push_devices
-                (user_id, token, environment, platform, app_version, created_at, updated_at, auth_method, auth_epoch, auth_session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (user_id, token, environment, platform, app_version, created_at, updated_at, auth_method, auth_epoch,
+                 auth_session_id, connection_binding, connection_generation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(token, environment) DO UPDATE SET
                     user_id = excluded.user_id, platform = excluded.platform,
                     app_version = excluded.app_version, last_badge = -1,
                     auth_method = excluded.auth_method, auth_epoch = excluded.auth_epoch,
                     auth_session_id = excluded.auth_session_id,
+                    connection_binding = excluded.connection_binding,
+                    connection_generation = excluded.connection_generation,
                     last_error = NULL, last_seen_at = NULL,
                     created_at = excluded.created_at, updated_at = excluded.updated_at
                 RETURNING id""",
-            (user_id, token, environment, platform, app_version, now, now, auth_method, auth_epoch, auth_session_id),
+            (user_id, token, environment, platform, app_version, now, now, auth_method, auth_epoch, auth_session_id,
+             connection_binding, connection_generation),
         ).fetchone()
         conn.execute(
             """INSERT INTO push_state (user_id, last_pushed_message_id)

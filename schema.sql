@@ -2674,6 +2674,9 @@ CREATE TABLE IF NOT EXISTS push_devices (
     auth_method TEXT,
     auth_epoch INTEGER,
     auth_session_id TEXT,
+    -- Set only by the generic iOS shell: the native connection that enrolled, echoed in alert routing.
+    connection_binding TEXT,
+    connection_generation INTEGER,
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -2687,3 +2690,22 @@ CREATE TABLE IF NOT EXISTS push_state (
     last_pushed_message_id INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- Short-lived browser approvals; raw codes and verifiers are never persisted.
+CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
+    request_id TEXT PRIMARY KEY,
+    challenge TEXT NOT NULL,
+    state TEXT NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    user_id TEXT,
+    auth_method TEXT,
+    auth_epoch INTEGER,
+    code_digest TEXT,
+    code_expires_at TEXT,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_expiry ON web_mobile_auth_requests(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_mobile_auth_code ON web_mobile_auth_requests(code_digest);
+CREATE INDEX IF NOT EXISTS idx_web_mobile_auth_source ON web_mobile_auth_requests(source, expires_at);

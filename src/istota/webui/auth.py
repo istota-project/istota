@@ -177,17 +177,17 @@ def get_retired_epoch(db_path: Path, user_id: str) -> int:
         return _retired_epoch(conn, user_id)
 
 
-def validate_session_credential(db_path: Path, user_id: str, method: str, epoch: int, web_config) -> Identity | None:
-    """Validate a stored auth snapshot against current account authority."""
+def validate_session_credential(db_path: Path, user_id: str, method: str, epoch: int, web_config,
+                                *, conn: sqlite3.Connection | None = None) -> Identity | None:
+    """Validate authority, optionally inside the caller's consumption transaction."""
+    if conn is None:
+        with get_db(db_path) as opened:
+            return validate_session_credential(db_path, user_id, method, epoch, web_config, conn=opened)
     if method not in ("nextcloud", "email", "local_code") or not web_config.has_method(method):
         raise ValueError("Authentication method is unavailable")
-    from istota import user_profiles
-
-    identity = get_identity(db_path, user_id)
-    current_epoch = identity.credential_epoch if identity else get_retired_epoch(db_path, user_id)
-    if method in ("email", "local_code") and (
-        identity is None or user_profiles.get_profile(db_path, user_id) is None
-    ):
+    identity = _get_identity(conn, user_id)
+    current_epoch = identity.credential_epoch if identity else _retired_epoch(conn, user_id)
+    if method in ("email", "local_code") and (identity is None or not _has_profile(conn, user_id)):
         raise ValueError("Account is unavailable")
     if identity and identity.disabled:
         raise ValueError("Account is disabled")

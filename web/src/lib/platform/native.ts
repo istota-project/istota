@@ -61,6 +61,32 @@ export function shellAtLeast(version: string): boolean {
 }
 
 /**
+ * The kind of device the page runs on, for naming it to the user. iPadOS asks for
+ * desktop sites by default and then sends a Macintosh User-Agent, so a Mac UA with a
+ * touch screen is an iPad. Anything else, including no navigator, is an iPhone: the
+ * only other device the app runs on.
+ */
+export function deviceModel(): 'iPhone' | 'iPad' {
+  if (typeof navigator === 'undefined') return 'iPhone';
+  const ua = navigator.userAgent;
+  if (/\biPad\b/.test(ua)) return 'iPad';
+  if (/\bMacintosh\b/.test(ua) && navigator.maxTouchPoints > 1) return 'iPad';
+  return 'iPhone';
+}
+
+/**
+ * Does this shell run the offline service worker?
+ *
+ * 0.10.0 and 0.11.0 declare the app-bound domains WebKit requires before it
+ * gives a WKWebView `navigator.serviceWorker` at all. From 0.12.0 the app
+ * connects to a server chosen at runtime, which a signed domain list cannot
+ * name, so the generic shell has no worker and must not be handed one.
+ */
+export function shellRunsServiceWorker(): boolean {
+  return shellAtLeast('0.10.0') && !shellAtLeast('0.12.0');
+}
+
+/**
  * The soft keyboard's height, reported as it starts to animate.
  *
  * Capacitor's Keyboard plugin mirrors its `keyboardWillShow`/`keyboardWillHide`

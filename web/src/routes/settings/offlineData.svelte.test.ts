@@ -48,6 +48,8 @@ const native = vi.hoisted(() => ({
   isNativeShell: vi.fn(() => true),
   shellVersion: vi.fn(() => '0.10.0'),
   shellAtLeast: vi.fn(() => true),
+  shellRunsServiceWorker: vi.fn(() => true),
+  deviceModel: vi.fn(() => 'iPhone'),
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 vi.mock('$lib/platform/native', () => native);
@@ -89,6 +91,7 @@ const renderPage = () => render(Harness, { component: Page, layout: SettingsLayo
 
 beforeEach(() => {
   native.shellAtLeast.mockReturnValue(true);
+  native.shellRunsServiceWorker.mockReturnValue(true);
   offline.clearOfflineData.mockClear();
 });
 
@@ -140,5 +143,14 @@ describe('the "Clear offline data" row', () => {
 
     await waitFor(() => expect(screen.getByText(/Could not clear the offline data/)).toBeVisible());
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('does not promise an app that opens offline in the generic shell', async () => {
+    // 0.12.0 has no service worker: the cache is rooms and messages only.
+    native.shellRunsServiceWorker.mockReturnValue(false);
+    renderPage();
+    await screen.findByRole('button', { name: ROW });
+    expect(screen.getByText(/The app itself is not stored/)).toBeInTheDocument();
+    expect(screen.queryByText(/so it opens and reads without a connection/)).toBeNull();
   });
 });

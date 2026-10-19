@@ -366,3 +366,62 @@ it('keeps registration retryable when enrollment fails on the server', async () 
   expect(screen.queryByText('This device is registered.')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Register this device' })).toBeEnabled();
 });
+
+const binding = '0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51';
+function genericShell() {
+  const { plugin } = nativePush();
+  Object.defineProperty(navigator, 'userAgent', { value: 'IstotaApp/0.12.0', configurable: true });
+  const connection = {
+    current: vi.fn(async () => ({
+      connectionBinding: binding,
+      generation: 3,
+      baseURL: 'https://your-host.tld/istota/',
+      state: 'active',
+    })),
+    recordPushRegistration: vi.fn(async () => {}),
+  };
+  const capacitor = globalThis as unknown as { Capacitor: { Plugins: Record<string, unknown> } };
+  capacitor.Capacitor.Plugins.IstotaConnection = connection;
+  return { plugin, connection };
+}
+
+it('binds a generic-shell enrollment to the native connection and hands back its ID', async () => {
+  const { connection } = genericShell();
+  api.registerPushDevice.mockResolvedValue({ id: 41 });
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByText('This device is registered.')).toBeInTheDocument();
+  expect(api.registerPushDevice).toHaveBeenCalledWith({
+    token: 'ab'.repeat(32),
+    environment: 'sandbox',
+    platform: 'ios',
+    app_version: '0.12.0',
+    connection_binding: binding,
+    connection_generation: 3,
+  });
+  expect(connection.recordPushRegistration).toHaveBeenCalledWith({
+    registrationId: 41,
+    connectionBinding: binding,
+    generation: 3,
+  });
+});
+
+it('does not prompt or enroll when the page no longer owns the connection', async () => {
+  const { plugin, connection } = genericShell();
+  connection.current.mockRejectedValueOnce(new Error('The connection changed.'));
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The connection changed.');
+  expect(plugin.register).not.toHaveBeenCalled();
+  expect(api.registerPushDevice).not.toHaveBeenCalled();
+});
+
+it('does not claim success when the app refuses the registration receipt', async () => {
+  const { connection } = genericShell();
+  api.registerPushDevice.mockResolvedValue({ id: 41 });
+  connection.recordPushRegistration.mockRejectedValueOnce(new Error('The connection changed.'));
+  mount();
+  await fireEvent.click(await screen.findByRole('button', { name: 'Register this device' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The connection changed.');
+  expect(screen.queryByText('This device is registered.')).not.toBeInTheDocument();
+});
