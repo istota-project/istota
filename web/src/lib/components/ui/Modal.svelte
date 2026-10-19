@@ -41,6 +41,16 @@
      * it to the safe box.
      */
     height?: string;
+    /**
+     * Form mode. The body and the footer render inside one `<form novalidate>`,
+     * so a footer `Button type="submit"` is the form's submit button and Enter
+     * in a single-line input submits it natively; Enter on a `Select` trigger,
+     * a checkbox, a button or a textarea does not. The default is prevented
+     * before the handler runs.
+     */
+    onsubmit?: (e: SubmitEvent) => void;
+    /** In flight: Escape and an outside click do not dismiss, and the dialog is `aria-busy`. */
+    busy?: boolean;
   }
 
   let {
@@ -60,7 +70,16 @@
     bodyKey,
     bodyPadding,
     height,
+    onsubmit,
+    busy = false,
   }: Props = $props();
+
+  const dismissNow = $derived<'close' | 'ignore'>(dismissible && !busy ? 'close' : 'ignore');
+
+  function handleSubmit(event: SubmitEvent) {
+    event.preventDefault();
+    onsubmit?.(event);
+  }
 
   // A dialog opened from inside a Field is not that field's control.
   setFieldContext(null);
@@ -146,11 +165,21 @@
   {/if}
 {/snippet}
 
-{#snippet body()}
+{#snippet bodyAndFooter()}
   <div class="ui-modal-body" style:padding={bodyPadding} bind:this={bodyEl}>
     {@render children()}
   </div>
   {#if footer}<div class="ui-modal-footer">{@render footer()}</div>{/if}
+{/snippet}
+
+{#snippet body()}
+  {#if onsubmit}
+    <form class="ui-modal-form" novalidate onsubmit={handleSubmit}>
+      {@render bodyAndFooter()}
+    </form>
+  {:else}
+    {@render bodyAndFooter()}
+  {/if}
 {/snippet}
 
 <Dialog.Root bind:open {onOpenChange}>
@@ -172,8 +201,9 @@
         (viewer ? '100dvh' : 'auto')}"
       onkeydown={handleKeydown}
       {onOpenAutoFocus}
-      escapeKeydownBehavior={dismissible ? 'close' : 'ignore'}
-      interactOutsideBehavior={dismissible ? 'close' : 'ignore'}
+      escapeKeydownBehavior={dismissNow}
+      interactOutsideBehavior={dismissNow}
+      aria-busy={busy || undefined}
     >
       {#if viewer}
         {#if navigation}<div class="ui-viewer-previous">{@render previous()}</div>{/if}
@@ -231,6 +261,10 @@
 </Dialog.Root>
 
 <style>
+  /* The form adds no box: body and footer stay the panel's flex items. */
+  .ui-modal-form {
+    display: contents;
+  }
   :global(.ui-modal-overlay) {
     position: fixed;
     inset: 0;

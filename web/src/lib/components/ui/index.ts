@@ -33,6 +33,7 @@ export { default as FileDropZone } from './FileDropZone.svelte';
 export { default as AvatarPicker } from './AvatarPicker.svelte';
 export { default as Modal } from './Modal.svelte';
 export type { ViewerNavigation } from './Modal.svelte';
+export { default as FormModal } from './FormModal.svelte';
 export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { default as KebabMenu } from './KebabMenu.svelte';
 export { default as SortHeader, sortAria } from './SortHeader.svelte';
