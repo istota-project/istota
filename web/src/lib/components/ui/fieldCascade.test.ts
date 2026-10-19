@@ -122,11 +122,11 @@ describe('Input and TextArea draw their own props', () => {
   ])('%s styles mono and invalid on its own class', (file, cls) => {
     const css = compiledCss(file).replace(/\s+/g, ' ');
     expect(css).toMatch(
-      new RegExp(`\\.${cls}\\.mono\\.svelte-[\\w-]+ \\{ font-family: var\\(--font-mono\\);`),
+      new RegExp(`\\.${cls}\\.mono\\.svelte-[\\w-]+[^{]*\\{ font-family: var\\(--font-mono\\);`),
     );
     expect(css).toMatch(
       new RegExp(
-        `\\.${cls}\\.invalid\\.svelte-[\\w-]+ \\{ border-color: var\\(--status-danger-fg\\);`,
+        `\\.${cls}\\.invalid\\.svelte-[\\w-]+[^{]*\\{ border-color: var\\(--status-danger-fg\\);`,
       ),
     );
   });

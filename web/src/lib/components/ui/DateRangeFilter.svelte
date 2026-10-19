@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Input from './Input.svelte';
   import { getFieldContext } from './fieldContext';
 
   interface Props {
@@ -82,15 +83,16 @@
     <label class="date-cap caption" for="{uid}-from">{fromLabel.replace(/ date$/i, '')}</label>
   {/if}
   <span class="date-field" class:date-unset={!from}>
-    <input
+    <Input
       id="{uid}-from"
       type="date"
+      size="toolbar"
       bind:value={from}
       onchange={onChange}
       {max}
       aria-label={fromLabel}
     />
-    {#if !from}<span class="date-ph caption" aria-hidden="true">{fromPlaceholder}</span>{/if}
+    {#if !from}<span class="date-ph" aria-hidden="true">{fromPlaceholder}</span>{/if}
   </span>
   {#if labelled}
     <label class="date-cap caption" for="{uid}-to">{toLabel.replace(/ date$/i, '')}</label>
@@ -98,15 +100,16 @@
     <span class="date-sep caption">{separator}</span>
   {/if}
   <span class="date-field" class:date-unset={!to}>
-    <input
+    <Input
       id="{uid}-to"
       type="date"
+      size="toolbar"
       bind:value={to}
       onchange={onChange}
       {max}
       aria-label={toLabel}
     />
-    {#if !to}<span class="date-ph caption" aria-hidden="true">{toPlaceholder}</span>{/if}
+    {#if !to}<span class="date-ph" aria-hidden="true">{toPlaceholder}</span>{/if}
   </span>
 </div>
 
@@ -164,26 +167,9 @@
     padding: 0 var(--space-1);
   }
 
-  /* Paint only. Height, corner and leading come from the field tier the
-     container sets — the same division `.money-control-input` draws, and what
-     keeps this level with the Select beside it once iOS floors its text. */
-  .date-range input[type='date'] {
-    width: 100%;
-    box-sizing: border-box;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--control-radius);
-    color: var(--text-primary);
-    font-family: inherit;
-    font-size: var(--text-xs);
-    line-height: var(--leading-tight);
-    /* design-lint-allow: hairline nudge below --space-1, matching the two
-       filters this replaces. */
-    padding: 0.2rem var(--space-2);
-    /* No min-width: sizing is primitives.css's job. Restating it here would
-       outrank the floor and collapse both inputs to blank slivers on iOS,
-       which is a bug one of these filters already shipped. */
-  }
+  /* The inputs are `Input size="toolbar"`: the filter paint, at the compact
+     height a `.control-row` lifts to the field tier, so the pair stays level
+     with the Select beside it once iOS floors its text. */
 
   /* Drawn over the field, so it sits where the value will and adds nothing to
      the box. `aria-hidden` and no pointer target: the input carries the
@@ -199,6 +185,8 @@
     display: none;
     align-items: center;
     padding: 0 calc(var(--space-2) + 1px);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
     line-height: var(--leading-tight);
     pointer-events: none;
   }
@@ -209,7 +197,7 @@
      mechanism, same `max()`, one token. */
   @media (pointer: coarse) {
     .date-ph {
-      --text-xs: max(0.7rem, 16px);
+      --text-sm: max(0.75rem, 16px);
     }
   }
 
@@ -219,10 +207,10 @@
     }
     /* On focus the native segments are what you are typing into, so hand them
        back and drop ours. */
-    .date-field input[type='date']:focus + .date-ph {
+    .date-field:focus-within .date-ph {
       display: none;
     }
-    .date-field.date-unset input[type='date']:not(:focus)::-webkit-datetime-edit {
+    .date-field.date-unset :global(input[type='date']:not(:focus))::-webkit-datetime-edit {
       opacity: 0;
     }
   }
@@ -231,7 +219,7 @@
      cannot restyle, only filter, and it ships dark — the token carries which
      way each theme needs it, so there is no theme-conditional rule here and
      no half of a pair to forget. */
-  .date-range input[type='date']::-webkit-calendar-picker-indicator {
+  .date-range :global(input[type='date'])::-webkit-calendar-picker-indicator {
     filter: var(--calendar-icon-filter);
   }
 </style>
