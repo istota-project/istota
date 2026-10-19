@@ -2,6 +2,7 @@
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { untrack } from 'svelte';
   import { addRoomMember } from '$lib/api';
+  import { copyText } from '$lib/clipboard';
   import type {
     ChatRoom,
     GuestReply,
@@ -304,7 +305,6 @@
   // Bumped after a confirmed add so the members pane lists the new member.
   let membersEpoch = $state(0);
   let copied = $state(false);
-  let copyError = $state('');
   let lastRoomId = $state(untrack(() => room.id));
 
   $effect(() => {
@@ -324,7 +324,6 @@
       pendingAdd = null;
       addError = '';
       copied = false;
-      copyError = '';
     }
   });
 
@@ -360,15 +359,11 @@
 
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
   async function copyToken() {
-    copyError = '';
-    try {
-      await navigator.clipboard.writeText(room.token);
-      copied = true;
-      clearTimeout(copyTimer);
-      copyTimer = setTimeout(() => (copied = false), 1500);
-    } catch {
-      copyError = 'Copy failed — select and copy manually.';
-    }
+    // copyText reports a refusal itself, in the notice drawer.
+    if (!(await copyText(room.token))) return;
+    copied = true;
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => (copied = false), 1500);
   }
 
   function handleSave() {
@@ -689,7 +684,6 @@
       </button>
     </div>
     <p class="caption">Use this to link to or route output to this room.</p>
-    {#if copyError}<p class="copy-error">{copyError}</p>{/if}
   </div>
 
   {#if phoneLabel}
@@ -943,12 +937,6 @@
   .talk-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-
-  .copy-error {
-    font-size: var(--text-xs);
-    color: var(--status-danger-fg);
-    margin: 0.1rem 0 0;
   }
 
   .delete-link {

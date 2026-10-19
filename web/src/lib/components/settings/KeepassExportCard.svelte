@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { exportKeepass, type StepUpProof } from '$lib/api';
+  import { copyText } from '$lib/clipboard';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
   import { formatDate } from '$lib/dateFormat';
   import { Button, Field, Modal } from '$lib/components/ui';
@@ -79,12 +80,8 @@
   }
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(password);
-      copied = true;
-    } catch {
-      error = 'Could not copy. Select the password and copy it yourself.';
-    }
+    // A refusal is reported by copyText; the password stays on screen to copy by hand.
+    copied = await copyText(password, { label: 'Password copied' });
   }
 </script>
 
