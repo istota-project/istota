@@ -78,13 +78,16 @@ class TestDeclaredPointSchema:
         assert "wifi_zone" in cols
         assert "vertical_accuracy" in cols
 
-    def test_fresh_db_records_schema_version_4(self, tmp_path):
+    def test_fresh_db_records_the_current_schema_version(self, tmp_path):
+        # v4 added these columns; a fresh DB is stamped with whatever the
+        # current version is, which later schema changes keep raising.
         path = _init_db(tmp_path)
         with location_db.connect(path) as conn:
             row = conn.execute(
                 "SELECT value FROM schema_meta WHERE key = 'version'"
             ).fetchone()
-        assert row[0] == "4"
+        assert int(row[0]) == location_db.SCHEMA_VERSION
+        assert location_db.SCHEMA_VERSION >= 4
 
     def test_migration_is_idempotent(self, tmp_path):
         path = _init_db(tmp_path)
