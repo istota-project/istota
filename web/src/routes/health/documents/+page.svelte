@@ -38,14 +38,13 @@
   } from '$lib/api';
   import {
     Badge,
-    Button,
     NoticeBanner,
     Chip,
     ConfirmDialog,
     EmptyState,
     Field,
     KebabMenu,
-    Modal,
+    FormModal,
     Select,
     type KebabItem,
     type SelectOption,
@@ -162,7 +161,6 @@
   let attachForId = $state<number | null>(null);
   let attachType = $state<DocumentEntity>('encounter');
   let attachId = $state('');
-  let attachError = $state('');
   let deleteTargetId = $state<number | null>(null);
 
   const pool = $derived({ encounters, diagnoses, immunizations });
@@ -294,7 +292,6 @@
     attachForId = doc.id;
     attachType = 'encounter';
     attachId = '';
-    attachError = '';
   }
 
   function pickType(v: string) {
@@ -307,9 +304,8 @@
   async function attach() {
     const doc = attachFor;
     const id = Number(attachId);
-    if (!doc || !Number.isFinite(id) || id <= 0) return;
+    if (!doc || !Number.isFinite(id) || id <= 0) return false;
     const target = { type: attachType, id };
-    attachError = '';
     busy.add(doc.id);
     try {
       const out = await linkDocument(doc.id, target);
@@ -322,8 +318,6 @@
       if (!out.created) {
         notifyWarning('That document was already attached to this record.');
       }
-    } catch (e) {
-      attachError = e instanceof Error ? e.message : 'Failed to attach';
     } finally {
       busy.delete(doc.id);
     }
@@ -512,14 +506,17 @@
 {/if}
 
 {#if attachFor}
-  <Modal
+  <FormModal
     open={true}
     title="Attach {documentName(attachFor)}"
     description="Pick the record this document is evidence for. To move it, attach the new record and detach the old one."
     width="30rem"
-    onOpenChange={(open) => {
-      if (!open) attachForId = null;
-    }}
+    submitLabel="Attach"
+    busyLabel="Attaching…"
+    canSubmit={!!attachId}
+    busy={attachFor !== null && busy.has(attachFor.id)}
+    onSubmit={attach}
+    onCancel={() => (attachForId = null)}
   >
     <div class="vstack">
       <Field label="Record type">
@@ -545,21 +542,8 @@
           fullWidth
         />
       </Field>
-      {#if attachError}
-        <p class="form-error" role="alert">{attachError}</p>
-      {/if}
     </div>
-    {#snippet footer()}
-      <Button onclick={() => (attachForId = null)}>Cancel</Button>
-      <Button
-        variant="primary"
-        onclick={attach}
-        disabled={!attachId || (attachFor !== null && busy.has(attachFor.id))}
-      >
-        Attach
-      </Button>
-    {/snippet}
-  </Modal>
+  </FormModal>
 {/if}
 
 <ConfirmDialog

@@ -37,7 +37,7 @@
     EmptyState,
     Field,
     Input,
-    Modal,
+    FormModal,
     Select,
     PageLoading,
   } from '$lib/components/ui';
@@ -114,8 +114,6 @@
   let formUnit = $state('');
   let formDate = $state('');
   let formNotes = $state('');
-  let saving = $state(false);
-  let formError = $state('');
 
   function defaultUnitFor(metric: string): string {
     const choices = LOG_UNIT_CHOICES[metric];
@@ -322,37 +320,28 @@
     });
   });
 
-  async function submitEntry(e: Event) {
-    e.preventDefault();
+  async function submitEntry() {
     // Not `formValue.trim()`: the binding above has made this a number by the
     // time anyone can press Save, so a string guard threw here — outside the
     // try, so the modal reported nothing at all. NaN is unreachable through
     // the input itself, which sanitizes a bad entry to '', but the field is
     // also written by `openEntry` and by the reset below.
     const entered = Number(formValue);
-    if (formValue === null || formValue === '' || Number.isNaN(entered)) return;
-    saving = true;
-    formError = '';
-    try {
-      const canonical = toCanonical(formMetric, entered, formUnit);
-      await createHealthStat({
-        metric: formMetric,
-        value: canonical.value,
-        unit: canonical.unit,
-        measured_at: formDate || undefined,
-        notes: formNotes.trim() || undefined,
-      });
-      modalOpen = false;
-      formValue = '';
-      formNotes = '';
-      formDate = '';
-      formUnit = defaultUnitFor(formMetric);
-      await load();
-    } catch (e) {
-      formError = e instanceof Error ? e.message : 'Failed to save';
-    } finally {
-      saving = false;
-    }
+    if (formValue === null || formValue === '' || Number.isNaN(entered)) return false;
+    const canonical = toCanonical(formMetric, entered, formUnit);
+    await createHealthStat({
+      metric: formMetric,
+      value: canonical.value,
+      unit: canonical.unit,
+      measured_at: formDate || undefined,
+      notes: formNotes.trim() || undefined,
+    });
+    modalOpen = false;
+    formValue = '';
+    formNotes = '';
+    formDate = '';
+    formUnit = defaultUnitFor(formMetric);
+    await load();
   }
 
   function openEntry(metric?: string) {
@@ -508,8 +497,14 @@
   />
 {/snippet}
 
-<Modal bind:open={modalOpen} title="Log measurement" width="26rem">
-  <form onsubmit={submitEntry}>
+<FormModal
+  bind:open={modalOpen}
+  title="Log measurement"
+  width="26rem"
+  onSubmit={submitEntry}
+  onCancel={() => (modalOpen = false)}
+>
+  <div class="vstack">
     <Field label="Metric">
       <Select
         value={formMetric}
@@ -535,13 +530,8 @@
     <Field label="Notes">
       <Input bind:value={formNotes} placeholder="optional" />
     </Field>
-    {#if formError}<div class="banner error">{formError}</div>{/if}
-    <div class="modal-actions">
-      <Button onclick={() => (modalOpen = false)} disabled={saving}>Cancel</Button>
-      <Button variant="primary" type="submit" loading={saving}>Save</Button>
-    </div>
-  </form>
-</Modal>
+  </div>
+</FormModal>
 
 <style>
   .bar {
@@ -609,13 +599,6 @@
   /* Typography is the global .caption; the spacing stays at the call site. */
   .caption {
     margin-top: var(--space-1);
-  }
-
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
   }
 
   /* Light theme overrides — dark rules above untouched. */

@@ -21,9 +21,8 @@
     ConfirmDialog,
     EmptyState,
     IconButton,
+    FormModal,
     KebabMenu,
-    Modal,
-    Select,
     type KebabItem,
     type SelectOption,
     Card,
@@ -31,6 +30,9 @@
     Input,
   } from '$lib/components/ui';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
+  import FeedSubscriptionModal, {
+    type FeedDraft,
+  } from '$lib/components/FeedSubscriptionModal.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { formatDateTime } from '$lib/dateFormat';
 
@@ -55,19 +57,12 @@
   let initialJson = $state('');
   let dirty = $derived(JSON.stringify(config) !== initialJson);
 
-  type FeedDraft = {
-    url: string;
-    title: string;
-    category: string;
-    poll_interval_minutes: string; // raw input — empty = inherit default
-  };
   let editing: { idx: number; draft: FeedDraft } | null = $state(null);
   let adding: FeedDraft | null = $state(null);
   // A category is two fields, so it gets a modal like a subscription rather
   // than the browser prompt it used to open — which could ask one question,
   // and reported a duplicate slug only after closing and dropping the draft.
   let addingCategory: { slug: string; title: string } | null = $state(null);
-  let modalError = $state('');
   let confirmDelete: { kind: 'feed' | 'category'; idx: number; label: string } | null =
     $state(null);
 
@@ -175,12 +170,10 @@
   }
 
   function startAdd() {
-    modalError = '';
     adding = { url: '', title: '', category: '', poll_interval_minutes: '' };
   }
 
   function startEdit(idx: number) {
-    modalError = '';
     editing = { idx, draft: feedToDraft(config.feeds[idx]) };
   }
 
@@ -188,39 +181,27 @@
     editing = null;
     adding = null;
     addingCategory = null;
-    modalError = '';
   }
 
-  function saveAdd() {
-    if (!adding) return;
-    const result = draftToFeed(adding);
-    if (typeof result === 'string') {
-      modalError = result;
-      return;
+  // Applies the subscription modal's draft to the page's config, or throws
+  // the reason it cannot, which the modal shows.
+  function saveFeed(draft: FeedDraft) {
+    const result = draftToFeed(draft);
+    if (typeof result === 'string') throw new Error(result);
+    if (editing) {
+      const idx = editing.idx;
+      if (config.feeds.some((f, i) => i !== idx && f.url === result.url)) {
+        throw new Error('A different subscription already uses that URL.');
+      }
+      config.feeds = config.feeds.map((f, i) => (i === idx ? result : f));
+      editing = null;
+    } else {
+      if (config.feeds.some((f) => f.url === result.url)) {
+        throw new Error('A subscription with that URL already exists.');
+      }
+      config.feeds = [...config.feeds, result];
+      adding = null;
     }
-    // Reject duplicate URLs.
-    if (config.feeds.some((f) => f.url === result.url)) {
-      modalError = 'A subscription with that URL already exists.';
-      return;
-    }
-    config.feeds = [...config.feeds, result];
-    adding = null;
-  }
-
-  function saveEdit() {
-    if (!editing) return;
-    const result = draftToFeed(editing.draft);
-    if (typeof result === 'string') {
-      modalError = result;
-      return;
-    }
-    const dup = config.feeds.findIndex((f, i) => i !== editing!.idx && f.url === result.url);
-    if (dup >= 0) {
-      modalError = 'A different subscription already uses that URL.';
-      return;
-    }
-    config.feeds = config.feeds.map((f, i) => (i === editing!.idx ? result : f));
-    editing = null;
   }
 
   function deleteFeed(idx: number) {
@@ -273,20 +254,15 @@
   }
 
   function startAddCategory() {
-    modalError = '';
     addingCategory = { slug: '', title: '' };
   }
 
   function saveAddCategory() {
     if (!addingCategory) return;
     const slug = addingCategory.slug.trim();
-    if (!slug) {
-      modalError = 'Slug is required';
-      return;
-    }
+    if (!slug) throw new Error('Slug is required');
     if (config.categories.some((c) => c.slug === slug)) {
-      modalError = `Category "${slug}" already exists.`;
-      return;
+      throw new Error(`Category "${slug}" already exists.`);
     }
     // A blank title still mirrors the slug, and that is the server's rule
     // rather than a leftover from the prompt: `feed_categories.title` is NOT
@@ -367,8 +343,14 @@
     {#if diagnostics}
       <Card title="Diagnostics">
         {#snippet actions()}
-          <Button variant="pill" size="sm" onclick={refreshNow} disabled={refreshing}>
-            {refreshing ? 'Queueing…' : 'Refresh all now'}
+          <Button
+            variant="pill"
+            size="sm"
+            onclick={refreshNow}
+            loading={refreshing}
+            loadingLabel="Queueing…"
+          >
+            Refresh all now
           </Button>
         {/snippet}
         <div class="diag-grid card-grid">
@@ -631,8 +613,8 @@
         / <code>arena:</code> on import.
       </p>
       <div class="hstack wrap">
-        <Button onclick={() => fileInput?.click()} disabled={importing}>
-          {importing ? 'Importing…' : 'Import OPML…'}
+        <Button onclick={() => fileInput?.click()} loading={importing} loadingLabel="Importing…">
+          Import OPML…
         </Button>
         <a class="opml-link link-muted" href={exportOpmlUrl()} download="feeds.opml">
           Download OPML
@@ -653,62 +635,24 @@
   {/if}
 </SettingsLayout>
 
-{#if adding}
-  <Modal
-    open={true}
-    title="Add subscription"
-    onOpenChange={(o) => {
-      if (!o) cancelModal();
-    }}
-  >
-    <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <Field label="URL">
-        <Input
-          type="text"
-          placeholder="https://example.com/feed.xml | tumblr:user | arena:slug"
-          bind:value={adding.url}
-        />
-      </Field>
-      <Field label="Title (optional)">
-        <Input type="text" bind:value={adding.title} />
-      </Field>
-      <Field label="Category">
-        <Select
-          value={adding.category}
-          options={categorySelectOptions}
-          onValueChange={(v) => {
-            if (adding) adding.category = v;
-          }}
-          ariaLabel="Category"
-          fullWidth
-        />
-      </Field>
-      <Field label="Poll interval (minutes, optional)">
-        <Input
-          type="number"
-          min="1"
-          placeholder={String(defaultInterval())}
-          bind:value={adding.poll_interval_minutes}
-        />
-      </Field>
-      {#if modalError}
-        <div class="banner error">{modalError}</div>
-      {/if}
-    </div>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
-      <Button variant="primary" onclick={saveAdd}>Add</Button>
-    {/snippet}
-  </Modal>
+{#if adding || editing}
+  <FeedSubscriptionModal
+    mode={editing ? 'edit' : 'add'}
+    initial={editing ? editing.draft : adding!}
+    categoryOptions={categorySelectOptions}
+    defaultInterval={defaultInterval()}
+    onSubmit={saveFeed}
+    onCancel={cancelModal}
+  />
 {/if}
 
 {#if addingCategory}
-  <Modal
+  <FormModal
     open={true}
     title="Add category"
-    onOpenChange={(o) => {
-      if (!o) cancelModal();
-    }}
+    submitLabel="Add"
+    onSubmit={saveAddCategory}
+    onCancel={cancelModal}
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
       <Field label="Slug">
@@ -717,60 +661,8 @@
       <Field label="Title (optional)">
         <Input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
       </Field>
-      {#if modalError}
-        <div class="banner error">{modalError}</div>
-      {/if}
     </div>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
-      <Button variant="primary" onclick={saveAddCategory}>Add</Button>
-    {/snippet}
-  </Modal>
-{/if}
-
-{#if editing}
-  <Modal
-    open={true}
-    title="Edit subscription"
-    onOpenChange={(o) => {
-      if (!o) cancelModal();
-    }}
-  >
-    <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <Field label="URL">
-        <Input type="text" bind:value={editing.draft.url} />
-      </Field>
-      <Field label="Title">
-        <Input type="text" bind:value={editing.draft.title} />
-      </Field>
-      <Field label="Category">
-        <Select
-          value={editing.draft.category}
-          options={categorySelectOptions}
-          onValueChange={(v) => {
-            if (editing) editing.draft.category = v;
-          }}
-          ariaLabel="Category"
-          fullWidth
-        />
-      </Field>
-      <Field label="Poll interval (minutes)">
-        <Input
-          type="number"
-          min="1"
-          placeholder={String(defaultInterval())}
-          bind:value={editing.draft.poll_interval_minutes}
-        />
-      </Field>
-      {#if modalError}
-        <div class="banner error">{modalError}</div>
-      {/if}
-    </div>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancelModal}>Cancel</Button>
-      <Button variant="primary" onclick={saveEdit}>Save</Button>
-    {/snippet}
-  </Modal>
+  </FormModal>
 {/if}
 
 {#if confirmDelete}

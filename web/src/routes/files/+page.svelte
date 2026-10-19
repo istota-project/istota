@@ -7,7 +7,7 @@
     Sidebar,
     SidebarToggle,
     Button,
-    Modal,
+    FormModal,
     Field,
     Input,
     FileDropZone,
@@ -246,8 +246,6 @@
   let folderOpen = $state(false);
   let folderName = $state('');
   let folderPath = $state('');
-  let folderBusy = $state(false);
-  let folderError = $state('');
   type Upload = {
     file: File;
     path: string;
@@ -261,26 +259,15 @@
   function openFolderDialog() {
     folderPath = selected?.path || '';
     folderName = '';
-    folderError = '';
     folderOpen = true;
   }
   async function refreshIfCurrent(path: string) {
     if (active && selected?.place === 'home' && selected.path === path) await loadFolder(selected);
   }
-  async function createFolder(event: SubmitEvent) {
-    event.preventDefault();
-    if (!folderName.trim() || folderBusy) return;
-    folderBusy = true;
-    folderError = '';
-    try {
-      await createWorkspaceFolder(folderPath, folderName.trim());
-      folderOpen = false;
-      await refreshIfCurrent(folderPath);
-    } catch (e) {
-      folderError = e instanceof Error ? e.message : 'Could not create this folder.';
-    } finally {
-      folderBusy = false;
-    }
+  async function createFolder() {
+    await createWorkspaceFolder(folderPath, folderName.trim());
+    folderOpen = false;
+    await refreshIfCurrent(folderPath);
   }
   function enqueue(files: File[]) {
     if (selected?.place !== 'home') return;
@@ -883,7 +870,7 @@
   </TextFileEditor>
 {/if}
 
-<Modal
+<FormModal
   bind:open={folderOpen}
   title="New folder"
   onOpenAutoFocus={(event) => {
@@ -891,29 +878,15 @@
     document.getElementById('workspace-folder-name')?.focus();
   }}
   description={`Create in My files${folderPath ? ` / ${folderPath}` : ''}`}
-  dismissible={!folderBusy}
   width="420px"
+  submitLabel="Create folder"
+  busyLabel="Creating…"
+  canSubmit={!!folderName.trim()}
+  onSubmit={createFolder}
+  onCancel={() => (folderOpen = false)}
 >
-  <form onsubmit={createFolder}>
-    <Field label="Folder name"
-      ><Input
-        id="workspace-folder-name"
-        bind:value={folderName}
-        required
-        disabled={folderBusy}
-      /></Field
-    >
-    {#if folderError}<p class="form-error" role="alert">{folderError}</p>{/if}
-    <div class="form-actions">
-      <Button variant="secondary" onclick={() => (folderOpen = false)} disabled={folderBusy}
-        >Cancel</Button
-      >
-      <Button type="submit" disabled={folderBusy || !folderName.trim()}
-        >{folderBusy ? 'Creating…' : 'Create folder'}</Button
-      >
-    </div>
-  </form>
-</Modal>
+  <Field label="Folder name"><Input id="workspace-folder-name" bind:value={folderName} /></Field>
+</FormModal>
 
 <style>
   .only-you {
@@ -965,10 +938,6 @@
     height: var(--space-1);
     accent-color: var(--accent);
   }
-  .form-actions {
-    margin-top: var(--space-4);
-  }
-
   .folder-toolbar {
     display: flex;
     align-items: center;

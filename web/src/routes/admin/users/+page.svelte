@@ -17,7 +17,7 @@
     Badge,
     ConfirmDialog,
     EmptyState,
-    Modal,
+    FormModal,
     KebabMenu,
     NoticeBanner,
     type KebabItem,
@@ -39,7 +39,6 @@
   /* The user whose settings editor is open, or null. */
   let editing = $state<string | null>(null);
   let formOpen = $state(false);
-  let formError = $state('');
   let aboutCollapsed = $state(true);
   let confirmOpen = $state(false);
   let pending = $state<{ user: AdminUser; action: AdminUserAction } | null>(null);
@@ -62,14 +61,11 @@
   }
   onMount(load);
 
-  async function submit(event: SubmitEvent) {
-    event.preventDefault();
-    if (busy) return;
-    formError = '';
+  async function submit() {
     if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(userId)) {
-      formError =
-        'Use 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit.';
-      return;
+      throw new Error(
+        'Use 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit.',
+      );
     }
     busy = true;
     try {
@@ -81,8 +77,8 @@
       // The editor holds everything the create form does not ask for.
       editing = created;
     } catch (e) {
-      if (e instanceof AuthError) failed(e);
-      else formError = e instanceof Error ? e.message : 'The user operation failed.';
+      if (!(e instanceof AuthError)) throw e;
+      failed(e);
     } finally {
       await load();
       busy = false;
@@ -96,7 +92,7 @@
 
   function add() {
     userId = email = displayName = '';
-    error = notice = formError = '';
+    error = notice = '';
     formOpen = true;
   }
 
@@ -277,9 +273,18 @@
   {/if}
 </div>
 
-<Modal bind:open={formOpen} title="Add user" description="Send an invitation to set up web access.">
-  <form aria-label="Add user" onsubmit={submit} class="user-form">
-    {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
+<FormModal
+  bind:open={formOpen}
+  title="Add user"
+  description="Send an invitation to set up web access."
+  submitLabel="Add and invite"
+  busyLabel="Sending…"
+  {busy}
+  canSubmit={!!view?.email_enabled && !!userId.trim() && !!email.trim()}
+  onSubmit={submit}
+  onCancel={() => (formOpen = false)}
+>
+  <div class="user-form">
     <Field
       label="User ID"
       warning="This becomes a directory name: 1–32 lowercase letters, digits, dots, underscores or hyphens; start with a letter or digit."
@@ -292,18 +297,8 @@
     <p class="form-note description">
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
-    <div class="form-actions dialog-actions">
-      <Button variant="secondary" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
-      <Button
-        type="submit"
-        variant="primary"
-        loading={busy}
-        loadingLabel="Sending…"
-        disabled={!view?.email_enabled}>Add and invite</Button
-      >
-    </div>
-  </form>
-</Modal>
+  </div>
+</FormModal>
 
 {#if editing}
   <AdminUserModal
@@ -334,10 +329,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-  }
-  .dialog-actions {
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--border-subtle);
   }
   .form-note {
     margin: 0;

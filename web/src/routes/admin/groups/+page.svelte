@@ -5,7 +5,7 @@
     Button,
     Input,
     Field,
-    Modal,
+    FormModal,
     ConfirmDialog,
     EmptyState,
     Badge,
@@ -159,7 +159,7 @@
     }
   }
   async function create() {
-    if (busy || !owners.length || !groupId.trim() || !displayName.trim()) return;
+    if (busy || !owners.length || !groupId.trim() || !displayName.trim()) return false;
     busy = true;
     formError = '';
     try {
@@ -182,7 +182,7 @@
         detailError = message(e);
       }
     } catch (e) {
-      formError = message(e);
+      throw new Error(message(e));
     } finally {
       busy = false;
     }
@@ -455,7 +455,17 @@
   {/if}
 </div>
 
-<Modal bind:open={createOpen} title="Create group">
+<FormModal
+  bind:open={createOpen}
+  title="Create group"
+  submitLabel="Create group"
+  busyLabel="Creating…"
+  error={formError}
+  {busy}
+  canSubmit={!!groupId.trim() && !!displayName.trim() && owners.length > 0}
+  onSubmit={create}
+  onCancel={() => (createOpen = false)}
+>
   <div class="create-fields vstack">
     <Field label="Group ID" warning="This identifier cannot be changed or reused after archiving."
       ><Input aria-label="Group ID" bind:value={groupId} disabled={busy} /></Field
@@ -482,19 +492,8 @@
       {#if !busy && !users.length}<EmptyState size="sm">No enabled users are available.</EmptyState
         >{/if}
     </fieldset>
-    {#if formError}<p class="banner error" role="alert">{formError}</p>{/if}
   </div>
-  {#snippet footer()}<Button
-      variant="secondary"
-      onclick={() => (createOpen = false)}
-      disabled={busy}>Cancel</Button
-    ><Button
-      variant="primary"
-      onclick={create}
-      loading={busy}
-      disabled={!groupId.trim() || !displayName.trim() || !owners.length}>Create group</Button
-    >{/snippet}
-</Modal>
+</FormModal>
 <ConfirmDialog
   bind:open={archiveOpen}
   title="Archive group"
