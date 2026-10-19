@@ -17220,6 +17220,10 @@ async def api_location_restore_dismissed(
 app.include_router(api_router)
 app.include_router(auth_router)
 
+from istota.webui.mobile_routes import router as _mobile_router
+
+app.include_router(_mobile_router, prefix="/istota/api/mobile", tags=["mobile"])
+
 # Feeds web API — native, in-process module backed by per-user SQLite.
 from istota.feeds.routes import require_auth as _feeds_require_auth
 from istota.feeds.routes import router as _feeds_router

@@ -30,6 +30,26 @@ The stack's image builds the frontend and its nginx fronts the web service, so n
 
 No extra Nextcloud apps are required — istota uses NC's built-in OAuth 2.0 provider.
 
+## iOS server discovery
+
+`GET /istota/api/mobile/config` is an anonymous, read-only compatibility endpoint for the generic iOS shell. It returns mobile protocol major `1`, minimum app version `0.12.0`, the `/istota/` web base path and the versioned browser-handoff mode. All paths belong to the origin that answered the request. The response contains no account details, provider URLs or credentials, sets `Cache-Control: no-store`, and stays below 512 bytes. It never fetches an address supplied by a caller or changes a session.
+
+This is the discovery part of the protocol. Browser approval, session exchange and the authenticated session receipt must also be deployed before distributing a generic binary that consumes it. Existing browser login and older iOS binaries continue using their current endpoints.
+
+The installation needs device-trusted HTTPS, a configured public `[site] hostname`, and the existing `/istota/` web prefix. Discovery returns 503 when no public origin is configured or that origin uses local plaintext HTTP. Host and forwarded-host headers cannot supply that configuration. The endpoint does not make the web build relocatable to arbitrary subpaths. Entering only an origin lets the app try `/api/mobile/config` and then the existing `/istota/api/mobile/config` after a 404 or 410.
+
+An outer proxy must expose the compatibility endpoint without cookies, Basic Auth, a client certificate or its own login page. Those login walls are unsupported for generic setup; the installation's own browser sign-in can still use its identity provider. VPN/LAN access also needs working DNS/routing and a certificate iOS trusts, including an administrator-installed trusted CA where appropriate. Local-network permission is separate from certificate trust. The existing loopback-only no-auth and local-login-code restrictions remain in force.
+
+`location_ingest_path` is `/webhooks/location` when the deployment enables location, otherwise null. The operator must route that path on the same HTTPS origin to the webhook receiver. This flag does not enroll a user, reveal an ingest token or override their location preferences; enrollment still requires an authenticated user and explicit consent.
+
+`push.delivery` describes deployment configuration:
+
+- `unavailable`: push is disabled, automatic dispatch is off, or an APNs provider setting is missing.
+- `direct`: push and automatic dispatch are enabled, with a signing-key path, key ID, team ID and topic configured. Discovery does not read the key, contact Apple, check topic authorization or prove delivery. The daemon still needs its key file, HTTP/2 support and credentials authorized for the binary's topic.
+- `relay`: reserved for a future authorized relay; this server does not emit it.
+
+A self-hosted operator must not receive the app publisher's APNs signing key. A generic app can connect without push; permission granted by iOS alone does not establish a delivery path. Use the existing operator push diagnostic to test APNs acceptance, which is still not proof that an alert appeared on the device.
+
 ## Email login
 
 Set `[web] auth = ["email"]` or `["nextcloud", "email"]`, provide a persistent session signing secret, and set `[site] hostname` to the public hostname. `ISTOTA_WEB_AUTH=email` or `nextcloud,email` overrides the config. Nextcloud remains the default regardless of the storage backend. Use HTTPS outside localhost.

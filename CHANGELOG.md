@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **iOS server discovery.** Installations now expose a small public compatibility response with location and push availability, so a generic app can check the server before sign-in. Existing browser and iOS login behavior is unchanged.
+
 - **`!arr` requests media without a model turn.** `!arr search film|show|album TITLE` lists matches with their ids, and `!arr add film|show|album ID` puts one on the arr's Wanted list, monitoring it if the library holds it unmonitored. It uses the servarr skill's own tiers and defaults.
 - The Chat sidebar now shows a Starred count beside the existing Unread count, with the same badges as Feeds. It counts all starred messages in listed rooms and updates after starring, unstarring or deleting a message.
 - Operators can configure iOS push separately from a full deployment. The dedicated Ansible tag installs the signing key, preserves other live settings and restarts the app only when needed.
