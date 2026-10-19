@@ -19,6 +19,7 @@
     LoadState,
     Checkbox,
     LoadMore,
+    Meter,
   } from '$lib/components/ui';
   import {
     getWorkspacePins,
@@ -766,11 +767,11 @@
                         : `${row.progress}%`
                       : row.message}
                 </span>
-                {#if row.state === 'uploading'}<progress
-                    max="100"
+                {#if row.state === 'uploading'}<Meter
+                    class="upload-meter"
                     value={row.progress}
-                    aria-label={`Uploading ${row.file.name}`}
-                  ></progress>{/if}
+                    label={`Uploading ${row.file.name}`}
+                  />{/if}
               </li>
             {/each}
           </ul>
@@ -922,11 +923,8 @@
   .upload-status {
     text-align: right;
   }
-  progress {
+  .upload-row :global(.upload-meter) {
     grid-column: 1 / -1;
-    width: 100%;
-    height: var(--space-1);
-    accent-color: var(--accent);
   }
   .folder-toolbar {
     justify-content: space-between;

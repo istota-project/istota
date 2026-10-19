@@ -23,6 +23,7 @@
     LoadState,
     Timestamp,
     StatusDot,
+    Meter,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
@@ -565,12 +566,12 @@
                     <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
                     <span class="truncate">{src}</span>
                   </div>
-                  <div class="source-bar">
-                    <div
-                      class="source-fill"
-                      style="width: {(count / maxN) * 100}%; background: {sourceColor(src)};"
-                    ></div>
-                  </div>
+                  <Meter
+                    value={count}
+                    max={maxN}
+                    color={sourceColor(src)}
+                    label="{src} tasks, of {formatNumber(maxN)} for the busiest source"
+                  />
                   <div class="source-count">
                     {formatNumber(count)}{#if failed > 0}<span
                         class="failed-inline"
@@ -636,16 +637,15 @@
                         <strong>{formatNumber(u.tasks_no_model_24h ?? 0)}</strong>
                       </div>
                       {#if totalSeg > 0}
-                        <div class="stack-bar" aria-label="24h source breakdown">
-                          {#each segments as seg (seg.source)}
-                            <span
-                              class="stack-seg"
-                              style="width: {(seg.count / totalSeg) *
-                                100}%; background: {sourceColor(seg.source)};"
-                              title={segmentTooltip(seg)}
-                            ></span>
-                          {/each}
-                        </div>
+                        <Meter
+                          class="stack-bar"
+                          label="24h source breakdown"
+                          segments={segments.map((seg) => ({
+                            value: seg.count,
+                            color: sourceColor(seg.source),
+                            label: segmentTooltip(seg),
+                          }))}
+                        />
                         <div class="source-list">
                           {#each segments as seg (seg.source)}
                             <span class="source-pill caption" title={segmentTooltip(seg)}>
@@ -1008,17 +1008,6 @@
     overflow: hidden;
   }
 
-  .source-bar {
-    height: 6px;
-    background: var(--surface-base);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-
-  .source-fill {
-    height: 100%;
-  }
-
   .source-count {
     text-align: right;
     font-variant-numeric: tabular-nums;
@@ -1143,18 +1132,8 @@
     margin: 0 0.15rem;
   }
 
-  .stack-bar {
-    display: flex;
-    height: 5px;
-    border-radius: var(--radius-sm);
-    overflow: hidden;
+  .source-cell :global(.stack-bar) {
     margin: var(--space-1) 0;
-    background: var(--surface-base);
-  }
-
-  .stack-seg {
-    display: block;
-    height: 100%;
   }
 
   .source-list {
