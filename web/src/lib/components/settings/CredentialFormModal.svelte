@@ -7,7 +7,7 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import { Button, Field, Input, Modal, Checkbox, SecretField } from '$lib/components/ui';
+  import { Field, FormModal, Input, Checkbox, SecretField } from '$lib/components/ui';
   import { notifySuccess } from '$lib/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
 
@@ -50,7 +50,6 @@
 
   let open = $state(true);
   let busy = $state(false);
-  let banner = $state('');
   let errors: Record<string, string> = $state({});
 
   let name = $state(editing ? (start?.name ?? '') : '');
@@ -89,21 +88,12 @@
   onDestroy(clearSecret);
 
   function cancel() {
-    // Escape and the overlay bypass the disabled fieldset; while a save runs,
-    // its result decides whether the dialog closes.
-    if (busy) {
-      open = true;
-      return;
-    }
     clearSecret();
-    open = false;
     onClose();
   }
 
   async function save() {
-    if (busy) return;
     busy = true;
-    banner = '';
     errors = {};
     try {
       if (editing) {
@@ -140,7 +130,6 @@
       }
       const saved = name;
       clearSecret();
-      open = false;
       notifySuccess(editing ? `Saved ${saved}` : `Added ${saved}`);
       onSaved(saved);
       onClose();
@@ -148,27 +137,27 @@
       if (e instanceof AuthError) {
         clearSecret();
         onSignedOut();
-        return;
+        return false;
       }
       if (e instanceof CredentialWriteError && e.field && shownFields.has(e.field)) {
         errors = { [e.field]: e.message };
         if (e.field === 'extra_hosts' || e.field === 'headers') moreOpen = true;
-      } else {
-        banner = (e as Error).message || 'The credential could not be saved.';
+        return false;
       }
+      throw new Error((e as Error).message || 'The credential could not be saved.');
     } finally {
       busy = false;
     }
   }
 </script>
 
-<Modal
+<FormModal
   bind:open
   title={editing ? `Edit ${name}` : 'Add credential'}
   width="480px"
-  onOpenChange={(next) => {
-    if (!next) cancel();
-  }}
+  submitLabel={editing ? 'Save' : 'Add credential'}
+  onSubmit={save}
+  onCancel={cancel}
 >
   <fieldset class="cred-form" disabled={busy}>
     <div class="cred-field">
@@ -299,15 +288,8 @@
         </div>
       </div>
     </details>
-    {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
   </fieldset>
-  {#snippet footer()}
-    <Button variant="secondary" onclick={cancel} disabled={busy}>Cancel</Button>
-    <Button variant="primary" onclick={save} loading={busy}>
-      {editing ? 'Save' : 'Add credential'}
-    </Button>
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .cred-form {
@@ -342,9 +324,5 @@
     flex-direction: column;
     gap: var(--space-3);
     margin-top: var(--space-3);
-  }
-
-  .cred-form .banner {
-    margin: 0;
   }
 </style>

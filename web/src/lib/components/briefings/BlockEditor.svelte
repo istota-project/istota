@@ -11,9 +11,9 @@
     Button,
     ConfirmDialog,
     EmptyState,
+    FormModal,
     IconButton,
     Input,
-    Modal,
     OptionCards,
     Select,
     TextArea,
@@ -73,7 +73,6 @@
   const dirty = $derived(JSON.stringify(draft) !== baseline);
   let saving = $state(false);
   let previewing = $state(false);
-  let error = $state('');
   let titleError = $state('');
   let discard = $state(false);
   let open = $state(true);
@@ -99,10 +98,6 @@
   ];
 
   function close() {
-    if (saving) {
-      open = true;
-      return;
-    }
     if (dirty) {
       open = true;
       discard = true;
@@ -157,28 +152,16 @@
   }
 
   async function save() {
-    if (saving) return;
-    error = '';
     titleError = draft.title.trim() ? '' : 'Title is required.';
-    if (titleError) {
-      error = titleError;
-      return;
-    }
-    if (!draft.id && draft.sources.length === 0) {
-      error = 'Add at least one source.';
-      return;
-    }
+    if (titleError) throw new Error(titleError);
+    if (!draft.id && draft.sources.length === 0) throw new Error('Add at least one source.');
     for (let index = 0; index < draft.sources.length; index++) {
       const message = sourceError(draft.sources[index]);
-      if (message) {
-        error = `Source ${index + 1}: ${message}`;
-        return;
-      }
+      if (message) throw new Error(`Source ${index + 1}: ${message}`);
     }
     const count = draft.options.story_count;
     if (count !== undefined && (!Number.isInteger(count) || Number(count) < 1)) {
-      error = 'Story count must be a positive whole number.';
-      return;
+      throw new Error('Story count must be a positive whole number.');
     }
     saving = true;
     try {
@@ -196,22 +179,19 @@
         },
       };
       await onSave(payload);
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Could not save block.';
     } finally {
       saving = false;
     }
   }
 </script>
 
-<Modal
+<FormModal
   bind:open
   title={draft.id ? 'Edit block' : 'New block'}
   width="680px"
-  dismissible={!saving}
-  onOpenChange={(next) => {
-    if (!next) close();
-  }}
+  submitLabel="Save block"
+  onSubmit={save}
+  onCancel={close}
 >
   <fieldset disabled={saving} class="draft-fields">
     <Field label="Title" error={titleError}>
@@ -328,8 +308,7 @@
       </div>
     </details>
   </fieldset>
-  {#if error}<div role="alert" class="banner error">{error}</div>{/if}
-  {#snippet footer()}
+  {#snippet extraActions()}
     {#if allowPreview}
       <Button
         variant="secondary"
@@ -339,12 +318,8 @@
         disabled={saving}>Preview</Button
       >
     {/if}
-    <Button variant="secondary" onclick={close} disabled={saving}>Cancel</Button>
-    <Button variant="primary" onclick={save} loading={saving} loadingLabel="Saving…"
-      >Save block</Button
-    >
   {/snippet}
-</Modal>
+</FormModal>
 
 {#if previewing}
   <BriefingPreview

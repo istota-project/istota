@@ -324,31 +324,29 @@
 
   useSettingsSave(() => (author ? { dirty, saving: busy, save } : null));
 
-  async function approve(resource: Record<string, unknown>) {
+  // A refusal stays in the approval dialog; losing access closes it, since the
+  // editor behind it is replaced by the access-lost notice.
+  async function settleApproval(change: (approval: BriefingSourceApproval) => Promise<unknown>) {
     if (!reviewing) return;
     busy = true;
     try {
-      await approveBriefingSource(group, name, reviewing, resource);
+      await change(reviewing);
       reviewing = null;
       await load();
     } catch (e) {
+      const status = (e as { status?: number })?.status;
+      if (status !== 403 && status !== 404) throw e;
+      reviewing = null;
       fail(e);
     } finally {
       busy = false;
     }
   }
-  async function revoke() {
-    if (!reviewing) return;
-    busy = true;
-    try {
-      await revokeBriefingSource(group, name, reviewing);
-      reviewing = null;
-      await load();
-    } catch (e) {
-      fail(e);
-    } finally {
-      busy = false;
-    }
+  function approve(resource: Record<string, unknown>) {
+    return settleApproval((approval) => approveBriefingSource(group, name, approval, resource));
+  }
+  function revoke() {
+    return settleApproval((approval) => revokeBriefingSource(group, name, approval));
   }
 
   async function run(kind: 'preview' | 'publish') {
@@ -825,7 +823,6 @@
     {channel}
     files={resources.files}
     calendars={resources.calendars}
-    {busy}
     onApprove={approve}
     onRevoke={revoke}
     onClose={() => (reviewing = null)}

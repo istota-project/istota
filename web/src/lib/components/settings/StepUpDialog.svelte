@@ -107,6 +107,7 @@
   onOpenChange={(open) => {
     if (!open) onCancel();
   }}
+  onsubmit={() => void submitProof()}
 >
   {#if method === 'password'}
     {#if methods.includes('email')}
@@ -118,14 +119,7 @@
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
   {#if method === 'password'}
     <Field label="Account password">
-      <Input
-        type="password"
-        bind:value={password}
-        autocomplete="current-password"
-        onkeydown={(e) => {
-          if (e.key === 'Enter') void submitProof();
-        }}
-      />
+      <Input type="password" bind:value={password} autocomplete="current-password" />
     </Field>
   {:else if method === 'email'}
     <Field label="Confirmation code">
@@ -159,11 +153,11 @@
       >
     {/if}
     <Button
+      type="submit"
       variant="primary"
       loading={busy}
       loadingLabel="Checking…"
-      disabled={!ready}
-      onclick={submitProof}>Confirm</Button
+      disabled={!ready}>Confirm</Button
     >
   {/snippet}
 </Modal>

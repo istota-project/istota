@@ -7,7 +7,7 @@
     type WalletCard,
     type WalletBilling,
   } from '$lib/api';
-  import { Button, Field, Input, Modal } from '$lib/components/ui';
+  import { Field, FormModal, Input } from '$lib/components/ui';
   let {
     card = null,
     onClose,
@@ -22,7 +22,6 @@
   const start = untrack(() => card);
   let open = $state(true);
   let busy = $state(false);
-  let banner = $state('');
   let errors: Record<string, string> = $state({});
   let label = $state(start?.label ?? '');
   let number = $state('');
@@ -53,17 +52,11 @@
   }
   onDestroy(clearSecrets);
   function close() {
-    if (busy) {
-      open = true;
-      return;
-    }
     clearSecrets();
     onClose();
   }
   async function save() {
-    if (busy) return;
     busy = true;
-    banner = '';
     errors = {};
     try {
       const details = { label, exp_month: Number(month), exp_year: Number(year), name, billing };
@@ -80,20 +73,23 @@
         return;
       }
       const error = e as Error & { field?: string };
-      if (error.field) errors = { [error.field]: error.message };
-      else banner = error.message || 'The card could not be saved.';
+      if (error.field) {
+        errors = { [error.field]: error.message };
+        return false;
+      }
+      throw new Error(error.message || 'The card could not be saved.');
     } finally {
       busy = false;
     }
   }
 </script>
 
-<Modal
+<FormModal
   bind:open
   title={start ? 'Edit card details' : 'Add card'}
-  onOpenChange={(next) => {
-    if (!next) close();
-  }}
+  submitLabel={start ? 'Save details' : 'Add card'}
+  onSubmit={save}
+  onCancel={close}
 >
   <fieldset class="card-form" disabled={busy}>
     <Field label="Label" error={errors.label}><Input bind:value={label} autocomplete="off" /></Field
@@ -135,15 +131,8 @@
       >
     {/each}
     {#if errors.billing}<p class="banner error" role="alert">{errors.billing}</p>{/if}
-    {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
   </fieldset>
-  {#snippet footer()}
-    <Button variant="secondary" onclick={close} disabled={busy}>Cancel</Button>
-    <Button variant="primary" onclick={save} loading={busy}
-      >{start ? 'Save details' : 'Add card'}</Button
-    >
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .card-form {

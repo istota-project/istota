@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { BriefingSourceApproval } from '$lib/api';
-  import { Button, Modal, type SelectOption, Field, Checkbox } from '$lib/components/ui';
+  import { FormModal, type SelectOption, Field, Checkbox } from '$lib/components/ui';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { calendarDisclosure, channelLabel } from './briefingSettings';
 
@@ -17,7 +17,6 @@
     channel,
     files,
     calendars,
-    busy = false,
     onApprove,
     onRevoke,
     onClose,
@@ -30,9 +29,8 @@
     channel: string;
     files: string[];
     calendars: SelectOption[];
-    busy?: boolean;
-    onApprove: (resource: Record<string, unknown>) => void;
-    onRevoke: () => void;
+    onApprove: (resource: Record<string, unknown>) => Promise<void>;
+    onRevoke: () => Promise<void>;
     onClose: () => void;
   } = $props();
 
@@ -48,16 +46,19 @@
   );
 </script>
 
-<Modal
+<FormModal
   open={true}
   title={approval.approved
     ? `Your shared ${calendar ? 'calendar' : 'file'}`
     : `Share your ${calendar ? 'calendar' : 'file'}`}
   description="A group briefing uses this on every run."
-  onOpenChange={(open) => {
-    if (!open) onClose();
-  }}
   width="36rem"
+  submitLabel={approval.approved ? 'Stop sharing' : 'Approve'}
+  busyLabel={approval.approved ? 'Stopping…' : 'Approving…'}
+  submitVariant={approval.approved ? 'danger' : 'primary'}
+  canSubmit={approval.approved || (agreed && chosen)}
+  onSubmit={() => (approval.approved ? onRevoke() : onApprove(config))}
+  onCancel={onClose}
 >
   <div class="approval">
     {#if !approval.approved}
@@ -99,23 +100,7 @@
       </Field>
     {/if}
   </div>
-  {#snippet footer()}
-    <Button variant="secondary" onclick={onClose}>Cancel</Button>
-    {#if approval.approved}
-      <Button variant="danger" onclick={onRevoke} loading={busy} loadingLabel="Stopping…"
-        >Stop sharing</Button
-      >
-    {:else}
-      <Button
-        variant="primary"
-        onclick={() => onApprove(config)}
-        disabled={!agreed || !chosen}
-        loading={busy}
-        loadingLabel="Approving…">Approve</Button
-      >
-    {/if}
-  {/snippet}
-</Modal>
+</FormModal>
 
 <style>
   .approval {
