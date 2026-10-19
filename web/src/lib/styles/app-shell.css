@@ -143,42 +143,6 @@
   color: var(--hover-fg);
 }
 
-/* The nav's overflow menu. bits-ui portals it to <body>, outside .app-nav, so
-   its rules cannot hang off .app-nav; the app-nav- prefix is their namespace. */
-.app-nav-menu {
-  min-width: 9rem;
-  background: var(--surface-card);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-card);
-  padding: var(--space-1);
-  z-index: var(--z-popover);
-  box-shadow: var(--shadow-md);
-  /* bits-ui focuses the content on open; the highlighted link shows where focus is. */
-  outline: none;
-}
-
-.app-nav-menu-link {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-base);
-  color: var(--text-muted);
-  text-decoration: none;
-  border-radius: var(--radius-sm);
-  outline: none;
-}
-
-.app-nav-menu-link:hover,
-.app-nav-menu-link[data-highlighted] {
-  background: var(--hover-bg);
-  color: var(--hover-fg);
-}
-
-.app-nav-menu-link.active {
-  color: var(--text-primary);
-}
-
 /* Page padding is safe-area-aware on all three exposed edges. AppShell cancels
    this padding with a negative margin, so it mirrors the same max() expressions
    — keep the two in step or a shell page grows a background strip at the edge. */

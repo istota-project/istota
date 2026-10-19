@@ -5,17 +5,18 @@
   import { page, updated } from '$app/state';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { Menu, Sun, Moon } from '@lucide/svelte';
-  import { DropdownMenu } from 'bits-ui';
+  import { Menu as MenuIcon, Sun, Moon } from '@lucide/svelte';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
   import {
     CountPill,
+    Menu,
     NotificationBell,
     SearchButton,
     SearchDialog,
     PageLoading,
     PageLoader,
+    type MenuItem,
   } from '$lib/components/ui';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
@@ -440,6 +441,44 @@
     return current.startsWith(`${base}${path}`);
   }
 
+  // The overflow menu: every section the inline links show, then Settings.
+  const navMenuItems = $derived.by((): MenuItem[] => {
+    if (!user) return [];
+    const link = (label: string, path: string): MenuItem => ({
+      label,
+      href: `${base}${path}`,
+      active: isActive(path),
+    });
+    const items: MenuItem[] = [
+      { ...link('Chat', '/chat'), ariaLabel: chatLabel, title: chatLabel, trailing: chatPill },
+    ];
+    if (user.features.workspace) items.push(link('Files', '/files'));
+    if (user.features.groups)
+      items.push({ ...link('Groups', '/groups/'), active: isActive('/groups') });
+    if (user.features.briefings) {
+      items.push({
+        ...link('Briefings', '/briefings'),
+        ariaLabel: briefingsLabel,
+        title: briefingsLabel,
+        trailing: briefingsPill,
+      });
+    }
+    if (user.features.feeds) {
+      items.push({
+        ...link('Feeds', '/feeds'),
+        ariaLabel: feedsLabel,
+        title: feedsLabel,
+        trailing: feedsPill,
+      });
+    }
+    if (user.features.location) items.push(link('Location', '/location'));
+    if (user.features.money) items.push(link('Money', '/money'));
+    if (user.features.health) items.push(link('Health', '/health'));
+    if (user.features.admin) items.push(link('Admin', '/admin'));
+    items.push(link('Settings', '/settings'));
+    return items;
+  });
+
   const pageTitle = $derived.by(() => {
     const path = page.url.pathname.replace(base, '').replace(/^\/+/, '');
     if (!path) return 'Istota';
@@ -451,6 +490,11 @@
 <svelte:head>
   <title>{pageTitle}</title>
 </svelte:head>
+
+<!-- The overflow menu keeps the numeric pill; the inline links show a mark. -->
+{#snippet chatPill()}<CountPill count={chatCount ?? 0} title={chatLabel} />{/snippet}
+{#snippet briefingsPill()}<CountPill count={briefingsCount ?? 0} title={briefingsLabel} />{/snippet}
+{#snippet feedsPill()}<CountPill count={feedsCount ?? 0} title={feedsLabel} />{/snippet}
 
 <PageLoader />
 
@@ -544,147 +588,13 @@
         {/if}
       </button>
       <LogoutButton />
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger>
-          {#snippet child({ props })}
-            <button
-              class="nav-icon-btn touch-target hamburger-btn"
-              aria-label="Open menu"
-              {...props}
-            >
-              <Menu size={18} />
-            </button>
-          {/snippet}
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content class="app-nav-menu" align="end" sideOffset={6}>
-            <DropdownMenu.Item>
-              {#snippet child({ props })}
-                <a
-                  href="{base}/chat"
-                  class="app-nav-menu-link"
-                  class:active={isActive('/chat')}
-                  {...props}
-                  aria-label={chatLabel}
-                  title={chatLabel}>Chat<CountPill count={chatCount ?? 0} title={chatLabel} /></a
-                >
-              {/snippet}
-            </DropdownMenu.Item>
-            {#if user.features.workspace}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/files"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/files')}
-                    {...props}>Files</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.groups}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/groups/"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/groups')}
-                    {...props}>Groups</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.briefings}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/briefings"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/briefings')}
-                    {...props}
-                    aria-label={briefingsLabel}
-                    title={briefingsLabel}
-                    >Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} /></a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.feeds}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/feeds"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/feeds')}
-                    {...props}
-                    aria-label={feedsLabel}
-                    title={feedsLabel}
-                    >Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} /></a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.location}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/location"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/location')}
-                    {...props}>Location</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.money}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/money"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/money')}
-                    {...props}>Money</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.health}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/health"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/health')}
-                    {...props}>Health</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            {#if user.features.admin}
-              <DropdownMenu.Item>
-                {#snippet child({ props })}
-                  <a
-                    href="{base}/admin"
-                    class="app-nav-menu-link"
-                    class:active={isActive('/admin')}
-                    {...props}>Admin</a
-                  >
-                {/snippet}
-              </DropdownMenu.Item>
-            {/if}
-            <DropdownMenu.Item>
-              {#snippet child({ props })}
-                <a
-                  href="{base}/settings"
-                  class="app-nav-menu-link"
-                  class:active={isActive('/settings')}
-                  {...props}>Settings</a
-                >
-              {/snippet}
-            </DropdownMenu.Item>
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>
+      <Menu items={navMenuItems} label="Sections">
+        {#snippet trigger(props)}
+          <button class="nav-icon-btn touch-target hamburger-btn" aria-label="Open menu" {...props}>
+            <MenuIcon size={18} />
+          </button>
+        {/snippet}
+      </Menu>
     </div>
   </nav>
   <main

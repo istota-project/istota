@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
-import { render, cleanup, fireEvent } from '@testing-library/svelte';
+import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
@@ -178,7 +178,31 @@ async function type(textarea: HTMLTextAreaElement, value: string) {
 const btn = (c: HTMLElement, label: string) =>
   c.querySelector(`[aria-label="${label}"]`) as HTMLButtonElement | null;
 
-const menu = (c: HTMLElement) => c.querySelector('[role="menu"]');
+// The menu portals to <body>, so it is looked for in the document; the argument
+// is the composer's container, kept so each call reads as before.
+const menu = (_c?: HTMLElement) => document.querySelector('[role="menu"]');
+
+// A row by its label. bits-ui holds the content `visibility: hidden` until it
+// is placed, which jsdom never does, so the row's accessible name is empty.
+const row = (label: string) =>
+  [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (el) => el.textContent?.trim() === label,
+  ) ?? null;
+
+// jsdom has no PointerEvent; bits-ui reads only `pointerType` and `button`.
+function pointer(type: string, pointerType: string) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 });
+  Object.defineProperty(event, 'pointerType', { value: pointerType });
+  return event;
+}
+
+/** A finger on the attach button: what iOS sends, ending in a real click. */
+async function tap(el: HTMLElement) {
+  el.dispatchEvent(pointer('pointerdown', 'touch'));
+  el.dispatchEvent(pointer('pointerup', 'touch'));
+  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
+  await tick();
+}
 
 const picker = (c: HTMLElement, kind: string) =>
   c.querySelector(`input[data-picker="${kind}"]`) as HTMLInputElement;
@@ -200,7 +224,7 @@ describe('Composer attachment menu', () => {
 
     expect(menu(container)).toBeTruthy();
     for (const label of ['Photo Library', 'Take Photo', 'Choose File']) {
-      expect(btn(container, label)).toBeTruthy();
+      expect(row(label)).toBeTruthy();
     }
   });
 
@@ -233,25 +257,39 @@ describe('Composer attachment menu', () => {
     expect(open).toHaveBeenCalled();
   });
 
-  it('keeps the field focused when a menu row is tapped', async () => {
+  it('keeps the field focused when the menu is tapped open, a row tapped and it closes', async () => {
     softKeyboard(true);
     const { container, textarea } = mount();
     textarea.focus();
-    await fireEvent.click(btn(container, 'Attach file')!);
+    await tap(btn(container, 'Attach file')!);
+    expect(menu(container)).toBeTruthy();
+    expect(document.activeElement).toBe(textarea);
 
     const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
-    btn(container, 'Photo Library')!.dispatchEvent(down);
-
+    row('Photo Library')!.dispatchEvent(down);
     expect(down.defaultPrevented).toBe(true);
+
+    await fireEvent.click(row('Photo Library')!);
+    await waitFor(() => expect(menu(container)).toBeNull());
     expect(document.activeElement).toBe(textarea);
   });
 
-  it('sits inside the composer, where the global dismiss leaves it alone', async () => {
-    // installKeyboardDismiss exempts `.composer` — a menu rendered anywhere else
-    // would drop the keyboard on the way to being tapped.
+  it('moves through the rows with the arrow keys when the keyboard opens it', async () => {
+    const { container } = mount();
+    const attach = btn(container, 'Attach file')!;
+    attach.focus();
+    await fireEvent.keyDown(attach, { key: 'Enter' });
+    await waitFor(() => expect(document.activeElement).toBe(row('Photo Library')));
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(row('Take Photo'));
+  });
+
+  it('is marked for the global dismiss to leave alone', async () => {
+    // installKeyboardDismiss exempts `[data-keeps-keyboard]` — without it a tap
+    // on a row would drop the keyboard on the way to being handled.
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
-    expect(menu(container)!.closest('.composer')).toBeTruthy();
+    expect(menu(container)!.closest('[data-keeps-keyboard]')).toBeTruthy();
   });
 
   it('sends each row to the source it names', async () => {
@@ -266,7 +304,7 @@ describe('Composer attachment menu', () => {
     for (const [label, fn] of rows) {
       const { container, unmount } = mount();
       await fireEvent.click(btn(container, 'Attach file')!);
-      await fireEvent.click(btn(container, label)!);
+      await fireEvent.click(row(label)!);
       expect(fn, label).toHaveBeenCalled();
       unmount();
     }
@@ -277,7 +315,7 @@ describe('Composer attachment menu', () => {
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Photo Library')!);
+    await fireEvent.click(row('Photo Library')!);
     await tick();
 
     expect(upload).toHaveBeenCalled();
@@ -292,7 +330,7 @@ describe('Composer attachment menu', () => {
     await tick();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Photo Library')!);
+    await fireEvent.click(row('Photo Library')!);
     await tick();
 
     expect(upload).not.toHaveBeenCalled();
@@ -307,7 +345,7 @@ describe('Composer attachment menu', () => {
     await tick();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Choose File')!);
+    await fireEvent.click(row('Choose File')!);
     await tick();
 
     expect(upload).not.toHaveBeenCalled();
@@ -324,7 +362,7 @@ describe('Composer attachment menu', () => {
     await tick();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Photo Library')!);
+    await fireEvent.click(row('Photo Library')!);
     await tick();
 
     expect(upload).toHaveBeenCalledTimes(1);
@@ -340,7 +378,7 @@ describe('Composer attachment menu', () => {
     await tick();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Photo Library')!);
+    await fireEvent.click(row('Photo Library')!);
     await tick();
 
     expect(upload).toHaveBeenCalledTimes(1);
@@ -352,7 +390,7 @@ describe('Composer attachment menu', () => {
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Photo Library')!);
+    await fireEvent.click(row('Photo Library')!);
     await tick();
 
     expect(upload).not.toHaveBeenCalled();
@@ -364,7 +402,7 @@ describe('Composer attachment menu', () => {
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Choose File')!);
+    await fireEvent.click(row('Choose File')!);
     await tick();
 
     expect(container.querySelector('.attach-error')?.textContent).toContain('picker');
@@ -374,7 +412,7 @@ describe('Composer attachment menu', () => {
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.click(btn(container, 'Photo Library')!);
+    await fireEvent.click(row('Photo Library')!);
 
     expect(menu(container)).toBeNull();
   });
@@ -383,19 +421,24 @@ describe('Composer attachment menu', () => {
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    await fireEvent.keyDown(window, { key: 'Escape' });
+    await fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
 
-    expect(menu(container)).toBeNull();
+    await waitFor(() => expect(menu(container)).toBeNull());
   });
 
   it('closes on a tap outside it', async () => {
     const { container } = mount();
     await fireEvent.click(btn(container, 'Attach file')!);
 
-    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    await tick();
-
-    expect(menu(container)).toBeNull();
+    // bits-ui starts listening for outside presses a moment after opening, so
+    // the press repeats until it lands. Away from the menu's box, which bits-ui
+    // measures and jsdom reports as all zeros.
+    await waitFor(() => {
+      document.body.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, clientX: 50, clientY: 50 }),
+      );
+      expect(menu(container)).toBeNull();
+    });
   });
 
   it('closes rather than reopening when attach is tapped again', async () => {
@@ -403,12 +446,12 @@ describe('Composer attachment menu', () => {
     // Closing there and reopening on the click would leave it stuck open.
     const { container } = mount();
     const attach = btn(container, 'Attach file')!;
-    await fireEvent.click(attach);
+    await tap(attach);
+    expect(menu(container)).toBeTruthy();
 
-    attach.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    await fireEvent.click(attach);
+    await tap(attach);
 
-    expect(menu(container)).toBeNull();
+    await waitFor(() => expect(menu(container)).toBeNull());
   });
 
   it('says whether it is open', async () => {

@@ -106,14 +106,14 @@ describe('composer reply chip', () => {
   });
 
   it('Escape closes the attach menu without clearing the chip', async () => {
-    // The attach menu deliberately leaves focus in the textarea, so its Escape
-    // bubbles through the same handler. Same rule as the popover: a chip that
+    // The attach menu leaves focus in the textarea when tapped open, so its
+    // Escape passes through the same handler. Same rule as the popover: a chip that
     // took the key would dismiss the citation while a menu was being closed.
     const { container, textarea, onReplyChange } = mount({ replyTo: CITATION });
     const plus = container.querySelector<HTMLButtonElement>('[aria-label="Attach file"]')!;
     await fireEvent.click(plus);
     await tick();
-    expect(container.querySelector('.attach-menu')).not.toBeNull();
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
 
     await fireEvent.keyDown(textarea, { key: 'Escape' });
     expect(onReplyChange).not.toHaveBeenCalled();

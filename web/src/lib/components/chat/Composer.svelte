@@ -26,7 +26,7 @@
     Folder,
     Reply,
   } from '@lucide/svelte';
-  import { IconButton } from '$lib/components/ui';
+  import { IconButton, Menu, type MenuItem } from '$lib/components/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import {
     uploadChatAttachment,
@@ -570,34 +570,24 @@
   // end at the same sheet, so the button opens the file input directly and the
   // browser behaves exactly as it did before any of this.
   //
-  // Focus deliberately stays in the textarea while the menu is open (the rows
-  // cancel their own focus shift too, and the menu renders inside `.composer`,
-  // which installKeyboardDismiss exempts). That is the same bargain the
-  // autocomplete popover makes: a menu that took focus would drop the keyboard
-  // itself, which is the entire thing being avoided.
+  // Focus deliberately stays in the textarea while a tap has the menu open:
+  // `Menu retainFocus` cancels the rows' focus shift and the focus moves on
+  // open and close, and marks the menu `data-keeps-keyboard`, which
+  // installKeyboardDismiss exempts. That is the same bargain the autocomplete
+  // popover makes: a menu that took focus would drop the keyboard itself, which
+  // is the entire thing being avoided. Opened from a hardware keyboard, the menu
+  // takes focus and the arrow keys move through the rows.
+  const pickersOffered = nativePickersAvailable();
   let attachMenuOpen = $state(false);
 
-  function onAttachClick() {
-    if (nativePickersAvailable()) attachMenuOpen = !attachMenuOpen;
-    else fileInput?.click();
-  }
-
-  function onWindowPointerDown(e: PointerEvent) {
-    if (!attachMenuOpen) return;
-    const target = e.target as Element | null;
-    // The attach button's own press arrives here before its click. Closing on
-    // it would leave the click to reopen the menu, so it is left to the toggle.
-    if (target?.closest?.('.attach-menu, .plus')) return;
-    attachMenuOpen = false;
-  }
-
-  function onWindowKeydown(e: KeyboardEvent) {
-    if (attachMenuOpen && e.key === 'Escape') attachMenuOpen = false;
-  }
+  const attachItems: MenuItem[] = [
+    { label: 'Photo Library', icon: Image, onSelect: () => pickWith(pickPhotos) },
+    { label: 'Take Photo', icon: Camera, onSelect: () => pickWith(takePhoto) },
+    { label: 'Choose File', icon: Folder, onSelect: () => pickWith(pickDocuments) },
+  ];
 
   /** Run one of the native pickers and attach whatever it hands back. */
   async function pickWith(source: () => Promise<Picked[]>) {
-    attachMenuOpen = false;
     uploadError = '';
     try {
       const files = await source();
@@ -1051,8 +1041,8 @@
     // order is the whole rule: a chip that took Escape first would dismiss the
     // citation while the user was looking at the menu they meant to close.
     // Both menus count — the attach menu deliberately leaves focus in the
-    // textarea, so its Escape bubbles through here on the way to the window
-    // handler that closes it.
+    // textarea, so its Escape passes through here on the way to the document
+    // listener that closes it.
     if (e.key === 'Escape' && replyTo && !attachMenuOpen) {
       e.preventDefault();
       onReplyChange?.(null);
@@ -1085,12 +1075,7 @@
      the last callback there is, and the reason the store's own poller already
      hangs off it. Without the second one the loss is bounded by 400ms of
      *idle*, not of typing — continuous typing never reaches a debounce. -->
-<svelte:window
-  onresize={autoGrow}
-  onpointerdown={onWindowPointerDown}
-  onkeydown={onWindowKeydown}
-  onpagehide={flushDraft}
-/>
+<svelte:window onresize={autoGrow} onpagehide={flushDraft} />
 <svelte:document
   onvisibilitychange={() => {
     if (document.visibilityState === 'hidden') flushDraft();
@@ -1109,45 +1094,6 @@
   ondragleave={() => (dragOver = false)}
   ondrop={onDrop}
 >
-  <!-- Inside `.composer` on purpose: that is the selector installKeyboardDismiss
-       exempts, so tapping a row is not also a tap "outside the composer". -->
-  {#if attachMenuOpen}
-    <div class="attach-menu" role="menu" aria-label="Attach">
-      <button
-        class="attach-menu-item"
-        type="button"
-        role="menuitem"
-        aria-label="Photo Library"
-        onmousedown={keepFocus}
-        onclick={() => pickWith(pickPhotos)}
-      >
-        <Image size={16} />
-        Photo Library
-      </button>
-      <button
-        class="attach-menu-item"
-        type="button"
-        role="menuitem"
-        aria-label="Take Photo"
-        onmousedown={keepFocus}
-        onclick={() => pickWith(takePhoto)}
-      >
-        <Camera size={16} />
-        Take Photo
-      </button>
-      <button
-        class="attach-menu-item"
-        type="button"
-        role="menuitem"
-        aria-label="Choose File"
-        onmousedown={keepFocus}
-        onclick={() => pickWith(pickDocuments)}
-      >
-        <Folder size={16} />
-        Choose File
-      </button>
-    </div>
-  {/if}
   <!-- The staged citation, above the field, so what the next send answers is
        visible while it is being written. -->
   {#if replyTo}
@@ -1209,19 +1155,33 @@
   {/if}
 
   <div class="composer-row" class:multiline bind:this={rowEl}>
-    <button
-      bind:this={plusEl}
-      class="icon-btn plus"
-      onmousedown={keepFocus}
-      onclick={onAttachClick}
-      type="button"
-      aria-label="Attach file"
-      title="Attach file"
-      aria-haspopup="menu"
-      aria-expanded={attachMenuOpen}
-    >
-      <Plus />
-    </button>
+    {#snippet plusButton(props: Record<string, unknown>)}
+      <button
+        bind:this={plusEl}
+        {...props}
+        class="icon-btn plus"
+        onmousedown={keepFocus}
+        type="button"
+        aria-label="Attach file"
+        title="Attach file"
+      >
+        <Plus />
+      </button>
+    {/snippet}
+    {#if pickersOffered}
+      <Menu
+        items={attachItems}
+        label="Attach"
+        side="top"
+        align="start"
+        retainFocus
+        bind:open={attachMenuOpen}
+      >
+        {#snippet trigger(props)}{@render plusButton(props)}{/snippet}
+      </Menu>
+    {:else}
+      {@render plusButton({ onclick: () => fileInput?.click() })}
+    {/if}
     <!-- The off-shell fallback. Tapping it raises WebKit's own sheet, which is
          what a browser has always done here and the reason the menu above is
          gated on the native pickers being there to make it worth a tap. -->
@@ -1603,48 +1563,6 @@
 
   .file-hidden {
     display: none;
-  }
-
-  /* Above the composer rather than over it, anchored to the attach button's
-     edge. `.composer` is the positioned ancestor, and its own padding is what
-     the left offset matches so the menu lines up with the button below it. */
-  .attach-menu {
-    position: absolute;
-    bottom: 100%;
-    left: max(0.75rem, var(--safe-left));
-    margin-bottom: var(--space-1);
-    padding: var(--space-1);
-    display: flex;
-    flex-direction: column;
-    min-width: 12rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    box-shadow: var(--shadow-md);
-    z-index: var(--z-popover);
-  }
-  .attach-menu-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-2);
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    font: inherit;
-    font-size: var(--text-sm);
-    color: var(--text-primary);
-    text-align: left;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  /* Guarded for the same reason the icon buttons above are: iOS synthesizes a
-     hover on tap and leaves it applied, so an unguarded rule lights the row
-     that was last touched and keeps it lit. */
-  @media (hover: hover) {
-    .attach-menu-item:hover {
-      background: var(--hover-bg);
-    }
   }
 
   .attach-row {
