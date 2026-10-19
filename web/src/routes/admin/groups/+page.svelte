@@ -14,9 +14,9 @@
     LoadState,
     Card,
     Checkbox,
+    Timestamp,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
-  import { formatDate, formatDateTime, formatRelative } from '$lib/dateFormat';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import {
     getAdminGroups,
@@ -291,9 +291,7 @@
                     <div class="caption mono">{item.group_id}</div>
                   </td>
                   <td class="col-kind muted">{item.kind}</td>
-                  <td class="col-created muted" title={formatDateTime(item.created_at)}
-                    >{formatDate(item.created_at)}</td
-                  >
+                  <td class="col-created muted"><Timestamp value={item.created_at} /></td>
                   <td class="col-status"
                     >{#if item.archived_at}<Badge size="sm">Archived</Badge
                       >{:else if item.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge
@@ -341,15 +339,13 @@
             <dd>{group.kind}</dd>
             <dt>Created</dt>
             <dd>
-              <span title={formatDateTime(group.created_at)}>{formatDate(group.created_at)}</span>
+              <Timestamp value={group.created_at} />
               <span class="muted">by {group.created_by}</span>
             </dd>
             {#if group.archived_at}
               <dt>Archived</dt>
               <dd>
-                <span title={formatDateTime(group.archived_at)}
-                  >{formatDate(group.archived_at)}</span
-                >
+                <Timestamp value={group.archived_at} />
                 <span class="muted">· data and membership history are kept</span>
               </dd>
             {/if}
@@ -411,14 +407,12 @@
                           >{membership.role === 'owner' ? 'Owner' : 'Member'}</Badge
                         ></td
                       ><td
-                        ><span title={formatDateTime(membership.added_at)}
-                          >{formatDate(membership.added_at)}</span
-                        >
+                        ><Timestamp value={membership.added_at} />
                         <div class="caption">by {membership.added_by}</div></td
                       ><td
-                        >{#if membership.ended_at}<span title={formatDateTime(membership.ended_at)}
-                            >{formatDate(membership.ended_at)}</span
-                          >{#if membership.ended_by}<div class="caption">
+                        >{#if membership.ended_at}<Timestamp
+                            value={membership.ended_at}
+                          />{#if membership.ended_by}<div class="caption">
                               by {membership.ended_by}
                             </div>{/if}{:else}<span class="muted">Current member</span>{/if}</td
                       ></tr
@@ -439,9 +433,7 @@
                 <li class="event">
                   <div class="event-head">
                     <span class="event-title">{eventTitle(event.event_type)}</span>
-                    <span class="caption" title={formatDateTime(event.created_at)}
-                      >{formatRelative(event.created_at)}</span
-                    >
+                    <Timestamp class="caption" value={event.created_at} format="relative" />
                   </div>
                   <div class="caption">
                     by {event.actor_id}{#if event.subject_user_id}

@@ -8,8 +8,7 @@
     type GroupBriefingRun,
     type BriefingDelivery,
   } from '$lib/api';
-  import { LoadState } from '$lib/components/ui';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { LoadState, Timestamp } from '$lib/components/ui';
   import type { GroupEditionSelection } from '$lib/stores/briefings';
   import BriefingEdition from './BriefingEdition.svelte';
   import { channelLabel } from './settings/briefingSettings';
@@ -88,9 +87,11 @@
         {@const at = run!.published_at || run!.created_at || ''}
         <p class="caption edition-meta">
           <span class="group-label"><Users size={13} aria-hidden="true" />{groupLabel}</span>
-          <time datetime={at}
-            >{formatDateTime(at, { dateStyle: 'medium', timeStyle: 'short' })}</time
-          >
+          <Timestamp
+            value={at}
+            format="datetime"
+            options={{ dateStyle: 'medium', timeStyle: 'short' }}
+          />
           {#if !definition!.deleted}<span>Delivered by {channelLabel(definition!.channel)}</span
             >{/if}
           {#if summary}<span>{summary}</span>{/if}

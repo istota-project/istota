@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { BriefingArchiveItem, BriefingDocument, BriefingDocumentBlock } from '$lib/api';
-  import { CardGrid, HintPopover, Modal } from '$lib/components/ui';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { CardGrid, HintPopover, Modal, Timestamp } from '$lib/components/ui';
   import { fileLinks } from '$lib/fileViewer/links';
   import { renderMarkdown } from '$lib/markdown';
   import BriefingBlockCard from './BriefingBlockCard.svelte';
@@ -70,9 +69,11 @@
     {#if showMetadata}
       <p class="caption edition-meta">
         <span>Just me</span>
-        <time datetime={edition.generated_at}
-          >{formatDateTime(edition.generated_at, { dateStyle: 'medium', timeStyle: 'short' })}</time
-        >
+        <Timestamp
+          value={edition.generated_at}
+          format="datetime"
+          options={{ dateStyle: 'medium', timeStyle: 'short' }}
+        />
         {#if edition.delivered_to?.length}
           <span>Delivered by {edition.delivered_to.map(channelLabel).join(', ')}</span>
         {/if}

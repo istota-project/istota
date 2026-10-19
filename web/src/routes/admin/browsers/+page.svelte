@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Button, Card, NoticeBanner, LoadState } from '$lib/components/ui';
+  import { Button, Card, NoticeBanner, LoadState, Timestamp } from '$lib/components/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);
@@ -100,7 +100,13 @@
         </Card>
       {/if}
       {#if report.as_of}
-        <p class="caption">As of {new Date(report.as_of).toLocaleTimeString()}</p>
+        <p class="caption">
+          As of <Timestamp
+            value={report.as_of}
+            format="time"
+            options={{ hour: 'numeric', minute: '2-digit', second: '2-digit' }}
+          />
+        </p>
       {/if}
     {/if}
   </LoadState>

@@ -7,8 +7,8 @@
     LoadState,
     NoticeBanner,
     type KebabItem,
+    Timestamp,
   } from '$lib/components/ui';
-  import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { brokenKind, scriptRefLabel, scriptUsage, type ScriptKind } from './scriptFiles';
 
   let {
@@ -87,11 +87,7 @@
                 <span class="caption">{file.description || 'No description'}</span>
                 <span class="caption">{scriptUsage(file)}</span>
               </div>
-              <time
-                class="caption index-detail"
-                datetime={file.modified}
-                title={formatDateTime(file.modified)}>{formatDate(file.modified)}</time
-              >
+              <Timestamp class="caption index-detail" value={file.modified} />
               <KebabMenu
                 ariaLabel={`Actions for ${file.path}`}
                 items={[
@@ -143,7 +139,7 @@
   .index-name:hover {
     text-decoration: underline;
   }
-  .index-detail {
+  .index-row :global(.index-detail) {
     white-space: nowrap;
   }
 </style>

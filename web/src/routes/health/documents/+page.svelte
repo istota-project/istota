@@ -51,6 +51,7 @@
     type SelectOption,
     LoadState,
     PageHeader,
+    Timestamp,
   } from '$lib/components/ui';
   import {
     attachOptions,
@@ -448,17 +449,15 @@
                 >
                 <Badge size="sm">{sourceLabel(doc.source)}</Badge>
                 <span class="mobile-meta card-only caption"
-                  >{formatBytes(doc.byte_size)}<span aria-hidden="true"> · </span><time
-                    datetime={doc.created_at}>{formatDate(doc.created_at)}</time
-                  ></span
+                  >{formatBytes(doc.byte_size)}<span aria-hidden="true"> · </span><Timestamp
+                    value={doc.created_at}
+                  /></span
                 >
               </div>
               {#if doc.notes}<p class="notes caption" title={doc.notes}>{doc.notes}</p>{/if}
             </td>
             <td class="size-column num card-hidden">{formatBytes(doc.byte_size)}</td>
-            <td class="added-column card-hidden"
-              ><time datetime={doc.created_at}>{formatDate(doc.created_at)}</time></td
-            >
+            <td class="added-column card-hidden"><Timestamp value={doc.created_at} /></td>
             <td class="links-column">
               <div class="links">
                 {#each links(doc) as link (`${link.entity_type}:${link.entity_id}`)}

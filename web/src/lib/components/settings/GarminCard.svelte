@@ -9,8 +9,7 @@
     importGarminTracks,
     type GarminStatus,
   } from '$lib/api';
-  import { Button, Card, Field, Input } from '$lib/components/ui';
-  import { formatDateTime } from '$lib/dateFormat';
+  import { Button, Card, Field, Input, Timestamp } from '$lib/components/ui';
 
   let loading = $state(true);
   let busy = $state(false);
@@ -146,8 +145,6 @@
     }
   }
 
-  const formatTimestamp = (iso: string | null) => formatDateTime(iso, { empty: 'never' });
-
   onMount(refresh);
 </script>
 
@@ -165,7 +162,9 @@
       </div>
       <div>
         <div class="label muted">Last sync</div>
-        <div class="value">{formatTimestamp(status.last_sync)}</div>
+        <div class="value">
+          <Timestamp value={status.last_sync} format="datetime" empty="never" />
+        </div>
       </div>
     </div>
     {#if status.error}

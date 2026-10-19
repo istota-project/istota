@@ -43,6 +43,7 @@
     EmptyState,
     PageLoading,
     LoadMore,
+    Timestamp,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import {
@@ -57,7 +58,7 @@
   } from '@lucide/svelte';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyError } from '$lib/stores/notices';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
+  import { formatDateTime } from '$lib/dateFormat';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
   let { children } = $props();
@@ -702,9 +703,7 @@
               >
                 <span class="archive-line">
                   <span class="archive-subject title-card">{row.title}</span>
-                  <time class="archive-date caption" datetime={entry.at} title={fmtDate(entry.at)}
-                    >{formatRelative(entry.at)}</time
-                  >
+                  <Timestamp class="archive-date caption" value={entry.at} format="relative" />
                 </span>
                 <span class="archive-audience caption">
                   {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
@@ -792,7 +791,7 @@
     white-space: nowrap;
   }
 
-  .archive-date {
+  .archive-line :global(.archive-date) {
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
   }

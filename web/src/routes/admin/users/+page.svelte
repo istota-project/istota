@@ -24,8 +24,8 @@
     type KebabItem,
     LoadState,
     Card,
+    Timestamp,
   } from '$lib/components/ui';
-  import { formatRelative } from '$lib/dateFormat';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { signInStateLabel } from '$lib/admin/signInState';
   import { createConfirm } from '$lib/ui/confirm.svelte';
@@ -227,11 +227,11 @@
                       >
                     </td>
                     <td class="col-last-login truncate"
-                      >{user.identity
-                        ? user.identity.last_login_at
-                          ? formatRelative(user.identity.last_login_at)
-                          : 'Never'
-                        : '—'}</td
+                      >{#if user.identity}<Timestamp
+                          value={user.identity.last_login_at}
+                          format="relative"
+                          empty="Never"
+                        />{:else}—{/if}</td
                     >
                     <td class="col-actions">
                       <KebabMenu

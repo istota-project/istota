@@ -1,10 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button, EmptyState, NoticeBanner, Card, LoadMore } from '$lib/components/ui';
+  import { Button, EmptyState, NoticeBanner, Card, LoadMore, Timestamp } from '$lib/components/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
   import { formatBytes } from '$lib/format';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import {
     getGroupMemory,
     saveGroupMemory,
@@ -157,9 +156,7 @@
       {#if notebook.last_change}<p class="caption last-change">
           Last changed by {notebook.last_change.user_id ||
             'an unknown actor'}{#if notebook.last_change.ts}
-            <span title={formatDateTime(notebook.last_change.ts)}
-              >{formatRelative(notebook.last_change.ts)}</span
-            >{/if}
+            <Timestamp value={notebook.last_change.ts} format="relative" />{/if}
         </p>{/if}
     {/if}
   </Card>
@@ -174,8 +171,12 @@
             <li class="change">
               <div class="change-head">
                 <span class="change-actor">{entry.user_id || 'Unknown actor'}</span>
-                <span class="caption" title={formatDateTime(entry.ts)}
-                  >{entry.ts ? formatRelative(entry.ts) : 'Unknown time'}{#if entry.source}
+                <span class="caption"
+                  ><Timestamp
+                    value={entry.ts}
+                    format="relative"
+                    empty="Unknown time"
+                  />{#if entry.source}
                     · {entry.source}{/if}</span
                 >
               </div>

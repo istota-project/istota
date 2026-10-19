@@ -476,7 +476,10 @@ describe('the last-sent row', () => {
   };
 
   /** The relative rung alone, without the exact-instant line beneath it. */
-  const rung = (): string => lastSent().firstChild?.textContent?.trim() ?? '';
+  const rung = (): string =>
+    lastSent()
+      .textContent?.replace(lastSent().querySelector('.sent-exact')?.textContent ?? '', '')
+      .trim() ?? '';
 
   it('renders the tight ladder rather than the spaced one it used to', async () => {
     // `5 min ago` and `2 h ago` were this card's alone; every other surface

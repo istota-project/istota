@@ -23,8 +23,8 @@
     Input,
     TextArea,
     Badge,
+    Timestamp,
   } from '$lib/components/ui';
-  import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { sourceKindLabel, uniqueName } from './briefingSettings';
 
@@ -75,16 +75,8 @@
     if (resp.shared_block_timezone) sharedBlockTimezone = resp.shared_block_timezone;
   }
 
-  // Compact "last run" — the raw ISO string is wide and ugly; show a short
-  // local "Mon D, HH:MM".
-  const fmtLastRun = (iso: string | null) =>
-    formatDateTime(iso, {
-      empty: '—',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+  // Compact "last run": a short local "Mon D, HH:MM".
+  const LAST_RUN = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' } as const;
 
   function startNewShared() {
     sharedEditingName = null;
@@ -314,7 +306,14 @@
                 ><Badge tone="subtle" uppercase={false}>{b.render_mode}</Badge></td
               >
               <td>{b.trusted ? 'trusted' : 'untrusted'}</td>
-              <td class="nowrap">{fmtLastRun(b.status.last_run_at)}</td>
+              <td class="nowrap"
+                ><Timestamp
+                  value={b.status.last_run_at}
+                  format="datetime"
+                  options={LAST_RUN}
+                  empty="—"
+                /></td
+              >
               <td class="col-actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
               </td>

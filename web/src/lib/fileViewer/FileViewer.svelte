@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Modal, Button, IconButton } from '$lib/components/ui';
+  import { Modal, Button, IconButton, Timestamp } from '$lib/components/ui';
   import { Code, Download, ExternalLink, Eye } from '@lucide/svelte';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
@@ -12,7 +12,7 @@
     type FilePreview,
   } from '$lib/api';
   import { formatBytes } from '$lib/format';
-  import { formatDateTime } from '$lib/dateFormat';
+  import type { DateFormatOptions } from '$lib/dateFormat';
   import { viewer, type FileSource } from './store.svelte';
   import PdfPreview from './PdfPreview.svelte';
   import { presentationFor } from './presentation';
@@ -36,15 +36,15 @@
   let name = $derived(direct?.name ?? preview?.name ?? path.split('/').pop() ?? 'File');
   let markdown = $derived(preview?.kind === 'text' && presentationFor(name).kind === 'markdown');
   // The year only when it is not this one (at every width), so a phone keeps size and time on one line.
-  function shortModified(iso: string): string {
+  function shortModified(iso: string): DateFormatOptions {
     const sameYear = new Date(iso).getFullYear() === new Date().getFullYear();
-    return formatDateTime(iso, {
+    return {
       month: 'short',
       day: 'numeric',
       year: sameYear ? undefined : 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-    });
+    };
   }
   $effect(() => {
     const requested = path;
@@ -92,11 +92,11 @@
 >
   {#snippet metadata()}
     {#if preview}
-      {formatBytes(preview.size)} · <span class="metadata-verb">modified</span>{' '}<time
-        datetime={preview.modified}
-        title={formatDateTime(preview.modified, { dateStyle: 'medium', timeStyle: 'short' })}
-        >{shortModified(preview.modified)}</time
-      >
+      {formatBytes(preview.size)} · <span class="metadata-verb">modified</span>{' '}<Timestamp
+        value={preview.modified}
+        format="datetime"
+        options={shortModified(preview.modified)}
+      />
     {/if}
   {/snippet}
   {#snippet actions()}

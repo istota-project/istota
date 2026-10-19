@@ -1,13 +1,12 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { FileText, Play, Star, ExternalLink } from '@lucide/svelte';
-  import { Modal, IconButton, Button } from '$lib/components/ui';
+  import { Modal, IconButton, Button, Timestamp } from '$lib/components/ui';
   import MediaPreview from '$lib/components/viewer/MediaPreview.svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
   import { fileKind, inlineMedia, linkUrl, playerUrl, providerLabel } from '$lib/feeds/embed';
   import { notifyError } from '$lib/stores/notices';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let {
     entries = [],
@@ -188,8 +187,12 @@
     }
   }
 
-  const formatDate = (iso: string) =>
-    formatIsoDate(iso, { locale: 'en-US', month: 'short', day: 'numeric', year: 'numeric' });
+  const DATE_OPTIONS = {
+    locale: 'en-US',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  } as const;
 </script>
 
 {#if entry}
@@ -212,9 +215,7 @@
     }}
   >
     {#snippet metadata()}
-      {#if entry.published_at}<time datetime={entry.published_at}
-          >{formatDate(entry.published_at)}</time
-        >{/if}
+      <Timestamp value={entry.published_at} options={DATE_OPTIONS} />
     {/snippet}
     {#snippet actions()}
       <span class="reader-star" class:starred={entry.starred}>

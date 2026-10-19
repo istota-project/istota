@@ -120,6 +120,49 @@ export function formatDateTime(
   return d.toLocaleString(locale, Object.keys(intl).length > 0 ? intl : undefined);
 }
 
+/**
+ * The time of day alone, `14:22`, for a value that is always a full timestamp.
+ *
+ * Hours and minutes by default, the shape the three hand-written copies used
+ * (chat's turn stamp, the location trip list, the browsers pane). Shares
+ * `formatDateTime`'s separator rule and fallbacks.
+ */
+export function formatTime(iso: string | null | undefined, opts: DateFormatOptions = {}): string {
+  const { empty = '', locale, ...intl } = opts;
+  if (!iso) return empty;
+  const d = new Date(separator(iso));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString(
+    locale,
+    Object.keys(intl).length > 0 ? intl : { hour: '2-digit', minute: '2-digit' },
+  );
+}
+
+/**
+ * The value for a `<time datetime>` attribute. An ISO date or timestamp is
+ * already one and passes through (a SQLite timestamp takes its `T`); any other
+ * value that parses (an RFC 822 feed date) becomes its ISO instant; a value
+ * with no instant in it gives `undefined`, since an attribute holding garbage
+ * is worse than none.
+ */
+export function dateTimeAttribute(iso: string | null | undefined): string | undefined {
+  if (!iso) return undefined;
+  if (DATE_ONLY.test(iso)) return iso;
+  const normalised = separator(iso);
+  const d = new Date(normalised);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return /^\d{4}-\d{2}-\d{2}T/.test(normalised) ? normalised : d.toISOString();
+}
+
+/**
+ * The full absolute form of a value, for a tooltip: the date alone for a bare
+ * calendar date, the date and time for a timestamp.
+ */
+export function formatAbsolute(iso: string | null | undefined): string {
+  if (iso && DATE_ONLY.test(iso)) return formatDate(iso);
+  return formatDateTime(iso);
+}
+
 /** What a relative timestamp may vary by. Nothing else about it is a choice. */
 export type RelativeFormatOptions = {
   /** Rendered for `null`, `undefined` and `''`. Defaults to `''`. */

@@ -13,8 +13,7 @@
    * tell whether that is by design.
    */
   import { onMount } from 'svelte';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
-  import { Button, Select, type SelectOption, Card, Field } from '$lib/components/ui';
+  import { Button, Select, type SelectOption, Card, Field, Timestamp } from '$lib/components/ui';
   import {
     trackerAvailable,
     scannerAvailable,
@@ -171,8 +170,6 @@
       return null;
     });
   }
-
-  const formatSent = (iso: string | null) => formatRelative(iso, { empty: 'never' });
 
   /**
    * One line under the Tracking row, and only one.
@@ -432,9 +429,14 @@
              `web/AGENTS.md` — "do not put anything the user needs to act on
              behind hover". -->
         <dd>
-          {formatSent(status.lastSentAt)}
+          <Timestamp value={status.lastSentAt} format="relative" empty="never" title={false} />
           {#if status.lastSentAt}
-            <span class="caption sent-exact">{formatDateTime(status.lastSentAt)}</span>
+            <Timestamp
+              class="caption sent-exact"
+              value={status.lastSentAt}
+              format="datetime"
+              title={false}
+            />
           {/if}
         </dd>
         {#if status.droppedPoints > 0}
@@ -516,7 +518,7 @@
 
   /* Placement only. The colour and the size are `.caption`'s, per
 	   `web/AGENTS.md` — restating either here is what `captions.test.ts` fails. */
-  .sent-exact {
+  dd :global(.sent-exact) {
     display: block;
   }
 </style>

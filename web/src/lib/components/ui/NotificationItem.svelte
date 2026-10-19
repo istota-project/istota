@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Timestamp from './Timestamp.svelte';
   /**
    * One row in the notification panel.
    *
@@ -22,7 +23,6 @@
     type NotificationAction,
     type ResolvedNotification,
   } from '$lib/api';
-  import { formatRelative } from '$lib/dateFormat';
   import Button from './Button.svelte';
 
   interface Props {
@@ -65,17 +65,6 @@
     default: 'secondary',
     danger: 'danger',
   };
-
-  /**
-   * Read off `updated_at` rather than `created_at`: a reopened row keeps the
-   * date it was first seen and refreshes the other, and "40 days ago" on an
-   * alert that fired an hour ago is the wrong answer to the question the panel
-   * is being asked.
-   *
-   * Which column is read is this component's decision; how the age renders is
-   * `formatRelative`'s.
-   */
-  const age = $derived(formatRelative(item.updated_at));
 </script>
 
 <div class="notification-item" class:unseen={!item.seen_at}>
@@ -89,7 +78,9 @@
     <span class="item-text">
       <span class="item-title">{item.title}</span>
       <span class="item-meta caption">
-        <span>{age}</span>
+        <!-- `updated_at`, not `created_at`: a reopened row refreshes it, and "40 days
+             ago" on an alert that fired an hour ago is the wrong answer. -->
+        <Timestamp value={item.updated_at} format="relative" />
         {#if item.occurrences > 1}
           <span class="occurrences" title="Raised {item.occurrences} times"
             >×{item.occurrences}</span

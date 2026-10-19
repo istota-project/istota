@@ -2,11 +2,10 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Folder } from '@lucide/svelte';
-  import { Button, EmptyState, Card } from '$lib/components/ui';
+  import { Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { fileIcon } from '$lib/components/workspace/filePresentation';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
 
   const RECENT = 6;
   let { groupId }: { groupId: string } = $props();
@@ -75,9 +74,7 @@
               onclick={() => viewer.openFile(target)}>{entry.name}</button
             >
           {:else}<span class="name" title={entry.name}>{entry.name}</span>{/if}
-          <span class="caption" title={formatDateTime(iso(entry))}
-            >{formatRelative(iso(entry))}</span
-          >
+          <Timestamp class="caption" value={iso(entry)} format="relative" />
         </li>
       {/each}
     </ul>

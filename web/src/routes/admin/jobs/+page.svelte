@@ -18,10 +18,10 @@
     LoadState,
     type KebabItem,
     Card,
+    Timestamp,
   } from '$lib/components/ui';
   import { ConfirmStepUpDialog } from '$lib/components/settings';
   import { createConfirm } from '$lib/ui/confirm.svelte';
-  import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess, notifyWarning } from '$lib/stores/notices';
 
   type JobState = 'running' | 'disabled' | 'suspended';
@@ -178,7 +178,7 @@
                     <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
                   </td>
                   <td class="col-last truncate"
-                    >{job.last_run_at ? formatRelative(job.last_run_at) : 'Never'}</td
+                    ><Timestamp value={job.last_run_at} format="relative" empty="Never" /></td
                   >
                   <td class="num col-failures" class:failing={job.consecutive_failures > 0}
                     >{job.consecutive_failures}</td

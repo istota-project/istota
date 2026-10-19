@@ -6,7 +6,7 @@
     type CredentialBackupSettings,
     type StepUpProof,
   } from '$lib/api';
-  import { Button, Field, Input, Card } from '$lib/components/ui';
+  import { Button, Field, Input, Card, Timestamp } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let settings = $state<CredentialBackupSettings | null>(null);
@@ -64,9 +64,8 @@
       </p>{/if}
     {#if settings.last_run}
       <p class="description">
-        Last backup: {settings.last_run.at} · {settings.last_run.outcome}{settings.last_run.reason
-          ? ` (${settings.last_run.reason})`
-          : ''}
+        Last backup: <Timestamp value={settings.last_run.at} format="datetime" /> · {settings
+          .last_run.outcome}{settings.last_run.reason ? ` (${settings.last_run.reason})` : ''}
       </p>
     {/if}
     <Field

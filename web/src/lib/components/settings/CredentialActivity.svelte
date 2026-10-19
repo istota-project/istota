@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCredentialActivity, type CredentialActivityRow } from '$lib/api';
-  import { Button, Card } from '$lib/components/ui';
+  import { Button, Card, Timestamp } from '$lib/components/ui';
   let rows: CredentialActivityRow[] = $state([]);
   let error = $state('');
   let busy = $state(false);
@@ -33,7 +33,9 @@
       {#each rows as row (row.id)}
         <li>
           <p>{row.action}{row.name ? ` · ${row.name}` : ''}</p>
-          <p class="caption">{row.at} · {row.actor}</p>
+          <p class="caption">
+            <Timestamp value={row.at} format="datetime" /> · {row.actor}
+          </p>
         </li>
       {/each}
     </ul>

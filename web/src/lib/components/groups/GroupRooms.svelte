@@ -2,9 +2,8 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { MessageSquare } from '@lucide/svelte';
-  import { CountPill, EmptyState, Card } from '$lib/components/ui';
+  import { CountPill, EmptyState, Card, Timestamp } from '$lib/components/ui';
   import { getChatRooms, type ChatRoom, type GroupDetail } from '$lib/api';
-  import { formatDateTime, formatRelative } from '$lib/dateFormat';
 
   let { rooms }: { rooms: GroupDetail['rooms'] } = $props();
   let chatRooms = $state<Map<string, ChatRoom>>(new Map());
@@ -40,11 +39,7 @@
           <a class="name" href="{base}/chat?room={encodeURIComponent(room.token)}" title={room.name}
             >{room.name}</a
           >
-          {#if room.chat?.last_activity}<span
-              class="caption"
-              title={formatDateTime(room.chat.last_activity)}
-              >{formatRelative(room.chat.last_activity)}</span
-            >{/if}
+          <Timestamp class="caption" value={room.chat?.last_activity} format="relative" />
           <CountPill count={room.chat?.unread_count ?? 0} />
         </li>
       {/each}

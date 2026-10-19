@@ -31,6 +31,7 @@
     Field,
     Input,
     Badge,
+    Timestamp,
   } from '$lib/components/ui';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
   import FeedSubscriptionModal, {
@@ -39,7 +40,6 @@
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { createDraft } from '$lib/ui/draft.svelte';
   import { parseOptionalInt } from '$lib/ui/parse';
-  import { formatDateTime } from '$lib/dateFormat';
 
   let loading = $state(true);
   let saving = $state(false);
@@ -328,8 +328,6 @@
   function categoryOptions(): string[] {
     return config.categories.map((c) => c.slug);
   }
-
-  const formatDate = (iso: string | null) => formatDateTime(iso, { empty: '—' });
 </script>
 
 <SettingsLayout
@@ -376,7 +374,12 @@
             <span class="diag-label caption">in error</span>
           </div>
           <div class="diag wide">
-            <span class="diag-value">{formatDate(diagnostics.last_poll_at)}</span>
+            <Timestamp
+              class="diag-value"
+              value={diagnostics.last_poll_at}
+              format="datetime"
+              empty="—"
+            />
             <span class="diag-label caption">last poll</span>
           </div>
         </div>
@@ -561,7 +564,12 @@
                   <td class="col-state">
                     {#if state}
                       <div class="state">
-                        <span class="truncate">{formatDate(state.last_fetched_at)}</span>
+                        <Timestamp
+                          class="truncate"
+                          value={state.last_fetched_at}
+                          format="datetime"
+                          empty="—"
+                        />
                         {#if state.last_error}
                           <span class="state-error" title={state.last_error}>
                             {state.error_count}× err: {state.last_error.slice(0, 60)}
@@ -690,7 +698,7 @@
     color: var(--status-danger-fg);
   }
 
-  .diag-value {
+  .diag :global(.diag-value) {
     font-size: var(--text-base);
     font-weight: var(--weight-semibold);
     color: var(--text-primary);

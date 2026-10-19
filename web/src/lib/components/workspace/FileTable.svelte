@@ -19,10 +19,10 @@
     sortAria,
     type KebabItem,
     Checkbox,
+    Timestamp,
   } from '$lib/components/ui';
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
-  import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { fileIcon } from './filePresentation';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
   import { createTableSort } from '$lib/ui/tableSort.svelte';
@@ -371,10 +371,7 @@
             </div>
           </td>
           <td class="size num muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
-          <td class="modified muted"
-            >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
-              >{:else}—{/if}</td
-          >
+          <td class="modified muted"><Timestamp value={iso} empty="—" /></td>
           <td class="col-actions">
             {#if actions.length}
               <KebabMenu items={actions} ariaLabel={`Actions for ${entry.name}`} />

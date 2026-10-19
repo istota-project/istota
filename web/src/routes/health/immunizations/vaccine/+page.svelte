@@ -20,9 +20,9 @@
     KebabMenu,
     LoadState,
     PageHeader,
+    Timestamp,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let name = $derived(page.url.searchParams.get('name') || '');
   let loading = $state(true);
@@ -71,8 +71,6 @@
     }
   }
 
-  const formatDate = (iso: string | null) => formatIsoDate(iso, { empty: '—' });
-
   $effect(() => {
     if (name) load();
   });
@@ -102,7 +100,7 @@
           <dl class="kv-stacked">
             <div>
               <dt>Last given</dt>
-              <dd>{formatDate(entry.last_given)}</dd>
+              <dd><Timestamp value={entry.last_given} empty="—" /></dd>
             </div>
             <div>
               <dt>Doses recorded</dt>
@@ -110,7 +108,7 @@
             </div>
             <div>
               <dt>Next due</dt>
-              <dd>{formatDate(entry.next_due)}</dd>
+              <dd><Timestamp value={entry.next_due} empty="—" /></dd>
             </div>
             {#if entry.days_until_due !== null}
               <div>
@@ -178,7 +176,7 @@
               <tbody>
                 {#each history as i (i.id)}
                   <tr>
-                    <td>{formatDate(i.date_given)}</td>
+                    <td><Timestamp value={i.date_given} empty="—" /></td>
                     <td>{i.product_name || '—'}</td>
                     <td>{i.dose_label || '—'}</td>
                     <td>{i.facility || '—'}</td>

@@ -13,8 +13,15 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, Select, LoadState, PageHeader } from '$lib/components/ui';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
+  import {
+    Badge,
+    Button,
+    EmptyState,
+    Select,
+    LoadState,
+    PageHeader,
+    Timestamp,
+  } from '$lib/components/ui';
 
   let loading = $state(true);
   let error = $state('');
@@ -75,8 +82,7 @@
     }
   }
 
-  const formatDate = (iso: string) =>
-    formatIsoDate(iso, { year: 'numeric', month: '2-digit', day: '2-digit' });
+  const DRAWN = { year: 'numeric', month: '2-digit', day: '2-digit' } as const;
 
   function formatRange(low: number | null, high: number | null): string {
     if (low == null && high == null) return '';
@@ -225,7 +231,7 @@
             <li>
               <a href="{base}/health/labs/panel?id={p.id}">
                 <Badge variant="warn">Draft</Badge>
-                <span>{formatDate(p.drawn_at)}</span>
+                <Timestamp value={p.drawn_at} options={DRAWN} title={false} />
                 <span class="muted">{p.lab_name || '—'}</span>
                 <span class="muted">{p.panel_type || ''}</span>
               </a>
@@ -262,7 +268,7 @@
                         .filter(Boolean)
                         .join(' · ') || undefined}
                     >
-                      <span class="date">{formatDate(p.drawn_at)}</span>
+                      <Timestamp class="date" value={p.drawn_at} options={DRAWN} title={false} />
                     </a>
                   </th>
                 {/each}
@@ -393,10 +399,10 @@
     text-decoration: none;
     white-space: nowrap;
   }
-  .date-link:hover .date {
+  .date-link:hover :global(.date) {
     text-decoration: underline;
   }
-  .date {
+  .date-link :global(.date) {
     font-weight: var(--weight-medium);
   }
 

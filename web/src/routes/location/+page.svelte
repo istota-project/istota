@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState } from '$lib/components/ui';
+  import { LoadState, Timestamp } from '$lib/components/ui';
   import { onMount, onDestroy } from 'svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
@@ -25,7 +25,7 @@
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { formatMinutes, formatRelative, localDateISO } from '$lib/dateFormat';
+  import { formatMinutes, localDateISO } from '$lib/dateFormat';
 
   let requestedPlaceId = $state<number | null>(null);
   const urlSelection = createUrlSelection<{ place: number | null }>({
@@ -87,18 +87,16 @@
 
   let currentSource = $derived<'tracker' | 'browser'>(current?.last_ping ? 'tracker' : 'browser');
 
-  const formatDuration = (minutes: number | null) => formatMinutes(minutes);
-
   let currentLabel = $derived.by(() => {
     if (!current?.last_ping) return null;
     const placeName = current.current_visit?.place_name ?? current.last_ping.place ?? null;
     const visitDuration = current.current_visit
-      ? formatDuration(current.current_visit.duration_minutes)
+      ? formatMinutes(current.current_visit.duration_minutes)
       : '';
     return {
       placeName,
       visitDuration,
-      ago: formatRelative(current.last_ping.timestamp),
+      at: current.last_ping.timestamp,
       battery:
         current.last_ping.battery != null ? `${Math.round(current.last_ping.battery * 100)}%` : '',
     };
@@ -218,7 +216,7 @@
           {:else}
             <span class="place dim">No place</span>
           {/if}
-          <span class="stat caption num">{currentLabel.ago}</span>
+          <Timestamp class="stat caption num" value={currentLabel.at} format="relative" />
           {#if currentLabel.battery}
             <span class="stat caption num">{currentLabel.battery}</span>
           {/if}

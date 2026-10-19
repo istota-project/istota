@@ -21,6 +21,7 @@
     Field,
     StatTile,
     LoadState,
+    Timestamp,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
@@ -34,7 +35,7 @@
     usageOriginTitle,
   } from '$lib/usageFormat';
   import { formatBytes } from '$lib/format';
-  import { formatDuration as formatIsoDuration, formatRelative } from '$lib/dateFormat';
+  import { formatDuration as formatIsoDuration } from '$lib/dateFormat';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
@@ -109,12 +110,6 @@
 
   // `—` rather than `0s` for an absent uptime: the figure is missing, not zero.
   const formatDuration = (seconds: number) => (seconds ? formatIsoDuration(seconds) : '—');
-
-  // The seconds tier is this page and nowhere else: the panel refreshes on a
-  // timer and several of these figures are liveness readouts, where the coarse
-  // sub-minute rung and a count of seconds are different answers to the
-  // question being asked.
-  const formatTimestamp = (ts: string | null) => formatRelative(ts, { seconds: true, empty: '—' });
 
   /**
    * A plan tile's tint, by the operator's own thresholds and nothing else.
@@ -399,7 +394,12 @@
                 {brainLabel(stats.brain_status.primary)} down, no fallback
               {/if}
             {:else}
-              Scheduler last active {formatTimestamp(stats.system.last_scheduler_run)}
+              Scheduler last active <Timestamp
+                value={stats.system.last_scheduler_run}
+                format="relative"
+                seconds
+                empty="—"
+              />
             {/if}
           </p>
           <dl class="kv">
@@ -436,7 +436,14 @@
             <dt>Backups</dt>
             <dd>
               {formatNumber(stats.storage.backups_count)}
-              <span class="muted">· last {formatTimestamp(stats.storage.last_backup)}</span>
+              <span class="muted"
+                >· last <Timestamp
+                  value={stats.storage.last_backup}
+                  format="relative"
+                  seconds
+                  empty="—"
+                /></span
+              >
             </dd>
             {#if stats.storage.nextcloud_configured}
               <dt>Nextcloud mount</dt>
@@ -666,7 +673,9 @@
                     <td class="num col-cost">{formatCost(u.usage_cost_24h)}</td>
                     <!-- truncate: past thirty days this is a localized date, which can outgrow
                          the column. td only; the header's two words are meant to wrap. -->
-                    <td class="col-active truncate">{formatTimestamp(u.last_active)}</td>
+                    <td class="col-active truncate"
+                      ><Timestamp value={u.last_active} format="relative" seconds empty="—" /></td
+                    >
                   </tr>
                 {/each}
               </tbody>
@@ -725,7 +734,12 @@
               {/if}
             </div>
             <p class="usage-note caption">
-              Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
+              Updated <Timestamp
+                value={sub.fetched_at}
+                format="relative"
+                seconds
+                empty="—"
+              />{#if sub.stale}
                 — reading is stale{#if sub.error}: {sub.error}{/if}
               {/if}
             </p>
@@ -899,11 +913,11 @@
                     {#each Object.entries(mod) as [k, v] (k)}
                       <dt>{fieldLabel(k)}</dt>
                       <dd>
-                        {v === null
-                          ? '—'
-                          : TIMESTAMP_KEYS.has(k)
-                            ? formatTimestamp(String(v))
-                            : String(v)}
+                        {#if v !== null && TIMESTAMP_KEYS.has(k)}
+                          <Timestamp value={String(v)} format="relative" seconds />
+                        {:else}
+                          {v === null ? '—' : String(v)}
+                        {/if}
                       </dd>
                     {/each}
                   </dl>
@@ -1277,7 +1291,7 @@
     .users-grid .col-failed {
       width: 3.5rem;
     }
-    /* A rem more than the 5rem "1234d ago" wanted. `formatTimestamp` no longer
+    /* A rem more than the 5rem "1234d ago" wanted. `formatRelative` no longer
 		   counts days indefinitely — past thirty it renders a date, and a dormant
 		   account is exactly the row that reaches it, so this column's longest
 		   string went from 9 characters to `Sep 5, 2026`. */

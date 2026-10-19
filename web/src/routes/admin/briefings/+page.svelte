@@ -22,11 +22,11 @@
     LoadState,
     type KebabItem,
     Card,
+    Timestamp,
   } from '$lib/components/ui';
   import { ConfirmStepUpDialog } from '$lib/components/settings';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { channelLabel, derivedTitle } from '$lib/components/briefings/settings/briefingSettings';
-  import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
 
   /** One row of either list, in the shape the table draws. */
@@ -242,7 +242,7 @@
                     >
                   </td>
                   <td class="col-last truncate"
-                    >{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td
+                    ><Timestamp value={row.lastRun} format="relative" empty="Never" /></td
                   >
                   <td class="col-actions">
                     <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />

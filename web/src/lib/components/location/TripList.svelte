@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Timestamp } from '$lib/components/ui';
   import type { Trip } from '$lib/location-path';
   import { ACTIVITY_COLORS, ACTIVITY_LABELS, DEFAULT_PATH_COLOR } from '$lib/location-constants';
 
@@ -8,11 +9,6 @@
   }
 
   let { trips, onTripClick }: Props = $props();
-
-  function formatTime(ts: string): string {
-    const d = new Date(ts);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
 
   function formatDist(m: number): string {
     return m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${m} m`;
@@ -39,7 +35,12 @@
           style="background: {ACTIVITY_COLORS[trip.activity_type] ?? DEFAULT_PATH_COLOR}"
         ></span>
         <div class="trip-info">
-          <span class="trip-time">{formatTime(trip.start_time)} - {formatTime(trip.end_time)}</span>
+          <span class="trip-time"
+            ><Timestamp value={trip.start_time} format="time" /> - <Timestamp
+              value={trip.end_time}
+              format="time"
+            /></span
+          >
           <span class="trip-details caption">
             {formatDist(trip.distance_m)}
             {#if trip.max_speed}&middot; {formatSpeed(trip.max_speed)}{/if}

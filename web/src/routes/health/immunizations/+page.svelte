@@ -29,9 +29,10 @@
     TextArea,
     LoadState,
     PageHeader,
+    Timestamp,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
+  import { localDateISO } from '$lib/dateFormat';
 
   let loading = $state(true);
   let error = $state('');
@@ -127,8 +128,6 @@
       error = e instanceof Error ? e.message : 'Failed to delete';
     }
   }
-
-  const formatDate = (iso: string | null) => formatIsoDate(iso, { empty: '—' });
 
   const statusOrder: Record<ImmunizationStatus, number> = {
     overdue: 0,
@@ -247,7 +246,7 @@
             <div class="card-body">
               <div class="caption">
                 {#if c.last_given}
-                  Last: {formatDate(c.last_given)}{#if c.dose_count > 1}
+                  Last: <Timestamp value={c.last_given} empty="—" />{#if c.dose_count > 1}
                     · {c.dose_count} doses{/if}
                 {:else}
                   No record
@@ -255,7 +254,7 @@
               </div>
               {#if c.next_due}
                 <div class="caption">
-                  Next due: {formatDate(c.next_due)}
+                  Next due: <Timestamp value={c.next_due} empty="—" />
                   {#if c.days_until_due !== null}
                     {#if c.days_until_due < 0}
                       ({-c.days_until_due}d overdue)
@@ -288,7 +287,7 @@
                 <div class="card-body">
                   <div class="caption">
                     {#if c.last_given}
-                      Last: {formatDate(c.last_given)}
+                      Last: <Timestamp value={c.last_given} empty="—" />
                     {:else}
                       Not recorded
                     {/if}
@@ -312,7 +311,7 @@
                 {c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
               </Badge>
               <div class="card-body">
-                <div class="caption">Last: {formatDate(c.last_given)}</div>
+                <div class="caption">Last: <Timestamp value={c.last_given} empty="—" /></div>
               </div>
             </Card>
           </li>
@@ -357,8 +356,8 @@
                 .join(' · ')}
               <tr>
                 <td class="date">
-                  <time datetime={i.date_given}>{formatDate(i.date_given)}</time>{#if details}<span
-                      class="card-only">{` · ${details}`}</span
+                  <Timestamp value={i.date_given} />{#if details}<span class="card-only"
+                      >{` · ${details}`}</span
                     >{/if}
                 </td>
                 <td class="vaccine cell-primary">

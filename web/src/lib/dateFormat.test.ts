@@ -16,11 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RelativeFormatOptions } from '$lib/dateFormat';
 import {
+  dateTimeAttribute,
   formatDate,
   formatDateTime,
   formatDuration,
   formatMinutes,
   formatRelative,
+  formatTime,
   localDateISO,
 } from '$lib/dateFormat';
 
@@ -145,6 +147,44 @@ describe('formatDateTime', () => {
     expect(formatDateTime('Tue, 05 Sep 2026 14:22:31 GMT')).not.toBe(
       'Tue, 05 Sep 2026 14:22:31 GMT',
     );
+  });
+});
+
+describe('formatTime', () => {
+  it('renders the time of day with no date', () => {
+    expect(formatTime('2026-09-05T14:22:31Z')).toBe(
+      new Date('2026-09-05T14:22:31Z').toLocaleTimeString(undefined, {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    );
+  });
+
+  it('carries the module fallbacks', () => {
+    expect(formatTime(null, { empty: '—' })).toBe('—');
+    expect(formatTime('nonsense')).toBe('nonsense');
+    expect(formatTime('2026-09-05 14:22:31')).toBe(formatTime('2026-09-05T14:22:31'));
+  });
+});
+
+describe('dateTimeAttribute', () => {
+  it('keeps a bare date as the calendar day it names', () => {
+    expect(dateTimeAttribute('2026-09-05')).toBe('2026-09-05');
+  });
+
+  it('passes an ISO timestamp through and gives a SQLite one its T', () => {
+    expect(dateTimeAttribute('2026-09-05T14:22:31Z')).toBe('2026-09-05T14:22:31Z');
+    expect(dateTimeAttribute('2026-09-05 14:22:31Z')).toBe('2026-09-05T14:22:31Z');
+  });
+
+  it('turns any other parseable date into an ISO instant', () => {
+    expect(dateTimeAttribute('Tue, 05 Sep 2026 14:22:31 GMT')).toBe('2026-09-05T14:22:31.000Z');
+  });
+
+  it('gives nothing for a value with no instant in it', () => {
+    expect(dateTimeAttribute(null)).toBeUndefined();
+    expect(dateTimeAttribute('')).toBeUndefined();
+    expect(dateTimeAttribute('nonsense')).toBeUndefined();
   });
 });
 

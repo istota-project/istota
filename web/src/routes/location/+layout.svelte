@@ -34,10 +34,11 @@
     IconButton,
     Chip,
     EmptyState,
+    Timestamp,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { Cog, Pencil, X } from '@lucide/svelte';
-  import { formatDate as formatIsoDate, formatMinutes } from '$lib/dateFormat';
+  import { formatMinutes } from '$lib/dateFormat';
 
   let { children } = $props();
 
@@ -189,8 +190,6 @@
   });
 
   const formatDuration = (minutes: number | null) => formatMinutes(minutes, '—');
-
-  const formatDate = (iso: string | null) => formatIsoDate(iso, { empty: '—' });
 
   async function handlePlaceMove(placeId: number, lat: number, lon: number) {
     try {
@@ -349,8 +348,8 @@
                   </div>
                 </div>
                 <div class="stats-dates caption">
-                  <span>First: {formatDate(placeStats.first_visit)}</span>
-                  <span>Last: {formatDate(placeStats.last_visit)}</span>
+                  <span>First: <Timestamp value={placeStats.first_visit} empty="—" /></span>
+                  <span>Last: <Timestamp value={placeStats.last_visit} empty="—" /></span>
                 </div>
               {:else}
                 <EmptyState size="sm">No visits recorded</EmptyState>

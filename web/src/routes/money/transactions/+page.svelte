@@ -15,9 +15,8 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { EmptyState, KebabMenu, LoadState, Pagination } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, LoadState, Pagination, Timestamp } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   const navigateToAccount = getTransactionNavigation();
 
@@ -200,8 +199,7 @@
 
   let totalPages = $derived(Math.max(1, Math.ceil(total / perPage)));
 
-  const formatDate = (iso: string) =>
-    formatIsoDate(iso, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  const GROUP_DATE = { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' } as const;
 
   function shortAccount(account: string): string {
     const parts = account.split(':');
@@ -227,7 +225,9 @@
     {/snippet}
     <div class="record-list txn-scroll" class:faded={loading}>
       {#each grouped as group (group.date)}
-        <div class="record-group micro-label">{formatDate(group.date)}</div>
+        <div class="record-group micro-label">
+          <Timestamp value={group.date} options={GROUP_DATE} title={false} />
+        </div>
         {#each group.rows as txn, i (group.date + '-' + i)}
           {@const key = txnKey(txn)}
           {@const isExpanded = expandedKeys.has(key)}

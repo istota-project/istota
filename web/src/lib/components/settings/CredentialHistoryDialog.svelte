@@ -7,7 +7,7 @@
     type CredentialHistory,
     type StepUpProof,
   } from '$lib/api';
-  import { Button, Modal } from '$lib/components/ui';
+  import { Button, Modal, Timestamp } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
   let {
     name,
@@ -53,7 +53,7 @@
     <ul>
       {#each rows as row (row.id)}
         <li>
-          <p>{row.op} · {row.at} · {row.actor}</p>
+          <p>{row.op} · <Timestamp value={row.at} format="datetime" /> · {row.actor}</p>
           <p class="caption">{row.fields.join(', ')}</p>
           <Button
             variant="secondary"

@@ -23,8 +23,8 @@
     Select,
     type SelectOption,
     Checkbox,
+    Timestamp,
   } from '$lib/components/ui';
-  import { formatRelative } from '$lib/dateFormat';
   import { changedProfileFields } from '$lib/profilePatch';
   import { formatList, parseList } from '$lib/ui/parse';
   import { ADMIN_MANAGED_BADGE, adminManagedHint } from '$lib/settings/managed';
@@ -378,10 +378,11 @@
             {#if detail.identity}
               <span>{detail.identity.email}</span>
               <span class="caption"
-                >{signInStateLabel(detail.identity, detail.identity.state)} · last login {detail
-                  .identity.last_login_at
-                  ? formatRelative(detail.identity.last_login_at)
-                  : 'never'}</span
+                >{signInStateLabel(detail.identity, detail.identity.state)} · last login <Timestamp
+                  value={detail.identity.last_login_at}
+                  format="relative"
+                  empty="never"
+                /></span
               >
             {:else}
               <span class="caption">{signInStateLabel(null, undefined)}: no login email.</span>
@@ -575,7 +576,10 @@
                 {/if}
                 {#if detail.whatsapp.last_seen_at}
                   <span class="caption"
-                    >Last seen {formatRelative(detail.whatsapp.last_seen_at)}</span
+                    >Last seen <Timestamp
+                      value={detail.whatsapp.last_seen_at}
+                      format="relative"
+                    /></span
                   >
                 {/if}
                 {#if whatsappHasIdentity}

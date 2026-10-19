@@ -2,8 +2,7 @@
   import { onMount } from 'svelte';
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
-  import { formatDateTime } from '$lib/dateFormat';
-  import { Badge, Button, Card, NoticeBanner, LoadState } from '$lib/components/ui';
+  import { Badge, Button, Card, NoticeBanner, LoadState, Timestamp } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);
@@ -83,10 +82,6 @@
     }
   }
 
-  function when(at: string | null): string {
-    return formatDateTime(at, { empty: 'never' });
-  }
-
   onMount(() => load());
 </script>
 
@@ -133,8 +128,15 @@
       {/if}
 
       <p class="caption run-times">
-        Last run by the daemon: {when(report.checked_at)}{#if report.deep_checked_at}
-          · deep checks: {when(report.deep_checked_at)}{/if}{#if report.pending}
+        Last run by the daemon: <Timestamp
+          value={report.checked_at}
+          format="datetime"
+          empty="never"
+        />{#if report.deep_checked_at}
+          · deep checks: <Timestamp
+            value={report.deep_checked_at}
+            format="datetime"
+          />{/if}{#if report.pending}
           · a {report.pending.deep ? 'deep ' : ''}run is waiting for the daemon{/if}
       </p>
 

@@ -1,8 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminServarrApp, AdminServarrConnection } from '$lib/api';
-  import { Badge, Button, Card, EmptyState, NoticeBanner } from '$lib/components/ui';
-  import { formatRelative } from '$lib/dateFormat';
+  import { Badge, Button, Card, EmptyState, NoticeBanner, Timestamp } from '$lib/components/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { notifyError } from '$lib/stores/notices';
   import { Clapperboard } from '@lucide/svelte';
@@ -146,7 +145,9 @@
                 />
               {/if}
               {#if app.check?.at}
-                <p class="caption app-foot">checked {formatRelative(app.check.at)}</p>
+                <p class="caption app-foot">
+                  checked <Timestamp value={app.check.at} format="relative" />
+                </p>
               {/if}
             {/if}
           </Card>

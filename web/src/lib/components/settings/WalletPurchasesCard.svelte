@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { cancelWalletPurchase, type WalletPurchase, type WalletSettings } from '$lib/api';
-  import { Badge, Button, EmptyState, Card } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
   let {
     purchases,
     precision,
@@ -58,7 +58,8 @@
         <div class="purchase-main">
           <span>{purchase.merchant_host} · {amount(purchase)}</span>
           <span class="caption"
-            >{purchase.created_at} · {purchase.card_label}{purchase.approval === 'auto'
+            ><Timestamp value={purchase.created_at} format="datetime" /> · {purchase.card_label}{purchase.approval ===
+            'auto'
               ? ' · Auto'
               : purchase.approval === 'user'
                 ? ' · Approved'

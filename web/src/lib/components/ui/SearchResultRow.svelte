@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { SearchHit } from '$lib/api';
   import { segments } from '$lib/search/highlight';
-  import { formatRelative } from '$lib/dateFormat';
+  import Timestamp from './Timestamp.svelte';
   import Badge from './Badge.svelte';
   let {
     hit,
@@ -30,9 +30,11 @@
   {onclick}
 >
   <span class="result-heading"
-    ><strong>{hit.title}</strong>{#if hit.date}<time class="caption" datetime={hit.date}
-        >{formatRelative(hit.date)}</time
-      >{/if}</span
+    ><strong>{hit.title}</strong><Timestamp
+      class="caption"
+      value={hit.date}
+      format="relative"
+    /></span
   >
   {#if hit.subtitle}<span class="caption">{hit.subtitle}</span>{/if}
   <span class="result-snippet"
@@ -77,7 +79,7 @@
   .result-heading strong {
     min-width: 0;
   }
-  time {
+  .result-heading :global(time) {
     flex-shrink: 0;
   }
   .result-snippet {

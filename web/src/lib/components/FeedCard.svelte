@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Timestamp } from '$lib/components/ui';
   import { FileText, Play, Star } from '@lucide/svelte';
   import type { FeedEntry } from '$lib/api';
   import { updateEntryStarred } from '$lib/api';
@@ -6,7 +7,6 @@
 
   import { markReadDelay } from '$lib/stores/feeds';
   import { notifyError } from '$lib/stores/notices';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let {
     entry,
@@ -139,8 +139,7 @@
   // the only way to reach images embedded in the body copy, which arrive as
   // {@html} and can't be conditioned in the template at all.
 
-  const formatDate = (iso: string) =>
-    formatIsoDate(iso, { locale: 'en-US', month: 'short', day: 'numeric' });
+  const DATE_OPTIONS = { locale: 'en-US', month: 'short', day: 'numeric' } as const;
 
   function trackView(node: HTMLElement) {
     if (entry.status === 'read' || !onViewed) return;
@@ -372,11 +371,11 @@
     {#if entry.published_at}
       {#if permalink}
         <a href={permalink} class="meta-link">
-          <time datetime={entry.published_at}>{formatDate(entry.published_at)}</time>
+          <Timestamp value={entry.published_at} options={DATE_OPTIONS} />
         </a>
       {:else}
         <span class="meta-link">
-          <time datetime={entry.published_at}>{formatDate(entry.published_at)}</time>
+          <Timestamp value={entry.published_at} options={DATE_OPTIONS} />
         </span>
       {/if}
     {/if}
