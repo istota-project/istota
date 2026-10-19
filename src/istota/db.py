@@ -1312,6 +1312,7 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     # nothing above it.
     _migrate_notifications(conn)
     _migrate_push_tables(conn)
+    _migrate_location_ingest_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
@@ -9358,6 +9359,32 @@ def _migrate_push_tables(conn: sqlite3.Connection) -> None:
         )
     """)
 
+
+def _migrate_location_ingest_tokens(conn: sqlite3.Connection) -> None:
+    """Create the per-device ingest token table without committing the caller's transaction.
+
+    Pure DDL, all `IF NOT EXISTS`; kept in step with its block in `schema.sql`.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_ingest_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            token_tail TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('app', 'code')),
+            device_id TEXT,
+            label TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_location_ingest_tokens_device"
+        " ON location_ingest_tokens(user_id, device_id) WHERE device_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_location_ingest_tokens_user ON location_ingest_tokens(user_id)"
+    )
 
 def _migrate_notifications_push_pending(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "notifications", {"push_pending": "INTEGER NOT NULL DEFAULT 0"})

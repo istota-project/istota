@@ -2691,6 +2691,25 @@ CREATE TABLE IF NOT EXISTS push_state (
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- Per-device location ingest tokens; only the SHA-256 of a token is kept
+-- (istota.location.ingest_tokens). The legacy shared token stays in `secrets`.
+CREATE TABLE IF NOT EXISTS location_ingest_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_tail TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('app', 'code')),
+    -- The tracker's UUID for kind 'app'; NULL for 'code'.
+    device_id TEXT,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_location_ingest_tokens_device
+    ON location_ingest_tokens(user_id, device_id) WHERE device_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_location_ingest_tokens_user
+    ON location_ingest_tokens(user_id);
+
 -- Short-lived browser approvals; raw codes and verifiers are never persisted.
 CREATE TABLE IF NOT EXISTS web_mobile_auth_requests (
     request_id TEXT PRIMARY KEY,
