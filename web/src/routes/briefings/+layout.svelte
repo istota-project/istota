@@ -34,6 +34,7 @@
     AppShell,
     ShellHeader,
     Sidebar,
+    SidebarNav,
     SidebarToggle,
     CategoryGroup,
     Chip,
@@ -140,6 +141,7 @@
   // The settings sidebar: every briefing the caller can open, under its audience,
   // then the two settings sections that are not one briefing.
   let settingsSidebarOpen = $state(false);
+  const closeSettingsSidebar = () => (settingsSidebarOpen = false);
   let personalBriefings = $state<UserBriefingRow[]>([]);
   let groupBriefings = $state<Record<string, GroupBriefingDefinition[]>>({});
   const settingsParams = $derived(onSettings ? page.url.searchParams : new URLSearchParams());
@@ -580,6 +582,19 @@
   {/snippet}
 
   {#snippet sidebar()}
+    {#snippet heldMark()}<span class="view-state" title="Paused by an administrator"
+        ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
+          >, paused by an administrator</span
+        ></span
+      >{/snippet}
+    {#snippet offMark()}<span class="view-state" title="Off"
+        ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden">, off</span
+        ></span
+      >{/snippet}
+    {#snippet draftMark()}<span class="view-state" title="Draft"
+        ><PencilLine size={13} aria-hidden="true" /><span class="visually-hidden">, draft</span
+        ></span
+      >{/snippet}
     {#if onSettings}
       <Sidebar
         title="Settings"
@@ -587,92 +602,75 @@
         onClose={() => (settingsSidebarOpen = false)}
       >
         <div class="settings-index">
-          <div class="views">
-            <a
-              class="view-btn"
-              class:active={settingsActive({ new: '1' })}
-              href={settingsUrl({ new: '1' })}
-              onclick={() => (settingsSidebarOpen = false)}
-            >
-              <Plus size={14} />
-              <span class="view-name">New briefing</span>
-            </a>
-          </div>
+          <SidebarNav
+            items={[
+              {
+                href: settingsUrl({ new: '1' }),
+                label: 'New briefing',
+                icon: Plus,
+                active: settingsActive({ new: '1' }),
+              },
+            ]}
+            label="New briefing"
+            divider
+            onnavigate={closeSettingsSidebar}
+          />
           <CategoryGroup label="Just me" count={personalBriefings.length}>
-            <div class="views">
-              {#each personalBriefings as item (item.name)}
-                {@const query = { name: item.name }}
-                <a
-                  class="view-btn"
-                  class:active={settingsActive(query)}
-                  href={settingsUrl(query)}
-                  onclick={() => (settingsSidebarOpen = false)}
-                >
-                  <span class="view-name">{item.title || item.name}</span>
-                  {#if item.held}<span class="view-state" title="Paused by an administrator"
-                      ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
-                        >, paused by an administrator</span
-                      ></span
-                    >{:else if !item.enabled}<span class="view-state" title="Off"
-                      ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
-                        >, off</span
-                      ></span
-                    >{/if}
-                </a>
-              {/each}
-            </div>
+            <SidebarNav
+              items={personalBriefings.map((item) => ({
+                href: settingsUrl({ name: item.name }),
+                label: item.title || item.name,
+                active: settingsActive({ name: item.name }),
+                mark: item.held ? heldMark : !item.enabled ? offMark : undefined,
+              }))}
+              label="Just me"
+              divider
+              onnavigate={closeSettingsSidebar}
+            />
           </CategoryGroup>
           {#each targets as target (target.group_id)}
             {@const items = groupBriefings[target.group_id!] ?? []}
             {#if items.length || target.capabilities.author_briefings}
               <CategoryGroup label={target.label} count={items.length}>
-                <div class="views">
-                  {#each items as item (item.id)}
-                    {@const query = { group: target.group_id!, briefing: item.name }}
-                    <a
-                      class="view-btn"
-                      class:active={settingsActive(query)}
-                      href={settingsUrl(query)}
-                      onclick={() => (settingsSidebarOpen = false)}
-                    >
-                      <span class="view-name">{item.title || item.name}</span>
-                      {#if item.held}<span class="view-state" title="Paused by an administrator"
-                          ><CirclePause size={13} aria-hidden="true" /><span class="visually-hidden"
-                            >, paused by an administrator</span
-                          ></span
-                        >{:else if !item.enabled}<span class="view-state" title="Draft"
-                          ><PencilLine size={13} aria-hidden="true" /><span class="visually-hidden"
-                            >, draft</span
-                          ></span
-                        >{/if}
-                    </a>
-                  {/each}
-                </div>
+                <SidebarNav
+                  items={items.map((item) => {
+                    const query = { group: target.group_id!, briefing: item.name };
+                    return {
+                      href: settingsUrl(query),
+                      label: item.title || item.name,
+                      active: settingsActive(query),
+                      mark: item.held ? heldMark : !item.enabled ? draftMark : undefined,
+                    };
+                  })}
+                  label={target.label}
+                  divider
+                  onnavigate={closeSettingsSidebar}
+                />
               </CategoryGroup>
             {/if}
           {/each}
-          <div class="views settings-sections">
-            <a
-              class="view-btn"
-              class:active={settingsView === 'delivery'}
-              href={settingsUrl({ view: 'delivery' })}
-              onclick={() => (settingsSidebarOpen = false)}
-            >
-              <Send size={14} />
-              <span class="view-name">Delivery</span>
-            </a>
-            {#if identity.user.features?.admin}
-              <a
-                class="view-btn"
-                class:active={settingsView === 'shared'}
-                href={settingsUrl({ view: 'shared' })}
-                onclick={() => (settingsSidebarOpen = false)}
-              >
-                <Layers size={14} />
-                <span class="view-name">Shared blocks</span>
-              </a>
-            {/if}
-          </div>
+          <SidebarNav
+            items={[
+              {
+                href: settingsUrl({ view: 'delivery' }),
+                label: 'Delivery',
+                icon: Send,
+                active: settingsView === 'delivery',
+              },
+              ...(identity.user.features?.admin
+                ? [
+                    {
+                      href: settingsUrl({ view: 'shared' }),
+                      label: 'Shared blocks',
+                      icon: Layers,
+                      active: settingsView === 'shared',
+                    },
+                  ]
+                : []),
+            ]}
+            label="Briefing settings"
+            onnavigate={closeSettingsSidebar}
+          />
         </div>
       </Sidebar>
     {:else}
@@ -831,14 +829,6 @@
   .settings-index :global(.cat-label) {
     padding-left: var(--space-2);
     padding-right: var(--space-2);
-  }
-
-  /* Every block above already ends in the `.views` rule, so this one draws
-     none of its own, above or below. */
-  .settings-index .settings-sections {
-    margin-bottom: 0;
-    padding-bottom: 0;
-    border-bottom: none;
   }
 
   .sidebar-error {

@@ -5,7 +5,7 @@
   import { page } from '$app/state';
   import { getProfile, getModules, updateProfile, type UserProfile } from '$lib/api';
   import { createDraft } from '$lib/ui/draft.svelte';
-  import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
+  import { AppShell, ShellHeader, Sidebar, SidebarNav, SidebarToggle } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyInfo, notifySuccess, notifyWarning, notifyError } from '$lib/stores/notices';
@@ -215,22 +215,16 @@
 
   {#snippet sidebar()}
     <Sidebar title="Settings" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
-      <nav class="views" aria-label="Settings sections">
-        {#each USER_SETTINGS_SECTIONS as section (section.href)}
-          {@const Icon = section.icon}
-          {@const active = sectionActive(section.href)}
-          <a
-            class="view-btn"
-            class:active
-            href="{settingsBase}{section.href}"
-            aria-current={active ? 'page' : undefined}
-            onclick={() => (sidebarOpen = false)}
-          >
-            <Icon size={14} />
-            <span class="view-name">{section.label}</span>
-          </a>
-        {/each}
-      </nav>
+      <SidebarNav
+        items={USER_SETTINGS_SECTIONS.map((section) => ({
+          href: `${settingsBase}${section.href}`,
+          label: section.label,
+          icon: section.icon,
+          active: sectionActive(section.href),
+        }))}
+        label="Settings sections"
+        onnavigate={() => (sidebarOpen = false)}
+      />
     </Sidebar>
   {/snippet}
 

@@ -20,6 +20,7 @@
     Select,
     Chip,
     Sidebar,
+    SidebarNav,
     SidebarToggle,
     LoadState,
   } from '$lib/components/ui';
@@ -191,22 +192,16 @@
           open={settingsSidebarOpen}
           onClose={() => (settingsSidebarOpen = false)}
         >
-          <div class="views">
-            {#each MONEY_SETTINGS_SECTIONS as section (section.href)}
-              {@const Icon = section.icon}
-              {@const active = settingsSectionActive(section.href)}
-              <a
-                class="view-btn"
-                class:active
-                href="{moneyBase}/settings{section.href}"
-                aria-current={active ? 'page' : undefined}
-                onclick={() => (settingsSidebarOpen = false)}
-              >
-                <Icon size={14} />
-                <span class="view-name">{section.label}</span>
-              </a>
-            {/each}
-          </div>
+          <SidebarNav
+            items={MONEY_SETTINGS_SECTIONS.map((section) => ({
+              href: `${moneyBase}/settings${section.href}`,
+              label: section.label,
+              icon: section.icon,
+              active: settingsSectionActive(section.href),
+            }))}
+            label="Money settings sections"
+            onnavigate={() => (settingsSidebarOpen = false)}
+          />
         </Sidebar>
       {/if}
     {/snippet}

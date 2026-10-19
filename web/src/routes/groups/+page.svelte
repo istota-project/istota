@@ -5,6 +5,7 @@
     AppShell,
     ShellHeader,
     Sidebar,
+    SidebarNav,
     SidebarToggle,
     Button,
     CardGrid,
@@ -140,27 +141,27 @@
       open={sidebarOpen}
       onClose={() => (sidebarOpen = false)}
     >
-      <div class="views">
-        {#each groups as group (group.group_id)}
-          <a
-            class="view-btn"
-            class:active={selected?.group === group.group_id}
-            href="{base}/groups/?group={encodeURIComponent(group.group_id)}"
-            onclick={(event) => {
-              if (
-                !event.ctrlKey &&
-                !event.metaKey &&
-                !event.shiftKey &&
-                !event.altKey &&
-                event.button === 0
-              ) {
-                event.preventDefault();
-                selection.push({ group: group.group_id });
-              }
-            }}><span class="view-name">{group.display_name}</span></a
-          >
-        {/each}
-      </div>
+      <SidebarNav
+        items={groups.map((group) => ({
+          href: `${base}/groups/?group=${encodeURIComponent(group.group_id)}`,
+          label: group.display_name,
+          active: selected?.group === group.group_id,
+          group: group.group_id,
+        }))}
+        label="Groups"
+        onnavigate={(item, event) => {
+          if (
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey &&
+            !event.altKey &&
+            event.button === 0
+          ) {
+            event.preventDefault();
+            selection.push({ group: item.group });
+          }
+        }}
+      />
     </Sidebar>
   {/snippet}
   <LoadState

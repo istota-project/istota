@@ -15,17 +15,17 @@
   }
 </script>
 
-<script lang="ts">
+<script lang="ts" generics="T extends SidebarNavItem">
   import CountPill from './CountPill.svelte';
   import ListRow from './ListRow.svelte';
 
   interface Props {
-    items: SidebarNavItem[];
+    items: T[];
     /** The nav landmark's accessible name. */
     label: string;
     /** Called on every click with the item, before the browser follows the link:
      *  close a drawer, or `preventDefault()` and push a selection instead. */
-    onnavigate?: (item: SidebarNavItem, event: MouseEvent) => void;
+    onnavigate?: (item: T, event: MouseEvent) => void;
     /** A rule under the block, separating it from a list below it. */
     divider?: boolean;
     density?: 'base' | 'sm';

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/state';
-  import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
+  import { AppShell, ShellHeader, Sidebar, SidebarNav, SidebarToggle } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import {
     Activity,
@@ -46,6 +46,15 @@
     return path === target;
   }
 
+  let navItems = $derived(
+    SECTIONS.map((s) => ({
+      href: `${base}/admin${s.href}`,
+      label: s.label,
+      icon: s.icon,
+      active: isActive(s.href),
+    })),
+  );
+
   let activeLabel = $derived(SECTIONS.find((s) => isActive(s.href))?.label ?? 'Admin');
 </script>
 
@@ -71,21 +80,11 @@
 
   {#snippet sidebar()}
     <Sidebar title="Admin" open={sidebarOpen} onClose={() => (sidebarOpen = false)}>
-      <div class="views">
-        {#each SECTIONS as section (section.href)}
-          {@const Icon = section.icon}
-          <a
-            class="view-btn"
-            class:active={isActive(section.href)}
-            href="{base}/admin{section.href}"
-            aria-current={isActive(section.href) ? 'page' : undefined}
-            onclick={() => (sidebarOpen = false)}
-          >
-            <Icon size={14} />
-            <span class="view-name">{section.label}</span>
-          </a>
-        {/each}
-      </div>
+      <SidebarNav
+        items={navItems}
+        label="Admin sections"
+        onnavigate={() => (sidebarOpen = false)}
+      />
     </Sidebar>
   {/snippet}
 
