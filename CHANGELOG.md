@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Compatible iOS apps can sign in through the browser and ask you to approve the displayed account and installation. The app receives a fresh session through a one-use exchange; existing browser and older-app sign-in behavior stays the same.
+
 - **iOS server discovery.** Installations now expose a small public compatibility response with location and push availability, so a generic app can check the server before sign-in. Existing browser and iOS login behavior is unchanged.
 
 - **`!arr` requests media without a model turn.** `!arr search film|show|album TITLE` lists matches with their ids, and `!arr add film|show|album ID` puts one on the arr's Wanted list, monitoring it if the library holds it unmonitored. It uses the servarr skill's own tiers and defaults.

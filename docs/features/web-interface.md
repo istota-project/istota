@@ -50,6 +50,24 @@ An outer proxy must expose the compatibility endpoint without cookies, Basic Aut
 
 A self-hosted operator must not receive the app publisher's APNs signing key. A generic app can connect without push; permission granted by iOS alone does not establish a delivery path. Use the existing operator push diagnostic to test APNs acceptance, which is still not proof that an alert appeared on the device.
 
+## iOS browser sign-in
+
+The server supports browser approval and a one-use session handoff for mobile protocol 1. Deploy this compatibility work before distributing a binary that consumes it. Ordinary browser sign-in and older iOS clients retain their existing redirects when no mobile request is pending.
+
+| Route | Contract |
+| --- | --- |
+| `POST /istota/auth/mobile/requests` | Anonymous JSON with `challenge` and `state`, each a canonical base64url 32-byte value. Returns `request_id`, `authorize_path` and `expires_in: 600`. |
+| `GET /istota/auth/mobile/authorize/{request_id}` | Requires a live request. Signs in through the existing login page if necessary, then displays the account and configured installation for explicit approval. |
+| `POST /istota/auth/mobile/authorize/{request_id}` | Requires live authentication and the approval form's CSRF token. Redirects to the fixed `com.cynium.istota.auth://complete` callback with only `request_id`, `code` and `state`. |
+| `POST /istota/auth/mobile/exchange` | Anonymous form with `request_id`, `code` and `verifier`. Consumes the verifier-bound code, replaces all ambient session fields with a fresh ordinary session, and returns a 303 to `/istota/auth/mobile/complete`. |
+| `GET /istota/api/mobile/session` | Requires the handoff's live signed session. Returns `{request_id, user_id}` so a native client can confirm the exact exchange before enabling its bridge. An ordinary browser session is not a receipt. |
+
+The native POSTs accept at most 4 KiB, including streamed requests without Content-Length. Content type and any Origin are checked before reading; Origin must match the configured scheme, host and effective port. Duplicate or unknown fields, malformed encodings and invalid proofs are refused. These routes sit outside the API prefix: the existing guard still refuses ordinary anonymous API bodies without reading them. Responses are not cacheable, and no broad CORS policy is added.
+
+The browser continuation is one request ID in the signed session, rechecked against its ten-minute database expiry after password, email-code, local-code or Nextcloud login. It is never an arbitrary return URL and never replaces OAuth state. Approval codes live for at most 60 seconds. Redemption rechecks account authority and consumes the code in the same SQLite transaction; concurrent exchanges have one winner. Replay returns 409, expired proof 410 and other invalid proof 400. Failed database access returns 503. A response lost after consumption does not make a code reusable: check the authenticated receipt, then restart sign-in if that receipt is missing or names another request.
+
+The existing loopback host restrictions still apply to local-code and no-auth development installs. No-auth approval names the configured local user and still requires an explicit CSRF-protected action; an ambient local-mode API identity is not proof of a completed handoff. These route tests do not make plaintext localhost a supported discovery destination for the generic iOS app.
+
 ## Email login
 
 Set `[web] auth = ["email"]` or `["nextcloud", "email"]`, provide a persistent session signing secret, and set `[site] hostname` to the public hostname. `ISTOTA_WEB_AUTH=email` or `nextcloud,email` overrides the config. Nextcloud remains the default regardless of the storage backend. Use HTTPS outside localhost.
