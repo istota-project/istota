@@ -25,6 +25,8 @@ export { default as Field } from './Field.svelte';
 export { getFieldContext, setFieldContext } from './fieldContext';
 export type { FieldContext, FieldControlKind } from './fieldContext';
 export { default as Checkbox } from './Checkbox.svelte';
+export { default as ToggleGroup } from './ToggleGroup.svelte';
+export type { ToggleOption } from './ToggleGroup.svelte';
 export { default as OptionCards } from './OptionCards.svelte';
 export type { OptionCard } from './OptionCards.svelte';
 export { default as AutocompleteInput } from './AutocompleteInput.svelte';

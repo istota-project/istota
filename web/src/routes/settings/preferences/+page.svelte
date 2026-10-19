@@ -8,6 +8,7 @@
     Card,
     Checkbox,
     Input,
+    ToggleGroup,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
@@ -46,14 +47,6 @@
     { value: 'collapsed', label: 'Sender, subject and first line (default)' },
     { value: 'hidden', label: 'Sender and subject only' },
   ];
-
-  function toggleDisabledModule(name: string) {
-    if (!profile) return;
-    const next = new Set(profile.disabled_modules || []);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    profile.disabled_modules = [...next];
-  }
 
   // The app's Device settings (0.12.0). A convenience: the native bar above the
   // page opens the same screen, and is the route that works when this page
@@ -204,18 +197,16 @@
       </Field>
       {#if settings.allModules.length > 0}
         <Field label="Disabled modules" badge={managedBadge(profile, 'disabled_modules')}>
-          <div class="module-toggles">
-            {#each settings.allModules as m (m)}
-              <Checkbox
-                class="module-chip"
-                label={m}
-                tone="muted"
-                disabled={isManaged(profile, 'disabled_modules')}
-                checked={(profile.disabled_modules || []).includes(m)}
-                onchange={() => toggleDisabledModule(m)}
-              />
-            {/each}
-          </div>
+          <ToggleGroup
+            type="multiple"
+            label="Disabled modules"
+            disabled={isManaged(profile, 'disabled_modules')}
+            value={profile.disabled_modules || []}
+            options={settings.allModules.map((m) => ({ value: m, label: m }))}
+            onValueChange={(next) => {
+              if (profile) profile.disabled_modules = next as string[];
+            }}
+          />
         </Field>
       {/if}
       <Field
@@ -294,24 +285,5 @@
   .card-actions {
     display: flex;
     gap: var(--space-2);
-  }
-
-  .module-toggles {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-  }
-
-  /* The pill look stays until the module list becomes a toggle group. */
-  .module-toggles :global(.module-chip) {
-    column-gap: var(--space-1);
-    padding: 0.15rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    font-size: var(--text-xs);
-  }
-
-  .module-toggles :global(.ui-checkbox-input) {
-    margin: 0;
   }
 </style>

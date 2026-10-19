@@ -19,6 +19,7 @@
     type SelectOption,
     Input,
     TextArea,
+    ToggleGroup,
   } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
@@ -138,28 +139,16 @@
     <Button href="{base}/health/immunizations">Back</Button>
   </div>
 
-  <div class="tabs" role="tablist">
-    <button
-      type="button"
-      role="tab"
-      aria-selected={mode === 'file'}
-      class="tab"
-      class:active={mode === 'file'}
-      onclick={() => switchMode('file')}
-    >
-      Screenshot or PDF
-    </button>
-    <button
-      type="button"
-      role="tab"
-      aria-selected={mode === 'paste'}
-      class="tab"
-      class:active={mode === 'paste'}
-      onclick={() => switchMode('paste')}
-    >
-      Paste text
-    </button>
-  </div>
+  <ToggleGroup
+    label="Import from"
+    class="import-mode"
+    value={mode}
+    onValueChange={(m) => switchMode(m as Mode)}
+    options={[
+      { value: 'file', label: 'Screenshot or PDF' },
+      { value: 'paste', label: 'Paste text' },
+    ]}
+  />
 
   {#if mode === 'file'}
     <Card as="div" class="import-card">
@@ -324,29 +313,8 @@
     margin: 0;
   }
 
-  .tabs {
-    display: flex;
-    gap: var(--space-1);
+  .import-page :global(.import-mode) {
     margin-bottom: var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .tab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-3);
-    cursor: pointer;
-    margin-bottom: -1px;
-  }
-  .tab:hover {
-    color: var(--text-primary);
-  }
-  .tab.active {
-    color: var(--text-primary);
-    border-bottom-color: var(--accent-blue);
   }
 
   .import-page :global(.import-card) {

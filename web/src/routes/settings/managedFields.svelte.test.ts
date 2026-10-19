@@ -109,9 +109,9 @@ describe('managed fields on /settings', () => {
   it('disables managed lists and module toggles on Preferences', async () => {
     currentProfile.value = profile(['trusted_email_senders', 'disabled_modules']);
     render(Harness, { component: PreferencesPage, layout: SettingsLayout, user: person });
-    await waitFor(() => expect(screen.getByLabelText('feeds')).toBeInTheDocument());
-    expect(screen.getByLabelText('feeds')).toBeDisabled();
-    expect(screen.getByLabelText('money')).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'feeds' })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'feeds' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'money' })).toBeDisabled();
     expect(screen.getAllByText(BADGE)).toHaveLength(2);
     const quiet = screen.getByRole('textbox', { name: /Quiet email senders/ });
     expect(quiet).not.toBeDisabled();

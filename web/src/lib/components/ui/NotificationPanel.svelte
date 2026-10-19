@@ -42,7 +42,7 @@
     seenPairs,
     type NotificationFilter,
   } from '$lib/stores/notifications';
-  import Chip from './Chip.svelte';
+  import ToggleGroup from './ToggleGroup.svelte';
   import EmptyState from './EmptyState.svelte';
   import NotificationDetail from './NotificationDetail.svelte';
   import NotificationItem from './NotificationItem.svelte';
@@ -144,19 +144,15 @@
     >
       <div class="panel-head">
         <span class="micro-label">Notifications</span>
-        <div class="panel-filters">
-          <Chip
-            checked={filter === 'all'}
-            onclick={() => load('all')}
-            aria-pressed={filter === 'all'}>All ({$notificationTotalOpen})</Chip
-          >
-          <Chip
-            checked={filter === 'action'}
-            onclick={() => load('action')}
-            aria-pressed={filter === 'action'}
-            >Needs action ({actionableCount($notificationItems)})</Chip
-          >
-        </div>
+        <ToggleGroup
+          label="Show"
+          value={filter}
+          onValueChange={(next) => load(next as NotificationFilter)}
+          options={[
+            { value: 'all', label: `All (${$notificationTotalOpen})` },
+            { value: 'action', label: `Needs action (${actionableCount($notificationItems)})` },
+          ]}
+        />
       </div>
 
       {#if $notificationsError}
@@ -265,11 +261,6 @@
     gap: var(--space-2);
     flex-wrap: wrap;
     padding: 0 var(--space-2);
-  }
-
-  .panel-filters {
-    display: flex;
-    gap: var(--space-1);
   }
 
   .panel-list {

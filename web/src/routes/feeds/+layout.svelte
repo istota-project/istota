@@ -27,6 +27,7 @@
     SidebarToggle,
     CategoryGroup,
     Chip,
+    ToggleGroup,
     Select,
     ConfirmDialog,
     CountPill,
@@ -270,22 +271,16 @@
       {/snippet}
       {#snippet tools()}
         {#if !onSettings}
-          <Chip
-            icon
-            checked={$viewMode === 'grid'}
-            onclick={() => viewMode.set('grid')}
-            title="Grid view"
-          >
-            <LayoutGrid size={14} />
-          </Chip>
-          <Chip
-            icon
-            checked={$viewMode === 'list'}
-            onclick={() => viewMode.set('list')}
-            title="List view"
-          >
-            <List size={14} />
-          </Chip>
+          <ToggleGroup
+            label="Layout"
+            iconOnly
+            value={$viewMode}
+            onValueChange={(mode) => viewMode.set(mode as 'grid' | 'list')}
+            options={[
+              { value: 'grid', label: 'Grid view', icon: LayoutGrid },
+              { value: 'list', label: 'List view', icon: List },
+            ]}
+          />
           <Chip
             icon
             onclick={handleMarkAllRead}

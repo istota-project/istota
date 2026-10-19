@@ -40,6 +40,7 @@
     FormModal,
     Select,
     PageLoading,
+    ToggleGroup,
   } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
 
@@ -59,6 +60,7 @@
   type Range = '30d' | '90d' | '1y' | 'all';
 
   let range = $state<Range>('90d');
+  const RANGE_OPTIONS = (['30d', '90d', '1y', 'all'] as const).map((r) => ({ value: r, label: r }));
   let selectionReady = $state(false);
   const rangeSel = createUrlSelection<{ range: Range }>({
     key: 'healthStats',
@@ -415,13 +417,12 @@
        the centered message rather than centering it in the space left under
        this header. -->
   <div class="bar">
-    <div class="ranges">
-      {#each ['30d', '90d', '1y', 'all'] as r}
-        <button class:active={range === r} onclick={() => (range = r as Range)} type="button"
-          >{r}</button
-        >
-      {/each}
-    </div>
+    <ToggleGroup
+      label="Range"
+      options={RANGE_OPTIONS}
+      value={range}
+      onValueChange={(r) => (range = r as Range)}
+    />
     <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
   </div>
 {/if}
@@ -539,24 +540,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-4);
-  }
-  .ranges {
-    display: flex;
-    gap: var(--space-1);
-  }
-  .ranges button {
-    background: none;
-    border: 1px solid var(--border-default);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-  .ranges button.active {
-    color: var(--text-primary);
-    border-color: var(--text-primary);
   }
   .log-btn {
     padding: var(--space-2) var(--space-3);

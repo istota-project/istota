@@ -13,7 +13,7 @@
   import {
     Badge,
     Button,
-    Chip,
+    ToggleGroup,
     ConfirmDialog,
     Field,
     FormStack,
@@ -204,10 +204,6 @@
     if (field === 'disabled_modules') return !!detail?.options.modules.length;
     if (field === 'disabled_skills') return !!detail?.options.skills.length;
     return !!form && field in form;
-  }
-
-  function toggle(list: string[], name: string): string[] {
-    return list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
   }
 
   function requestClose() {
@@ -601,19 +597,16 @@
               hint={hint('disabled_modules', 'Modules are on by default. Pick one to turn it off.')}
               error={errors.disabled_modules}
             >
-              <div class="hstack wrap">
-                {#each detail.options.modules as name (name)}
-                  {@const on = form.disabled_modules.includes(name)}
-                  <Chip
-                    checked={on}
-                    aria-pressed={on}
-                    disabled={locked('disabled_modules')}
-                    onclick={() => {
-                      if (form) form.disabled_modules = toggle(form.disabled_modules, name);
-                    }}>{name}</Chip
-                  >
-                {/each}
-              </div>
+              <ToggleGroup
+                type="multiple"
+                label="Disabled modules"
+                value={form.disabled_modules}
+                disabled={locked('disabled_modules')}
+                options={detail.options.modules.map((name) => ({ value: name, label: name }))}
+                onValueChange={(next) => {
+                  if (form) form.disabled_modules = next as string[];
+                }}
+              />
             </Field>
           {/if}
           {#if detail.options.skills.length}

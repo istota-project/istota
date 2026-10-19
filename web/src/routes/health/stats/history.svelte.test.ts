@@ -53,7 +53,7 @@ afterEach(cleanup);
 describe('health range history', () => {
   it('replaces range changes and restores the range on reload', async () => {
     render(Page);
-    await fireEvent.click(await screen.findByRole('button', { name: 'all' }));
+    await fireEvent.click(await screen.findByRole('radio', { name: 'all' }));
     await waitFor(() => expect(healthStatsSeries).toHaveBeenLastCalledWith('weight', {}));
     expect(currentUrl()).toBe('/istota/health/stats/?range=all');
     expect(__history.entries).toHaveLength(1);
@@ -62,8 +62,8 @@ describe('health range history', () => {
     __history.reset(currentUrl());
     render(Page);
     await waitFor(() => expect(healthStatsSeries).toHaveBeenCalledWith('weight', {}));
-    expect((await screen.findByRole('button', { name: 'all' })).classList.contains('active')).toBe(
-      true,
+    expect((await screen.findByRole('radio', { name: 'all' })).getAttribute('aria-checked')).toBe(
+      'true',
     );
   });
 
@@ -71,8 +71,8 @@ describe('health range history', () => {
     __history.reset('/istota/health/stats/?range=invalid');
     render(Page);
     await waitFor(() => expect(currentUrl()).toBe('/istota/health/stats/?range=90d'));
-    expect((await screen.findByRole('button', { name: '90d' })).classList.contains('active')).toBe(
-      true,
+    expect((await screen.findByRole('radio', { name: '90d' })).getAttribute('aria-checked')).toBe(
+      'true',
     );
     expect(__history.entries).toHaveLength(1);
   });

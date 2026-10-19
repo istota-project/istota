@@ -4,7 +4,7 @@
   import {
     Badge,
     Button,
-    Chip,
+    ToggleGroup,
     Field,
     Input,
     Select,
@@ -141,12 +141,9 @@
     emit(parsed);
   }
 
-  function toggleChoice(choice: string) {
-    const current = Array.isArray(shown) ? (shown as string[]) : [];
-    const next = current.includes(choice)
-      ? current.filter((c) => c !== choice)
-      : (field.multi_choices ?? []).filter((c) => c === choice || current.includes(c));
-    emit(next);
+  // In vocabulary order, whatever order the chips were pressed in.
+  function emitChoices(picked: string[]) {
+    emit((field.multi_choices ?? []).filter((c) => picked.includes(c)));
   }
 
   function undo() {
@@ -267,12 +264,16 @@
       <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned beside">
           <span class="choices">
-            {#each field.multi_choices ?? [] as choice (choice)}
-              {@const on = Array.isArray(shown) && (shown as string[]).includes(choice)}
-              <Chip checked={on} aria-pressed={on} onclick={() => toggleChoice(choice)}
-                >{choice}</Chip
-              >
-            {/each}
+            <ToggleGroup
+              type="multiple"
+              label={field.name}
+              value={Array.isArray(shown) ? (shown as string[]) : []}
+              options={(field.multi_choices ?? []).map((choice) => ({
+                value: choice,
+                label: choice,
+              }))}
+              onValueChange={(next) => emitChoices(next as string[])}
+            />
           </span>
           {@render defaultMark()}
         </span>
@@ -390,12 +391,6 @@
     .field-note {
       margin-left: calc(var(--field-label-width) + var(--space-3));
     }
-  }
-
-  .choices {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
   }
 
   /* The control and its "not in config.toml" mark, for the controls that are
