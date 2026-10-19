@@ -41,7 +41,22 @@ beforeEach(() => {
   api.disconnectNextcloudToken.mockReset();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  inShell(null);
+});
+
+/** The page as the given iOS app version sees it: its User-Agent token and its connection plugin. */
+function inShell(version: string | null) {
+  const ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15';
+  Object.defineProperty(window.navigator, 'userAgent', {
+    value: version ? `${ua} IstotaApp/${version}` : ua,
+    configurable: true,
+  });
+  (window as { Capacitor?: unknown }).Capacitor = version
+    ? { Plugins: { IstotaConnection: { openSettings: vi.fn() } } }
+    : undefined;
+}
 
 async function mount(
   s: NextcloudSharing | Error,
@@ -318,5 +333,34 @@ describe('NextcloudCard', () => {
       ).toBeInTheDocument();
       expect(onDisconnected).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('the connect route in the iOS app', () => {
+  const NOTE = 'Opens in the browser. You may need to sign in to Istota there first.';
+
+  it('opens Reconnect and Connect in the browser from the 0.12.0 app', async () => {
+    inShell('0.12.0');
+    await mount(sharing());
+    const reconnect = await screen.findByRole('link', { name: 'Reconnect' });
+    expect(reconnect.getAttribute('href')).toMatch(/\/reconnect$/);
+    expect(reconnect).toHaveAttribute('target', '_blank');
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+    cleanup();
+    render(NextcloudCard, { token: { connected: false, expires_at: null }, username: 'alice' });
+    const connect = await screen.findByRole('link', { name: 'Connect' });
+    expect(connect).toHaveAttribute('target', '_blank');
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+  });
+
+  it('keeps the page navigation in a browser and in older apps', async () => {
+    for (const version of [null, '0.11.0']) {
+      inShell(version);
+      await mount(sharing());
+      expect(await screen.findByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Reconnect' })).toBeNull();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      cleanup();
+    }
   });
 });

@@ -26,7 +26,7 @@
   import { installKeyboardDismiss } from '$lib/platform/input';
   import { startPushBadgeSync } from '$lib/stores/pushBadge';
   import { startPushOpenHandling } from '$lib/platform/pushOpen';
-  import { shellAtLeast } from '$lib/platform/native';
+  import { shellRunsServiceWorker } from '$lib/platform/native';
   import {
     canReadCachedUser,
     forgetLastUserId,
@@ -171,14 +171,14 @@
   // that a shell-dependent capability is gated on the version that introduced
   // it: 0.10.0 is the build that declares the app-bound domains WebKit needs
   // before it will run a worker here at all, and it is also the build whose
-  // settings row can unregister one. An older app is expected to have no
-  // `navigator.serviceWorker` to register with — but if that expectation is
-  // ever wrong, it would install a worker it has no way to remove.
+  // settings row can unregister one. 0.12.0 dropped those domains to connect
+  // to a server chosen at runtime, so it has no worker either, and
+  // `shellRunsServiceWorker` closes the gate again from there.
   //
   // Fire-and-forget: a registration that fails leaves the app exactly as it is
   // without one, which is what every other surface already runs.
   onMount(() => {
-    if (setupRoute || !shellAtLeast('0.10.0')) return;
+    if (setupRoute || !shellRunsServiceWorker()) return;
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     navigator.serviceWorker
       // Kit bundles the worker as a classic script for the build and serves it

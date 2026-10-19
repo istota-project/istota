@@ -5,6 +5,7 @@ including failures; chat watermarks stop at the delay cutoff. A process killed
 between a send and its acknowledgement can repeat that alert on restart.
 """
 
+import copy
 import importlib.util
 import json
 import logging
@@ -57,6 +58,21 @@ def _alert_payload(title: str, body: str, badge: int, thread: str, target: dict)
                 "interruption-level": "active"},
         "istota": target,
     })
+
+
+def _for_device(payload: dict, device: dict) -> dict:
+    """Name the enrolling connection in a generic-shell registration's routing.
+
+    The app refuses a tap whose binding is not its current connection, since a
+    room ID alone is not unique across servers. Legacy rows get the payload as is.
+    """
+    binding = device.get("connection_binding")
+    if binding is None or "istota" not in payload:
+        return payload
+    routed = copy.deepcopy(payload)
+    routed["istota"]["connection_binding"] = binding
+    routed["istota"]["connection_generation"] = device["connection_generation"]
+    return _fit_payload(routed)
 
 
 def _notification_pushes(rows: list[dict], badge: int, preview: bool, oldest: float):
@@ -160,7 +176,7 @@ def _dispatch_user(config: Config, user_id: str, pending: list[dict], ceiling: i
         alerts.extend(_chat_pushes(chat, badge, preview, oldest))
     for device in registered:
         for payload, collapse in alerts:
-            _send(config, device, payload, collapse_id=collapse)
+            _send(config, device, _for_device(payload, device), collapse_id=collapse)
         if not alerts and device["last_badge"] != badge:
             _send(config, device, {"aps": {"badge": badge}}, collapse_id="badge", priority=5)
     with db.get_db(config.db_path) as conn:

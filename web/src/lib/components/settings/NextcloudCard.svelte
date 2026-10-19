@@ -14,6 +14,7 @@
   } from '$lib/api';
   import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
   import SettingsCard from './SettingsCard.svelte';
   import SettingsField from './SettingsField.svelte';
 
@@ -164,8 +165,15 @@
 
   // A full page navigation: `/reconnect` is a server auth route that answers
   // with a redirect to Nextcloud, so the client router has nothing to resolve.
+  // In the iOS app it opens in the browser instead (`offSiteRoutesOpenInBrowser`).
+  const reconnectUrl = `${base}/reconnect`;
+  const inBrowser = offSiteRoutesOpenInBrowser();
+  const reconnectLink = inBrowser
+    ? { href: reconnectUrl, target: '_blank', rel: 'noopener noreferrer' }
+    : { onclick: reconnect };
+
   function reconnect() {
-    window.location.href = `${base}/reconnect`;
+    window.location.href = reconnectUrl;
   }
 
   /**
@@ -212,6 +220,10 @@
     if (token.connected) void load();
   });
 </script>
+
+{#snippet browserNote()}
+  <p class="caption note">Opens in the browser. You may need to sign in to Istota there first.</p>
+{/snippet}
 
 {#snippet statusPill()}
   <span class="status-pill status-{token.connected ? 'configured' : 'missing'}">
@@ -278,18 +290,20 @@
     {/if}
 
     <div class="card-actions">
-      <Button variant="secondary" size="sm" onclick={reconnect}>Reconnect</Button>
+      <Button variant="secondary" size="sm" {...reconnectLink}>Reconnect</Button>
       <Button variant="secondary" size="sm" onclick={startDisconnect} disabled={busy}>
         {busy ? 'Disconnecting…' : 'Disconnect'}
       </Button>
     </div>
+    {#if inBrowser}{@render browserNote()}{/if}
     {#if disconnectError && !confirmingDisconnect}
       <div class="banner error">{disconnectError}</div>
     {/if}
   {:else}
     <div class="card-actions">
-      <Button variant="primary" size="sm" onclick={reconnect}>Connect</Button>
+      <Button variant="primary" size="sm" {...reconnectLink}>Connect</Button>
     </div>
+    {#if inBrowser}{@render browserNote()}{/if}
     <p class="caption note">
       Connecting signs you in to Nextcloud again and brings you back here. Your session stays as it
       is. Calendars and address books you shared with Istota stay shared until you remove them in

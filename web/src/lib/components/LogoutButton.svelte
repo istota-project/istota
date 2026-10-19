@@ -3,6 +3,8 @@
   import { LogOut } from '@lucide/svelte';
   import { ConfirmDialog } from '$lib/components/ui';
   import { forgetLastUserId } from '$lib/offline/lastUser';
+  import { signOutOfApp } from '$lib/platform/nativeConnection';
+  import { notifyError } from '$lib/stores/notices';
 
   interface Props {
     /**
@@ -35,6 +37,22 @@
     forgetLastUserId();
     navigate(`${base}/logout`);
   }
+
+  // The generic iOS app (0.12.0) asks natively and then stops tracking, removes
+  // the notification enrollment and clears this page's data, which a navigation
+  // to /logout would leave bound to the account. Its own question replaces the
+  // dialog below, so the user is asked once. Cancel is not an error.
+  async function start() {
+    let outcome;
+    try {
+      outcome = await signOutOfApp();
+    } catch {
+      notifyError('Could not sign out here. Open Device settings to sign out.');
+      return;
+    }
+    if (outcome === 'signed-out') forgetLastUserId();
+    else if (outcome === 'unavailable') confirming = true;
+  }
 </script>
 
 <!--
@@ -47,7 +65,7 @@
 <button
   type="button"
   class="nav-icon-btn touch-target logout-btn"
-  onclick={() => (confirming = true)}
+  onclick={start}
   title="Log out"
   aria-label="Log out"
 >

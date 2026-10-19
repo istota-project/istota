@@ -6941,6 +6941,9 @@ export function registerPushDevice(device: {
   environment: 'production' | 'sandbox';
   platform: 'ios';
   app_version: string;
+  /** The generic shell's native connection (0.12.0 and later); older shells send neither. */
+  connection_binding?: string;
+  connection_generation?: number;
 }): Promise<{ id: number }> {
   return apiFetch('/push/devices', { method: 'POST', body: JSON.stringify(device) });
 }

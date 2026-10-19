@@ -65,6 +65,8 @@ from istota import db as _db
 from istota import user_profiles
 from istota.webui import auth as web_auth
 from istota.webui import auth_mail as web_auth_mail
+from istota.webui import mobile_auth
+from istota.webui.mobile_routes import read_handoff_fields
 from istota.webui import shutdown as web_shutdown
 from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
@@ -1277,11 +1279,9 @@ async def login_email(request: Request):
             logger.warning("Login profile lookup failed", exc_info=True)
             profile = None
         if profile is not None:
-            request.session.clear()
-            request.session["user"] = {"username": identity.user_id, "display_name": profile.display_name}
-            request.session["auth"] = {"method": "email", "epoch": identity.credential_epoch}
-            request.session["session_id"] = secrets.token_hex(16)
-            return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+            landing = await _mobile_login_target(request)
+            _start_session(request, identity.user_id, profile.display_name, "email", identity.credential_epoch)
+            return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return await _auth_error("Sign-in failed", "Email or password was not accepted.", 400)
 
@@ -1341,11 +1341,9 @@ async def _start_email_session(request: Request, result, method: str = "email") 
     if (profile is None or identity is None or identity.disabled
             or identity.email != email or identity.credential_epoch != epoch):
         return None
-    request.session.clear()
-    request.session["user"] = {"username": user_id, "display_name": profile.display_name}
-    request.session["auth"] = {"method": method, "epoch": epoch}
-    request.session["session_id"] = secrets.token_hex(16)
-    return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    landing = await _mobile_login_target(request)
+    _start_session(request, user_id, profile.display_name, method, epoch)
+    return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
 async def _set_password_form(request: Request, token: str, purpose: str, error: str = ""):
@@ -1362,6 +1360,128 @@ async def _set_password_form(request: Request, token: str, purpose: str, error: 
         '<button class="btn" type="submit">Set password and sign in</button></form>'
     )
     return await _auth_form(headline, body, 400 if error else 200)
+
+
+_MOBILE_LOGIN_KEY = "mobile_login_request"
+_MOBILE_ROOT = "/istota/auth/mobile"
+
+
+def _start_session(request: Request, user_id: str, display_name: str, method: str, epoch: int) -> None:
+    request.session.clear()
+    request.session["user"] = {"username": user_id, "display_name": display_name}
+    request.session["auth"] = {"method": method, "epoch": epoch}
+    request.session["session_id"] = secrets.token_hex(16)
+
+
+async def _mobile_login_target(request: Request) -> str | None:
+    request_id = request.session.pop(_MOBILE_LOGIN_KEY, None)
+    if request_id is None:
+        return None
+    try:
+        attempt = await asyncio.to_thread(mobile_auth.get_request, _config.db_path, request_id)
+    except (mobile_auth.HandoffError, sqlite3.Error):
+        return None
+    return f"{_MOBILE_ROOT}/authorize/{attempt.request_id}"
+
+
+def _mobile_error(exc) -> JSONResponse:
+    if isinstance(exc, BodyError):
+        status = exc.status
+    elif isinstance(exc, mobile_auth.HandoffError):
+        status = {"replay": 409, "expired": 410, "throttled": 429}.get(str(exc), 400)
+    else:
+        status = 503
+    return JSONResponse({"error": "mobile_handoff_failed"}, status_code=status, headers=_AUTH_PAGE_HEADERS)
+
+
+@auth_router.post("/auth/mobile/requests")
+async def mobile_request(request: Request):
+    try:
+        fields = await read_handoff_fields(request, _config, json_body=True, names={"challenge", "state"})
+        source = _client_ip(request) or (request.client.host if request.client else "unknown")
+        attempt = await asyncio.to_thread(mobile_auth.create_request, _config.db_path, source=source, **fields)
+    except (BodyError, mobile_auth.HandoffError, sqlite3.Error) as exc:
+        return _mobile_error(exc)
+    return JSONResponse({"request_id": attempt.request_id,
+                         "authorize_path": f"{_MOBILE_ROOT}/authorize/{attempt.request_id}",
+                         "expires_in": mobile_auth.REQUEST_TTL_SECONDS}, headers=_AUTH_PAGE_HEADERS)
+
+
+@auth_router.get("/auth/mobile/authorize/{request_id}")
+async def mobile_authorize_page(request: Request, request_id: str):
+    try:
+        await asyncio.to_thread(mobile_auth.get_request, _config.db_path, request_id)
+    except (mobile_auth.HandoffError, sqlite3.Error) as exc:
+        return _mobile_error(exc)
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
+        # One server-owned id, bounded by the request's DB expiry. Never a URL
+        # supplied by a caller, and separate from the provider's OAuth state.
+        request.session[_MOBILE_LOGIN_KEY] = request_id
+        return RedirectResponse("/istota/login", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    from istota.webui.origin import external_origin
+
+    try:
+        host, scheme = external_origin(_config)
+    except ValueError as exc:
+        return _mobile_error(exc)
+    body = (
+        f'<p>Connect the Istota app as <strong>{escape(user["display_name"])}</strong> '
+        f'({escape(user["username"])}) on {escape(f"{scheme}://{host}/istota/")}?</p>'
+        f'<form method="post" action="{_MOBILE_ROOT}/authorize/{request_id}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "mobile-approve"))}">'
+        '<button class="btn btn-primary" type="submit">Connect app</button></form>'
+        '<p class="tagline">Approve only if you started this sign-in in the app. '
+        'To cancel, close this sign-in window.</p>'
+    )
+    return await _auth_form("Connect the Istota app", body)
+
+
+@auth_router.post("/auth/mobile/authorize/{request_id}")
+async def mobile_authorize(request: Request, request_id: str):
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+        credential = await asyncio.to_thread(_session_auth, request)
+    except _UnauthorizedException:
+        return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_AUTH_PAGE_HEADERS)
+    try:
+        fields = await read_handoff_fields(request, _config, json_body=False, names={"csrf_token"})
+        if not _check_csrf(request, "mobile-approve", fields["csrf_token"]):
+            raise BodyError(403, "form expired")
+        approval = await asyncio.to_thread(
+            mobile_auth.approve_request, _config, request_id, user_id=user["username"],
+            method=credential["method"], epoch=credential["epoch"],
+        )
+    except (BodyError, mobile_auth.HandoffError, sqlite3.Error) as exc:
+        return _mobile_error(exc)
+    from urllib.parse import urlencode
+
+    request.session.pop(_MOBILE_LOGIN_KEY, None)
+    callback = "com.cynium.istota.auth://complete?" + urlencode({
+        "request_id": approval.request_id, "code": approval.code, "state": approval.state,
+    })
+    return RedirectResponse(callback, status_code=303, headers=_AUTH_PAGE_HEADERS)
+
+
+@auth_router.post("/auth/mobile/exchange")
+async def mobile_exchange(request: Request):
+    try:
+        fields = await read_handoff_fields(request, _config, json_body=False,
+                                           names={"request_id", "code", "verifier"})
+        credential = await asyncio.to_thread(mobile_auth.redeem_request, _config, **fields)
+        profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, credential.user_id)
+    except (BodyError, mobile_auth.HandoffError, sqlite3.Error) as exc:
+        return _mobile_error(exc)
+    _start_session(request, credential.user_id, profile.display_name if profile else credential.user_id,
+                   credential.method, credential.epoch)
+    request.session["mobile_handoff_id"] = fields["request_id"]
+    return RedirectResponse(f"{_MOBILE_ROOT}/complete", status_code=303, headers=_AUTH_PAGE_HEADERS)
+
+
+@auth_router.get("/auth/mobile/complete")
+async def mobile_complete(request: Request):
+    return await _auth_form("Return to the Istota app", '<p>Your sign-in has been received.</p>')
 
 
 @auth_router.get("/auth/set-password")
@@ -1713,6 +1833,7 @@ async def reconnect(request: Request):
         await asyncio.to_thread(_require_api_auth, request)
     except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
+    request.session.pop(_MOBILE_LOGIN_KEY, None)
     request.session[_POST_LOGIN_KEY] = "settings"
     return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
 
@@ -1868,15 +1989,8 @@ async def callback(request: Request):
     # Read before the clear, resolve through the allowlist, and consume it: a
     # marker left in place would send every later login of this session to
     # settings.
-    landing = _post_login_target(request.session.get(_POST_LOGIN_KEY))
-
-    request.session.clear()
-    request.session["user"] = {
-        "username": username,
-        "display_name": display_name,
-    }
-    request.session["auth"] = {"method": "nextcloud", "epoch": epoch}
-    request.session["session_id"] = secrets.token_hex(16)
+    landing = await _mobile_login_target(request) or _post_login_target(request.session.get(_POST_LOGIN_KEY))
+    _start_session(request, username, display_name, "nextcloud", epoch)
     return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
@@ -2174,6 +2288,26 @@ async def api_nav_unread(user: dict = Depends(_require_api_auth)):
     if enabled:
         counts = await asyncio.to_thread(get_nav_unread_counts, _config, username)
     return JSONResponse({"enabled": enabled, **counts}, headers={"Cache-Control": "no-store"})
+
+
+@api_router.get("/mobile/session")
+def mobile_session(request: Request):
+    try:
+        user = _require_api_auth(request)
+        credential = _session_auth(request)
+        # Local mode bypasses ordinary cookie auth; a handoff receipt still
+        # needs its approved account to be enabled and configured.
+        with _db.get_db(_config.db_path) as conn:
+            mobile_auth._validate_credential(conn, _config, user["username"],
+                                             credential["method"], credential["epoch"])
+        request_id = request.session.get("mobile_handoff_id")
+        if (not mobile_auth._valid_proof(request_id) or not request.session.get("session_id")
+                or request.session.get("user", {}).get("username") != user["username"]
+                or request.session.get("auth") != credential):
+            raise _UnauthorizedException()
+    except (_UnauthorizedException, mobile_auth.HandoffError, sqlite3.Error):
+        return JSONResponse({"error": "unauthorized"}, status_code=401, headers=_AUTH_PAGE_HEADERS)
+    return JSONResponse({"request_id": request_id, "user_id": user["username"]}, headers=_AUTH_PAGE_HEADERS)
 
 
 @api_router.get("/me")
@@ -12723,6 +12857,11 @@ async def push_devices_list(user: dict = Depends(_require_api_auth)):
     return await asyncio.to_thread(_push_devices_list, user["username"])
 
 
+_CONNECTION_BINDING = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# The native generation reaches JavaScript as a number, which is exact only this far.
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
 @api_router.post("/push/devices")
 async def push_devices_register(request: Request, user: dict = Depends(_require_api_auth)):
     _verify_origin(request)
@@ -12734,8 +12873,20 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
         body = json.loads(raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(400, "invalid JSON") from None
-    if not isinstance(body, dict) or set(body) - {"token", "environment", "platform", "app_version"}:
+    if not isinstance(body, dict) or set(body) - {
+        "token", "environment", "platform", "app_version", "connection_binding", "connection_generation",
+    }:
         raise HTTPException(400, "invalid device registration")
+    # The generic iOS shell names its native connection; older binaries send neither field.
+    binding = body.get("connection_binding")
+    generation = body.get("connection_generation")
+    if ("connection_binding" in body) != ("connection_generation" in body):
+        raise HTTPException(400, "invalid connection binding")
+    if "connection_binding" in body and (
+        not isinstance(binding, str) or not _CONNECTION_BINDING.fullmatch(binding)
+        or type(generation) is not int or not 1 <= generation <= _MAX_SAFE_INTEGER
+    ):
+        raise HTTPException(400, "invalid connection binding")
     token = body.get("token")
     environment = body.get("environment")
     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64,200}", token):
@@ -17219,6 +17370,10 @@ async def api_location_restore_dismissed(
 
 app.include_router(api_router)
 app.include_router(auth_router)
+
+from istota.webui.mobile_routes import router as _mobile_router
+
+app.include_router(_mobile_router, prefix="/istota/api/mobile", tags=["mobile"])
 
 # Feeds web API — native, in-process module backed by per-user SQLite.
 from istota.feeds.routes import require_auth as _feeds_require_auth

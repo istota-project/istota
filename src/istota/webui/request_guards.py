@@ -91,8 +91,11 @@ def host_refusal(headers, allowed: frozenset[str]) -> str | None:
     return None
 
 
-async def read_bounded_body(request, limit: int) -> bytes:
+async def read_bounded_body(request, limit: int, *, require_length: bool = True) -> bytes:
     """Read the request body, refusing before it exists in memory.
+
+    Native handoff forms opt into a missing length with ``require_length=False``;
+    the running cap still applies. Existing upload callers require the header.
 
     Two checks, and neither substitutes for the other. The declared length is
     what lets the refusal happen before a byte is read; the running total is
@@ -106,7 +109,7 @@ async def read_bounded_body(request, limit: int) -> bytes:
 
     declared = request.headers.get("content-length")
     try:
-        length = int(declared)
+        length = 0 if declared is None and not require_length else int(declared)
     except (TypeError, ValueError):
         # A multipart upload from a browser always sets it.
         raise BodyError(413, "the upload must declare its length") from None
@@ -116,10 +119,10 @@ async def read_bounded_body(request, limit: int) -> bytes:
     buf = bytearray()
     try:
         async for chunk in request.stream():
-            buf += chunk
-            if len(buf) > limit:
+            if len(buf) + len(chunk) > limit:
                 # The rest of the stream is not read.
                 raise BodyError(413, "that upload is too large")
+            buf += chunk
     except ClientDisconnect:
         # An upload the user cancels in the picker, or one that dies on a
         # mobile connection, is the ordinary case rather than the exotic one.

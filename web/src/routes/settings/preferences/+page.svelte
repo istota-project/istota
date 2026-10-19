@@ -2,7 +2,9 @@
   import { Button, ConfirmDialog, Field, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
-  import { shellAtLeast } from '$lib/platform/native';
+  import { deviceModel, shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';
+  import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
+  import { notifyError } from '$lib/stores/notices';
   import { clearOfflineData } from '$lib/offline/clear';
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
@@ -44,6 +46,20 @@
     profile.disabled_modules = [...next];
   }
 
+  // The app's Device settings (0.12.0). A convenience: the native bar above the
+  // page opens the same screen, and is the route that works when this page
+  // cannot load. The card is titled with the device it describes.
+  const appSettingsOffered = appConnectionAvailable();
+  const device = deviceModel();
+
+  async function showAppSettings() {
+    try {
+      await openAppSettings();
+    } catch {
+      notifyError('Could not open Device settings. Use Device settings above the page instead.');
+    }
+  }
+
   // Offline storage (ISSUE-202). Shown only in a shell that installs a service
   // worker, which is what makes this more than a cache-clearing button: a
   // worker can serve a document from a build the server has deleted, and there
@@ -52,6 +68,9 @@
   // so an older app is offered nothing it could act on. In a browser there is
   // no worker and the page reload the user already knows is the whole remedy.
   const offlineDataClearable = shellAtLeast('0.10.0');
+  // The generic shell (0.12.0) has no service worker, so what it keeps is the
+  // cached rooms and messages only, and it cannot open without a connection.
+  const offlineAppStored = shellRunsServiceWorker();
   let confirmingClearOffline = $state(false);
   let clearingOffline = $state(false);
 
@@ -227,15 +246,32 @@
        fetch is the first thing that fails when the app cannot reach the
        server, and a cache gone wrong is a reason it might not. A row that
        disappears exactly when it is needed is not an escape hatch. -->
+  {#if appSettingsOffered}
+    <SettingsCard
+      title={device}
+      description="Server, location tracking and notifications on this device."
+    >
+      <div class="card-actions">
+        <Button variant="secondary" size="sm" onclick={showAppSettings}>Device settings</Button>
+      </div>
+    </SettingsCard>
+  {/if}
+
   {#if offlineDataClearable}
     <SettingsCard
       title="Offline data"
-      description="What this app keeps on the device so it opens and reads without a connection: the app itself, your room list, and the recent messages of the rooms you have opened."
+      description={offlineAppStored
+        ? 'What this app keeps on the device so it opens and reads without a connection: the app itself, your room list, and the recent messages of the rooms you have opened.'
+        : 'What this app keeps on the device: your room list and the recent messages of the rooms you have opened. The app itself is not stored, so it needs a connection to open.'}
     >
       <p class="description">
-        Clearing it takes the app back to a first install: it is downloaded again the next time you
-        open it, and each room's messages are fetched again when you open the room. Messages waiting
-        to send are kept, but a file held with one is not.
+        {#if offlineAppStored}
+          Clearing it takes the app back to a first install: it is downloaded again the next time
+          you open it, and each room's messages are fetched again when you open the room.
+        {:else}
+          Clearing it means each room's messages are fetched again when you open the room.
+        {/if}
+        Messages waiting to send are kept, but a file held with one is not.
       </p>
       <div class="card-actions">
         <Button
@@ -253,7 +289,9 @@
   <ConfirmDialog
     bind:open={confirmingClearOffline}
     title="Clear offline data"
-    message="Are you sure? The app and its saved messages are downloaded again the next time you open each room, which needs a connection. Messages waiting to send are kept — a file held with one is not."
+    message={offlineAppStored
+      ? 'Are you sure? The app and its saved messages are downloaded again the next time you open each room, which needs a connection. Messages waiting to send are kept — a file held with one is not.'
+      : 'Are you sure? Saved messages are downloaded again the next time you open each room, which needs a connection. Messages waiting to send are kept — a file held with one is not.'}
     confirmLabel="Clear"
     onConfirm={clearOfflineStorage}
   />
