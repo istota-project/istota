@@ -79,6 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A phone browser's toolbar now takes the color of the web UI's top navigation bar instead of the page background, so the two read as one header in light and dark themes. The iOS app colors its own top bar the same way.
 - The web dashboard shows two module tiles per row on a phone instead of one, so the whole list fits on screen. The tile descriptions are shorter so they stay at two lines.
 - On a wide screen, every web dashboard tile is now as tall as the welcome card's row. Before, the tile beside the welcome card was taller than the tiles below it. Narrower layouts keep their shorter tiles.
 - Images and location maps in web chat are drawn at one size, the same however tall the window is, and keep their shape on a phone. Before, an image's size followed the window's height and a map stretched across the whole chat column.

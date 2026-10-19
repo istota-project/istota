@@ -21,12 +21,14 @@
       href="%sveltekit.assets%/manifest.webmanifest"
       crossorigin="use-credentials"
     />
-    <!-- Mobile browser chrome. Content is --surface-base for the active theme;
-         the pre-paint script below seeds it and applyTheme() keeps it in step
+    <!-- Mobile browser chrome. Content is --surface-card for the active theme,
+         the app nav's fill, so the chrome continues the nav; the iOS app paints
+         its native bar from it too. The pre-paint script below seeds it and
+         applyTheme() keeps it in step
          with the toggle. Deliberately not a prefers-color-scheme pair — the
          theme follows the OS only until one is chosen, and the stored choice
          can disagree with it. -->
-    <meta name="theme-color" content="#111111" />
+    <meta name="theme-color" content="#1a1a1a" />
     <meta name="apple-mobile-web-app-title" content="Istota" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -56,7 +58,7 @@
               : 'dark';
         root.setAttribute('data-theme', theme);
         var chrome = document.querySelector('meta[name="theme-color"]');
-        if (chrome) chrome.setAttribute('content', theme === 'light' ? '#ffffff' : '#111111');
+        if (chrome) chrome.setAttribute('content', theme === 'light' ? '#f4f4f5' : '#1a1a1a');
         var size = read('fontSize', 'medium');
         root.setAttribute('data-font-size', size === 'small' || size === 'large' ? size : 'medium');
       })();

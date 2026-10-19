@@ -4,7 +4,7 @@
  * Beyond the `data-theme` attribute, `applyTheme` keeps the `theme-color` meta
  * in step so the mobile browser chrome follows the in-app toggle. That colour
  * is stated in three places — this module, the pre-paint script in app.html,
- * and `--surface-base` in app.css — so the drift between them is tested too.
+ * and `--surface-card` in app.css — so the drift between them is tested too.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -23,7 +23,7 @@ async function load() {
 function addChromeMeta(): HTMLMetaElement {
   const meta = document.createElement('meta');
   meta.setAttribute('name', 'theme-color');
-  meta.setAttribute('content', '#111111');
+  meta.setAttribute('content', '#1a1a1a');
   document.head.appendChild(meta);
   return meta;
 }
@@ -81,10 +81,10 @@ describe('theme store', () => {
     const { applyTheme } = await load();
 
     applyTheme('light');
-    expect(chromeColor()).toBe('#ffffff');
+    expect(chromeColor()).toBe('#f4f4f5');
 
     applyTheme('dark');
-    expect(chromeColor()).toBe('#111111');
+    expect(chromeColor()).toBe('#1a1a1a');
   });
 
   // The meta only exists in app.html, which no test renders — applying a theme
@@ -105,7 +105,7 @@ describe('theme store', () => {
     expect(get(theme)).toBe('light');
     expect(localStorage.getItem('theme')).toBe(JSON.stringify('light'));
     expect(document.documentElement.getAttribute('data-theme')).toBe('light');
-    expect(chromeColor()).toBe('#ffffff');
+    expect(chromeColor()).toBe('#f4f4f5');
   });
 
   it('toggleTheme flips the theme and the meta together', async () => {
@@ -114,11 +114,11 @@ describe('theme store', () => {
 
     toggleTheme();
     expect(get(theme)).toBe('light');
-    expect(chromeColor()).toBe('#ffffff');
+    expect(chromeColor()).toBe('#f4f4f5');
 
     toggleTheme();
     expect(get(theme)).toBe('dark');
-    expect(chromeColor()).toBe('#111111');
+    expect(chromeColor()).toBe('#1a1a1a');
   });
 });
 
@@ -135,20 +135,20 @@ describe('theme-color drift', () => {
       : value;
   }
 
-  /** `--surface-base` from the dark (`:root`) and light theme blocks. */
-  function surfaceBase(selector: string): string {
+  /** `--surface-card` from the dark (`:root`) and light theme blocks. */
+  function surfaceCard(selector: string): string {
     const block = new RegExp(`${selector}\\s*\\{([\\s\\S]*?)\\}`, 'm').exec(css);
     expect(block, `no ${selector} block in app.css`).not.toBeNull();
-    const declaration = /--surface-base:\s*([^;]+);/.exec(block![1]);
-    expect(declaration, `no --surface-base in ${selector}`).not.toBeNull();
+    const declaration = /--surface-card:\s*([^;]+);/.exec(block![1]);
+    expect(declaration, `no --surface-card in ${selector}`).not.toBeNull();
     return expand(declaration![1]);
   }
 
   it.each([
-    ['dark', ':root', '#111111'],
-    ['light', ":root\\[data-theme='light'\\]", '#ffffff'],
-  ])('the %s chrome colour matches --surface-base', async (mode, selector, expected) => {
-    expect(expand(expected)).toBe(surfaceBase(selector));
+    ['dark', ':root', '#1a1a1a'],
+    ['light', ":root\\[data-theme='light'\\]", '#f4f4f5'],
+  ])('the %s chrome colour matches --surface-card', async (mode, selector, expected) => {
+    expect(expand(expected)).toBe(surfaceCard(selector));
 
     addChromeMeta();
     const { applyTheme } = await load();
@@ -159,8 +159,8 @@ describe('theme-color drift', () => {
   // The pre-paint script seeds the meta before the store loads; if it drifts,
   // the chrome flashes the wrong colour for one frame on every cold load.
   it.each([
-    ['dark', '#111111'],
-    ['light', '#ffffff'],
+    ['dark', '#1a1a1a'],
+    ['light', '#f4f4f5'],
   ])('the app.html pre-paint script seeds the %s colour', (_mode, expected) => {
     expect(html).toContain(expected);
   });
