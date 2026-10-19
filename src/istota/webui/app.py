@@ -28,6 +28,7 @@ import sqlite3
 import stat
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field as _dc_field, replace as _dc_replace
@@ -15433,87 +15434,12 @@ def _signal_ingest_reload_if_needed(service: str, key: str) -> None:
     ingest_signal.signal_reload(_config.db_path)
 
 
-@api_router.post("/settings/secrets/overland/ingest_token/generate")
-async def settings_generate_ingest_token(
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Mint a fresh location ingest token and return it **once**.
-
-    The only endpoint that puts a secret in a response body. That is the
-    point: the token has to reach a phone, and the alternative is the user
-    transcribing 43 random characters by hand. Returning it here lets the
-    settings page render it as a QR the device scans, after which it is
-    write-only like every other secret — no read path exists.
-
-    Generating rotates: any previous token stops working immediately. That
-    is the revocation mechanism, and with one token per user it also
-    revokes the user's other devices, which is why the UI has to say so.
-    """
-    import secrets as _secrets
-
-    from istota.credentials import store as secrets_store
-    from fastapi import HTTPException
-
-    if not _config:
-        raise HTTPException(status_code=503, detail="config not loaded")
-
-    if not _user_has_location(user["username"]):
-        # The receiver only builds a token map for users with the module on,
-        # so a token issued here would be refused on first use. A 409 that
-        # says why beats a token that silently never works.
-        raise HTTPException(
-            status_code=409,
-            detail="The location module is off for this user, so an ingest "
-                   "token would not be accepted. Enable it in Settings first.",
-        )
-
-    if not _config.site.hostname:
-        # Checked before minting, not after: rotating the user's token and
-        # then refusing would cut off their working devices for nothing.
-        #
-        # With no hostname the URL below is *relative*, which the QR payload's
-        # decoder rejects for not being https — so the phone reports "not an
-        # Istota provisioning code" and blames the code rather than the
-        # missing config. A tracker cannot post to a relative URL either, so
-        # there is no token worth issuing here. Hits a checkout running
-        # `istota serve`, where hostname is routinely blank.
-        raise HTTPException(
-            status_code=409,
-            detail="This deployment has no public hostname configured, so the "
-                   "webhook URL a device posts to cannot be built. Set "
-                   "[site] hostname and try again.",
-        )
-
-    token = _secrets.token_urlsafe(32)
-    try:
-        secrets_store.set_secret(
-            _config.db_path, user["username"], "overland", "ingest_token", token,
-        )
-    except secrets_store.SecretKeyMissingError:
-        raise HTTPException(
-            status_code=503,
-            detail="ISTOTA_SECRET_KEY is not set; cannot store secrets.",
-        )
-
-    _signal_ingest_reload_if_needed("overland", "ingest_token")
-
-    logger.info(
-        "settings: generated location ingest token for user=%s", user["username"],
-    )
-    return {
-        "ok": True,
-        "token": token,
-        "webhook_url": _location_webhook_url(token),
-    }
-
-
 def _location_webhook_url(token: str = "<token>") -> str:
     """The ingest URL a device posts to.
 
-    Shared by the generate endpoint (which fills in the real token so the
-    QR carries a working URL) and ``/location/settings-info`` (which leaves
-    the placeholder, since it must never echo a stored token).
+    Shared by the device mint (which fills in the real token so the QR
+    carries a working URL) and ``/location/settings-info`` (which leaves the
+    placeholder, since it must never echo a stored token).
     """
     hostname = _config.site.hostname if _config else ""
     if not hostname:
@@ -15669,6 +15595,8 @@ async def settings_delete_secret(
         )
 
     deleted = secrets_store.delete_secret(_config.db_path, user["username"], service, key)
+    if deleted:
+        _signal_ingest_reload_if_needed(service, key)
     return {"ok": True, "deleted": deleted}
 
 
@@ -17194,6 +17122,188 @@ async def api_location_settings_info(user: dict = Depends(_require_api_auth)):
             "visit_exit_minutes": loc.visit_exit_minutes,
         },
     }
+
+
+# What `GLManager` sends: `[[NSUUID UUID] UUIDString]`, any case.
+_LOCATION_DEVICE_ID = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_LOCATION_DEVICE_LABEL_MAX = 64
+_LOCATION_DEVICE_DEFAULT_LABELS = {"app": "iPhone", "code": "QR code"}
+
+
+def _parse_location_device_mint(raw: bytes) -> tuple[str, str | None, str]:
+    """Validate a mint body into `(kind, device_id, label)`, or raise a 400 naming the field."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise HTTPException(400, "invalid JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "the body must be a JSON object")
+    unknown = sorted(set(body) - {"kind", "device_id", "label"})
+    if unknown:
+        raise HTTPException(400, f"unknown field: {unknown[0]}")
+
+    kind = body.get("kind")
+    if not isinstance(kind, str) or kind not in _LOCATION_DEVICE_DEFAULT_LABELS:
+        raise HTTPException(400, 'kind must be "app" or "code"')
+
+    device_id = None
+    if kind == "app":
+        device_id = body.get("device_id")
+        if not isinstance(device_id, str) or not _LOCATION_DEVICE_ID.fullmatch(device_id):
+            raise HTTPException(400, "device_id must be a UUID")
+    elif "device_id" in body:
+        raise HTTPException(400, 'device_id is not accepted for kind "code"')
+
+    label = body.get("label")
+    if label is None:
+        label = ""
+    if not isinstance(label, str):
+        raise HTTPException(400, "label must be a string")
+    label = "".join(c for c in label if unicodedata.category(c) != "Cc").strip()
+    if len(label) > _LOCATION_DEVICE_LABEL_MAX:
+        raise HTTPException(400, f"label must be at most {_LOCATION_DEVICE_LABEL_MAX} characters")
+    if not label:
+        label = _LOCATION_DEVICE_DEFAULT_LABELS[kind]
+    return kind, device_id, label
+
+
+def _location_devices_list(username: str) -> dict:
+    from istota import db
+    from istota.credentials import store as secrets_store
+    from istota.location import ingest_tokens
+
+    with db.get_db(_config.db_path) as conn:
+        devices = ingest_tokens.list_tokens(conn, username)
+        # `list_user_services` reads key names only: no decrypt, no `last_accessed_at` bump.
+        services = secrets_store.list_user_services(_config.db_path, username, connection=conn)
+    legacy = any(entry["key"] == "ingest_token" for entry in services.get("overland", []))
+    return {"devices": devices, "legacy_token": legacy}
+
+
+def _location_device_mint(username: str, kind: str, device_id: str | None, label: str) -> tuple[int, str]:
+    from istota import db
+    from istota.location import ingest_signal, ingest_tokens
+
+    with db.get_db(_config.db_path) as conn:
+        result = ingest_tokens.mint(conn, username, kind, device_id, label)
+    # After the commit, so the receiver's reload sees the new row.
+    ingest_signal.signal_reload(_config.db_path)
+    return result
+
+
+def _location_device_delete(username: str, row_id: int) -> bool:
+    from istota import db
+    from istota.location import ingest_signal, ingest_tokens
+
+    with db.get_db(_config.db_path) as conn:
+        deleted = ingest_tokens.delete_token(conn, username, row_id)
+    if deleted:
+        ingest_signal.signal_reload(_config.db_path)
+    return deleted
+
+
+def _location_legacy_token_delete(username: str) -> bool:
+    from istota.credentials import store as secrets_store
+
+    deleted = secrets_store.delete_secret(_config.db_path, username, "overland", "ingest_token")
+    if deleted:
+        _signal_ingest_reload_if_needed("overland", "ingest_token")
+    return deleted
+
+
+@api_router.get("/location/devices")
+async def api_location_devices_list(user: dict = Depends(_require_api_auth)):
+    """Every token that can post to `/webhooks/location` for this user.
+
+    Never the token or its hash: `token_tail` is what tells rows apart.
+    `legacy_token` says whether the shared `overland` / `ingest_token` secret
+    from before per-device tokens still exists.
+    """
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    return await asyncio.to_thread(_location_devices_list, user["username"])
+
+
+@api_router.post("/location/devices", status_code=201)
+async def api_location_devices_mint(request: Request, user: dict = Depends(_require_api_auth)):
+    """Mint an ingest token for one device and return it **once**.
+
+    The one place a location token appears in a response body: it has to
+    reach a tracker or a QR code. Minting never touches another device's
+    token. Every refusal comes before anything is written.
+    """
+    from istota.location import ingest_tokens
+
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not _user_has_location(user["username"]):
+        # The receiver builds its token map only for users with the module
+        # on, so a token minted here would be refused on first use.
+        raise HTTPException(
+            409,
+            "The location module is off for this user, so an ingest "
+            "token would not be accepted. Enable it in Settings first.",
+        )
+    if not _config.site.hostname:
+        # With no hostname the webhook URL is relative: the QR decoder rejects
+        # it for not being https, and a tracker cannot post to it. Reachable
+        # only on a no-auth install, where `_verify_origin` does not check.
+        raise HTTPException(
+            409,
+            "This deployment has no public hostname configured, so the "
+            "webhook URL a device posts to cannot be built. Set "
+            "[site] hostname and try again.",
+        )
+    try:
+        raw = await read_bounded_body(request, 4096)
+    except BodyError as exc:
+        raise HTTPException(exc.status, "invalid device body") from None
+    kind, device_id, label = _parse_location_device_mint(raw)
+    try:
+        row_id, token = await asyncio.to_thread(
+            _location_device_mint, user["username"], kind, device_id, label,
+        )
+    except ingest_tokens.TooManyDevices:
+        raise HTTPException(
+            409,
+            f"This account already has {ingest_tokens.MAX_TOKENS_PER_USER} devices. Remove one first.",
+        ) from None
+    webhook_url = _location_webhook_url(token)
+    logger.info("location: minted a %s ingest token for user=%s", kind, user["username"])
+    return {
+        "id": row_id,
+        "token": token,
+        "endpoint": webhook_url.split("?", 1)[0],
+        "webhook_url": webhook_url,
+    }
+
+
+# Declared before `/location/devices/{row_id}`; the `int` type keeps them apart too.
+@api_router.delete("/location/devices/legacy")
+async def api_location_devices_delete_legacy(request: Request, user: dict = Depends(_require_api_auth)):
+    """Remove the shared ingest token from before per-device tokens."""
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not await asyncio.to_thread(_location_legacy_token_delete, user["username"]):
+        raise HTTPException(404, "no shared token")
+    logger.info("location: removed the shared ingest token for user=%s", user["username"])
+    return {"ok": True}
+
+
+@api_router.delete("/location/devices/{row_id}")
+async def api_location_devices_delete(row_id: int, request: Request, user: dict = Depends(_require_api_auth)):
+    """Remove one device's token. 404 for a row that is not the caller's."""
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not await asyncio.to_thread(_location_device_delete, user["username"], row_id):
+        raise HTTPException(404, "device not found")
+    logger.info("location: removed ingest token %d for user=%s", row_id, user["username"])
+    return {"ok": True}
 
 
 @api_router.get("/location/current")

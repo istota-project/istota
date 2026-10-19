@@ -47,6 +47,31 @@ class TestIngestReloadSignal:
         ) > 0.0
 
 
+class TestAccountDisableSignals:
+    """A disabled account's ingest tokens are refused on the next request, not
+    on whatever reload happens to come next."""
+
+    def test_disable_and_enable_each_stamp_the_sentinel(self, tmp_path):
+        import os
+
+        from istota import db
+        from istota.location import ingest_signal
+        from istota.webui import auth as web_auth
+
+        db_path = tmp_path / "istota.db"
+        db.init_db(db_path)
+        web_auth.upsert_identity(db_path, "alice", "alice@example.com", create_profile=True)
+        assert ingest_signal.reload_stamp(db_path) == 0.0
+
+        web_auth.set_disabled(db_path, "alice", True)
+        first = ingest_signal.reload_stamp(db_path)
+        assert first > 0.0
+
+        os.utime(ingest_signal.sentinel_path(db_path), (first - 10, first - 10))
+        web_auth.set_disabled(db_path, "alice", False)
+        assert ingest_signal.reload_stamp(db_path) > first - 10
+
+
 @_needs_fastapi
 class TestReceiverReloadsOnSignal:
     def _reset(self, wr, cfg):

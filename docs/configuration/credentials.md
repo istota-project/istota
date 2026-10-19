@@ -76,10 +76,12 @@ Gated by module enablement. Appear on per-module settings pages.
 |---|---|---|---|
 | money | Monarch Money | `session_id`, `csrftoken` | `money` skill (transaction sync via cookie auth) |
 | feeds | Tumblr | `tumblr_api_key`\* | `feeds` skill (Tumblr feed ingestion) |
-| location | Overland | `ingest_token` | `location` skill (GPS ingestion webhook) |
+| location | Overland | `ingest_token` | The legacy shared token for the GPS ingestion webhook (see below) |
 | location | CARTO basemap | `api_key`\* | The map surfaces, via `GET /api/map/basemap` |
 
 \* = optional
+
+The Overland `ingest_token` is the shared token from before per-device ingest tokens. Each device now has its own token, minted from Location settings and stored as a SHA-256 hash in `location_ingest_tokens` rather than in `secrets`, since the server never needs it back; see [GPS location tracking](../features/location.md#ingest-tokens-one-per-device). The shared token is still accepted, listed on that page with a Remove button, and can still be written through the Overland card on that page, `istota secret ensure` or a settings plan, but nothing creates or rotates it any more.
 
 CARTO is its own service rather than a second field on Overland: a different credential with a different lifecycle, and adding it there would flip that card to "Partial" for every user who has an ingest token and no basemap key. **It is the one credential in the schema that is meant to reach the browser** — MapLibre puts it in the tile URL, so it ships to every client that loads a map, and CARTO issues these free for exactly that. It lives in the store for the encryption at rest, the per-user scoping and the input UI, not because it is confidential; nothing reads it back as a value, so the store stays write-only to the browser where that means something. Setting one **selects CARTO as that user's basemap**, overriding the operator's [`[web.map] provider`](reference.md#webmap); leaving it empty uses the deployment default.
 

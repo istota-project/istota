@@ -357,7 +357,13 @@ def clear_password(db_path: Path, user_id: str) -> int:
 
 
 def set_disabled(db_path: Path, user_id: str, disabled: bool, *, protected_admins: set[str] | None = None) -> int:
-    return _change_credential(db_path, user_id, disabled=disabled, protected_admins=protected_admins)
+    from istota.location import ingest_signal  # noqa: PLC0415
+
+    epoch = _change_credential(db_path, user_id, disabled=disabled, protected_admins=protected_admins)
+    # The location receiver skips disabled accounts when it builds its token
+    # map; the stamp makes that apply on the next ingest request.
+    ingest_signal.signal_reload(db_path)
+    return epoch
 
 
 def bump_epoch(db_path: Path, user_id: str) -> int:

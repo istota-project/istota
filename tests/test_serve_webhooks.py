@@ -459,7 +459,7 @@ class TestReceiverLoadsUnderAParentLifespan:
         for name, value in (
             ("_config", None), ("_sms_providers", None), ("_token_map", {}),
             ("_user_contexts", {}), ("_places_cache", {}), ("_sentinel_stamp", 0.0),
-            ("_never_loaded_claimed", False),
+            ("_never_loaded_claimed", False), ("_last_used_writes", {}),
         ):
             monkeypatch.setattr(wr, name, value, raising=False)
         return config
@@ -496,6 +496,145 @@ class TestReceiverLoadsUnderAParentLifespan:
         with TestClient(parent) as client:
             resp = client.post(
                 "/webhooks/location", params={"token": "alice-tok"}, json=self._batch(),
+            )
+
+        assert resp.status_code == 200, resp.text
+
+    @staticmethod
+    def _mounted(config):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from istota import serve
+
+        parent = FastAPI()
+        serve._maybe_mount_webhooks(parent, config)
+        return TestClient(parent)
+
+    @staticmethod
+    def _mint(config, kind="app", device_id="6F1C2A3B-4D5E-4F60-8A7B-9C0D1E2F3A4B"):
+        from istota import db
+        from istota.location import ingest_signal, ingest_tokens
+
+        with db.get_db(config.db_path) as conn:
+            minted = ingest_tokens.mint(conn, "alice", kind, device_id, "iPhone")
+        ingest_signal.signal_reload(config.db_path)
+        return minted
+
+    @staticmethod
+    def _last_used(config, row_id):
+        from istota import db
+
+        with db.get_db(config.db_path) as conn:
+            return conn.execute(
+                "SELECT last_used_at FROM location_ingest_tokens WHERE id = ?", (row_id,),
+            ).fetchone()[0]
+
+    def test_a_row_token_is_accepted_as_a_bearer_header(self, stored_token):
+        with self._mounted(stored_token) as client:
+            _, token = self._mint(stored_token)
+            resp = client.post(
+                "/webhooks/location", headers={"Authorization": f"Bearer {token}"},
+                json=self._batch(),
+            )
+
+        assert resp.status_code == 200, resp.text
+
+    def test_a_row_token_is_accepted_as_a_query_parameter(self, stored_token):
+        with self._mounted(stored_token) as client:
+            _, token = self._mint(stored_token, kind="code", device_id=None)
+            resp = client.post(
+                "/webhooks/location", params={"token": token}, json=self._batch(),
+            )
+            legacy = client.post(
+                "/webhooks/location", params={"token": "alice-tok"}, json=self._batch(),
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert legacy.status_code == 200, legacy.text
+
+    def test_a_deleted_row_is_refused_on_the_next_request(self, stored_token):
+        import os
+
+        from istota import db
+        from istota.location import ingest_signal, ingest_tokens
+        from istota.webui import webhook_receiver as wr
+
+        with self._mounted(stored_token) as client:
+            row_id, token = self._mint(stored_token)
+            auth = {"Authorization": f"Bearer {token}"}
+            assert client.post("/webhooks/location", headers=auth, json=self._batch()).status_code == 200
+
+            with db.get_db(stored_token.db_path) as conn:
+                assert ingest_tokens.delete_token(conn, "alice", row_id)
+            ingest_signal.signal_reload(stored_token.db_path)
+            # A filesystem with coarse mtimes could stamp the same value twice.
+            later = wr._sentinel_stamp + 1
+            os.utime(ingest_signal.sentinel_path(stored_token.db_path), (later, later))
+            resp = client.post("/webhooks/location", headers=auth, json=self._batch())
+
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "invalid token"}
+
+    def test_disabling_the_account_refuses_its_tokens_at_once(self, stored_token):
+        """`set_disabled` stamps the sentinel, so no unrelated reload is needed."""
+        from istota.webui import auth as web_auth
+
+        web_auth.upsert_identity(stored_token.db_path, "alice", "alice@example.com", create_profile=True)
+        with self._mounted(stored_token) as client:
+            _, token = self._mint(stored_token)
+            auth = {"Authorization": f"Bearer {token}"}
+            assert client.post("/webhooks/location", headers=auth, json=self._batch()).status_code == 200
+
+            web_auth.set_disabled(stored_token.db_path, "alice", True)
+            row = client.post("/webhooks/location", headers=auth, json=self._batch())
+            legacy = client.post(
+                "/webhooks/location", params={"token": "alice-tok"}, json=self._batch(),
+            )
+
+        assert row.status_code == 403
+        assert legacy.status_code == 403
+
+    def test_last_used_at_is_written_at_most_once_per_window(self, stored_token, monkeypatch):
+        from istota import db
+        from istota.webui import webhook_receiver as wr
+
+        now = [1000.0]
+        monkeypatch.setattr(wr, "_clock", lambda: now[0])
+        with self._mounted(stored_token) as client:
+            row_id, token = self._mint(stored_token)
+            auth = {"Authorization": f"Bearer {token}"}
+            assert self._last_used(stored_token, row_id) is None
+
+            assert client.post("/webhooks/location", headers=auth, json=self._batch()).status_code == 200
+            assert self._last_used(stored_token, row_id) is not None
+
+            with db.get_db(stored_token.db_path) as conn:
+                conn.execute(
+                    "UPDATE location_ingest_tokens SET last_used_at = 'marker' WHERE id = ?", (row_id,),
+                )
+            now[0] += wr.LAST_USED_INTERVAL_SECONDS - 1
+            assert client.post("/webhooks/location", headers=auth, json=self._batch()).status_code == 200
+            assert self._last_used(stored_token, row_id) == "marker"
+
+            now[0] += 2
+            assert client.post("/webhooks/location", headers=auth, json=self._batch()).status_code == 200
+            assert self._last_used(stored_token, row_id) not in (None, "marker")
+
+    def test_a_failed_last_used_write_does_not_fail_the_batch(self, stored_token, monkeypatch):
+        import sqlite3
+
+        from istota.location import ingest_tokens
+
+        def locked(conn, row_id, when):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(ingest_tokens, "touch_last_used", locked)
+        with self._mounted(stored_token) as client:
+            _, token = self._mint(stored_token)
+            resp = client.post(
+                "/webhooks/location", headers={"Authorization": f"Bearer {token}"},
+                json=self._batch(),
             )
 
         assert resp.status_code == 200, resp.text
@@ -539,6 +678,7 @@ class TestReceiverLoadsUnderAParentLifespan:
         from fastapi import FastAPI
 
         from istota import serve
+        from istota.location.ingest_tokens import hash_token
         from istota.webui import webhook_receiver as wr
 
         parent_reloads = []
@@ -553,7 +693,7 @@ class TestReceiverLoadsUnderAParentLifespan:
         saved = signal.getsignal(signal.SIGHUP)
         try:
             async with parent.router.lifespan_context(parent):
-                assert wr._token_map == {"alice-tok": "alice"}
+                assert wr._token_map == {hash_token("alice-tok"): ("alice", None)}
                 monkeypatch.setattr(wr, "_token_map", {})
                 signal.getsignal(signal.SIGHUP)(signal.SIGHUP, None)
                 for thread in threading.enumerate():
@@ -563,7 +703,7 @@ class TestReceiverLoadsUnderAParentLifespan:
             signal.signal(signal.SIGHUP, saved)
 
         assert parent_reloads == [1]
-        assert wr._token_map == {"alice-tok": "alice"}
+        assert wr._token_map == {hash_token("alice-tok"): ("alice", None)}
 
     def test_a_receiver_that_was_never_loaded_loads_on_first_use(self, stored_token):
         """A missed startup costs one slow request, not a permanent 403."""

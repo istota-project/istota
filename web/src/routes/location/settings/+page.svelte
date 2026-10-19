@@ -4,15 +4,16 @@
   import {
     getModuleServices,
     getLocationSettingsInfo,
-    generateIngestToken,
+    createLocationDevice,
     type ServiceCard as ServiceCardData,
     type LocationSettingsInfo,
   } from '$lib/api';
   import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
-  import { Button, ConfirmDialog } from '$lib/components/ui';
+  import { Button } from '$lib/components/ui';
   import QrCode from '$lib/components/location/QrCode.svelte';
   import DeviceTrackerCard from '$lib/components/location/DeviceTrackerCard.svelte';
-  import { encodeProvisioning, endpointFromWebhookUrl } from '$lib/location/provisioning';
+  import LocationDevicesCard from '$lib/components/location/LocationDevicesCard.svelte';
+  import { encodeProvisioning } from '$lib/location/provisioning';
 
   let loading = $state(true);
   let error = $state('');
@@ -22,56 +23,39 @@
   let info: LocationSettingsInfo | null = $state(null);
 
   /**
-   * The freshly minted token, held for this page view only.
+   * The freshly created code, held for this page view only.
    *
-   * There is no read path for it — the generate call is the one and only time
-   * the server hands it back — so leaving the page loses it and the next
-   * device needs a new one. That is the whole reason the card says so out
-   * loud rather than assuming anyone would guess.
+   * There is no read path for it — the create call is the one and only time
+   * the server hands the token back — so leaving the page loses it and the
+   * next device needs a new code. That is the whole reason the card says so
+   * out loud rather than assuming anyone would guess.
    */
   let minted = $state<{ token: string; endpoint: string; webhookUrl: string } | null>(null);
   let minting = $state(false);
   let mintError = $state('');
-  let confirmRotate = $state(false);
-
-  const tokenConfigured = $derived(
-    moduleServices.some(
-      (svc) => svc.service === 'overland' && svc.configured_keys.includes('ingest_token'),
-    ),
-  );
+  let devicesCard: ReturnType<typeof LocationDevicesCard> | undefined = $state();
 
   const qrPayload = $derived(
     minted ? encodeProvisioning({ endpoint: minted.endpoint, token: minted.token }) : '',
   );
 
   async function mint() {
-    // ConfirmDialog does not close itself on confirm, so its button stays
-    // live for the whole round trip. Without this guard a double-tap mints
-    // twice and the QR can end up showing the token that lost the race —
-    // which the phone would accept and then 401 on forever.
     if (minting) return;
     minting = true;
     mintError = '';
     try {
-      const result = await generateIngestToken();
+      const result = await createLocationDevice({ kind: 'code' });
       minted = {
         token: result.token,
-        endpoint: endpointFromWebhookUrl(result.webhook_url),
+        endpoint: result.endpoint,
         webhookUrl: result.webhook_url,
       };
-      await reloadServices();
+      await devicesCard?.reload();
     } catch (e) {
-      mintError = e instanceof Error ? e.message : 'Could not generate a token';
+      mintError = e instanceof Error && e.message ? e.message : 'Could not create a code.';
     } finally {
       minting = false;
-      confirmRotate = false;
     }
-  }
-
-  /** Rotating cuts off every device on this account, so it asks first. */
-  function requestMint() {
-    if (tokenConfigured) confirmRotate = true;
-    else void mint();
   }
 
   async function refresh() {
@@ -100,6 +84,8 @@
     } catch {
       // non-fatal
     }
+    // The overland card writes the shared token, which the device list shows.
+    await devicesCard?.reload();
   }
 
   onMount(refresh);
@@ -107,7 +93,7 @@
 
 <SettingsLayout
   title="Location settings"
-  description="Overland GPS connection and place-detection tuning. The ingest token is encrypted at rest and never sent back to the browser."
+  description="The devices that send locations to this account, and place-detection tuning. A device's token is shown once, when it is created, and never sent back to the browser."
   {loading}
   {error}
 >
@@ -124,16 +110,24 @@
     <!-- Outside the `info` guard below: this card reads the device, not the
          server, and it is the readout that says whether tracking silently
          stopped. A transient server failure must not be what hides it. -->
-    <DeviceTrackerCard />
+    <DeviceTrackerCard onDeviceAdded={() => devicesCard?.reload()} />
+
+    <LocationDevicesCard bind:this={devicesCard} />
 
     {#if info}
       <SettingsCard
         title="Provision a device"
-        description="Generate a token and scan it from the Istota app on the phone you want to track."
+        description="Create a code to scan from the Istota app on a phone, or to paste into Overland. Each code is a device of its own in the list above."
       >
         {#snippet actions()}
-          <Button variant="secondary" size="sm" onclick={requestMint} disabled={minting}>
-            {tokenConfigured ? 'Generate new token' : 'Generate token'}
+          <Button
+            variant="secondary"
+            size="sm"
+            onclick={mint}
+            loading={minting}
+            loadingLabel="Creating…"
+          >
+            Create code
           </Button>
         {/snippet}
 
@@ -144,8 +138,8 @@
             <QrCode value={qrPayload} label="Location provisioning code" />
             <div class="provision-copy">
               <p class="description">
-                Scan this from <strong>This device</strong> below, in the app on the phone. It is shown
-                once — leaving this page loses it, and the next device needs a new token.
+                Scan this from <strong>This device</strong>, in the app on the phone. It is shown
+                once — leaving this page loses it, and the next device needs a new code.
               </p>
               <p class="description">
                 For the third-party Overland app, which cannot scan, paste this URL instead. It
@@ -156,9 +150,9 @@
           </div>
         {:else}
           <p class="description">
-            The token is stored encrypted and never sent back to the browser, so it can only be
-            shown at the moment it is generated. Generating a new one immediately cuts off every
-            device currently using the old one, which is also how you revoke a lost phone.
+            A code is shown once, when it is created, and the server keeps no copy it could show
+            again. Creating one does not affect any other device. On a phone with the Istota app,
+            open this page in the app and turn tracking on there instead.
           </p>
           <code class="webhook-url">{info.webhook_url}</code>
         {/if}
@@ -178,16 +172,6 @@
     {/if}
   {/if}
 </SettingsLayout>
-
-<ConfirmDialog
-  bind:open={confirmRotate}
-  title="Generate a new token"
-  message="Are you sure? The current token stops working immediately, on every device using it. Any phone still tracking with the old one will stop sending until you rescan its code."
-  confirmLabel="Generate"
-  confirmVariant="danger"
-  confirmDisabled={minting}
-  onConfirm={mint}
-/>
 
 <style>
   /* Shared .settings/.card/.field/.banner primitives live in

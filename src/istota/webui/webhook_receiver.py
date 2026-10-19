@@ -12,6 +12,7 @@ import logging
 import signal
 import sqlite3
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -31,7 +32,9 @@ logger = logging.getLogger("istota.webui.webhook_receiver")
 # the lock sees a consistent snapshot.
 _config = None
 _sms_providers = None
-_token_map: dict[str, str] = {}                        # token -> user_id
+# sha256 hex of a token -> (user_id, location_ingest_tokens row id). The row
+# id is None for the legacy shared `overland` / `ingest_token` secret.
+_token_map: dict[str, tuple[str, int | None]] = {}
 _user_contexts: dict[str, LocationContext] = {}        # user_id -> ctx
 _places_cache: dict[str, list] = {}                     # user_id -> places
 _lock = threading.Lock()
@@ -42,6 +45,14 @@ _sentinel_stamp: float = 0.0
 
 # Whether `_load_if_never_loaded` has taken its one attempt. See there.
 _never_loaded_claimed = False
+
+# `last_used_at` is written at most this often per token, so a tracker
+# posting every few seconds does not take a write lock on `istota.db` each time.
+LAST_USED_INTERVAL_SECONDS = 600.0
+# Keyed by (row id, token hash) rather than row id alone: replacing an 'app'
+# row keeps its id, and the new token's first batch should still be recorded.
+_last_used_writes: dict[tuple[int, str], float] = {}
+_clock = time.monotonic
 
 # Hysteresis threshold: consecutive pings at new place before opening a visit
 HYSTERESIS_THRESHOLD = 2
@@ -157,20 +168,27 @@ def _get_user_db_path(user_id: str):
     return _user_contexts[user_id].db_path
 
 
-def reload_config() -> None:
+def reload_config() -> bool:
     """Reload config, token map, user contexts, and places cache.
 
-    Tokens come from the encrypted ``secrets`` table per user; the
-    location module gate decides which users get scanned. Users without
-    an ingest token (or with the location module disabled, or with no
-    nextcloud mount configured) don't appear in any of the three dicts
+    Tokens are the user's `location_ingest_tokens` rows plus the legacy
+    shared `overland` / `ingest_token` secret, all keyed by SHA-256. A user
+    is scanned only with the location module on, a usable `location.db` and
+    an account that is not disabled (the check `validate_session_credential`
+    makes). A user with no token at all appears in none of the three dicts,
     and their requests fall through to the 403 path.
+
+    A failure reading the framework database (locked, or the token table not
+    migrated yet) keeps the previous dicts rather than emptying them, and
+    returns False so a signalled reload can be retried.
 
     The three dicts are rebound under ``_lock`` as a single block so any
     reader holding the lock sees a consistent snapshot.
     """
+    from istota import db  # noqa: PLC0415
     from istota.credentials import store as secrets_store  # noqa: PLC0415
-    from istota.location import ingest_signal  # noqa: PLC0415
+    from istota.location import ingest_signal, ingest_tokens  # noqa: PLC0415
+    from istota.webui import auth as web_auth  # noqa: PLC0415
 
     global _config, _sms_providers, _token_map, _user_contexts, _places_cache, _sentinel_stamp
     _config = load_config()
@@ -178,16 +196,28 @@ def reload_config() -> None:
 
     _sms_providers = make_provider_registry(_config)
 
-    # Read the sentinel *before* the secrets, not after: a token written
+    # Read the sentinel *before* the tokens, not after: a token written
     # between the two would otherwise be marked as already-loaded and would
     # not apply until the next write.
     stamp = ingest_signal.reload_stamp(_config.db_path)
 
-    token_map: dict[str, str] = {}
-    user_contexts: dict[str, LocationContext] = {}
-    places_cache: dict[str, list] = {}
+    try:
+        disabled = {
+            identity.user_id for identity in web_auth.list_identities(_config.db_path)
+            if identity.disabled
+        }
+    except Exception:
+        logger.warning(
+            "could not read disabled accounts; keeping the previous location token map",
+            exc_info=True,
+        )
+        return False
 
+    # user_id -> (ctx, places, legacy token or None)
+    candidates: dict[str, tuple[LocationContext, list, str | None]] = {}
     for user_id in location.list_users(_config):
+        if user_id in disabled:
+            continue
         try:
             ctx = location.resolve_for_user(user_id, _config)
         except location.UserNotFoundError as e:
@@ -202,29 +232,80 @@ def reload_config() -> None:
             # provisioning lands in a real DB (Stage 2's lazy init pairs
             # with Stage 3's data copy).
             location.init_db(ctx.db_path)
-            tok = secrets_store.get_secret(
+            legacy = secrets_store.get_secret(
                 _config.db_path, user_id, "overland", "ingest_token",
             )
-            if not tok:
-                continue
             with location.connect(ctx.db_path) as conn:
                 places = location.db.get_places(conn)
         except Exception:
             logger.exception("skipping user '%s' for location ingest", user_id)
             continue
-        token_map[tok] = user_id
-        user_contexts[user_id] = ctx
-        places_cache[user_id] = places
+        candidates[user_id] = (ctx, places, legacy or None)
+
+    try:
+        with db.get_db(_config.db_path) as conn:
+            rows = ingest_tokens.all_token_hashes(conn, candidates)
+    except Exception:
+        logger.warning(
+            "could not read location_ingest_tokens; keeping the previous location token map",
+            exc_info=True,
+        )
+        return False
+
+    token_map: dict[str, tuple[str, int | None]] = {}
+    for user_id, (_ctx, _places, legacy) in candidates.items():
+        if legacy:
+            token_map[ingest_tokens.hash_token(legacy)] = (user_id, None)
+    for token_hash, user_id, row_id in rows:
+        token_map[token_hash] = (user_id, row_id)
+
+    admitted = {user_id for user_id, _row_id in token_map.values()}
+    user_contexts = {user_id: candidates[user_id][0] for user_id in admitted}
+    places_cache = {user_id: candidates[user_id][1] for user_id in admitted}
+    live_rows = {
+        (row_id, token_hash) for token_hash, (_user, row_id) in token_map.items()
+        if row_id is not None
+    }
 
     with _lock:
         _token_map = token_map
         _user_contexts = user_contexts
         _places_cache = places_cache
         _sentinel_stamp = stamp
+        for key in [key for key in _last_used_writes if key not in live_rows]:
+            del _last_used_writes[key]
 
     logger.info(
-        "Loaded location config: %d user(s) with tokens", len(_token_map),
+        "Loaded location config: %d user(s) with tokens", len(user_contexts),
     )
+    return True
+
+
+def _record_last_used(row_id: int, token_hash: str) -> None:
+    """Stamp `last_used_at` on a row, throttled and best-effort.
+
+    A failure is logged at debug and swallowed: the batch is already stored,
+    and a locked `istota.db` is no reason to make the device resend it. No
+    sentinel stamp, since the token map does not change.
+    """
+    from istota import db  # noqa: PLC0415
+    from istota.location import ingest_tokens  # noqa: PLC0415
+
+    config = _config
+    if config is None:
+        return
+    key = (row_id, token_hash)
+    now = _clock()
+    with _lock:
+        last = _last_used_writes.get(key)
+        if last is not None and now - last < LAST_USED_INTERVAL_SECONDS:
+            return
+        _last_used_writes[key] = now
+    try:
+        with db.get_db(config.db_path, busy_timeout_ms=1000) as conn:
+            ingest_tokens.touch_last_used(conn, row_id, db.iso_utc_now())
+    except Exception:
+        logger.debug("could not record last_used_at for ingest token %s", row_id, exc_info=True)
 
 
 def _maybe_reload_for_signal() -> None:
@@ -239,7 +320,10 @@ def _maybe_reload_for_signal() -> None:
     concurrent uvicorn threads produce one rebuild rather than one each. A
     reload that then fails stays claimed: it means config loading is broken,
     and re-attempting it on every subsequent ping would rescan every user's
-    DB in a tight loop. SIGHUP and restart remain the way out.
+    DB in a tight loop. SIGHUP and restart remain the way out. A reload that
+    kept the previous map because `istota.db` could not be read is different:
+    the change it was signalled for has not applied, so the stamp is handed
+    back and the next request retries.
     """
     global _sentinel_stamp
 
@@ -256,13 +340,21 @@ def _maybe_reload_for_signal() -> None:
     with _lock:
         if stamp <= _sentinel_stamp:
             return
+        previous_stamp = _sentinel_stamp
         _sentinel_stamp = stamp
 
     logger.info("location ingest reload signalled; rebuilding token map")
     try:
-        reload_config()
+        rebuilt = reload_config()
     except Exception:
         logger.exception("failed to reload location ingest config")
+        return
+    if rebuilt is False:
+        # The map was kept, so the signalled change (often a removal) has not
+        # applied yet: hand the stamp back so the next request retries.
+        with _lock:
+            if _sentinel_stamp == stamp:
+                _sentinel_stamp = previous_stamp
 
 
 def _load_if_never_loaded() -> None:
@@ -598,8 +690,11 @@ async def receive_location(
     # work on its first use, which is exactly when someone is watching.
     _maybe_reload_for_signal()
 
+    from istota.location.ingest_tokens import hash_token  # noqa: PLC0415
+
+    token_hash = hash_token(auth_token)
     with _lock:
-        user_id = _token_map.get(auth_token)
+        user_id, row_id = _token_map.get(token_hash, (None, None))
         db_path = (
             _user_contexts[user_id].db_path
             if user_id and user_id in _user_contexts else None
@@ -631,6 +726,8 @@ async def receive_location(
         logger.exception("Error processing location batch for %s", user_id)
         return JSONResponse({"error": "processing error"}, status_code=500)
 
+    if row_id is not None:
+        _record_last_used(row_id, token_hash)
     return JSONResponse({"result": "ok"})
 
 
