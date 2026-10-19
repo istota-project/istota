@@ -503,7 +503,4 @@
     gap: var(--space-2);
     align-items: center;
   }
-  .chip-add input {
-    max-width: 16rem;
-  }
 </style>

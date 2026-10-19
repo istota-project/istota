@@ -86,6 +86,9 @@
 	   in-app cross-references. Distinct from --status-info-fg: this marks
 	   something you can act on, not a severity. */
   --accent-blue: #7aa3d8;
+  /* A focused text field's border (primitives.css). The interactive accent in
+	   both themes; declared in each so a theme can tune it on its own. */
+  --focus-field-border: var(--accent-blue);
   /* The WhatsApp surface glyph in the room list, the chat header and a texted
 	   turn's provenance line (ISSUE-584). A brand cue, not a severity. */
   --accent-whatsapp: #5fd07a;
@@ -516,6 +519,7 @@
   /* Darker amber so the bot's accent stays legible on a light surface. */
   --accent-amber: #b9740a;
   --accent-blue: #2563b0;
+  --focus-field-border: var(--accent-blue);
   --accent-whatsapp: #1c8043;
   --map-marker-live: #16a34a;
   --map-marker-browser: #ea580c;

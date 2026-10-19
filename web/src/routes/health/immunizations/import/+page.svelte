@@ -355,8 +355,9 @@
     box-sizing: border-box;
     resize: vertical;
   }
-  .paste:focus {
-    outline: 1px solid var(--accent-blue);
+  /* Not a TextArea yet, so outside the shared focus rule; same border, same token. */
+  .paste:focus-visible {
+    border-color: var(--focus-field-border);
   }
 
   .actions {

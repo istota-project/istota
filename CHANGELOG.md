@@ -104,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Health forms west of UTC no longer pre-fill tomorrow's date in the evening, a briefing's "Sender filters" caption no longer removes the first sender when clicked, and pressing Enter on a place's category dropdown or radius slider no longer saves the place. An empty Feeds list now says so instead of showing a blank grid and "0 / 0".
 - The bloodwork table now highlights the row under the pointer on the light theme too, and its biomarker review tables scroll sideways on a phone instead of overflowing. The diagnoses table on a history import lays out as a table again, and long names in the chat autocomplete, the location place list and the admin source breakdown now end in an ellipsis instead of running past their column.
+- A text field now shows when it has focus: its border turns blue as you click or tab into it, where before nothing changed. Fields meant for paths, tokens and keys (setup, the admin user editor, the config editor) are drawn in the monospace face again, and a rejected value shows its red border inside a form. Note and prompt boxes in forms are now in the regular face rather than monospace.
 - On a phone, the Admin → Scheduled jobs and Admin → Briefings tables keep every column and scroll sideways, instead of squeezing the job or briefing name until it ran down the page one letter per line.
 - Admin → Configuration scrolls more smoothly on a phone: the browser now skips drawing the settings sections that are off screen.
 

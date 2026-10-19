@@ -450,16 +450,6 @@
     gap: var(--space-2) var(--space-3);
     max-width: 32rem;
   }
-  .header-edit input {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-1) var(--space-2);
-    min-width: 0;
-  }
   .header-edit .full-row {
     grid-column: 1 / -1;
   }

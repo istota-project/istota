@@ -450,22 +450,6 @@
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);
   }
-  .quick-form input,
-  .quick-form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .quick-form textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
   /* Not a <label>: the control is a Select whose trigger is a button, and
      wrapping it would make clicking the field name open the dropdown. */
   .conditions-field {

@@ -680,8 +680,10 @@
     color: var(--text-dim);
   }
 
+  /* The border is the wrapper's, so the shared text-field focus rule cannot
+     reach it; this is that rule's colour on the box that draws the edge. */
   .input-field:focus-within {
-    border-color: var(--text-muted);
+    border-color: var(--focus-field-border);
   }
 
   .input-meta {

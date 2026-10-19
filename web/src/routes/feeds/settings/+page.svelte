@@ -944,6 +944,10 @@
     background: var(--surface-base);
   }
 
+  .grid input[type='text']:focus-visible {
+    border-color: var(--focus-field-border);
+  }
+
   .type-pill {
     display: inline-block;
     font-size: var(--text-xs);

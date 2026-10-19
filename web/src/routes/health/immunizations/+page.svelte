@@ -436,23 +436,6 @@
     grid-column: 1 / -1;
     margin-top: var(--space-1);
   }
-  .quick-form input,
-  .quick-form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    line-height: 1.4;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .quick-form textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
   .quick-form details.advanced > summary {
     color: var(--text-muted);
     font-size: var(--text-sm);

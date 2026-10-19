@@ -610,22 +610,6 @@
   .form :global(.field.full) {
     grid-column: 1 / -1;
   }
-  .form input,
-  .form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .form textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab
      alongside the name rather than being one big link. */
