@@ -201,7 +201,7 @@
 {/if}
 
 {#if extracting}
-  <div class="card extracting">
+  <div class="card extracting muted">
     <span class="spinner" aria-hidden="true"></span>
     Extracting immunizations from the source — this can take a few seconds.
   </div>
@@ -226,7 +226,7 @@
   </div>
 
   {#if documentId !== null && file}
-    <p class="attach-note">
+    <p class="attach-note caption">
       <strong>{file.name}</strong> will be kept as proof and attached to the rows below.
     </p>
   {/if}
@@ -377,14 +377,11 @@
     flex-direction: row;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
 
   .attach-note {
     margin: 0 0 var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
   .review-head {
     display: flex;

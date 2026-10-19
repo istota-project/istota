@@ -56,18 +56,18 @@
 {#if stats}
   <div class="day-stats">
     <div class="stat-row">
-      <span class="stat-label">Distance</span>
+      <span class="stat-label caption">Distance</span>
       <span class="stat-value">{formatDist(stats.totalDist)}</span>
     </div>
     {#if stats.maxSpeed > 0}
       <div class="stat-row">
-        <span class="stat-label">Max speed</span>
+        <span class="stat-label caption">Max speed</span>
         <span class="stat-value">{formatSpeed(stats.maxSpeed)}</span>
       </div>
     {/if}
     {#if stats.batteryDrain != null}
       <div class="stat-row">
-        <span class="stat-label">Battery</span>
+        <span class="stat-label caption">Battery</span>
         <span class="stat-value"
           >{stats.batteryDrain > 0 ? `-${stats.batteryDrain}%` : `+${-stats.batteryDrain}%`}</span
         >
@@ -87,11 +87,6 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-  }
-
-  .stat-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .stat-value {

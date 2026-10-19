@@ -344,24 +344,25 @@
 
     <div class="stats-bar">
       {#if pings.length > 0}
-        <span class="stat">{pings.length} pings</span>
+        <span class="stat caption">{pings.length} pings</span>
       {/if}
       {#if summary && pings.length > 0}
-        <span class="stat">{summary.stops.length} stops</span>
-        <span class="stat">{summary.transit_pings} transit</span>
+        <span class="stat caption">{summary.stops.length} stops</span>
+        <span class="stat caption">{summary.transit_pings} transit</span>
       {/if}
       {#if showDiscover && clusters.length > 0}
-        <span class="stat">{clusters.length} unknown</span>
+        <span class="stat caption">{clusters.length} unknown</span>
       {/if}
       {#if !isSingleDay}
         {@const uniquePlaces = new Set(pings.filter((p) => p.place).map((p) => p.place))}
-        <span class="stat">{uniquePlaces.size} places</span>
+        <span class="stat caption">{uniquePlaces.size} places</span>
       {/if}
       {#if isSingleDay && trips.length > 0}
-        <span class="stat">{trips.length} trips</span>
+        <span class="stat caption">{trips.length} trips</span>
       {/if}
       {#if elevation.range}
-        <span class="stat">{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
+        <span class="stat caption"
+          >{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
         >
       {/if}
       {#if (summary && summary.stops.length > 0) || trips.length > 0 || elevation.show}
@@ -427,11 +428,6 @@
     padding: var(--space-2) var(--space-3);
     border-top: 1px solid var(--border-subtle);
     flex-shrink: 0;
-  }
-
-  .stat {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .stops-btn {

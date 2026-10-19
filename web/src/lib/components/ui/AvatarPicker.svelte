@@ -135,9 +135,9 @@
 
   <div class="side">
     {#if busyLabel}
-      <p class="hint busy" aria-live="polite">{busyLabel}</p>
+      <p class="description busy" aria-live="polite">{busyLabel}</p>
     {:else}
-      <p class="hint">{prompt}</p>
+      <p class="description">{prompt}</p>
       {#if removable}
         <Button variant="secondary" size="sm" onclick={onRemove}>Remove</Button>
       {/if}
@@ -218,7 +218,7 @@
     gap: var(--space-1);
   }
 
-  .side .hint {
+  .side .description {
     margin: 0;
   }
 

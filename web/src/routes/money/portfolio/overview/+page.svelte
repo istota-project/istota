@@ -218,7 +218,7 @@
     <div class="money-table-header holdings-header">
       <span class="col-symbol">Symbol</span>
       <span class="col-desc">Description</span>
-      <span class="col-class">Class</span>
+      <span class="col-class caption">Class</span>
       <span class="money-amount col-qty">Qty</span>
       <span class="money-amount col-value">Value</span>
       <span class="money-amount col-gain">P&amp;L</span>
@@ -237,7 +237,7 @@
             {/if}
           </span>
           <span class="col-desc desc" title={holding.description}>{holding.description}</span>
-          <span class="col-class class-label">
+          <span class="col-class caption class-label">
             {holding.asset_class}{holding.sub_class && holding.sub_class !== 'Unclassified'
               ? ` · ${holding.sub_class}`
               : ''}
@@ -347,8 +347,6 @@
   .col-class {
     width: 13rem;
     flex-shrink: 0;
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
 
   .col-qty {

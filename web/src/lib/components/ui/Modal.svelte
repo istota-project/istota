@@ -177,7 +177,7 @@
           <header class="ui-viewer-header">
             <div class="ui-viewer-heading">
               <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
-              {#if metadata}<div class="ui-viewer-metadata">{@render metadata()}</div>{/if}
+              {#if metadata}<div class="ui-viewer-metadata caption">{@render metadata()}</div>{/if}
             </div>
             {#if actions}<div class="ui-viewer-actions">{@render actions()}</div>{/if}
             <div class="ui-viewer-close">
@@ -194,7 +194,7 @@
               <div class="ui-viewer-mobile-navigation">{@render previous()}{@render next()}</div>
             {/if}
           </header>
-          {#if description}<Dialog.Description class="ui-modal-description"
+          {#if description}<Dialog.Description class="ui-modal-description description"
               >{description}</Dialog.Description
             >{/if}
           {@render body()}
@@ -217,7 +217,7 @@
         {:else}
           <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
         {/if}
-        {#if description}<Dialog.Description class="ui-modal-description"
+        {#if description}<Dialog.Description class="ui-modal-description description"
             >{description}</Dialog.Description
           >{/if}
         {@render body()}
@@ -267,8 +267,6 @@
     color: var(--text-primary);
   }
   :global(.ui-modal-description) {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
     margin: 0 0 var(--space-3);
   }
   /* min-height: 0 or the body refuses to shrink below its content and the
@@ -387,8 +385,6 @@
     white-space: nowrap;
   }
   .ui-viewer-metadata {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }
   .ui-viewer-actions {

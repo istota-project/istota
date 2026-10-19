@@ -256,7 +256,7 @@
           <div class="orphan-row">
             <div>
               <div class="user-name">{user.user_id}</div>
-              <div class="user-detail">{user.identity?.email}</div>
+              <div class="user-detail caption">{user.identity?.email}</div>
             </div>
             <Button
               variant="danger"
@@ -283,7 +283,7 @@
     <Field label="Email"><Input type="email" bind:value={email} required disabled={busy} /></Field>
     <Field label="Display name (optional)"><Input bind:value={displayName} disabled={busy} /></Field
     >
-    <p class="form-note">
+    <p class="form-note description">
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
     <div class="form-actions dialog-actions">
@@ -335,8 +335,6 @@
   }
   .form-note {
     margin: 0;
-    color: var(--text-muted);
-    font-size: var(--text-sm);
   }
   .user-name {
     display: flex;
@@ -347,8 +345,6 @@
   }
   .user-detail {
     margin-top: var(--space-1);
-    color: var(--text-muted);
-    font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }
   .access {

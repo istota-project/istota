@@ -48,7 +48,7 @@
     </PortfolioUpload>
   </section>
 
-  <p class="import-footnote">
+  <p class="import-footnote caption">
     Imported snapshots appear on the
     <a href="{base}/money/portfolio/overview">Overview</a> and
     <a href="{base}/money/portfolio/history">History</a> tabs. Account groups and symbol
@@ -88,8 +88,6 @@
 
   .import-footnote {
     margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .import-footnote a {

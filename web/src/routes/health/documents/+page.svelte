@@ -380,7 +380,7 @@
   <div class="header">
     <div>
       <h1>Documents</h1>
-      <p class="sub">
+      <p class="sub caption">
         <!-- Never "N on file" once the walk stopped early: the count would be
              a claim about the store rather than about what is loaded. -->
         {#if truncated.documents}
@@ -464,7 +464,7 @@
                   ></span
                 >
               </div>
-              {#if doc.notes}<p class="notes" title={doc.notes}>{doc.notes}</p>{/if}
+              {#if doc.notes}<p class="notes caption" title={doc.notes}>{doc.notes}</p>{/if}
             </td>
             <td class="size-column">{formatBytes(doc.byte_size)}</td>
             <td class="added-column"
@@ -600,8 +600,6 @@
 
   .sub {
     margin: var(--space-1) 0 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .name {
@@ -644,8 +642,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     margin: var(--space-1) 0 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
     line-height: var(--leading-snug);
   }
 

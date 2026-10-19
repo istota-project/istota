@@ -238,7 +238,7 @@
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else}
-    <p class="card-hint">
+    <p class="card-hint caption">
       New symbols classify themselves on import (ticker lookup, marked <em>auto</em>); edit a row to
       override — your edit always wins, and an automatic guess never replaces one. Auto-classify
       fills in anything still unclassified. Classifications reclassify all history at read time.
@@ -390,8 +390,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .cls-form {

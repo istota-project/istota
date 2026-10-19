@@ -697,11 +697,11 @@
               >
                 <span class="archive-line">
                   <span class="archive-subject">{row.title}</span>
-                  <time class="archive-date" datetime={entry.at} title={fmtDate(entry.at)}
+                  <time class="archive-date caption" datetime={entry.at} title={fmtDate(entry.at)}
                     >{formatRelative(entry.at)}</time
                   >
                 </span>
-                <span class="archive-audience">
+                <span class="archive-audience caption">
                   {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
                   <span>{row.audience}</span>
                   <CountPill count={row.unread ? 1 : 0} title="Unread" shape="inline-mark" />
@@ -791,8 +791,6 @@
 
   .archive-date {
     flex-shrink: 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
 
@@ -801,8 +799,6 @@
     align-items: center;
     gap: var(--space-1);
     min-width: 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .archive-preview {

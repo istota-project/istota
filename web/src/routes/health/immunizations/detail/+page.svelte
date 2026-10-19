@@ -248,7 +248,7 @@
       <a class="card linked-card" href="{base}/health/history/encounter?id={encounter.id}">
         <div class="card-head">
           <Badge>{encounter.encounter_type}</Badge>
-          <span class="date">{encounter.encounter_date}</span>
+          <span class="date caption">{encounter.encounter_date}</span>
         </div>
         {#if encounter.provider || encounter.facility}
           <div class="caption">
@@ -339,9 +339,5 @@
   .card-head {
     align-items: center;
     margin-bottom: var(--space-2);
-  }
-  .date {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 </style>

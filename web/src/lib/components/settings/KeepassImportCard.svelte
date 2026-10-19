@@ -135,7 +135,7 @@
       {@const items = preview.items.filter((item) => item.status === group.status)}
       {#if items.length}
         <fieldset>
-          <legend>{group.label}</legend>
+          <legend class="muted">{group.label}</legend>
           {#each items as item}
             <div>
               <Field label={item.name} checkbox>
@@ -197,6 +197,5 @@
     padding: 0;
     margin-bottom: var(--space-2);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 </style>

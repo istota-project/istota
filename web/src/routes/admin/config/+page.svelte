@@ -604,7 +604,7 @@
     <div class="config-toolbar control-row">
       <Input bind:value={filter} placeholder="Filter settings…" aria-label="Filter settings" />
       {#if filter.trim()}
-        <span class="match-count">{matchCount} matching</span>
+        <span class="match-count caption">{matchCount} matching</span>
       {/if}
     </div>
 
@@ -801,8 +801,6 @@
   }
 
   .match-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     white-space: nowrap;
   }
 

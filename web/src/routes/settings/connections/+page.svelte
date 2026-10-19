@@ -60,7 +60,7 @@
 </script>
 
 <SettingsLayout {loading} {error}>
-  <p class="hint intro">
+  <p class="description intro">
     Accounts and per-service credentials for skills that need them. Values are encrypted at rest and
     never sent back to the browser — secret fields are write-only. Module-specific credentials live
     on their own settings pages (<a href="{base}/feeds/settings">feeds</a>,

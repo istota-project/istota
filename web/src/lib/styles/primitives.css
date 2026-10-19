@@ -7,7 +7,7 @@
 
    In source order, which is also cascade order:
      - the box-sizing reset
-     - the named shared blocks: .micro-label, .caption, .muted,
+     - the named shared blocks: .micro-label, .caption, .muted, .description,
        .spinner + @keyframes spin, .banner and its status variants
      - one global :focus-visible ring, and the text-field exception to it
      - the iOS date-input and 16px-zoom-floor fixes (see @media pointer:coarse)
@@ -64,6 +64,18 @@
 
 .muted {
   color: var(--text-muted);
+}
+
+/* The line under a page, card or modal title: what the thing above is for.
+   One step up from a caption and on the brighter of the two dim tokens,
+   because it is read rather than glanced at. Was `.settings .hint`, scoped to
+   the settings shell, and `Modal`'s own description and seven page copies
+   besides. The measure is the one geometry it carries: a sentence that runs
+   the width of a 980px card is hard to follow. */
+.description {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  max-width: 60ch;
 }
 
 /* An inline "working…" spinner, beside its label. Declared in three files,

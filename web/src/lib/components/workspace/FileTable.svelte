@@ -367,7 +367,7 @@
                 {/if}
                 {#if entry.share}
                   <span
-                    class="share-marker"
+                    class="share-marker caption"
                     role="img"
                     aria-label={`Shared · ${entry.share.count} ${entry.share.kind} shares`}
                     title={`Nextcloud ${entry.share.kind} shares`}
@@ -595,8 +595,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
   tbody tr:hover {
     background: var(--surface-card);

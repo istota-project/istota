@@ -265,7 +265,7 @@
             {#if panel.specimen}<span class="type">· {specimenLabel(panel.specimen)}</span>{/if}
           </h1>
           {#if panel.encounter_id != null}
-            <div class="encounter-link">
+            <div class="encounter-link muted">
               <span class="encounter-label">Linked to encounter:</span>
               <a href="{base}/health/history/encounter?id={panel.encounter_id}">
                 {linkedEncounter ? encounterLabel(linkedEncounter) : `#${panel.encounter_id}`}
@@ -385,13 +385,18 @@
 
       {#if source.available}
         <div class="source">
-          <div class="source-header">Source document</div>
+          <div class="source-header muted">Source document</div>
           {#if source.mime?.startsWith('image/')}
             <img src={healthPanelSourceUrl(id)} alt="Lab report" />
           {:else}
             <embed src={healthPanelSourceUrl(id)} type={source.mime || 'application/pdf'} />
           {/if}
-          <a class="source-link" href={healthPanelSourceUrl(id)} target="_blank" rel="noopener">
+          <a
+            class="source-link caption"
+            href={healthPanelSourceUrl(id)}
+            target="_blank"
+            rel="noopener"
+          >
             Open in new tab
           </a>
         </div>
@@ -455,7 +460,6 @@
   }
   .encounter-link {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .encounter-label {
     color: var(--text-dim);
@@ -543,7 +547,6 @@
   }
   .source-header {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .source img {
     width: 100%;
@@ -552,9 +555,5 @@
   .source embed {
     width: 100%;
     height: 600px;
-  }
-  .source-link {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 </style>

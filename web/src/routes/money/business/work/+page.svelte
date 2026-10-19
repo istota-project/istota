@@ -452,7 +452,7 @@
           <span class="work-service">
             {entry.service_name}
             {#if entry.description}
-              <span class="work-desc">{entry.description}</span>
+              <span class="work-desc caption">{entry.description}</span>
             {/if}
           </span>
           <span class="work-qty">{formatQty(entry)}</span>
@@ -596,9 +596,7 @@
   }
 
   .work-desc {
-    color: var(--text-dim);
     margin-left: var(--space-2);
-    font-size: var(--text-xs);
   }
 
   .work-qty {

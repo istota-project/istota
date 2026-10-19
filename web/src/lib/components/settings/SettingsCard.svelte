@@ -28,6 +28,6 @@
       <div class="header-actions">{@render actions()}</div>
     {/if}
   </header>
-  {#if description}<p class="hint">{description}</p>{/if}
+  {#if description}<p class="description">{description}</p>{/if}
   {@render children()}
 </section>

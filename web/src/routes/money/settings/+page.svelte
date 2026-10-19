@@ -203,7 +203,7 @@
 
         <details class="monarch-method">
           <summary>Paste cookies from your browser</summary>
-          <p class="hint">
+          <p class="caption">
             Use this when programmatic login is blocked by Cloudflare (common on cloud-hosted Istota
             deploys).
           </p>
@@ -224,7 +224,7 @@
           </ol>
         </details>
 
-        <p class="legacy-note">
+        <p class="legacy-note caption">
           Cookies are the only credential we store. They last months on a trusted-device login.
         </p>
       </SettingsCard>
@@ -285,16 +285,12 @@
     gap: var(--space-2);
   }
 
-  .monarch-method .hint {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
+  .monarch-method .caption {
     margin: var(--space-1) 0;
   }
 
   .legacy-note {
     margin: var(--space-2) 0 0;
-    color: var(--text-dim);
-    font-size: var(--text-xs);
   }
 
   /* Stacked, not label-beside-input — that is `Field`'s arrangement, and it is

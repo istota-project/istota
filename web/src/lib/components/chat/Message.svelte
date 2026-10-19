@@ -688,7 +688,7 @@
          line. It lived in a hover bar that floated over a continuation row's
          first line, where nothing reserved space for it (ISSUE-691). -->
     {#if showMeta}
-      <span class="meta-footer">{meta.join(' · ')}</span>
+      <span class="meta-footer caption">{meta.join(' · ')}</span>
     {/if}
   </div>
 {/snippet}
@@ -919,7 +919,7 @@
           label={author}
         />
       {:else if revealed}
-        <time class="hover-time">{time}</time>
+        <time class="hover-time caption">{time}</time>
       {/if}
     </div>
 
@@ -1322,9 +1322,7 @@
   .meta-footer {
     margin-left: auto;
     min-width: 0;
-    font-size: var(--text-xs);
     line-height: var(--leading-relaxed);
-    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     /* A narrow row trims the tail (tool count, then duration) rather than
@@ -1558,8 +1556,6 @@
 
   /* Continuation-row timestamp, revealed with the row. */
   .hover-time {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     opacity: 0;
     line-height: var(--leading-relaxed);
     transition: opacity var(--transition-fast);

@@ -90,7 +90,7 @@
   <div class="micro-label">{label}</div>
   <div class="stat-value">{@render children()}</div>
   {#if sub}
-    <div class="stat-sub">{sub}</div>
+    <div class="stat-sub caption">{sub}</div>
   {/if}
 </div>
 
@@ -138,10 +138,5 @@
     font-variant-numeric: tabular-nums;
     /* design-lint-allow: see above. */
     color: var(--stat-value-fg, var(--text-primary));
-  }
-
-  .stat-sub {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 </style>

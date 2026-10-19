@@ -40,14 +40,14 @@
   color: var(--text-primary);
 }
 
-.settings .hint {
+/* Placement only: the type is the global `.description`. A description just
+   under a title sits a step below it; inside a card the `:where()` reset
+   further down zeroes this, since the card's gap already spaces it. Scored at
+   one class so any page rule placing its own description wins outright. */
+.settings :where(.description) {
   margin: var(--space-1) 0 0;
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  max-width: 60ch;
 }
 
-.settings .hint code,
 .settings code {
   background: var(--surface-raised);
   padding: 0 var(--space-1);
@@ -112,11 +112,6 @@
   gap: var(--space-2);
 }
 
-.settings .meta {
-  font-size: var(--text-xs);
-  color: var(--text-dim);
-}
-
 .settings .status-pill {
   font-size: var(--text-xs);
   padding: 0.05rem var(--space-2);
@@ -178,10 +173,6 @@
   text-align: right;
   width: 3rem;
   white-space: nowrap;
-}
-
-.settings .muted {
-  color: var(--text-dim);
 }
 
 @media (max-width: 768px) {

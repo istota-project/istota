@@ -137,35 +137,35 @@
   {/if}
 
   <label class="field">
-    <span>Name</span>
+    <span class="caption">Name</span>
     <input type="text" bind:this={nameInput} bind:value={name} placeholder="e.g. Office, Gym..." />
   </label>
 
   <label class="field">
-    <span>Category</span>
+    <span class="caption">Category</span>
     <Select bind:value={category} options={categoryOptions} ariaLabel="Category" />
   </label>
 
   <label class="field">
-    <span>Radius ({radius}m)</span>
+    <span class="caption">Radius ({radius}m)</span>
     <input type="range" min="25" max="500" step="25" bind:value={radius} />
   </label>
 
   {#if showCoords}
     <div class="coords">
       <label class="field coord">
-        <span>Lat</span>
+        <span class="caption">Lat</span>
         <input type="number" step="0.00001" bind:value={lat} />
       </label>
       <label class="field coord">
-        <span>Lon</span>
+        <span class="caption">Lon</span>
         <input type="number" step="0.00001" bind:value={lon} />
       </label>
     </div>
   {/if}
 
   <label class="field">
-    <span>Notes (optional)</span>
+    <span class="caption">Notes (optional)</span>
     <textarea bind:value={notes} rows="2" placeholder="Anything to remember about this place"
     ></textarea>
   </label>
@@ -205,11 +205,6 @@
     flex-direction: column;
     gap: var(--space-1);
     margin-bottom: var(--space-3);
-  }
-
-  .field span {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .field input[type='text'],

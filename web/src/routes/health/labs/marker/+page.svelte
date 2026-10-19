@@ -292,11 +292,11 @@
   <header class="page-header">
     <div>
       <h1>{ref?.display_name || trend.name}</h1>
-      <div class="meta">
+      <div class="meta muted">
         {#if ref}<span class="cat">{ref.category}</span>{/if}
         {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
         {#if trend.points.length > 0}
-          <span class="summary">{trendSummary()}</span>
+          <span class="summary caption">{trendSummary()}</span>
         {/if}
       </div>
     </div>
@@ -304,7 +304,7 @@
 
   {#if related.length > 0}
     <div class="related">
-      <span class="related-label">Related:</span>
+      <span class="related-label caption">Related:</span>
       {#each related as r (r.name)}
         <a href="{base}/health/labs/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
       {/each}
@@ -332,10 +332,10 @@
       {:else if explainerError}
         <div class="error-text">{explainerError}</div>
       {:else if explainer}
-        <p class="summary">{explainer.summary}</p>
+        <p class="summary caption">{explainer.summary}</p>
         {#if explainer.causes.length > 0}
           <div class="block">
-            <h3>What might contribute</h3>
+            <h3 class="micro-label">What might contribute</h3>
             <ul>
               {#each explainer.causes as c}<li>{c}</li>{/each}
             </ul>
@@ -343,7 +343,7 @@
         {/if}
         {#if explainer.mitigations.length > 0}
           <div class="block">
-            <h3>Things to consider</h3>
+            <h3 class="micro-label">Things to consider</h3>
             <ul>
               {#each explainer.mitigations as m}<li>{m}</li>{/each}
             </ul>
@@ -371,18 +371,18 @@
   {#if ref?.description}
     <section class="about">
       <h2>About this marker</h2>
-      <p>{ref.description}</p>
+      <p class="description">{ref.description}</p>
       <dl>
-        <dt>Reference range</dt>
+        <dt class="micro-label">Reference range</dt>
         <dd>
           {formatRange(trend.ref_range_low, trend.ref_range_high)}
           {#if trend.unit}{trend.unit}{/if}
         </dd>
         {#if ref.aliases.length > 0}
-          <dt>Also called</dt>
+          <dt class="micro-label">Also called</dt>
           <dd>{ref.aliases.join(', ')}</dd>
         {/if}
-        <dt>Category</dt>
+        <dt class="micro-label">Category</dt>
         <dd>{ref.category}</dd>
       </dl>
     </section>
@@ -437,7 +437,6 @@
     align-items: baseline;
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .cat {
     padding: 0 var(--space-2);
@@ -449,20 +448,12 @@
   .unit {
     color: var(--text-dim);
   }
-  .summary {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
   .related {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
     align-items: baseline;
     margin-bottom: var(--space-4);
-  }
-  .related-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
   .related a {
     font-size: var(--text-xs);
@@ -532,11 +523,6 @@
     margin-bottom: var(--space-3);
   }
   .alert .block h3 {
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--text-muted);
     margin: 0 0 var(--space-2);
   }
   .alert ul {
@@ -591,8 +577,6 @@
     margin: 0 0 var(--space-2);
   }
   .about p {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
     line-height: var(--leading-relaxed);
     margin: 0 0 var(--space-3);
   }
@@ -602,12 +586,6 @@
     gap: var(--space-1) var(--space-3);
     font-size: var(--text-sm);
     margin: 0;
-  }
-  .about dt {
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    font-size: var(--text-xs);
   }
   .about dd {
     margin: 0;

@@ -97,7 +97,7 @@
           >{option.title}{#if option.badge}<Badge variant="info" size="sm">{option.badge}</Badge
             >{/if}</span
         >
-        {#if option.description}<span class="description">{option.description}</span>{/if}
+        {#if option.description}<span class="caption">{option.description}</span>{/if}
       </span>
     </button>
     {#if checked && selected}
@@ -176,11 +176,6 @@
     gap: var(--space-2);
     font-size: var(--text-sm);
     font-weight: var(--weight-semibold);
-  }
-
-  .description {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .option-detail {

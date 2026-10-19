@@ -115,7 +115,7 @@
   {:else if loaded && rows.length === 0}
     <EmptyState>No portfolio accounts yet. They appear with the first positions import.</EmptyState>
   {:else}
-    <p class="card-hint">
+    <p class="card-hint caption">
       Excluded accounts stay imported but are hidden from every chart and total. Group and type
       drive the Portfolio filters — a group is any label worth filtering by (an owner, a purpose).
       Edits save with the page's Save button.
@@ -172,8 +172,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .account-list {

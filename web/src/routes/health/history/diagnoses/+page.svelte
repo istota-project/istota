@@ -272,7 +272,7 @@
 {#if formOpen}
   <form class="form" onsubmit={submit}>
     {#if editing}
-      <div class="form-title">Editing <strong>{editing.name}</strong></div>
+      <div class="form-title muted">Editing <strong>{editing.name}</strong></div>
     {/if}
     <div class="row">
       <Field label="Name *" class="full">
@@ -311,7 +311,7 @@
     <!-- Not a <label>: the control is a Select whose trigger is a button, and
          wrapping it would make clicking the field name open the dropdown. -->
     <div class="full encounters-field">
-      <span class="field-label">Linked encounters</span>
+      <span class="field-label caption">Linked encounters</span>
       {#if stagedEncounters.length}
         <ul class="staged">
           {#each stagedEncounters as e (e.id)}
@@ -376,7 +376,7 @@
         {/if}
       </div>
     {/if}
-    <div class="d-meta">
+    <div class="d-meta caption">
       {#if transition === 'reactivate'}
         {#if d.date_resolved}<span>Resolved {formatDate(d.date_resolved)}</span>{/if}
       {:else}
@@ -389,7 +389,7 @@
         {/each}
       {/if}
     </div>
-    {#if d.notes}<p class="notes">{d.notes}</p>{/if}
+    {#if d.notes}<p class="notes muted">{d.notes}</p>{/if}
   </li>
 {/snippet}
 
@@ -544,7 +544,6 @@
   }
   .form-title {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .form-title strong {
     color: var(--text-primary);
@@ -563,10 +562,6 @@
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
-  }
-  .encounters-field .field-label {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .staged {
     list-style: none;
@@ -703,8 +698,6 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     flex-wrap: wrap;
   }
   .d-meta .enc {
@@ -719,7 +712,6 @@
     margin: 0;
     font-size: var(--text-sm);
     white-space: pre-wrap;
-    color: var(--text-muted);
     line-height: var(--leading-snug);
   }
 

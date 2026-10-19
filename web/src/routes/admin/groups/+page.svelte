@@ -439,7 +439,7 @@
                   by {event.actor_id}{#if event.subject_user_id}
                     · {event.subject_user_id}{/if}
                 </div>
-                {#if lines.length}<ul class="event-details">
+                {#if lines.length}<ul class="event-details muted">
                     {#each lines as line}<li>{line}</li>{/each}
                   </ul>{/if}
               </li>
@@ -592,7 +592,6 @@
   .event-details {
     margin: var(--space-1) 0 0;
     padding-left: var(--space-4);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
   @container settings (max-width: 40rem) {

@@ -442,12 +442,12 @@
       {@const v = formatLatestValue(metric)}
       <button class="card interactive" onclick={() => openEntry(metric)} type="button">
         <header>
-          <span class="label">{metricLabel(metric)}</span>
-          <span class="count">{(seriesByMetric[metric] || []).length} pts</span>
+          <span class="label micro-label">{metricLabel(metric)}</span>
+          <span class="count caption">{(seriesByMetric[metric] || []).length} pts</span>
         </header>
         <div class="value">
           {#if v}
-            {v.value}<span class="unit">{v.unit}</span>
+            {v.value}<span class="unit muted">{v.unit}</span>
           {:else}
             —
           {/if}
@@ -471,8 +471,8 @@
         type="button"
       >
         <header>
-          <span class="label">Blood Pressure</span>
-          <span class="count">
+          <span class="label micro-label">Blood Pressure</span>
+          <span class="count caption">
             {Math.max(
               (seriesByMetric.blood_pressure_systolic || []).length,
               (seriesByMetric.blood_pressure_diastolic || []).length,
@@ -480,7 +480,7 @@
           </span>
         </header>
         <div class="value">
-          {bpHeadline() || '—'}<span class="unit">mmHg</span>
+          {bpHeadline() || '—'}<span class="unit muted">mmHg</span>
         </div>
         <div class="chart">
           <canvas bind:this={canvases['blood_pressure']}></canvas>
@@ -514,7 +514,7 @@
             {/each}
           </select>
         {:else}
-          <span class="unit-static">{METRIC_UNITS[formMetric]}</span>
+          <span class="unit-static muted">{METRIC_UNITS[formMetric]}</span>
         {/if}
       </div>
     </Field>
@@ -582,16 +582,6 @@
     justify-content: space-between;
     align-items: baseline;
   }
-  .label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-  }
-  .count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
   .value {
     font-size: 1.6rem;
     font-weight: var(--weight-medium);
@@ -600,7 +590,6 @@
   }
   .unit {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     margin-left: var(--space-1);
   }
   .chart {
@@ -635,7 +624,6 @@
   }
   .unit-static {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     padding: var(--space-1) 0.2rem;
   }
   .modal-actions {

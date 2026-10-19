@@ -294,34 +294,34 @@
     <section class="meta">
       <dl>
         <div>
-          <dt>Date</dt>
+          <dt class="micro-label">Date</dt>
           <dd>{formatDate(encounter.encounter_date)}</dd>
         </div>
         <div>
-          <dt>Type</dt>
+          <dt class="micro-label">Type</dt>
           <dd>{typeLabel(encounter.encounter_type)}</dd>
         </div>
         {#if encounter.provider}
           <div>
-            <dt>Provider</dt>
+            <dt class="micro-label">Provider</dt>
             <dd>{encounter.provider}</dd>
           </div>
         {/if}
         {#if encounter.facility}
           <div>
-            <dt>Facility</dt>
+            <dt class="micro-label">Facility</dt>
             <dd>{encounter.facility}</dd>
           </div>
         {/if}
         {#if encounter.specialty}
           <div>
-            <dt>Specialty</dt>
+            <dt class="micro-label">Specialty</dt>
             <dd>{encounter.specialty}</dd>
           </div>
         {/if}
         {#if encounter.reason}
           <div>
-            <dt>Reason</dt>
+            <dt class="micro-label">Reason</dt>
             <dd>{encounter.reason}</dd>
           </div>
         {/if}
@@ -356,7 +356,7 @@
               {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
               <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
             </div>
-            <div class="card-meta">
+            <div class="card-meta caption">
               {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
             </div>
           </li>
@@ -401,7 +401,7 @@
                   {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
                 </span>
               </div>
-              <div class="card-meta">
+              <div class="card-meta caption">
                 {#if p.lab_name}<span>{p.lab_name}</span>{/if}
               </div>
             </a>
@@ -485,10 +485,6 @@
     margin: 0;
   }
   .meta dt {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--text-dim);
     margin-bottom: 0.15rem;
   }
   .meta dd {
@@ -575,8 +571,6 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     flex-wrap: wrap;
   }
   .icd {

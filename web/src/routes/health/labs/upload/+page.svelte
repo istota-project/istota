@@ -317,7 +317,7 @@
       </div>
 
       <div class="source">
-        <div class="source-header">Source preview</div>
+        <div class="source-header muted">Source preview</div>
         {#if mime?.startsWith('image/')}
           <img src={healthPanelSourceUrl(panelId)} alt="Lab report" />
         {:else}
@@ -425,7 +425,6 @@
   }
   .source-header {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     margin-bottom: var(--space-2);
   }
   .source img {

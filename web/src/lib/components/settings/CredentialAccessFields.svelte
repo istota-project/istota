@@ -49,7 +49,7 @@
     </p>{/if}
   {#if scope === 'rooms'}
     <fieldset class="access-rooms">
-      <legend>Rooms</legend>
+      <legend class="muted">Rooms</legend>
       <div class="room-options">
         {#each rooms as room (room.token)}
           <Field label={room.name} checkbox>
@@ -100,7 +100,6 @@
     padding: 0;
     margin-bottom: var(--space-2);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .room-options {

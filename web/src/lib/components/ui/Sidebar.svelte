@@ -22,7 +22,7 @@
 <aside class="sidebar" class:open style="--sidebar-width: {width}">
   <div class="sidebar-header">
     <span class="sidebar-title">{title}</span>
-    {#if count !== undefined}<span class="sidebar-count">{count}</span>{/if}
+    {#if count !== undefined}<span class="sidebar-count caption">{count}</span>{/if}
   </div>
   {#if extras}{@render extras()}{/if}
   <div class="sidebar-list">{@render children()}</div>
@@ -52,11 +52,6 @@
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: var(--tracking-caps);
-  }
-
-  .sidebar-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .sidebar-list {

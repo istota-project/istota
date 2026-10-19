@@ -42,7 +42,7 @@
   {/if}
 
   {#if hasSource}
-    <p class="source">
+    <p class="source caption">
       {#if provenance.source_url}
         <a href={provenance.source_url} target="_blank" rel="noopener noreferrer">
           {provenance.source}
@@ -55,11 +55,11 @@
       {/if}
     </p>
   {:else if !available}
-    <p class="source">No rates apply here.</p>
+    <p class="source caption">No rates apply here.</p>
   {:else if provenance.overridden}
-    <p class="source">No bundled figures — these are your own values.</p>
+    <p class="source caption">No bundled figures — these are your own values.</p>
   {:else}
-    <p class="source">No bundled figures for this jurisdiction and year.</p>
+    <p class="source caption">No bundled figures for this jurisdiction and year.</p>
   {/if}
 </div>
 
@@ -79,8 +79,6 @@
 
   .source {
     margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .source a {

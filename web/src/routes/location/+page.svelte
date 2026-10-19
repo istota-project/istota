@@ -217,38 +217,39 @@
           {#if currentLabel.placeName}
             <span class="place">{currentLabel.placeName}</span>
             {#if currentLabel.visitDuration}
-              <span class="stat">{currentLabel.visitDuration}</span>
+              <span class="stat caption">{currentLabel.visitDuration}</span>
             {/if}
           {:else}
             <span class="place dim">No place</span>
           {/if}
-          <span class="stat">{currentLabel.ago}</span>
+          <span class="stat caption">{currentLabel.ago}</span>
           {#if currentLabel.battery}
-            <span class="stat">{currentLabel.battery}</span>
+            <span class="stat caption">{currentLabel.battery}</span>
           {/if}
         </span>
       {:else if browserPos}
         <span class="current">
           <span class="place dim">Browser location</span>
-          <span class="stat">set up Overland for tracking</span>
+          <span class="stat caption">set up Overland for tracking</span>
         </span>
       {:else}
-        <span class="stat dim">No location data</span>
+        <span class="stat caption dim">No location data</span>
       {/if}
       {#if pings.length > 0}
-        <span class="stat">{pings.length} pings</span>
+        <span class="stat caption">{pings.length} pings</span>
       {/if}
       {#if summary && summary.stops.length > 0}
-        <span class="stat">{summary.stops.length} stops</span>
+        <span class="stat caption">{summary.stops.length} stops</span>
       {/if}
       {#if summary && summary.transit_pings > 0}
-        <span class="stat">{summary.transit_pings} transit</span>
+        <span class="stat caption">{summary.transit_pings} transit</span>
       {/if}
       {#if trips.length > 0}
-        <span class="stat">{trips.length} trips</span>
+        <span class="stat caption">{trips.length} trips</span>
       {/if}
       {#if elevation.range}
-        <span class="stat">{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
+        <span class="stat caption"
+          >{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
         >
       {/if}
       {#if hasDetails}
@@ -311,11 +312,6 @@
     color: var(--text-dim);
     font-weight: var(--weight-regular);
     font-size: var(--text-xs);
-  }
-
-  .stat {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .stat.dim {

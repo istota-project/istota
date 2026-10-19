@@ -63,7 +63,7 @@
     <ul class="cards">
       {#each data.results as r, i (i)}
         <li class="card" class:memory={isMemory(r)}>
-          <div class="result-head">
+          <div class="result-head caption">
             <span class="icon" aria-hidden="true">
               {#if isMemory(r)}
                 <FileText size={14} />
@@ -138,8 +138,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
   .icon {
     display: inline-flex;

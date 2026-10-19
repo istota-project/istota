@@ -213,7 +213,7 @@
         <h2>Inputs</h2>
         <div class="input-card">
           <div class="input-group">
-            <label class="input-label" for="w2-income">W-2 income YTD</label>
+            <label class="input-label caption" for="w2-income">W-2 income YTD</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input id="w2-income" type="number" bind:value={w2Income} oninput={scheduleRecalc} />
@@ -221,7 +221,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="w2-fed">Federal withholding YTD</label>
+            <label class="input-label caption" for="w2-fed">Federal withholding YTD</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -234,7 +234,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="w2-state">State withholding YTD</label>
+            <label class="input-label caption" for="w2-state">State withholding YTD</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -247,7 +247,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="w2-months">W-2 employment months</label>
+            <label class="input-label caption" for="w2-months">W-2 employment months</label>
             <div class="input-field">
               <input
                 id="w2-months"
@@ -257,12 +257,12 @@
                 bind:value={w2Months}
                 oninput={scheduleRecalc}
               />
-              <span class="input-suffix">of 12</span>
+              <span class="input-suffix caption">of 12</span>
             </div>
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="fed-est">Federal estimated paid</label>
+            <label class="input-label caption" for="fed-est">Federal estimated paid</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -275,7 +275,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="state-est">State estimated paid</label>
+            <label class="input-label caption" for="state-est">State estimated paid</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -288,7 +288,7 @@
           </div>
         </div>
 
-        <div class="input-meta">
+        <div class="input-meta caption">
           <span>Q{data.quarter} {data.tax_year}</span>
           <span>{data.filing_status.toUpperCase()}</span>
           <span
@@ -359,7 +359,7 @@
           </div>
           <details class="info-panel">
             <summary>How income is annualized</summary>
-            <p>
+            <p class="caption">
               This uses the IRS annualized-income method (Form 2210). For the Q{data.quarter}
               payment, SE income is pulled from the ledger through the first
               {data.annualization_months} months of the year and annualized &times;{(
@@ -399,7 +399,7 @@
           {/if}
           <details class="info-panel">
             <summary>How SE tax works</summary>
-            <p>
+            <p class="caption">
               SE tax is 15.3% (12.4% Social Security + 2.9% Medicare) on {fmtPct(
                 data.se_taxable_fraction,
               )} of net SE income. The taxable base is {fmtDollar(seTaxableBase)}.
@@ -421,7 +421,7 @@
           <div class="breakdown-group-label">Tax calculation</div>
           <div class="breakdown-row">
             <span class="breakdown-label"
-              >AGI{#if showState && stateBasisLabel}<span class="basis-note">
+              >AGI{#if showState && stateBasisLabel}<span class="basis-note caption">
                   · state basis: {stateBasisLabel}</span
                 >{/if}</span
             >
@@ -479,7 +479,7 @@
           </div>
           <details class="info-panel">
             <summary>How tax liability is computed</summary>
-            <p>
+            <p class="caption">
               AGI = annualized SE income + annualized W-2 income - half SE deduction. Federal
               taxable income = AGI - standard deduction ({fmtDollar(
                 data.federal_standard_deduction,
@@ -538,7 +538,7 @@
           </div>
           <details class="info-panel">
             <summary>How the quarterly amount is determined</summary>
-            <p>
+            <p class="caption">
               {#if method === 'annualized'}
                 Net due = total annual liability - annualized withholding - estimated payments
                 already made. Federal installments are 25% each quarter.
@@ -551,7 +551,7 @@
               {/if}
             </p>
             {#if data.se_income_annualized > 0}
-              <p>
+              <p class="caption">
                 The SE income bears an effective marginal rate of ~{fmtPct(seEffectiveRate)} when stacked
                 on top of W-2 income, because it's taxed at the household's marginal bracket (not starting
                 from zero).
@@ -633,11 +633,6 @@
     gap: 0.2rem;
   }
 
-  .input-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .input-field {
     display: flex;
     align-items: center;
@@ -676,8 +671,6 @@
 
   .input-suffix {
     padding: var(--space-1) var(--space-2) var(--space-1) 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   /* The border is the wrapper's, so the shared text-field focus rule cannot
@@ -691,8 +684,6 @@
     gap: var(--space-3);
     margin-top: var(--space-1);
     padding: 0 var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   /* Summary cards */
@@ -819,8 +810,6 @@
 
   .info-panel p {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
     line-height: var(--leading-normal);
   }
 
@@ -849,11 +838,6 @@
 
   .settings-link {
     margin: 0;
-    font-size: var(--text-xs);
-  }
-
-  .basis-note {
-    color: var(--text-dim);
     font-size: var(--text-xs);
   }
 

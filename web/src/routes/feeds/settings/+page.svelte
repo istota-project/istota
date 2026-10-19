@@ -376,23 +376,23 @@
         <div class="diag-grid card-grid">
           <div class="diag">
             <span class="diag-value">{diagnostics.total_feeds}</span>
-            <span class="diag-label">subscriptions</span>
+            <span class="diag-label caption">subscriptions</span>
           </div>
           <div class="diag">
             <span class="diag-value">{diagnostics.total_entries}</span>
-            <span class="diag-label">entries stored</span>
+            <span class="diag-label caption">entries stored</span>
           </div>
           <div class="diag">
             <span class="diag-value">{diagnostics.unread_entries}</span>
-            <span class="diag-label">unread</span>
+            <span class="diag-label caption">unread</span>
           </div>
           <div class="diag" class:bad={diagnostics.error_feeds > 0}>
             <span class="diag-value">{diagnostics.error_feeds}</span>
-            <span class="diag-label">in error</span>
+            <span class="diag-label caption">in error</span>
           </div>
           <div class="diag wide">
             <span class="diag-value">{formatDate(diagnostics.last_poll_at)}</span>
-            <span class="diag-label">last poll</span>
+            <span class="diag-label caption">last poll</span>
           </div>
         </div>
       </SettingsCard>
@@ -623,7 +623,7 @@
     </SettingsCard>
 
     <SettingsCard title="OPML">
-      <p class="hint">
+      <p class="description">
         Import subscriptions from an OPML export, or download the current list as OPML. Legacy
         bridger URLs (<code>localhost:8900/tumblr/…</code>,
         <code>localhost:8900/arena/…</code>) are rewritten to <code>tumblr:</code>
@@ -822,11 +822,6 @@
     font-size: var(--text-base);
     font-weight: var(--weight-semibold);
     color: var(--text-primary);
-  }
-
-  .diag-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .col-title {

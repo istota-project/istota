@@ -75,7 +75,7 @@
   {/if}
 
   {#if challenge != null}
-    <p class="confirm-challenge">
+    <p class="confirm-challenge description">
       Type <code>{challenge}</code> to confirm.
     </p>
     <input
@@ -104,8 +104,6 @@
   }
   .confirm-challenge {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .confirm-challenge code {
     background: var(--surface-raised);

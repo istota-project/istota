@@ -267,7 +267,7 @@
     </Field>
 
     <div class="full conditions-field">
-      <span class="field-label">Conditions</span>
+      <span class="field-label caption">Conditions</span>
       {#if stagedConditions.length}
         <ul class="staged">
           {#each stagedConditions as d (d.id)}
@@ -339,7 +339,7 @@
                   <span class="badge {typeBadgeClass(e.encounter_type)}"
                     >{typeLabel(e.encounter_type)}</span
                   >
-                  <span class="date">{formatDate(e.encounter_date)}</span>
+                  <span class="date caption">{formatDate(e.encounter_date)}</span>
                 </div>
                 <div class="card-body">
                   {#if e.provider || e.facility}
@@ -348,10 +348,10 @@
                     </div>
                   {/if}
                   {#if e.specialty}
-                    <div class="muted">{e.specialty}</div>
+                    <div class="specialty caption">{e.specialty}</div>
                   {/if}
                   {#if e.reason}
-                    <div class="reason">{e.reason}</div>
+                    <div class="reason muted">{e.reason}</div>
                   {/if}
                 </div>
               </a>
@@ -381,7 +381,7 @@
           </ul>
         {/if}
         {#if chronic.length > 0}
-          <h3>Chronic</h3>
+          <h3 class="micro-label">Chronic</h3>
           <ul class="conditions">
             {#each chronic as d (d.id)}
               <li>
@@ -457,10 +457,6 @@
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
-  }
-  .conditions-field .field-label {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .staged {
     list-style: none;
@@ -559,15 +555,12 @@
     font-weight: var(--weight-medium);
     font-size: var(--text-sm);
   }
-  .card-body .muted {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
+  .card-body .specialty {
     text-transform: lowercase;
   }
   .card-body .reason {
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   /* Badge palette tuned for the dark surface: each canonical encounter
@@ -626,11 +619,6 @@
     color: var(--text-muted);
   }
 
-  .date {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .sidebar {
     border-left: 1px solid var(--border-subtle);
     padding-left: 1.25rem;
@@ -648,11 +636,6 @@
   }
   .sidebar h3 {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
   }
   /* Cards, not flat rows. A condition name is routinely long ("Bilateral
 	   patellofemoral pain syndrome with anterior knee crepitus") and the old

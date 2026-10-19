@@ -399,7 +399,7 @@
     <div class="banner error">{loadError}</div>
   {/if}
   {#if everLoaded || !loadError}
-    <p class="card-hint">
+    <p class="card-hint caption">
       One ordered pass per imported transaction, low priority first. A rule fills its slot only if
       that slot is still empty, so first match wins per slot and a <code>skip</code> ends the pass.
       An empty slot falls back to <code>Expenses:Uncategorized</code> and the profile's default account.
@@ -664,8 +664,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .scope-row {

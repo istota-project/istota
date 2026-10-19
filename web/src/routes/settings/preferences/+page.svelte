@@ -198,7 +198,7 @@
               </label>
             {/each}
           </div>
-          <p class="hint">
+          <p class="description">
             Modules are on by default. Tick to opt out — the corresponding UI tab and scheduled jobs
             will be hidden / paused.
           </p>
@@ -232,7 +232,7 @@
       title="Offline data"
       description="What this app keeps on the device so it opens and reads without a connection: the app itself, your room list, and the recent messages of the rooms you have opened."
     >
-      <p class="hint">
+      <p class="description">
         Clearing it takes the app back to a first install: it is downloaded again the next time you
         open it, and each room's messages are fetched again when you open the room. Messages waiting
         to send are kept, but a file held with one is not.

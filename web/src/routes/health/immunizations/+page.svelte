@@ -296,7 +296,7 @@
     {/if}
 
     {#if other.length > 0}
-      <h3>Other recorded</h3>
+      <h3 class="micro-label">Other recorded</h3>
       <ul class="cards card-grid">
         {#each other as c (c.name)}
           <li>
@@ -451,11 +451,6 @@
   }
   .coverage h3 {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
   }
   .cards {
     list-style: none;

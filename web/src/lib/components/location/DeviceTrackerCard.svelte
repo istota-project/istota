@@ -296,7 +296,7 @@
 
 {#if !available}
   <SettingsCard title="This device">
-    <p class="hint">
+    <p class="description">
       Background tracking is set up per device, in the Istota app. Open the app on the phone you
       want to track and come back to this page there.
     </p>
@@ -311,9 +311,9 @@
     {#if note}<p class="tracker-note">{note}</p>{/if}
 
     {#if !status}
-      <p class="hint">Reading the tracker…</p>
+      <p class="description">Reading the tracker…</p>
     {:else if !status.configured}
-      <p class="hint">
+      <p class="description">
         Not provisioned yet. Generate a token above on another screen, then scan the code it shows.
       </p>
       {#if canScan}

@@ -193,7 +193,7 @@
       <div class="static-key">
         <span>Key</span>
         <code>{client?.key}</code>
-        <small>The key is the identity — work entries reference it by name.</small>
+        <small class="caption">The key is the identity — work entries reference it by name.</small>
       </div>
     {:else}
       <SettingsField
@@ -302,11 +302,6 @@
   .static-key code {
     font-size: var(--text-xs);
     color: var(--text-secondary);
-  }
-
-  .static-key small {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   details {

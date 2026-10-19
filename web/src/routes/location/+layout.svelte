@@ -334,24 +334,24 @@
                 <div class="stats-grid">
                   <div class="stat">
                     <span class="stat-value">{placeStats.total_visits}</span>
-                    <span class="stat-label"
+                    <span class="stat-label caption"
                       >{placeStats.total_visits === 1 ? 'visit' : 'visits'}</span
                     >
                   </div>
                   <div class="stat">
                     <span class="stat-value">{formatDuration(placeStats.avg_duration_min)}</span>
-                    <span class="stat-label">avg</span>
+                    <span class="stat-label caption">avg</span>
                   </div>
                   <div class="stat">
                     <span class="stat-value">{formatDuration(placeStats.longest_visit_min)}</span>
-                    <span class="stat-label">longest</span>
+                    <span class="stat-label caption">longest</span>
                   </div>
                   <div class="stat">
                     <span class="stat-value">{formatDuration(placeStats.total_duration_min)}</span>
-                    <span class="stat-label">total</span>
+                    <span class="stat-label caption">total</span>
                   </div>
                 </div>
-                <div class="stats-dates">
+                <div class="stats-dates caption">
                   <span>First: {formatDate(placeStats.first_visit)}</span>
                   <span>Last: {formatDate(placeStats.last_visit)}</span>
                 </div>
@@ -489,17 +489,10 @@
     color: var(--text-primary);
   }
 
-  .stat-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .stats-dates {
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .stats-loading,

@@ -192,7 +192,7 @@
             placeholder="5"
             aria-label="Feet"
           />
-          <span class="suffix">ft</span>
+          <span class="suffix muted">ft</span>
           <input
             type="number"
             step="0.1"
@@ -201,12 +201,12 @@
             placeholder="10"
             aria-label="Inches"
           />
-          <span class="suffix">in</span>
+          <span class="suffix muted">in</span>
         </div>
       {:else}
         <div class="cm-row">
           <input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
-          <span class="suffix">cm</span>
+          <span class="suffix muted">cm</span>
         </div>
       {/if}
     </SettingsField>
@@ -275,6 +275,5 @@
   }
   .suffix {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 </style>

@@ -441,7 +441,7 @@
     <p class="caption locked-note" role="note">{lockedReason}</p>
   {/if}
   <label class="field">
-    <span>Name</span>
+    <span class="caption">Name</span>
     <input
       type="text"
       bind:value={name}
@@ -459,7 +459,7 @@
 	     rather than buttons, because that is what a single-choice set is — it
 	     gives arrow-key movement and one tab stop for free (ISSUE-433). -->
   <fieldset class="field colors">
-    <legend>Colour</legend>
+    <legend class="caption">Colour</legend>
     <div class="swatches">
       <label class="swatch none" class:selected={colorValue === ''} title="No colour">
         <input
@@ -506,7 +506,7 @@
   {/if}
 
   <div class="field">
-    <span>Notifications</span>
+    <span class="caption">Notifications</span>
     <Select
       value={notificationsValue}
       options={NOTIFICATION_OPTIONS}
@@ -522,7 +522,7 @@
 
   {#if showBrain}
     <div class="field">
-      <span>Brain</span>
+      <span class="caption">Brain</span>
       <Select
         value={brainValue}
         options={brainOptions}
@@ -539,7 +539,7 @@
   {/if}
 
   <div class="field">
-    <span>Model</span>
+    <span class="caption">Model</span>
     <Select
       value={modelValue}
       options={modelOptions}
@@ -563,7 +563,7 @@
   </div>
 
   <div class="field">
-    <span>Effort</span>
+    <span class="caption">Effort</span>
     <Select
       value={effortValue}
       options={EFFORT_OPTIONS}
@@ -576,7 +576,7 @@
 
   {#if room.policy && !room.policy.email_thread}
     <div class="field">
-      <span>Guests</span>
+      <span class="caption">Guests</span>
       <Select
         value={guestReplyValue}
         options={GUEST_REPLY_OPTIONS}
@@ -599,7 +599,7 @@
 
   {#if room.policy && showSpeechMode}
     <div class="field">
-      <span>Replies</span>
+      <span class="caption">Replies</span>
       <Select
         value={speechModeValue}
         options={speechModeOptions}
@@ -628,7 +628,7 @@
 
   {#if room.policy && showDisposition}
     <div class="field">
-      <span>Disposition</span>
+      <span class="caption">Disposition</span>
       <Select
         value={dispositionValue}
         options={dispositionOptions}
@@ -655,7 +655,7 @@
   {/if}
 
   <div class="field">
-    <span>Members</span>
+    <span class="caption">Members</span>
     {#key membersEpoch}
       <RoomMembers
         roomId={room.id}
@@ -671,12 +671,12 @@
   </div>
 
   <div class="field">
-    <span>Group</span>
+    <span class="caption">Group</span>
     <RoomGroupLink roomId={room.id} />
   </div>
 
   <div class="field">
-    <span>Room token</span>
+    <span class="caption">Room token</span>
     <div class="token-row">
       <input class="token" type="text" readonly value={room.token} />
       <button class="copy-btn" type="button" onclick={copyToken}>
@@ -691,7 +691,7 @@
          belongs to the connected-services flow, so there is nothing to unbind
          here. -->
     <div class="field">
-      <span>Connected to</span>
+      <span class="caption">Connected to</span>
       <p class="caption phone-binding">
         {#if room.phone_group}
           {phoneLabel} — this room is a {phoneLabel} group. It is read-only here; write in the group on
@@ -704,7 +704,7 @@
     </div>
   {:else}
     <div class="field">
-      <span>Nextcloud Talk</span>
+      <span class="caption">Nextcloud Talk</span>
       {#if onTalk}
         <p class="caption talk-on">
           This room is also open in Nextcloud Talk — replies sync to your phone.
@@ -779,11 +779,6 @@
     margin-bottom: var(--space-3);
   }
 
-  .field > span {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
   .check {
     display: flex;
     align-items: center;
@@ -804,8 +799,6 @@
 
   fieldset.colors legend {
     padding: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .swatches {

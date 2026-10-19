@@ -96,7 +96,7 @@
   >
     <input type="checkbox" bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
   </Field>
-  {#if useKeyfile}<p class="hint">
+  {#if useKeyfile}<p class="description">
       Save the key file when it downloads. You will need both it and the export password to open the
       KeePass file.
     </p>{/if}

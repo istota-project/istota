@@ -313,7 +313,7 @@
     {#if totalPages > 1}
       <div class="pagination">
         <button onclick={prevPage} disabled={currentPage <= 1} type="button">&laquo; Prev</button>
-        <span class="page-info">{currentPage} / {totalPages}</span>
+        <span class="page-info caption">{currentPage} / {totalPages}</span>
         <button onclick={nextPage} disabled={currentPage >= totalPages} type="button"
           >Next &raquo;</button
         >
@@ -492,11 +492,6 @@
   .pagination button:disabled {
     opacity: 0.3;
     cursor: default;
-  }
-
-  .page-info {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   @media (max-width: 640px) {

@@ -82,7 +82,7 @@
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else}
-    <p class="card-hint">
+    <p class="card-hint caption">
       The distinct values recent imports carried, and the account each one posted to when it was
       last seen. Values falling through to <code>Expenses:Uncategorized</code> come first — that is the
       list a rule is worth writing for. An edit made since a sync is not reflected here; run it through
@@ -119,8 +119,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .cov-list {

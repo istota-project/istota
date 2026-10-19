@@ -157,7 +157,7 @@
 {/if}
 
 {#if extracting}
-  <div class="card extracting">
+  <div class="card extracting muted">
     <span class="spinner" aria-hidden="true"></span>
     Extracting encounter from the source — this can take a few seconds.
   </div>
@@ -182,7 +182,7 @@
   </div>
 
   {#if documentId !== null && file}
-    <p class="attach-note">
+    <p class="attach-note caption">
       <strong>{file.name}</strong> will be kept and attached to the records below.
     </p>
   {/if}
@@ -247,7 +247,7 @@
       </Field>
 
       <div class="diag-head">
-        <h3>Diagnoses ({row.diagnoses.length})</h3>
+        <h3 class="micro-label">Diagnoses ({row.diagnoses.length})</h3>
         <Button size="sm" onclick={() => addDiagnosis(row)}>+ Add diagnosis</Button>
       </div>
 
@@ -354,11 +354,6 @@
     margin: 0;
   }
   h3 {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--text-dim);
-    font-weight: var(--weight-medium);
     margin: 0;
   }
 
@@ -391,14 +386,11 @@
     flex-direction: row;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
 
   .attach-note {
     margin: 0 0 var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
   .review-head {
     display: flex;

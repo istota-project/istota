@@ -48,7 +48,7 @@
       onmouseenter={() => onhover(i)}
     >
       <span class="ac-label">{s.label}</span>
-      {#if s.description}<span class="ac-desc">{s.description}</span>{/if}
+      {#if s.description}<span class="ac-desc caption">{s.description}</span>{/if}
     </li>
   {/each}
 </ul>
@@ -89,8 +89,6 @@
     flex-shrink: 0;
   }
   .ac-desc {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;

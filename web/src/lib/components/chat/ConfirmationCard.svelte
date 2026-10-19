@@ -37,7 +37,7 @@
     <span class="confirm-label">This action needs your confirmation.</span>
   </span>
   {#if answerByText}
-    <span class="confirm-elsewhere">Reply by {answerByText} to answer.</span>
+    <span class="confirm-elsewhere muted">Reply by {answerByText} to answer.</span>
   {:else}
     <div class="confirm-actions">
       <Button variant="primary" size="sm" disabled={busy} onclick={onConfirm}>Confirm</Button>
@@ -79,7 +79,6 @@
   }
   .confirm-elsewhere {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .confirm-actions {
     display: flex;

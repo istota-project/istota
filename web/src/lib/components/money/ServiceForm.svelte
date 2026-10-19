@@ -110,7 +110,7 @@
       <div class="static-key">
         <span>Key</span>
         <code>{service?.key}</code>
-        <small>The key is the identity — work entries reference it by name.</small>
+        <small class="caption">The key is the identity — work entries reference it by name.</small>
       </div>
     {:else}
       <SettingsField label="Key" hint="Short identifier used by work entries." error={keyError}>
@@ -127,7 +127,7 @@
     </SettingsField>
 
     {#if type === 'other'}
-      <p class="field-note">Rate is not used — the amount comes from each work entry.</p>
+      <p class="field-note caption">Rate is not used — the amount comes from each work entry.</p>
     {:else}
       <SettingsField label={rateLabel} error={rateError}>
         <input type="text" inputmode="decimal" bind:value={rate} placeholder="150" />
@@ -174,14 +174,7 @@
     color: var(--text-secondary);
   }
 
-  .static-key small {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
   .field-note {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     margin: 0;
   }
 

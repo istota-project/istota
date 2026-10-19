@@ -46,7 +46,7 @@
             &middot; {tripDuration(trip)}
           </span>
         </div>
-        <span class="trip-activity"
+        <span class="trip-activity caption"
           >{ACTIVITY_LABELS[trip.activity_type] ?? trip.activity_type}</span
         >
       </button>
@@ -106,8 +106,6 @@
   }
 
   .trip-activity {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
     flex-shrink: 0;
   }
 </style>

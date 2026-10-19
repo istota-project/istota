@@ -37,7 +37,7 @@
       </li>
     {/each}
   </ol>
-  <p class="label">Step {position} of {steps.length} · {title}</p>
+  <p class="label description">Step {position} of {steps.length} · {title}</p>
 </nav>
 
 <style>
@@ -101,8 +101,6 @@
 
   .label {
     margin: 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   @media (max-width: 640px) {

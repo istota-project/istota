@@ -262,9 +262,9 @@
                 <span class="cred-warn">{noSiteLine(credential)}</span>
               {/if}
               {#if credential.grant}
-                <span class="cred-meta">{grantSummary(credential.grant)}</span>
+                <span class="caption">{grantSummary(credential.grant)}</span>
               {:else}
-                <span class="cred-meta cred-warn">No access yet</span>
+                <span class="caption cred-warn">No access yet</span>
               {/if}
             </div>
             <div class="cred-badges">
@@ -458,11 +458,6 @@
 
   .cred-main > .cred-warn:first-child {
     font-size: var(--text-sm);
-  }
-
-  .cred-meta {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .cred-warn {

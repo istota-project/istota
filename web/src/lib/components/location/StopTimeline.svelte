@@ -34,7 +34,7 @@
         </div>
         <div class="timeline-content">
           <div class="stop-name">{stop.location}</div>
-          <div class="stop-time">
+          <div class="stop-time muted">
             {stop.arrived}{#if stop.departed && stop.departed !== stop.arrived}
               &ndash; {stop.departed}{/if}
             {#if duration(stop.arrived, stop.departed)}
@@ -113,7 +113,6 @@
 
   .stop-time {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     margin-top: 0.1rem;
   }
 

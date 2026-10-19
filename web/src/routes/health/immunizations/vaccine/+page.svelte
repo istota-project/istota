@@ -97,27 +97,29 @@
       </div>
       <dl class="grid-stats">
         <div>
-          <dt>Last given</dt>
+          <dt class="micro-label">Last given</dt>
           <dd>{formatDate(entry.last_given)}</dd>
         </div>
         <div>
-          <dt>Doses recorded</dt>
+          <dt class="micro-label">Doses recorded</dt>
           <dd>{entry.dose_count}</dd>
         </div>
         <div>
-          <dt>Next due</dt>
+          <dt class="micro-label">Next due</dt>
           <dd>{formatDate(entry.next_due)}</dd>
         </div>
         {#if entry.days_until_due !== null}
           <div>
-            <dt>{entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}</dt>
+            <dt class="micro-label">
+              {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
+            </dt>
             <dd>{Math.abs(entry.days_until_due)}</dd>
           </div>
         {/if}
       </dl>
     {/if}
     {#if ref.description}
-      <p class="description">{ref.description}</p>
+      <p class="ref-description">{ref.description}</p>
     {/if}
     {#if ref.typical_age_range}
       <p class="caption">Typical age range: {ref.typical_age_range}</p>
@@ -132,13 +134,13 @@
   {:else if explainer && explainer.summary}
     <details class="card explainer">
       <summary>
-        <span class="label">About this vaccine</span>
+        <span class="label micro-label">About this vaccine</span>
         <span class="chev" aria-hidden="true">›</span>
       </summary>
       <div class="content">
         <p class="summary">{explainer.summary}</p>
         {#if explainer.why_it_matters.length > 0}
-          <h3>Why it matters</h3>
+          <h3 class="micro-label">Why it matters</h3>
           <ul>
             {#each explainer.why_it_matters as item (item)}
               <li>{item}</li>
@@ -228,10 +230,6 @@
     margin: 0;
   }
   dt {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
     margin-bottom: 0.15rem;
   }
   dd {
@@ -239,7 +237,7 @@
     font-size: var(--text-sm);
     color: var(--text-primary);
   }
-  .description {
+  .ref-description {
     margin: var(--space-3) 0 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
@@ -274,13 +272,6 @@
   details.explainer > summary::-webkit-details-marker {
     display: none;
   }
-  details.explainer > summary .label {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--text-dim);
-    font-weight: var(--weight-medium);
-  }
   details.explainer > summary .chev {
     color: var(--text-dim);
     font-size: 1rem;
@@ -301,11 +292,6 @@
   }
   .explainer h3 {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
   }
   .explainer .summary {
     margin: 0;

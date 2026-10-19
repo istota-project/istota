@@ -161,7 +161,7 @@
     <p class="caption">Nothing to invoice for these filters.</p>
   {:else if shown.length > 0}
     <div class="preview" role="table" aria-label="Invoices">
-      <div class="preview-row preview-head" role="row">
+      <div class="preview-row preview-head caption" role="row">
         <span role="columnheader">Invoice</span>
         <span role="columnheader">Client</span>
         <span role="columnheader">Group</span>
@@ -236,11 +236,6 @@
     padding: var(--space-1) 0;
     border-bottom: 1px solid var(--border-subtle);
     align-items: baseline;
-  }
-
-  .preview-head {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
   }
 
   .number {

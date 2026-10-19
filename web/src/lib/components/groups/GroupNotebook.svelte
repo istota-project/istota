@@ -180,7 +180,7 @@
                     · {entry.source}{/if}</span
                 >
               </div>
-              <ul class="change-outcomes">
+              <ul class="change-outcomes muted">
                 {#each entry.applied ?? [] as outcome}<li>
                     {outcome.op?.op || 'change'}: {outcome.outcome || 'applied'}
                   </li>{/each}
@@ -283,7 +283,6 @@
   .change-outcomes {
     margin: var(--space-1) 0 0;
     padding-left: var(--space-4);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
   .change-outcomes .rejected {

@@ -125,14 +125,21 @@ describe('it claims no class primitives.css already publishes', () => {
    * class started life as `empty`, which primitives.css then published as the
    * shared empty-state block — so every field silently took its `2rem 1rem`,
    * and the filter grew 70px of vertical padding nothing in this file
-   * mentioned. The same trap is waiting on `caption`, `muted`, `banner`.
+   * mentioned. The same trap is waiting on `banner`, `spinner`, `kv`.
+   *
+   * The text roles are the exception, taken on purpose: the captions and the
+   * placeholder ARE `.caption`, and the roles carry type and no spacing by a
+   * contract captions.test.ts holds, so nothing can arrive with them unasked.
    */
+  const TEXT_ROLES = new Set(['caption', 'muted', 'description', 'micro-label']);
   const shared = new Set(
-    [...readLayer('primitives').matchAll(/^\.([a-z][\w-]*)[\s,{:.]/gm)].map((m) => m[1]),
+    [...readLayer('primitives').matchAll(/^\.([a-z][\w-]*)[\s,{:.]/gm)]
+      .map((m) => m[1])
+      .filter((cls) => !TEXT_ROLES.has(cls)),
   );
 
   it('parses the shared blocks it checks against', () => {
-    expect(shared.has('caption')).toBe(true);
+    expect(shared.has('banner')).toBe(true);
     expect(shared.size).toBeGreaterThan(5);
   });
 

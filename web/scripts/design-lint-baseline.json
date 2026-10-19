@@ -14,7 +14,7 @@
     "off-scale-space": 5
   },
   "src/lib/components/chat/RoomSettings.svelte": {
-    "redefined-primitive": 3,
+    "redefined-primitive": 2,
     "off-scale-space": 1
   },
   "src/lib/components/chat/SearchResults.svelte": {
@@ -27,7 +27,7 @@
     "off-scale-space": 1
   },
   "src/lib/components/location/PlaceForm.svelte": {
-    "redefined-primitive": 5
+    "redefined-primitive": 4
   },
   "src/lib/components/location/StopTimeline.svelte": {
     "off-scale-space": 1
@@ -45,10 +45,10 @@
     "off-scale-space": 1
   },
   "src/lib/components/money/TransactionForm.svelte": {
-    "redefined-primitive": 3
+    "redefined-primitive": 2
   },
   "src/lib/components/money/WorkEntryForm.svelte": {
-    "redefined-primitive": 3
+    "redefined-primitive": 2
   },
   "src/lib/components/ui/Badge.svelte": {
     "off-scale-space": 1

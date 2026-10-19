@@ -55,27 +55,27 @@
       >
         <span class="caret" class:open>&#9654;</span>
       </button>
-      <button class="cat-select" onclick={onSelect} type="button">
+      <button class="cat-select micro-label" onclick={onSelect} type="button">
         <span class="cat-label-text">{label}</span>
-        {#if count !== undefined}<span class="cat-count">{count}</span>{/if}
+        {#if count !== undefined}<span class="cat-count caption">{count}</span>{/if}
       </button>
     </div>
     {#if open}
       {@render children()}
     {/if}
   {:else if collapsible}
-    <button class="cat-label cat-label-button" onclick={toggle} type="button">
+    <button class="cat-label cat-label-button micro-label" onclick={toggle} type="button">
       <span class="caret" class:open>&#9654;</span>
       <span class="cat-label-text">{label}</span>
-      {#if count !== undefined}<span class="cat-count">{count}</span>{/if}
+      {#if count !== undefined}<span class="cat-count caption">{count}</span>{/if}
     </button>
     {#if open}
       {@render children()}
     {/if}
   {:else}
-    <div class="cat-label">
+    <div class="cat-label micro-label">
       <span class="cat-label-text">{label}</span>
-      {#if count !== undefined}<span class="cat-count">{count}</span>{/if}
+      {#if count !== undefined}<span class="cat-count caption">{count}</span>{/if}
     </div>
     {@render children()}
   {/if}
@@ -94,11 +94,6 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    font-weight: var(--weight-medium);
     padding: var(--space-2) var(--space-3) 0.15rem;
   }
 
@@ -106,12 +101,10 @@
     width: 100%;
     background: none;
     border: none;
-    font: inherit;
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--text-dim);
+    /* Family and leading only: the shorthand would reset the size and weight
+       .micro-label gives the button. */
+    font-family: inherit;
+    line-height: inherit;
     cursor: pointer;
     text-align: left;
     transition: color var(--transition-fast);
@@ -154,12 +147,8 @@
     gap: var(--space-2);
     background: none;
     border: none;
-    font: inherit;
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    color: var(--text-dim);
+    font-family: inherit;
+    line-height: inherit;
     cursor: pointer;
     text-align: left;
     padding: var(--space-2) var(--space-3) 0.15rem 0;
@@ -188,8 +177,6 @@
   }
 
   .cat-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     text-transform: none;
     letter-spacing: 0;
   }

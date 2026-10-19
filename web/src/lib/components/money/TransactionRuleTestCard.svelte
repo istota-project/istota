@@ -149,7 +149,7 @@
 </script>
 
 <SettingsCard title="Test a transaction">
-  <p class="card-hint">
+  <p class="card-hint caption">
     A made-up transaction run through the ordered pass, against the enabled rules in this scope —
     the same set an import is scored against, so a disabled rule is absent here as it is there.
     Nothing is written.
@@ -265,8 +265,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .test-form {

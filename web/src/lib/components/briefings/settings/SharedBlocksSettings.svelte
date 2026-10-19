@@ -296,9 +296,9 @@
             <tr>
               <td class="sb-name">
                 <strong>{b.name}</strong>
-                {#if !b.enabled}<span class="muted small"> (disabled)</span>{/if}
+                {#if !b.enabled}<span class="caption"> (disabled)</span>{/if}
                 {#if b.status.has_content}
-                  <div class="muted small sb-preview" title={b.status.value_preview ?? ''}>
+                  <div class="caption sb-preview" title={b.status.value_preview ?? ''}>
                     {(b.status.value_preview ?? '').slice(0, 60)}
                   </div>
                 {/if}
@@ -370,11 +370,11 @@
 
       <div class="shared-sources">
         <div class="shared-sources-head">
-          <span class="field-label">Sources</span>
+          <span class="field-label muted">Sources</span>
           <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button>
         </div>
         {#if sharedDraft.sources.length === 0}
-          <p class="muted small">No sources — add at least one browse/markets/email source.</p>
+          <p class="caption">No sources — add at least one browse/markets/email source.</p>
         {/if}
         {#each sharedDraft.sources as src, i (i)}
           <div class="sb-source">
@@ -446,9 +446,6 @@
     background: var(--surface-raised);
     color: var(--text-muted);
   }
-  .muted.small {
-    font-size: var(--text-xs);
-  }
 
   /* Admin shared-blocks editor */
   .nowrap {
@@ -502,7 +499,6 @@
   }
   .field-label {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   /* Type + the source's config fields flow inline by default, wrapping on
 	   narrow widths. The remove button pins to the top-right corner. */

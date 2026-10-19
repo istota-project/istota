@@ -27,7 +27,7 @@
 </script>
 
 <div class="location-share-card" data-testid="location-share-card">
-  <div class="location-share-head">
+  <div class="location-share-head caption">
     <span class="location-share-mark" aria-hidden="true"><MapPin size={13} /></span>
     <span class="location-share-owner">{share.ownerLabel}</span>
     <span>· {precisionLabel}</span>
@@ -64,8 +64,6 @@
     align-items: baseline;
     flex-wrap: wrap;
     gap: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
   .location-share-mark {
     display: inline-flex;

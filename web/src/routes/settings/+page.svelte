@@ -116,7 +116,7 @@
 >
   {#if profile}
     <SettingsCard title="Identity">
-      <p class="hint">
+      <p class="description">
         How Istota addresses you. User ID: <code>{profile.user_id}</code>
       </p>
 
@@ -150,7 +150,7 @@
             />
           {/snippet}
         </AvatarPicker>
-        <p class="hint">
+        <p class="description">
           Removing an uploaded picture falls back to the one imported from Nextcloud, if there is
           one. Changing it here does not change the picture Nextcloud shows.
         </p>

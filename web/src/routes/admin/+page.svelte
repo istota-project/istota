@@ -478,7 +478,7 @@
 
           {#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
             <div class="overrides">
-              <div class="cell-label">Source-type routing</div>
+              <div class="cell-label micro-label">Source-type routing</div>
               <dl class="kv model-kv">
                 {#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
                   <dt>{src}</dt>
@@ -490,7 +490,7 @@
 
           {#if m.room_selectable && m.room_selectable.length > 0}
             <div class="overrides">
-              <div class="cell-label">Rooms may select</div>
+              <div class="cell-label micro-label">Rooms may select</div>
               <div class="room-selectable">
                 {#each m.room_selectable as kind (kind)}
                   <span class="effort-chip">{brainLabel(kind)}</span>
@@ -642,7 +642,7 @@
                       </div>
                       <div class="source-list">
                         {#each segments as seg (seg.source)}
-                          <span class="source-pill" title={segmentTooltip(seg)}>
+                          <span class="source-pill caption" title={segmentTooltip(seg)}>
                             <span
                               class="dot dot-source"
                               style="background: {sourceColor(seg.source)};"
@@ -723,7 +723,7 @@
               </StatTile>
             {/if}
           </div>
-          <p class="usage-note">
+          <p class="usage-note caption">
             Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
               — reading is stale{#if sub.error}: {sub.error}{/if}
             {/if}
@@ -767,7 +767,7 @@
              writes no row, and the native brain records no context; a synthetic
              zero for either would make this pane complete and wrong. -->
           {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0 || (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
-            <p class="usage-note">
+            <p class="usage-note caption">
               {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0}
                 {formatNumber(stats.usage.unmeasured_tasks_24h ?? 0)} task(s) in the last 24h recorded
                 no usage.
@@ -784,7 +784,7 @@
           <header class="section-header">
             <h2>Token usage</h2>
           </header>
-          <p class="usage-note">Usage stats unavailable: {stats.usage.error}</p>
+          <p class="usage-note caption">Usage stats unavailable: {stats.usage.error}</p>
         </section>
       {/if}
 
@@ -881,7 +881,7 @@
             {/snippet}
           </AvatarPicker>
         </Field>
-        <p class="hint">
+        <p class="description">
           Shown wherever the web UI names the bot. It applies to everyone on this deployment.
           {#if stats.storage.nextcloud_username}
             This is not the picture Nextcloud shows for
@@ -927,13 +927,13 @@
       <div class="banner error">Partial data: {stats.error}</div>
     {/if}
 
-    <p class="refresh-note">Auto-refreshes every 60s.</p>
+    <p class="refresh-note caption">Auto-refreshes every 60s.</p>
   {/if}
 </div>
 
 <style>
   /* Layout primitives (.settings / .card / .grid / .banner / .placeholder /
-	   .section-header / .hint) come from web/src/lib/styles/settings.css.
+	   .section-header) come from web/src/lib/styles/settings.css.
 	   Admin-specific bits below: KPIs, source bars, dot indicators. */
 
   /* Page metadata, not content. It sat in the app bar until the admin sidebar
@@ -942,8 +942,6 @@
 	   it describes rather than with the chrome. */
   .refresh-note {
     margin-top: var(--space-4);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     text-align: right;
   }
 
@@ -962,13 +960,6 @@
     align-items: center;
     font-weight: var(--weight-semibold);
     color: var(--text-primary);
-  }
-
-  .cell-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
   }
 
   .dot {
@@ -1176,8 +1167,6 @@
 
   .usage-note {
     margin-top: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .users-grid .col-24h {
@@ -1226,8 +1215,6 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .failed-pill {
