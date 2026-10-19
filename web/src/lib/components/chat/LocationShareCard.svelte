@@ -74,7 +74,7 @@
   }
   .location-share-owner {
     color: var(--text-secondary);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   .location-share-link {
     margin-left: auto;

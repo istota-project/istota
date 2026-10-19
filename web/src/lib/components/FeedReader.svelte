@@ -362,7 +362,7 @@
 
   .reader-title {
     font-size: 1rem;
-    line-height: 1.25;
+    line-height: var(--leading-tight);
     margin: 0 0 var(--space-4);
     color: var(--text-primary);
   }
@@ -451,7 +451,7 @@
     justify-content: center;
     width: 64px;
     height: 64px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
        the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.6);
@@ -459,7 +459,7 @@
     /* design-lint-allow-end */
     /* A triangle's optical centre sits left of its bounding box's. */
     padding-left: 5px;
-    transition: background 0.15s ease;
+    transition: background var(--transition-fast);
     pointer-events: none;
   }
 
@@ -480,8 +480,8 @@
     color: #fff;
     /* design-lint-allow-end */
     font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-caps);
   }
 
   .reader-player {
@@ -513,7 +513,7 @@
 
   .reader-content {
     color: var(--text-secondary);
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     font-size: var(--text-base);
     word-break: break-word;
   }
@@ -551,7 +551,7 @@
     background: var(--surface-raised);
     color: var(--text-primary);
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     text-decoration: none;
   }
 

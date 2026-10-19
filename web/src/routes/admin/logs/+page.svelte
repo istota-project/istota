@@ -566,7 +566,7 @@
     padding: var(--space-2);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
 
   .log-row {
@@ -580,7 +580,7 @@
   }
 
   .log-row:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .log-time {
@@ -592,7 +592,7 @@
     /* Fixed width, or a WARNING row shifts every column after it (the same
        reason a status chip needs a min-width). */
     min-width: 4.5rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .lvl-error .log-level {

@@ -31,14 +31,14 @@
   padding-right: max(0.75rem, var(--safe-right));
   background: var(--surface-card);
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 0.85rem;
+  font-size: var(--text-base);
 }
 
 .app-nav .app-name {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   font-size: 0.9rem;
   text-decoration: none;
   color: var(--text-primary);
@@ -139,8 +139,8 @@
    trigger's open state and never matches the other two. */
 .app-nav .nav-right .nav-icon-btn:hover,
 .app-nav .nav-right .nav-icon-btn[data-state='open'] {
-  background: var(--surface-raised);
-  color: var(--text-primary);
+  background: var(--hover-bg);
+  color: var(--hover-fg);
 }
 
 /* The nav's overflow menu. bits-ui portals it to <body>, outside .app-nav, so
@@ -171,8 +171,8 @@
 
 .app-nav-menu-link:hover,
 .app-nav-menu-link[data-highlighted] {
-  background: var(--surface-raised);
-  color: var(--text-primary);
+  background: var(--hover-bg);
+  color: var(--hover-fg);
 }
 
 .app-nav-menu-link.active {
@@ -265,7 +265,7 @@ body:has(.app-content-fill) {
   text-align: center;
   padding: 3rem 1rem;
   color: var(--text-dim);
-  font-size: 0.85rem;
+  font-size: var(--text-base);
 }
 
 .error-msg {

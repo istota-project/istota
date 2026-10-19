@@ -315,7 +315,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   .actions {
@@ -354,7 +354,7 @@
     font-size: var(--text-sm);
   }
   .drafts a:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .spreadsheet {
     background: var(--surface-card);
@@ -390,7 +390,7 @@
     text-align: center;
     padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -414,7 +414,7 @@
     text-decoration: underline;
   }
   .date {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   /* Category banner row — section divider running across the markers it
@@ -426,8 +426,8 @@
   .cat-cell {
     text-align: left;
     font-size: var(--text-xs);
-    font-weight: 500;
-    letter-spacing: 0.05em;
+    font-weight: var(--weight-medium);
+    letter-spacing: var(--tracking-caps);
     color: var(--text-muted);
     text-transform: uppercase;
     padding: var(--space-1) var(--space-2);
@@ -457,7 +457,7 @@
   }
   .marker-name {
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     /* The fixed column width clips overlong names to an ellipsis (full
 		   name lives on the link's title tooltip). Keeping the column a fixed
 		   width is what keeps the ref column's sticky offset exact. */
@@ -483,7 +483,7 @@
     font-size: 10px;
     color: var(--text-dim);
     font-style: italic;
-    font-weight: 400;
+    font-weight: var(--weight-regular);
   }
   tbody td {
     text-align: center;
@@ -612,7 +612,7 @@
   tbody td.flag-C {
     background: var(--status-critical-bg);
     color: var(--status-critical-fg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   /* Subtle full-row highlight on hover to make scanning a marker's values

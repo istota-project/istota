@@ -358,7 +358,7 @@
     cursor: pointer;
   }
   .row-clickable:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .last-login {
     width: 7rem;

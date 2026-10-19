@@ -457,7 +457,7 @@
 
   .stats-name {
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   .stats-actions {
@@ -485,7 +485,7 @@
 
   .stat-value {
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
 
@@ -522,7 +522,7 @@
     color: inherit;
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     cursor: pointer;
     padding: 0.2rem var(--space-3);
     border-radius: var(--radius-sm);
@@ -534,11 +534,11 @@
   }
 
   .place-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .place-btn.selected {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
     color: var(--text-primary);
   }
 

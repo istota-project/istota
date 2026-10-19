@@ -64,11 +64,20 @@ describe('theme parity', () => {
     // of token somebody defines in dark and never gives a light value.
     '--room-color-',
     '--category-',
+    // Interaction fills, row tints and the focused-field border. Each is a
+    // colour whose name says what it is for rather than what it is, so none
+    // of the prefixes above would see them.
+    '--hover-',
+    '--selected-',
+    '--row-',
+    '--focus-field-',
   ];
   const isColorToken = (name: string) =>
     COLOR_PREFIXES.some((p) => name.startsWith(p)) &&
-    // The --text-* scale is half type sizes and half colors; sizes are rem.
-    !/^\d|rem|px|%/.test(dark[name] ?? '');
+    // The --text-* scale is half type sizes and half colors; a size is a bare
+    // length. Anchored, because a loose `%` test read every hsla() as a size
+    // and dropped it from the check (--status-partial-bg, --row-warn-bg).
+    !/^[\d.]+(rem|px|em|%)?$/.test(dark[name] ?? '');
 
   /**
    * A `filter` that corrects an asset the theme does not control — the octopus
@@ -115,6 +124,22 @@ describe('theme parity', () => {
     for (const c of ROOM_COLORS) {
       expect(dark, `--room-color-${c} needs a dark value`).toHaveProperty(`--room-color-${c}`);
       expect(light, `--room-color-${c} needs a light value`).toHaveProperty(`--room-color-${c}`);
+    }
+  });
+
+  it('covers the role-named colour tokens, which no colour prefix names', () => {
+    // Guards the guard again: drop one of these prefixes from the list and
+    // the parity check stops seeing the token rather than failing on it.
+    for (const name of [
+      '--hover-bg',
+      '--hover-fg',
+      '--selected-bg',
+      '--row-danger-bg',
+      '--row-warn-bg',
+      '--focus-field-border',
+    ]) {
+      expect(needsBothThemes(name), `${name} is not parity-checked`).toBe(true);
+      expect(light, `${name} needs a light value`).toHaveProperty(name);
     }
   });
 
@@ -196,5 +221,71 @@ describe('z-index scale', () => {
 
   it('puts the lightbox above the reader it opens from', () => {
     expect(z('--z-lightbox')).toBeGreaterThan(z('--z-viewer-control'));
+  });
+});
+
+describe('type and motion scales', () => {
+  const num = (name: string) => {
+    const raw = dark[name];
+    expect(raw, `${name} is not defined`).toBeDefined();
+    return Number.parseFloat(raw);
+  };
+  const ascending = (names: string[]) => {
+    const values = names.map(num);
+    expect(values).toEqual([...values].sort((a, b) => a - b));
+    expect(new Set(values).size, `${names.join(', ')} has a duplicate step`).toBe(values.length);
+  };
+
+  it('orders the weights regular to bold', () => {
+    ascending(['--weight-regular', '--weight-medium', '--weight-semibold', '--weight-bold']);
+  });
+
+  it('orders the leading none to relaxed, as unitless ratios', () => {
+    // Unitless so the leading follows the element's own font size: a length
+    // here would be computed once where it is declared and inherited
+    // unchanged by smaller text inside.
+    const names = [
+      '--leading-none',
+      '--leading-tight',
+      '--leading-snug',
+      '--leading-normal',
+      '--leading-relaxed',
+    ];
+    ascending(names);
+    for (const name of names) expect(dark[name]).toMatch(/^\d+(\.\d+)?$/);
+  });
+
+  it('orders the icon sizes, in rem', () => {
+    const names = ['--icon-xs', '--icon-sm', '--icon-md', '--icon-lg', '--icon-xl'];
+    ascending(names);
+    for (const name of names) expect(dark[name]).toMatch(/rem$/);
+  });
+
+  it('puts the fast duration below the slow one', () => {
+    expect(num('--duration-fast')).toBeLessThan(num('--duration-slow'));
+  });
+
+  it('builds the fast transition from the duration and easing tokens', () => {
+    // So an animation written with var(--duration-fast) and a transition
+    // written with var(--transition-fast) cannot drift apart.
+    expect(dark['--transition-fast']).toBe('var(--duration-fast) var(--ease-standard)');
+  });
+
+  it('declares the non-colour families once, outside the theme blocks', () => {
+    // A weight, a leading or a duration that changed with the theme would be
+    // a layout shift on every theme switch.
+    const families = [
+      /^--weight-/,
+      /^--leading-/,
+      /^--tracking-/,
+      /^--duration-/,
+      /^--ease-/,
+      /^--icon-/,
+      /^--radius-round$/,
+      /^--disabled-opacity$/,
+    ];
+    const inFamily = (name: string) => families.some((re) => re.test(name));
+    expect(Object.keys(dark).filter(inFamily)).toHaveLength(20);
+    expect(Object.keys(light).filter(inFamily)).toEqual([]);
   });
 });

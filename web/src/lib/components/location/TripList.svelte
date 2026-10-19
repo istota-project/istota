@@ -78,13 +78,13 @@
   }
 
   .trip-item:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .trip-dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     flex-shrink: 0;
   }
 

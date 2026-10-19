@@ -303,13 +303,13 @@
 
   .place {
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
 
   .place.dim {
     color: var(--text-dim);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     font-size: var(--text-xs);
   }
 

@@ -75,9 +75,9 @@
   .name {
     margin: 0;
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--accent-blue);
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     text-decoration: none;
     /* A long scanner-generated filename must not widen its grid column. */
     overflow-wrap: anywhere;
@@ -114,6 +114,6 @@
     margin: 0;
     font-size: var(--text-xs);
     color: var(--text-muted);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
 </style>

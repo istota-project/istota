@@ -140,7 +140,7 @@
   }
 
   .history-id {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .history-summary {

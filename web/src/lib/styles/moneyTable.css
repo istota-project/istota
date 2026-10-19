@@ -50,11 +50,11 @@
 }
 
 .money-section-nav .nav-link:hover {
-  background: var(--surface-raised);
+  background: var(--hover-bg);
 }
 
 .money-section-nav .nav-link.active {
-  background: var(--surface-raised);
+  background: var(--selected-bg);
   border-color: var(--border-default);
 }
 
@@ -170,8 +170,8 @@
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 0.15rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 500;
+  letter-spacing: var(--tracking-caps);
+  font-weight: var(--weight-medium);
 }
 
 /* One row rhythm for every money record table, at both breakpoints. The
@@ -229,8 +229,8 @@
   font: inherit;
   font-size: var(--text-xs);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 500;
+  letter-spacing: var(--tracking-caps);
+  font-weight: var(--weight-medium);
   cursor: pointer;
   padding: 0;
   text-align: left;
@@ -258,9 +258,9 @@
    a fixed slot is what keeps the columns after it from shifting per row. */
 .money-status {
   font-size: var(--text-2xs);
-  font-weight: 700;
+  font-weight: var(--weight-bold);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-caps);
   flex-shrink: 0;
   padding: 0.1rem var(--space-2);
   border-radius: var(--radius-pill);
@@ -290,7 +290,7 @@
   background: none;
   padding: 0;
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .money-amount {

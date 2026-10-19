@@ -568,7 +568,7 @@
     cursor: pointer;
   }
   .log-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .card {
     font: inherit;
@@ -586,7 +586,7 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
   .count {
     font-size: var(--text-xs);
@@ -594,9 +594,9 @@
   }
   .value {
     font-size: 1.6rem;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin-top: var(--space-1);
-    line-height: 1.1;
+    line-height: var(--leading-tight);
   }
   .unit {
     font-size: var(--text-sm);

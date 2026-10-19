@@ -234,7 +234,7 @@
 
   .ac-option.active,
   .ac-option:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 </style>

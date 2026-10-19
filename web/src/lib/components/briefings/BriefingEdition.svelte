@@ -157,7 +157,7 @@
     min-width: 0;
     margin: 0;
     font-size: var(--text-xl);
-    line-height: 1.3;
+    line-height: var(--leading-tight);
   }
 
   .legacy {
@@ -168,7 +168,7 @@
     background: var(--surface-card);
     color: var(--text-reading);
     font-size: var(--text-base);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     overflow-wrap: anywhere;
   }
 </style>

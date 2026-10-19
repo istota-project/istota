@@ -363,6 +363,62 @@ describe('off-scale-space', () => {
   });
 });
 
+describe('off-scale-breakpoint', () => {
+  const media = (condition: string) =>
+    `<style>\n  @media ${condition} {\n    .x {\n      display: none;\n    }\n  }\n</style>`;
+
+  it.each([
+    '(max-width: 640px)',
+    '(min-width: 641px)',
+    '(max-width: 768px)',
+    '(min-width: 769px)',
+    '(max-width: 1023px)',
+    '(min-width: 1024px)',
+    '(pointer: coarse), (max-width: 768px)',
+    '(pointer: coarse)',
+    '(prefers-reduced-motion: reduce)',
+  ])('allows %s', (condition) => {
+    expect(rules(media(condition))).not.toContain('off-scale-breakpoint');
+  });
+
+  it.each([
+    ['a width one pixel off a step', '(max-width: 639px)'],
+    ['a min-width on the step, which overlaps its max-width', '(min-width: 640px)'],
+    ['a max-width above the step, which overlaps its min-width', '(max-width: 641px)'],
+    ['a width between steps', '(max-width: 900px)'],
+    ['a rem width', '(max-width: 40rem)'],
+    ['range syntax', '(width <= 640px)'],
+    ['an off-scale width beside an allowed feature', '(pointer: coarse), (max-width: 600px)'],
+  ])('flags %s', (_label, condition) => {
+    expect(rules(media(condition))).toContain('off-scale-breakpoint');
+  });
+
+  it('names the offending width', () => {
+    const [v] = lint(media('(max-width: 1100px)')).filter((x) => x.rule === 'off-scale-breakpoint');
+    expect(v.hint).toMatch(/^\(max-width: 1100px\):/);
+  });
+
+  it('ignores a container query, which sizes by the component rather than the viewport', () => {
+    const source =
+      '<style>\n  @container settings (max-width: 40rem) {\n    .x {\n      display: none;\n    }\n  }\n</style>';
+    expect(rules(source)).not.toContain('off-scale-breakpoint');
+  });
+
+  it('ignores a width named in a comment', () => {
+    expect(rules('<style>\n  /* was @media (max-width: 900px) */\n</style>')).not.toContain(
+      'off-scale-breakpoint',
+    );
+  });
+
+  it.each(['src/lib/styles/tokens.css', 'src/lib/styles/app-shell.css'])(
+    'still checks %s, which the other rules leave alone as the token home',
+    (file) => {
+      const source = '@media (max-width: 900px) {\n  :root {\n    --x: #fff;\n  }\n}';
+      expect(rules(source, file)).toEqual(['off-scale-breakpoint']);
+    },
+  );
+});
+
 describe('redefined-primitive', () => {
   it.each(['.btn', '.badge', '.icon-btn', '.field', '.chip'])('flags %s', (cls) => {
     expect(rules(`<style>\n  ${cls} {\n    color: red;\n  }\n</style>`)).toContain(

@@ -194,13 +194,13 @@
   }
 
   .nw-label {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: 1rem;
   }
 
   .nw-amount {
     margin-left: auto;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: 1rem;
     font-variant-numeric: tabular-nums;
   }
@@ -214,7 +214,7 @@
 
   .section-total {
     margin-left: auto;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-variant-numeric: tabular-nums;
     font-size: var(--text-base);
     color: var(--text-primary);

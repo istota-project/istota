@@ -266,7 +266,7 @@
   .active-filter .clear {
     color: var(--text-dim);
     font-size: var(--text-sm);
-    line-height: 1;
+    line-height: var(--leading-none);
   }
 
   /* The chip precedes the toolbar in the DOM because on a wide screen it sits
@@ -343,11 +343,11 @@
   }
 
   .acct-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .acct-btn.selected {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
     color: var(--text-primary);
   }
 

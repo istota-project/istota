@@ -115,10 +115,10 @@
 
   .health-frame :global(table.grid th) {
     color: var(--text-dim);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
 
   .health-frame :global(table.grid--dense th),

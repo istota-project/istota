@@ -262,7 +262,7 @@
   }
   :global(.ui-modal-title) {
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     margin: 0 0 var(--space-2);
     color: var(--text-primary);
   }

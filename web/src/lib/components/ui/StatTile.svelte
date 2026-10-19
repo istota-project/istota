@@ -132,7 +132,7 @@
        hooks a caller sets on the element, so they are supplied from outside and
        are deliberately absent from the token roster. */
     font-size: var(--stat-value-size, var(--text-lg));
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     /* Tabular figures, so a column of numbers lines up and a changing value
        does not shift the characters after it. */
     font-variant-numeric: tabular-nums;

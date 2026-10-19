@@ -897,8 +897,8 @@
       background var(--transition-fast);
   }
   .copy-btn:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   /* Typography is the global .caption; only the <p> reset stays here. */
@@ -932,10 +932,10 @@
       color var(--transition-fast);
   }
   .talk-btn:hover:not(:disabled) {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .talk-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

@@ -107,7 +107,7 @@
     border: none;
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     border-radius: var(--control-radius);
     cursor: pointer;
     transition: all var(--transition-fast);
@@ -115,7 +115,7 @@
   }
 
   .btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

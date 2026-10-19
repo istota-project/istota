@@ -828,7 +828,7 @@
   }
 
   .notice-part-title {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 

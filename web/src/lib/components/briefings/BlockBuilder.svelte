@@ -572,7 +572,7 @@
     gap: var(--space-3);
     padding: var(--space-3);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     color: var(--text-primary);
     background: var(--surface-base);
@@ -585,14 +585,14 @@
   }
   .preset:hover:not(:disabled) {
     border-color: var(--border-hover);
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .preset:disabled {
     cursor: not-allowed;
   }
   .preset:disabled .preset-icon,
   .preset:disabled .preset-label {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
   .preset-icon {
     flex: none;
@@ -612,7 +612,7 @@
   }
   .preset-label {
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   /* Two lines reserved and no more, so every tile is one height across groups and widths. */
   .preset-desc {

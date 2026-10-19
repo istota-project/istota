@@ -278,7 +278,7 @@
     gap: var(--space-3);
   }
   .change-actor {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .change-outcomes {
     margin: var(--space-1) 0 0;

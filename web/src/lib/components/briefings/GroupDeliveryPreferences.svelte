@@ -175,7 +175,7 @@
   }
   .group-row th {
     text-align: left;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   .name {
     display: flex;

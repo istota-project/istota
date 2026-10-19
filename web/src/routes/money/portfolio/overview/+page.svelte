@@ -318,7 +318,7 @@
   }
 
   .symbol {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .symbol a {
@@ -367,7 +367,7 @@
     width: 4.5rem;
   }
 
-  @media (max-width: 860px) {
+  @media (max-width: 768px) {
     .donut-grid {
       grid-template-columns: minmax(0, 1fr);
     }

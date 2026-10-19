@@ -119,8 +119,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.85rem;
-    font-weight: 600;
+    font-size: var(--text-base);
+    font-weight: var(--weight-semibold);
     /* design-lint-allow-begin: fixed surface — an avatar fill is an identity
        chip, not a themed surface, so it holds one value in both themes. */
     color: #fff;

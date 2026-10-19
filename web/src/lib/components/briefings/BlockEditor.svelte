@@ -415,7 +415,7 @@
     flex: 1;
     min-width: 0;
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   .source-toggle {
     display: inline-flex;

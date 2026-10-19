@@ -63,7 +63,7 @@
   }
   .search-result.active,
   .search-result:hover:not(:disabled) {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .search-result:disabled {
     cursor: default;

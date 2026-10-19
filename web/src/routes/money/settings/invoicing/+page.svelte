@@ -613,7 +613,7 @@
     justify-content: space-between;
     align-items: baseline;
     gap: var(--space-2);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     font-size: var(--text-sm);
   }
@@ -622,7 +622,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     color: var(--text-dim);
     font-size: var(--text-xs);
   }

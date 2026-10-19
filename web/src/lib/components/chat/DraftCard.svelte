@@ -415,7 +415,7 @@
   .draft-edit {
     width: 100%;
     font: inherit;
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     font-size: var(--text-sm);
     color: var(--text-primary);
     background: var(--surface-raised);

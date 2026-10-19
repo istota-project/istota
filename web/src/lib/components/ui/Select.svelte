@@ -154,7 +154,7 @@
     padding: 0.15rem var(--space-2);
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     cursor: pointer;
     transition: background var(--transition-fast);
     /* The label below caps at 220px, which on a narrow phone is most of the
@@ -173,7 +173,7 @@
     font-size: var(--text-sm);
   }
   :global(.ui-select-trigger:hover) {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   /* Full-width variant: matches the settings text inputs exactly — width:100%
@@ -202,7 +202,7 @@
     max-width: none;
   }
   :global(.ui-select-trigger:disabled) {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   :global(.ui-select-label) {
@@ -259,14 +259,14 @@
     overflow-wrap: anywhere;
   }
   :global(.ui-select-item[data-highlighted]) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
   :global(.ui-select-item[data-selected]) {
     color: var(--text-primary);
   }
   :global(.ui-select-item[data-disabled]) {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   @media (pointer: coarse) {

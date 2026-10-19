@@ -92,7 +92,7 @@
      0.9/0.85 and so rendered a step larger than every other banner in the app.
      Keep them tokens, and keep them here. */
   .notice-title {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: var(--text-base);
   }
 

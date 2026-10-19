@@ -283,7 +283,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   .actions {

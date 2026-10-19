@@ -130,7 +130,7 @@
   }
 
   .notification-item:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .item-open {
@@ -143,7 +143,7 @@
     border: none;
     background: none;
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     cursor: pointer;
     color: inherit;
@@ -163,7 +163,7 @@
        the other. */
     /* design-lint-allow: sub---space-1 optical nudge, centring a 0.5rem dot on a line box */
     margin-top: 0.35rem;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-dim);
   }
 
@@ -203,7 +203,7 @@
      new rather than as important — severity is the dot's job. */
   .unseen .item-title {
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .item-meta {

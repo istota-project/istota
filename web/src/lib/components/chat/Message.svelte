@@ -1323,7 +1323,7 @@
     margin-left: auto;
     min-width: 0;
     font-size: var(--text-xs);
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -1409,8 +1409,8 @@
       background var(--transition-fast);
   }
   .turn-action:hover {
-    color: var(--text-primary);
-    background: var(--surface-raised);
+    color: var(--hover-fg);
+    background: var(--hover-bg);
   }
   .turn-action.danger:hover {
     color: var(--status-danger-fg);
@@ -1459,7 +1459,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     cursor: pointer;
   }
@@ -1509,7 +1509,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     padding: 0.05rem var(--space-2);
     cursor: pointer;
     max-width: 12rem;
@@ -1561,7 +1561,7 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     opacity: 0;
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     transition: opacity var(--transition-fast);
     font-variant-numeric: tabular-nums;
   }
@@ -1579,7 +1579,7 @@
   }
   .author {
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     flex-shrink: 0;
   }
@@ -1595,7 +1595,7 @@
 
   .body {
     font-size: var(--text-base);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-primary);
     word-break: break-word;
     max-width: var(--chat-body-max);
@@ -1615,7 +1615,7 @@
     margin: var(--space-2) 0;
     border-left: 2px solid var(--status-warn-fg);
     font-size: var(--text-xs);
-    line-height: 1.45;
+    line-height: var(--leading-snug);
   }
   /* The executor backticks the brain and model names; the default `code` run
 	   is sized off body text and would out-weigh the notice around it. */
@@ -1716,7 +1716,7 @@
   }
   .cmd-row :global(.mention-self),
   .msg :global(.mention-self) {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     background: color-mix(in srgb, var(--accent-blue) 30%, transparent);
   }
@@ -1796,7 +1796,7 @@
     color: var(--link);
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     cursor: pointer;
   }
   .external-toggle:hover {
@@ -1808,7 +1808,7 @@
   .external-preview {
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1949,7 +1949,7 @@
   .cmd-output {
     max-width: var(--chat-body-max);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-secondary);
     background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
@@ -2015,7 +2015,7 @@
   .dot {
     width: 6px;
     height: 6px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-muted);
     animation: pulse 1.1s ease-in-out infinite;
   }

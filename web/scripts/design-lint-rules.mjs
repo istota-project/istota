@@ -140,6 +140,30 @@ function offScaleSpacing(line) {
   return found.length ? found : null;
 }
 
+// Viewport breakpoints are three named steps, sm 640, md 768 and lg 1024, each
+// written as a pair: `max-width` on the step and `min-width` one pixel above
+// it, so a max rule and a min rule never both match at the boundary. A custom
+// property cannot appear in a media query, so the table in web/AGENTS.md plus
+// this rule is what holds them. Before it the tree had twelve widths, a 639,
+// and a `min-width: 640px` that overlapped `max-width: 640px` by a pixel.
+// `@container` thresholds size a component by its own box and are not checked.
+const BREAKPOINT_MAX = new Set(['640', '768', '1023']);
+const BREAKPOINT_MIN = new Set(['641', '769', '1024']);
+const MEDIA_WIDTH = /\((min|max)-width\s*:\s*([\d.]+)([a-z]+)\s*\)/g;
+const MEDIA_RANGE = /\(\s*width\s*[<>]=?[^)]*\)|\([^)]*[<>]=?\s*width\s*\)/g;
+
+function offScaleBreakpoints(line) {
+  if (!/@media\b/.test(line)) return null;
+  const found = [];
+  for (const [text, side, value, unit] of line.matchAll(MEDIA_WIDTH)) {
+    const steps = side === 'max' ? BREAKPOINT_MAX : BREAKPOINT_MIN;
+    if (unit !== 'px' || !steps.has(value)) found.push(text);
+  }
+  // Range syntax hides which side of a step it is on; write min-/max-width.
+  for (const [text] of line.matchAll(MEDIA_RANGE)) found.push(text);
+  return found.length ? found : null;
+}
+
 // A page redefining a primitive's class name is how health ended up with a
 // second .btn system that inverted what `primary` meant — filled in one, an
 // outlined blue in the other — and with .btn.danger rendering red on three
@@ -212,6 +236,14 @@ export const RULES = [
     match: (line) => offScaleSpacing(line),
     exempt: STYLE_LAYERS,
     hint: 'use a --space-* token, or mark the exception with a reason',
+  },
+  {
+    id: 'off-scale-breakpoint',
+    match: (line) => offScaleBreakpoints(line),
+    // The style layers are exempt from every other rule as the token home,
+    // but a breakpoint in tokens.css or app-shell.css is still a breakpoint.
+    layers: true,
+    hint: 'breakpoints are max-width 640/768/1023px and min-width 641/769/1024px (web/AGENTS.md)',
   },
   {
     id: 'undefined-token',
@@ -297,7 +329,9 @@ function stripComments(line, state) {
 // `ctx.tokens` is the global custom-property roster, supplied by the caller
 // that read app.css — omit it and the token rules simply stand down.
 export function scanSource(rel, source, ctx = {}) {
-  if (EXEMPT_FILES.has(rel)) return [];
+  // A style layer is scanned only by the rules that opt in with `layers`.
+  const isLayer = STYLE_LAYERS.includes(rel);
+  if (EXEMPT_FILES.has(rel) && !isLayer) return [];
   if (EXEMPT_SUFFIXES.some((suffix) => rel.endsWith(suffix))) return [];
   if (ALLOW_FILE.test(source)) return [];
 
@@ -338,6 +372,7 @@ export function scanSource(rel, source, ctx = {}) {
       continue;
     }
     for (const rule of RULES) {
+      if (isLayer && !rule.layers) continue;
       // Substring match so a rule can exempt one owning file ("routes/money/+layout.svelte")
       // or a whole class of file (".test.ts", whose fixtures deliberately contain the pattern).
       if (rule.exempt?.some((p) => rel.includes(p))) continue;

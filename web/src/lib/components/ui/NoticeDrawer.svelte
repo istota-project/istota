@@ -241,7 +241,7 @@
 
   .notice-action {
     font: inherit;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     flex-shrink: 0;
     background: none;
     border: 1px solid currentColor;
@@ -267,7 +267,7 @@
     padding: 0;
     background: none;
     border: none;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     color: inherit;
     opacity: 0.75;
     cursor: pointer;

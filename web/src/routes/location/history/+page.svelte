@@ -450,7 +450,7 @@
   }
 
   .chip-count {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     opacity: 0.8;
     margin-left: var(--space-1);
   }

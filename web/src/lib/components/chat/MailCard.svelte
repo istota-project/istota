@@ -286,7 +286,7 @@
   .mail-subject {
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     overflow-wrap: anywhere;
   }
@@ -335,7 +335,7 @@
   .mail-body {
     margin-top: var(--space-2);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-primary);
     overflow-wrap: anywhere;
   }

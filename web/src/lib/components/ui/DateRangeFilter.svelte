@@ -166,7 +166,7 @@
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--text-xs);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     /* design-lint-allow: hairline nudge below --space-1, matching the two
        filters this replaces. */
     padding: 0.2rem var(--space-2);
@@ -190,7 +190,7 @@
     align-items: center;
     padding: 0 calc(var(--space-2) + 1px);
     font-size: var(--text-xs);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     color: var(--text-dim);
     pointer-events: none;
   }

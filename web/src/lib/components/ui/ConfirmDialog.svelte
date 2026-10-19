@@ -100,7 +100,7 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-primary);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
   .confirm-challenge {
     margin: var(--space-3) 0 var(--space-2);

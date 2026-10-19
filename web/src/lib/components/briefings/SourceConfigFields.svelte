@@ -495,7 +495,7 @@
     cursor: pointer;
     color: var(--text-muted);
     font-size: 1rem;
-    line-height: 1;
+    line-height: var(--leading-none);
     padding: 0;
   }
   .chip-add {

@@ -152,7 +152,7 @@
 <style>
   .section-total {
     margin-left: auto;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-variant-numeric: tabular-nums;
     font-size: var(--text-base);
   }
@@ -219,13 +219,13 @@
   }
 
   .net-label {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: var(--text-base);
   }
 
   .net-amount {
     margin-left: auto;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: var(--text-base);
     font-variant-numeric: tabular-nums;
   }

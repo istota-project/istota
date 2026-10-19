@@ -341,12 +341,12 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   h2 {
     font-size: var(--text-base);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0 0 var(--space-2);
   }
   .card {
@@ -391,7 +391,7 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: var(--space-4);
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1023px) {
     .split {
       grid-template-columns: 1fr;
     }

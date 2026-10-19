@@ -203,7 +203,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
 
@@ -231,7 +231,7 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     margin-bottom: 0.15rem;
   }
   dd {
@@ -243,7 +243,7 @@
     margin: var(--space-3) 0 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
 
@@ -277,15 +277,15 @@
   details.explainer > summary .label {
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
     color: var(--text-dim);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   details.explainer > summary .chev {
     color: var(--text-dim);
     font-size: 1rem;
-    line-height: 1;
-    transition: transform 0.15s ease;
+    line-height: var(--leading-none);
+    transition: transform var(--transition-fast);
   }
   details.explainer[open] > summary .chev {
     transform: rotate(90deg);
@@ -302,16 +302,16 @@
   .explainer h3 {
     margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
   .explainer .summary {
     margin: 0;
     font-size: var(--text-base);
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
   .explainer ul {
@@ -319,7 +319,7 @@
     padding-left: 1.1rem;
     font-size: var(--text-base);
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
   }
   .explainer li {
     margin: 0.2rem 0;

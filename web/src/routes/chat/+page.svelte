@@ -1785,7 +1785,7 @@
     align-items: center;
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1;
+    line-height: var(--leading-none);
     color: var(--text-muted);
     background: var(--surface-base);
     border: 1px solid var(--border-default);
@@ -1814,7 +1814,7 @@
   .brain-badge:hover {
     color: var(--accent-blue);
     border-color: var(--accent-blue);
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   /* Read-only where the user cannot change the pin: same colour, because it
 	   still says which brain the room is on, minus the affordance. */
@@ -1840,6 +1840,9 @@
     /* Soften body text a step (scoped to chat) to ease sustained reading. The
 		   token flips to a soft dark in light, so this needs no override. */
     --text-primary: var(--text-reading);
+    /* :root resolves --hover-fg against its own --text-primary, so restate it
+       here or a hovered control in the pane brightens past the softened text. */
+    --hover-fg: var(--text-primary);
   }
 
   /* The composer floats over the transcript instead of taking a row of its own,
@@ -1940,7 +1943,7 @@
     /* Fully opaque: centered it floats over message text rather than over the
 		   right margin, and the old 0.9 let that text read straight through. */
     opacity: 1;
-    transition: transform 0.12s ease;
+    transition: transform var(--transition-fast);
   }
   .jump-latest:hover {
     transform: translate(-50%, -1px);
@@ -2016,7 +2019,7 @@
   .day-label {
     flex-shrink: 0;
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     letter-spacing: 0.02em;
     color: var(--text-dim);
     text-transform: uppercase;
@@ -2108,7 +2111,7 @@
   /* A room with unseen bot/system messages reads bolder; the active room never
 	   bolds (looking at it is reading it). */
   .room-name.unread {
-    font-weight: 700;
+    font-weight: var(--weight-bold);
     color: var(--text-primary);
   }
   /* Leading origin glyph. Fixed slot before the title so a long room name
@@ -2163,7 +2166,7 @@
     align-items: center;
     gap: var(--space-1);
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   .room-off-row p {
     margin: var(--space-1) 0 0;

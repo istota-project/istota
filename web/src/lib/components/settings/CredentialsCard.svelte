@@ -523,7 +523,7 @@
   /* On a phone the name and the menu share the first line and the rest wraps
      under them, so a long host list is not squeezed into a sliver beside the
      badges. */
-  @media (max-width: 600px) {
+  @media (max-width: 640px) {
     .cred-row {
       flex-wrap: wrap;
     }

@@ -162,7 +162,7 @@
      sized by their rows and read as prose, and they stay in the sans face
      unless they are a TextArea with `monospace`. */
   .field :global(:where(input:not([type='checkbox'], .ui-input), select)) {
-    line-height: 1.2;
+    line-height: var(--leading-tight);
   }
 
   .field :global(:where(textarea:not(.ui-textarea))) {

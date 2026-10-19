@@ -124,7 +124,7 @@
     background: var(--surface-card);
     color: var(--text-primary);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     cursor: pointer;
     transition: border-color var(--transition-fast);
@@ -143,7 +143,7 @@
   }
 
   .option-card[aria-disabled='true'] {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 
@@ -154,7 +154,7 @@
     height: 1em;
     margin-top: 0.2em;
     border: 1px solid var(--border-hover);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     box-sizing: border-box;
   }
 
@@ -175,7 +175,7 @@
     align-items: center;
     gap: var(--space-2);
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .description {

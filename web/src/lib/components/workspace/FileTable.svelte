@@ -488,7 +488,7 @@
     cursor: pointer;
   }
   tr.selected {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
   }
   .delete-errors {
     padding: var(--space-2) var(--space-3);
@@ -531,7 +531,7 @@
   }
   th {
     text-align: left;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-dim);
     font-size: var(--text-xs);
   }

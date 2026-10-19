@@ -430,13 +430,13 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: var(--space-1) 0;
   }
   .lab,
   .type {
     color: var(--text-muted);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
   }
   .header-meta {
     display: flex;
@@ -479,7 +479,7 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: var(--space-4);
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1023px) {
     .split {
       grid-template-columns: 1fr;
     }
@@ -503,7 +503,7 @@
     text-decoration: underline;
   }
   .flag-row {
-    background: rgba(204, 102, 102, 0.06);
+    background: var(--row-danger-bg);
   }
   .flag {
     display: inline-flex;
@@ -513,7 +513,7 @@
     padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .flag-H {
     background: var(--status-danger-bg);

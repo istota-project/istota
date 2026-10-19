@@ -81,7 +81,7 @@
     width: 1.5rem;
     height: 1.5rem;
     border: 1px solid var(--border-default);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     font-size: var(--text-xs);
     color: var(--text-muted);
     background: var(--surface-card);
@@ -96,7 +96,7 @@
     border-color: var(--accent-blue);
     background: var(--accent-blue);
     color: var(--on-accent-fg);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .label {

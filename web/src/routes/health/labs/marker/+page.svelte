@@ -428,7 +428,7 @@
   }
   h1 {
     font-size: var(--text-xl);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   .meta {
@@ -497,12 +497,12 @@
   }
   .alert-pill {
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     padding: 0.15rem 0.55rem;
     border-radius: var(--radius-pill);
     background: rgba(204, 102, 102, 0.25);
     color: var(--status-danger-fg);
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
   }
   .alert-low .alert-pill {
     background: rgba(122, 163, 216, 0.25);
@@ -510,7 +510,7 @@
   }
   .alert-title {
     font-size: var(--text-base);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
   .alert-tag {
@@ -520,11 +520,11 @@
     background: var(--surface-raised);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
   }
   .alert .summary {
     font-size: var(--text-sm);
-    line-height: 1.55;
+    line-height: var(--leading-normal);
     color: var(--text-primary);
     margin: 0 0 var(--space-3);
   }
@@ -533,9 +533,9 @@
   }
   .alert .block h3 {
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
     color: var(--text-muted);
     margin: 0 0 var(--space-2);
   }
@@ -544,7 +544,7 @@
     padding-left: 1.1rem;
     color: var(--text-primary);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
   .alert ul li {
     margin-bottom: 0.2rem;
@@ -587,13 +587,13 @@
   .about h2,
   .history h2 {
     font-size: var(--text-base);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0 0 var(--space-2);
   }
   .about p {
     font-size: var(--text-sm);
     color: var(--text-muted);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
     margin: 0 0 var(--space-3);
   }
   .about dl {
@@ -606,7 +606,7 @@
   .about dt {
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     font-size: var(--text-xs);
   }
   .about dd {
@@ -632,13 +632,13 @@
   }
   .history th {
     color: var(--text-dim);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     text-transform: uppercase;
     font-size: var(--text-xs);
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
   .flag-row {
-    background: rgba(204, 102, 102, 0.05);
+    background: var(--row-danger-bg);
   }
   .flag {
     display: inline-flex;
@@ -648,7 +648,7 @@
     padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .flag-H {
     background: var(--status-danger-bg);

@@ -1015,7 +1015,7 @@
   }
   a[aria-current='page'] {
     color: var(--text-primary);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   a:hover {
     text-decoration: underline;

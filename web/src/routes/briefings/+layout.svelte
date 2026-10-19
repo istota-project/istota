@@ -783,7 +783,7 @@
     flex: 1;
     min-width: 0;
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -812,7 +812,7 @@
     line-clamp: 2;
     overflow: hidden;
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     color: var(--text-muted);
     overflow-wrap: anywhere;
   }
@@ -863,8 +863,8 @@
   }
 
   .load-more:hover:not(:disabled) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   .sidebar-error {

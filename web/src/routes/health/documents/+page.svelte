@@ -595,7 +595,7 @@
   h1 {
     margin: 0;
     font-size: var(--text-lg);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .sub {
@@ -607,7 +607,7 @@
   .name {
     color: var(--accent-blue);
     text-decoration: none;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -646,7 +646,7 @@
     margin: var(--space-1) 0 0;
     font-size: var(--text-xs);
     color: var(--text-muted);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
 
   .documents-grid {
@@ -771,7 +771,7 @@
   .detach:disabled,
   .attach:disabled {
     cursor: default;
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
 
   .busy {

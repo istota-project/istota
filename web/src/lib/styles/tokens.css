@@ -103,6 +103,19 @@
 	   moving the identity color. Hover is the underline only — see `.prose a`. */
   --link: var(--accent-amber);
 
+  /* Interaction fills. --hover-bg/--hover-fg are the pointer-over state of a
+     button, menu item or list row; --selected-bg is the state that stays
+     after the pointer leaves (the current nav item, the selected row). Both
+     are the raised surface today, named apart so either can move alone. */
+  --hover-bg: var(--surface-raised);
+  --hover-fg: var(--text-primary);
+  --selected-bg: var(--surface-raised);
+
+  /* Row tints: a table row or record card flagged as an error or a warning.
+     Washes rather than the status fills, so the row's text stays legible. */
+  --row-danger-bg: rgba(204, 102, 102, 0.06);
+  --row-warn-bg: hsla(35, 60%, 60%, 0.08);
+
   /* Categorical chips, independent of status severity. */
   --category-blue-bg: #203245;
   --category-blue-fg: #a7c8ee;
@@ -235,6 +248,8 @@
   --radius-md: 0.5rem;
   --radius-card: var(--radius-md);
   --radius-pill: 999px;
+  /* A circle: a dot, an avatar, a round icon button. */
+  --radius-round: 50%;
 
   /* Spacing ramp — 4px steps at the unscaled root, in rem so they track the
 	   text-scale preference. Nine off-ramp values (0.3 / 0.35 / 0.4 / 0.45 /
@@ -402,10 +417,43 @@
   --focus-ring-width: 2px;
   --focus-ring-offset: 2px;
 
-  /* Transitions */
-  --transition-fast: 0.15s ease;
+  /* Motion. A duration and an easing are separate tokens because an
+     `animation` cannot take the `transition` shorthand; --transition-fast is
+     the two together for the common case. Spinners and pulses keep their own
+     lengths: those are a rhythm, not a response to input. */
+  --duration-fast: 0.15s;
+  --duration-slow: 0.3s;
+  --ease-standard: ease;
+  --transition-fast: var(--duration-fast) var(--ease-standard);
+
+  /* A disabled control, drawn at reduced strength rather than recoloured, so
+     it keeps its variant's look. */
+  --disabled-opacity: 0.5;
+
+  /* Icon boxes, for an icon that sizes with the text-scale preference. */
+  --icon-xs: 0.75rem;
+  --icon-sm: 0.875rem;
+  --icon-md: 1rem;
+  --icon-lg: 1.25rem;
+  --icon-xl: 1.75rem;
 
   /* Typography */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  /* Leading, as unitless ratios so it follows the element's own size.
+     `none` is a single line box (a glyph button, a badge), `tight` a heading
+     or a dense label, `snug` a card or list line, `normal` body text (the
+     body's own value), `relaxed` long prose at a reading measure. */
+  --leading-none: 1;
+  --leading-tight: 1.2;
+  --leading-snug: 1.4;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.6;
+  /* Uppercase text: a micro-label, a table header, a status chip. Caps set
+     solid read cramped, and every caps rule in the tree tracks by this. */
+  --tracking-caps: 0.04em;
   --font-sans: system-ui, -apple-system, sans-serif;
   /* One monospace stack. Five slightly different ones were written out as
 	   var(--font-mono, …) fallbacks, so the token they all named never existed
@@ -524,6 +572,11 @@
   --map-marker-live: #16a34a;
   --map-marker-browser: #ea580c;
   --link: var(--accent-amber);
+  --hover-bg: var(--surface-raised);
+  --hover-fg: var(--text-primary);
+  --selected-bg: var(--surface-raised);
+  --row-danger-bg: rgba(163, 21, 46, 0.06);
+  --row-warn-bg: rgba(160, 110, 20, 0.08);
 
   /* Categorical chips. */
   --category-blue-bg: #e6effa;

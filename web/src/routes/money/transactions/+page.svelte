@@ -359,8 +359,8 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
+    letter-spacing: var(--tracking-caps);
+    font-weight: var(--weight-medium);
     padding: var(--space-3) var(--space-3) var(--space-1);
     border-top: 1px solid var(--border-subtle);
     margin-top: var(--space-1);
@@ -380,7 +380,7 @@
   }
 
   .txn-payee {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -485,8 +485,8 @@
   }
 
   .pagination button:hover:not(:disabled) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   .pagination button:disabled {

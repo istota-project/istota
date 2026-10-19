@@ -205,7 +205,7 @@
 
   .account-name {
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 

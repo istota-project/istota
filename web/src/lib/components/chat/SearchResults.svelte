@@ -146,7 +146,7 @@
     color: var(--text-dim);
   }
   .source {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-secondary);
   }
   .date {
@@ -156,7 +156,7 @@
   .summary {
     font-size: var(--text-sm);
     color: var(--text-primary);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
   .card-actions {
     display: flex;

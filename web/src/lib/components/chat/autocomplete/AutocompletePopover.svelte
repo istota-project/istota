@@ -80,7 +80,7 @@
     white-space: nowrap;
   }
   .ac-item[data-highlighted='true'] {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .ac-label {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

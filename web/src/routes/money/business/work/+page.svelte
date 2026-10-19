@@ -583,7 +583,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     color: var(--text-primary);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   .work-service {

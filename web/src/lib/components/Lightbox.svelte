@@ -590,7 +590,7 @@
     width: 2.5rem;
     height: 2.5rem;
     border: none;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     /* design-lint-allow-begin: fixed chrome — the lightbox is a theme-invariant
        dark overlay over the image, so its controls stay dark-on-white in both
        themes. */
@@ -598,7 +598,7 @@
     color: #fff;
     /* design-lint-allow-end */
     cursor: pointer;
-    transition: background 120ms;
+    transition: background var(--transition-fast);
   }
   .nav:hover {
     /* design-lint-allow: fixed chrome — see .nav above. */

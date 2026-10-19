@@ -561,9 +561,9 @@
     position: absolute;
     top: 0.4rem;
     right: 0.4rem;
-    font-size: 0.55rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-caps);
     padding: 0.1rem var(--space-2);
     background: var(--scrim-pill-bg);
     color: var(--scrim-pill-fg);
@@ -640,7 +640,7 @@
     justify-content: center;
     width: 56px;
     height: 56px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
        the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.6);
@@ -649,7 +649,7 @@
     /* Nudge the glyph off centre — a triangle's optical centre sits left
 		   of its bounding box's. */
     padding-left: 4px;
-    transition: background 0.15s ease;
+    transition: background var(--transition-fast);
     pointer-events: none;
   }
 
@@ -744,8 +744,8 @@
     color: #fff;
     /* design-lint-allow-end */
     font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-caps);
     pointer-events: none;
   }
 
@@ -808,7 +808,7 @@
     color: #fff;
     /* design-lint-allow-end */
     font-size: 1.2rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     pointer-events: none;
   }
 
@@ -842,7 +842,7 @@
     margin: 0;
     padding: var(--space-2) var(--space-3) var(--space-1);
     font-size: 0.8rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .feed-grid :global(.card-body h3 a) {
@@ -861,7 +861,7 @@
     margin: 0;
     padding: var(--space-2) var(--space-3);
     font-size: var(--text-base);
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     color: var(--text-secondary);
     word-break: break-word;
   }

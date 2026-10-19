@@ -925,7 +925,7 @@
     background: var(--map-marker-live);
     /* The page surface, so the dot keeps a contrasting ring on either theme's tiles. */
     border: 2px solid var(--surface-base);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     box-shadow: 0 0 0 0 rgba(74, 255, 127, 0.4);
     animation: pulse 2s ease-out infinite;
   }
@@ -961,7 +961,7 @@
     height: 18px;
     background: #ffc107;
     border: 2px solid var(--surface-base);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     cursor: grab;
     box-shadow: 0 0 0 3px rgba(255, 193, 7, 0.3);
   }
@@ -982,7 +982,7 @@
   }
 
   :global(.maplibregl-ctrl-group button:not(:disabled):hover) {
-    background-color: var(--surface-raised) !important;
+    background-color: var(--hover-bg) !important;
   }
 
   :global(.maplibregl-ctrl-group button span) {

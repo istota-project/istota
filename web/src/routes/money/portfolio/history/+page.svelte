@@ -525,7 +525,7 @@
   }
 
   .symbol-title {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .clear-symbol {
@@ -621,7 +621,7 @@
   }
 
   .diff-symbol {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .diff-col-symbol {

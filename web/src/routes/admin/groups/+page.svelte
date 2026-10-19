@@ -520,14 +520,14 @@
   }
   legend {
     padding-inline: var(--space-1);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .row-clickable {
     cursor: pointer;
   }
   .row-clickable:hover,
   .row-clickable.selected {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .row-clickable.selected td:first-child {
     box-shadow: inset 2px 0 0 var(--accent);
@@ -541,7 +541,7 @@
     background: none;
     color: var(--text-primary);
     font: inherit;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     text-align: left;
     cursor: pointer;
     overflow-wrap: anywhere;
@@ -587,7 +587,7 @@
     gap: var(--space-3);
   }
   .event-title {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .event-details {
     margin: var(--space-1) 0 0;

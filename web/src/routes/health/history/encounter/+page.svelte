@@ -460,7 +460,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   h2 {
@@ -487,7 +487,7 @@
   .meta dt {
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     color: var(--text-dim);
     margin-bottom: 0.15rem;
   }
@@ -509,30 +509,33 @@
   }
   .notes p {
     white-space: pre-wrap;
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-primary);
   }
 
-  /* Three across on desktop, two on a narrow window, one on a phone —
-     matching the conditions list. */
+  /* One column, then two, then three as the section widens — the
+     conditions list's steps, which are CardGrid's. */
+  .related {
+    container: related / inline-size;
+  }
   .card-grid {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
-  @media (max-width: 1100px) {
+  @container related (min-width: 40rem) {
     .card-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  @media (max-width: 768px) {
+  @container related (min-width: 64rem) {
     .card-grid {
-      grid-template-columns: minmax(0, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
   /* Direct child only: the diagnoses cards below hold their name in a nested
@@ -557,8 +560,8 @@
   .card-grid .name {
     margin: 0;
     font-size: var(--text-sm);
-    font-weight: 500;
-    line-height: 1.35;
+    font-weight: var(--weight-medium);
+    line-height: var(--leading-snug);
     min-width: 0;
     overflow-wrap: anywhere;
   }

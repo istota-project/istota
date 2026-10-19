@@ -97,8 +97,8 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
+    letter-spacing: var(--tracking-caps);
+    font-weight: var(--weight-medium);
     padding: var(--space-2) var(--space-3) 0.15rem;
   }
 
@@ -108,9 +108,9 @@
     border: none;
     font: inherit;
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     color: var(--text-dim);
     cursor: pointer;
     text-align: left;
@@ -131,11 +131,11 @@
   }
 
   .cat-header:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .cat-header.active {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
   }
 
   .caret-btn {
@@ -156,9 +156,9 @@
     border: none;
     font: inherit;
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     color: var(--text-dim);
     cursor: pointer;
     text-align: left;

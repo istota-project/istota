@@ -51,11 +51,11 @@
 }
 
 .sidebar .view-btn:hover {
-  background: var(--surface-raised);
+  background: var(--hover-bg);
 }
 
 .sidebar .view-btn.active {
-  background: var(--surface-raised);
+  background: var(--selected-bg);
   color: var(--text-primary);
 }
 
@@ -79,7 +79,7 @@
 
 .sidebar .list-row:hover,
 .sidebar .list-row.active {
-  background: var(--surface-raised);
+  background: var(--hover-bg);
 }
 
 @media (pointer: coarse) {

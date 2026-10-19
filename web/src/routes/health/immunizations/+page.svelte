@@ -408,7 +408,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   .actions {
@@ -452,10 +452,10 @@
   .coverage h3 {
     margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
   .cards {
     list-style: none;
@@ -477,9 +477,9 @@
     color: var(--text-primary);
   }
   .card .name {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     font-size: var(--text-sm);
-    line-height: 1.35;
+    line-height: var(--leading-snug);
   }
   .card-body {
     margin-top: auto;
@@ -515,7 +515,7 @@
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     font-size: var(--text-sm);
     max-width: 240px;
   }

@@ -72,8 +72,8 @@
     }
 
     .sidebar-toggle:hover {
-      color: var(--text-primary);
-      background: var(--surface-raised);
+      color: var(--hover-fg);
+      background: var(--hover-bg);
     }
 
     .sidebar-toggle:active {

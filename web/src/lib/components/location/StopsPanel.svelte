@@ -68,8 +68,8 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
+    letter-spacing: var(--tracking-caps);
+    font-weight: var(--weight-medium);
     margin-bottom: var(--space-1);
   }
 </style>

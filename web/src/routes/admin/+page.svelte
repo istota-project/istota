@@ -960,7 +960,7 @@
   .health {
     display: inline-flex;
     align-items: center;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 
@@ -968,14 +968,14 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
   }
 
   .dot {
     display: inline-block;
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-dim);
     margin-right: var(--space-1);
     flex-shrink: 0;
@@ -1043,7 +1043,7 @@
   .source-bar {
     height: 6px;
     background: var(--surface-base);
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -1204,7 +1204,7 @@
   .stack-bar {
     display: flex;
     height: 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
     margin: var(--space-1) 0;
     background: var(--surface-base);
@@ -1260,7 +1260,7 @@
   }
 
   .module-name {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: var(--text-base);
     margin-bottom: var(--space-2);
   }
@@ -1328,7 +1328,7 @@
     align-items: flex-start;
     gap: var(--space-1);
     font-size: var(--text-sm);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     color: var(--text-secondary);
   }
 
@@ -1340,10 +1340,10 @@
   .effort-chip {
     display: inline-block;
     padding: 0.05rem var(--space-2);
-    font-size: 0.55rem;
-    font-weight: 600;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     border-radius: var(--radius-pill);
     background: var(--status-info-bg);
     color: var(--status-info-fg);
@@ -1433,7 +1433,7 @@
       gap: 0 var(--space-1);
     }
     .source-pill {
-      font-size: 0.7rem;
+      font-size: var(--text-xs);
     }
   }
 

@@ -121,7 +121,7 @@
     color: var(--text-primary);
     font: inherit;
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     cursor: pointer;
     padding: 0;
     display: flex;

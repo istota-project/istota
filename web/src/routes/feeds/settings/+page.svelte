@@ -820,7 +820,7 @@
 
   .diag-value {
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 
@@ -885,11 +885,11 @@
     padding: 0;
     overflow-wrap: anywhere;
     word-break: break-all;
-    line-height: 1.3;
+    line-height: var(--leading-tight);
   }
 
   .grid tbody tr.has-error {
-    background: rgba(204, 102, 102, 0.05);
+    background: var(--row-danger-bg);
   }
 
   .grid td.type,
@@ -935,7 +935,7 @@
     padding: 0.2rem var(--space-1);
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     min-height: var(--control-height-md);
   }
 

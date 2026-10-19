@@ -407,7 +407,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   .actions {
@@ -496,7 +496,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1;
+    line-height: var(--leading-none);
     cursor: pointer;
   }
   .unstage:hover {
@@ -556,7 +556,7 @@
     margin-bottom: var(--space-2);
   }
   .card-body .who {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     font-size: var(--text-sm);
   }
   .card-body .muted {
@@ -578,10 +578,10 @@
     align-items: center;
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     padding: 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   /* design-lint-allow-begin: categorical palette — the hue names the encounter
      type (visit / procedure / imaging / dental), not a severity. Folding these
@@ -649,10 +649,10 @@
   .sidebar h3 {
     margin: var(--space-3) 0 var(--space-2);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
   /* Cards, not flat rows. A condition name is routinely long ("Bilateral
 	   patellofemoral pain syndrome with anterior knee crepitus") and the old
@@ -712,7 +712,7 @@
   }
   .conditions .name {
     min-width: 0;
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     overflow-wrap: anywhere;
   }
   /* Metrics copied from the admin dashboard's .effort-chip / .admin-badge so
@@ -721,10 +721,10 @@
     display: inline-block;
     flex: 0 0 auto;
     padding: 0.05rem var(--space-2);
-    font-size: 0.55rem;
-    font-weight: 600;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     border-radius: var(--radius-pill);
   }
   .severity.sev-mild {

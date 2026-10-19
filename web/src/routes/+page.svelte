@@ -192,13 +192,13 @@
   }
   .welcome-greeting {
     margin: 0;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: 0.95rem;
     color: var(--text-primary);
   }
   .welcome-note {
     margin: var(--space-1) 0 0;
-    font-size: 0.85rem;
+    font-size: var(--text-base);
     color: var(--text-muted);
     /* A plus-address is one unbroken token and can be long; on a phone it would
 		   otherwise run past the card's edge rather than wrap. */
@@ -249,7 +249,7 @@
     transition: background var(--transition-fast);
   }
   .feature-card:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   /* Two tiles a row on a phone. The auto-fit wall drops to one column below
      about 430px, where a single tile per row scrolls the module list off the
@@ -267,7 +267,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: 0.9rem;
     margin-bottom: var(--space-1);
     color: var(--text-primary);

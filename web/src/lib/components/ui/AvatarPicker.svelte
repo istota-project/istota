@@ -169,7 +169,7 @@
        picture underneath it when it appears. */
     outline: 2px dashed transparent;
     outline-offset: 3px;
-    transition: outline-color 0.12s ease;
+    transition: outline-color var(--transition-fast);
   }
 
   .target.is-busy {
@@ -200,7 +200,7 @@
     background: var(--scrim-bg);
     color: var(--on-scrim-fg);
     opacity: 0;
-    transition: opacity 0.12s ease;
+    transition: opacity var(--transition-fast);
   }
 
   .avatar-picker.dragging .overlay,

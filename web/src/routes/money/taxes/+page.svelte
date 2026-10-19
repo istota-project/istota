@@ -611,7 +611,7 @@
 
   section h2 {
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     margin: 0 0 var(--space-2) var(--space-1);
   }
@@ -724,8 +724,8 @@
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
+    letter-spacing: var(--tracking-caps);
+    font-weight: var(--weight-medium);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -733,7 +733,7 @@
     padding: var(--space-2) var(--space-3) 0.15rem;
     font-size: var(--text-xs);
     color: var(--text-dim);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     border-top: 1px solid var(--border-subtle);
   }
 
@@ -744,13 +744,13 @@
   }
 
   .breakdown-row.highlight {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     padding-top: var(--space-1);
     padding-bottom: var(--space-1);
   }
 
   .breakdown-row.result {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     background: var(--surface-raised);
     padding-top: var(--space-2);
     padding-bottom: var(--space-2);
@@ -784,8 +784,8 @@
   .breakdown-header .breakdown-val {
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
+    letter-spacing: var(--tracking-caps);
+    font-weight: var(--weight-medium);
   }
 
   /* Info panels */
@@ -821,7 +821,7 @@
     margin: 0 0 var(--space-2);
     font-size: var(--text-xs);
     color: var(--text-muted);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
 
   .state-notice {
@@ -843,7 +843,7 @@
 
   .prov-label {
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-secondary);
   }
 

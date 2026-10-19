@@ -95,7 +95,7 @@
   margin: 0;
   font-size: var(--text-sm);
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .settings .section-header {
@@ -167,10 +167,10 @@
 
 .settings .grid th {
   color: var(--text-dim);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   font-size: var(--text-xs);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-caps);
 }
 
 .settings .grid td.actions,

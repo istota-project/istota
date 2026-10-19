@@ -500,7 +500,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   h2 {
@@ -512,7 +512,7 @@
   .count {
     font-size: var(--text-xs);
     color: var(--text-dim);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     letter-spacing: 0;
     text-transform: none;
   }
@@ -548,7 +548,7 @@
   }
   .form-title strong {
     color: var(--text-primary);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .form .row {
     display: grid;
@@ -602,29 +602,34 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1;
+    line-height: var(--leading-none);
     cursor: pointer;
   }
   .unstage:hover {
     color: var(--text-primary);
   }
 
+  /* Each condition group sizes its card grid by its own width, in
+     CardGrid's steps. */
+  section {
+    container: conditions / inline-size;
+  }
   .list {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
-  @media (max-width: 1100px) {
+  @container conditions (min-width: 40rem) {
     .list {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  @media (max-width: 768px) {
+  @container conditions (min-width: 64rem) {
     .list {
-      grid-template-columns: minmax(0, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
   .list li {
@@ -647,9 +652,9 @@
   .name {
     margin: 0;
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     /* Long condition names wrap rather than pushing the kebab out of the
        corner. */
     min-width: 0;
@@ -674,10 +679,10 @@
     align-items: center;
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .sev-mild {
     background: hsla(145, 40%, 55%, 0.18);
@@ -715,7 +720,7 @@
     font-size: var(--text-sm);
     white-space: pre-wrap;
     color: var(--text-muted);
-    line-height: 1.45;
+    line-height: var(--leading-snug);
   }
 
   .docs {

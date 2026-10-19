@@ -299,7 +299,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   h2 {
@@ -401,7 +401,7 @@
   }
 
   tr.warn td {
-    background: hsla(35, 60%, 60%, 0.08);
+    background: var(--row-warn-bg);
   }
   td.row-actions,
   th.row-actions {

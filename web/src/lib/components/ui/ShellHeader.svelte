@@ -56,7 +56,7 @@
 
   .header h1 {
     font-size: 1rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     margin: 0;
     min-width: 0;
   }

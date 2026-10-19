@@ -533,8 +533,8 @@
     position: absolute;
     top: 0.35rem;
     right: 0.4rem;
-    font-size: 1.25rem;
-    line-height: 1;
+    font-size: var(--text-xl);
+    line-height: var(--leading-none);
   }
   @container settings (max-width: 560px) {
     .sb-grid {

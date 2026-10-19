@@ -276,7 +276,7 @@
   }
 
   .restart-note {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .review-note {

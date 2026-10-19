@@ -347,7 +347,7 @@
   }
   h1 {
     font-size: var(--text-lg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
   h2 {
@@ -356,9 +356,9 @@
   h3 {
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     color: var(--text-dim);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin: 0;
   }
 
@@ -418,7 +418,7 @@
     gap: var(--space-3);
   }
   .enc-card.warn {
-    background: hsla(35, 60%, 60%, 0.08);
+    background: var(--row-warn-bg);
   }
   .enc-head {
     display: flex;

@@ -112,8 +112,7 @@
     "off-scale-space": 4
   },
   "src/routes/feeds/settings/+page.svelte": {
-    "off-scale-space": 5,
-    "raw-color": 1
+    "off-scale-space": 5
   },
   "src/routes/health/history/+page.svelte": {
     "off-scale-space": 8,
@@ -127,17 +126,11 @@
   "src/routes/health/history/encounter/+page.svelte": {
     "off-scale-space": 4
   },
-  "src/routes/health/history/import/+page.svelte": {
-    "raw-color": 1
-  },
   "src/routes/health/immunizations/+page.svelte": {
     "off-scale-space": 2
   },
   "src/routes/health/immunizations/detail/+page.svelte": {
     "off-scale-space": 1
-  },
-  "src/routes/health/immunizations/import/+page.svelte": {
-    "raw-color": 1
   },
   "src/routes/health/immunizations/vaccine/+page.svelte": {
     "off-scale-space": 3
@@ -148,11 +141,10 @@
   },
   "src/routes/health/labs/marker/+page.svelte": {
     "off-scale-space": 8,
-    "raw-color": 8
+    "raw-color": 7
   },
   "src/routes/health/labs/panel/+page.svelte": {
-    "off-scale-space": 1,
-    "raw-color": 1
+    "off-scale-space": 1
   },
   "src/routes/health/labs/upload/+page.svelte": {
     "off-scale-space": 1
