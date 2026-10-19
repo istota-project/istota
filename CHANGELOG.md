@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- In the generic iOS app (0.12.0), Log out hands over to the app, which asks once and then stops location tracking, removes the notification enrollment and clears the app's website data. Settings → Preferences has an App settings button, and the app no longer gets the offline service worker, which it cannot run. Browsers and older iOS apps are unchanged.
+
 - Notification registrations from the generic iOS app name the app's server connection, and alerts repeat it, so the app ignores a tapped alert from a server it has disconnected from. Registrations and alerts for older iOS apps are unchanged.
 
 - Compatible iOS apps can sign in through the browser and ask you to approve the displayed account and installation. The app receives a fresh session through a one-use exchange; existing browser and older-app sign-in behavior stays the same.

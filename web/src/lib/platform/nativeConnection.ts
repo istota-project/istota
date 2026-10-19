@@ -16,6 +16,8 @@ export interface NativeConnectionContext {
 }
 interface ConnectionPlugin {
   current(): Promise<NativeConnectionContext>;
+  openSettings(): Promise<void>;
+  signOut(): Promise<void>;
   recordPushRegistration(input: {
     registrationId: number;
     connectionBinding: string;
@@ -45,4 +47,39 @@ export async function recordPushRegistration(
     connectionBinding: context.connectionBinding,
     generation: context.generation,
   });
+}
+
+/** Whether the app has native settings and a native sign-out for this page to hand over to. */
+export function appConnectionAvailable(): boolean {
+  return connectionPlugin() !== null;
+}
+
+/** Opens the app's own settings. False when there is no app to open them in. */
+export async function openAppSettings(): Promise<boolean> {
+  const plugin = connectionPlugin();
+  if (!plugin) return false;
+  await plugin.openSettings();
+  return true;
+}
+
+export type AppSignOut = 'signed-out' | 'cancelled' | 'unavailable';
+
+/**
+ * Hands sign-out to the app, which asks natively and then stops tracking, removes the
+ * notification enrollment and clears this page's website data before anyone signs in again.
+ *
+ * 'cancelled' is the user saying no, or a question already on screen; neither is an error.
+ * The page is retired by the app after 'signed-out', so a caller has nothing left to do.
+ */
+export async function signOutOfApp(): Promise<AppSignOut> {
+  const plugin = connectionPlugin();
+  if (!plugin) return 'unavailable';
+  try {
+    await plugin.signOut();
+    return 'signed-out';
+  } catch (e) {
+    const code = (e as { code?: unknown } | null)?.code;
+    if (code === 'USER_CANCELLED' || code === 'SIGN_OUT_PENDING') return 'cancelled';
+    throw e;
+  }
 }

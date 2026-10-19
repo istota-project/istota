@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { isNativeShell, onKeyboardGeometry, shellAtLeast, shellVersion } from './native';
+import {
+  isNativeShell,
+  onKeyboardGeometry,
+  shellAtLeast,
+  shellRunsServiceWorker,
+  shellVersion,
+} from './native';
 
 function setUserAgent(ua: string): void {
   Object.defineProperty(window.navigator, 'userAgent', { value: ua, configurable: true });
@@ -71,6 +77,21 @@ describe('shellAtLeast', () => {
   it('ignores a prerelease suffix rather than failing the parse', () => {
     setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.2.0-beta.1`);
     expect(shellAtLeast('0.2.0')).toBe(true);
+  });
+});
+
+describe('shellRunsServiceWorker', () => {
+  // Only the app-bound builds can run one; the generic shell picks its server at runtime.
+  it.each([
+    ['', false],
+    [' IstotaApp/0.9.0', false],
+    [' IstotaApp/0.10.0', true],
+    [' IstotaApp/0.11.0', true],
+    [' IstotaApp/0.12.0', false],
+    [' IstotaApp/0.13.0', false],
+  ])('is %s → %s', (suffix, expected) => {
+    setUserAgent(`${PLAIN_SAFARI}${suffix}`);
+    expect(shellRunsServiceWorker()).toBe(expected);
   });
 });
 

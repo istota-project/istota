@@ -1,6 +1,23 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen, within } from '@testing-library/svelte';
 import LogoutButton from './LogoutButton.svelte';
+
+const app = vi.hoisted(() => ({
+  signOutOfApp: vi.fn<() => Promise<'signed-out' | 'cancelled' | 'unavailable'>>(),
+}));
+vi.mock('$lib/platform/nativeConnection', () => app);
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
+const lastUser = vi.hoisted(() => ({ forgetLastUserId: vi.fn() }));
+vi.mock('$lib/offline/lastUser', () => lastUser);
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  app.signOutOfApp.mockResolvedValue('unavailable');
+});
 
 // The dialog holds a body scroll lock whose reset runs after unmount; ending a
 // test with it open lands that reset after jsdom tears `document` down.
@@ -59,5 +76,39 @@ describe('LogoutButton', () => {
     await screen.findByRole('dialog');
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe('LogoutButton in the generic iOS app', () => {
+  // The app asks natively and cleans up what /logout would leave bound to the
+  // account, so the button hands over instead of asking a second time.
+  it('signs out through the app without its own dialog or navigation', async () => {
+    app.signOutOfApp.mockResolvedValue('signed-out');
+    const { navigate, trigger } = mount();
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(lastUser.forgetLastUserId).toHaveBeenCalledOnce());
+    expect(app.signOutOfApp).toHaveBeenCalledOnce();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('does nothing when the user cancels the app question', async () => {
+    app.signOutOfApp.mockResolvedValue('cancelled');
+    const { navigate, trigger } = mount();
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(app.signOutOfApp).toHaveBeenCalledOnce());
+    expect(navigate).not.toHaveBeenCalled();
+    expect(lastUser.forgetLastUserId).not.toHaveBeenCalled();
+    expect(notices.notifyError).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('says so, and stays signed in, when the app refuses', async () => {
+    app.signOutOfApp.mockRejectedValue(new Error('The connection changed.'));
+    const { navigate, trigger } = mount();
+    await fireEvent.click(trigger);
+    await vi.waitFor(() => expect(notices.notifyError).toHaveBeenCalledOnce());
+    expect(navigate).not.toHaveBeenCalled();
+    expect(lastUser.forgetLastUserId).not.toHaveBeenCalled();
   });
 });
