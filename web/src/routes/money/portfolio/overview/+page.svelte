@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { Chart, DoughnutController, ArcElement, Tooltip, Legend } from 'chart.js';
   import {
     getPortfolioSummary,
@@ -151,6 +151,9 @@
       if (typeCanvas) charts.push(buildDonut(typeCanvas, s.by_account_type));
       if (geoCanvas) charts.push(buildDonut(geoCanvas, s.by_geography));
     });
+  });
+  onDestroy(() => {
+    while (charts.length) charts.pop()?.destroy();
   });
 </script>
 

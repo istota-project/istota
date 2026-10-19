@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
     ApiError,
     getTaxEstimate,
@@ -26,6 +27,7 @@
   let w2Months = $state(12);
 
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(debounceTimer));
 
   async function loadInitial() {
     loading = true;

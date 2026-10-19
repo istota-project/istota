@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import {
     Chart,
     BarController,
@@ -261,6 +261,10 @@
     if (!_loading && chartCanvas) {
       untrack(() => buildChart());
     }
+  });
+  onDestroy(() => {
+    chart?.destroy();
+    chart = undefined;
   });
 
   async function handleDelete() {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { theme } from '$lib/stores/theme';
   import { chartChrome } from '$lib/chartTheme';
   import { base } from '$app/paths';
@@ -271,6 +271,10 @@
   }
 
   onMount(load);
+  onDestroy(() => {
+    chart?.destroy();
+    chart = undefined;
+  });
 </script>
 
 {#if !loading && !error}

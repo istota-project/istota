@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { getAccounts, type AccountRow } from '$lib/money/api';
@@ -19,6 +19,9 @@
   let accounts: AccountRow[] = $state([]);
   let sidebarOpen = $state(false);
   let filterTimeout: ReturnType<typeof setTimeout> | null = null;
+  onDestroy(() => {
+    if (filterTimeout) clearTimeout(filterTimeout);
+  });
 
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 11 }, (_, i) => currentYear - i);

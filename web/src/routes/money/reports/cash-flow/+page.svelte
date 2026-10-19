@@ -19,7 +19,7 @@
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
   import { parseAmount, formatAmount } from '$lib/money/utils/accounts';
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { theme } from '$lib/stores/theme';
   import { chartChrome } from '$lib/chartTheme';
 
@@ -307,6 +307,10 @@
     if (!_loading && chartCanvas && _m.length > 0) {
       untrack(() => buildChart());
     }
+  });
+  onDestroy(() => {
+    chart?.destroy();
+    chart = undefined;
   });
 </script>
 

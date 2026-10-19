@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { theme } from '$lib/stores/theme';
@@ -403,6 +403,12 @@
   onMount(() => {
     range = rangeSel.current()?.range ?? '90d';
     selectionReady = true;
+  });
+  onDestroy(() => {
+    for (const metric of Object.keys(charts)) {
+      charts[metric]?.destroy();
+      delete charts[metric];
+    }
   });
 </script>
 
