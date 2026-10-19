@@ -106,11 +106,9 @@
 >
   <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
-      <div class="static-key">
-        <span>Key</span>
-        <code>{service?.key}</code>
-        <small class="caption">The key is the identity — work entries reference it by name.</small>
-      </div>
+      <Field label="Key" description="The key is the identity — work entries reference it by name.">
+        <code class="key-value">{service?.key}</code>
+      </Field>
     {:else}
       <Field label="Key" hint="Short identifier used by work entries." error={keyError}>
         <input type="text" bind:value={key} placeholder="consulting" autocomplete="off" />
@@ -151,18 +149,7 @@
 </Modal>
 
 <style>
-  .static-key {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-sm);
-  }
-
-  .static-key > span {
-    color: var(--text-muted);
-  }
-
-  .static-key code {
+  .key-value {
     color: var(--text-secondary);
   }
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EmptyState, Input, Card, Checkbox } from '$lib/components/ui';
+  import { EmptyState, Field, Input, Card, Checkbox } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import {
@@ -135,24 +135,22 @@
             {/if}
           </div>
           <div class="account-controls control-row">
-            <label class="ctl">
-              <span class="micro-label">Group</span>
+            <Field label="Group" layout="compact">
               <Input
                 bind:value={row.group}
                 placeholder="Group"
                 list="portfolio-account-groups"
                 aria-label="Group of {row.account.account_name}"
               />
-            </label>
-            <label class="ctl">
-              <span class="micro-label">Type</span>
+            </Field>
+            <Field label="Type" layout="compact">
               <Input
                 bind:value={row.account_type}
                 placeholder="taxable"
                 list="portfolio-account-types"
                 aria-label="Type of {row.account.account_name}"
               />
-            </label>
+            </Field>
             <Checkbox
               class="excluded-toggle"
               label="Excluded"
@@ -198,13 +196,6 @@
     flex-wrap: wrap;
     align-items: flex-end;
     gap: var(--space-2) var(--space-3);
-  }
-
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
   }
 
   .account-controls :global(.excluded-toggle) {

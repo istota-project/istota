@@ -229,7 +229,7 @@ describe('WorkEntryForm keyboard', () => {
   it('does not save on Enter from the description field', async () => {
     const onSave = vi.fn();
     mount({ entry: row(), onSave });
-    await fireEvent.keyDown(screen.getByPlaceholderText('Optional'), { key: 'Enter' });
+    await fireEvent.keyDown(screen.getByLabelText('Description (optional)'), { key: 'Enter' });
     expect(onSave).not.toHaveBeenCalled();
   });
 

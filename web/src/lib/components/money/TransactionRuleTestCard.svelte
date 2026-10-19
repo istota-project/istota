@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Badge, Button, Input, Select, Card } from '$lib/components/ui';
+  import { Badge, Button, Field, Input, Select, Card } from '$lib/components/ui';
   import {
     ApiError,
     getLedgers,
@@ -158,34 +158,27 @@
     <p class="loading">Loading…</p>
   {:else}
     <div class="test-form control-row">
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Ledger</span>
+      <Field label="Ledger" layout="compact">
         <Select bind:value={ledger} options={ledgerOptions} fullWidth ariaLabel="Preview ledger" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Source</span>
+      </Field>
+      <Field label="Source" layout="compact">
         <Select bind:value={source} options={sourceOptions} fullWidth ariaLabel="Preview source" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Category</span>
+      </Field>
+      <Field label="Category" layout="compact">
         <Input bind:value={category} placeholder="Software" aria-label="Category" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Account</span>
+      </Field>
+      <Field label="Account" layout="compact">
         <Input bind:value={account} placeholder="Chase Business" aria-label="Account" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Payee</span>
+      </Field>
+      <Field label="Payee" layout="compact">
         <Input bind:value={payee} aria-label="Payee" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Notes</span>
+      </Field>
+      <Field label="Notes" layout="compact">
         <Input bind:value={notes} aria-label="Notes" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Tags</span>
+      </Field>
+      <Field label="Tags" layout="compact">
         <Input bind:value={tags} placeholder="one, two" aria-label="Tags" />
-      </div>
+      </Field>
       <div class="ctl-action">
         <Button
           variant="primary"
@@ -272,13 +265,6 @@
     align-items: flex-end;
     gap: var(--space-2) var(--space-3);
     margin-bottom: var(--space-3);
-  }
-
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
   }
 
   .ctl-action {

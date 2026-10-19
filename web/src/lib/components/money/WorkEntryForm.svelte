@@ -6,7 +6,15 @@
     quantityFieldFor,
     type WorkEntrySavePayload,
   } from '$lib/money/workEntryPayload';
-  import { Modal, Button, Field, Select, type SelectOption, Checkbox } from '$lib/components/ui';
+  import {
+    Modal,
+    Button,
+    Field,
+    Input,
+    Select,
+    type SelectOption,
+    Checkbox,
+  } from '$lib/components/ui';
   import { formatDecimal } from '$lib/format';
   import { localDateISO } from '$lib/dateFormat';
 
@@ -185,54 +193,48 @@
   onOpenChange={handleOpenChange}
   width="400px"
 >
-  <label class="field">
-    <span class="caption">Date</span>
-    <input type="date" bind:value={date} />
-  </label>
+  <div class="vstack">
+    <Field label="Date">
+      <Input type="date" bind:value={date} />
+    </Field>
 
-  <label class="field">
-    <span class="caption">Client</span>
-    <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
-  </label>
+    <Field label="Client">
+      <Select bind:value={client} options={clientOptions} fullWidth />
+    </Field>
 
-  <label class="field">
-    <span class="caption">Service</span>
-    <Select bind:value={service} options={serviceOptions} fullWidth ariaLabel="Service" />
-  </label>
+    <Field label="Service">
+      <Select bind:value={service} options={serviceOptions} fullWidth />
+    </Field>
 
-  {#if wants === 'qty'}
-    <label class="field">
-      <span class="caption">{selectedService?.type === 'days' ? 'Days' : 'Hours'}</span>
-      <input type="text" inputmode="decimal" bind:value={qty} placeholder="e.g. 3" />
-    </label>
-  {:else if wants === 'amount'}
-    <label class="field">
-      <span class="caption">Amount</span>
-      <input type="text" inputmode="decimal" bind:value={amount} placeholder="e.g. 1200" />
-    </label>
-  {:else if selectedService}
-    <p class="field-note caption">Flat-rate service — quantity is not used.</p>
-  {/if}
-
-  <label class="field">
-    <span class="caption">Discount</span>
-    <input type="text" inputmode="decimal" bind:value={discount} placeholder="0" />
-  </label>
-
-  <label class="field">
-    <span class="caption">Description</span>
-    <input type="text" data-multiline="true" bind:value={description} placeholder="Optional" />
-  </label>
-
-  <label class="field">
-    <span class="caption">Entity</span>
-    <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
-    {#if !entity && selectedClient?.entity}
-      <span class="caption">Defaults to {selectedClient.entity}</span>
+    {#if wants === 'qty'}
+      <Field label={selectedService?.type === 'days' ? 'Days' : 'Hours'}>
+        <Input inputmode="decimal" bind:value={qty} placeholder="e.g. 3" />
+      </Field>
+    {:else if wants === 'amount'}
+      <Field label="Amount">
+        <Input inputmode="decimal" bind:value={amount} placeholder="e.g. 1200" />
+      </Field>
+    {:else if selectedService}
+      <p class="caption">Flat-rate service — quantity is not used.</p>
     {/if}
-  </label>
 
-  <div class="separate">
+    <Field label="Discount">
+      <Input inputmode="decimal" bind:value={discount} placeholder="0" />
+    </Field>
+
+    <Field label="Description" optional>
+      <Input data-multiline="true" bind:value={description} />
+    </Field>
+
+    <Field
+      label="Entity"
+      description={!entity && selectedClient?.entity
+        ? `Defaults to ${selectedClient.entity}`
+        : undefined}
+    >
+      <Select bind:value={entity} options={entityOptions} fullWidth />
+    </Field>
+
     <Field
       label="Invoice separately"
       checkbox
@@ -259,30 +261,8 @@
 </Modal>
 
 <style>
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    margin-bottom: var(--space-3);
-  }
-
-  .field input[type='text'],
-  .field input[type='date'] {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
-  .field-note {
-    margin: 0 0 var(--space-3);
-  }
-
-  .separate {
-    margin-bottom: var(--space-3);
+  p {
+    margin: 0;
   }
 
   .preview {
@@ -292,11 +272,11 @@
     background: var(--surface-card);
     border-radius: var(--radius-sm);
     padding: var(--space-2) var(--space-2);
-    margin-bottom: var(--space-2);
+    margin: var(--space-3) 0 var(--space-2);
   }
 
-  /* Type is the global .form-error; only the space below it is this form's. */
+  /* Type is the global .form-error; only the space around it is this form's. */
   .form-error {
-    margin-bottom: var(--space-2);
+    margin: var(--space-3) 0 var(--space-2);
   }
 </style>

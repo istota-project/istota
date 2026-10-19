@@ -31,7 +31,7 @@ describe('PlaceForm Enter to save', () => {
   // save the form in the same keystroke.
   it('does not save on Enter from the category Select trigger', async () => {
     const onSave = mount();
-    const trigger = document.querySelector('button[aria-label="Category"]') as HTMLElement;
+    const trigger = screen.getByRole('button', { name: 'Category' });
     await fireEvent.keyDown(trigger, { key: 'Enter' });
     expect(onSave).not.toHaveBeenCalled();
   });

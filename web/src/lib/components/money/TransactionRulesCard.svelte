@@ -5,6 +5,7 @@
     Button,
     ConfirmDialog,
     EmptyState,
+    Field,
     Input,
     KebabMenu,
     Select,
@@ -406,8 +407,7 @@
     </p>
 
     <div class="scope-row control-row">
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Ledger</span>
+      <Field label="Ledger" layout="compact">
         <Select
           bind:value={filterLedger}
           options={filterLedgerOptions}
@@ -415,9 +415,8 @@
           ariaLabel="Filter by ledger"
           onValueChange={onFilterLedger}
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Source</span>
+      </Field>
+      <Field label="Source" layout="compact">
         <Select
           bind:value={filterSource}
           options={filterSourceOptions}
@@ -425,12 +424,11 @@
           ariaLabel="Filter by source"
           onValueChange={onFilterSource}
         />
-      </div>
+      </Field>
     </div>
 
     <div class="rule-form add-form control-row">
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Ledger</span>
+      <Field label="Ledger" layout="compact">
         <Select
           bind:value={addLedger}
           options={addLedgerOptions}
@@ -438,9 +436,8 @@
           fullWidth
           ariaLabel="Rule ledger"
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Source</span>
+      </Field>
+      <Field label="Source" layout="compact">
         <Select
           bind:value={addSource}
           options={addSourceOptions}
@@ -448,25 +445,20 @@
           fullWidth
           ariaLabel="Rule source"
         />
-      </div>
-      <div class="ctl ctl-narrow">
-        <span class="micro-label" aria-hidden="true">Field</span>
+      </Field>
+      <Field label="Field" layout="compact" class="ctl-narrow">
         <Select bind:value={addField} options={fieldOptions} fullWidth ariaLabel="Rule field" />
-      </div>
-      <div class="ctl ctl-narrow">
-        <span class="micro-label" aria-hidden="true">Match</span>
+      </Field>
+      <Field label="Match" layout="compact" class="ctl-narrow">
         <Select bind:value={addKind} options={kindOptions} fullWidth ariaLabel="Rule match kind" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Value</span>
+      </Field>
+      <Field label="Value" layout="compact">
         <Input bind:value={addValue} placeholder="Software" aria-label="Match value" />
-      </div>
-      <div class="ctl ctl-narrow">
-        <span class="micro-label" aria-hidden="true">Action</span>
+      </Field>
+      <Field label="Action" layout="compact" class="ctl-narrow">
         <Select bind:value={addAction} options={actionOptions} fullWidth ariaLabel="Rule action" />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Target</span>
+      </Field>
+      <Field label="Target" layout="compact">
         <Input
           bind:value={addTarget}
           placeholder="Expenses:Business:Software"
@@ -474,9 +466,8 @@
           disabled={addAction === 'skip'}
           aria-label="Target account"
         />
-      </div>
-      <div class="ctl ctl-tiny">
-        <span class="micro-label" aria-hidden="true">Priority</span>
+      </Field>
+      <Field label="Priority" layout="compact" class="ctl-tiny">
         <Input
           bind:value={addPriority}
           type="number"
@@ -486,7 +477,7 @@
           invalid={!isIntegerPriority(addPriority)}
           aria-label="Rule priority"
         />
-      </div>
+      </Field>
       <div class="ctl-action">
         <Button
           variant="primary"
@@ -526,61 +517,54 @@
           <li class="rule-row" class:off={!rule.enabled}>
             {#if editingId === rule.id}
               <div class="rule-form control-row">
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Ledger</span>
+                <Field label="Ledger" layout="compact">
                   <Select
                     bind:value={editLedger}
                     options={editLedgerOptions}
                     fullWidth
                     ariaLabel="Edit ledger"
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Source</span>
+                </Field>
+                <Field label="Source" layout="compact">
                   <Select
                     bind:value={editSource}
                     options={editSourceOptions}
                     fullWidth
                     ariaLabel="Edit source"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">Field</span>
+                </Field>
+                <Field label="Field" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editField}
                     options={fieldOptions}
                     fullWidth
                     ariaLabel="Edit field"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">Match</span>
+                </Field>
+                <Field label="Match" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editKind}
                     options={kindOptions}
                     fullWidth
                     ariaLabel="Edit match kind"
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Value</span>
+                </Field>
+                <Field label="Value" layout="compact">
                   <Input
                     bind:value={editValue}
                     invalid={editValue.trim() === ''}
                     aria-label="Edit match value"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">Action</span>
+                </Field>
+                <Field label="Action" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editAction}
                     options={actionOptions}
                     fullWidth
                     ariaLabel="Edit action"
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Target</span>
+                </Field>
+                <Field label="Target" layout="compact">
                   <Input
                     bind:value={editTarget}
                     monospace
@@ -588,9 +572,8 @@
                     invalid={editAction !== 'skip' && editTarget.trim() === ''}
                     aria-label="Edit target account"
                   />
-                </div>
-                <div class="ctl ctl-tiny">
-                  <span class="micro-label" aria-hidden="true">Priority</span>
+                </Field>
+                <Field label="Priority" layout="compact" class="ctl-tiny">
                   <Input
                     bind:value={editPriority}
                     type="number"
@@ -600,16 +583,15 @@
                     invalid={!isIntegerPriority(editPriority)}
                     aria-label="Priority"
                   />
-                </div>
-                <div class="ctl ctl-narrow">
-                  <span class="micro-label" aria-hidden="true">State</span>
+                </Field>
+                <Field label="State" layout="compact" class="ctl-narrow">
                   <Select
                     bind:value={editEnabled}
                     options={enabledOptions}
                     fullWidth
                     ariaLabel="Enabled"
                   />
-                </div>
+                </Field>
                 <div class="ctl-action">
                   <Button
                     variant="primary"
@@ -690,18 +672,11 @@
     margin: 0 0 var(--space-3);
   }
 
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
-  }
-
-  .ctl-narrow {
+  .rule-form :global(.ctl-narrow) {
     flex: 0 1 7rem;
   }
 
-  .ctl-tiny {
+  .rule-form :global(.ctl-tiny) {
     flex: 0 1 5rem;
   }
 

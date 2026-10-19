@@ -16,6 +16,8 @@
     Modal,
     Button,
     ConfirmDialog,
+    Field,
+    Input,
     Select,
     type SelectOption,
     Checkbox,
@@ -438,6 +440,53 @@
   }
 </script>
 
+{#snippet modelNote()}
+  {#if crossesNamespace}
+    Now listing the models the new brain can run — the one this room had reads model names
+    differently and has been cleared. Pick a new one here, or leave it on
+    <em>Default model</em> to use that brain's own.
+  {:else}
+    Applies to every message in this room, on both web and Nextcloud Talk. A
+    <code>!model</code> prefix still overrides it for a single message.
+  {/if}
+{/snippet}
+
+{#snippet guestsNote()}
+  {#if room.policy?.is_host}
+    A guest's turn runs on your behalf, as this room's host.
+  {:else if room.policy?.host}
+    A guest's turn runs on behalf of this room's host, {room.policy.host}, who sets this.
+  {:else}
+    This room has no host, so guests are not answered until a member claims it.
+  {/if}
+{/snippet}
+
+{#snippet repliesNote()}
+  {#if room.policy?.is_host}
+    When the bot answers a message nobody addressed to it. You set this as the room's host.
+  {:else if room.policy?.host}
+    When the bot answers a message nobody addressed to it. This room's host, {room.policy.host},
+    sets this.
+  {:else}
+    This room has no host, so nobody can change this until a member claims it.
+  {/if}
+{/snippet}
+
+{#snippet dispositionNote()}
+  Friendly also answers thanks or a remark about what the bot just said; reserved answers only a
+  message addressed to it or asking it something.
+  {#if room.policy?.is_host}
+    You set this as the room's host.
+  {:else if room.policy?.host}
+    This room's host, {room.policy.host}, sets this.
+  {:else}
+    This room has no host, so nobody can change this until a member claims it.
+  {/if}
+  {#if !classifierSelected}
+    This applies only when Replies is set to decide from context.
+  {/if}
+{/snippet}
+
 <Modal
   open={open && !confirming}
   title="Room settings"
@@ -447,299 +496,236 @@
   {#if lockedReason}
     <p class="caption locked-note" role="note">{lockedReason}</p>
   {/if}
-  <label class="field">
-    <span class="caption">Name</span>
-    <input
-      type="text"
-      bind:value={name}
-      maxlength="80"
-      readonly={locked}
-      placeholder="Room name"
-      onkeydown={(e) => {
-        if (e.key === 'Enter') handleSave();
-      }}
-    />
-  </label>
+  <div class="vstack">
+    <Field label="Name">
+      <Input
+        bind:value={name}
+        maxlength={80}
+        readonly={locked}
+        placeholder="Room name"
+        onkeydown={(e: KeyboardEvent) => {
+          if (e.key === 'Enter') handleSave();
+        }}
+      />
+    </Field>
 
-  <!-- A fixed palette rather than a colour input: one user-picked value cannot
-	     read on both themes' --surface-raised, so the choice is among ours. Radios
-	     rather than buttons, because that is what a single-choice set is — it
-	     gives arrow-key movement and one tab stop for free (ISSUE-433). -->
-  <fieldset class="field colors">
-    <legend class="caption">Colour</legend>
-    <div class="swatches">
-      <label class="swatch none" class:selected={colorValue === ''} title="No colour">
-        <input
-          type="radio"
-          name="room-color"
-          value=""
-          aria-label="No colour"
-          bind:group={colorValue}
-        />
-        <span class="dot" aria-hidden="true"></span>
-      </label>
-      {#each ROOM_COLORS as c (c)}
-        <label
-          class="swatch"
-          class:selected={colorValue === c}
-          style:--swatch={roomColorVar(c)}
-          title={ROOM_COLOR_LABELS[c]}
-        >
+    <!-- A fixed palette rather than a colour input: one user-picked value cannot
+         read on both themes' --surface-raised, so the choice is among ours. Radios
+         rather than buttons, because that is what a single-choice set is — it
+         gives arrow-key movement and one tab stop for free (ISSUE-433). The
+         field names the radios as a group. -->
+    <Field label="Colour" description="Tints this room's row in the sidebar. Only you see it.">
+      <div class="swatches">
+        <label class="swatch none" class:selected={colorValue === ''} title="No colour">
           <input
             type="radio"
             name="room-color"
-            value={c}
-            aria-label={ROOM_COLOR_LABELS[c]}
+            value=""
+            aria-label="No colour"
             bind:group={colorValue}
           />
           <span class="dot" aria-hidden="true"></span>
         </label>
-      {/each}
-    </div>
-    <p class="caption">Tints this room's row in the sidebar. Only you see it.</p>
-  </fieldset>
+        {#each ROOM_COLORS as c (c)}
+          <label
+            class="swatch"
+            class:selected={colorValue === c}
+            style:--swatch={roomColorVar(c)}
+            title={ROOM_COLOR_LABELS[c]}
+          >
+            <input
+              type="radio"
+              name="room-color"
+              value={c}
+              aria-label={ROOM_COLOR_LABELS[c]}
+              bind:group={colorValue}
+            />
+            <span class="dot" aria-hidden="true"></span>
+          </label>
+        {/each}
+      </div>
+    </Field>
 
-  {#if room.email_thread}
-    <div class="field">
+    {#if room.email_thread}
       <Checkbox
         label="Show in room list"
         description="Email threads sit in the collapsed Email threads group, and their unread messages are not counted. Only you see this."
         bind:checked={listedValue}
       />
-    </div>
-  {/if}
+    {/if}
 
-  <div class="field">
-    <span class="caption">Notifications</span>
-    <Select
-      value={notificationsValue}
-      options={NOTIFICATION_OPTIONS}
-      onValueChange={(v) => (notificationsValue = v as RoomNotifications)}
-      ariaLabel="Room notifications"
-      fullWidth
-    />
-    <p class="caption">
-      Applies only to you. The account default is in Settings → Notifications. Off excludes this
-      room from alerts and the app badge; its unread count stays visible in chat.
-    </p>
-  </div>
-
-  {#if showBrain}
-    <div class="field">
-      <span class="caption">Brain</span>
+    <Field
+      label="Notifications"
+      description="Applies only to you. The account default is in Settings → Notifications. Off excludes this room from alerts and the app badge; its unread count stays visible in chat."
+    >
       <Select
-        value={brainValue}
-        options={brainOptions}
-        onValueChange={(v) => (brainValue = v)}
-        ariaLabel="Room brain"
+        value={notificationsValue}
+        options={NOTIFICATION_OPTIONS}
+        onValueChange={(v) => (notificationsValue = v as RoomNotifications)}
+        ariaLabel="Room notifications"
+        fullWidth
+      />
+    </Field>
+
+    {#if showBrain}
+      <Field
+        label="Brain"
+        description="Every turn in this room runs on this brain, and a room that names one does not fall back to another if it is unavailable."
+      >
+        <Select
+          value={brainValue}
+          options={brainOptions}
+          onValueChange={(v) => (brainValue = v)}
+          ariaLabel="Room brain"
+          disabled={locked}
+          fullWidth
+        />
+      </Field>
+    {/if}
+
+    <Field label="Model" description={modelNote}>
+      <Select
+        value={modelValue}
+        options={modelOptions}
+        onValueChange={(v) => (modelValue = v)}
+        ariaLabel="Room model default"
         disabled={locked}
         fullWidth
       />
-      <p class="caption">
-        Every turn in this room runs on this brain, and a room that names one does not fall back to
-        another if it is unavailable.
-      </p>
-    </div>
-  {/if}
+    </Field>
 
-  <div class="field">
-    <span class="caption">Model</span>
-    <Select
-      value={modelValue}
-      options={modelOptions}
-      onValueChange={(v) => (modelValue = v)}
-      ariaLabel="Room model default"
-      disabled={locked}
-      fullWidth
-    />
-    {#if crossesNamespace}
-      <p class="caption">
-        Now listing the models the new brain can run — the one this room had reads model names
-        differently and has been cleared. Pick a new one here, or leave it on
-        <em>Default model</em> to use that brain's own.
-      </p>
+    <Field label="Effort">
+      <Select
+        value={effortValue}
+        options={EFFORT_OPTIONS}
+        onValueChange={(v) => (effortValue = v)}
+        ariaLabel="Room effort default"
+        disabled={locked}
+        fullWidth
+      />
+    </Field>
+
+    {#if room.policy && !room.policy.email_thread}
+      <Field label="Guests" description={guestsNote}>
+        <Select
+          value={guestReplyValue}
+          options={GUEST_REPLY_OPTIONS}
+          onValueChange={(v) => (guestReplyValue = v as GuestReply)}
+          ariaLabel="How guests are answered"
+          disabled={!room.policy.is_host}
+          fullWidth
+        />
+      </Field>
+    {/if}
+
+    {#if room.policy && showSpeechMode}
+      <Field label="Replies" description={repliesNote}>
+        <Select
+          value={speechModeValue}
+          options={speechModeOptions}
+          onValueChange={(v) => (speechModeValue = v)}
+          ariaLabel="When to reply to a message not addressed to the bot"
+          disabled={!room.policy.is_host}
+          fullWidth
+        />
+        {#if speechModeValue === 'off'}
+          <p class="banner warn speech-warning">
+            The bot will answer every message anyone sends in this room.
+          </p>
+        {/if}
+      </Field>
+    {/if}
+
+    {#if room.policy && showDisposition}
+      <Field label="Disposition" description={dispositionNote}>
+        <Select
+          value={dispositionValue}
+          options={dispositionOptions}
+          onValueChange={(v) => (dispositionValue = v)}
+          ariaLabel="How readily the bot replies when it decides from context"
+          disabled={!room.policy.is_host}
+          fullWidth
+        />
+      </Field>
+    {/if}
+
+    <Field label="Members">
+      {#key membersEpoch}
+        <RoomMembers
+          roomId={room.id}
+          {userId}
+          talkBound={onTalk}
+          phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
+          onChanged={onMembersChanged}
+          {onLeft}
+          onRequestAdd={requestAdd}
+          {addError}
+        />
+      {/key}
+    </Field>
+
+    <Field label="Group">
+      <RoomGroupLink roomId={room.id} />
+    </Field>
+
+    <Field label="Room token" description="Use this to link to or route output to this room.">
+      <div class="token-row">
+        <input class="token" type="text" readonly value={room.token} />
+        <button class="copy-btn" type="button" onclick={copyToken}>
+          {copied ? 'Copied!' : 'Copy'}
+        </button>
+      </div>
+    </Field>
+
+    {#if phoneLabel}
+      <!-- Read-only by design: the binding is the user's phone identity, which
+           belongs to the connected-services flow, so there is nothing to unbind
+           here. -->
+      <Field label="Connected to">
+        <p class="caption phone-binding">
+          {#if room.phone_group}
+            {phoneLabel} — this room is a {phoneLabel} group. It is read-only here; write in the group
+            on {phoneLabel}.
+          {:else}
+            {phoneLabel} — this room is the transcript of {phoneLabel === 'email' ? 'an' : 'a'}
+            {phoneLabel} conversation. It is read-only here; reply by {phoneLabel}.
+          {/if}
+        </p>
+      </Field>
     {:else}
-      <p class="caption">
-        Applies to every message in this room, on both web and Nextcloud Talk. A
-        <code>!model</code> prefix still overrides it for a single message.
+      <Field label="Nextcloud Talk">
+        {#if onTalk}
+          <p class="caption talk-on">
+            This room is also open in Nextcloud Talk — replies sync to your phone.
+          </p>
+        {/if}
+        {#if canPromote && onPromote && !locked}
+          <button class="talk-btn" type="button" disabled={promoting} onclick={handlePromote}>
+            {#if promoting}
+              {isPromoted ? 'Checking…' : 'Opening…'}
+            {:else}
+              {isPromoted ? 'Reconnect to Talk' : 'Also open in Talk'}
+            {/if}
+          </button>
+          <p class="caption">
+            {#if isPromoted}
+              If the Talk conversation for this room was deleted, this creates a new one and points
+              the room at it. Nothing changes while the existing conversation is still there.
+            {:else}
+              Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
+            {/if}
+          </p>
+        {/if}
+      </Field>
+    {/if}
+
+    {#if isImported}
+      <p class="caption hide-hint">
+        Hiding only removes this room from your web chat list. The Nextcloud Talk conversation and
+        its messages aren't deleted, and it reappears here if you post in it again.
       </p>
     {/if}
   </div>
-
-  <div class="field">
-    <span class="caption">Effort</span>
-    <Select
-      value={effortValue}
-      options={EFFORT_OPTIONS}
-      onValueChange={(v) => (effortValue = v)}
-      ariaLabel="Room effort default"
-      disabled={locked}
-      fullWidth
-    />
-  </div>
-
-  {#if room.policy && !room.policy.email_thread}
-    <div class="field">
-      <span class="caption">Guests</span>
-      <Select
-        value={guestReplyValue}
-        options={GUEST_REPLY_OPTIONS}
-        onValueChange={(v) => (guestReplyValue = v as GuestReply)}
-        ariaLabel="How guests are answered"
-        disabled={!room.policy.is_host}
-        fullWidth
-      />
-      <p class="caption">
-        {#if room.policy.is_host}
-          A guest's turn runs on your behalf, as this room's host.
-        {:else if room.policy.host}
-          A guest's turn runs on behalf of this room's host, {room.policy.host}, who sets this.
-        {:else}
-          This room has no host, so guests are not answered until a member claims it.
-        {/if}
-      </p>
-    </div>
-  {/if}
-
-  {#if room.policy && showSpeechMode}
-    <div class="field">
-      <span class="caption">Replies</span>
-      <Select
-        value={speechModeValue}
-        options={speechModeOptions}
-        onValueChange={(v) => (speechModeValue = v)}
-        ariaLabel="When to reply to a message not addressed to the bot"
-        disabled={!room.policy.is_host}
-        fullWidth
-      />
-      {#if speechModeValue === 'off'}
-        <p class="banner warn speech-warning">
-          The bot will answer every message anyone sends in this room.
-        </p>
-      {/if}
-      <p class="caption">
-        {#if room.policy.is_host}
-          When the bot answers a message nobody addressed to it. You set this as the room's host.
-        {:else if room.policy.host}
-          When the bot answers a message nobody addressed to it. This room's host, {room.policy
-            .host}, sets this.
-        {:else}
-          This room has no host, so nobody can change this until a member claims it.
-        {/if}
-      </p>
-    </div>
-  {/if}
-
-  {#if room.policy && showDisposition}
-    <div class="field">
-      <span class="caption">Disposition</span>
-      <Select
-        value={dispositionValue}
-        options={dispositionOptions}
-        onValueChange={(v) => (dispositionValue = v)}
-        ariaLabel="How readily the bot replies when it decides from context"
-        disabled={!room.policy.is_host}
-        fullWidth
-      />
-      <p class="caption">
-        Friendly also answers thanks or a remark about what the bot just said; reserved answers only
-        a message addressed to it or asking it something.
-        {#if room.policy.is_host}
-          You set this as the room's host.
-        {:else if room.policy.host}
-          This room's host, {room.policy.host}, sets this.
-        {:else}
-          This room has no host, so nobody can change this until a member claims it.
-        {/if}
-        {#if !classifierSelected}
-          This applies only when Replies is set to decide from context.
-        {/if}
-      </p>
-    </div>
-  {/if}
-
-  <div class="field">
-    <span class="caption">Members</span>
-    {#key membersEpoch}
-      <RoomMembers
-        roomId={room.id}
-        {userId}
-        talkBound={onTalk}
-        phoneLabel={room.read_only && !room.phone_group ? phoneLabel : null}
-        onChanged={onMembersChanged}
-        {onLeft}
-        onRequestAdd={requestAdd}
-        {addError}
-      />
-    {/key}
-  </div>
-
-  <div class="field">
-    <span class="caption">Group</span>
-    <RoomGroupLink roomId={room.id} />
-  </div>
-
-  <div class="field">
-    <span class="caption">Room token</span>
-    <div class="token-row">
-      <input class="token" type="text" readonly value={room.token} />
-      <button class="copy-btn" type="button" onclick={copyToken}>
-        {copied ? 'Copied!' : 'Copy'}
-      </button>
-    </div>
-    <p class="caption">Use this to link to or route output to this room.</p>
-  </div>
-
-  {#if phoneLabel}
-    <!-- Read-only by design: the binding is the user's phone identity, which
-         belongs to the connected-services flow, so there is nothing to unbind
-         here. -->
-    <div class="field">
-      <span class="caption">Connected to</span>
-      <p class="caption phone-binding">
-        {#if room.phone_group}
-          {phoneLabel} — this room is a {phoneLabel} group. It is read-only here; write in the group on
-          {phoneLabel}.
-        {:else}
-          {phoneLabel} — this room is the transcript of {phoneLabel === 'email' ? 'an' : 'a'}
-          {phoneLabel} conversation. It is read-only here; reply by {phoneLabel}.
-        {/if}
-      </p>
-    </div>
-  {:else}
-    <div class="field">
-      <span class="caption">Nextcloud Talk</span>
-      {#if onTalk}
-        <p class="caption talk-on">
-          This room is also open in Nextcloud Talk — replies sync to your phone.
-        </p>
-      {/if}
-      {#if canPromote && onPromote && !locked}
-        <button class="talk-btn" type="button" disabled={promoting} onclick={handlePromote}>
-          {#if promoting}
-            {isPromoted ? 'Checking…' : 'Opening…'}
-          {:else}
-            {isPromoted ? 'Reconnect to Talk' : 'Also open in Talk'}
-          {/if}
-        </button>
-        <p class="caption">
-          {#if isPromoted}
-            If the Talk conversation for this room was deleted, this creates a new one and points
-            the room at it. Nothing changes while the existing conversation is still there.
-          {:else}
-            Creates a Nextcloud Talk conversation so this chat is reachable from the Talk apps.
-          {/if}
-        </p>
-      {/if}
-    </div>
-  {/if}
-
-  {#if isImported}
-    <p class="caption hide-hint">
-      Hiding only removes this room from your web chat list. The Nextcloud Talk conversation and its
-      messages aren't deleted, and it reappears here if you post in it again.
-    </p>
-  {/if}
 
   {#snippet footer()}
     {#if isImported}
@@ -776,31 +762,11 @@
 />
 
 <style>
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    margin-bottom: var(--space-3);
-  }
-
-  /* The palette row. A <fieldset> so the group has a real legend, styled back
-	   to match the plain `.field > span` labels around it. */
-  fieldset.colors {
-    border: none;
-    padding: 0;
-    margin: 0 0 var(--space-3);
-    min-width: 0;
-  }
-
-  fieldset.colors legend {
-    padding: 0;
-  }
-
   .swatches {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
-    margin-top: var(--space-1);
+    padding-block: var(--space-1);
   }
 
   .swatch {
@@ -845,16 +811,6 @@
     box-shadow:
       0 0 0 2px var(--surface-card),
       0 0 0 3px var(--accent);
-  }
-
-  .field input[type='text'] {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
   }
 
   .token-row {

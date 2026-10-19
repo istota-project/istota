@@ -5,6 +5,7 @@
     Button,
     ConfirmDialog,
     EmptyState,
+    Field,
     Input,
     KebabMenu,
     Select,
@@ -245,12 +246,10 @@
     </p>
 
     <div class="cls-form add-form control-row">
-      <label class="ctl ctl-symbol">
-        <span class="micro-label">Symbol</span>
+      <Field label="Symbol" layout="compact" class="ctl-symbol">
         <Input bind:value={addSymbol} placeholder="VTI" monospace aria-label="Symbol" />
-      </label>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Asset class</span>
+      </Field>
+      <Field label="Asset class" layout="compact">
         <Select
           bind:value={addClass}
           options={classOptions}
@@ -259,9 +258,8 @@
           ariaLabel="Asset class"
           onValueChange={(v) => onClassPicked(v, 'add')}
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Sub-class</span>
+      </Field>
+      <Field label="Sub-class" layout="compact">
         <Select
           bind:value={addSub}
           options={addSubOptions}
@@ -270,9 +268,8 @@
           ariaLabel="Sub-class"
           disabled={!addClass}
         />
-      </div>
-      <div class="ctl">
-        <span class="micro-label" aria-hidden="true">Geography</span>
+      </Field>
+      <Field label="Geography" layout="compact">
         <Select
           bind:value={addGeo}
           options={geoOptions}
@@ -280,7 +277,7 @@
           fullWidth
           ariaLabel="Geography"
         />
-      </div>
+      </Field>
       <div class="ctl-action">
         <Button
           variant="primary"
@@ -303,12 +300,10 @@
           <li class="cls-row">
             {#if editingSymbol === cls.symbol}
               <div class="cls-form control-row">
-                <div class="ctl ctl-symbol">
-                  <span class="micro-label">Symbol</span>
+                <Field label="Symbol" layout="compact" class="ctl-symbol">
                   <code class="cls-symbol code-chip">{cls.symbol}</code>
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Asset class</span>
+                </Field>
+                <Field label="Asset class" layout="compact">
                   <Select
                     bind:value={editClass}
                     options={classOptions}
@@ -317,9 +312,8 @@
                     ariaLabel="Asset class"
                     onValueChange={(v) => onClassPicked(v, 'edit')}
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Sub-class</span>
+                </Field>
+                <Field label="Sub-class" layout="compact">
                   <Select
                     bind:value={editSub}
                     options={editSubOptions}
@@ -328,9 +322,8 @@
                     ariaLabel="Sub-class"
                     disabled={!editClass}
                   />
-                </div>
-                <div class="ctl">
-                  <span class="micro-label" aria-hidden="true">Geography</span>
+                </Field>
+                <Field label="Geography" layout="compact">
                   <Select
                     bind:value={editGeo}
                     options={geoOptions}
@@ -338,7 +331,7 @@
                     fullWidth
                     ariaLabel="Geography"
                   />
-                </div>
+                </Field>
                 <div class="ctl-action">
                   <Button
                     variant="primary"
@@ -403,14 +396,7 @@
     margin-bottom: var(--space-3);
   }
 
-  .ctl {
-    display: grid;
-    gap: var(--space-1);
-    flex: 1 1 9rem;
-    min-width: 0;
-  }
-
-  .ctl-symbol {
+  .cls-form :global(.ctl-symbol) {
     flex: 0 1 7rem;
   }
 

@@ -2,7 +2,16 @@
   import { untrack } from 'svelte';
   import type { DiscoveredCluster, Place } from '$lib/api';
   import { locationPlaces } from '$lib/stores/location';
-  import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Modal,
+    Button,
+    ConfirmDialog,
+    Field,
+    Input,
+    Select,
+    TextArea,
+    type SelectOption,
+  } from '$lib/components/ui';
 
   interface Props {
     cluster?: DiscoveredCluster;
@@ -25,10 +34,7 @@
   let { cluster, place, initialLat, initialLon, onSave, onCancel, onDismiss, onDelete }: Props =
     $props();
 
-  let nameInput: HTMLInputElement | undefined = $state();
-  $effect(() => {
-    nameInput?.focus();
-  });
+  const focusOnMount = (el: HTMLElement) => el.focus();
 
   const editing = $derived(!!place);
   const manual = $derived(!place && !cluster);
@@ -136,39 +142,34 @@
     <div class="caption">{cluster.total_pings} pings recorded here</div>
   {/if}
 
-  <label class="field">
-    <span class="caption">Name</span>
-    <input type="text" bind:this={nameInput} bind:value={name} placeholder="e.g. Office, Gym..." />
-  </label>
+  <div class="vstack">
+    <Field label="Name">
+      <Input {@attach focusOnMount} bind:value={name} placeholder="e.g. Office, Gym..." />
+    </Field>
 
-  <label class="field">
-    <span class="caption">Category</span>
-    <Select bind:value={category} options={categoryOptions} ariaLabel="Category" />
-  </label>
+    <Field label="Category">
+      <Select bind:value={category} options={categoryOptions} />
+    </Field>
 
-  <label class="field">
-    <span class="caption">Radius ({radius}m)</span>
-    <input type="range" min="25" max="500" step="25" bind:value={radius} />
-  </label>
+    <Field label="Radius ({radius}m)">
+      <input class="radius" type="range" min="25" max="500" step="25" bind:value={radius} />
+    </Field>
 
-  {#if showCoords}
-    <div class="coords">
-      <label class="field coord">
-        <span class="caption">Lat</span>
-        <input type="number" step="0.00001" bind:value={lat} />
-      </label>
-      <label class="field coord">
-        <span class="caption">Lon</span>
-        <input type="number" step="0.00001" bind:value={lon} />
-      </label>
-    </div>
-  {/if}
+    {#if showCoords}
+      <div class="coords hstack">
+        <Field label="Lat">
+          <Input type="number" step="0.00001" bind:value={lat} />
+        </Field>
+        <Field label="Lon">
+          <Input type="number" step="0.00001" bind:value={lon} />
+        </Field>
+      </div>
+    {/if}
 
-  <label class="field">
-    <span class="caption">Notes (optional)</span>
-    <textarea bind:value={notes} rows="2" placeholder="Anything to remember about this place"
-    ></textarea>
-  </label>
+    <Field label="Notes" optional>
+      <TextArea bind:value={notes} rows={2} placeholder="Anything to remember about this place" />
+    </Field>
+  </div>
 
   {#snippet footer()}
     {#if editing && onDelete}
@@ -200,46 +201,12 @@
     margin-bottom: var(--space-2);
   }
 
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    margin-bottom: var(--space-3);
-  }
-
-  .field input[type='text'],
-  .field input[type='number'],
-  .field textarea {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
-  .field textarea {
-    resize: vertical;
-    min-height: 2.5rem;
-    font-family: inherit;
-  }
-
-  .field input[type='range'] {
+  .radius {
     accent-color: var(--accent-amber);
   }
 
-  .coords {
-    display: flex;
-    gap: var(--space-2);
-  }
-
-  .coord {
+  .coords > :global(.field) {
     flex: 1;
-  }
-
-  .coord input {
-    width: 100%;
   }
 
   .delete-link {

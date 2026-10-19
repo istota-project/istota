@@ -177,7 +177,7 @@
   class:field-wide={wide}
   class:checkbox
   class:inline={layout === 'inline'}
-  class:compact={layout === 'compact'}
+  class:field-compact={layout === 'compact'}
   role={claimed ? undefined : 'group'}
   aria-labelledby={claimed ? undefined : labelId}
 >
@@ -233,7 +233,13 @@
   }
 
   .field
-    :global(:where(input:not([type='checkbox'], .ui-input), select, textarea:not(.ui-textarea))) {
+    :global(
+      :where(
+        input:not([type='checkbox'], [type='range'], .ui-input),
+        select,
+        textarea:not(.ui-textarea)
+      )
+    ) {
     background: var(--surface-base);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
@@ -249,7 +255,7 @@
      centrally for that reason. Textareas keep the inherited leading: they are
      sized by their rows and read as prose, and they stay in the sans face
      unless they are a TextArea with `monospace`. */
-  .field :global(:where(input:not([type='checkbox'], .ui-input), select)) {
+  .field :global(:where(input:not([type='checkbox'], [type='range'], .ui-input), select)) {
     line-height: var(--leading-tight);
   }
 
@@ -288,9 +294,14 @@
   }
 
   /* The money `.ctl`: a dense field that grows from 9rem in a wrapping row. */
-  .field.compact {
+  .field-compact {
     gap: var(--space-1);
     flex: 1 1 9rem;
+  }
+
+  /* The row sizes a compact field, so its control fills it uncapped. */
+  .field-compact :global(:where(input, textarea)) {
+    max-width: none;
   }
 
   .field-description {

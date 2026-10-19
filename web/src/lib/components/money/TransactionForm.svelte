@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { TransactionRow } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Modal, Button, Field, Input, Select, type SelectOption } from '$lib/components/ui';
 
   interface Props {
     txn: TransactionRow;
@@ -21,10 +21,7 @@
 
   let { txn, accounts = [], onSave, onCancel, error = '', saving = false }: Props = $props();
 
-  let payeeInput: HTMLInputElement | undefined = $state();
-  $effect(() => {
-    payeeInput?.focus();
-  });
+  const focusOnMount = (el: HTMLElement) => el.focus();
 
   let payee = $state(untrack(() => txn.payee ?? ''));
   let narration = $state(untrack(() => txn.narration ?? ''));
@@ -77,30 +74,23 @@
 <svelte:window on:keydown={handleKeydown} />
 
 <Modal bind:open title="Edit transaction" onOpenChange={handleOpenChange} width="380px">
-  <label class="field">
-    <span class="caption">Payee</span>
-    <input type="text" bind:this={payeeInput} bind:value={payee} placeholder="e.g. Acme Corp" />
-  </label>
-
-  <label class="field">
-    <span class="caption">Narration</span>
-    <input type="text" bind:value={narration} placeholder="Description" />
-  </label>
-
-  <label class="field">
-    <span class="caption">Date</span>
-    <input type="date" bind:value={date} />
-  </label>
-
-  <label class="field">
-    <span class="caption">Account</span>
-    <Select bind:value={account} options={accountOptions} fullWidth ariaLabel="Account" />
-  </label>
-
-  <label class="field">
-    <span class="caption">Amount</span>
-    <input type="text" bind:value={position} placeholder="e.g. -12.50 USD" />
-  </label>
+  <div class="vstack">
+    <Field label="Payee">
+      <Input {@attach focusOnMount} bind:value={payee} placeholder="e.g. Acme Corp" />
+    </Field>
+    <Field label="Narration">
+      <Input bind:value={narration} placeholder="Description" />
+    </Field>
+    <Field label="Date">
+      <Input type="date" bind:value={date} />
+    </Field>
+    <Field label="Account">
+      <Select bind:value={account} options={accountOptions} fullWidth />
+    </Field>
+    <Field label="Amount">
+      <Input bind:value={position} placeholder="e.g. -12.50 USD" />
+    </Field>
+  </div>
 
   {#if error}
     <div class="form-error">{error}</div>
@@ -115,26 +105,8 @@
 </Modal>
 
 <style>
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    margin-bottom: var(--space-3);
-  }
-
-  .field input[type='text'],
-  .field input[type='date'] {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
-  /* Type is the global .form-error; only the space below it is this form's. */
+  /* Type is the global .form-error; only the space around it is this form's. */
   .form-error {
-    margin-bottom: var(--space-2);
+    margin: var(--space-3) 0 var(--space-2);
   }
 </style>
