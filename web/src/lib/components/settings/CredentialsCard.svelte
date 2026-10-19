@@ -25,8 +25,8 @@
     KebabMenu,
     Modal,
     Card,
+    CopyButton,
   } from '$lib/components/ui';
-  import { copyText } from '$lib/clipboard';
   import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
   import CredentialFormModal from './CredentialFormModal.svelte';
@@ -340,10 +340,13 @@
     <pre class="recovery-codes" data-testid="recovery-codes">{recoveryText}</pre>
   {/if}
   {#snippet footer()}
-    <Button
-      variant="secondary"
-      onclick={() => reveal && copyText(recoveryText, { label: 'Recovery codes' })}>Copy</Button
-    >
+    <CopyButton
+      variant="button"
+      size="md"
+      text={recoveryText}
+      copiedLabel="Recovery codes"
+      disabled={!reveal}
+    />
     <Button variant="primary" onclick={() => (reveal = null)}>Done</Button>
   {/snippet}
 </Modal>

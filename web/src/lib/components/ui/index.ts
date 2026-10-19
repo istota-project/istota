@@ -17,6 +17,8 @@ export { default as Select } from './Select.svelte';
 export { default as MultiSelect } from './MultiSelect.svelte';
 export { default as Input } from './Input.svelte';
 export { default as TextArea } from './TextArea.svelte';
+export { default as CopyButton } from './CopyButton.svelte';
+export { default as CopyField } from './CopyField.svelte';
 export { default as Field } from './Field.svelte';
 export { getFieldContext, setFieldContext } from './fieldContext';
 export type { FieldContext, FieldControlKind } from './fieldContext';

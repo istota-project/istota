@@ -9,7 +9,7 @@
     type LocationSettingsInfo,
   } from '$lib/api';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
-  import { Button, ConfirmDialog, Card } from '$lib/components/ui';
+  import { Button, ConfirmDialog, Card, CopyField } from '$lib/components/ui';
   import QrCode from '$lib/components/location/QrCode.svelte';
   import DeviceTrackerCard from '$lib/components/location/DeviceTrackerCard.svelte';
   import { encodeProvisioning, endpointFromWebhookUrl } from '$lib/location/provisioning';
@@ -151,7 +151,7 @@
                 For the third-party Overland app, which cannot scan, paste this URL instead. It
                 carries the same token and is shown only now, for the same reason.
               </p>
-              <code class="webhook-url">{minted.webhookUrl}</code>
+              <CopyField label="Webhook URL" value={minted.webhookUrl} monospace />
             </div>
           </div>
         {:else}
@@ -160,7 +160,7 @@
             shown at the moment it is generated. Generating a new one immediately cuts off every
             device currently using the old one, which is also how you revoke a lost phone.
           </p>
-          <code class="webhook-url">{info.webhook_url}</code>
+          <CopyField label="Webhook URL" value={info.webhook_url} monospace />
         {/if}
       </Card>
 
@@ -209,13 +209,6 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--status-danger-fg);
-  }
-
-  .webhook-url {
-    display: block;
-    padding: var(--space-2) var(--space-2);
-    font-family: var(--font-mono);
-    word-break: break-all;
   }
 
   .kv dd {

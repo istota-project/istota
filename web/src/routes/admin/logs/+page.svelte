@@ -10,9 +10,16 @@
     type AdminLogRecord,
     type AdminLogSource,
   } from '$lib/api';
-  import { Button, Chip, EmptyState, Input, Select, PageLoading } from '$lib/components/ui';
+  import {
+    Button,
+    Chip,
+    EmptyState,
+    Input,
+    Select,
+    PageLoading,
+    CopyButton,
+  } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
-  import { copyText } from '$lib/clipboard';
   import { notifyError } from '$lib/stores/notices';
 
   const PAGE = 200;
@@ -329,8 +336,8 @@
     return ts.replace('T', ' ').replace(/\.\d+$/, '');
   }
 
-  function copyAll() {
-    const text = records
+  function logText(): string {
+    return records
       .map((r) =>
         [
           shortTime(r.timestamp),
@@ -342,7 +349,6 @@
           .join(' '),
       )
       .join('\n');
-    void copyText(text, { label: `Copied ${records.length} lines` });
   }
 
   onMount(async () => {
@@ -477,7 +483,7 @@
   <div class="log-footer">
     <span class="log-count caption num">{records.length} shown</span>
     {#if records.length > 0}
-      <Button variant="secondary" size="sm" onclick={copyAll}>Copy</Button>
+      <CopyButton variant="button" text={logText} copiedLabel="Copied {records.length} lines" />
     {/if}
     {#if !atBottom && records.length > 0}
       <Button variant="secondary" size="sm" onclick={scrollToBottom}>Jump to latest</Button>

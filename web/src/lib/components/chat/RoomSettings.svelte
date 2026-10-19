@@ -2,7 +2,6 @@
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { untrack } from 'svelte';
   import { addRoomMember } from '$lib/api';
-  import { copyText } from '$lib/clipboard';
   import type {
     ChatRoom,
     GuestReply,
@@ -21,6 +20,7 @@
     Select,
     type SelectOption,
     Checkbox,
+    CopyField,
   } from '$lib/components/ui';
   import RoomMembers, { type AddRequest } from './RoomMembers.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
@@ -313,7 +313,6 @@
   let addError = $state('');
   // Bumped after a confirmed add so the members pane lists the new member.
   let membersEpoch = $state(0);
-  let copied = $state(false);
   let lastRoomId = $state(untrack(() => room.id));
 
   $effect(() => {
@@ -332,7 +331,6 @@
       showDeleteConfirm = false;
       pendingAdd = null;
       addError = '';
-      copied = false;
     }
   });
 
@@ -365,15 +363,6 @@
         dispositionChanged ||
         (!locked && (nameChanged || modelChanged || effortChanged || brainChanged))),
   );
-
-  let copyTimer: ReturnType<typeof setTimeout> | undefined;
-  async function copyToken() {
-    // copyText reports a refusal itself, in the notice drawer.
-    if (!(await copyText(room.token))) return;
-    copied = true;
-    clearTimeout(copyTimer);
-    copyTimer = setTimeout(() => (copied = false), 1500);
-  }
 
   function handleSave() {
     if (!canSave) return;
@@ -668,14 +657,12 @@
       <RoomGroupLink roomId={room.id} />
     </Field>
 
-    <Field label="Room token" description="Use this to link to or route output to this room.">
-      <div class="token-row">
-        <input class="token" type="text" readonly value={room.token} />
-        <button class="copy-btn" type="button" onclick={copyToken}>
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
-      </div>
-    </Field>
+    <CopyField
+      label="Room token"
+      value={room.token}
+      monospace
+      description="Use this to link to or route output to this room."
+    />
 
     {#if phoneLabel}
       <!-- Read-only by design: the binding is the user's phone identity, which
@@ -811,38 +798,6 @@
     box-shadow:
       0 0 0 2px var(--surface-card),
       0 0 0 3px var(--accent);
-  }
-
-  .token-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: stretch;
-  }
-
-  .token-row .token {
-    flex: 1;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
-  .copy-btn {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    white-space: nowrap;
-    transition:
-      color var(--transition-fast),
-      background var(--transition-fast);
-  }
-  .copy-btn:hover {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
   }
 
   /* Typography is the global .caption; only the <p> reset stays here. */

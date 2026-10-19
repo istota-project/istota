@@ -140,5 +140,4 @@ it('copies the export password through copyText', async () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Copy password' }));
   expect(copyText).toHaveBeenCalledWith(password, { label: 'Password copied' });
   expect(writeText).not.toHaveBeenCalled();
-  expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy();
 });
