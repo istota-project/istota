@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button, EmptyState, NoticeBanner, Card } from '$lib/components/ui';
+  import { Button, EmptyState, NoticeBanner, Card, LoadMore } from '$lib/components/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
   import { formatBytes } from '$lib/format';
@@ -200,10 +200,13 @@
       {:else if !entries.length && !activityBusy}<EmptyState size="sm"
           >No recorded changes yet.</EmptyState
         >{/if}
-      {#if activityBusy}<p class="caption">Loading recorded changes…</p>
-      {:else if cursor}<div class="actions">
-          <Button size="sm" onclick={() => loadActivity(true)}>Load older changes</Button>
-        </div>{/if}
+      {#if activityBusy && !entries.length}<p class="caption">Loading recorded changes…</p>
+      {:else}<LoadMore
+          onload={() => loadActivity(true)}
+          hasMore={!!cursor}
+          loading={activityBusy}
+          label="Load older changes"
+        />{/if}
     </Card>
   {/if}
 </div>

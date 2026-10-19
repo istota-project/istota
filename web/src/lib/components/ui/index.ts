@@ -67,4 +67,6 @@ export { default as PageLoader } from './PageLoader.svelte';
 export { default as LoadState } from './LoadState.svelte';
 export { default as PageHeader } from './PageHeader.svelte';
 export { default as BackLink } from './BackLink.svelte';
+export { default as LoadMore } from './LoadMore.svelte';
+export { default as Pagination } from './Pagination.svelte';
 export { default as LoadingOctopus } from './LoadingOctopus.svelte';

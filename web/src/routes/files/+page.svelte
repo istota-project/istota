@@ -18,6 +18,7 @@
     PageLoading,
     LoadState,
     Checkbox,
+    LoadMore,
   } from '$lib/components/ui';
   import {
     getWorkspacePins,
@@ -811,25 +812,15 @@
             onNavigate={navigate}
             onRefresh={() => loadFolder(selected!)}
           />
-          {#if driveListing.next_page_token}
+          {#if driveListing.next_page_token && needsConnection(moreError)}
             <div class="drive-pagination">
-              {#if moreError}<p class="form-error" role="alert">
-                  {moreError === 'drive_not_granted' ? 'Drive access is off' : moreError}
-                </p>{/if}
-              {#if needsConnection(moreError)}
-                <Button variant="secondary" href={`${base}/settings/connections`}
-                  >Connections</Button
-                >
-              {:else}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={moreLoading}
-                  loadingLabel="Loading…"
-                  onclick={loadMore}>Load more</Button
-                >
-              {/if}
+              <p class="form-error" role="alert">
+                {moreError === 'drive_not_granted' ? 'Drive access is off' : moreError}
+              </p>
+              <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
             </div>
+          {:else if driveListing.next_page_token}
+            <LoadMore onload={loadMore} hasMore loading={moreLoading} error={moreError || null} />
           {/if}
         {:else if listing}
           <FileTable

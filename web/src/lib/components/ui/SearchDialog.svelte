@@ -10,6 +10,7 @@
   import Select from './Select.svelte';
   import Button from './Button.svelte';
   import SearchResultRow from './SearchResultRow.svelte';
+  import LoadMore from './LoadMore.svelte';
 
   let {
     open = $bindable(false),
@@ -171,11 +172,12 @@
       >
         No matches.
       </p>{/if}
-    {#if $controller.selectedSource && groups.some((group) => group.has_more)}<Button
-        variant="secondary"
-        disabled={$controller.loading}
-        onclick={() => controller.showMore()}>Show more</Button
-      >{/if}
+    {#if $controller.selectedSource}<LoadMore
+        onload={() => controller.showMore()}
+        hasMore={groups.some((group) => group.has_more)}
+        loading={$controller.loading}
+        label="Show more"
+      />{/if}
     {#if !$controller.selectedSource && $controller.query.trim().length >= 2}
       {#each $controller.onDemand as source}<Button
           variant="secondary"

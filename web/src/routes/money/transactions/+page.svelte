@@ -15,7 +15,7 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, LoadState, Pagination } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -174,18 +174,10 @@
       });
   });
 
-  function prevPage() {
-    if (currentPage > 1) {
-      currentPage--;
-      load(currentOpts(currentPage));
-    }
-  }
-
-  function nextPage() {
-    if (currentPage * perPage < total) {
-      currentPage++;
-      load(currentOpts(currentPage));
-    }
+  function goToPage(page: number) {
+    if (page < 1 || (page - 1) * perPage >= total) return;
+    currentPage = page;
+    load(currentOpts(currentPage));
   }
 
   interface TxnGroup {
@@ -302,12 +294,8 @@
     </div>
 
     {#if totalPages > 1}
-      <div class="pagination">
-        <button onclick={prevPage} disabled={currentPage <= 1} type="button">&laquo; Prev</button>
-        <span class="page-info caption">{currentPage} / {totalPages}</span>
-        <button onclick={nextPage} disabled={currentPage >= totalPages} type="button"
-          >Next &raquo;</button
-        >
+      <div class="txn-pages">
+        <Pagination page={currentPage} pages={totalPages} onchange={goToPage} />
       </div>
     {/if}
   </LoadState>
@@ -401,36 +389,10 @@
     color: var(--text-secondary);
   }
 
-  .pagination {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-4);
-    padding: var(--space-3);
+  /* Pinned under the scrolling rows, ruled off from them. */
+  .txn-pages {
     flex-shrink: 0;
     border-top: 1px solid var(--border-subtle);
-  }
-
-  .pagination button {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-1) var(--space-3);
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .pagination button:hover:not(:disabled) {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
-  }
-
-  .pagination button:disabled {
-    opacity: 0.3;
-    cursor: default;
   }
 
   @media (max-width: 640px) {

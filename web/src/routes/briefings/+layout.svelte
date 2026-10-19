@@ -42,6 +42,7 @@
     ConfirmDialog,
     EmptyState,
     PageLoading,
+    LoadMore,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import {
@@ -715,11 +716,13 @@
               </button>
             </div>
           {/each}
-          {#if hasMore}
-            <button class="load-more" type="button" onclick={loadMore} disabled={loadingMore}>
-              {loadingMore ? 'Loading…' : 'Load older'}
-            </button>
-          {/if}
+          <LoadMore
+            onload={loadMore}
+            {hasMore}
+            loading={loadingMore}
+            label="Load older"
+            fullWidth
+          />
         {/if}
       </Sidebar>
     {/if}
@@ -837,24 +840,6 @@
     margin-bottom: 0;
     padding-bottom: 0;
     border-bottom: none;
-  }
-
-  .load-more {
-    width: 100%;
-    margin-top: var(--space-2);
-    padding: var(--space-2);
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    cursor: pointer;
-  }
-
-  .load-more:hover:not(:disabled) {
-    background: var(--hover-bg);
-    color: var(--hover-fg);
   }
 
   .sidebar-error {

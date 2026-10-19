@@ -18,6 +18,7 @@
     Select,
     LoadState,
     CopyButton,
+    LoadMore,
   } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
   import { notifyError } from '$lib/stores/notices';
@@ -451,22 +452,15 @@
             : 'No entries yet.'}
         </EmptyState>
       {/snippet}
-      {#if nextBefore}
-        <div class="older-row">
-          <Button
-            variant="secondary"
-            size="sm"
-            onclick={loadOlder}
-            loading={loadingOlder}
-            loadingLabel="Loading…">Load older</Button
-          >
-        </div>
-      {:else if truncated}
-        <p class="older-note">
-          Stopped after scanning the size limit without a match. Narrow the search or pick a higher
-          level.
-        </p>
-      {/if}
+      <LoadMore
+        onload={loadOlder}
+        hasMore={!!nextBefore}
+        loading={loadingOlder}
+        label="Load older"
+        note={truncated
+          ? 'Stopped after scanning the size limit without a match. Narrow the search or pick a higher level.'
+          : undefined}
+      />
 
       {#each records as record (record.cursor)}
         <div class="log-row {levelClass(record.level)}">
@@ -654,18 +648,6 @@
     color: var(--text-primary);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-  }
-
-  .older-row {
-    display: flex;
-    justify-content: center;
-    padding-bottom: var(--space-2);
-  }
-
-  .older-note {
-    margin: 0 0 var(--space-2);
-    text-align: center;
-    color: var(--text-dim);
   }
 
   .log-footer {
