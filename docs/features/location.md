@@ -52,21 +52,55 @@ enabled = true
 
 `istota setup` writes this when you turn GPS location on.
 
-Per-user ingest tokens are stored as connected services in the encrypted `secrets` table. Provision via the web settings UI at `/istota/location/settings` or CLI:
+### Ingest tokens, one per device
+
+Every device that sends locations has its own ingest token. Tokens are rows in `location_ingest_tokens` in the framework `istota.db`, not in the per-user `location.db`, because the receiver has to find the user from the token before it knows which `location.db` to open. A row keeps the SHA-256 hash of the token and its last four characters, never the token itself. The token is a 256-bit random value, so an unsalted hash is enough, and it does not depend on `ISTOTA_SECRET_KEY`. The plaintext is returned once, by the request that mints it, and there is no way to read it back.
+
+Location settings (`/istota/location/settings`) lists every token under **Devices**: the label, the token's last four characters, when it was added and when it last sent ("never" until its first batch). In the iOS app, the row for the phone you are holding is marked "This phone". Remove asks first, then deletes the row; that device's next request is refused, and no other device is affected. An account can hold 20 tokens.
+
+There are two ways to add a device.
+
+- **One tap in the iOS app.** On a phone whose tracker is not configured, the **This device** card shows "Turn on location tracking". It mints a token for the phone's tracker id, hands it to the tracker, asks iOS for location permission when it has not been asked yet, and starts tracking with the chosen profile once permission is granted. If the answer is not in within a minute, or permission was already denied, the tracker stays configured and stopped and the card's permission controls take over. Setting the same phone up again replaces its row in place: same row, new token, "last sent" cleared, and the old token stops working. Two accounts used in turn on one phone each get their own row.
+- **A code.** "Create code" on the Provision a device card mints a new token each time and shows it once, as a QR code and as the full webhook URL. Scan it with the app's "Scan a code instead" button, or paste the URL into third-party Overland. Creating a code never changes another device's token.
+
+When the server refuses a configured phone's token (the tracker reports "token rejected", usually because the row was removed), the card says so and offers "Set up again", which mints a new token and reconfigures the tracker without starting or stopping it. Points the tracker held while refused are sent on its next send.
+
+Ingest tokens are not tied to a web session. Signing out, a session expiring or a password change leaves a tracker running. A token stops working when it is removed from the list, when the account is disabled, or when the location module is off for the user.
+
+The routes, all under `/istota/api`:
+
+| Route | Does |
+|---|---|
+| `GET /location/devices` | Lists the rows (`id`, `kind`, `device_id`, `label`, `token_tail`, `created_at`, `last_used_at`), newest first, plus `legacy_token`, whether the shared token below exists. Never a token or a hash |
+| `POST /location/devices` | Mints a token. Body: `kind` (`app` or `code`), `device_id` (a UUID, required for `app` and refused for `code`) and an optional `label`. Returns `id`, `token`, `endpoint` and `webhook_url` with status 201 |
+| `DELETE /location/devices/{id}` | Removes one row. 404 for a row that is not yours |
+| `DELETE /location/devices/legacy` | Removes the shared token. 404 when there is none |
+
+The label has control characters removed and is trimmed. Over 64 characters after that is refused with 400 rather than cut short, and a blank label becomes "iPhone" for `app` or "QR code" for `code`. An unknown body key is a 400 naming it.
+
+Minting refuses before it writes anything, in this order: 409 when the location module is off for the user (the receiver builds no token map for them, so the token would be refused on first use), 409 when `[site] hostname` is unset, 400 naming the field that is wrong, and 409 "This account already has 20 devices. Remove one first." Replacing a phone's existing row never counts against the 20. The hostname check exists because the assembled URL would otherwise be a relative path, which the phone's decoder rejects as not being `https://`, and the device would then blame the code rather than the configuration. In practice only `istota serve` on a Mac reaches it, since under Nextcloud auth a blank hostname already fails the origin check. The endpoint is always built from `[site] hostname`, not from the address the page was opened on. When the app is connected under a different name for the same server, the tracker refuses it with `WRONG_SERVER` and the card shows that message; the minted row stays in the list and can be removed.
+
+### The QR code
+
+A created code is rendered as a QR code the native iOS app scans, with the full webhook URL printed beside it for the third-party Overland app, which has no scanner. The payload is a small JSON envelope (`{v, endpoint, token}`, version 1) carrying the endpoint and the token, deliberately not the webhook URL itself: a bare `https://` code is offered for opening by every generic scanner, including the iOS Camera app, which would put the token in Safari's address bar and history in exchange for a 405. The query string is stripped from the endpoint, so the token appears in the payload exactly once; the tracker sends it as a bearer header. The decoder rejects rather than repairs: a wrong version, a non-`https` endpoint, or anything over its size caps is refused whole rather than partially honoured. Leaving the settings page loses the code, because there is nowhere to read the token back from; the next device needs a new one.
+
+### The shared token from before per-device tokens
+
+Before per-device tokens each account had one token, the encrypted secret `overland` / `ingest_token`, and minting a new one cut off every device using the old. An upgrade keeps it working: the receiver still accepts it, and nothing converts it into per-device rows, since the server cannot know which devices hold it. The Devices list shows it as "Shared token (from before per-device tokens)" with a Remove button. Remove it once each device that used it has been set up again. It has no "last sent" time, because there is no row to record one on.
+
+The location page no longer creates or rotates it, and the old `POST /istota/api/settings/secrets/overland/ingest_token/generate` route is gone. It can still be written by `PUT /istota/api/settings/secrets/overland/ingest_token`, a settings plan, or the CLI:
 
 ```bash
 istota secret ensure --user alice --service overland --key ingest_token --value secret-token-here
 ```
 
-The settings page can also mint one for you (`POST /api/settings/secrets/overland/ingest_token/generate`), which returns the token and the assembled webhook URL. That response is the only time either is readable — afterwards the secret is write-only like every other one, and it is the only endpoint in the app that returns a secret in a response body. Generating again rotates: the previous token stops working immediately, on every device using it, which is also how you revoke a lost phone.
+### Reloading the receiver
 
-Minting refuses in three cases, and every check runs before the write, so a refusal never rotates a token that was working: the location module is off for that user (409), `[site] hostname` is unset (409), or `ISTOTA_SECRET_KEY` is missing (503). The hostname check exists because the assembled URL would otherwise be a relative path, which the phone's decoder rejects as not being `https://` — the device would then blame the code rather than the configuration. In practice only `istota serve` on a Mac reaches it, since under Nextcloud auth a blank hostname already fails the origin check.
+The receiver holds a map from token hash to user in memory, loaded when it starts. Minting, removing a token, a web write to the shared token, and disabling or re-enabling an account (the admin page or `istota auth disable|enable`) each stamp a sentinel (`.location_ingest_reload`, beside `istota.db`) that the receiver stats on each ingest request and reloads from, so a removed token is refused on the very next request. Stamping is best-effort: if it fails, the change applies after the next restart. **The CLI path above does not stamp it**: `istota secret ensure` writes the secret and nothing else, so a shared token provisioned that way applies on the receiver's next restart or SIGHUP. A reload that cannot read the token table or the account list logs a warning and keeps the previous map.
 
-Having minted one, the page renders it as a QR code the native iOS app scans (Settings → Location → **This device** → Scan), and prints the full webhook URL beside it for the third-party Overland app, which has no scanner. The payload is a small JSON envelope — `{v, endpoint, token}`, version 1 — carrying the endpoint and the token, deliberately not the webhook URL itself: a bare `https://` code is offered for opening by every generic scanner, including the iOS Camera app, which would put the token in Safari's address bar and history in exchange for a 405. The query string is stripped from the endpoint, so the token appears in the payload exactly once; the tracker sends it as a bearer header. The decoder rejects rather than repairs — wrong version, non-`https` endpoint, or anything over its size caps is refused whole rather than partially honoured. Leaving the settings page loses the code, because there is nowhere to read the token back from; the next device needs a new one.
+A token's "last sent" time is written after a batch is stored, at most once every ten minutes per token. The write is best-effort and does not affect the response.
 
-The receiver holds the token map in memory, loaded when it starts, so a write through the web UI leaves a stamped sentinel (`.location_ingest_reload`, beside `istota.db`) that the receiver stats on each ingest request and reloads from. Before that existed, a freshly provisioned token was refused until the receiver restarted. Stamping is best-effort: if it fails, the token still works after the next restart. **The CLI path above does not stamp it** — `istota secret ensure` writes the secret and nothing else, so a token provisioned that way applies on the receiver's next restart or SIGHUP.
-
-There is no separate receiver process to run. With `[location] enabled = true` the web app includes the ingest router, so the endpoint is `/webhooks/location` on the web app's own address and `webhooks_port` is unused. The image carries the location extras. The receiver loads with the web app, and a SIGHUP to the web process reloads both. The sentinel above is still what applies a token generated in the browser without either.
+There is no separate receiver process to run. With `[location] enabled = true` the web app includes the ingest router, so the endpoint is `/webhooks/location` on the web app's own address and `webhooks_port` is unused. The image carries the location extras. The receiver loads with the web app, and a SIGHUP to the web process reloads both. The sentinel above is still what applies a token minted in the browser without either.
 
 ## Tracking on the device
 
@@ -80,13 +114,14 @@ What it exposes is deliberately smaller than Overland's fifteen settings:
 | Profile: Detailed or Places | **Detailed** logs a continuous line and sends every minute, at a battery cost. **Places** logs arrivals and departures only and sends every five minutes. Switching while tracking re-arms in place, so it costs no gap in coverage; switching while stopped is held and applied by the next Start, since starting is the only thing that can set a profile |
 | Permission, and a way into iOS Settings | Only Settings.app can restore a *denied* Always authorization, so that is the one state where the button replaces Start/Stop rather than sitting beside it. **While in use** — the case the card mostly exists to catch — keeps Stop reachable and shows the prompt alongside it |
 | Queued points, points dropped, last sent, last error, endpoint host, device id | The readout that says tracking is still alive. The failure worth preventing is tracking stopping silently and the gap being found weeks later. Only the endpoint's host is shown; the token is never echoed back |
-| Send now, rescan code | |
+| Turn on location tracking, scan a code instead | Shown while the tracker is not configured. See [ingest tokens](#ingest-tokens-one-per-device) |
+| Send now, rescan code, set up again | Set up again appears only when the server has refused this phone's token |
 
 Send interval and batch size are not separately exposed. The interval follows the profile — there is nothing to send every minute when fixes arrive a kilometre apart — and a numeric field with no basis for setting it invites a five-second interval and a dead battery.
 
 Both profiles request 100 m accuracy, which is not a knob because the server drops any ping worse than `accuracy_threshold_m` (default 100) from place matching. A genuinely coarse profile would keep storing pings — the map would still fill in — while quietly ceasing to detect being anywhere.
 
-The card is gated on the app's version, and the two halves are gated separately: tracking needs shell 0.6.0, scanning a code needs 0.7.0. A 0.6.0 app therefore gets a working status card that says it cannot scan and points at TestFlight, rather than a Scan button that does nothing. The gate reads the app's own `IstotaApp/<version>` user-agent token rather than the presence of a plugin object, so a page carrying a look-alike shim outside the app never calls through. A scan that finds nothing distinguishes three outcomes — cancelled (which says nothing, because the user chose it), a code that isn't ours, and a build too old to scan.
+The card is gated on the app's version, and the two halves are gated separately: tracking needs shell 0.6.0, scanning a code needs 0.7.0. A 0.6.0 app therefore gets the status card and the one-tap "Turn on location tracking" button, which needs no scanner, and no Scan button that would do nothing. No app update is needed for the one-tap path: it uses the same `configure` call a scan ends in. The gate reads the app's own `IstotaApp/<version>` user-agent token rather than the presence of a plugin object, so a page carrying a look-alike shim outside the app never calls through. A scan that finds nothing distinguishes three outcomes — cancelled (which says nothing, because the user chose it), a code that isn't ours, and a build too old to scan.
 
 ## Places
 
@@ -168,7 +203,7 @@ The webhook receiver must be reachable from the Overland app on your phone. Two 
 
 **VPN (alternative)**: if you don't want to expose the endpoint publicly, give the stack a hostname that resolves only inside a WireGuard or Tailscale network, and connect your phone to it. This keeps the endpoint off the public internet but requires the VPN to be active for location tracking to work. QR provisioning still needs an `https://` endpoint and `[site] hostname`; with plain HTTP, the URL has to be typed into stock Overland by hand.
 
-A public hostname with TLS is the simpler arrangement, since it also covers the web UI. The endpoint is authenticated per-user by the ingest token, supplied either as a `?token=` query parameter (what Overland sends) or as an `Authorization: Bearer` header (what the native tracker sends). A missing token is a 401 and an unknown one a 403. Public exposure is safe as long as TLS is enabled and tokens are kept secret.
+A public hostname with TLS is the simpler arrangement, since it also covers the web UI. The endpoint is authenticated by a device's ingest token (or the shared token from before per-device tokens), supplied either as a `?token=` query parameter (what Overland sends) or as an `Authorization: Bearer` header (what the native tracker sends). A missing token is a 401 and an unknown one a 403. Public exposure is safe as long as TLS is enabled and tokens are kept secret.
 
 ## Web interface
 

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- In the Istota iOS app (0.6.0 and later), Location settings has a "Turn on location tracking" button that sets up this phone in one tap: it creates a token for the phone, configures the tracker, asks for location permission and starts tracking. No QR code or second screen is needed, and if the server later refuses the phone's token the card offers "Set up again".
+- Location settings lists every device that can send locations, with when it was added and when it last sent, and each can be removed on its own. Every device now has its own ingest token, stored only as a hash, so setting up or removing one device never affects another.
 - In the generic iOS app (0.12.0), Log out hands over to the app, which asks once and then stops location tracking, removes the notification enrollment and clears the app's website data. Settings → Preferences has a card named for the device (iPhone or iPad) with a Device settings button, Nextcloud Reconnect and Google Connect open in the browser because those sign-ins leave the site, and the app no longer gets the offline service worker, which it cannot run. Browsers and older iOS apps are unchanged.
 
 - Notification registrations from the generic iOS app name the app's server connection, and alerts repeat it, so the app ignores a tapped alert from a server it has disconnected from. Registrations and alerts for older iOS apps are unchanged.
@@ -79,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- "Generate token" on Location settings is now "Create code", which adds a new device token instead of replacing the account's only one, and the generate API route is removed. The account's existing shared token keeps working through the upgrade and appears in the device list until you remove it.
 - The web dashboard shows two module tiles per row on a phone instead of one, so the whole list fits on screen. The tile descriptions are shorter so they stay at two lines.
 - On a wide screen, every web dashboard tile is now as tall as the welcome card's row. Before, the tile beside the welcome card was taller than the tiles below it. Narrower layouts keep their shorter tiles.
 - Images and location maps in web chat are drawn at one size, the same however tall the window is, and keep their shape on a phone. Before, an image's size followed the window's height and a map stretched across the whole chat column.
