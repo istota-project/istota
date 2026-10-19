@@ -442,6 +442,9 @@
     align-items: center;
     gap: var(--space-2);
     min-height: var(--control-height-lg);
+    /* Below 641px the checkbox field is a flex row; full width here pushed
+       the label to the far end. In the inline grid it still stretches. */
+    width: auto;
     max-width: none;
   }
 

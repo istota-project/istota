@@ -273,4 +273,17 @@ describe('dashboard grid on a phone', () => {
       /\.feature-grid \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
     );
   });
+
+  /* The welcome row stays content-height while it holds the row alone, and
+     joins the tiles' equal height only once a fourth track puts tiles beside it. */
+  it('gives every row one height only once tiles share the welcome row', () => {
+    expect(source).toMatch(/\.feature-grid \{\s*grid-template-rows: auto;\s*grid-auto-rows: 1fr;/);
+    const block =
+      source.match(
+        /@container dashboard \(min-width: calc\(4 \* 200px \+ 3rem\)\) \{([\s\S]*?)\n {2}\}/,
+      )?.[1] ?? '';
+    expect(block).toMatch(/\.feature-grid \{\s*grid-template-rows: none;/);
+    expect(source).toMatch(/\.dashboard \{\s*container: dashboard \/ inline-size;/);
+    expect(source).toContain('--card-min: 200px; --card-gap: var(--card-pane-pad);');
+  });
 });

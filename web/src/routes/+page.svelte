@@ -222,11 +222,22 @@
 	   what lets it be content-height wherever it holds the row alone (every
 	   width up to three columns, the phone layout included) instead of being
 	   stretched to a tile's height. From four columns up it shares the row with
-	   the tiles that flow around it and stretches to match them, which is what
-	   keeps that row looking like the ones below it. */
+	   tiles, so the container rule below drops the exemption and every row,
+	   the welcome card's included, takes one height. */
   .feature-grid {
     grid-template-rows: auto;
     grid-auto-rows: 1fr;
+  }
+  /* Four auto-fit tracks fit from 4 × --card-min + 3 gaps (200px, and the 1rem
+     --card-pane-pad). A query can't read either custom property, so keep these
+     numbers in step with the grid's inline style. */
+  .dashboard {
+    container: dashboard / inline-size;
+  }
+  @container dashboard (min-width: calc(4 * 200px + 3rem)) {
+    .feature-grid {
+      grid-template-rows: none;
+    }
   }
   /* Two tiles a row on a phone. The auto-fit wall drops to one column below
      about 430px, where a single tile per row scrolls the module list off the
