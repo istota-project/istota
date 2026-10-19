@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, Card, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -87,113 +87,115 @@
 {:else if !ref}
   <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState>
 {:else}
-  <section class="card coverage-card">
-    {#if entry}
-      <div class="status-row">
-        <Badge variant={immunizationStatusVariant(entry.status)}
-          >{immunizationStatusLabel(entry.status)}</Badge
-        >
-        <span class="caption">{ref.category} · {ref.schedule}</span>
-      </div>
-      <dl class="kv-stacked">
-        <div>
-          <dt>Last given</dt>
-          <dd>{formatDate(entry.last_given)}</dd>
+  <div class="vaccine">
+    <Card class="coverage-card">
+      {#if entry}
+        <div class="status-row">
+          <Badge variant={immunizationStatusVariant(entry.status)}
+            >{immunizationStatusLabel(entry.status)}</Badge
+          >
+          <span class="caption">{ref.category} · {ref.schedule}</span>
         </div>
-        <div>
-          <dt>Doses recorded</dt>
-          <dd>{entry.dose_count}</dd>
-        </div>
-        <div>
-          <dt>Next due</dt>
-          <dd>{formatDate(entry.next_due)}</dd>
-        </div>
-        {#if entry.days_until_due !== null}
+        <dl class="kv-stacked">
           <div>
-            <dt>
-              {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
-            </dt>
-            <dd>{Math.abs(entry.days_until_due)}</dd>
+            <dt>Last given</dt>
+            <dd>{formatDate(entry.last_given)}</dd>
           </div>
-        {/if}
-      </dl>
-    {/if}
-    {#if ref.description}
-      <p class="ref-description">{ref.description}</p>
-    {/if}
-    {#if ref.typical_age_range}
-      <p class="caption">Typical age range: {ref.typical_age_range}</p>
-    {/if}
-  </section>
+          <div>
+            <dt>Doses recorded</dt>
+            <dd>{entry.dose_count}</dd>
+          </div>
+          <div>
+            <dt>Next due</dt>
+            <dd>{formatDate(entry.next_due)}</dd>
+          </div>
+          {#if entry.days_until_due !== null}
+            <div>
+              <dt>
+                {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
+              </dt>
+              <dd>{Math.abs(entry.days_until_due)}</dd>
+            </div>
+          {/if}
+        </dl>
+      {/if}
+      {#if ref.description}
+        <p class="ref-description">{ref.description}</p>
+      {/if}
+      {#if ref.typical_age_range}
+        <p class="caption">Typical age range: {ref.typical_age_range}</p>
+      {/if}
+    </Card>
 
-  {#if explainerLoading}
-    <section class="card explainer placeholder">
-      <h2 class="micro-label">About this vaccine</h2>
-      <p class="muted">Loading…</p>
-    </section>
-  {:else if explainer && explainer.summary}
-    <details class="card explainer">
-      <summary>
-        <span class="label micro-label">About this vaccine</span>
-        <span class="chev" aria-hidden="true">›</span>
-      </summary>
-      <div class="content">
-        <p class="summary">{explainer.summary}</p>
-        {#if explainer.why_it_matters.length > 0}
-          <h3 class="micro-label">Why it matters</h3>
-          <ul>
-            {#each explainer.why_it_matters as item (item)}
-              <li>{item}</li>
-            {/each}
-          </ul>
-        {/if}
-        {#if explainer.disclaimer}
-          <p class="disclaimer">{explainer.disclaimer}</p>
-        {/if}
-      </div>
-    </details>
-  {/if}
+    {#if explainerLoading}
+      <Card class="coverage-card explainer-placeholder">
+        <h2 class="micro-label">About this vaccine</h2>
+        <p class="muted">Loading…</p>
+      </Card>
+    {:else if explainer && explainer.summary}
+      <details class="explainer">
+        <summary>
+          <span class="label micro-label">About this vaccine</span>
+          <span class="chev" aria-hidden="true">›</span>
+        </summary>
+        <div class="content">
+          <p class="summary">{explainer.summary}</p>
+          {#if explainer.why_it_matters.length > 0}
+            <h3 class="micro-label">Why it matters</h3>
+            <ul>
+              {#each explainer.why_it_matters as item (item)}
+                <li>{item}</li>
+              {/each}
+            </ul>
+          {/if}
+          {#if explainer.disclaimer}
+            <p class="disclaimer">{explainer.disclaimer}</p>
+          {/if}
+        </div>
+      </details>
+    {/if}
 
-  <section class="history">
-    <h2 class="micro-label">Dose history</h2>
-    {#if history.length === 0}
-      <EmptyState size="sm">No doses recorded yet.</EmptyState>
-    {:else}
-      <div class="table-scroll">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Product</th>
-              <th>Dose label</th>
-              <th>Facility</th>
-              <th>Notes</th>
-              <th class="col-actions"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each history as i (i.id)}
+    <section class="history">
+      <h2 class="micro-label">Dose history</h2>
+      {#if history.length === 0}
+        <EmptyState size="sm">No doses recorded yet.</EmptyState>
+      {:else}
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
               <tr>
-                <td>{formatDate(i.date_given)}</td>
-                <td>{i.product_name || '—'}</td>
-                <td>{i.dose_label || '—'}</td>
-                <td>{i.facility || '—'}</td>
-                <td class="notes cell-truncate">{i.notes || '—'}</td>
-                <td class="col-actions">
-                  <KebabMenu
-                    ariaLabel="Immunization actions"
-                    items={[
-                      { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
-                    ]}
-                  />
-                </td>
+                <th>Date</th>
+                <th>Product</th>
+                <th>Dose label</th>
+                <th>Facility</th>
+                <th>Notes</th>
+                <th class="col-actions"></th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-  </section>
+            </thead>
+            <tbody>
+              {#each history as i (i.id)}
+                <tr>
+                  <td>{formatDate(i.date_given)}</td>
+                  <td>{i.product_name || '—'}</td>
+                  <td>{i.dose_label || '—'}</td>
+                  <td>{i.facility || '—'}</td>
+                  <td class="notes cell-truncate">{i.notes || '—'}</td>
+                  <td class="col-actions">
+                    <KebabMenu
+                      ariaLabel="Immunization actions"
+                      items={[
+                        { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
+                      ]}
+                    />
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+  </div>
 {/if}
 
 <style>
@@ -204,40 +206,33 @@
     margin-bottom: var(--space-4);
   }
 
-  .card {
-    /* The layout owns .card's box and reads its padding from this hook. A
-		   plain `padding` here is dead: `.health-frame :global(.card)` scopes to
-		   (0,3,0) and beats a page-local `.card` at (0,2,0), so the declaration
-		   never applied and every card sat at the layout default. */
-    --card-padding: 0.85rem 1rem;
+  .vaccine :global(.coverage-card) {
     margin-bottom: var(--space-4);
   }
-  .coverage-card .status-row {
+  .status-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: var(--space-2);
   }
   dd {
     color: var(--text-primary);
   }
   .ref-description {
-    margin: var(--space-3) 0 0;
+    margin: 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
 
-  .explainer h2 {
-    margin: 0 0 var(--space-2);
-  }
+  /* A disclosure drawn as a card until the Disclosure component takes it: the
+     padding lives on the summary and the content rather than on the
+     <details>, or the click target would stop short of the panel's edges. */
   details.explainer {
-    /* Zero the panel's own padding — via the hook, for the same specificity
-		   reason — so the summary and the content can each carry the full card
-		   padding themselves. Without this the two stacked and the panel was
-		   inset roughly twice as far as the coverage card above it. */
-    --card-padding: 0;
+    margin-bottom: var(--space-4);
+    background: var(--surface-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-card);
   }
   details.explainer > summary {
     list-style: none;
@@ -246,11 +241,9 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
-    /* Matches .card's padding so the collapsed panel is the same box as the
-		   coverage card above it. The padding lives on the summary and the
-		   content rather than on the <details>, or the click target would stop
-		   short of the panel's edges. */
-    padding: var(--space-3) var(--space-4);
+    /* The card's padding, so the collapsed panel is the same box as the
+       coverage card above it. */
+    padding: var(--space-4);
     user-select: none;
   }
   details.explainer > summary::-webkit-details-marker {
@@ -304,7 +297,7 @@
     color: var(--text-dim);
     font-style: italic;
   }
-  .explainer.placeholder {
+  .vaccine :global(.explainer-placeholder) {
     opacity: 0.7;
   }
 

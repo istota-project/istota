@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { BriefingDocumentBlock } from '$lib/api';
   import { Maximize2, Settings2 } from '@lucide/svelte';
-  import { HintPopover, IconButton } from '$lib/components/ui';
+  import { Card, HintPopover, IconButton } from '$lib/components/ui';
   import { fileLinks } from '$lib/fileViewer/links';
   import { renderMarkdown } from '$lib/markdown';
 
@@ -23,7 +23,7 @@
 {#if fullContent}
   {@render body()}
 {:else}
-  <section class="briefing-block" data-width={block.presentation.width} aria-label={block.title}>
+  <Card class="briefing-block" data-width={block.presentation.width} ariaLabel={block.title}>
     <div data-masonry-content>
       <header class="block-head">
         <div class="block-title">
@@ -57,19 +57,10 @@
       </header>
       {@render body()}
     </div>
-  </section>
+  </Card>
 {/if}
 
 <style>
-  .briefing-block {
-    box-sizing: border-box;
-    min-width: 0;
-    padding: var(--space-4);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-card);
-    background: var(--surface-card);
-  }
-
   [data-masonry-content] {
     display: flow-root;
   }

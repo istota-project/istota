@@ -8,7 +8,7 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
-  import { EmptyState, StatTile, PageLoading } from '$lib/components/ui';
+  import { Card, EmptyState, StatTile, PageLoading } from '$lib/components/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
@@ -211,7 +211,7 @@
       <!-- Inputs -->
       <section class="input-section">
         <h2 class="title-section">Inputs</h2>
-        <div class="input-card">
+        <Card as="div" padding="sm" class="input-card">
           <div class="input-group">
             <label class="input-label caption" for="w2-income">W-2 income YTD</label>
             <div class="input-field">
@@ -286,7 +286,7 @@
               />
             </div>
           </div>
-        </div>
+        </Card>
 
         <div class="input-meta caption">
           <span>Q{data.quarter} {data.tax_year}</span>
@@ -622,13 +622,7 @@
   }
 
   /* Inputs */
-  .input-card {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3);
-    display: flex;
-    flex-direction: column;
+  .input-section :global(.input-card) {
     gap: var(--space-2);
   }
 

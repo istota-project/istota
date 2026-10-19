@@ -10,7 +10,7 @@
     type ImmunizationRef,
     type ParsedImmunization,
   } from '$lib/api';
-  import { Badge, Button, FileDropZone, Select, type SelectOption } from '$lib/components/ui';
+  import { Badge, Button, Card, FileDropZone, Select, type SelectOption } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
   type Mode = 'file' | 'paste';
@@ -123,172 +123,178 @@
   }
 </script>
 
-<div class="header">
-  <h1 class="title-page">Import immunizations</h1>
-  <Button href="{base}/health/immunizations">Back</Button>
-</div>
+<div class="import-page">
+  <div class="header">
+    <h1 class="title-page">Import immunizations</h1>
+    <Button href="{base}/health/immunizations">Back</Button>
+  </div>
 
-<div class="tabs" role="tablist">
-  <button
-    type="button"
-    role="tab"
-    aria-selected={mode === 'file'}
-    class="tab"
-    class:active={mode === 'file'}
-    onclick={() => switchMode('file')}
-  >
-    Screenshot or PDF
-  </button>
-  <button
-    type="button"
-    role="tab"
-    aria-selected={mode === 'paste'}
-    class="tab"
-    class:active={mode === 'paste'}
-    onclick={() => switchMode('paste')}
-  >
-    Paste text
-  </button>
-</div>
+  <div class="tabs" role="tablist">
+    <button
+      type="button"
+      role="tab"
+      aria-selected={mode === 'file'}
+      class="tab"
+      class:active={mode === 'file'}
+      onclick={() => switchMode('file')}
+    >
+      Screenshot or PDF
+    </button>
+    <button
+      type="button"
+      role="tab"
+      aria-selected={mode === 'paste'}
+      class="tab"
+      class:active={mode === 'paste'}
+      onclick={() => switchMode('paste')}
+    >
+      Paste text
+    </button>
+  </div>
 
-{#if mode === 'file'}
-  <div class="card">
-    <FileDropZone bind:file onClear={() => (documentId = null)}>
-      <p>Drop, paste, or pick a screenshot or PDF of your immunization list.</p>
+  {#if mode === 'file'}
+    <Card as="div" class="import-card">
+      <FileDropZone bind:file onClear={() => (documentId = null)}>
+        <p>Drop, paste, or pick a screenshot or PDF of your immunization list.</p>
+        <p class="caption">
+          The LLM extracts vaccine name + date and matches each row to a canonical family. You'll
+          review the table before anything is saved.
+        </p>
+      </FileDropZone>
+
+      <div class="actions hstack">
+        <Button
+          variant="primary"
+          disabled={!file || extracting}
+          onclick={doExtract}
+          loading={extracting}
+          loadingLabel="Extracting…">Extract</Button
+        >
+      </div>
+    </Card>
+  {:else}
+    <Card as="div" class="import-card">
       <p class="caption">
-        The LLM extracts vaccine name + date and matches each row to a canonical family. You'll
-        review the table before anything is saved.
+        Paste a MyChart / EHR vaccine list below. Lines like
+        <code>"Influenza (Given 11/28/2025)"</code> are recognised and matched to a canonical vaccine
+        family. Review the table before importing.
       </p>
-    </FileDropZone>
-
-    <div class="actions hstack">
-      <Button
-        variant="primary"
-        disabled={!file || extracting}
-        onclick={doExtract}
-        loading={extracting}
-        loadingLabel="Extracting…">Extract</Button
-      >
-    </div>
-  </div>
-{:else}
-  <div class="card">
-    <p class="caption">
-      Paste a MyChart / EHR vaccine list below. Lines like
-      <code>"Influenza (Given 11/28/2025)"</code> are recognised and matched to a canonical vaccine family.
-      Review the table before importing.
-    </p>
-    <textarea
-      class="paste"
-      rows="10"
-      bind:value={raw}
-      placeholder={'INFS Pres Free 6mos-Adult (Fluzone trivalent) (influenza) (Given 11/28/2025)\nTdap (Tetanus, diphtheria, acellular pertussis) (Given 12/1/2016)\nTYDvi (Typhoid, ViCPs) (Given 10/23/2023)'}
-    ></textarea>
-    <div class="actions hstack">
-      <Button
-        variant="primary"
-        disabled={!raw.trim() || parsing}
-        onclick={doParse}
-        loading={parsing}
-        loadingLabel="Parsing…">Parse</Button
-      >
-    </div>
-  </div>
-{/if}
-
-{#if error}
-  <div class="banner error">{error}</div>
-{/if}
-
-{#if extracting}
-  <div class="card extracting muted">
-    <span class="spinner" aria-hidden="true"></span>
-    Extracting immunizations from the source — this can take a few seconds.
-  </div>
-{/if}
-
-{#if warnings.length > 0}
-  <div class="banner warn">
-    <ul>
-      {#each warnings as w (w)}
-        <li>{w}</li>
-      {/each}
-    </ul>
-  </div>
-{/if}
-
-{#if parsed.length > 0}
-  <div class="review-head">
-    <h2 class="micro-label">Review {parsed.length} row{parsed.length === 1 ? '' : 's'}</h2>
-    {#if extractMode}
-      <span class="caption">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
-    {/if}
-  </div>
-
-  {#if documentId !== null && file}
-    <p class="attach-note caption">
-      <strong>{file.name}</strong> will be kept as proof and attached to the rows below.
-    </p>
+      <textarea
+        class="paste"
+        rows="10"
+        bind:value={raw}
+        placeholder={'INFS Pres Free 6mos-Adult (Fluzone trivalent) (influenza) (Given 11/28/2025)\nTdap (Tetanus, diphtheria, acellular pertussis) (Given 12/1/2016)\nTYDvi (Typhoid, ViCPs) (Given 10/23/2023)'}
+      ></textarea>
+      <div class="actions hstack">
+        <Button
+          variant="primary"
+          disabled={!raw.trim() || parsing}
+          onclick={doParse}
+          loading={parsing}
+          loadingLabel="Parsing…">Parse</Button
+        >
+      </div>
+    </Card>
   {/if}
 
-  <div class="table-scroll">
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Vaccine</th>
-          <th>Date</th>
-          <th>Product</th>
-          <th>Confidence</th>
-          {#if mode === 'paste'}
-            <th>Source line</th>
-          {/if}
-          <th class="col-actions"></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each parsed as row, i (i)}
-          <tr class:is-warn={row.name === 'Unknown' || !row.date_given}>
-            <td>
-              <Select
-                value={row.name}
-                options={nameOptions}
-                onValueChange={(v) => (row.name = v)}
-                ariaLabel="Vaccine"
-                fullWidth
-              />
-            </td>
-            <td>
-              <input type="date" bind:value={row.date_given} />
-            </td>
-            <td>
-              <input
-                type="text"
-                value={row.product_name || ''}
-                oninput={(e) =>
-                  (row.product_name = (e.currentTarget as HTMLInputElement).value || null)}
-              />
-            </td>
-            <td>
-              <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
-            </td>
-            {#if mode === 'paste'}
-              <td class="src cell-truncate">{row.source_line}</td>
-            {/if}
-            <td class="col-actions">
-              <Button size="sm" onclick={() => removeRow(i)}>Remove</Button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
-  </div>
+  {#if error}
+    <div class="banner error">{error}</div>
+  {/if}
 
-  <div class="actions hstack">
-    <Button variant="primary" disabled={importing} onclick={doImport}>
-      {importing ? 'Importing…' : `Import ${parsed.length} rows`}
-    </Button>
-  </div>
-{/if}
+  {#if extracting}
+    <Card as="div" class="import-card">
+      <div class="extracting muted">
+        <span class="spinner" aria-hidden="true"></span>
+        Extracting immunizations from the source — this can take a few seconds.
+      </div>
+    </Card>
+  {/if}
+
+  {#if warnings.length > 0}
+    <div class="banner warn">
+      <ul>
+        {#each warnings as w (w)}
+          <li>{w}</li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
+
+  {#if parsed.length > 0}
+    <div class="review-head">
+      <h2 class="micro-label">Review {parsed.length} row{parsed.length === 1 ? '' : 's'}</h2>
+      {#if extractMode}
+        <span class="caption"
+          >Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span
+        >
+      {/if}
+    </div>
+
+    {#if documentId !== null && file}
+      <p class="attach-note caption">
+        <strong>{file.name}</strong> will be kept as proof and attached to the rows below.
+      </p>
+    {/if}
+
+    <div class="table-scroll">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Vaccine</th>
+            <th>Date</th>
+            <th>Product</th>
+            <th>Confidence</th>
+            {#if mode === 'paste'}
+              <th>Source line</th>
+            {/if}
+            <th class="col-actions"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each parsed as row, i (i)}
+            <tr class:is-warn={row.name === 'Unknown' || !row.date_given}>
+              <td>
+                <Select
+                  value={row.name}
+                  options={nameOptions}
+                  onValueChange={(v) => (row.name = v)}
+                  ariaLabel="Vaccine"
+                  fullWidth
+                />
+              </td>
+              <td>
+                <input type="date" bind:value={row.date_given} />
+              </td>
+              <td>
+                <input
+                  type="text"
+                  value={row.product_name || ''}
+                  oninput={(e) =>
+                    (row.product_name = (e.currentTarget as HTMLInputElement).value || null)}
+                />
+              </td>
+              <td>
+                <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
+              </td>
+              {#if mode === 'paste'}
+                <td class="src cell-truncate">{row.source_line}</td>
+              {/if}
+              <td class="col-actions">
+                <Button size="sm" onclick={() => removeRow(i)}>Remove</Button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="actions hstack">
+      <Button variant="primary" disabled={importing} onclick={doImport}>
+        {importing ? 'Importing…' : `Import ${parsed.length} rows`}
+      </Button>
+    </div>
+  {/if}
+</div>
 
 <style>
   .header {
@@ -326,11 +332,8 @@
     border-bottom-color: var(--accent-blue);
   }
 
-  .card {
+  .import-page :global(.import-card) {
     margin-bottom: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
 
   /* Typography is the global .caption; only the <p> reset stays here. */
@@ -355,7 +358,7 @@
     border-color: var(--focus-field-border);
   }
 
-  .card .actions {
+  .import-page :global(.import-card .actions) {
     margin-top: var(--space-1);
   }
 

@@ -14,6 +14,7 @@
   import {
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     Field,
@@ -131,111 +132,113 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if immunization}
-  <form class="card form vstack" onsubmit={save}>
-    <div class="row">
-      <Field label="Vaccine name">
-        <input type="text" bind:value={immunization.name} required />
-      </Field>
-      <Field label="Date given">
-        <input type="date" bind:value={immunization.date_given} required />
-      </Field>
-      <Field label="Product">
-        <input
-          type="text"
-          value={immunization.product_name ?? ''}
+  <Card as="div">
+    <form class="form vstack" onsubmit={save}>
+      <div class="row">
+        <Field label="Vaccine name">
+          <input type="text" bind:value={immunization.name} required />
+        </Field>
+        <Field label="Date given">
+          <input type="date" bind:value={immunization.date_given} required />
+        </Field>
+        <Field label="Product">
+          <input
+            type="text"
+            value={immunization.product_name ?? ''}
+            oninput={(e) =>
+              (immunization!.product_name = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="Manufacturer">
+          <input
+            type="text"
+            value={immunization.manufacturer ?? ''}
+            oninput={(e) =>
+              (immunization!.manufacturer = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="Dose label">
+          <input
+            type="text"
+            value={immunization.dose_label ?? ''}
+            oninput={(e) =>
+              (immunization!.dose_label = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="Lot number">
+          <input
+            type="text"
+            value={immunization.lot_number ?? ''}
+            oninput={(e) =>
+              (immunization!.lot_number = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="Route">
+          <Select
+            value={immunization.route ?? ''}
+            options={routeOptions}
+            onValueChange={(v) => {
+              if (immunization) immunization.route = v || null;
+            }}
+            ariaLabel="Route"
+            fullWidth
+          />
+        </Field>
+        <Field label="Site">
+          <input
+            type="text"
+            value={immunization.site ?? ''}
+            oninput={(e) =>
+              (immunization!.site = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="Administered by">
+          <input
+            type="text"
+            value={immunization.administered_by ?? ''}
+            oninput={(e) =>
+              (immunization!.administered_by = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="Facility">
+          <input
+            type="text"
+            value={immunization.facility ?? ''}
+            oninput={(e) =>
+              (immunization!.facility = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+        <Field label="CVX code">
+          <input
+            type="text"
+            value={immunization.cvx_code ?? ''}
+            oninput={(e) =>
+              (immunization!.cvx_code = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+      </div>
+      <Field label="Notes" class="full">
+        <textarea
+          rows="3"
+          value={immunization.notes ?? ''}
           oninput={(e) =>
-            (immunization!.product_name = (e.currentTarget as HTMLInputElement).value || null)}
-        />
+            (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
+        ></textarea>
       </Field>
-      <Field label="Manufacturer">
-        <input
-          type="text"
-          value={immunization.manufacturer ?? ''}
-          oninput={(e) =>
-            (immunization!.manufacturer = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-      <Field label="Dose label">
-        <input
-          type="text"
-          value={immunization.dose_label ?? ''}
-          oninput={(e) =>
-            (immunization!.dose_label = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-      <Field label="Lot number">
-        <input
-          type="text"
-          value={immunization.lot_number ?? ''}
-          oninput={(e) =>
-            (immunization!.lot_number = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-      <Field label="Route">
-        <Select
-          value={immunization.route ?? ''}
-          options={routeOptions}
-          onValueChange={(v) => {
-            if (immunization) immunization.route = v || null;
-          }}
-          ariaLabel="Route"
-          fullWidth
-        />
-      </Field>
-      <Field label="Site">
-        <input
-          type="text"
-          value={immunization.site ?? ''}
-          oninput={(e) =>
-            (immunization!.site = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-      <Field label="Administered by">
-        <input
-          type="text"
-          value={immunization.administered_by ?? ''}
-          oninput={(e) =>
-            (immunization!.administered_by = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-      <Field label="Facility">
-        <input
-          type="text"
-          value={immunization.facility ?? ''}
-          oninput={(e) =>
-            (immunization!.facility = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-      <Field label="CVX code">
-        <input
-          type="text"
-          value={immunization.cvx_code ?? ''}
-          oninput={(e) =>
-            (immunization!.cvx_code = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-    </div>
-    <Field label="Notes" class="full">
-      <textarea
-        rows="3"
-        value={immunization.notes ?? ''}
-        oninput={(e) =>
-          (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
-      ></textarea>
-    </Field>
-    <div class="caption">
-      Source: {immunization.source}
-      {#if immunization.created_at}
-        · Created: {immunization.created_at}
+      <div class="caption">
+        Source: {immunization.source}
+        {#if immunization.created_at}
+          · Created: {immunization.created_at}
+        {/if}
+      </div>
+      {#if formError}
+        <div class="banner error">{formError}</div>
       {/if}
-    </div>
-    {#if formError}
-      <div class="banner error">{formError}</div>
-    {/if}
-    <div class="form-actions">
-      <Button variant="primary" type="submit" loading={saving}>Save</Button>
-    </div>
-  </form>
+      <div class="form-actions">
+        <Button variant="primary" type="submit" loading={saving}>Save</Button>
+      </div>
+    </form>
+  </Card>
 
   <section class="linked">
     <h2 class="micro-label">Proof of immunization</h2>
@@ -245,7 +248,7 @@
   {#if encounter}
     <section class="linked">
       <h2 class="micro-label">Linked encounter</h2>
-      <a class="card linked-card" href="{base}/health/history/encounter?id={encounter.id}">
+      <Card href="{base}/health/history/encounter?id={encounter.id}">
         <div class="card-head">
           <Badge>{encounter.encounter_type}</Badge>
           <span class="date caption">{encounter.encounter_date}</span>
@@ -257,7 +260,7 @@
               : ''}{encounter.facility || ''}
           </div>
         {/if}
-      </a>
+      </Card>
     </section>
   {/if}
 {:else}
@@ -318,16 +321,7 @@
   .linked h2 {
     margin: 0 0 var(--space-2);
   }
-  .linked-card {
-    display: block;
-    text-decoration: none;
-    color: var(--text-primary);
-  }
-  .linked-card:hover {
-    border-color: var(--border-hover);
-  }
   .card-head {
     align-items: center;
-    margin-bottom: var(--space-2);
   }
 </style>

@@ -885,7 +885,12 @@
         <Card title="Modules" data-width="full">
           <div class="module-grid card-grid">
             {#each Object.entries(stats.modules) as [name, mod] (name)}
-              <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
+              <Card
+                as="div"
+                variant="inset"
+                padding="sm"
+                class={moduleErrorCount(mod) > 0 ? 'module-card module-warn' : 'module-card'}
+              >
                 <div class="module-name title-section">{name}</div>
                 <dl class="kv module-fields">
                   {#each Object.entries(mod) as [k, v] (k)}
@@ -899,7 +904,7 @@
                     </dd>
                   {/each}
                 </dl>
-              </div>
+              </Card>
             {/each}
           </div>
         </Card>
@@ -1172,19 +1177,12 @@
     --card-min: 220px;
   }
 
-  .module-card {
-    background: var(--surface-base);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
+  .module-grid :global(.module-card) {
+    gap: var(--space-2);
   }
 
-  .module-warn {
+  .module-grid :global(.module-warn) {
     border-color: var(--status-warn-bg);
-  }
-
-  .module-name {
-    margin-bottom: var(--space-2);
   }
 
   .module-fields {

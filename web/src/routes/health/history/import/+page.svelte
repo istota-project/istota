@@ -10,6 +10,7 @@
   import {
     Badge,
     Button,
+    Card,
     Field,
     FileDropZone,
     Select,
@@ -124,219 +125,225 @@
   }
 </script>
 
-<div class="header">
-  <h1 class="title-page">Import encounter</h1>
-  <Button href="{base}/health/history">Back</Button>
-</div>
-
-<div class="card">
-  <FileDropZone bind:file onClear={() => (documentId = null)}>
-    <p>
-      Drop, paste, or pick a screenshot or PDF of your visit paperwork — after-visit summary,
-      discharge note, referral letter, etc.
-    </p>
-    <p class="caption">
-      The LLM extracts date, provider, facility, reason, and any diagnoses listed, then matches each
-      to the canonical encounter type. You'll review everything before it's saved.
-    </p>
-  </FileDropZone>
-
-  <div class="actions hstack">
-    <Button
-      variant="primary"
-      disabled={!file || extracting}
-      onclick={doExtract}
-      loading={extracting}
-      loadingLabel="Extracting…">Extract</Button
-    >
-  </div>
-</div>
-
-{#if error}
-  <div class="banner error">{error}</div>
-{/if}
-
-{#if extracting}
-  <div class="card extracting muted">
-    <span class="spinner" aria-hidden="true"></span>
-    Extracting encounter from the source — this can take a few seconds.
-  </div>
-{/if}
-
-{#if warnings.length > 0}
-  <div class="banner warn">
-    <ul>
-      {#each warnings as w (w)}
-        <li>{w}</li>
-      {/each}
-    </ul>
-  </div>
-{/if}
-
-{#if parsed.length > 0}
-  <div class="review-head">
-    <h2 class="micro-label">Review {parsed.length} encounter{parsed.length === 1 ? '' : 's'}</h2>
-    {#if extractMode}
-      <span class="caption">Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span>
-    {/if}
+<div class="import-page">
+  <div class="header">
+    <h1 class="title-page">Import encounter</h1>
+    <Button href="{base}/health/history">Back</Button>
   </div>
 
-  {#if documentId !== null && file}
-    <p class="attach-note caption">
-      <strong>{file.name}</strong> will be kept and attached to the records below.
-    </p>
+  <Card as="div" class="import-card">
+    <FileDropZone bind:file onClear={() => (documentId = null)}>
+      <p>
+        Drop, paste, or pick a screenshot or PDF of your visit paperwork — after-visit summary,
+        discharge note, referral letter, etc.
+      </p>
+      <p class="caption">
+        The LLM extracts date, provider, facility, reason, and any diagnoses listed, then matches
+        each to the canonical encounter type. You'll review everything before it's saved.
+      </p>
+    </FileDropZone>
+
+    <div class="actions hstack">
+      <Button
+        variant="primary"
+        disabled={!file || extracting}
+        onclick={doExtract}
+        loading={extracting}
+        loadingLabel="Extracting…">Extract</Button
+      >
+    </div>
+  </Card>
+
+  {#if error}
+    <div class="banner error">{error}</div>
   {/if}
 
-  {#each parsed as row, i (i)}
-    <div class="enc-card" class:warn={!row.encounter_date}>
-      <div class="enc-head">
-        <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
-        <Button size="sm" onclick={() => removeRow(i)}>Remove encounter</Button>
+  {#if extracting}
+    <Card as="div" class="import-card">
+      <div class="extracting muted">
+        <span class="spinner" aria-hidden="true"></span>
+        Extracting encounter from the source — this can take a few seconds.
       </div>
+    </Card>
+  {/if}
 
-      <div class="enc-fields">
-        <Field label="Date">
-          <input type="date" bind:value={row.encounter_date} />
-        </Field>
-        <Field label="Type">
-          <Select
-            value={row.encounter_type}
-            options={encounterTypeOptions}
-            onValueChange={(v) => (row.encounter_type = v)}
-            ariaLabel="Type"
-            fullWidth
-          />
-        </Field>
-        <Field label="Provider">
-          <input
-            type="text"
-            value={row.provider || ''}
-            oninput={(e) => (row.provider = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Facility">
-          <input
-            type="text"
-            value={row.facility || ''}
-            oninput={(e) => (row.facility = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Specialty">
-          <input
-            type="text"
-            value={row.specialty || ''}
-            oninput={(e) => (row.specialty = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-      </div>
+  {#if warnings.length > 0}
+    <div class="banner warn">
+      <ul>
+        {#each warnings as w (w)}
+          <li>{w}</li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
 
-      <Field label="Reason" class="full">
-        <input
-          type="text"
-          value={row.reason || ''}
-          oninput={(e) => (row.reason = (e.currentTarget as HTMLInputElement).value || null)}
-        />
-      </Field>
-
-      <Field label="Notes" class="full">
-        <textarea
-          rows="3"
-          value={row.notes || ''}
-          oninput={(e) => (row.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
-        ></textarea>
-      </Field>
-
-      <div class="diag-head">
-        <h3 class="micro-label">Diagnoses ({row.diagnoses.length})</h3>
-        <Button size="sm" onclick={() => addDiagnosis(row)}>+ Add diagnosis</Button>
-      </div>
-
-      {#if row.diagnoses.length > 0}
-        <div class="table-scroll">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>ICD-10</th>
-                <th>Status</th>
-                <th>Severity</th>
-                <th class="col-actions"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each row.diagnoses as d, j (j)}
-                <tr>
-                  <td>
-                    <input
-                      type="text"
-                      value={d.name}
-                      oninput={(e) =>
-                        setDiagnosisField(
-                          row,
-                          j,
-                          'name',
-                          (e.currentTarget as HTMLInputElement).value,
-                        )}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="text"
-                      value={d.icd10 || ''}
-                      oninput={(e) =>
-                        setDiagnosisField(
-                          row,
-                          j,
-                          'icd10',
-                          (e.currentTarget as HTMLInputElement).value || null,
-                        )}
-                    />
-                  </td>
-                  <td>
-                    <Select
-                      value={d.status}
-                      options={statusOptions}
-                      onValueChange={(v) =>
-                        setDiagnosisField(row, j, 'status', v as ParsedDiagnosis['status'])}
-                      ariaLabel="Status"
-                      fullWidth
-                    />
-                  </td>
-                  <td>
-                    <Select
-                      value={d.severity || ''}
-                      options={severityOptions}
-                      onValueChange={(v) =>
-                        setDiagnosisField(
-                          row,
-                          j,
-                          'severity',
-                          (v || null) as ParsedDiagnosis['severity'],
-                        )}
-                      ariaLabel="Severity"
-                      fullWidth
-                    />
-                  </td>
-                  <td class="col-actions">
-                    <Button size="sm" onclick={() => removeDiagnosis(row, j)}>Remove</Button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+  {#if parsed.length > 0}
+    <div class="review-head">
+      <h2 class="micro-label">Review {parsed.length} encounter{parsed.length === 1 ? '' : 's'}</h2>
+      {#if extractMode}
+        <span class="caption"
+          >Extracted via {extractMode === 'vision' ? 'vision' : 'text'} mode</span
+        >
       {/if}
     </div>
-  {/each}
 
-  <div class="actions hstack">
-    <Button variant="primary" disabled={importing} onclick={doImport}>
-      {importing
-        ? 'Importing…'
-        : `Import ${parsed.length} encounter${parsed.length === 1 ? '' : 's'}`}
-    </Button>
-  </div>
-{/if}
+    {#if documentId !== null && file}
+      <p class="attach-note caption">
+        <strong>{file.name}</strong> will be kept and attached to the records below.
+      </p>
+    {/if}
+
+    {#each parsed as row, i (i)}
+      <div class="enc-card" class:warn={!row.encounter_date}>
+        <div class="enc-head">
+          <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
+          <Button size="sm" onclick={() => removeRow(i)}>Remove encounter</Button>
+        </div>
+
+        <div class="enc-fields">
+          <Field label="Date">
+            <input type="date" bind:value={row.encounter_date} />
+          </Field>
+          <Field label="Type">
+            <Select
+              value={row.encounter_type}
+              options={encounterTypeOptions}
+              onValueChange={(v) => (row.encounter_type = v)}
+              ariaLabel="Type"
+              fullWidth
+            />
+          </Field>
+          <Field label="Provider">
+            <input
+              type="text"
+              value={row.provider || ''}
+              oninput={(e) => (row.provider = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Facility">
+            <input
+              type="text"
+              value={row.facility || ''}
+              oninput={(e) => (row.facility = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Specialty">
+            <input
+              type="text"
+              value={row.specialty || ''}
+              oninput={(e) => (row.specialty = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+        </div>
+
+        <Field label="Reason" class="full">
+          <input
+            type="text"
+            value={row.reason || ''}
+            oninput={(e) => (row.reason = (e.currentTarget as HTMLInputElement).value || null)}
+          />
+        </Field>
+
+        <Field label="Notes" class="full">
+          <textarea
+            rows="3"
+            value={row.notes || ''}
+            oninput={(e) => (row.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
+          ></textarea>
+        </Field>
+
+        <div class="diag-head">
+          <h3 class="micro-label">Diagnoses ({row.diagnoses.length})</h3>
+          <Button size="sm" onclick={() => addDiagnosis(row)}>+ Add diagnosis</Button>
+        </div>
+
+        {#if row.diagnoses.length > 0}
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>ICD-10</th>
+                  <th>Status</th>
+                  <th>Severity</th>
+                  <th class="col-actions"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each row.diagnoses as d, j (j)}
+                  <tr>
+                    <td>
+                      <input
+                        type="text"
+                        value={d.name}
+                        oninput={(e) =>
+                          setDiagnosisField(
+                            row,
+                            j,
+                            'name',
+                            (e.currentTarget as HTMLInputElement).value,
+                          )}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        value={d.icd10 || ''}
+                        oninput={(e) =>
+                          setDiagnosisField(
+                            row,
+                            j,
+                            'icd10',
+                            (e.currentTarget as HTMLInputElement).value || null,
+                          )}
+                      />
+                    </td>
+                    <td>
+                      <Select
+                        value={d.status}
+                        options={statusOptions}
+                        onValueChange={(v) =>
+                          setDiagnosisField(row, j, 'status', v as ParsedDiagnosis['status'])}
+                        ariaLabel="Status"
+                        fullWidth
+                      />
+                    </td>
+                    <td>
+                      <Select
+                        value={d.severity || ''}
+                        options={severityOptions}
+                        onValueChange={(v) =>
+                          setDiagnosisField(
+                            row,
+                            j,
+                            'severity',
+                            (v || null) as ParsedDiagnosis['severity'],
+                          )}
+                        ariaLabel="Severity"
+                        fullWidth
+                      />
+                    </td>
+                    <td class="col-actions">
+                      <Button size="sm" onclick={() => removeDiagnosis(row, j)}>Remove</Button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
+    {/each}
+
+    <div class="actions hstack">
+      <Button variant="primary" disabled={importing} onclick={doImport}>
+        {importing
+          ? 'Importing…'
+          : `Import ${parsed.length} encounter${parsed.length === 1 ? '' : 's'}`}
+      </Button>
+    </div>
+  {/if}
+</div>
 
 <style>
   .header {
@@ -352,11 +359,8 @@
     margin: 0;
   }
 
-  .card {
+  .import-page :global(.import-card) {
     margin-bottom: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
 
   /* Typography is the global .caption; only the <p> reset stays here. */
@@ -364,7 +368,7 @@
     margin: 0;
   }
 
-  .card .actions {
+  .import-page :global(.import-card .actions) {
     margin-top: var(--space-1);
   }
 

@@ -12,6 +12,7 @@
   } from '$lib/api';
   import {
     Button,
+    Card,
     DateRangeFilter,
     EmptyState,
     Field,
@@ -334,7 +335,7 @@
         <ul>
           {#each encounters as e (e.id)}
             <li>
-              <a class="card" href="{base}/health/history/encounter?id={e.id}">
+              <Card href="{base}/health/history/encounter?id={e.id}">
                 <div class="card-head">
                   <span class="badge {typeBadgeClass(e.encounter_type)}"
                     >{typeLabel(e.encounter_type)}</span
@@ -354,7 +355,7 @@
                     <div class="reason muted">{e.reason}</div>
                   {/if}
                 </div>
-              </a>
+              </Card>
             </li>
           {/each}
         </ul>
@@ -530,16 +531,8 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .card {
-    display: block;
-    color: var(--text-primary);
-  }
-  .card:hover {
-    border-color: var(--border-hover);
-  }
   .card-head {
     align-items: center;
-    margin-bottom: var(--space-2);
   }
   .card-body .who {
     font-weight: var(--weight-medium);

@@ -13,7 +13,7 @@
     Wallet,
   } from '@lucide/svelte';
   import { buildGreeting, noteSegments, type Greeting } from '$lib/greeting';
-  import { AppShell, ShellHeader } from '$lib/components/ui';
+  import { AppShell, Card, ShellHeader } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
 
   /* The identity the root layout resolved, not a second `/me` of this page's
@@ -84,7 +84,7 @@
       class="feature-grid card-grid"
       style="--card-min: 200px; --card-gap: var(--card-pane-pad);"
     >
-      <section class="welcome-card" class:pending={timeZone === null}>
+      <Card class={timeZone === null ? 'welcome-card pending' : 'welcome-card'}>
         <img class="welcome-sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
         <div class="welcome-text">
           <p class="welcome-greeting">{welcome.greeting}</p>
@@ -95,73 +95,70 @@
           <!-- prettier-ignore -->
           <p class="welcome-note">{#each noteSegments(welcome.note, user.contact?.email) as segment}{#if segment.mailto}<a href="mailto:{segment.mailto}">{segment.text}</a>{:else}{segment.text}{/if}{/each}</p>
         </div>
-      </section>
+      </Card>
       {#if user.features.chat}
-        <a href="{base}/chat" class="feature-card">
+        <Card href="{base}/chat" class="feature-card">
           <div class="feature-title title-section"><MessageSquare aria-hidden="true" />Chat</div>
           <div class="feature-desc description">Talk to Istota in the app</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.workspace}
-        <a href="{base}/files" class="feature-card">
+        <Card href="{base}/files" class="feature-card">
           <div class="feature-title title-section"><FolderOpen aria-hidden="true" />Files</div>
           <div class="feature-desc description">Your files and pins</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.groups}
-        <a href="{base}/groups/" class="feature-card">
+        <Card href="{base}/groups/" class="feature-card">
           <div class="feature-title title-section"><Users aria-hidden="true" />Groups</div>
           <div class="feature-desc description">Notebooks, members, rooms</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.briefings}
-        <a href="{base}/briefings" class="feature-card">
+        <Card href="{base}/briefings" class="feature-card">
           <div class="feature-title title-section"><Newspaper aria-hidden="true" />Briefings</div>
           <div class="feature-desc description">Briefings and archive</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.feeds}
-        <a href="{base}/feeds" class="feature-card">
+        <Card href="{base}/feeds" class="feature-card">
           <div class="feature-title title-section"><Rss aria-hidden="true" />Feeds</div>
           <div class="feature-desc description">RSS feed reader</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.location}
-        <a href="{base}/location" class="feature-card">
+        <Card href="{base}/location" class="feature-card">
           <div class="feature-title title-section"><MapPin aria-hidden="true" />Location</div>
           <div class="feature-desc description">GPS tracking and map</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.money}
-        <a href="{base}/money" class="feature-card">
+        <Card href="{base}/money" class="feature-card">
           <div class="feature-title title-section"><Wallet aria-hidden="true" />Money</div>
           <div class="feature-desc description">Accounts and reports</div>
-        </a>
+        </Card>
       {/if}
       {#if user.features.health}
-        <a href="{base}/health" class="feature-card">
+        <Card href="{base}/health" class="feature-card">
           <div class="feature-title title-section"><HeartPulse aria-hidden="true" />Health</div>
           <div class="feature-desc description">Body stats and lab results</div>
-        </a>
+        </Card>
       {/if}
     </div>
   </div>
 </AppShell>
 
 <style>
-  .welcome-card {
+  /* The welcome card is a row, the sigil beside the two lines, with the bot's
+     amber on its leading edge. */
+  .feature-grid :global(.welcome-card) {
     grid-column: 1 / -1;
-    display: flex;
+    flex-direction: row;
     /* Centred rather than top-aligned, because from four columns up the card
 		   stretches to its row's height and the two lines would otherwise sit high
 		   in a box taller than they are. */
     align-items: center;
-    gap: var(--space-3);
-    background: var(--surface-card);
-    border: 1px solid var(--border-subtle);
     border-left: 2px solid var(--accent-amber);
-    border-radius: var(--radius-card);
-    padding: 1.25rem;
   }
   /* Three tracks exist from ~740px up (200px min + 1rem gap against the 1rem
 	   pane padding, with room for a scrollbar), so the span can't spill into an
@@ -170,7 +167,7 @@
 	   rather than the 760px it was derived at — a one-off value that close to
 	   the shared one leaves a 9px band where this page alone changes layout. */
   @media (min-width: 769px) {
-    .welcome-card {
+    .feature-grid :global(.welcome-card) {
       grid-column: span 3;
     }
   }
@@ -187,7 +184,7 @@
   .welcome-text {
     min-width: 0;
   }
-  .welcome-card.pending .welcome-text {
+  .feature-grid :global(.welcome-card.pending .welcome-text) {
     visibility: hidden;
   }
   .welcome-greeting {
@@ -239,17 +236,9 @@
       grid-template-rows: none;
     }
   }
-  .feature-card {
-    display: block;
-    background: var(--surface-card);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-card);
-    padding: 1.25rem;
-    text-decoration: none;
-    transition: background var(--transition-fast);
-  }
-  .feature-card:hover {
-    background: var(--hover-bg);
+  /* A tile's title and description sit one step apart, not the card's gap. */
+  .feature-grid :global(.feature-card) {
+    gap: var(--space-1);
   }
   /* Two tiles a row on a phone. The auto-fit wall drops to one column below
      about 430px, where a single tile per row scrolls the module list off the
@@ -259,15 +248,11 @@
     .feature-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    .feature-card {
-      padding: var(--space-4);
-    }
   }
   .feature-title {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    margin-bottom: var(--space-1);
     color: var(--text-primary);
   }
   /* Size the glyph in CSS rather than through lucide's `size` prop, which

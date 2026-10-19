@@ -378,7 +378,7 @@
     {:else}
       <div class="entity-grid card-grid">
         {#each entities as entity (entity.key)}
-          <div class="entity">
+          <Card as="div" variant="inset" padding="sm" class="entity">
             <div class="entity-head title-card">
               <span>{entity.name}</span>
               <span class="entity-key">
@@ -416,7 +416,7 @@
                 <dd><code>{entity.logo}</code></dd>
               {/if}
             </dl>
-          </div>
+          </Card>
         {/each}
       </div>
     {/if}
@@ -594,13 +594,7 @@
     --card-gap: 0.6rem;
   }
 
-  .entity {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-2) var(--space-3);
-    display: flex;
-    flex-direction: column;
+  .entity-grid :global(.entity) {
     gap: var(--space-2);
   }
 

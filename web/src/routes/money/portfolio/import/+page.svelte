@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { Field, Select } from '$lib/components/ui';
+  import { Card, Field, Select } from '$lib/components/ui';
   import PortfolioUpload from '../PortfolioUpload.svelte';
 
   // One entry per importer-registry source; adding a source is a new row here,
@@ -29,7 +29,7 @@
 </script>
 
 <div class="import-body">
-  <section class="import-card">
+  <Card variant="flat" padding="sm" class="import-card">
     <Field label="Source">
       <Select
         value={sourceValue}
@@ -46,7 +46,7 @@
         <span class="hint">{selected.hint}</span>
       {/snippet}
     </PortfolioUpload>
-  </section>
+  </Card>
 
   <p class="import-footnote caption">
     Imported snapshots appear on the
@@ -71,12 +71,7 @@
     margin-inline: auto;
   }
 
-  .import-card {
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
-    padding: var(--space-3);
-    display: flex;
-    flex-direction: column;
+  .import-body :global(.import-card) {
     gap: var(--space-2);
   }
 

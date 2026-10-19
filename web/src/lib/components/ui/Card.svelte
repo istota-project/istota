@@ -119,6 +119,9 @@
     border-radius: var(--radius-card);
     background: var(--surface-card);
     box-sizing: border-box;
+    /* A grid or flex item that may shrink below its content, as a card in a
+       wall of them must. */
+    min-width: 0;
   }
 
   .ui-card-flat {

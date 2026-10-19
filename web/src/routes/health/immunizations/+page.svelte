@@ -15,6 +15,7 @@
   import {
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     Field,
@@ -230,8 +231,8 @@
     <ul class="cards card-grid">
       {#each visibleCoverage as c (c.name)}
         <li>
-          <a
-            class="card interactive"
+          <Card
+            class="coverage-tile"
             href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
           >
             <span class="name title-card">{c.display_name}</span>
@@ -260,7 +261,7 @@
                 </div>
               {/if}
             </div>
-          </a>
+          </Card>
         </li>
       {/each}
     </ul>
@@ -271,8 +272,8 @@
         <ul class="cards card-grid">
           {#each riskBased as c (c.name)}
             <li>
-              <a
-                class="card interactive"
+              <Card
+                class="coverage-tile"
                 href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
               >
                 <span class="name title-card">{c.display_name}</span>
@@ -288,7 +289,7 @@
                     {/if}
                   </div>
                 </div>
-              </a>
+              </Card>
             </li>
           {/each}
         </ul>
@@ -300,7 +301,7 @@
       <ul class="cards card-grid">
         {#each other as c (c.name)}
           <li>
-            <div class="card">
+            <Card as="div" class="coverage-tile">
               <span class="name title-card">{c.display_name}</span>
               <Badge variant="neutral">
                 {c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
@@ -308,7 +309,7 @@
               <div class="card-body">
                 <div class="caption">Last: {formatDate(c.last_given)}</div>
               </div>
-            </div>
+            </Card>
           </li>
         {/each}
       </ul>
@@ -453,15 +454,12 @@
   .cards > li {
     display: flex;
   }
-  .card {
-    display: flex;
-    flex-direction: column;
+  .coverage :global(.coverage-tile) {
     align-items: flex-start;
     gap: var(--space-2);
     width: 100%;
-    color: var(--text-primary);
   }
-  .card .name {
+  .name {
     line-height: var(--leading-snug);
   }
   .card-body {

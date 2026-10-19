@@ -12,7 +12,7 @@
     type Biomarker,
     type Specimen,
   } from '$lib/api';
-  import { Button, EmptyState, Field, FileDropZone, Select } from '$lib/components/ui';
+  import { Button, Card, EmptyState, Field, FileDropZone, Select } from '$lib/components/ui';
   import { localDateISO } from '$lib/dateFormat';
 
   const flagOptions = [
@@ -173,7 +173,7 @@
   <h1 class="title-page">Upload lab results</h1>
 
   {#if panelId == null}
-    <div class="card vstack">
+    <Card as="div">
       <FileDropZone bind:file>
         <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
         <p class="caption">
@@ -194,7 +194,7 @@
           loadingLabel="Uploading…">Upload + extract</Button
         >
       </div>
-    </div>
+    </Card>
   {:else}
     {#if collision}
       <div class="banner warn">

@@ -31,6 +31,7 @@
   import {
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     KebabMenu,
@@ -363,9 +364,9 @@
   </div>
 
   <div class="history-body">
-    <div class="chart-container">
+    <Card as="div" variant="flat" padding="sm" class="chart-container">
       <div class="chart-canvas"><canvas bind:this={chartCanvas}></canvas></div>
-    </div>
+    </Card>
 
     <div class="micro-label snapshots-label">Snapshots</div>
     <!-- Header inside the .record-list scroller (the work/invoices shape), so
@@ -537,13 +538,12 @@
     padding: 0 0 var(--space-4);
   }
 
-  .chart-container {
+  /* Block rather than the card's flex column: Chart.js sizes the canvas
+     from this box, and the canvas wrapper below carries the height. */
+  .history-body :global(.chart-container) {
+    display: block;
     height: 280px;
-    padding: var(--space-3);
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
     margin: 0 var(--space-3) var(--space-4);
-    min-width: 0;
   }
 
   /* Chart.js sizes the canvas from its parent, and needs that parent
@@ -664,7 +664,7 @@
       display: none;
     }
 
-    .chart-container {
+    .history-body :global(.chart-container) {
       height: 200px;
     }
 

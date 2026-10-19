@@ -31,7 +31,16 @@
     metricLabel,
     toCanonical,
   } from '$lib/health/units';
-  import { Button, EmptyState, Field, Input, Modal, Select, PageLoading } from '$lib/components/ui';
+  import {
+    Button,
+    Card,
+    EmptyState,
+    Field,
+    Input,
+    Modal,
+    Select,
+    PageLoading,
+  } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
 
   Chart.register(
@@ -440,7 +449,7 @@
   <div class="grid card-grid" style="--card-min: 380px;">
     {#each metricsToShow() as metric (metric)}
       {@const v = formatLatestValue(metric)}
-      <button class="card interactive" onclick={() => openEntry(metric)} type="button">
+      <Card interactive class="metric-tile" onclick={() => openEntry(metric)}>
         <header>
           <span class="label micro-label">{metricLabel(metric)}</span>
           <span class="count caption num">{(seriesByMetric[metric] || []).length} pts</span>
@@ -462,14 +471,10 @@
             {formatDate(latestByMetric[metric].measured_at)}
           </div>
         {/if}
-      </button>
+      </Card>
     {/each}
     {#if hasBp()}
-      <button
-        class="card interactive"
-        onclick={() => openEntry('blood_pressure_systolic')}
-        type="button"
-      >
+      <Card interactive class="metric-tile" onclick={() => openEntry('blood_pressure_systolic')}>
         <header>
           <span class="label micro-label">Blood Pressure</span>
           <span class="count caption num">
@@ -486,7 +491,7 @@
           <canvas bind:this={canvases['blood_pressure']}></canvas>
         </div>
         {#if bpLatestDate()}<div class="caption">{bpLatestDate()}</div>{/if}
-      </button>
+      </Card>
     {/if}
   </div>
 {/if}
@@ -570,11 +575,9 @@
   .log-btn:hover {
     background: var(--hover-bg);
   }
-  .card {
-    font: inherit;
-    text-align: left;
-    display: flex;
-    flex-direction: column;
+  /* The tile spaces its rows with their own margins, not the card's gap. */
+  .grid :global(.metric-tile) {
+    gap: 0;
     min-height: 170px;
   }
   header {

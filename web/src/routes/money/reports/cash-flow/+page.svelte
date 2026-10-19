@@ -13,7 +13,7 @@
     Tooltip,
     Legend,
   } from 'chart.js';
-  import { EmptyState, StatTile, PageLoading } from '$lib/components/ui';
+  import { Card, EmptyState, StatTile, PageLoading } from '$lib/components/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -322,9 +322,9 @@
   <EmptyState>No data for the selected period.</EmptyState>
 {:else}
   <div class="cashflow-page">
-    <div class="chart-container">
+    <Card as="div" variant="flat" padding="sm" class="chart-container">
       <canvas bind:this={chartCanvas}></canvas>
-    </div>
+    </Card>
 
     {#if activeMonth}
       <div class="month-title">
@@ -419,11 +419,11 @@
 {/if}
 
 <style>
-  .chart-container {
+  /* Block rather than the card's flex column: Chart.js sizes the canvas
+     from this box. */
+  .cashflow-page :global(.chart-container) {
+    display: block;
     height: 280px;
-    padding: var(--space-3);
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
     margin-bottom: var(--space-4);
   }
 
@@ -479,7 +479,7 @@
       grid-template-columns: repeat(2, 1fr);
     }
 
-    .chart-container {
+    .cashflow-page :global(.chart-container) {
       height: 200px;
     }
   }

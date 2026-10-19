@@ -10,7 +10,7 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { EmptyState, NoticeBanner, StatTile, PageLoading } from '$lib/components/ui';
+  import { Card, EmptyState, NoticeBanner, StatTile, PageLoading } from '$lib/components/ui';
   import { directionColor } from '$lib/money/direction';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
@@ -200,18 +200,18 @@
     </div>
 
     <div class="donut-grid">
-      <div class="donut-card">
+      <Card as="div" variant="flat" padding="sm" class="donut-card">
         <div class="micro-label">Asset class</div>
         <div class="donut-canvas"><canvas bind:this={classCanvas}></canvas></div>
-      </div>
-      <div class="donut-card">
+      </Card>
+      <Card as="div" variant="flat" padding="sm" class="donut-card">
         <div class="micro-label">Account type</div>
         <div class="donut-canvas"><canvas bind:this={typeCanvas}></canvas></div>
-      </div>
-      <div class="donut-card">
+      </Card>
+      <Card as="div" variant="flat" padding="sm" class="donut-card">
         <div class="micro-label">Geography</div>
         <div class="donut-canvas"><canvas bind:this={geoCanvas}></canvas></div>
-      </div>
+      </Card>
     </div>
 
     <div class="micro-label holdings-label">Holdings</div>
@@ -303,11 +303,10 @@
     padding: 0 var(--space-3) var(--space-4);
   }
 
-  .donut-card {
-    background: var(--surface-card);
-    border-radius: var(--radius-card);
-    padding: var(--space-3);
-    min-width: 0;
+  /* Block rather than the card's flex column, so the label sits on the
+     canvas as it did and Chart.js sizes from a plain box. */
+  .donut-grid :global(.donut-card) {
+    display: block;
   }
 
   .donut-canvas {
