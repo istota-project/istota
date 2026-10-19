@@ -12,7 +12,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RelativeFormatOptions } from '$lib/dateFormat';
 import {
@@ -21,6 +21,7 @@ import {
   formatDuration,
   formatMinutes,
   formatRelative,
+  localDateISO,
 } from '$lib/dateFormat';
 
 describe('formatDate', () => {
@@ -94,6 +95,32 @@ describe('formatDate', () => {
     expect(formatDate('2026-09-05', { locale: 'de-DE', month: 'short', day: 'numeric' })).not.toBe(
       'Sep 5',
     );
+  });
+});
+
+describe('localDateISO', () => {
+  // A zone west of UTC, at an hour where the UTC date is already tomorrow:
+  // the case `toISOString().slice(0, 10)` got wrong on five health forms.
+  const savedTZ = process.env.TZ;
+  beforeEach(() => {
+    process.env.TZ = 'America/Los_Angeles';
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 9, 18, 23, 30));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = savedTZ;
+  });
+
+  it('returns the local calendar date, not the UTC one', () => {
+    // The precondition that makes this test mean anything: the zone stub took.
+    expect(new Date().toISOString().slice(0, 10)).toBe('2026-10-19');
+    expect(localDateISO()).toBe('2026-10-18');
+  });
+
+  it('formats a given date and pads month and day', () => {
+    expect(localDateISO(new Date(2026, 0, 5, 23, 59))).toBe('2026-01-05');
   });
 });
 
@@ -294,6 +321,15 @@ describe('no second copy of the date coercion', () => {
     // quotes and a bare `T00:00` are the same copy coming back, and a literal
     // match would report the tree clean.
     expect(filesMatching(/T00:00(:00)?['"`]/)).toEqual(['lib/dateFormat.ts']);
+  });
+
+  it('never takes today from the UTC half of an ISO string', () => {
+    // After local midnight west of Greenwich that is tomorrow. `localDateISO`
+    // is the local calendar date.
+    expect(filesMatching(/new Date\(\)\.toISOString\(\)\.(slice|substring)\(0,\s*10\)/)).toEqual(
+      [],
+    );
+    expect(filesMatching(/function (localDate|localToday)\(/)).toEqual([]);
   });
 
   it('splits seconds into days and hours in exactly one file', () => {

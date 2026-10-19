@@ -30,7 +30,7 @@
   import DocumentList from '$lib/components/health/DocumentList.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { Paperclip } from '@lucide/svelte';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate, localDateISO } from '$lib/dateFormat';
 
   const getScrollRoot = getShellScrollRoot();
 
@@ -61,7 +61,7 @@
   let formName = $state('');
   let formStatus = $state<'active' | 'chronic' | 'resolved'>('active');
   let formIcd10 = $state('');
-  let formDateDiagnosed = $state(new Date().toISOString().slice(0, 10));
+  let formDateDiagnosed = $state(localDateISO());
   let formDateResolved = $state('');
   // A condition is seen at several visits, so this is a set the form builds up
   // rather than a single value.
@@ -118,7 +118,7 @@
     formName = '';
     formStatus = 'active';
     formIcd10 = '';
-    formDateDiagnosed = new Date().toISOString().slice(0, 10);
+    formDateDiagnosed = localDateISO();
     formDateResolved = '';
     formEncounterIds = [];
     formEncounterPick = '';
@@ -215,7 +215,7 @@
     try {
       await updateDiagnosis(d.id, {
         status: 'resolved',
-        date_resolved: new Date().toISOString().slice(0, 10),
+        date_resolved: localDateISO(),
       });
       await load();
     } catch (e) {

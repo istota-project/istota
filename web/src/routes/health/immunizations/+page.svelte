@@ -24,7 +24,7 @@
     PageLoading,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
+  import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
 
   let loading = $state(true);
   let error = $state('');
@@ -36,7 +36,7 @@
 
   let formOpen = $state(false);
   let formName = $state('Influenza');
-  let formDate = $state(new Date().toISOString().slice(0, 10));
+  let formDate = $state(localDateISO());
   let formProduct = $state('');
   let formFacility = $state('');
   let formLot = $state('');

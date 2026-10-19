@@ -25,7 +25,7 @@
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { formatMinutes, formatRelative } from '$lib/dateFormat';
+  import { formatMinutes, formatRelative, localDateISO } from '$lib/dateFormat';
 
   let requestedPlaceId = $state<number | null>(null);
   const urlSelection = createUrlSelection<{ place: number | null }>({
@@ -75,9 +75,6 @@
     saveSetting('location.panelOpen', panelOpen);
   });
 
-  function localDate(d: Date = new Date()): string {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
   let places = $derived($locationPlaces);
 
   let currentPos = $derived(
@@ -133,7 +130,7 @@
   async function loadData() {
     if (loadInFlight) return;
     loadInFlight = true;
-    const today = localDate();
+    const today = localDateISO();
     try {
       const [currentResult, pingsResult, summaryResult] = await Promise.allSettled([
         getLocationCurrent(),

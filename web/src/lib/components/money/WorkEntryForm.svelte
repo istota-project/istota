@@ -8,6 +8,7 @@
   } from '$lib/money/workEntryPayload';
   import { Modal, Button, Field, Select, type SelectOption } from '$lib/components/ui';
   import { formatDecimal } from '$lib/format';
+  import { localDateISO } from '$lib/dateFormat';
 
   interface Props {
     /** The entry being edited, or null when adding. */
@@ -40,14 +41,7 @@
   // Greenwich logging work in the evening got tomorrow pre-filled onto a
   // billable record — and the list below renders dates in local time, so the
   // field visibly disagreed with "today".
-  const today = localToday();
-
-  function localToday(): string {
-    const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    return `${now.getFullYear()}-${month}-${day}`;
-  }
+  const today = localDateISO();
 
   let date = $state(untrack(() => entry?.date ?? today));
   let client = $state(untrack(() => entry?.client ?? ''));

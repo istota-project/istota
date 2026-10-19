@@ -16,6 +16,7 @@
     type DismissedCluster,
   } from '$lib/api';
   import { segmentTrips, type Trip } from '$lib/location-path';
+  import { localDateISO } from '$lib/dateFormat';
   import { elevationSummary } from '$lib/location-elevation';
   import {
     locationPlaces,
@@ -109,10 +110,7 @@
 
   let places = $derived($locationPlaces);
 
-  function localDate(d: Date = new Date()): string {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-  const today = localDate();
+  const today = localDateISO();
   let isSingleDay = $derived(startStr === endStr);
 
   // Trips are derived from the same filtered-ping pipeline the map draws, so
@@ -130,13 +128,13 @@
   function yesterday(): string {
     const d = new Date();
     d.setDate(d.getDate() - 1);
-    return localDate(d);
+    return localDateISO(d);
   }
 
   function thisWeekStart(): string {
     const d = new Date();
     d.setDate(d.getDate() - d.getDay());
-    return localDate(d);
+    return localDateISO(d);
   }
 
   function thisMonthStart(): string {

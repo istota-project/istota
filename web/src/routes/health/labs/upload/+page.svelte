@@ -13,6 +13,7 @@
     type Specimen,
   } from '$lib/api';
   import { Button, EmptyState, Field, FileDropZone, Select } from '$lib/components/ui';
+  import { localDateISO } from '$lib/dateFormat';
 
   const flagOptions = [
     { value: '', label: '—' },
@@ -36,7 +37,7 @@
 
   // Panel-level metadata — uploaded with a placeholder date, replaced from
   // the LLM extraction, then editable before confirm.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateISO();
   let drawnAt = $state(today);
   let labName = $state('');
   let panelType = $state('');
