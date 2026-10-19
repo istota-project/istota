@@ -73,5 +73,6 @@ export { default as Timestamp } from './Timestamp.svelte';
 export { default as StatusDot } from './StatusDot.svelte';
 export { default as Meter } from './Meter.svelte';
 export { default as Spinner } from './Spinner.svelte';
+export { default as Disclosure } from './Disclosure.svelte';
 export type { MeterSegment } from './Meter.svelte';
 export { default as LoadingOctopus } from './LoadingOctopus.svelte';

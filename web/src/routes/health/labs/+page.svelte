@@ -21,6 +21,7 @@
     LoadState,
     PageHeader,
     Timestamp,
+    Disclosure,
   } from '$lib/components/ui';
 
   let loading = $state(true);
@@ -198,16 +199,13 @@
       for the same date + lab — saved as drafts for review below.
     {/if}
     {#if csvSummary.warnings.length > 0}
-      <details>
-        <summary
-          >{csvSummary.warnings.length} warning{csvSummary.warnings.length === 1
-            ? ''
-            : 's'}</summary
-        >
+      <Disclosure
+        summary="{csvSummary.warnings.length} warning{csvSummary.warnings.length === 1 ? '' : 's'}"
+      >
         <ul>
           {#each csvSummary.warnings as w}<li>{w}</li>{/each}
         </ul>
-      </details>
+      </Disclosure>
     {/if}
   </div>
 {/if}

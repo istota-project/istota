@@ -21,6 +21,7 @@
     LoadState,
     PageHeader,
     Timestamp,
+    Disclosure,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
 
@@ -134,11 +135,8 @@
           <p class="caption">Loading…</p>
         </Card>
       {:else if explainer && explainer.summary}
-        <details class="explainer">
-          <summary>
-            <span class="label micro-label">About this vaccine</span>
-            <span class="chev" aria-hidden="true">›</span>
-          </summary>
+        <Disclosure variant="card" class="explainer">
+          {#snippet summary()}<span class="micro-label">About this vaccine</span>{/snippet}
           <div class="content">
             <p class="summary">{explainer.summary}</p>
             {#if explainer.why_it_matters.length > 0}
@@ -153,7 +151,7 @@
               <p class="disclaimer">{explainer.disclaimer}</p>
             {/if}
           </div>
-        </details>
+        </Disclosure>
       {/if}
 
       <section class="history">
@@ -220,73 +218,34 @@
     max-width: 75ch;
   }
 
-  /* A disclosure drawn as a card until the Disclosure component takes it: the
-     padding lives on the summary and the content rather than on the
-     <details>, or the click target would stop short of the panel's edges. */
-  details.explainer {
+  .vaccine :global(.explainer) {
     margin-bottom: var(--space-4);
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
   }
-  details.explainer > summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    /* The card's padding, so the collapsed panel is the same box as the
-       coverage card above it. */
-    padding: var(--space-4);
-    user-select: none;
-  }
-  details.explainer > summary::-webkit-details-marker {
-    display: none;
-  }
-  details.explainer > summary .chev {
-    color: var(--text-dim);
-    font-size: var(--text-lg);
-    line-height: var(--leading-none);
-    transition: transform var(--transition-fast);
-  }
-  details.explainer[open] > summary .chev {
-    transform: rotate(90deg);
-  }
-  details.explainer:hover > summary .label,
-  details.explainer:hover > summary .chev {
-    color: var(--text-muted);
-  }
-  details.explainer > .content {
-    /* No top padding: the summary's own bottom padding already separates the
-		   label from the body, so adding more would double it once open. */
-    padding: 0 var(--space-4) var(--space-3);
-  }
-  .explainer h3 {
+  .content h3 {
     margin: var(--space-3) 0 var(--space-2);
   }
-  .explainer .summary {
+  .content .summary {
     margin: 0;
     font-size: var(--text-base);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
-  .explainer ul {
+  .content ul {
     margin: 0;
     padding-left: 1.1rem;
     font-size: var(--text-base);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
   }
-  .explainer li {
+  .content li {
     margin: 0.2rem 0;
     /* Same measure as .summary above, applied to the item rather than the
 		   list: the <ul>'s marker indent would otherwise eat into the width and
 		   wrap each bullet a little earlier than the paragraph. */
     max-width: 75ch;
   }
-  .explainer .disclaimer {
+  .content .disclaimer {
     margin: var(--space-3) 0 0;
     font-size: var(--text-xs);
     color: var(--text-dim);

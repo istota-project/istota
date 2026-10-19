@@ -21,6 +21,7 @@
     Field,
     FormStack,
     Checkbox,
+    Disclosure,
   } from '$lib/components/ui';
   import { createDraft } from '$lib/ui/draft.svelte';
   import SourceConfigFields from './SourceConfigFields.svelte';
@@ -270,44 +271,45 @@
       <OptionCards options={widths} value={width} label="Width" onchange={setWidth} />
       <p class="caption">Applies to future editions.</p>
     </section>
-    <details class="advanced">
-      <summary>Advanced</summary>
-      <div class="advanced-fields">
-        <Field label="Directive" hint="How to treat this block's sources.">
-          <TextArea bind:value={form.value.directive} rows={3} />
-        </Field>
-        <Field label="Render mode">
-          <Select
-            value={form.value.render_mode}
-            options={renderOptions}
-            fullWidth
-            ariaLabel="Render mode"
-            onValueChange={(value) => {
-              form.value.render_mode = value;
-            }}
-          />
-        </Field>
-        <Field label="Story count">
-          <Input
-            type="number"
-            min="1"
-            step="1"
-            value={(form.value.options.story_count as number) ?? ''}
-            oninput={(event) =>
-              setOption(
-                'story_count',
-                event.currentTarget.value === '' ? undefined : Number(event.currentTarget.value),
-              )}
-          />
-        </Field>
-        <Field label="Tone">
-          <Input
-            value={(form.value.options.tone as string) ?? ''}
-            oninput={(event) => setOption('tone', event.currentTarget.value)}
-          />
-        </Field>
-      </div>
-    </details>
+    <div class="advanced">
+      <Disclosure summary="Advanced">
+        <div class="advanced-fields">
+          <Field label="Directive" hint="How to treat this block's sources.">
+            <TextArea bind:value={form.value.directive} rows={3} />
+          </Field>
+          <Field label="Render mode">
+            <Select
+              value={form.value.render_mode}
+              options={renderOptions}
+              fullWidth
+              ariaLabel="Render mode"
+              onValueChange={(value) => {
+                form.value.render_mode = value;
+              }}
+            />
+          </Field>
+          <Field label="Story count">
+            <Input
+              type="number"
+              min="1"
+              step="1"
+              value={(form.value.options.story_count as number) ?? ''}
+              oninput={(event) =>
+                setOption(
+                  'story_count',
+                  event.currentTarget.value === '' ? undefined : Number(event.currentTarget.value),
+                )}
+            />
+          </Field>
+          <Field label="Tone">
+            <Input
+              value={(form.value.options.tone as string) ?? ''}
+              oninput={(event) => setOption('tone', event.currentTarget.value)}
+            />
+          </Field>
+        </div>
+      </Disclosure>
+    </div>
   </FormStack>
   {#snippet extraActions()}
     {#if allowPreview}
@@ -415,13 +417,5 @@
   .advanced {
     border-top: 1px solid var(--border-subtle);
     padding-top: var(--space-4);
-  }
-  summary {
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-  .advanced-fields {
-    margin-top: var(--space-3);
   }
 </style>

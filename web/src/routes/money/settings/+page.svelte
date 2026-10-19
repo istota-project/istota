@@ -2,7 +2,7 @@
   import { monarchLogin } from '$lib/api';
   import { getMoneyServices } from '$lib/money/settingsContext';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
-  import { Button, HintPopover, Input, Card, Field } from '$lib/components/ui';
+  import { Button, HintPopover, Input, Card, Field, Disclosure } from '$lib/components/ui';
 
   const moneyServices = getMoneyServices();
 
@@ -100,115 +100,118 @@
         title="Connect to Monarch Money"
         description="Monarch's API requires browser session cookies. Pick the method that works for your account."
       >
-        <details class="monarch-method" open>
-          <summary>
-            <span class="summary-label">
-              Log in with email and password
-              <HintPopover
-                label="About logging in with email and password"
-                text="We sign in to Monarch on your behalf and store the session cookies it returns (session_id and csrftoken). Your password is used once and is never written to disk. If Monarch doesn't recognise this device it emails you a 6-digit code — enter it when asked. If Cloudflare blocks the request from this server, paste cookies from your browser instead."
-              />
-            </span>
-          </summary>
-          <form
-            class="login-form"
-            onsubmit={(e) => {
-              e.preventDefault();
-              void submitLogin();
-            }}
-          >
-            <Field label="Email">
-              <Input
-                type="email"
-                bind:value={loginEmail}
-                autocomplete="off"
-                disabled={loginBusy}
-                required
-              />
-            </Field>
-            <Field label="Password">
-              <Input
-                type="password"
-                bind:value={loginPassword}
-                autocomplete="off"
-                disabled={loginBusy}
-                required
-              />
-            </Field>
-            {#if loginChallenge}
-              <Field label={loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}>
-                <Input
-                  type="text"
-                  inputmode="numeric"
-                  pattern="[0-9]*"
-                  maxlength={6}
-                  bind:value={loginCode}
-                  autocomplete="one-time-code"
-                  disabled={loginBusy}
-                  placeholder="6-digit code"
-                  autofocus
+        <div class="monarch-methods">
+          <Disclosure variant="card" nested open>
+            {#snippet summary()}
+              <span class="summary-label">
+                Log in with email and password
+                <HintPopover
+                  label="About logging in with email and password"
+                  text="We sign in to Monarch on your behalf and store the session cookies it returns (session_id and csrftoken). Your password is used once and is never written to disk. If Monarch doesn't recognise this device it emails you a 6-digit code — enter it when asked. If Cloudflare blocks the request from this server, paste cookies from your browser instead."
                 />
-              </Field>
-            {:else}
-              <Field label="MFA code" hint="Only if your account has MFA enabled.">
+              </span>
+            {/snippet}
+            <form
+              class="login-form"
+              onsubmit={(e) => {
+                e.preventDefault();
+                void submitLogin();
+              }}
+            >
+              <Field label="Email">
                 <Input
-                  type="text"
-                  inputmode="numeric"
-                  pattern="[0-9]*"
-                  bind:value={loginMfa}
+                  type="email"
+                  bind:value={loginEmail}
                   autocomplete="off"
                   disabled={loginBusy}
-                  placeholder="6-digit code"
+                  required
                 />
               </Field>
-            {/if}
-            <div class="login-actions">
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={!loginEmail || !loginPassword || (!!loginChallenge && !loginCode)}
-                loading={loginBusy}
-                loadingLabel={loginChallenge ? 'Verifying…' : 'Logging in…'}
-                type="submit"
-              >
-                {loginChallenge ? 'Verify code' : 'Login & save cookies'}
-              </Button>
+              <Field label="Password">
+                <Input
+                  type="password"
+                  bind:value={loginPassword}
+                  autocomplete="off"
+                  disabled={loginBusy}
+                  required
+                />
+              </Field>
               {#if loginChallenge}
-                <Button variant="secondary" size="sm" disabled={loginBusy} onclick={resetLogin}>
-                  Start over
-                </Button>
+                <Field
+                  label={loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}
+                >
+                  <Input
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    maxlength={6}
+                    bind:value={loginCode}
+                    autocomplete="one-time-code"
+                    disabled={loginBusy}
+                    placeholder="6-digit code"
+                    autofocus
+                  />
+                </Field>
+              {:else}
+                <Field label="MFA code" hint="Only if your account has MFA enabled.">
+                  <Input
+                    type="text"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    bind:value={loginMfa}
+                    autocomplete="off"
+                    disabled={loginBusy}
+                    placeholder="6-digit code"
+                  />
+                </Field>
               {/if}
-            </div>
-            {#if loginMessage}
-              <div class="login-status" data-kind={loginErrorKind || 'ok'}>
-                {loginMessage}
+              <div class="login-actions">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={!loginEmail || !loginPassword || (!!loginChallenge && !loginCode)}
+                  loading={loginBusy}
+                  loadingLabel={loginChallenge ? 'Verifying…' : 'Logging in…'}
+                  type="submit"
+                >
+                  {loginChallenge ? 'Verify code' : 'Login & save cookies'}
+                </Button>
+                {#if loginChallenge}
+                  <Button variant="secondary" size="sm" disabled={loginBusy} onclick={resetLogin}>
+                    Start over
+                  </Button>
+                {/if}
               </div>
-            {/if}
-          </form>
-        </details>
+              {#if loginMessage}
+                <div class="login-status" data-kind={loginErrorKind || 'ok'}>
+                  {loginMessage}
+                </div>
+              {/if}
+            </form>
+          </Disclosure>
 
-        <details class="monarch-method">
-          <summary>Paste cookies from your browser</summary>
-          <p class="caption">
-            Use this when programmatic login is blocked by Cloudflare (common on cloud-hosted Istota
-            deploys).
-          </p>
-          <ol>
-            <li>
-              Open <a href="https://app.monarch.com" target="_blank" rel="noopener noreferrer"
-                >app.monarch.com</a
-              > in a logged-in browser tab.
-            </li>
-            <li>
-              Open DevTools (Cmd/Ctrl+Option+I) → <strong>Application</strong> →
-              <strong>Cookies</strong>
-              → <code>https://api.monarch.com</code>.
-            </li>
-            <li>Copy the value of <code>session_id</code> into the field below.</li>
-            <li>Copy the value of <code>csrftoken</code> into the field below.</li>
-            <li>Click <strong>Save</strong>.</li>
-          </ol>
-        </details>
+          <Disclosure variant="card" nested summary="Paste cookies from your browser">
+            <p class="caption">
+              Use this when programmatic login is blocked by Cloudflare (common on cloud-hosted
+              Istota deploys).
+            </p>
+            <ol>
+              <li>
+                Open <a href="https://app.monarch.com" target="_blank" rel="noopener noreferrer"
+                  >app.monarch.com</a
+                > in a logged-in browser tab.
+              </li>
+              <li>
+                Open DevTools (Cmd/Ctrl+Option+I) → <strong>Application</strong> →
+                <strong>Cookies</strong>
+                → <code>https://api.monarch.com</code>.
+              </li>
+              <li>Copy the value of <code>session_id</code> into the field below.</li>
+              <li>Copy the value of <code>csrftoken</code> into the field below.</li>
+              <li>Click <strong>Save</strong>.</li>
+            </ol>
+          </Disclosure>
+        </div>
 
         <p class="legacy-note caption">
           Cookies are the only credential we store. They last months on a trusted-device login.
@@ -225,52 +228,42 @@
      contrast — the panel around them used to be a hand-rolled card at
      card level, which put a different fill and a stronger border beside every
      real Card on the page. */
-  .monarch-method {
-    margin: var(--space-2) 0;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-2) var(--space-3);
-    background: var(--surface-raised);
+  .monarch-methods {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
     font-size: var(--text-sm);
     color: var(--text-secondary);
   }
 
-  .monarch-method summary {
-    cursor: pointer;
-    font-weight: var(--weight-semibold);
-    color: var(--text-primary);
-  }
-
-  .monarch-method p,
-  .monarch-method ol {
+  .monarch-methods p,
+  .monarch-methods ol {
     margin: var(--space-1) 0;
   }
 
-  .monarch-method ol {
+  .monarch-methods ol {
     padding-left: 1.25rem;
   }
 
-  .monarch-method li {
+  .monarch-methods li {
     margin: 0.1rem 0;
   }
 
-  .monarch-method code {
+  .monarch-methods code {
     background: var(--surface-base);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
   }
 
-  /* The hint trigger rides inside the <summary> so it sits beside the label
-     rather than below the disclosure. `display: inline-flex` on a wrapper —
-     not on the summary itself, which would drop the disclosure triangle in
-     some engines — keeps the "?" aligned to the text baseline box. */
-  .monarch-method .summary-label {
+  /* The hint trigger rides inside the summary so it sits beside the label
+     rather than below the disclosure. */
+  .monarch-methods .summary-label {
     display: inline-flex;
     align-items: center;
     gap: var(--space-2);
   }
 
-  .monarch-method .caption {
+  .monarch-methods .caption {
     margin: var(--space-1) 0;
   }
 

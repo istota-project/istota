@@ -1,6 +1,5 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { Collapsible } from 'bits-ui';
   import {
     Chart,
     BarController,
@@ -13,7 +12,7 @@
     Tooltip,
     Legend,
   } from 'chart.js';
-  import { Card, EmptyState, StatTile, LoadState } from '$lib/components/ui';
+  import { Card, EmptyState, StatTile, LoadState, Disclosure } from '$lib/components/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -351,65 +350,49 @@
       </div>
 
       <div class="breakdowns">
-        <Collapsible.Root bind:open={incomeOpen}>
-          <div class="section-header">
-            <Collapsible.Trigger class="section-toggle button-reset">
-              <span class="record-caret" class:is-open={incomeOpen}>&#9654;</span>
-              Income
-            </Collapsible.Trigger>
+        <Disclosure variant="section" summary="Income" bind:open={incomeOpen}>
+          <div class="breakdown-list">
+            {#each sortedIncome as [account, amount]}
+              <div class="record-row record-row--tree">
+                <button
+                  class="record-name button-reset"
+                  type="button"
+                  onclick={() => navigateToAccount(account)}
+                >
+                  {shortAccountName(account)}
+                </button>
+                <span class="breakdown-amount num income">
+                  {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
+                    amount,
+                    activeMonth.income,
+                  )})
+                </span>
+              </div>
+            {/each}
           </div>
-          <Collapsible.Content>
-            <div class="breakdown-list">
-              {#each sortedIncome as [account, amount]}
-                <div class="record-row record-row--tree">
-                  <button
-                    class="record-name button-reset"
-                    type="button"
-                    onclick={() => navigateToAccount(account)}
-                  >
-                    {shortAccountName(account)}
-                  </button>
-                  <span class="breakdown-amount num income">
-                    {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
-                      amount,
-                      activeMonth.income,
-                    )})
-                  </span>
-                </div>
-              {/each}
-            </div>
-          </Collapsible.Content>
-        </Collapsible.Root>
+        </Disclosure>
 
-        <Collapsible.Root bind:open={expenseOpen}>
-          <div class="section-header">
-            <Collapsible.Trigger class="section-toggle button-reset">
-              <span class="record-caret" class:is-open={expenseOpen}>&#9654;</span>
-              Expenses
-            </Collapsible.Trigger>
+        <Disclosure variant="section" summary="Expenses" bind:open={expenseOpen}>
+          <div class="breakdown-list">
+            {#each sortedExpenses as [account, amount]}
+              <div class="record-row record-row--tree">
+                <button
+                  class="record-name button-reset"
+                  type="button"
+                  onclick={() => navigateToAccount(account)}
+                >
+                  {shortAccountName(account)}
+                </button>
+                <span class="breakdown-amount num expense">
+                  {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
+                    amount,
+                    activeMonth.expenses,
+                  )})
+                </span>
+              </div>
+            {/each}
           </div>
-          <Collapsible.Content>
-            <div class="breakdown-list">
-              {#each sortedExpenses as [account, amount]}
-                <div class="record-row record-row--tree">
-                  <button
-                    class="record-name button-reset"
-                    type="button"
-                    onclick={() => navigateToAccount(account)}
-                  >
-                    {shortAccountName(account)}
-                  </button>
-                  <span class="breakdown-amount num expense">
-                    {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
-                      amount,
-                      activeMonth.expenses,
-                    )})
-                  </span>
-                </div>
-              {/each}
-            </div>
-          </Collapsible.Content>
-        </Collapsible.Root>
+        </Disclosure>
       </div>
     {/if}
   </div>
@@ -434,7 +417,7 @@
      putting the cards a step in from the chart card above them — the whole
      page reads as one column of cards, and the report convention is that a
      card's box sits on the frame edge while only text steps in (the
-     .section-header below, balance-sheet's net-worth banner). */
+     section headers below, balance-sheet's net-worth banner). */
   .summary-cards {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
@@ -453,9 +436,9 @@
     color: var(--money-expense);
   }
 
-  /* `.breakdowns` is a bare grouping element: its `.section-header` rows carry
-     their own inline padding from the report shell, exactly as income-statement's
-     do, so an inset here only pushed them a step deeper than the same rows on
+  /* `.breakdowns` is a bare grouping element: its section headers carry their
+     own inline padding (`Disclosure variant="section"`), exactly as
+     income-statement's do, so an inset here only pushed them a step deeper than the same rows on
      the sibling reports. */
 
   .breakdown-list {

@@ -8,7 +8,15 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
-  import { Card, EmptyState, Field, Input, StatTile, LoadState } from '$lib/components/ui';
+  import {
+    Card,
+    EmptyState,
+    Field,
+    Input,
+    StatTile,
+    LoadState,
+    Disclosure,
+  } from '$lib/components/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
@@ -345,8 +353,7 @@
                   >{fmtDollar(data.w2_income_annualized)}</span
                 >{/if}
             </div>
-            <details class="info-panel">
-              <summary>How income is annualized</summary>
+            <Disclosure class="info-panel" summary="How income is annualized">
               <p class="caption">
                 This uses the IRS annualized-income method (Form 2210). For the Q{data.quarter}
                 payment, SE income is pulled from the ledger through the first
@@ -365,7 +372,7 @@
                   tightens toward your actual annual income.
                 {/if}
               </p>
-            </details>
+            </Disclosure>
 
             <div class="record-group micro-label">Self-employment tax</div>
             <div class="record-row record-row--tree">
@@ -385,8 +392,7 @@
                 {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
               </div>
             {/if}
-            <details class="info-panel">
-              <summary>How SE tax works</summary>
+            <Disclosure class="info-panel" summary="How SE tax works">
               <p class="caption">
                 SE tax is 15.3% (12.4% Social Security + 2.9% Medicare) on {fmtPct(
                   data.se_taxable_fraction,
@@ -404,7 +410,7 @@
                   the filing-status threshold.
                 {/if}
               </p>
-            </details>
+            </Disclosure>
 
             <div class="record-group micro-label">Tax calculation</div>
             <div class="record-row record-row--tree">
@@ -469,8 +475,7 @@
               <span class="breakdown-label">Effective tax rate</span>
               <span class="breakdown-val num combined">{fmtPct(effectiveTaxRate)}</span>
             </div>
-            <details class="info-panel">
-              <summary>How tax liability is computed</summary>
+            <Disclosure class="info-panel" summary="How tax liability is computed">
               <p class="caption">
                 AGI = annualized SE income + annualized W-2 income - half SE deduction. Federal
                 taxable income = AGI - standard deduction ({fmtDollar(
@@ -502,7 +507,7 @@
                   {/if}
                 {/if}
               </p>
-            </details>
+            </Disclosure>
 
             <div class="record-group micro-label">Credits and payments</div>
             <div class="record-row record-row--tree">
@@ -532,8 +537,7 @@
                   >{fmtDollar(data.state_quarterly_amount)}</span
                 >{/if}
             </div>
-            <details class="info-panel">
-              <summary>How the quarterly amount is determined</summary>
+            <Disclosure class="info-panel" summary="How the quarterly amount is determined">
               <p class="caption">
                 {#if method === 'annualized'}
                   Net due = total annual liability - annualized withholding - estimated payments
@@ -553,7 +557,7 @@
                   from zero).
                 </p>
               {/if}
-            </details>
+            </Disclosure>
           </div>
 
           <div class="provenance-footnote">
@@ -687,36 +691,13 @@
   }
 
   /* Info panels */
-  .info-panel {
-    margin: 0;
-    padding: 0 var(--space-3);
+  .tax-content :global(.info-panel) {
+    padding: var(--space-2) var(--space-3);
     border-top: 1px solid var(--border-subtle);
   }
 
-  .info-panel summary {
-    padding: var(--space-2) 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    cursor: pointer;
-    user-select: none;
-    list-style: none;
-  }
-
-  .info-panel summary::before {
-    content: '+ ';
-    font-family: var(--font-mono);
-  }
-
-  .info-panel[open] summary::before {
-    content: '- ';
-  }
-
-  .info-panel summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .info-panel p {
-    margin: 0 0 var(--space-2);
+  .tax-content :global(.info-panel p) {
+    margin: 0;
     line-height: var(--leading-normal);
   }
 

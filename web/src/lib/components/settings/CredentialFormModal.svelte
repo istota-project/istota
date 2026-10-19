@@ -7,7 +7,15 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import { Field, FormModal, FormStack, Input, Checkbox, SecretField } from '$lib/components/ui';
+  import {
+    Field,
+    FormModal,
+    FormStack,
+    Input,
+    Checkbox,
+    SecretField,
+    Disclosure,
+  } from '$lib/components/ui';
   import { notifySuccess } from '$lib/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
 
@@ -251,8 +259,7 @@
         {/if}
       </div>
     {/if}
-    <details class="cred-more" bind:open={moreOpen}>
-      <summary>More options</summary>
+    <Disclosure summary="More options" bind:open={moreOpen}>
       <div class="cred-more-fields">
         <div class="cred-field">
           <Field label="Also used on" error={errors.extra_hosts}>
@@ -287,7 +294,7 @@
           <p class="caption">Otherwise a task can only have Istota send it.</p>
         </div>
       </div>
-    </details>
+    </Disclosure>
   </FormStack>
 </FormModal>
 
@@ -303,16 +310,9 @@
     margin: 0;
   }
 
-  .cred-more summary {
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-
   .cred-more-fields {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    margin-top: var(--space-3);
   }
 </style>

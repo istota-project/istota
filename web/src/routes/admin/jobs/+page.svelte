@@ -19,6 +19,7 @@
     type KebabItem,
     Card,
     Timestamp,
+    Disclosure,
   } from '$lib/components/ui';
   import { ConfirmStepUpDialog } from '$lib/components/settings';
   import { createConfirm } from '$lib/ui/confirm.svelte';
@@ -167,10 +168,9 @@
                   <td class="col-job">
                     <div class="cell-main">{job.name}</div>
                     {#if job.last_error}
-                      <details class="last-error">
-                        <summary class="caption">Last error</summary>
-                        <pre>{job.last_error}</pre>
-                      </details>
+                      <Disclosure summary="Last error">
+                        <pre class="last-error">{job.last_error}</pre>
+                      </Disclosure>
                     {/if}
                   </td>
                   <td class="col-schedule"><code>{job.cron}</code></td>
@@ -263,11 +263,8 @@
   .cell-main {
     overflow-wrap: anywhere;
   }
-  .last-error summary {
-    cursor: pointer;
-  }
-  .last-error pre {
-    margin: var(--space-1) 0 0;
+  .last-error {
+    margin: 0;
     font-size: var(--text-xs);
     color: var(--status-danger-fg);
     white-space: pre-wrap;

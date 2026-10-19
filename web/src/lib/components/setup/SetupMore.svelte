@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { Disclosure } from '$lib/components/ui';
 
   interface Props {
     /** The disclosure's caption. */
@@ -14,26 +15,18 @@
 
 <!--
   The setup screens' "More": the settings most people leave alone, folded
-  away under one link-styled line.
+  away under one line.
 -->
-<details class="setup-more" {open}>
-  <summary>{label}</summary>
+<Disclosure summary={label} {open}>
   <div class="setup-more-body">
     {@render children()}
   </div>
-</details>
+</Disclosure>
 
 <style>
-  .setup-more summary {
-    width: fit-content;
-    color: var(--link);
-    cursor: pointer;
-  }
-
   .setup-more-body {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    margin-top: var(--space-2);
   }
 </style>

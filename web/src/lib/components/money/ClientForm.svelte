@@ -16,6 +16,7 @@
     Checkbox,
     Input,
     TextArea,
+    Disclosure,
   } from '$lib/components/ui';
 
   /**
@@ -221,20 +222,21 @@
       <Checkbox bind:checked={ledgerPosting} />
     </Field>
 
-    <details bind:open={advancedOpen}>
-      <summary>Advanced</summary>
-      <div class="vstack" style:--vstack-gap="var(--space-2)">
-        <Field label="Reminder days">
-          <Input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
-        </Field>
-        <Field label="Notifications" hint="Where overdue notices go.">
-          <Input type="text" bind:value={notifications} />
-        </Field>
-        <Field label="Days until overdue">
-          <Input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
-        </Field>
-      </div>
-    </details>
+    <div class="advanced">
+      <Disclosure summary="Advanced" bind:open={advancedOpen}>
+        <div class="vstack" style:--vstack-gap="var(--space-2)">
+          <Field label="Reminder days">
+            <Input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
+          </Field>
+          <Field label="Notifications" hint="Where overdue notices go.">
+            <Input type="text" bind:value={notifications} />
+          </Field>
+          <Field label="Days until overdue">
+            <Input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
+          </Field>
+        </div>
+      </Disclosure>
+    </div>
   </div>
 </FormModal>
 
@@ -243,15 +245,8 @@
     color: var(--text-secondary);
   }
 
-  details {
+  .advanced {
     border-top: 1px solid var(--border-subtle);
     padding-top: var(--space-2);
-  }
-
-  summary {
-    cursor: pointer;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    margin-bottom: var(--space-2);
   }
 </style>

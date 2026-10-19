@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fileLinks } from '$lib/fileViewer/links';
   import hljs from 'highlight.js/lib/common';
-  import { TextArea } from '$lib/components/ui';
+  import { TextArea, Disclosure } from '$lib/components/ui';
   import { pinViewportZoom, releaseViewportZoom } from '$lib/zoomPin';
   import { renderDocument, renderUntrustedDocument } from '$lib/markdown';
   import {
@@ -38,10 +38,10 @@
   <div use:fileLinks class="file-body">
     {#if presentation.kind === 'markdown' && !source}
       <article class="document">
-        {#if split.frontmatter !== null}<details class="frontmatter">
-            <summary class="micro-label">Frontmatter</summary>
-            <pre>{split.frontmatter}</pre>
-          </details>{/if}
+        {#if split.frontmatter !== null}<Disclosure variant="card" nested class="frontmatter">
+            {#snippet summary()}<span class="micro-label">Frontmatter</span>{/snippet}
+            <pre class="frontmatter-text">{split.frontmatter}</pre>
+          </Disclosure>{/if}
         <div class="markdown prose">
           {@html (untrusted ? renderUntrustedDocument : renderDocument)(split.body)}
         </div>
@@ -122,19 +122,11 @@
     font-size: var(--text-sm);
   }
 
-  .frontmatter {
+  .document :global(.frontmatter) {
     margin: 0 0 var(--space-6);
-    padding: var(--space-2) var(--space-3);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
   }
-  .frontmatter summary {
-    cursor: pointer;
-    color: var(--text-muted);
-  }
-  .frontmatter pre {
-    margin: var(--space-2) 0 0;
+  .frontmatter-text {
+    margin: 0;
     font-size: var(--text-xs);
     line-height: var(--leading-relaxed);
     color: var(--text-secondary);

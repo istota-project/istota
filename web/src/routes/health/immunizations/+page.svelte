@@ -30,6 +30,7 @@
     LoadState,
     PageHeader,
     Timestamp,
+    Disclosure,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { localDateISO } from '$lib/dateFormat';
@@ -195,29 +196,30 @@
             <Input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
           </Field>
         </FormGrid>
-        <details class="advanced">
-          <summary>More fields</summary>
-          <FormGrid>
-            <Field label="Lot number">
-              <Input type="text" bind:value={formLot} />
+        <div class="advanced">
+          <Disclosure summary="More fields">
+            <FormGrid>
+              <Field label="Lot number">
+                <Input type="text" bind:value={formLot} />
+              </Field>
+              <Field label="Route">
+                <Select
+                  value={formRoute}
+                  options={routeOptions}
+                  onValueChange={(v) => (formRoute = v)}
+                  ariaLabel="Route"
+                  fullWidth
+                />
+              </Field>
+              <Field label="Site">
+                <Input type="text" bind:value={formSite} placeholder="left deltoid" />
+              </Field>
+            </FormGrid>
+            <Field label="Notes" class="notes">
+              <TextArea bind:value={formNotes} rows={2} />
             </Field>
-            <Field label="Route">
-              <Select
-                value={formRoute}
-                options={routeOptions}
-                onValueChange={(v) => (formRoute = v)}
-                ariaLabel="Route"
-                fullWidth
-              />
-            </Field>
-            <Field label="Site">
-              <Input type="text" bind:value={formSite} placeholder="left deltoid" />
-            </Field>
-          </FormGrid>
-          <Field label="Notes" class="notes">
-            <TextArea bind:value={formNotes} rows={2} />
-          </Field>
-        </details>
+          </Disclosure>
+        </div>
         {#if formError}
           <div class="banner error">{formError}</div>
         {/if}
@@ -271,33 +273,34 @@
     </ul>
 
     {#if riskBased.length > 0}
-      <details class="risk-based" bind:open={riskOpen}>
-        <summary>Risk-based vaccines ({riskBased.length})</summary>
-        <ul class="cards card-grid">
-          {#each riskBased as c (c.name)}
-            <li>
-              <Card
-                class="coverage-tile"
-                href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
-              >
-                <span class="name title-card">{c.display_name}</span>
-                <Badge variant={immunizationStatusVariant(c.status)}
-                  >{immunizationStatusLabel(c.status)}</Badge
+      <div class="risk-based">
+        <Disclosure summary="Risk-based vaccines ({riskBased.length})" bind:open={riskOpen}>
+          <ul class="cards card-grid">
+            {#each riskBased as c (c.name)}
+              <li>
+                <Card
+                  class="coverage-tile"
+                  href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
                 >
-                <div class="card-body">
-                  <div class="caption">
-                    {#if c.last_given}
-                      Last: <Timestamp value={c.last_given} empty="—" />
-                    {:else}
-                      Not recorded
-                    {/if}
+                  <span class="name title-card">{c.display_name}</span>
+                  <Badge variant={immunizationStatusVariant(c.status)}
+                    >{immunizationStatusLabel(c.status)}</Badge
+                  >
+                  <div class="card-body">
+                    <div class="caption">
+                      {#if c.last_given}
+                        Last: <Timestamp value={c.last_given} empty="—" />
+                      {:else}
+                        Not recorded
+                      {/if}
+                    </div>
                   </div>
-                </div>
-              </Card>
-            </li>
-          {/each}
-        </ul>
-      </details>
+                </Card>
+              </li>
+            {/each}
+          </ul>
+        </Disclosure>
+      </div>
     {/if}
 
     {#if other.length > 0}
@@ -412,12 +415,6 @@
   .advanced :global(.notes) {
     margin-top: var(--space-1);
   }
-  details.advanced > summary {
-    color: var(--text-muted);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    user-select: none;
-  }
   .coverage {
     margin-bottom: 1.25rem;
   }
@@ -455,16 +452,6 @@
   }
   .risk-based {
     margin-top: var(--space-3);
-  }
-  .risk-based > summary {
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    padding: var(--space-2) 0;
-    user-select: none;
-  }
-  .risk-based[open] > summary {
-    margin-bottom: var(--space-2);
   }
 
   .history-head {

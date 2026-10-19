@@ -1,6 +1,6 @@
 <script lang="ts">
   import { unlockSetup, SetupApiError } from '$lib/api';
-  import { Button, Field, FormStack, Input } from '$lib/components/ui';
+  import { Button, Field, FormStack, Input, Disclosure } from '$lib/components/ui';
 
   interface Props {
     /** Under the field: why the last code was refused, the address's included. */
@@ -49,15 +49,14 @@
       invalid={!!error}
     />
   </Field>
-  <details class="where">
-    <summary>Where do I find this?</summary>
-    <p>
+  <Disclosure summary="Where do I find this?">
+    <p class="where">
       On the server, run <code>sudo istota-stack setup-code</code> to print it again. If that says
       no setup is in progress, start one with <code>sudo istota-stack setup --web</code>, which
       prints a new code. A code works once: after it has opened setup in one browser, another
       browser needs a new one.
     </p>
-  </details>
+  </Disclosure>
   <div class="form-actions">
     <Button variant="primary" type="submit" loading={busy} loadingLabel="Checking…">Continue</Button
     >
@@ -65,14 +64,8 @@
 </FormStack>
 
 <style>
-  .where summary {
-    width: fit-content;
-    color: var(--link);
-    cursor: pointer;
-  }
-
-  .where p {
-    margin-top: var(--space-2);
+  .where {
+    margin: 0;
     color: var(--text-muted);
   }
 </style>

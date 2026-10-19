@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { LoadState } from '$lib/components/ui';
+  import { LoadState, Disclosure } from '$lib/components/ui';
   import { goto } from '$app/navigation';
-  import { Collapsible } from 'bits-ui';
   import { getReport, type AccountRow } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { selectedYear, transactionsUrl } from '$lib/money/stores/transactions';
@@ -79,39 +78,27 @@
 
 <LoadState {loading} {error}>
   <div class="report-content">
-    <Collapsible.Root bind:open={incomeOpen}>
-      <div class="section-header">
-        <Collapsible.Trigger class="section-toggle button-reset">
-          <span class="record-caret" class:is-open={incomeOpen}>&#9654;</span>
-          Income
-        </Collapsible.Trigger>
-        <span class="section-total income">{formatAmount(totals.income, totals.currency)}</span>
+    <Disclosure variant="section" summary="Income" bind:open={incomeOpen}>
+      {#snippet trailing()}<span class="section-total income"
+          >{formatAmount(totals.income, totals.currency)}</span
+        >{/snippet}
+      <div class="tree-section">
+        {#each incomeTree as node (node.fullName)}
+          {@render treeNode(node)}
+        {/each}
       </div>
-      <Collapsible.Content>
-        <div class="tree-section">
-          {#each incomeTree as node (node.fullName)}
-            {@render treeNode(node)}
-          {/each}
-        </div>
-      </Collapsible.Content>
-    </Collapsible.Root>
+    </Disclosure>
 
-    <Collapsible.Root bind:open={expenseOpen}>
-      <div class="section-header">
-        <Collapsible.Trigger class="section-toggle button-reset">
-          <span class="record-caret" class:is-open={expenseOpen}>&#9654;</span>
-          Expenses
-        </Collapsible.Trigger>
-        <span class="section-total expense">{formatAmount(totals.expenses, totals.currency)}</span>
+    <Disclosure variant="section" summary="Expenses" bind:open={expenseOpen}>
+      {#snippet trailing()}<span class="section-total expense"
+          >{formatAmount(totals.expenses, totals.currency)}</span
+        >{/snippet}
+      <div class="tree-section">
+        {#each expenseTree as node (node.fullName)}
+          {@render treeNode(node)}
+        {/each}
       </div>
-      <Collapsible.Content>
-        <div class="tree-section">
-          {#each expenseTree as node (node.fullName)}
-            {@render treeNode(node)}
-          {/each}
-        </div>
-      </Collapsible.Content>
-    </Collapsible.Root>
+    </Disclosure>
 
     <div class="net-row">
       <span class="net-label">Net income</span>

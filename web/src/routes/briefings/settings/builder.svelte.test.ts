@@ -464,7 +464,7 @@ describe('briefing block builder', () => {
   it('edits synthesis controls without losing source state or other options', async () => {
     await mount();
     const editor = await edit();
-    await fireEvent.click(within(editor).getByText('Advanced', { selector: 'summary' }));
+    await fireEvent.click(within(editor).getByText('Advanced').closest('summary')!);
     await fireEvent.input(within(editor).getByRole('textbox', { name: /Directive/ }), {
       target: { value: 'Only local news' },
     });
