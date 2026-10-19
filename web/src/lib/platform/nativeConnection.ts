@@ -54,6 +54,16 @@ export function appConnectionAvailable(): boolean {
   return connectionPlugin() !== null;
 }
 
+/**
+ * Whether a server route that redirects to another site, such as an OAuth connect, has to
+ * open in the system browser. The 0.12.0 app stops a redirect off the site that the user
+ * did not tap and loses the page, but opens a tapped new-window link in its browser view.
+ * That view has its own cookies, so the user may have to sign in to Istota there.
+ */
+export function offSiteRoutesOpenInBrowser(): boolean {
+  return appConnectionAvailable();
+}
+
 /** Opens the app's own settings. False when there is no app to open them in. */
 export async function openAppSettings(): Promise<boolean> {
   const plugin = connectionPlugin();

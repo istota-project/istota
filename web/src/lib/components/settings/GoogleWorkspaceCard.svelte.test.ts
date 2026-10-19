@@ -47,7 +47,22 @@ beforeEach(() => {
   api.disconnectGoogle.mockReset();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  inShell(null);
+});
+
+/** The page as the given iOS app version sees it: its User-Agent token and its connection plugin. */
+function inShell(version: string | null) {
+  const ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15';
+  Object.defineProperty(window.navigator, 'userAgent', {
+    value: version ? `${ua} IstotaApp/${version}` : ua,
+    configurable: true,
+  });
+  (window as { Capacitor?: unknown }).Capacitor = version
+    ? { Plugins: { IstotaConnection: { openSettings: vi.fn() } } }
+    : undefined;
+}
 
 async function mount(s: GoogleStatus) {
   api.getGoogleStatus.mockResolvedValue(s);
@@ -348,5 +363,34 @@ describe('GoogleWorkspaceCard', () => {
       await headerSave();
       expect(await screen.findByText('nope')).toBeInTheDocument();
     });
+  });
+});
+
+describe('the connect route in the iOS app', () => {
+  const NOTE = 'Opens in the browser. You may need to sign in to Istota there first.';
+
+  it('opens Connect and Reconnect in the browser from the 0.12.0 app', async () => {
+    inShell('0.12.0');
+    await mount(status());
+    const connect = await screen.findByRole('link', { name: 'Connect' });
+    expect(connect.getAttribute('href')).toMatch(/\/google\/connect$/);
+    expect(connect).toHaveAttribute('target', '_blank');
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+    cleanup();
+    await mount(status({ connected: true }));
+    expect(await screen.findByRole('link', { name: 'Reconnect' })).toHaveAttribute(
+      'target',
+      '_blank',
+    );
+  });
+
+  it('keeps the page navigation in a browser and in older apps', async () => {
+    for (const version of [null, '0.11.0']) {
+      inShell(version);
+      await mount(status());
+      expect(await screen.findByRole('button', { name: 'Connect' })).toBeInTheDocument();
+      expect(screen.queryByText(NOTE)).toBeNull();
+      cleanup();
+    }
   });
 });

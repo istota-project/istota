@@ -10,6 +10,7 @@
   } from '$lib/api';
   import { Button, ConfirmDialog, EmptyState, Select, type SelectOption } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
   import SettingsCard from './SettingsCard.svelte';
   import SettingsField from './SettingsField.svelte';
 
@@ -123,10 +124,18 @@
   // there is nothing to write then.
   useSettingsSave(() => (status?.enabled ? { dirty, saving, save } : null));
 
+  // In the iOS app the connect route opens in the browser instead, and this page stays
+  // as it is (`offSiteRoutesOpenInBrowser`).
+  const connectUrl = `${base}/google/connect`;
+  const inBrowser = offSiteRoutesOpenInBrowser();
+  const browserLink = inBrowser
+    ? { href: connectUrl, target: '_blank', rel: 'noopener noreferrer' }
+    : { onclick: connect };
+
   function connect() {
     busy = true;
     // Full-page nav — the OAuth callback redirects back into the app.
-    window.location.href = `${base}/google/connect`;
+    window.location.href = connectUrl;
   }
 
   async function doDisconnect() {
@@ -261,18 +270,21 @@
 
     <div class="actions">
       {#if status.connected}
-        <Button variant="secondary" onclick={connect} disabled={busy || nothingRequested}>
+        <Button variant="secondary" {...browserLink} disabled={busy || nothingRequested}>
           Reconnect
         </Button>
         <Button variant="secondary" onclick={() => (confirmingDisconnect = true)} disabled={busy}>
           Disconnect
         </Button>
       {:else}
-        <Button variant="primary" onclick={connect} disabled={busy || nothingRequested}>
+        <Button variant="primary" {...browserLink} disabled={busy || nothingRequested}>
           {busy ? 'Connecting…' : 'Connect'}
         </Button>
       {/if}
     </div>
+    {#if inBrowser}
+      <p class="caption">Opens in the browser. You may need to sign in to Istota there first.</p>
+    {/if}
     {#if nothingRequested}
       <!-- The server refuses this connect too, but it refuses it after a
            full-page round trip; saying so here is the difference between a
