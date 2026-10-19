@@ -102,7 +102,7 @@
   const input = (e: Event) => (e.currentTarget as HTMLInputElement).value;
 </script>
 
-<div class="step">
+<div class="vstack">
   <p>Both are optional.</p>
 
   <ConnectionCard
@@ -155,7 +155,7 @@
       >
     </div>
     <SetupCheckResultLine result={results.email} />
-    <div class="sender-check">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <p class="micro-label">Sender check (optional)</p>
       <p class="muted">
         Mail from your own address is trusted on its From: line alone, unless {botName} can read your
@@ -278,23 +278,11 @@
 </div>
 
 <style>
-  .step {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
   }
 
   .test-row {
     display: flex;
-  }
-
-  .sender-check {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
 </style>

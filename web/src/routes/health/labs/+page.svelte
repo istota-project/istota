@@ -148,7 +148,7 @@
        it: the filter is the only way to change what failed. -->
   <div class="header">
     <h1 class="title-page">Labs</h1>
-    <div class="actions">
+    <div class="actions hstack">
       <Select
         value={specimen}
         options={specimenOptions}
@@ -312,11 +312,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-4);
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
   }
 
   .drafts {

@@ -170,7 +170,7 @@
       description="Direct file edits may not appear here. These records are not restorable versions."
     >
       {#if entries.length}
-        <ol class="changes">
+        <ol class="list-reset">
           {#each entries as entry (entry.id)}
             <li class="change">
               <div class="change-head">
@@ -257,11 +257,6 @@
   }
   .last-change {
     margin: var(--space-2) 0 0;
-  }
-  .changes {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
   .change {
     padding-block: var(--space-2);

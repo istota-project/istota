@@ -65,7 +65,7 @@
   {:else if loaded && !items.length}
     <EmptyState size="sm">No briefings for this group yet.</EmptyState>
   {:else}
-    <ul class="briefings">
+    <ul class="briefings list-reset">
       {#each items as item (item.id)}
         {@const href = readUrl(item)}
         <li>
@@ -84,11 +84,6 @@
 </SettingsCard>
 
 <style>
-  .briefings {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .briefings li {
     display: flex;
     align-items: center;

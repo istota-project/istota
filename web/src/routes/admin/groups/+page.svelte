@@ -276,7 +276,7 @@
                   <td>
                     <button
                       type="button"
-                      class="group-name"
+                      class="group-name button-reset"
                       aria-current={item.group_id === selected ? 'true' : undefined}
                       disabled={busy}
                       onclick={(event) => {
@@ -424,7 +424,7 @@
         description="Role changes keep the membership period intact. Each change is recorded here."
       >
         {#if !group.events.length}<EmptyState size="sm">No management events.</EmptyState>{:else}<ol
-            class="events"
+            class="list-reset"
           >
             {#each group.events as event (event.id)}
               {@const lines = eventDetails(event)}
@@ -451,7 +451,7 @@
 </div>
 
 <Modal bind:open={createOpen} title="Create group">
-  <div class="create-fields">
+  <div class="create-fields vstack">
     <Field label="Group ID" warning="This identifier cannot be changed or reused after archiving."
       ><Input aria-label="Group ID" bind:value={groupId} disabled={busy} /></Field
     >
@@ -501,11 +501,6 @@
 </ConfirmDialog>
 
 <style>
-  .create-fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .create-fields p {
     margin: 0;
   }
@@ -536,14 +531,9 @@
     color: var(--text-muted);
   }
   .group-name {
-    padding: 0;
-    border: none;
-    background: none;
     color: var(--text-primary);
-    font: inherit;
     font-weight: var(--weight-medium);
     text-align: left;
-    cursor: pointer;
     overflow-wrap: anywhere;
   }
   .col-kind,
@@ -563,11 +553,6 @@
   }
   .group-facts + .banner {
     margin-top: var(--space-3);
-  }
-  .events {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
   .event {
     padding-block: var(--space-2);

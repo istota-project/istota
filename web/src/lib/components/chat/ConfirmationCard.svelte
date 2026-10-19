@@ -27,7 +27,7 @@
 </script>
 
 <div class="confirm-card">
-  <span class="confirm-ask">
+  <span class="hstack">
     <!-- The wrapper the size is set on, never the card: `--avatar-size`
 		     inherits, so putting it on `.confirm-card` would resize anything
 		     nested under it later. -->
@@ -61,11 +61,6 @@
   }
   /* Actor and sentence travel together, so the card's own `space-between`
 	   pushes the buttons to the far edge and not the face away from the words. */
-  .confirm-ask {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
   .confirm-actor {
     /* Proportionate to the one line of --text-sm beside it, and set here
 		   because Avatar deliberately owns no size of its own. */

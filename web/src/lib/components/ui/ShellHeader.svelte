@@ -24,10 +24,10 @@
 
 <div class="header">
   {#if leading}{@render leading()}{/if}
-  <h1 class:with-after={!!afterTitle}>
+  <h1 class:with-after={!!afterTitle} class:hstack={!!afterTitle}>
     {#if onTitleClick}
       <button
-        class="title-btn"
+        class="title-btn button-reset truncate"
         onclick={onTitleClick}
         type="button"
         aria-label={titleActionLabel ? `${title} — ${titleActionLabel}` : undefined}
@@ -61,12 +61,6 @@
     min-width: 0;
   }
 
-  .header h1.with-after {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .header h1.with-after .title-btn {
     min-width: 0;
   }
@@ -76,17 +70,8 @@
 	   toggle it drives is a no-op — harmless, and keeping the markup stable beats
 	   branching it on a breakpoint the component can't see. */
   .title-btn {
-    font: inherit;
-    color: inherit;
-    background: none;
-    border: none;
-    padding: 0;
     text-align: left;
-    cursor: pointer;
     max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .header-nav {

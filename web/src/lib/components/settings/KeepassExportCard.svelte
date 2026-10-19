@@ -101,7 +101,7 @@
       KeePass file.
     </p>{/if}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  <div class="row">
+  <div class="hstack wrap">
     <Button
       variant="primary"
       size="sm"

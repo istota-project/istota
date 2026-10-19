@@ -703,7 +703,7 @@
                 </span>
                 <span class="archive-audience caption">
                   {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
-                  <span>{row.audience}</span>
+                  <span class="truncate">{row.audience}</span>
                   <CountPill count={row.unread ? 1 : 0} title="Unread" shape="inline-mark" />
                   {#if row.unread}<span class="visually-hidden">, unread</span>{/if}
                 </span>
@@ -809,12 +809,6 @@
     line-height: var(--leading-snug);
     color: var(--text-muted);
     overflow-wrap: anywhere;
-  }
-
-  .archive-audience span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Pull the unread mark in to 2px from the audience, the feeds sidebar's gap. */

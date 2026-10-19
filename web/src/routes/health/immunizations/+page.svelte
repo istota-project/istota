@@ -157,7 +157,7 @@
        this header. -->
   <div class="header">
     <h1 class="title-page">Immunizations</h1>
-    <div class="actions">
+    <div class="actions hstack">
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Log dose'}
       </Button>
@@ -405,11 +405,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-4);
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
   }
 
   .quick-form {

@@ -7,7 +7,7 @@
 <div class="index-caption">
   <p>{caption}</p>
   {#if reachNote}
-    <p class="banner info reach-note"><Bot size={14} aria-hidden="true" />{reachNote}</p>
+    <p class="banner info reach-note hstack"><Bot size={14} aria-hidden="true" />{reachNote}</p>
   {/if}
 </div>
 
@@ -22,11 +22,6 @@
   }
   .index-caption p {
     margin: 0;
-  }
-  .reach-note {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
   .reach-note :global(svg) {
     flex-shrink: 0;

@@ -243,7 +243,7 @@
         {/if}
 
         <h4 class="micro-label trace-head">Trace</h4>
-        <ul class="trace-list">
+        <ul class="list-reset">
           {#each trace as entry (entry.rule_id)}
             {@const outcome = outcomeOf(entry)}
             <li class="trace-row">
@@ -318,12 +318,6 @@
 
   .trace-head {
     margin-top: var(--space-3);
-  }
-
-  .trace-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
 
   .trace-row {

@@ -174,7 +174,12 @@
   </p>
   {#each groups as group (group.step)}
     {@const title = stepInfo(group.step).title}
-    <section class="review-group" aria-label={title} data-review-step={group.step}>
+    <section
+      class="vstack"
+      style:--vstack-gap="var(--space-2)"
+      aria-label={title}
+      data-review-step={group.step}
+    >
       <div class="card-head">
         <h3 class="micro-label">{title}</h3>
         <Button
@@ -205,12 +210,6 @@
   h3,
   dl {
     margin: 0;
-  }
-
-  .review-group {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
 
   .card-head {

@@ -183,7 +183,7 @@
 
     <SettingsField label="Height">
       {#if settings.display_units.height === 'ft_in'}
-        <div class="ft-in-row">
+        <div class="ft-in-row hstack">
           <input
             type="number"
             step="1"
@@ -204,7 +204,7 @@
           <span class="suffix muted">in</span>
         </div>
       {:else}
-        <div class="cm-row">
+        <div class="cm-row hstack">
           <input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
           <span class="suffix muted">cm</span>
         </div>
@@ -262,12 +262,6 @@
 </SettingsLayout>
 
 <style>
-  .ft-in-row,
-  .cm-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   .ft-in-row input,
   .cm-row input {
     flex: 1;

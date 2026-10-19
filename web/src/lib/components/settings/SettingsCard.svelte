@@ -17,7 +17,7 @@
 <section class="card">
   <header class="section-header">
     {#if status}
-      <div class="title">
+      <div class="hstack">
         <h2 class="title-section">{title}</h2>
         {@render status()}
       </div>
@@ -25,7 +25,7 @@
       <h2 class="title-section">{title}</h2>
     {/if}
     {#if actions}
-      <div class="header-actions">{@render actions()}</div>
+      <div class="hstack">{@render actions()}</div>
     {/if}
   </header>
   {#if description}<p class="description">{description}</p>{/if}

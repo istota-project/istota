@@ -80,17 +80,17 @@
   });
 </script>
 
-<div class="step">
+<div class="vstack">
   <p>Your settings are saved and {botName} is {rerun ? 'restarting' : 'starting'}.</p>
-  <ol class="progress" aria-live="polite">
-    <li class="done"><span class="mark" aria-hidden="true">✓</span>Settings saved</li>
-    <li class={ready ? 'done' : 'busy'}>
+  <ol class="vstack list-reset" style:--vstack-gap="var(--space-2)" aria-live="polite">
+    <li class="hstack done"><span class="mark" aria-hidden="true">✓</span>Settings saved</li>
+    <li class="hstack" class:done={ready} class:busy={!ready}>
       <span class="mark" aria-hidden="true"
         >{#if ready}✓{:else}<span class="spinner"></span>{/if}</span
       >{rerun ? 'Restarting' : 'Starting'}
       {botName}
     </li>
-    <li class={ready ? 'done' : 'todo'}>
+    <li class="hstack" class:done={ready} class:todo={!ready}>
       <span class="mark" aria-hidden="true">{ready ? '✓' : ''}</span>Ready
     </li>
   </ol>
@@ -130,29 +130,8 @@
 </div>
 
 <style>
-  .step {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
-  }
-
-  .progress {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .progress li {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .mark {

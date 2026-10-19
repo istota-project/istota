@@ -253,7 +253,11 @@
         >
       {/if}
       {#if hasDetails}
-        <button class="stops-btn" onclick={() => (panelOpen = !panelOpen)} type="button">
+        <button
+          class="stops-btn button-reset caption"
+          onclick={() => (panelOpen = !panelOpen)}
+          type="button"
+        >
           {panelOpen ? 'Hide details' : 'Show details'}
         </button>
       {/if}
@@ -320,13 +324,6 @@
 
   .stops-btn {
     margin-left: auto;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-xs);
-    cursor: pointer;
-    padding: 0;
   }
 
   .stops-btn:hover {

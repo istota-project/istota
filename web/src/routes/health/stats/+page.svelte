@@ -505,7 +505,7 @@
       />
     </Field>
     <Field label="Value" labelled={false}>
-      <div class="value-row">
+      <div class="value-row hstack">
         <Input type="number" step="any" bind:value={formValue} required aria-label="Value" />
         {#if LOG_UNIT_CHOICES[formMetric]}
           <select class="unit-select" bind:value={formUnit} aria-label="Unit">
@@ -602,11 +602,6 @@
     margin-top: var(--space-1);
   }
 
-  .value-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   /* :global because the value input is an <Input> now — Svelte prunes a rule
      whose subject sits inside a component. */
   .value-row :global(input) {

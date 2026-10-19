@@ -281,7 +281,11 @@
         <p class="caption">Enable Feeds and subscribe to a feed first to use a feed source.</p>
       {/if}
     </section>
-    <section class="width-options" aria-label="Block width">
+    <section
+      class="width-options vstack"
+      style:--vstack-gap="var(--space-2)"
+      aria-label="Block width"
+    >
       <h3 class="micro-label">Width</h3>
       <OptionCards options={widths} value={width} label="Width" onchange={setWidth} />
       <p class="caption">Applies to future editions.</p>
@@ -438,11 +442,6 @@
   .source-entry.off .source-kind,
   .source-entry.off .source-body {
     opacity: 0.6;
-  }
-  .width-options {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
   /* Three short choices sit side by side rather than as three tall cards. */
   @media (min-width: 641px) {

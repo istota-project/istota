@@ -360,7 +360,7 @@
       <KebabMenu items={diagnosisMenu(d, transition)} ariaLabel="Diagnosis actions" />
     </div>
     {#if d.icd10 || d.severity || (d.document_count ?? 0) > 0}
-      <div class="tags">
+      <div class="hstack wrap">
         {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
         {#if d.severity}<span class="sev sev-{d.severity}">{d.severity}</span>{/if}
         {#if (d.document_count ?? 0) > 0}
@@ -642,12 +642,6 @@
        corner. */
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-  .tags {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
   }
   .icd {
     color: var(--text-muted);

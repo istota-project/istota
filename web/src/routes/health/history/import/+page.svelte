@@ -141,7 +141,7 @@
     </p>
   </FileDropZone>
 
-  <div class="actions">
+  <div class="actions hstack">
     <Button
       variant="primary"
       disabled={!file || extracting}
@@ -329,7 +329,7 @@
     </div>
   {/each}
 
-  <div class="actions">
+  <div class="actions hstack">
     <Button variant="primary" disabled={importing} onclick={doImport}>
       {importing
         ? 'Importing…'
@@ -364,11 +364,6 @@
     margin: 0;
   }
 
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   .card .actions {
     margin-top: var(--space-1);
   }

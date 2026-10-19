@@ -84,7 +84,7 @@
       }}>Add card</Button
     >{/snippet}
   {#if cards.length === 0}<EmptyState>No cards yet.</EmptyState>{/if}
-  <ul class="card-list">
+  <ul class="list-reset">
     {#each cards as card (card.id)}
       <li class="card-row">
         <div class="card-main">
@@ -132,11 +132,6 @@
 />
 
 <style>
-  .card-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .card-row {
     display: flex;
     align-items: center;

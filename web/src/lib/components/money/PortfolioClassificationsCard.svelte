@@ -298,7 +298,7 @@
     {#if loaded && classifications.length === 0}
       <EmptyState>No classifications yet.</EmptyState>
     {:else}
-      <ul class="cls-list">
+      <ul class="list-reset">
         {#each classifications as cls (cls.symbol)}
           <li class="cls-row">
             {#if editingSymbol === cls.symbol}
@@ -355,7 +355,7 @@
                 </div>
               </div>
             {:else}
-              <div class="cls-line">
+              <div class="hstack">
                 <code class="cls-symbol code-chip">{cls.symbol}</code>
                 <!-- Written without template whitespace so the line reads
                      exactly "Class · Sub · Geo" with no stray gaps. -->
@@ -420,24 +420,12 @@
     gap: var(--space-1);
   }
 
-  .cls-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
   .cls-row {
     padding: var(--space-2) 0;
   }
 
   .cls-row + .cls-row {
     border-top: 1px solid var(--border-subtle);
-  }
-
-  .cls-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .cls-symbol {

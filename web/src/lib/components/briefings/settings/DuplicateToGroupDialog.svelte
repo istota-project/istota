@@ -152,7 +152,7 @@
   }}
   width="34rem"
 >
-  <div class="duplicate">
+  <div class="duplicate vstack">
     {#if choices.length}
       <OptionCards {options} bind:value={target} label="Group to copy into" />
     {:else}
@@ -190,11 +190,6 @@
 </Modal>
 
 <style>
-  .duplicate {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .duplicate p,
   .duplicate ul {
     margin: 0;

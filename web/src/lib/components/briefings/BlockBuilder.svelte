@@ -351,7 +351,7 @@
   }
 </script>
 
-<div class="block-builder">
+<div class="vstack">
   {#if error}<div role="alert" class="banner error">{error}</div>{/if}
   <div role="status" aria-live="polite" class="visually-hidden">{announcement}</div>
   {#if blocks.length === 0}
@@ -505,11 +505,6 @@
 {/if}
 
 <style>
-  .block-builder {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .builder-actions {
     display: flex;
     flex-wrap: wrap;

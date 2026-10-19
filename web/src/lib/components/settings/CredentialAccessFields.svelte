@@ -28,7 +28,7 @@
   }: Props = $props();
 </script>
 
-<div class="access-fields">
+<div class="access-fields vstack">
   <Field
     label="Room scope"
     labelled={false}
@@ -78,12 +78,6 @@
 </div>
 
 <style>
-  .access-fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   .access-fields .caption,
   .access-fields .form-error {
     margin: 0;

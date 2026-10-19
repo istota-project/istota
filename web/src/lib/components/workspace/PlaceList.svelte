@@ -54,11 +54,6 @@
 {/each}
 
 <style>
-  .view-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .view-btn :global(svg) {
     flex-shrink: 0;
   }

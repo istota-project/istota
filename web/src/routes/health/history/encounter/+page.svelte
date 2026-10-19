@@ -354,7 +354,7 @@
               >
               <KebabMenu items={conditionMenu(d)} ariaLabel="Condition actions" />
             </div>
-            <div class="tags">
+            <div class="hstack wrap">
               {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
               <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
             </div>
@@ -398,7 +398,7 @@
           <li>
             <a href="{base}/health/labs/panel?id={p.id}">
               <h3 class="name title-card">{formatDate(p.drawn_at)}</h3>
-              <div class="tags">
+              <div class="hstack wrap">
                 <span class="count-tag">
                   {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
                 </span>
@@ -550,12 +550,6 @@
     line-height: var(--leading-snug);
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-  .card-grid .tags {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
   }
   .card-grid .card-meta {
     display: flex;

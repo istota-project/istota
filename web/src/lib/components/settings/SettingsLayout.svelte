@@ -38,7 +38,7 @@
         {#if description}<p class="description">{description}</p>{/if}
       </div>
       {#if headerActions}
-        <div class="header-actions">{@render headerActions()}</div>
+        <div class="hstack">{@render headerActions()}</div>
       {/if}
     </header>
   {/if}

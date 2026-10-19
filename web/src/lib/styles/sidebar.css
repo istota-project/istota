@@ -62,6 +62,9 @@
 .sidebar .view-name {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The row a sidebar item sits in: the item button plus whatever trails it (a

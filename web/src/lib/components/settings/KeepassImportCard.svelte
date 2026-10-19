@@ -158,7 +158,7 @@
       {/if}
     {/each}
   {/if}
-  <div class="row">
+  <div class="hstack wrap">
     {#if preview}
       <Button
         variant="primary"

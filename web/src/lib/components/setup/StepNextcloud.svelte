@@ -187,7 +187,7 @@
   }
 </script>
 
-<div class="step">
+<div class="vstack">
   <p>
     {botName} can keep its files on this server, or work in your Nextcloud. This is optional.
   </p>
@@ -202,7 +202,7 @@
   >
     {#snippet selected(value)}
       {#if value === 'nextcloud'}
-        <div class="fields">
+        <div class="vstack">
           <NoticeBanner variant="info" title="Before you continue" collapsed={false}>
             {#snippet children()}
               <ol class="checklist">
@@ -325,13 +325,6 @@
 </div>
 
 <style>
-  .step,
-  .fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
   }

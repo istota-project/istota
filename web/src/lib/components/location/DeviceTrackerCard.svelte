@@ -332,7 +332,7 @@
            a <button> becomes the label's implicit control, and clicking the
            caption "Tracking" would stop the tracker. -->
       <SettingsField label="Tracking" warning={trackingWarning} labelled={false}>
-        <div class="tracker-row">
+        <div class="hstack">
           <!-- "Paused" rather than "On", because On beside an hours-old
                last-sent time is the reading that sends someone looking for a
                fault. It is deliberately not styled as a problem: nothing is
@@ -470,12 +470,6 @@
 {/if}
 
 <style>
-  .tracker-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .tracker-state {
     font-size: var(--text-sm);
     color: var(--text-dim);

@@ -287,7 +287,7 @@
           <span class="caption">No senders yet.</span>
         {/if}
       </div>
-      <div class="chip-add">
+      <div class="hstack">
         <input
           type="text"
           placeholder="*@example.com"
@@ -497,10 +497,5 @@
     font-size: var(--text-lg);
     line-height: var(--leading-none);
     padding: 0;
-  }
-  .chip-add {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
   }
 </style>

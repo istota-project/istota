@@ -48,7 +48,7 @@
       onmouseenter={() => onhover(i)}
     >
       <span class="ac-label">{s.label}</span>
-      {#if s.description}<span class="ac-desc caption">{s.description}</span>{/if}
+      {#if s.description}<span class="truncate caption">{s.description}</span>{/if}
     </li>
   {/each}
 </ul>
@@ -87,11 +87,5 @@
     font-size: var(--text-sm);
     color: var(--text-primary);
     flex-shrink: 0;
-  }
-  .ac-desc {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

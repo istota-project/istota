@@ -161,7 +161,7 @@
       </p>
     </FileDropZone>
 
-    <div class="actions">
+    <div class="actions hstack">
       <Button
         variant="primary"
         disabled={!file || extracting}
@@ -184,7 +184,7 @@
       bind:value={raw}
       placeholder={'INFS Pres Free 6mos-Adult (Fluzone trivalent) (influenza) (Given 11/28/2025)\nTdap (Tetanus, diphtheria, acellular pertussis) (Given 12/1/2016)\nTYDvi (Typhoid, ViCPs) (Given 10/23/2023)'}
     ></textarea>
-    <div class="actions">
+    <div class="actions hstack">
       <Button
         variant="primary"
         disabled={!raw.trim() || parsing}
@@ -283,7 +283,7 @@
     </table>
   </div>
 
-  <div class="actions">
+  <div class="actions hstack">
     <Button variant="primary" disabled={importing} onclick={doImport}>
       {importing ? 'Importing…' : `Import ${parsed.length} rows`}
     </Button>
@@ -355,11 +355,6 @@
     border-color: var(--focus-field-border);
   }
 
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   .card .actions {
     margin-top: var(--space-1);
   }

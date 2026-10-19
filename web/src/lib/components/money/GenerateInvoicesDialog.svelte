@@ -141,7 +141,7 @@
   width="640px"
 >
   {#if step === 'filters'}
-    <div class="filters">
+    <div class="vstack">
       <Field label="Client" labelled={false}>
         <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
       </Field>
@@ -218,12 +218,6 @@
 </Modal>
 
 <style>
-  .filters {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   .preview {
     display: flex;
     flex-direction: column;

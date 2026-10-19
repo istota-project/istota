@@ -28,7 +28,7 @@
   {#if expandable}
     <button
       type="button"
-      class="notice-head"
+      class="notice-head button-reset"
       onclick={() => (collapsed = !collapsed)}
       aria-expanded={!collapsed}
     >
@@ -71,13 +71,6 @@
     justify-content: space-between;
     gap: var(--space-2);
     width: 100%;
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    cursor: pointer;
-    color: inherit;
-    font: inherit;
     text-align: left;
   }
 

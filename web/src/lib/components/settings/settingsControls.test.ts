@@ -185,7 +185,13 @@ describe('settings card defaults', () => {
 
   it('keeps direct card buttons compact and action rows able to wrap', () => {
     expect(rule('.settings .card > .btn')).toContain('align-self: flex-start');
-    expect(rule('.settings .row')).toContain('flex-wrap: wrap');
+    // The wrapping action row is the global `hstack wrap` now; a second
+    // `.settings .row` would give one name two meanings again.
+    expect(rule('.settings .row')).toBe('');
+    for (const card of ['CredentialsCard', 'KeepassExportCard', 'KeepassImportCard']) {
+      const source = read(join(SRC, `lib/components/settings/${card}.svelte`));
+      expect(source, card).toContain('class="hstack wrap"');
+    }
   });
 });
 

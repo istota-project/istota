@@ -32,7 +32,7 @@
     {/if}
   </div>
   {#if added}
-    <div class="connection-body">
+    <div class="vstack">
       {@render children()}
     </div>
   {/if}
@@ -61,11 +61,5 @@
 
   p {
     margin: 0;
-  }
-
-  .connection-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
 </style>

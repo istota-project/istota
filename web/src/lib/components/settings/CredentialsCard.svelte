@@ -251,7 +251,7 @@
     {#if data.credentials.length === 0}
       <EmptyState>No credentials yet.</EmptyState>
     {:else}
-      <ul class="cred-list">
+      <ul class="list-reset">
         {#each data.credentials as credential (credential.name)}
           <li class="cred-row" data-testid="credential-{credential.name}">
             <code class="cred-name code-chip">{credential.name}</code>
@@ -285,7 +285,7 @@
       </ul>
     {/if}
   {/if}
-  <div class="row">
+  <div class="hstack wrap">
     <Button variant="secondary" size="sm" onclick={showDeleted}>Recently deleted credentials</Button
     >
   </div>
@@ -414,12 +414,6 @@
 />
 
 <style>
-  .cred-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
   .cred-row {
     display: flex;
     align-items: center;

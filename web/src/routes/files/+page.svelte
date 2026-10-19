@@ -693,7 +693,7 @@
           {/each}
         </ol>
       </nav>
-      <div class="folder-actions">
+      <div class="folder-actions hstack wrap">
         {#if place.kind === 'nextcloud'}
           <Badge size="sm"
             ><span class="only-you"><BotOff size={12} aria-hidden="true" />Only you</span></Badge
@@ -754,13 +754,13 @@
     <ReachPanel {place} {notes} {botName} />
     {#if uploads.length}
       <section class="uploads" aria-label="Uploads">
-        <div class="upload-heading">
+        <div class="upload-heading hstack wrap">
           <span class="micro-label">Uploads</span>
           {#if !uploads.some((row) => row.state === 'waiting' || row.state === 'uploading')}
             <Button size="sm" variant="secondary" onclick={() => (uploads = [])}>Dismiss</Button>
           {/if}
         </div>
-        <ul>
+        <ul class="list-reset">
           {#each uploads as row}
             <li class="upload-row">
               <span class="upload-name"
@@ -933,13 +933,6 @@
   .folder-actions {
     min-height: var(--control-height-sm);
   }
-  .folder-actions,
-  .upload-heading {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
   .uploads {
     padding: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
@@ -949,11 +942,6 @@
   }
   .upload-heading {
     justify-content: space-between;
-  }
-  .uploads ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
   .upload-row {
     display: grid;

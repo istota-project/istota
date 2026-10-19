@@ -92,7 +92,7 @@
     {#if loaded && ordered.length === 0}
       <EmptyState>No imports yet.</EmptyState>
     {:else}
-      <ul class="cov-list">
+      <ul class="list-reset">
         {#each ordered as row (row.value)}
           <li class="cov-row">
             <span class="cov-value code-chip">{row.value}</span>
@@ -119,12 +119,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-  }
-
-  .cov-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
 
   .cov-row {

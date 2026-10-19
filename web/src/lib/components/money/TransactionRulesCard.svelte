@@ -521,7 +521,7 @@
         <EmptyState>No rules in this scope yet.</EmptyState>
       {/if}
     {:else}
-      <ul class="rule-list">
+      <ul class="list-reset">
         {#each rules as rule (rule.id)}
           <li class="rule-row" class:off={!rule.enabled}>
             {#if editingId === rule.id}
@@ -626,7 +626,7 @@
                 </div>
               </div>
             {:else}
-              <div class="rule-line">
+              <div class="hstack">
                 <span class="rule-prio" title="Priority">{rule.priority}</span>
                 <span class="rule-desc">
                   <span class="muted">{rule.field} {rule.match_kind}</span>
@@ -711,12 +711,6 @@
     gap: var(--space-1);
   }
 
-  .rule-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
   .rule-row {
     padding: var(--space-2) 0;
   }
@@ -729,12 +723,6 @@
      as inert rather than being hidden, since only an import ignores it. */
   .rule-row.off .rule-desc {
     opacity: 0.6;
-  }
-
-  .rule-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .rule-prio {

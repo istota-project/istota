@@ -76,7 +76,12 @@
   keys move the selection, as in a native radio group, and skip a disabled
   card.
 -->
-<div class="option-cards" role="radiogroup" aria-label={label}>
+<div
+  class="option-cards vstack"
+  style:--vstack-gap="var(--space-2)"
+  role="radiogroup"
+  aria-label={label}
+>
   {#each options as option, index (option.value)}
     {@const checked = option.value === value}
     <button
@@ -107,12 +112,6 @@
 </div>
 
 <style>
-  .option-cards {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
   .option-card {
     display: flex;
     align-items: flex-start;

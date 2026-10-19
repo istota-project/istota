@@ -294,7 +294,7 @@
       <span class="money-result-count"
         >{invoiceCount} invoices ({outstandingCount} outstanding)</span
       >
-      <div class="toolbar-actions">
+      <div class="hstack">
         <Button variant="secondary" onclick={() => (manualOpen = true)}>New manual invoice</Button>
         <Button variant="primary" onclick={() => (generateOpen = true)}>Generate invoices</Button>
         <KebabMenu items={workExportItems()} icon={Download} ariaLabel="Download work log" />
@@ -483,12 +483,6 @@
 {/if}
 
 <style>
-  .toolbar-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   /* Muted rather than hidden: a voided number stays on record. */
   .money-table-row.voided .inv-client,
   .money-table-row.voided .inv-amount {

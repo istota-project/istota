@@ -215,7 +215,7 @@
        this header. -->
   <div class="header">
     <h1 class="title-page">Medical history</h1>
-    <div class="actions">
+    <div class="actions hstack">
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Add encounter'}
       </Button>
@@ -404,11 +404,6 @@
     align-items: center;
     gap: var(--space-4);
     margin-bottom: var(--space-4);
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
   }
   /* Three pill buttons plus the title do not fit a phone on one line, and
 	   letting them wrap inside the flex row leaves them ragged against the

@@ -349,6 +349,7 @@
                   >
                 {:else if entry.kind === 'file' && place.kind === 'nextcloud'}
                   <button
+                    class="button-reset"
                     type="button"
                     onclick={() =>
                       viewer.openFile(entry.path, {
@@ -359,11 +360,13 @@
                 {:else if entry.kind === 'file' && entry.web_url}
                   <a href={entry.web_url} target="_blank" rel="noopener noreferrer">{entry.name}</a>
                 {:else if entry.kind === 'file' && place.view_root}
-                  <button type="button" onclick={() => viewer.openFile(entry.ref!)}
-                    >{entry.name}</button
+                  <button
+                    class="button-reset"
+                    type="button"
+                    onclick={() => viewer.openFile(entry.ref!)}>{entry.name}</button
                   >
                 {:else}
-                  <span>{entry.name}</span>
+                  <span class="truncate">{entry.name}</span>
                 {/if}
                 {#if entry.share}
                   <span
@@ -377,9 +380,9 @@
                     >
                   </span>
                 {/if}
-                {#if entry.kind === 'link'}<span class="caption marker-label"
+                {#if entry.kind === 'link'}<span class="caption marker-label truncate"
                     >Symbolic link · not followed</span
-                  >{:else if entry.kind === 'other'}<span class="caption marker-label"
+                  >{:else if entry.kind === 'other'}<span class="caption marker-label truncate"
                     >Not a regular file</span
                   >{/if}
               </div>
@@ -496,11 +499,6 @@
   .delete-errors p {
     margin: 0;
   }
-  .entry-label > span:not(.share-marker) {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   @media (max-width: 640px) {
     .mobile-sort {
       display: flex;
@@ -578,11 +576,6 @@
     white-space: nowrap;
   }
   .entry-label button {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    cursor: pointer;
     overflow-wrap: anywhere;
   }
   .entry-label a:hover,

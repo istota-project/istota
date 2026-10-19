@@ -131,7 +131,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if immunization}
-  <form class="card form" onsubmit={save}>
+  <form class="card form vstack" onsubmit={save}>
     <div class="row">
       <Field label="Vaccine name">
         <input type="text" bind:value={immunization.name} required />
@@ -287,11 +287,6 @@
     flex-wrap: wrap;
   }
 
-  .card {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));

@@ -46,7 +46,7 @@
     {@const label = APP_LABELS[name]}
     {@const need = editable && app.enabled ? privateHostNeed(app.url, privateHosts) : null}
     {@const status = credentialStatus(app.keySet === true, app.keySource ?? undefined)}
-    <div class="app" data-testid={`servarr-app-${name}`}>
+    <div class="app vstack" style:--vstack-gap="var(--space-2)" data-testid={`servarr-app-${name}`}>
       <h3 class="micro-label">{label}</h3>
       {#if editable}
         <Field label="Connected" inline checkbox>
@@ -129,12 +129,6 @@
     gap: var(--space-3);
     padding: var(--space-2) 0;
     border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .app {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
 
   .app > .micro-label {

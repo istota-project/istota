@@ -327,7 +327,7 @@
     }}
     width="40rem"
   >
-    <div class="shared-editor">
+    <div class="vstack">
       {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
       <div class="sb-grid">
         <SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
@@ -368,7 +368,7 @@
         </SettingsField>
       </div>
 
-      <div class="shared-sources">
+      <div class="vstack" style:--vstack-gap="var(--space-2)">
         <div class="shared-sources-head">
           <span class="field-label muted">Sources</span>
           <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button>
@@ -474,11 +474,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .shared-editor {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   /* Two-column field row that top-aligns, so a field with a hint doesn't push
 	   its sibling's input out of line (unlike .inline-fields' flex-end). */
   .sb-grid {
@@ -486,11 +481,6 @@
     grid-template-columns: 1fr 1fr;
     gap: var(--space-2) var(--space-4);
     align-items: start;
-  }
-  .shared-sources {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
   .shared-sources-head {
     display: flex;

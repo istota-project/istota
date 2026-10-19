@@ -81,7 +81,7 @@
 <div class="notification-item" class:unseen={!item.seen_at}>
   <button
     type="button"
-    class="item-open"
+    class="item-open button-reset"
     onclick={() => onOpen(item)}
     aria-label="Open notification: {item.title}"
   >
@@ -139,14 +139,8 @@
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
-    padding: 0;
-    border: none;
-    background: none;
-    font: inherit;
     line-height: var(--leading-snug);
     text-align: left;
-    cursor: pointer;
-    color: inherit;
     /* The row is full-bleed inside its own padding, so the global focus ring
        would paint outside the item's box and over its neighbour. */
     outline-offset: calc(-1 * var(--focus-ring-width));

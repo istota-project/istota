@@ -49,7 +49,7 @@
   const checked = (e: Event) => (e.currentTarget as HTMLInputElement).checked;
 </script>
 
-<div class="step">
+<div class="vstack">
   {#if rerun}
     <p>
       These features are settings of your own account. Change these in Settings. Web browsing is the
@@ -87,12 +87,6 @@
 </div>
 
 <style>
-  .step {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   .feature {
     display: flex;
     flex-direction: column;

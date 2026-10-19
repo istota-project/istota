@@ -260,7 +260,9 @@
                     >{STATE_LABEL[row.state]}</Badge
                   >
                 </td>
-                <td class="col-last">{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td>
+                <td class="col-last truncate"
+                  >{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td
+                >
                 <td class="col-actions">
                   <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />
                 </td>
@@ -367,11 +369,6 @@
   }
   .col-last {
     width: 6.5rem;
-  }
-  td.col-last {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .briefings-grid .col-actions {
     width: 2.5rem;

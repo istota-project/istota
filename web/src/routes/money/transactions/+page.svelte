@@ -273,7 +273,7 @@
               {/if}
             </div>
             <button
-              class="txn-account"
+              class="txn-account button-reset caption"
               onclick={(e) => {
                 e.stopPropagation();
                 navigateToAccount(txn.account);
@@ -291,12 +291,14 @@
           {#if isExpanded}
             <div class="postings">
               {#if postingsLoading.has(key)}
-                <div class="posting-row"><span class="posting-account">Loading...</span></div>
+                <div class="posting-row">
+                  <span class="posting-account caption">Loading...</span>
+                </div>
               {:else if postingsCache.has(key)}
                 {#each postingsCache.get(key) ?? [] as posting}
                   <div class="posting-row">
                     <button
-                      class="posting-account"
+                      class="posting-account button-reset caption"
                       onclick={() => navigateToAccount(posting.account)}
                       type="button">{posting.account}</button
                     >
@@ -394,14 +396,7 @@
   }
 
   .txn-account {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-xs);
     white-space: nowrap;
-    cursor: pointer;
-    padding: 0;
     flex-shrink: 0;
   }
 
@@ -440,13 +435,6 @@
   }
 
   .posting-account {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    cursor: pointer;
-    padding: 0;
     text-align: left;
   }
 

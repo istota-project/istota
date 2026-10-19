@@ -31,7 +31,7 @@
   }
 </script>
 
-<div class="step">
+<div class="vstack">
   <p>
     {#if email}
       You will sign in with your email, <strong>{email}</strong>, and this password.
@@ -57,12 +57,6 @@
 </div>
 
 <style>
-  .step {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
   }

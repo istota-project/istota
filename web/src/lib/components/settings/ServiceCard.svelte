@@ -96,13 +96,13 @@
 
 <section class="card" data-status={service.status}>
   <header class="section-header">
-    <div class="title">
+    <div class="hstack">
       <h2 class="title-section">{service.label}</h2>
       <span class="status-pill status-{service.status}">
         {statusLabel(service.status)}
       </span>
     </div>
-    <div class="header-actions">
+    <div class="hstack">
       {#if service.last_updated}
         <span class="caption">Updated {service.last_updated}</span>
       {/if}

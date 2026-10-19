@@ -600,7 +600,7 @@
                   <td class="col-state">
                     {#if state}
                       <div class="state">
-                        <span>{formatDate(state.last_fetched_at)}</span>
+                        <span class="truncate">{formatDate(state.last_fetched_at)}</span>
                         {#if state.last_error}
                           <span class="state-error" title={state.last_error}>
                             {state.error_count}× err: {state.last_error.slice(0, 60)}
@@ -629,7 +629,7 @@
         <code>localhost:8900/arena/…</code>) are rewritten to <code>tumblr:</code>
         / <code>arena:</code> on import.
       </p>
-      <div class="opml-actions">
+      <div class="hstack wrap">
         <Button onclick={() => fileInput?.click()} disabled={importing}>
           {importing ? 'Importing…' : 'Import OPML…'}
         </Button>
@@ -660,7 +660,7 @@
       if (!o) cancelModal();
     }}
   >
-    <div class="modal-body">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <SettingsField label="URL">
         <input
           type="text"
@@ -709,7 +709,7 @@
       if (!o) cancelModal();
     }}
   >
-    <div class="modal-body">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <SettingsField label="Slug">
         <input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
       </SettingsField>
@@ -735,7 +735,7 @@
       if (!o) cancelModal();
     }}
   >
-    <div class="modal-body">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <SettingsField label="URL">
         <input type="text" bind:value={editing.draft.url} />
       </SettingsField>
@@ -963,12 +963,6 @@
     overflow: hidden;
   }
 
-  .state > span:first-child {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .state-error {
     color: var(--status-danger-fg);
     max-width: 32ch;
@@ -977,21 +971,8 @@
     white-space: nowrap;
   }
 
-  .opml-actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-    flex-wrap: wrap;
-  }
-
   .opml-link {
     font-size: var(--text-sm);
-  }
-
-  .modal-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
 
   /* Container-based: hide low-priority table columns as the content area

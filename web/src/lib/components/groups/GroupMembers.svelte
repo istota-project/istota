@@ -165,7 +165,7 @@
   }
 </script>
 
-<div class="members">
+<div class="vstack">
   {#if group.system_key === 'all_users'}
     <p class="caption">Everyone in this installation; membership is automatic.</p>
   {/if}
@@ -190,7 +190,7 @@
       >
     {/if}
   </div>
-  <ul class="member-list">
+  <ul class="member-list list-reset">
     {#each group.members as member (member.user_id)}
       <li>
         <span class="member-name"
@@ -219,7 +219,7 @@
 </div>
 
 <Modal bind:open={memberOpen} title={target ? 'Change member role' : 'Add member'}>
-  <div class="form-fields">
+  <div class="form-fields vstack">
     {#if target}<p>{target.display_name}</p>{:else}
       <Field label="User" labelled={false}
         ><Select bind:value={userId} {options} ariaLabel="User" fullWidth disabled={busy} /></Field
@@ -279,7 +279,7 @@
     >{/snippet}
 </Modal>
 <Modal bind:open={metadataOpen} title="Edit group details">
-  <div class="form-fields">
+  <div class="form-fields vstack">
     <Field label="Name"><Input bind:value={displayName} /></Field>
     <Field label="Kind" hint="A display label, such as family or team."
       ><Input bind:value={kind} /></Field
@@ -327,21 +327,10 @@
 </ConfirmDialog>
 
 <style>
-  .members,
-  .form-fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
-  }
-  .member-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
   .member-list li {
     display: flex;

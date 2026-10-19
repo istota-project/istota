@@ -131,14 +131,14 @@
 
 <div class="members">
   {#if data}
-    <ul>
+    <ul class="list-reset">
       {#each data.members as m (m.user_id)}
         <li>
           <span class="name">{m.display_name}</span>
           {#if m.is_owner}<span class="caption">created the room</span>{/if}
           {#if !talkBound && !m.is_owner && (data.can_manage || m.user_id === userId)}
             <button
-              class="remove"
+              class="remove button-reset caption"
               type="button"
               disabled={busy}
               onclick={() =>
@@ -181,11 +181,6 @@
 </div>
 
 <style>
-  ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   li {
     display: flex;
     align-items: center;
@@ -198,13 +193,6 @@
   }
   .remove {
     margin-left: auto;
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    cursor: pointer;
   }
   .remove:hover:not(:disabled) {
     color: var(--status-danger-fg);

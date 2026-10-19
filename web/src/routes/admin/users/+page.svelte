@@ -219,7 +219,7 @@
                       isAdmin={user.is_admin}
                     />
                   </td>
-                  <td class="email-cell" title={user.identity?.email}
+                  <td class="truncate" title={user.identity?.email}
                     >{user.identity?.email ?? '—'}</td
                   >
                   <td class="access">
@@ -227,7 +227,7 @@
                       >{signInStateLabel(user.identity, user.state)}</Badge
                     >
                   </td>
-                  <td class="last-login"
+                  <td class="last-login truncate"
                     >{user.identity
                       ? user.identity.last_login_at
                         ? formatRelative(user.identity.last_login_at)
@@ -359,11 +359,6 @@
   .last-login {
     width: 7rem;
   }
-  td.last-login {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .users-grid .user-actions {
     width: 2.5rem;
     text-align: right;
@@ -377,11 +372,6 @@
   }
   .col-user {
     width: 11rem;
-  }
-  .email-cell {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   @container settings (max-width: 40rem) {
     .last-login {

@@ -59,7 +59,7 @@
     label="Standard deduction"
     hint="Leave as shipped unless you have a figure from the authority that differs."
   >
-    <div class="field-row control-row">
+    <div class="hstack control-row">
       <Input
         type="number"
         value={deductionValue}
@@ -95,12 +95,6 @@
 </SettingsCard>
 
 <style>
-  .field-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .overridden {
     margin: var(--space-1) 0 0;
     font-size: var(--text-xs);

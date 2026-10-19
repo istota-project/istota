@@ -326,13 +326,13 @@
       {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
 
       <fieldset class="editor-fields" disabled={busy}>
-        <section class="editor-section" aria-labelledby="admin-user-identity">
+        <section class="editor-section vstack" aria-labelledby="admin-user-identity">
           <h3 id="admin-user-identity" class="micro-label">Identity</h3>
           <Field label="User ID">
             <Input value={userId} readonly monospace />
           </Field>
           {#if detail.is_admin}
-            <p class="admin-line">
+            <p class="hstack wrap">
               <Badge size="sm">Admin</Badge><span class="caption">Set in the admins file.</span>
             </p>
           {/if}
@@ -372,7 +372,7 @@
         </section>
 
         <fieldset
-          class="editor-section login-fields"
+          class="editor-section vstack login-fields"
           disabled={loginBusy}
           aria-labelledby="admin-user-login"
         >
@@ -436,7 +436,7 @@
           {/if}
         </fieldset>
 
-        <section class="editor-section" aria-labelledby="admin-user-email">
+        <section class="editor-section vstack" aria-labelledby="admin-user-email">
           <h3 id="admin-user-email" class="micro-label">Email</h3>
           <Field
             label="Email addresses (comma-separated)"
@@ -519,7 +519,7 @@
         </section>
 
         {#if showSms || showWhatsApp}
-          <section class="editor-section" aria-labelledby="admin-user-phone">
+          <section class="editor-section vstack" aria-labelledby="admin-user-phone">
             <h3 id="admin-user-phone" class="micro-label">Phone</h3>
             {#if showSms}
               <Field
@@ -556,7 +556,7 @@
                     ? 'Use the full international form, starting with +.'
                     : undefined)}
               >
-                <div class="inline-control">
+                <div class="hstack">
                   <Input
                     bind:value={form.whatsapp_number}
                     type="tel"
@@ -578,7 +578,7 @@
                   {/if}
                 </div>
               </Field>
-              <div class="whatsapp-status">
+              <div class="hstack wrap">
                 <Badge size="sm" variant={whatsappStatus.variant}>{whatsappStatus.label}</Badge>
                 {#if detail.whatsapp.identity}
                   <span class="caption mono">{detail.whatsapp.identity}</span>
@@ -598,7 +598,7 @@
           </section>
         {/if}
 
-        <section class="editor-section" aria-labelledby="admin-user-access">
+        <section class="editor-section vstack" aria-labelledby="admin-user-access">
           <h3 id="admin-user-access" class="micro-label">Access and limits</h3>
           {#if detail.options.modules.length}
             <Field
@@ -608,7 +608,7 @@
               hint={hint('disabled_modules', 'Modules are on by default. Pick one to turn it off.')}
               error={errors.disabled_modules}
             >
-              <div class="chip-set">
+              <div class="hstack wrap">
                 {#each detail.options.modules as name (name)}
                   {@const on = form.disabled_modules.includes(name)}
                   <Chip
@@ -672,7 +672,7 @@
           </p>
         </section>
 
-        <section class="editor-section" aria-labelledby="admin-user-channels">
+        <section class="editor-section vstack" aria-labelledby="admin-user-channels">
           <h3 id="admin-user-channels" class="micro-label">Channels</h3>
           <dl class="kv">
             <dt class="muted">Log channel</dt>
@@ -729,12 +729,6 @@
     border: 0;
   }
 
-  .editor-section {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   .editor-section + .editor-section {
     padding-top: var(--space-3);
     border-top: 1px solid var(--border-subtle);
@@ -743,20 +737,6 @@
   .editor h3,
   .editor p {
     margin: 0;
-  }
-
-  .admin-line,
-  .whatsapp-status,
-  .inline-control,
-  .chip-set {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
-  .inline-control {
-    flex-wrap: nowrap;
   }
 
   .login-state {

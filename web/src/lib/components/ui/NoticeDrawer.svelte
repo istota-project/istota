@@ -143,7 +143,7 @@
       {/if}
       <button
         type="button"
-        class="notice-dismiss touch-target"
+        class="notice-dismiss button-reset touch-target"
         aria-label="Dismiss notification"
         onclick={dismissCurrent}
       >
@@ -257,20 +257,14 @@
   .notice-dismiss {
     --touch-target-w: var(--touch-comfort);
     --touch-target-h: var(--touch-comfort);
-    font: inherit;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     width: 1.5em;
     height: 1.5em;
-    padding: 0;
-    background: none;
-    border: none;
     border-radius: var(--radius-round);
-    color: inherit;
     opacity: 0.75;
-    cursor: pointer;
   }
 
   .notice-dismiss:hover {

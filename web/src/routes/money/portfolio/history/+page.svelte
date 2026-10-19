@@ -350,7 +350,7 @@
         <span class="symbol-title">{symbol}</span>
         <button
           type="button"
-          class="clear-symbol"
+          class="clear-symbol button-reset"
           onclick={() => goto(`${base}/money/portfolio/history`)}
         >
           ← All holdings
@@ -529,13 +529,8 @@
   }
 
   .clear-symbol {
-    background: none;
-    border: none;
     color: var(--accent-blue);
-    font: inherit;
     font-size: var(--text-sm);
-    cursor: pointer;
-    padding: 0;
   }
 
   .history-body {

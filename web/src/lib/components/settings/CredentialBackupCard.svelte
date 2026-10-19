@@ -81,7 +81,7 @@
         disabled={confirming || !settings.available}
       />
     </Field>
-    <div class="row">
+    <div class="hstack wrap">
       <Button
         variant="primary"
         size="sm"

@@ -45,7 +45,7 @@
       <Input type="email" value={auth.email ?? ''} autocomplete="username" readonly />
     </SettingsField>
     {#if auth.can_change_password}
-      <form onsubmit={submit} class="password-form">
+      <form onsubmit={submit} class="vstack">
         <SettingsField label="Current password">
           <Input
             type="password"
@@ -74,7 +74,7 @@
           />
         </SettingsField>
         {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-        <div class="actions">
+        <div class="actions hstack wrap">
           <Button
             type="submit"
             variant="primary"
@@ -85,23 +85,9 @@
         </div>
       </form>
     {:else}
-      <div class="actions">
+      <div class="actions hstack wrap">
         <Button href="{base}/auth/reset" variant="secondary" size="sm">Set a password</Button>
       </div>
     {/if}
   </SettingsCard>
 {/if}
-
-<style>
-  .password-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
-  }
-</style>

@@ -56,7 +56,7 @@
   {#if loading}<p class="caption">Loading files…</p>
   {:else if error}<p class="banner error">{error}</p>
   {:else if entries.length}
-    <ul class="files">
+    <ul class="files list-reset">
       {#each entries as entry (entry.name)}
         {@const target = entry.kind === 'file' ? ref(entry) : null}
         {@const EntryIcon = fileIcon(entry.name)}
@@ -71,7 +71,7 @@
             >
           {:else if target}<button
               type="button"
-              class="name"
+              class="name button-reset"
               title={entry.name}
               onclick={() => viewer.openFile(target)}>{entry.name}</button
             >
@@ -86,11 +86,6 @@
 </SettingsCard>
 
 <style>
-  .files {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .files li {
     display: flex;
     align-items: center;
@@ -116,14 +111,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  button.name {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    line-height: inherit;
-    cursor: pointer;
   }
   button.name:hover {
     text-decoration: underline;

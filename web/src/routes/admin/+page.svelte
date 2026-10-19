@@ -357,7 +357,7 @@
       {@const jobErrors = stats.scheduler?.last_errors?.length ?? 0}
       <section class="card installation">
         <header class="section-header">
-          <h2 class="install-name title-section">
+          <h2 class="hstack title-section">
             <span class="install-avatar">
               <Avatar
                 kind="bot"
@@ -466,13 +466,13 @@
 
           <dl class="kv model-kv role-kv">
             <dt>Default</dt>
-            <dd class="model-value">
+            <dd class="hstack">
               <code>{m.default_model}</code>
               {#if m.default_effort}<span class="effort-chip">{m.default_effort}</span>{/if}
             </dd>
             {#each m.roles as r (r.role)}
               <dt>{r.role}</dt>
-              <dd class="model-value"><code>{r.resolved}</code></dd>
+              <dd class="hstack"><code>{r.resolved}</code></dd>
             {/each}
           </dl>
 
@@ -553,7 +553,7 @@
               <div class="source-row">
                 <div class="source-label">
                   <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
-                  <span class="source-name">{src}</span>
+                  <span class="truncate">{src}</span>
                 </div>
                 <div class="source-bar">
                   <div
@@ -666,7 +666,9 @@
                     >{formatNumber(u.usage_tokens_24h)}</td
                   >
                   <td class="num col-cost">{formatCost(u.usage_cost_24h)}</td>
-                  <td class="col-active">{formatTimestamp(u.last_active)}</td>
+                  <!-- truncate: past thirty days this is a localized date, which can outgrow
+                       the column. td only; the header's two words are meant to wrap. -->
+                  <td class="col-active truncate">{formatTimestamp(u.last_active)}</td>
                 </tr>
               {/each}
             </tbody>
@@ -803,7 +805,7 @@
             <div class="usage-rows">
               {#each stats.usage?.by_model_30d ?? [] as g (g.key)}
                 <div class="usage-row">
-                  <div class="usage-key">{g.key}</div>
+                  <div class="truncate">{g.key}</div>
                   <div class="usage-num">{formatNumber(g.total_tokens)}</div>
                   <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
                 </div>
@@ -820,7 +822,7 @@
             <div class="usage-rows">
               {#each stats.usage?.by_brain_30d ?? [] as g (g.key)}
                 <div class="usage-row">
-                  <div class="usage-key">{g.key}</div>
+                  <div class="truncate">{g.key}</div>
                   <div class="usage-num">{formatNumber(g.total_tokens)}</div>
                   <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
                 </div>
@@ -837,7 +839,7 @@
             <div class="usage-rows">
               {#each stats.usage?.by_origin_24h ?? [] as g (g.key)}
                 <div class="usage-row">
-                  <div class="usage-key">{g.key}</div>
+                  <div class="truncate">{g.key}</div>
                   <div class="usage-num">{formatNumber(g.total_tokens)}</div>
                   <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
                 </div>
@@ -945,12 +947,6 @@
     text-align: right;
   }
 
-  .install-name {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .install-avatar {
     --avatar-size: 1.5rem;
   }
@@ -1019,15 +1015,6 @@
     gap: var(--space-1);
     min-width: 0;
     overflow: hidden;
-  }
-
-  /* The ellipsis goes on the text's own box: a flex container's anonymous text
-     item does not take text-overflow. */
-  .source-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .source-bar {
@@ -1115,24 +1102,6 @@
     width: 9rem;
   }
 
-  /* The column `formatTimestamp` writes into, and the only cell in the
-	   table whose content is a localized string of unbounded width: past thirty
-	   days it renders a date, and `5. Sept. 2026` is longer than the
-	   `Sep 5, 2026` these were sized against. Nothing sets `overflow` on a
-	   `.grid` cell, so without this a long locale paints over the column beside
-	   it rather than wrapping. The widths elsewhere still carry the common case;
-	   this is the backstop.
-
-	   `td` only. The header cell carries the same class, and `Last active` is
-	   two words that are *meant* to wrap to a second line at the
-	   narrow breakpoints — clipping those would cost more than it saves, and a
-	   header has no tooltip to fall back on. */
-  .users-grid td.col-active {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .usage-rows {
     display: flex;
     flex-direction: column;
@@ -1145,12 +1114,6 @@
     gap: var(--space-2);
     align-items: baseline;
     font-size: var(--text-sm);
-  }
-
-  .usage-key {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .usage-num,
@@ -1284,12 +1247,6 @@
   .model-kv {
     gap: var(--space-2) 1.25rem;
     align-items: baseline;
-  }
-
-  .model-value {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   /* Separate the config block (Brain/Endpoint) from the resolution list. */

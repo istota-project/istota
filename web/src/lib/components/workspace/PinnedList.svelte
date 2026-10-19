@@ -79,7 +79,7 @@
       {@const describedBy = access && reachesTasks(access) ? reachId : undefined}
       <div class="list-row pin-row">
         {#snippet content()}
-          <span class="pin-label" title={pin.name}
+          <span class="pin-label truncate" title={pin.name}
             >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
           >{#if access}<TaskReachIcon
               {access}
@@ -139,11 +139,6 @@
     align-items: center;
     gap: var(--space-2);
     color: var(--text-dim);
-  }
-  .pin-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .pin-label .caption {
     display: block;

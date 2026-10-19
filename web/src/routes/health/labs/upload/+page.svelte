@@ -173,7 +173,7 @@
   <h1 class="title-page">Upload lab results</h1>
 
   {#if panelId == null}
-    <div class="card">
+    <div class="card vstack">
       <FileDropZone bind:file>
         <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
         <p class="caption">
@@ -339,11 +339,6 @@
   }
   h2 {
     margin: 0 0 var(--space-2);
-  }
-  .card {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
   .metadata {
     display: grid;

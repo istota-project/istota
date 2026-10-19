@@ -450,7 +450,7 @@
             class:busy={busy.has(doc.id)}
           >
             <td class="document-column">
-              <div class="document-title">
+              <div class="document-title hstack">
                 <a
                   class="name"
                   href={doc.url}
@@ -521,7 +521,7 @@
       if (!open) attachForId = null;
     }}
   >
-    <div class="attach-form">
+    <div class="vstack">
       <!-- `labelled={false}` on both: a Select's trigger is a <button>, so
            inside a <label> it becomes that label's implicit control and
            clicking the caption opens the dropdown. See web/AGENTS.md. -->
@@ -608,12 +608,6 @@
 
   .name:hover {
     text-decoration: underline;
-  }
-
-  .document-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .document-title :global(.badge) {
@@ -774,11 +768,6 @@
     opacity: 0.7;
   }
 
-  .attach-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   @media (max-width: 768px) {
     .documents-grid thead {
       display: none;

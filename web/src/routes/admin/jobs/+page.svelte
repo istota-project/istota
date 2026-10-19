@@ -195,7 +195,7 @@
                 <td class="col-state">
                   <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
                 </td>
-                <td class="col-last"
+                <td class="col-last truncate"
                   >{job.last_run_at ? formatRelative(job.last_run_at) : 'Never'}</td
                 >
                 <td class="num col-failures" class:failing={job.consecutive_failures > 0}
@@ -319,11 +319,6 @@
   }
   .col-last {
     width: 6.5rem;
-  }
-  td.col-last {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .col-failures {
     width: 5rem;

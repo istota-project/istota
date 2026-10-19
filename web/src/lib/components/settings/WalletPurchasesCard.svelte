@@ -53,7 +53,7 @@
         size="sm">Money transactions</Button
       >{/if}{/snippet}
   {#if purchases.length === 0}<EmptyState>No purchases yet.</EmptyState>{/if}
-  <ul class="purchase-list">
+  <ul class="list-reset">
     {#each purchases as purchase (purchase.id)}
       <li class="purchase-row">
         <div class="purchase-main">
@@ -84,11 +84,6 @@
 </SettingsCard>
 
 <style>
-  .purchase-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
   .purchase-row {
     display: flex;
     flex-wrap: wrap;

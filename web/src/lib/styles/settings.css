@@ -48,12 +48,6 @@
   border-radius: var(--radius-sm);
 }
 
-.settings .header-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
 .settings .dirty-badge {
   font-size: var(--text-xs);
   color: var(--status-warn-fg);
@@ -93,12 +87,6 @@
   flex-wrap: wrap;
 }
 
-.settings .title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
 .settings .status-pill {
   font-size: var(--text-xs);
   padding: 0.05rem var(--space-2);
@@ -117,13 +105,6 @@
 }
 .settings .status-pill.status-unavailable {
   color: var(--text-dim);
-}
-
-.settings .row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
 }
 
 .settings .table-scroll {

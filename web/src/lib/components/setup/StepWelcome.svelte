@@ -64,7 +64,7 @@
   }
 </script>
 
-<div class="step">
+<div class="vstack">
   {#if rerun}
     <p>Change how your assistant is set up. Each screen starts from what it uses now.</p>
   {:else}
@@ -150,12 +150,6 @@
 </div>
 
 <style>
-  .step {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
   }

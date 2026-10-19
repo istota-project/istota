@@ -7,6 +7,8 @@
 
    In source order, which is also cascade order:
      - the box-sizing reset
+     - the layout utilities: .hstack, .vstack, .wrap, .list-reset, .truncate,
+       .button-reset (ahead of the roles, so a role on the same element wins)
      - the named shared blocks: .micro-label, .caption, .muted, .description,
        the heading base and .title-page / .title-section / .title-card,
        the code element with .mono and .code-chip, .num,
@@ -27,6 +29,59 @@
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Layout utilities: the rows, stacks, list resets, truncations and button
+   resets that were written out byte-for-byte in twenty-odd files each. One
+   class, so a page rule can still override any of it and keeps only what it
+   adds. The gaps are the commonest values; a call site that wants another
+   sets --hstack-gap / --vstack-gap rather than a second rule. Not `.row`:
+   that name meant "a wrapping row of controls" under .settings. They come
+   before every role class below so a role on the same element wins a tie:
+   `button-reset caption` keeps the caption's size and colour. */
+.hstack {
+  display: flex;
+  align-items: center;
+  gap: var(--hstack-gap, var(--space-2));
+}
+
+.vstack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vstack-gap, var(--space-3));
+}
+
+.wrap {
+  flex-wrap: wrap;
+}
+
+.list-reset {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* min-width: 0 is what lets a flex or grid child shrink below its text, which
+   the trio alone does not: without it an ellipsis never appears in a row. */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* A <button> that should read as its content: a name, a row, a caret. The
+   line-height pin is the rule under "Sizing and layout" in web/AGENTS.md:
+   `font: inherit` alone resets it. */
+.button-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  line-height: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
 /* The small uppercase heading over a section, a sidebar list, or a definition
