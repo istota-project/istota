@@ -46,7 +46,7 @@
   change; credentials and the admin list stay as they are now.
 -->
 <section class="card">
-  <header class="section-header"><h2>History</h2></header>
+  <header class="section-header"><h2 class="title-section">History</h2></header>
   {#if error}
     <p class="form-error">{error}</p>
   {:else if requests === null}
@@ -57,7 +57,7 @@
     {#if restoreBlockedReason}
       <p class="caption">{restoreBlockedReason}</p>
     {/if}
-    <ul class="history">
+    <ul class="list-reset">
       {#each requests as request (request.id)}
         <li class="history-row">
           <div class="card-head history-head control-row">
@@ -103,12 +103,6 @@
 </section>
 
 <style>
-  .history {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
   .history-row {
     display: flex;
     flex-direction: column;
@@ -140,7 +134,7 @@
   }
 
   .history-id {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .history-summary {

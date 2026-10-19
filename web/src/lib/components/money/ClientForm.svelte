@@ -188,12 +188,12 @@
   onOpenChange={handleOpenChange}
   width="420px"
 >
-  <div class="form-grid">
+  <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
       <div class="static-key">
         <span>Key</span>
         <code>{client?.key}</code>
-        <small>The key is the identity — work entries reference it by name.</small>
+        <small class="caption">The key is the identity — work entries reference it by name.</small>
       </div>
     {:else}
       <SettingsField
@@ -255,7 +255,7 @@
 
     <details bind:open={advancedOpen}>
       <summary>Advanced</summary>
-      <div class="form-grid">
+      <div class="vstack" style:--vstack-gap="var(--space-2)">
         <SettingsField label="Reminder days">
           <input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
         </SettingsField>
@@ -282,12 +282,6 @@
 </Modal>
 
 <style>
-  .form-grid {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
   .static-key {
     display: flex;
     flex-direction: column;
@@ -300,13 +294,7 @@
   }
 
   .static-key code {
-    font-size: var(--text-xs);
     color: var(--text-secondary);
-  }
-
-  .static-key small {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   details {

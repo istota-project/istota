@@ -30,22 +30,39 @@ const dose: Immunization = {
   source: 'manual',
 };
 
-// jsdom has no layout or media-query evaluation. Apply the real page rules
-// for each width here; browser preview checks the resulting geometry.
+// jsdom has no layout, media-query or container-query evaluation. Apply the
+// real rules for each width here — the table family's (table.css, whose
+// card layout this page uses) and the page's own; browser preview checks the
+// resulting geometry. `width` stands in for both the viewport and the
+// history table's own box, and a container query in rem is read at 16px.
 let pageStyle: HTMLStyleElement;
 function useStylesAt(width: number) {
-  const css = ['src/routes/health/immunizations/+page.svelte', 'src/routes/health/+layout.svelte']
-    .map((path) => readFileSync(path, 'utf8').split('<style>')[1].split('</style>')[0])
+  const styleOf = (path: string) =>
+    readFileSync(path, 'utf8').split('<style>')[1].split('</style>')[0];
+  const css = [
+    readFileSync('src/lib/styles/table.css', 'utf8'),
+    styleOf('src/routes/health/immunizations/+page.svelte'),
+    styleOf('src/routes/health/+layout.svelte'),
+  ]
     .join('\n')
-    .replace(/:global\(([^)]+)\)/g, '$1');
+    .replace(/:global\(([^)]+)\)/g, '$1')
+    .replace(
+      /@container \(max-width: ([\d.]+)rem\)/g,
+      (_, rem) => `@media (max-width: ${rem * 16}px)`,
+    )
+    .replace(
+      /@container \(width > ([\d.]+)rem\)/g,
+      (_, rem) => `@media (min-width: ${rem * 16 + 1}px)`,
+    );
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(css);
   let active = '';
   for (const rule of sheet.cssRules) {
     if (rule instanceof CSSMediaRule) {
       const max = rule.conditionText.match(/max-width:\s*(\d+)px/);
-      if (!max) throw new Error(`Unhandled media query: ${rule.conditionText}`);
-      if (width <= Number(max[1])) {
+      const min = rule.conditionText.match(/min-width:\s*(\d+)px/);
+      if (!max && !min) throw new Error(`Unhandled media query: ${rule.conditionText}`);
+      if ((max && width <= Number(max[1])) || (min && width >= Number(min[1]))) {
         active += Array.from(rule.cssRules, (child) => child.cssText).join('\n');
       }
     } else {

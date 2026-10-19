@@ -53,7 +53,7 @@
         size="sm">Money transactions</Button
       >{/if}{/snippet}
   {#if purchases.length === 0}<EmptyState>No purchases yet.</EmptyState>{/if}
-  <ul class="purchase-list">
+  <ul class="divided-list">
     {#each purchases as purchase (purchase.id)}
       <li class="purchase-row">
         <div class="purchase-main">
@@ -84,20 +84,11 @@
 </SettingsCard>
 
 <style>
-  .purchase-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
   .purchase-row {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
     align-items: center;
-    padding: var(--space-2) 0;
-  }
-  .purchase-row + .purchase-row {
-    border-top: 1px solid var(--border-subtle);
   }
   .purchase-main {
     display: flex;

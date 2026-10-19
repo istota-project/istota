@@ -48,7 +48,7 @@
       onmouseenter={() => onhover(i)}
     >
       <span class="ac-label">{s.label}</span>
-      {#if s.description}<span class="ac-desc">{s.description}</span>{/if}
+      {#if s.description}<span class="truncate caption">{s.description}</span>{/if}
     </li>
   {/each}
 </ul>
@@ -80,18 +80,12 @@
     white-space: nowrap;
   }
   .ac-item[data-highlighted='true'] {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .ac-label {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-sm);
     color: var(--text-primary);
     flex-shrink: 0;
-  }
-  .ac-desc {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 </style>

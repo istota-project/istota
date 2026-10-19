@@ -180,7 +180,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     color: var(--text-secondary);
   }
   /* Failed tools keep an X; success and in-progress tools show description only
@@ -196,7 +196,7 @@
     background: var(--surface-base);
     border-radius: var(--radius-pill);
     padding: 0 var(--space-2);
-    font-size: 0.65rem;
+    font-size: var(--text-xs);
     opacity: 0.8;
   }
 

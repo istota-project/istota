@@ -164,7 +164,7 @@
   description="Enabled categories send alerts and count toward the app badge. These choices do not change your inbox, its bell count or delivery to email and Talk."
 >
   {#if categoriesLoading}
-    <p class="hint">Loading categories…</p>
+    <p class="description">Loading categories…</p>
   {:else if categoriesError}
     <p class="banner error" role="alert">{categoriesError}</p>
     <Button variant="secondary" size="sm" onclick={loadCategories}>Retry categories</Button>
@@ -196,7 +196,7 @@
 <SettingsCard title="Push notifications">
   {#if native}
     {#if permission === 'denied'}
-      <p class="hint">
+      <p class="description">
         Notifications are denied in iOS Settings. Enable them there, then register this device.
       </p>
       <Button variant="secondary" size="sm" onclick={openSettings}>Open iOS Settings</Button>
@@ -211,23 +211,23 @@
         Register this device
       </Button>
     {/if}
-    {#if registrationMessage && permission !== 'denied'}<p class="hint" role="status">
+    {#if registrationMessage && permission !== 'denied'}<p class="description" role="status">
         {registrationMessage}
       </p>{/if}
   {:else}
-    <p class="hint">Register a device from the Istota iOS app.</p>
+    <p class="description">Register a device from the Istota iOS app.</p>
   {/if}
-  <p class="hint">iOS notification settings control whether alerts appear on each device.</p>
+  <p class="description">iOS notification settings control whether alerts appear on each device.</p>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}
   {#if loading}
-    <p class="hint">Loading devices…</p>
+    <p class="description">Loading devices…</p>
   {:else if devices.length}
     <ul class="devices">
       {#each devices as device (device.id)}
         <li>
           <div>
             <span>iOS {device.app_version} · …{device.token_tail}</span>
-            {#if device.last_error}<p class="hint">{device.last_error}</p>{/if}
+            {#if device.last_error}<p class="description">{device.last_error}</p>{/if}
           </div>
           <Button
             variant="secondary"
@@ -273,7 +273,7 @@
         disabled={isManaged(profile, 'push_preview')}
       />
     </SettingsField>
-    <p class="hint">
+    <p class="description">
       Previews send message text to Apple for display on your lock screen. Turn them off to send
       only a generic title, badge and link.
     </p>

@@ -30,7 +30,7 @@
   import DocumentList from '$lib/components/health/DocumentList.svelte';
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { Paperclip } from '@lucide/svelte';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate, localDateISO } from '$lib/dateFormat';
 
   const getScrollRoot = getShellScrollRoot();
 
@@ -61,7 +61,7 @@
   let formName = $state('');
   let formStatus = $state<'active' | 'chronic' | 'resolved'>('active');
   let formIcd10 = $state('');
-  let formDateDiagnosed = $state(new Date().toISOString().slice(0, 10));
+  let formDateDiagnosed = $state(localDateISO());
   let formDateResolved = $state('');
   // A condition is seen at several visits, so this is a set the form builds up
   // rather than a single value.
@@ -118,7 +118,7 @@
     formName = '';
     formStatus = 'active';
     formIcd10 = '';
-    formDateDiagnosed = new Date().toISOString().slice(0, 10);
+    formDateDiagnosed = localDateISO();
     formDateResolved = '';
     formEncounterIds = [];
     formEncounterPick = '';
@@ -215,7 +215,7 @@
     try {
       await updateDiagnosis(d.id, {
         status: 'resolved',
-        date_resolved: new Date().toISOString().slice(0, 10),
+        date_resolved: localDateISO(),
       });
       await load();
     } catch (e) {
@@ -260,8 +260,8 @@
        this header. -->
   <div class="header">
     <div>
-      <a class="back" href="{base}/health/history">← Medical history</a>
-      <h1>Conditions</h1>
+      <a class="back link-muted" href="{base}/health/history">← Medical history</a>
+      <h1 class="title-page">Conditions</h1>
     </div>
     <Button onclick={toggleForm}>
       {formOpen ? 'Cancel' : '+ Add diagnosis'}
@@ -272,7 +272,7 @@
 {#if formOpen}
   <form class="form" onsubmit={submit}>
     {#if editing}
-      <div class="form-title">Editing <strong>{editing.name}</strong></div>
+      <div class="form-title muted">Editing <strong>{editing.name}</strong></div>
     {/if}
     <div class="row">
       <Field label="Name *" class="full">
@@ -311,7 +311,7 @@
     <!-- Not a <label>: the control is a Select whose trigger is a button, and
          wrapping it would make clicking the field name open the dropdown. -->
     <div class="full encounters-field">
-      <span class="field-label">Linked encounters</span>
+      <span class="field-label caption">Linked encounters</span>
       {#if stagedEncounters.length}
         <ul class="staged">
           {#each stagedEncounters as e (e.id)}
@@ -356,12 +356,12 @@
     <!-- The kebab is a sibling of the name rather than of the whole card body,
          so it pins to the top-right corner however tall the card grows. -->
     <div class="card-head">
-      <h3 class="name">{d.name}</h3>
+      <h3 class="name title-card">{d.name}</h3>
       <KebabMenu items={diagnosisMenu(d, transition)} ariaLabel="Diagnosis actions" />
     </div>
     {#if d.icd10 || d.severity || (d.document_count ?? 0) > 0}
-      <div class="tags">
-        {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+      <div class="hstack wrap">
+        {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
         {#if d.severity}<span class="sev sev-{d.severity}">{d.severity}</span>{/if}
         {#if (d.document_count ?? 0) > 0}
           <button
@@ -376,7 +376,7 @@
         {/if}
       </div>
     {/if}
-    <div class="d-meta">
+    <div class="d-meta caption">
       {#if transition === 'reactivate'}
         {#if d.date_resolved}<span>Resolved {formatDate(d.date_resolved)}</span>{/if}
       {:else}
@@ -389,7 +389,7 @@
         {/each}
       {/if}
     </div>
-    {#if d.notes}<p class="notes">{d.notes}</p>{/if}
+    {#if d.notes}<p class="notes muted">{d.notes}</p>{/if}
   </li>
 {/snippet}
 
@@ -491,17 +491,7 @@
   .back {
     display: inline-block;
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
     margin-bottom: var(--space-1);
-  }
-  .back:hover {
-    text-decoration: underline;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
   }
   h2 {
     margin: var(--space-6) 0 var(--space-2);
@@ -512,7 +502,7 @@
   .count {
     font-size: var(--text-xs);
     color: var(--text-dim);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     letter-spacing: 0;
     text-transform: none;
   }
@@ -544,11 +534,10 @@
   }
   .form-title {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .form-title strong {
     color: var(--text-primary);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .form .row {
     display: grid;
@@ -558,31 +547,11 @@
   .form :global(.field.full) {
     grid-column: 1 / -1;
   }
-  .form input,
-  .form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .form textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
   .encounters-field {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
-  }
-  .encounters-field .field-label {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .staged {
     list-style: none;
@@ -618,29 +587,34 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1;
+    line-height: var(--leading-none);
     cursor: pointer;
   }
   .unstage:hover {
     color: var(--text-primary);
   }
 
+  /* Each condition group sizes its card grid by its own width, in
+     CardGrid's steps. */
+  section {
+    container: conditions / inline-size;
+  }
   .list {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
-  @media (max-width: 1100px) {
+  @container conditions (min-width: 40rem) {
     .list {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  @media (max-width: 768px) {
+  @container conditions (min-width: 64rem) {
     .list {
-      grid-template-columns: minmax(0, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
   .list li {
@@ -662,38 +636,25 @@
   }
   .name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: 500;
     color: var(--text-primary);
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     /* Long condition names wrap rather than pushing the kebab out of the
        corner. */
     min-width: 0;
     overflow-wrap: anywhere;
   }
-  .tags {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
   .icd {
-    font-size: var(--text-xs);
     color: var(--text-muted);
-    background: var(--surface-raised);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-mono);
   }
   .sev {
     display: inline-flex;
     align-items: center;
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .sev-mild {
     background: hsla(145, 40%, 55%, 0.18);
@@ -714,8 +675,6 @@
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     flex-wrap: wrap;
   }
   .d-meta .enc {
@@ -730,8 +689,7 @@
     margin: 0;
     font-size: var(--text-sm);
     white-space: pre-wrap;
-    color: var(--text-muted);
-    line-height: 1.45;
+    line-height: var(--leading-snug);
   }
 
   .docs {

@@ -170,7 +170,7 @@
       description="Direct file edits may not appear here. These records are not restorable versions."
     >
       {#if entries.length}
-        <ol class="changes">
+        <ol class="list-reset">
           {#each entries as entry (entry.id)}
             <li class="change">
               <div class="change-head">
@@ -180,7 +180,7 @@
                     · {entry.source}{/if}</span
                 >
               </div>
-              <ul class="change-outcomes">
+              <ul class="change-outcomes muted">
                 {#each entry.applied ?? [] as outcome}<li>
                     {outcome.op?.op || 'change'}: {outcome.outcome || 'applied'}
                   </li>{/each}
@@ -258,11 +258,6 @@
   .last-change {
     margin: var(--space-2) 0 0;
   }
-  .changes {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .change {
     padding-block: var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
@@ -278,12 +273,11 @@
     gap: var(--space-3);
   }
   .change-actor {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .change-outcomes {
     margin: var(--space-1) 0 0;
     padding-left: var(--space-4);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
   .change-outcomes .rejected {

@@ -28,9 +28,9 @@
 <section class="index" aria-label={label}>
   {#if places.length}
     <IndexCaption {caption} {reachNote} />
-    <ul>
+    <ul class="list-reset">
       {#each places as place (place.id)}
-        <li class="index-row">
+        <li class="record-row record-row--divided index-row">
           <a
             class="index-name"
             href={href(place.id)}
@@ -40,7 +40,7 @@
             {#if place.kind === 'group'}<Users size={14} aria-hidden="true" />{:else}<MessageSquare
                 size={14}
                 aria-hidden="true"
-              />{/if}<span class="index-label">{place.label}</span>
+              />{/if}<span class="index-label truncate">{place.label}</span>
           </a>
           <ReachBadge access={place.reach.private} />
         </li>
@@ -52,19 +52,10 @@
 </section>
 
 <style>
-  .index ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
+  /* A record row (table.css), ruled like the file table beside it. */
   .index-row {
-    display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
   }
   .index-name {
     display: flex;
@@ -80,10 +71,5 @@
   .index-name :global(svg) {
     flex-shrink: 0;
     color: var(--accent-amber);
-  }
-  .index-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>

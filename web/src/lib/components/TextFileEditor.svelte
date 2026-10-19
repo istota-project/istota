@@ -183,7 +183,7 @@
           {#if caption}{@render caption(loaded)}{/if}
         </p>
         {#if empty && loaded.template}
-          <button class="link-btn" type="button" onclick={useTemplate}>
+          <button class="link-btn link-action" type="button" onclick={useTemplate}>
             Start from template
           </button>
         {/if}
@@ -193,7 +193,9 @@
         <p class="msg-warn">
           Someone — probably the assistant — changed this file while you were editing. Your text is
           still here.
-          <button class="link-btn" type="button" onclick={load}>Discard mine and reload</button>
+          <button class="link-btn link-action" type="button" onclick={load}
+            >Discard mine and reload</button
+          >
         </p>
       {:else if invalid.length}
         <div class="msg-error" role="alert">
@@ -281,17 +283,7 @@
   }
 
   .link-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font: inherit;
     font-size: var(--text-xs);
-    text-decoration: underline;
-    cursor: pointer;
-    padding: 0;
     white-space: nowrap;
-  }
-  .link-btn:hover {
-    color: var(--text-primary);
   }
 </style>

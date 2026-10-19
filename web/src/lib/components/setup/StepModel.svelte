@@ -122,7 +122,7 @@
   }
 </script>
 
-<div class="step">
+<div class="vstack">
   <p>Istota needs an AI service to think with. Choose how you will pay for it.</p>
   <OptionCards
     label="AI service"
@@ -136,7 +136,7 @@
   >
     {#snippet selected(value)}
       {#if value === 'subscription'}
-        <div class="fields">
+        <div class="vstack">
           <p class="muted">
             Run <code>claude setup-token</code> on a computer with Claude Code installed, sign in, and
             paste the token it prints. It can't be tested here: finishing setup takes several minutes
@@ -152,7 +152,7 @@
         </div>
       {:else}
         {@const keyService = value as 'anthropic' | 'openrouter'}
-        <div class="fields">
+        <div class="vstack">
           <SecretField
             label={keyService === 'anthropic' ? 'Anthropic API key' : 'OpenRouter API key'}
             configured={draft.isSet('native_api_key')}
@@ -204,13 +204,6 @@
 </div>
 
 <style>
-  .step,
-  .fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
   }

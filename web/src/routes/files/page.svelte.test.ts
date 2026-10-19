@@ -851,16 +851,19 @@ it('sorts folders first, toggles date order and remembers it', async () => {
   expect(names()[1]).toContain('a.txt');
   await fireEvent.click(screen.getByRole('button', { name: 'Sort by modified' }));
   expect(names()[1]).toContain('a.txt');
-  await fireEvent.click(screen.getByRole('button', { name: 'Sort by modified' }));
+  await fireEvent.click(
+    screen.getByRole('button', { name: 'Sorted by modified, descending. Reverse the order' }),
+  );
   expect(names()[1]).toContain('z.txt');
   unmount();
   render(Workspace);
   const restored = await screen.findByRole('table', { name: 'Files' });
   expect(within(restored).getAllByRole('row')[2]).toHaveTextContent('z.txt');
-  expect(screen.getByRole('button', { name: 'Sort by modified' }).closest('th')).toHaveAttribute(
-    'aria-sort',
-    'ascending',
-  );
+  expect(
+    screen
+      .getByRole('button', { name: 'Sorted by modified, ascending. Reverse the order' })
+      .closest('th'),
+  ).toHaveAttribute('aria-sort', 'ascending');
 });
 
 it('selects only visible files and confirms deletion, retaining failed items', async () => {

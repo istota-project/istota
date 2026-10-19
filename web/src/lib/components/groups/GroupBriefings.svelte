@@ -65,14 +65,14 @@
   {:else if loaded && !items.length}
     <EmptyState size="sm">No briefings for this group yet.</EmptyState>
   {:else}
-    <ul class="briefings">
+    <ul class="briefings list-reset">
       {#each items as item (item.id)}
         {@const href = readUrl(item)}
         <li>
           <span class="entry-icon" aria-hidden="true"><Newspaper size={16} /></span>
           <span class="text">
-            {#if href}<a class="name" {href}>{item.title || item.name}</a>{:else}<span class="name"
-                >{item.title || item.name}</span
+            {#if href}<a class="name link-quiet" {href}>{item.title || item.name}</a>{:else}<span
+                class="name">{item.title || item.name}</span
               >{/if}
             <span class="caption">{status(item)}</span>
           </span>
@@ -84,11 +84,6 @@
 </SettingsCard>
 
 <style>
-  .briefings {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .briefings li {
     display: flex;
     align-items: center;
@@ -117,7 +112,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  a.name:hover,
   .edit:hover {
     text-decoration: underline;
   }

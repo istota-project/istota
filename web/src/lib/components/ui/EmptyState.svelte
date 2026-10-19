@@ -57,7 +57,7 @@
   .title {
     margin: 0 0 calc(-1 * var(--space-2));
     font-size: inherit;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 

@@ -214,7 +214,7 @@
     font-size: var(--text-2xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
   }
 
   .col-rate {

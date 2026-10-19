@@ -234,3 +234,14 @@ export function formatMinutes(minutes: number | null | undefined, empty = ''): s
   const m = minutes % 60;
   return m ? `${h}h ${m}m` : `${h}h`;
 }
+
+/**
+ * The local calendar date as `YYYY-MM-DD`, for a date input's value or a
+ * date-only field. Not `toISOString().slice(0, 10)`, which is the UTC date and
+ * so tomorrow for anyone west of Greenwich after their local evening.
+ */
+export function localDateISO(date: Date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}

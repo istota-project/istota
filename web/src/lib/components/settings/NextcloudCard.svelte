@@ -251,7 +251,12 @@
         {@const state = loaded.kinds[group.kind]}
         {@const rows = rowsFor(group.kind)}
         {@const note = groupNote(state)}
-        <div class="group" role="group" aria-labelledby="nc-share-{group.kind}">
+        <div
+          class="group vstack"
+          style:--vstack-gap="var(--space-2)"
+          role="group"
+          aria-labelledby="nc-share-{group.kind}"
+        >
           <h3 id="nc-share-{group.kind}" class="micro-label">{group.title}</h3>
           {#if note}<p class="caption note">{note}</p>{/if}
           {#if rows.length === 0}
@@ -350,11 +355,6 @@
 </Modal>
 
 <style>
-  .group {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
   .group h3 {
     margin: 0;
   }

@@ -3,8 +3,11 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * The money record-table shell — the toolbar/list/header/row rules every money
- * list page inherits, defined once in `lib/styles/moneyTable.css`.
+ * The money record-table shell — the toolbar rules every money list page
+ * inherits, defined once in `lib/styles/moneyTable.css`, and the record rows
+ * under it, which are table.css's `.record-*` family (money's own rows,
+ * generalised and moved there so the taxes page and the file pane could use
+ * them without importing a money sheet).
  *
  * Same reasoning as controlTier.test.ts: these are inherited-token and
  * reserved-height invariants that are invisible at any one call site, so a page
@@ -16,13 +19,16 @@ import { join } from 'node:path';
  * The selectors are bare as a result — no wrapper to match around them.
  */
 
-const shell = readFileSync(join(process.cwd(), 'src/lib/styles/moneyTable.css'), 'utf8');
+const read = (sheet: string): string =>
+  readFileSync(join(process.cwd(), 'src/lib/styles', sheet), 'utf8');
+const sheets = { moneyTable: read('moneyTable.css'), table: read('table.css') };
 
 /** The declarations inside a top-level rule. */
-const ruleBody = (selector: string): string => {
-  const start = shell.indexOf(`\n${selector} {`);
-  if (start === -1) throw new Error(`no ${selector} rule in lib/styles/moneyTable.css`);
-  return shell.slice(start, shell.indexOf('}', start));
+const ruleBody = (selector: string, sheet: keyof typeof sheets = 'moneyTable'): string => {
+  const css = sheets[sheet];
+  const start = css.indexOf(`\n${selector} {`);
+  if (start === -1) throw new Error(`no ${selector} rule in lib/styles/${sheet}.css`);
+  return css.slice(start, css.indexOf('}', start));
 };
 
 describe('.money-result-count', () => {
@@ -59,7 +65,7 @@ describe('the kebab in a row', () => {
   // so its baseline is the bottom of the icon box — which `baseline` lines up
   // with the text baseline and leaves it hanging above the row's centre.
   it('centres itself rather than taking the row baseline', () => {
-    expect(ruleBody('.money-table-row .ui-kebab-trigger')).toMatch(/align-self:\s*center/);
+    expect(ruleBody('.record-row .ui-kebab-trigger', 'table')).toMatch(/align-self:\s*center/);
   });
 });
 
@@ -91,15 +97,15 @@ describe('the row rhythm belongs to the shell', () => {
   /**
    * Classes a page hangs on the shared row/header elements alongside the shell
    * class (`.holdings-row`), so a page can't dodge the rule by styling its own
-   * alias. Shell classes themselves stay out — the layout owns those.
+   * alias. Shell classes themselves stay out — table.css owns those.
    */
   const rowAliases = (source: string): string[] =>
-    [...source.matchAll(/class="([^"]*money-table-(?:row|header)[^"]*)"/g)]
+    [...source.matchAll(/class="([^"]*record-(?:row|header)[^"]*)"/g)]
       .flatMap((m) => m[1].split(/\s+/))
-      .filter((name) => name && !name.startsWith('money-'));
+      .filter((name) => name && !name.startsWith('record-') && name !== 'micro-label');
 
   it.each(pages.map((p) => [p.slice(root.length + 1), p] as const))(
-    '%s leaves the row block padding to the money layout',
+    '%s leaves the row block padding to the record shell',
     (_name, path) => {
       const source = readFileSync(path, 'utf8');
       // Comments out first, or a rule that merely *explains* the shared shell
@@ -108,7 +114,7 @@ describe('the row rhythm belongs to the shell', () => {
       const style = source.slice(source.indexOf('<style>')).replace(/\/\*[\s\S]*?\*\//g, '');
       if (!style) return;
 
-      const targets = ['money-table-row', 'money-table-header', ...rowAliases(source)];
+      const targets = ['record-row', 'record-header', ...rowAliases(source)];
       const offenders = [...style.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
         .filter(([, selector]) => targets.some((cls) => selector.includes(`.${cls}`)))
         .filter(([, , body]) => VERTICAL_PADDING.test(body))
@@ -117,4 +123,33 @@ describe('the row rhythm belongs to the shell', () => {
       expect(offenders).toEqual([]);
     },
   );
+});
+
+/**
+ * The record rows left money for table.css under new names, with no aliases
+ * kept: two names for one row is how the six re-implementations started.
+ */
+describe('the old money row names are gone', () => {
+  const RETIRED =
+    /\bmoney-(?:table|table-header|table-row|sortable|sort-arrow|status|amount|kebab-spacer)\b/;
+
+  const sources = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) return sources(path);
+      return /\.(svelte|css)$/.test(entry.name) ? [path] : [];
+    });
+
+  it('no stylesheet or component uses one', () => {
+    const offenders = sources(join(process.cwd(), 'src')).filter((path) =>
+      RETIRED.test(readFileSync(path, 'utf8')),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it('table.css holds the rows money used to', () => {
+    for (const selector of ['.record-list', '.record-header', '.record-row', '.record-row--tree']) {
+      expect(() => ruleBody(selector, 'table')).not.toThrow();
+    }
+  });
 });

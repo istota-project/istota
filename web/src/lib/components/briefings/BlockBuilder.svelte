@@ -351,7 +351,7 @@
   }
 </script>
 
-<div class="block-builder">
+<div class="vstack">
   {#if error}<div role="alert" class="banner error">{error}</div>{/if}
   <div role="status" aria-live="polite" class="visually-hidden">{announcement}</div>
   {#if blocks.length === 0}
@@ -361,7 +361,7 @@
       {#each blocks as block, index (block.id)}
         <li class="block-row">
           <div class="block-content">
-            <h3>{block.title}</h3>
+            <h3 class="title-card">{block.title}</h3>
             <p class="caption">{sourceSummary(block)}</p>
             <span class="caption">{widthLabel(block)}</span>
           </div>
@@ -505,11 +505,6 @@
 {/if}
 
 <style>
-  .block-builder {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .builder-actions {
     display: flex;
     flex-wrap: wrap;
@@ -540,7 +535,6 @@
   }
   h3 {
     margin: 0 0 var(--space-1);
-    font-size: var(--text-sm);
   }
   p {
     margin: var(--space-1) 0;
@@ -572,7 +566,7 @@
     gap: var(--space-3);
     padding: var(--space-3);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     color: var(--text-primary);
     background: var(--surface-base);
@@ -585,14 +579,14 @@
   }
   .preset:hover:not(:disabled) {
     border-color: var(--border-hover);
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .preset:disabled {
     cursor: not-allowed;
   }
   .preset:disabled .preset-icon,
   .preset:disabled .preset-label {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
   .preset-icon {
     flex: none;
@@ -612,7 +606,7 @@
   }
   .preset-label {
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   /* Two lines reserved and no more, so every tile is one height across groups and widths. */
   .preset-desc {

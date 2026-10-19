@@ -110,7 +110,7 @@
                 value={opt.value}
                 label={opt.label}
                 disabled={opt.disabled}
-                class="ui-select-item ui-multiselect-item"
+                class="ui-select-item ui-multiselect-item hstack"
               >
                 {#snippet children({ selected })}
                   <span class="ui-multiselect-check" aria-hidden="true"
@@ -178,11 +178,6 @@
     min-width: var(--bits-combobox-anchor-width, 8rem);
     /* design-lint-allow: bits-ui runtime property, as above. */
     max-width: var(--bits-combobox-content-available-width, 100vw);
-  }
-  :global(.ui-multiselect-item) {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
   :global(.ui-multiselect-check) {
     display: inline-flex;

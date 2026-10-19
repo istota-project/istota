@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { theme } from '$lib/stores/theme';
   import { chartChrome } from '$lib/chartTheme';
   import { base } from '$app/paths';
@@ -271,13 +271,17 @@
   }
 
   onMount(load);
+  onDestroy(() => {
+    chart?.destroy();
+    chart = undefined;
+  });
 </script>
 
 {#if !loading && !error}
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <a class="back" href="{base}/health/labs">← Labs</a>
+  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
 {/if}
 
 {#if loading}
@@ -287,12 +291,12 @@
 {:else if trend}
   <header class="page-header">
     <div>
-      <h1>{ref?.display_name || trend.name}</h1>
-      <div class="meta">
+      <h1 class="title-page">{ref?.display_name || trend.name}</h1>
+      <div class="meta muted">
         {#if ref}<span class="cat">{ref.category}</span>{/if}
         {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
         {#if trend.points.length > 0}
-          <span class="summary">{trendSummary()}</span>
+          <span class="summary caption">{trendSummary()}</span>
         {/if}
       </div>
     </div>
@@ -300,7 +304,7 @@
 
   {#if related.length > 0}
     <div class="related">
-      <span class="related-label">Related:</span>
+      <span class="related-label caption">Related:</span>
       {#each related as r (r.name)}
         <a href="{base}/health/labs/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
       {/each}
@@ -328,10 +332,10 @@
       {:else if explainerError}
         <div class="error-text">{explainerError}</div>
       {:else if explainer}
-        <p class="summary">{explainer.summary}</p>
+        <p class="summary caption">{explainer.summary}</p>
         {#if explainer.causes.length > 0}
           <div class="block">
-            <h3>What might contribute</h3>
+            <h3 class="micro-label">What might contribute</h3>
             <ul>
               {#each explainer.causes as c}<li>{c}</li>{/each}
             </ul>
@@ -339,7 +343,7 @@
         {/if}
         {#if explainer.mitigations.length > 0}
           <div class="block">
-            <h3>Things to consider</h3>
+            <h3 class="micro-label">Things to consider</h3>
             <ul>
               {#each explainer.mitigations as m}<li>{m}</li>{/each}
             </ul>
@@ -366,19 +370,19 @@
 
   {#if ref?.description}
     <section class="about">
-      <h2>About this marker</h2>
-      <p>{ref.description}</p>
-      <dl>
-        <dt>Reference range</dt>
+      <h2 class="title-section">About this marker</h2>
+      <p class="description">{ref.description}</p>
+      <dl class="kv">
+        <dt class="micro-label">Reference range</dt>
         <dd>
           {formatRange(trend.ref_range_low, trend.ref_range_high)}
           {#if trend.unit}{trend.unit}{/if}
         </dd>
         {#if ref.aliases.length > 0}
-          <dt>Also called</dt>
+          <dt class="micro-label">Also called</dt>
           <dd>{ref.aliases.join(', ')}</dd>
         {/if}
-        <dt>Category</dt>
+        <dt class="micro-label">Category</dt>
         <dd>{ref.category}</dd>
       </dl>
     </section>
@@ -386,21 +390,21 @@
 
   {#if trend.points.length > 0}
     <section class="history">
-      <h2>History</h2>
-      <table>
+      <h2 class="title-section">History</h2>
+      <table class="table">
         <thead>
           <tr>
             <th>Date</th>
-            <th>Value</th>
+            <th class="num">Value</th>
             <th>Unit</th>
             <th>Flag</th>
           </tr>
         </thead>
         <tbody>
           {#each [...trend.points].reverse() as p}
-            <tr class:flag-row={p.flag}>
+            <tr class:is-danger={p.flag}>
               <td>{formatDate(p.drawn_at)}</td>
-              <td>{p.value}</td>
+              <td class="num">{p.value}</td>
               <td>{p.unit}</td>
               <td>
                 {#if p.flag}<span class="flag flag-{p.flag}">{p.flag}</span>{/if}
@@ -416,16 +420,9 @@
 <style>
   .back {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
   }
   .page-header {
     margin: var(--space-1) 0 var(--space-4);
-  }
-  h1 {
-    font-size: var(--text-xl);
-    font-weight: 500;
-    margin: 0;
   }
   .meta {
     display: flex;
@@ -433,7 +430,6 @@
     align-items: baseline;
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .cat {
     padding: 0 var(--space-2);
@@ -445,20 +441,12 @@
   .unit {
     color: var(--text-dim);
   }
-  .summary {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
   .related {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
     align-items: baseline;
     margin-bottom: var(--space-4);
-  }
-  .related-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
   .related a {
     font-size: var(--text-xs);
@@ -493,12 +481,12 @@
   }
   .alert-pill {
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     padding: 0.15rem 0.55rem;
     border-radius: var(--radius-pill);
     background: rgba(204, 102, 102, 0.25);
     color: var(--status-danger-fg);
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
   }
   .alert-low .alert-pill {
     background: rgba(122, 163, 216, 0.25);
@@ -506,21 +494,21 @@
   }
   .alert-title {
     font-size: var(--text-base);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
   .alert-tag {
-    font-size: 10px;
+    font-size: var(--text-2xs);
     padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: var(--tracking-caps);
   }
   .alert .summary {
     font-size: var(--text-sm);
-    line-height: 1.55;
+    line-height: var(--leading-normal);
     color: var(--text-primary);
     margin: 0 0 var(--space-3);
   }
@@ -528,11 +516,6 @@
     margin-bottom: var(--space-3);
   }
   .alert .block h3 {
-    font-size: var(--text-xs);
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
     margin: 0 0 var(--space-2);
   }
   .alert ul {
@@ -540,7 +523,7 @@
     padding-left: 1.1rem;
     color: var(--text-primary);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
   .alert ul li {
     margin-bottom: 0.2rem;
@@ -582,31 +565,13 @@
   }
   .about h2,
   .history h2 {
-    font-size: var(--text-base);
-    font-weight: 500;
     margin: 0 0 var(--space-2);
   }
   .about p {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
     margin: 0 0 var(--space-3);
   }
-  .about dl {
-    display: grid;
-    grid-template-columns: 9rem 1fr;
-    gap: var(--space-1) var(--space-3);
-    font-size: var(--text-sm);
-    margin: 0;
-  }
-  .about dt {
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-size: var(--text-xs);
-  }
   .about dd {
-    margin: 0;
     color: var(--text-primary);
   }
   .history {
@@ -614,27 +579,6 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     padding: var(--space-4);
-  }
-  .history table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  .history th,
-  .history td {
-    padding: var(--space-2) var(--space-2);
-    text-align: left;
-    font-size: var(--text-sm);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .history th {
-    color: var(--text-dim);
-    font-weight: 400;
-    text-transform: uppercase;
-    font-size: var(--text-xs);
-    letter-spacing: 0.04em;
-  }
-  .flag-row {
-    background: rgba(204, 102, 102, 0.05);
   }
   .flag {
     display: inline-flex;
@@ -644,7 +588,7 @@
     padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .flag-H {
     background: var(--status-danger-bg);

@@ -164,18 +164,18 @@
   .clear {
     background: none;
     border: 1px solid var(--border-default);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     color: var(--text-muted);
     width: 1.4rem;
     height: 1.4rem;
-    line-height: 1;
+    line-height: var(--leading-none);
     cursor: pointer;
     font-size: var(--text-sm);
   }
 
   .clear:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   /* A row of its own rather than `align-self`, so a long prompt sentence above

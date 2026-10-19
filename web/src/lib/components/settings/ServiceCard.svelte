@@ -96,15 +96,15 @@
 
 <section class="card" data-status={service.status}>
   <header class="section-header">
-    <div class="title">
-      <h2>{service.label}</h2>
+    <div class="hstack">
+      <h2 class="title-section">{service.label}</h2>
       <span class="status-pill status-{service.status}">
         {statusLabel(service.status)}
       </span>
     </div>
-    <div class="header-actions">
+    <div class="hstack">
       {#if service.last_updated}
-        <span class="meta">Updated {service.last_updated}</span>
+        <span class="caption">Updated {service.last_updated}</span>
       {/if}
       <!-- No Save button: the app bar owns it (see useSettingsSave above). The
 			     flash stays, because with one shared button it is the only thing that
@@ -116,11 +116,11 @@
   </header>
 
   {#if service.hint}
-    <p class="hint">{service.hint}</p>
+    <p class="description">{service.hint}</p>
   {/if}
 
   {#if service.used_by && service.used_by.length > 0}
-    <p class="used-by">
+    <p class="used-by caption">
       Used by:
       {#each service.used_by as skill, i (skill)}
         {#if i > 0},{' '}{/if}
@@ -185,15 +185,12 @@
 	   <div class="settings"> wrappers that already pull in settings.css. */
   .used-by {
     margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .used-by code {
     background: var(--surface-raised);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
-    font-size: 0.9em;
     color: var(--text-muted);
   }
 

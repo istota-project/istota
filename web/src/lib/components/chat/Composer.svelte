@@ -1467,7 +1467,7 @@
     border: none;
     color: var(--text-primary);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     padding: 0.45em var(--ta-pad-x);
     /* The bordered pill around it carries the focus affordance
        (.composer-row:focus-within), so a ring here would double it. */
@@ -1492,7 +1492,7 @@
   .rec-dot {
     width: 0.6em;
     height: 0.6em;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--status-danger-fg);
     animation: rec-pulse 1.2s ease-in-out infinite;
   }
@@ -1514,7 +1514,7 @@
     justify-content: center;
     width: 2.35em;
     height: 2.35em;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     border: none;
     background: transparent;
     /* A button does not inherit font by default — without this the em sizes
@@ -1643,7 +1643,7 @@
      that was last touched and keeps it lit. */
   @media (hover: hover) {
     .attach-menu-item:hover {
-      background: var(--surface-raised);
+      background: var(--hover-bg);
     }
   }
 
@@ -1668,7 +1668,7 @@
     border-radius: var(--radius-sm);
     color: var(--text-muted);
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
   .reply-chip :global(.reply-chip-icon) {
     flex: 0 0 auto;

@@ -90,7 +90,7 @@
   <div class="micro-label">{label}</div>
   <div class="stat-value">{@render children()}</div>
   {#if sub}
-    <div class="stat-sub">{sub}</div>
+    <div class="stat-sub caption">{sub}</div>
   {/if}
 </div>
 
@@ -132,16 +132,11 @@
        hooks a caller sets on the element, so they are supplied from outside and
        are deliberately absent from the token roster. */
     font-size: var(--stat-value-size, var(--text-lg));
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     /* Tabular figures, so a column of numbers lines up and a changing value
        does not shift the characters after it. */
     font-variant-numeric: tabular-nums;
     /* design-lint-allow: see above. */
     color: var(--stat-value-fg, var(--text-primary));
-  }
-
-  .stat-sub {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 </style>

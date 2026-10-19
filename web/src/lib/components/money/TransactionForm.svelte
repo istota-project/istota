@@ -78,27 +78,27 @@
 
 <Modal bind:open title="Edit transaction" onOpenChange={handleOpenChange} width="380px">
   <label class="field">
-    <span>Payee</span>
+    <span class="caption">Payee</span>
     <input type="text" bind:this={payeeInput} bind:value={payee} placeholder="e.g. Acme Corp" />
   </label>
 
   <label class="field">
-    <span>Narration</span>
+    <span class="caption">Narration</span>
     <input type="text" bind:value={narration} placeholder="Description" />
   </label>
 
   <label class="field">
-    <span>Date</span>
+    <span class="caption">Date</span>
     <input type="date" bind:value={date} />
   </label>
 
   <label class="field">
-    <span>Account</span>
+    <span class="caption">Account</span>
     <Select bind:value={account} options={accountOptions} fullWidth ariaLabel="Account" />
   </label>
 
   <label class="field">
-    <span>Amount</span>
+    <span class="caption">Amount</span>
     <input type="text" bind:value={position} placeholder="e.g. -12.50 USD" />
   </label>
 
@@ -120,11 +120,6 @@
     flex-direction: column;
     gap: var(--space-1);
     margin-bottom: var(--space-3);
-  }
-
-  .field span {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .field input[type='text'],

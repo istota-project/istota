@@ -24,7 +24,7 @@
     linkableConditionOptions,
     resolveById,
   } from '$lib/health/conditions';
-  import { formatDate } from '$lib/dateFormat';
+  import { formatDate, localDateISO } from '$lib/dateFormat';
 
   // Suggested types — the server accepts any free-text encounter_type, so
   // these are just defaults for the dropdowns. Unknown types from the API
@@ -58,7 +58,7 @@
 
   // Quick-add encounter form
   let formOpen = $state(false);
-  let formDate = $state(new Date().toISOString().slice(0, 10));
+  let formDate = $state(localDateISO());
   let formType = $state('visit');
   let formProvider = $state('');
   let formFacility = $state('');
@@ -214,8 +214,8 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Medical history</h1>
-    <div class="actions">
+    <h1 class="title-page">Medical history</h1>
+    <div class="actions hstack">
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Add encounter'}
       </Button>
@@ -267,7 +267,7 @@
     </Field>
 
     <div class="full conditions-field">
-      <span class="field-label">Conditions</span>
+      <span class="field-label caption">Conditions</span>
       {#if stagedConditions.length}
         <ul class="staged">
           {#each stagedConditions as d (d.id)}
@@ -339,7 +339,7 @@
                   <span class="badge {typeBadgeClass(e.encounter_type)}"
                     >{typeLabel(e.encounter_type)}</span
                   >
-                  <span class="date">{formatDate(e.encounter_date)}</span>
+                  <span class="date caption">{formatDate(e.encounter_date)}</span>
                 </div>
                 <div class="card-body">
                   {#if e.provider || e.facility}
@@ -348,10 +348,10 @@
                     </div>
                   {/if}
                   {#if e.specialty}
-                    <div class="muted">{e.specialty}</div>
+                    <div class="specialty caption">{e.specialty}</div>
                   {/if}
                   {#if e.reason}
-                    <div class="reason">{e.reason}</div>
+                    <div class="reason muted">{e.reason}</div>
                   {/if}
                 </div>
               </a>
@@ -381,7 +381,7 @@
           </ul>
         {/if}
         {#if chronic.length > 0}
-          <h3>Chronic</h3>
+          <h3 class="micro-label">Chronic</h3>
           <ul class="conditions">
             {#each chronic as d (d.id)}
               <li>
@@ -404,16 +404,6 @@
     align-items: center;
     gap: var(--space-4);
     margin-bottom: var(--space-4);
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
   }
   /* Three pill buttons plus the title do not fit a phone on one line, and
 	   letting them wrap inside the flex row leaves them ragged against the
@@ -450,22 +440,6 @@
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);
   }
-  .quick-form input,
-  .quick-form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .quick-form textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
   /* Not a <label>: the control is a Select whose trigger is a button, and
      wrapping it would make clicking the field name open the dropdown. */
   .conditions-field {
@@ -473,10 +447,6 @@
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
-  }
-  .conditions-field .field-label {
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
   .staged {
     list-style: none;
@@ -512,7 +482,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1;
+    line-height: var(--leading-none);
     cursor: pointer;
   }
   .unstage:hover {
@@ -562,7 +532,6 @@
   }
   .card {
     display: block;
-    padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
   }
   .card:hover {
@@ -573,18 +542,15 @@
     margin-bottom: var(--space-2);
   }
   .card-body .who {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     font-size: var(--text-sm);
   }
-  .card-body .muted {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
+  .card-body .specialty {
     text-transform: lowercase;
   }
   .card-body .reason {
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   /* Badge palette tuned for the dark surface: each canonical encounter
@@ -595,10 +561,10 @@
     align-items: center;
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     padding: 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   /* design-lint-allow-begin: categorical palette — the hue names the encounter
      type (visit / procedure / imaging / dental), not a severity. Folding these
@@ -643,11 +609,6 @@
     color: var(--text-muted);
   }
 
-  .date {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .sidebar {
     border-left: 1px solid var(--border-subtle);
     padding-left: 1.25rem;
@@ -665,11 +626,6 @@
   }
   .sidebar h3 {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   /* Cards, not flat rows. A condition name is routinely long ("Bilateral
 	   patellofemoral pain syndrome with anterior knee crepitus") and the old
@@ -729,7 +685,7 @@
   }
   .conditions .name {
     min-width: 0;
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     overflow-wrap: anywhere;
   }
   /* Metrics copied from the admin dashboard's .effort-chip / .admin-badge so
@@ -738,10 +694,10 @@
     display: inline-block;
     flex: 0 0 auto;
     padding: 0.05rem var(--space-2);
-    font-size: 0.55rem;
-    font-weight: 600;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     border-radius: var(--radius-pill);
   }
   .severity.sev-mild {

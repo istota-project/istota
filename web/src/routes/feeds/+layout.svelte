@@ -434,16 +434,16 @@
   /* .views / .view-btn / .view-name (the All / Unread / Starred block) come
 	   from web/src/lib/styles/sidebar.css, shared with the chat sidebar. */
   .feed-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .feed-btn.has-unread {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 
   .feed-btn.active {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
     color: var(--text-primary);
   }
 

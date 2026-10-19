@@ -50,19 +50,21 @@
 >
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
   {#if settings}
-    {#if !settings.available}<p class="hint">Ask the operator to enable credential backups.</p>{/if}
+    {#if !settings.available}<p class="description">
+        Ask the operator to enable credential backups.
+      </p>{/if}
     {#if settings.recipient_suffix}
       <p>Backup key ending {settings.recipient_suffix}.</p>
     {:else}
-      <p class="hint">
+      <p class="description">
         Add an age public key to turn on scheduled backups. The private key stays with you.
       </p>
     {/if}
-    {#if settings.interval <= 0}<p class="hint">
+    {#if settings.interval <= 0}<p class="description">
         The operator has disabled scheduled backups.
       </p>{/if}
     {#if settings.last_run}
-      <p class="hint">
+      <p class="description">
         Last backup: {settings.last_run.at} · {settings.last_run.outcome}{settings.last_run.reason
           ? ` (${settings.last_run.reason})`
           : ''}
@@ -79,7 +81,7 @@
         disabled={confirming || !settings.available}
       />
     </Field>
-    <div class="row">
+    <div class="hstack wrap">
       <Button
         variant="primary"
         size="sm"

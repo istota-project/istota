@@ -237,8 +237,8 @@
        this header. -->
   <div class="header">
     <div>
-      <a class="back" href="{base}/health/history">← Medical history</a>
-      <h1>Encounter</h1>
+      <a class="back link-muted" href="{base}/health/history">← Medical history</a>
+      <h1 class="title-page">Encounter</h1>
     </div>
     {#if encounter && !editing}
       <div class="actions">
@@ -292,7 +292,7 @@
     </form>
   {:else}
     <section class="meta">
-      <dl>
+      <dl class="kv-stacked">
         <div>
           <dt>Date</dt>
           <dd>{formatDate(encounter.encounter_date)}</dd>
@@ -349,14 +349,16 @@
         {#each diagnoses as d (d.id)}
           <li class="dx-card">
             <div class="card-head">
-              <a class="name" href="{base}/health/history/diagnoses">{d.name}</a>
+              <a class="name title-card link-quiet" href="{base}/health/history/diagnoses"
+                >{d.name}</a
+              >
               <KebabMenu items={conditionMenu(d)} ariaLabel="Condition actions" />
             </div>
-            <div class="tags">
-              {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+            <div class="hstack wrap">
+              {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
               <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
             </div>
-            <div class="card-meta">
+            <div class="card-meta caption">
               {#if d.date_diagnosed}<span>Dx {formatDate(d.date_diagnosed)}</span>{/if}
             </div>
           </li>
@@ -395,13 +397,13 @@
         {#each panels as p (p.id)}
           <li>
             <a href="{base}/health/labs/panel?id={p.id}">
-              <h3 class="name">{formatDate(p.drawn_at)}</h3>
-              <div class="tags">
+              <h3 class="name title-card">{formatDate(p.drawn_at)}</h3>
+              <div class="hstack wrap">
                 <span class="count-tag">
                   {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
                 </span>
               </div>
-              <div class="card-meta">
+              <div class="card-meta caption">
                 {#if p.lab_name}<span>{p.lab_name}</span>{/if}
               </div>
             </a>
@@ -451,17 +453,7 @@
   .back {
     display: inline-block;
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
     margin-bottom: var(--space-1);
-  }
-  .back:hover {
-    text-decoration: underline;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
   }
   h2 {
     margin: 1.25rem 0 var(--space-2);
@@ -479,21 +471,10 @@
     padding: var(--space-3) var(--space-4);
   }
   .meta dl {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
-    gap: var(--space-2) var(--space-6);
-    margin: 0;
-  }
-  .meta dt {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
-    margin-bottom: 0.15rem;
+    --kv-track: 11.5rem;
+    --kv-gap: var(--space-6);
   }
   .meta dd {
-    margin: 0;
-    font-size: var(--text-sm);
     color: var(--text-primary);
   }
 
@@ -509,30 +490,33 @@
   }
   .notes p {
     white-space: pre-wrap;
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-primary);
   }
 
-  /* Three across on desktop, two on a narrow window, one on a phone —
-     matching the conditions list. */
+  /* One column, then two, then three as the section widens — the
+     conditions list's steps, which are CardGrid's. */
+  .related {
+    container: related / inline-size;
+  }
   .card-grid {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
-  @media (max-width: 1100px) {
+  @container related (min-width: 40rem) {
     .card-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  @media (max-width: 768px) {
+  @container related (min-width: 64rem) {
     .card-grid {
-      grid-template-columns: minmax(0, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
   /* Direct child only: the diagnoses cards below hold their name in a nested
@@ -556,33 +540,18 @@
   }
   .card-grid .name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: 500;
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     min-width: 0;
     overflow-wrap: anywhere;
-  }
-  .card-grid .tags {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
   }
   .card-grid .card-meta {
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     flex-wrap: wrap;
   }
   .icd {
-    font-size: var(--text-xs);
     color: var(--text-muted);
-    background: var(--surface-raised);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-mono);
   }
   .count-tag {
     font-size: var(--text-xs);
@@ -610,22 +579,6 @@
   .form :global(.field.full) {
     grid-column: 1 / -1;
   }
-  .form input,
-  .form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .form textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab
      alongside the name rather than being one big link. */
@@ -649,13 +602,6 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-2);
-  }
-  .dx-card .name {
-    color: var(--text-primary);
-    text-decoration: none;
-  }
-  .dx-card .name:hover {
-    text-decoration: underline;
   }
 
   .link-row {

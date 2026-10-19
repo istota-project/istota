@@ -357,7 +357,7 @@
       {@const jobErrors = stats.scheduler?.last_errors?.length ?? 0}
       <section class="card installation">
         <header class="section-header">
-          <h2 class="install-name">
+          <h2 class="hstack title-section">
             <span class="install-avatar">
               <Avatar
                 kind="bot"
@@ -450,7 +450,7 @@
         {@const m = stats.models}
         <section class="card">
           <header class="section-header">
-            <h2>Models</h2>
+            <h2 class="title-section">Models</h2>
           </header>
           <dl class="kv model-kv">
             <dt>Brain</dt>
@@ -466,19 +466,19 @@
 
           <dl class="kv model-kv role-kv">
             <dt>Default</dt>
-            <dd class="model-value">
+            <dd class="hstack">
               <code>{m.default_model}</code>
               {#if m.default_effort}<span class="effort-chip">{m.default_effort}</span>{/if}
             </dd>
             {#each m.roles as r (r.role)}
               <dt>{r.role}</dt>
-              <dd class="model-value"><code>{r.resolved}</code></dd>
+              <dd class="hstack"><code>{r.resolved}</code></dd>
             {/each}
           </dl>
 
           {#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
             <div class="overrides">
-              <div class="cell-label">Source-type routing</div>
+              <div class="cell-label micro-label">Source-type routing</div>
               <dl class="kv model-kv">
                 {#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
                   <dt>{src}</dt>
@@ -490,7 +490,7 @@
 
           {#if m.room_selectable && m.room_selectable.length > 0}
             <div class="overrides">
-              <div class="cell-label">Rooms may select</div>
+              <div class="cell-label micro-label">Rooms may select</div>
               <div class="room-selectable">
                 {#each m.room_selectable as kind (kind)}
                   <span class="effort-chip">{brainLabel(kind)}</span>
@@ -505,7 +505,7 @@
            where Users after it starts a row of its own. -->
       <section class="card" data-fill>
         <header class="section-header">
-          <h2>Task activity</h2>
+          <h2 class="title-section">Task activity</h2>
         </header>
         <div class="kpi-grid card-grid">
           <StatTile
@@ -553,7 +553,7 @@
               <div class="source-row">
                 <div class="source-label">
                   <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
-                  {src}
+                  <span class="truncate">{src}</span>
                 </div>
                 <div class="source-bar">
                   <div
@@ -576,10 +576,10 @@
       <!-- Users -->
       <section class="card" data-width="full">
         <header class="section-header">
-          <h2>Users</h2>
+          <h2 class="title-section">Users</h2>
         </header>
         <div class="table-scroll">
-          <table class="grid users-grid">
+          <table class="table table--fixed users-grid">
             <thead>
               <tr>
                 <th class="col-user">User</th>
@@ -642,7 +642,7 @@
                       </div>
                       <div class="source-list">
                         {#each segments as seg (seg.source)}
-                          <span class="source-pill" title={segmentTooltip(seg)}>
+                          <span class="source-pill caption" title={segmentTooltip(seg)}>
                             <span
                               class="dot dot-source"
                               style="background: {sourceColor(seg.source)};"
@@ -666,7 +666,9 @@
                     >{formatNumber(u.usage_tokens_24h)}</td
                   >
                   <td class="num col-cost">{formatCost(u.usage_cost_24h)}</td>
-                  <td class="col-active">{formatTimestamp(u.last_active)}</td>
+                  <!-- truncate: past thirty days this is a localized date, which can outgrow
+                       the column. td only; the header's two words are meant to wrap. -->
+                  <td class="col-active truncate">{formatTimestamp(u.last_active)}</td>
                 </tr>
               {/each}
             </tbody>
@@ -696,7 +698,7 @@
         {@const sub = stats.subscription}
         <section class="card">
           <header class="section-header">
-            <h2>Claude Code subscription</h2>
+            <h2 class="title-section">Claude Code subscription</h2>
           </header>
           <!-- Extra usage is a tile in this grid rather than a footer line
                under it, so the card reads as one row of meters the way the
@@ -723,7 +725,7 @@
               </StatTile>
             {/if}
           </div>
-          <p class="usage-note">
+          <p class="usage-note caption">
             Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
               — reading is stale{#if sub.error}: {sub.error}{/if}
             {/if}
@@ -740,7 +742,7 @@
         {@const u30 = stats.usage.totals_30d}
         <section class="card">
           <header class="section-header">
-            <h2>Token usage</h2>
+            <h2 class="title-section">Token usage</h2>
           </header>
           <div class="kpi-grid card-grid">
             <StatTile label="Tokens 24h" sub="{formatNumber(u30.total_tokens)} (30d)">
@@ -767,7 +769,7 @@
              writes no row, and the native brain records no context; a synthetic
              zero for either would make this pane complete and wrong. -->
           {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0 || (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
-            <p class="usage-note">
+            <p class="usage-note caption">
               {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0}
                 {formatNumber(stats.usage.unmeasured_tasks_24h ?? 0)} task(s) in the last 24h recorded
                 no usage.
@@ -782,9 +784,9 @@
       {:else if stats.usage?.error}
         <section class="card">
           <header class="section-header">
-            <h2>Token usage</h2>
+            <h2 class="title-section">Token usage</h2>
           </header>
-          <p class="usage-note">Usage stats unavailable: {stats.usage.error}</p>
+          <p class="usage-note caption">Usage stats unavailable: {stats.usage.error}</p>
         </section>
       {/if}
 
@@ -793,7 +795,7 @@
         {#if (stats.usage?.by_model_30d ?? []).length > 0}
           <section class="card">
             <header class="section-header">
-              <h2>Tokens by model</h2>
+              <h2 class="title-section">Tokens by model</h2>
               <span class="caption"
                 >30d{#if (stats.usage?.by_model_30d_omitted ?? 0) > 0}
                   · top 5 of {(stats.usage?.by_model_30d ?? []).length +
@@ -803,7 +805,7 @@
             <div class="usage-rows">
               {#each stats.usage?.by_model_30d ?? [] as g (g.key)}
                 <div class="usage-row">
-                  <div class="usage-key">{g.key}</div>
+                  <div class="truncate">{g.key}</div>
                   <div class="usage-num">{formatNumber(g.total_tokens)}</div>
                   <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
                 </div>
@@ -814,13 +816,13 @@
         {#if (stats.usage?.by_brain_30d ?? []).length > 0}
           <section class="card">
             <header class="section-header">
-              <h2>Tokens by brain</h2>
+              <h2 class="title-section">Tokens by brain</h2>
               <span class="caption">30d</span>
             </header>
             <div class="usage-rows">
               {#each stats.usage?.by_brain_30d ?? [] as g (g.key)}
                 <div class="usage-row">
-                  <div class="usage-key">{g.key}</div>
+                  <div class="truncate">{g.key}</div>
                   <div class="usage-num">{formatNumber(g.total_tokens)}</div>
                   <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
                 </div>
@@ -831,13 +833,13 @@
         {#if (stats.usage?.by_origin_24h ?? []).length > 0}
           <section class="card">
             <header class="section-header">
-              <h2>Tokens by origin</h2>
+              <h2 class="title-section">Tokens by origin</h2>
               <span class="caption">24h</span>
             </header>
             <div class="usage-rows">
               {#each stats.usage?.by_origin_24h ?? [] as g (g.key)}
                 <div class="usage-row">
-                  <div class="usage-key">{g.key}</div>
+                  <div class="truncate">{g.key}</div>
                   <div class="usage-num">{formatNumber(g.total_tokens)}</div>
                   <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
                 </div>
@@ -856,7 +858,7 @@
          subscription card it would sit alone before Modules. -->
       <section class="card" data-fill>
         <header class="section-header">
-          <h2>Bot icon</h2>
+          <h2 class="title-section">Bot icon</h2>
         </header>
         <Field label="Picture" labelled={false} wide error={botIconError} warning={botIconNote}>
           <AvatarPicker
@@ -881,7 +883,7 @@
             {/snippet}
           </AvatarPicker>
         </Field>
-        <p class="hint">
+        <p class="description">
           Shown wherever the web UI names the bot. It applies to everyone on this deployment.
           {#if stats.storage.nextcloud_username}
             This is not the picture Nextcloud shows for
@@ -898,13 +900,13 @@
       {#if Object.keys(stats.modules).length > 0}
         <section class="card" data-width="full">
           <header class="section-header">
-            <h2>Modules</h2>
+            <h2 class="title-section">Modules</h2>
           </header>
           <div class="module-grid card-grid">
             {#each Object.entries(stats.modules) as [name, mod] (name)}
               <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
-                <div class="module-name">{name}</div>
-                <dl class="module-fields">
+                <div class="module-name title-section">{name}</div>
+                <dl class="kv module-fields">
                   {#each Object.entries(mod) as [k, v] (k)}
                     <dt>{fieldLabel(k)}</dt>
                     <dd>
@@ -927,13 +929,14 @@
       <div class="banner error">Partial data: {stats.error}</div>
     {/if}
 
-    <p class="refresh-note">Auto-refreshes every 60s.</p>
+    <p class="refresh-note caption">Auto-refreshes every 60s.</p>
   {/if}
 </div>
 
 <style>
-  /* Layout primitives (.settings / .card / .grid / .banner / .placeholder /
-	   .section-header / .hint) come from web/src/lib/styles/settings.css.
+  /* Layout primitives (.settings / .card / .banner / .placeholder /
+	   .section-header) come from web/src/lib/styles/settings.css, the table
+	   from table.css.
 	   Admin-specific bits below: KPIs, source bars, dot indicators. */
 
   /* Page metadata, not content. It sat in the app bar until the admin sidebar
@@ -942,15 +945,7 @@
 	   it describes rather than with the chrome. */
   .refresh-note {
     margin-top: var(--space-4);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     text-align: right;
-  }
-
-  .install-name {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .install-avatar {
@@ -960,22 +955,15 @@
   .health {
     display: inline-flex;
     align-items: center;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
-  }
-
-  .cell-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
   }
 
   .dot {
     display: inline-block;
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-dim);
     margin-right: var(--space-1);
     flex-shrink: 0;
@@ -992,12 +980,6 @@
   .dot-source {
     width: 6px;
     height: 6px;
-  }
-
-  .num {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
   }
 
   /* The tiles themselves are `StatTile`; this sizes the wall they sit in. */
@@ -1029,13 +1011,12 @@
     gap: var(--space-1);
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .source-bar {
     height: 6px;
     background: var(--surface-base);
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
   }
 
@@ -1075,7 +1056,7 @@
     min-width: 58.5rem;
   }
 
-  /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
+  /* The table is fixed layout, so a cell min-width is ignored and unsized
 	   columns split the table evenly. Size the narrow columns explicitly and
 	   leave 24h activity auto so it soaks up whatever is left — it carries the
 	   stacked bar plus the per-source chips and needs the room; username and
@@ -1117,24 +1098,6 @@
     width: 9rem;
   }
 
-  /* The column `formatTimestamp` writes into, and the only cell in the
-	   table whose content is a localized string of unbounded width: past thirty
-	   days it renders a date, and `5. Sept. 2026` is longer than the
-	   `Sep 5, 2026` these were sized against. Nothing sets `overflow` on a
-	   `.grid` cell, so without this a long locale paints over the column beside
-	   it rather than wrapping. The widths elsewhere still carry the common case;
-	   this is the backstop.
-
-	   `td` only. The header cell carries the same class, and `Last active` is
-	   two words that are *meant* to wrap to a second line at the
-	   narrow breakpoints — clipping those would cost more than it saves, and a
-	   header has no tooltip to fall back on. */
-  .users-grid td.col-active {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .usage-rows {
     display: flex;
     flex-direction: column;
@@ -1147,12 +1110,6 @@
     gap: var(--space-2);
     align-items: baseline;
     font-size: var(--text-sm);
-  }
-
-  .usage-key {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .usage-num,
@@ -1168,8 +1125,6 @@
 
   .usage-note {
     margin-top: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .users-grid .col-24h {
@@ -1196,7 +1151,7 @@
   .stack-bar {
     display: flex;
     height: 5px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
     margin: var(--space-1) 0;
     background: var(--surface-base);
@@ -1218,8 +1173,6 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .failed-pill {
@@ -1232,7 +1185,6 @@
   }
 
   code {
-    font-size: var(--text-xs);
     color: var(--text-secondary);
   }
 
@@ -1252,25 +1204,15 @@
   }
 
   .module-name {
-    font-weight: 600;
-    font-size: var(--text-base);
     margin-bottom: var(--space-2);
   }
 
   .module-fields {
-    display: grid;
-    grid-template-columns: max-content 1fr;
     gap: 0.1rem var(--space-3);
-    margin: 0;
     font-size: var(--text-xs);
   }
 
-  .module-fields dt {
-    color: var(--text-dim);
-  }
-
   .module-fields dd {
-    margin: 0;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
@@ -1281,24 +1223,10 @@
     --kv-gap: var(--space-6);
   }
 
-  .kv dt {
-    color: var(--text-dim);
-  }
-
-  .kv dd {
-    margin: 0;
-  }
-
   /* Models / brain backend */
   .model-kv {
     gap: var(--space-2) 1.25rem;
     align-items: baseline;
-  }
-
-  .model-value {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   /* Separate the config block (Brain/Endpoint) from the resolution list. */
@@ -1320,7 +1248,7 @@
     align-items: flex-start;
     gap: var(--space-1);
     font-size: var(--text-sm);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     color: var(--text-secondary);
   }
 
@@ -1332,10 +1260,10 @@
   .effort-chip {
     display: inline-block;
     padding: 0.05rem var(--space-2);
-    font-size: 0.55rem;
-    font-weight: 600;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     border-radius: var(--radius-pill);
     background: var(--status-info-bg);
     color: var(--status-info-fg);
@@ -1356,7 +1284,7 @@
 
   /* Mobile: keep every column and scroll the table sideways, the same treatment
 	   the briefings tables get. Hiding columns was the previous answer and it did
-	   not survive two more of them. `.grid` is table-layout: fixed, so the widths
+	   not survive two more of them. The table is fixed layout, so the widths
 	   below are honoured whatever the screen is, and dropping the table's
 	   min-width never made it narrower — it made `col-24h`, the one column left
 	   auto on purpose, absorb everything that no longer fit. Once Tokens and Cost
@@ -1373,7 +1301,7 @@
     }
     /* Tighten the columns whose content has a known short bound, so that scroll
 		   stays as short as it can be, and leave the numeric ones at a width their
-		   strings fit. Nothing sets `overflow` on a `.grid` cell, so a number too
+		   strings fit. Nothing sets `overflow` on a table cell, so a number too
 		   wide for its box paints over the column beside it rather than wrapping —
 		   `toLocaleString` puts commas in but no break opportunity. Total is the one
 		   that bit: it keeps its (widened) desktop width here rather than the 3.5rem
@@ -1425,7 +1353,7 @@
       gap: 0 var(--space-1);
     }
     .source-pill {
-      font-size: 0.7rem;
+      font-size: var(--text-xs);
     }
   }
 

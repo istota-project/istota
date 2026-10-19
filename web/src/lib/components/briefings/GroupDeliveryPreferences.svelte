@@ -101,7 +101,7 @@
     <EmptyState size="sm">You are not in any group with briefings.</EmptyState>
   {:else if entries.length}
     <div class="table-scroll">
-      <table class="grid mutes">
+      <table class="table">
         <thead>
           <tr>
             <th>Briefing</th>
@@ -166,16 +166,12 @@
 </SettingsCard>
 
 <style>
-  .mutes {
-    table-layout: auto;
-  }
   .toggle {
     width: 9rem;
     text-align: center;
   }
   .group-row th {
-    text-align: left;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
   .name {
     display: flex;

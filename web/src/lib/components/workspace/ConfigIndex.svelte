@@ -44,13 +44,13 @@
     <PageLoading />
   {:else if files.length}
     <IndexCaption {caption} {reachNote} />
-    <ul>
+    <ul class="list-reset">
       {#each files as file (file.name)}
-        <li class="index-row">
+        <li class="record-row record-row--divided index-row">
           <div class="index-text">
             <button
               type="button"
-              class="index-name"
+              class="index-name button-reset truncate"
               disabled={!file.editable}
               title={file.name}
               onclick={() => onEdit(file)}>{configFileLabel(file)}</button
@@ -74,18 +74,9 @@
 </section>
 
 <style>
-  .index ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
+  /* A record row (table.css), ruled like the file table beside it. */
   .index-row {
-    display: flex;
     align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
   }
   .index-text {
     display: flex;
@@ -96,17 +87,8 @@
   .index-name {
     align-self: flex-start;
     max-width: 100%;
-    padding: 0;
-    border: 0;
-    background: none;
-    font: inherit;
-    line-height: inherit;
     color: var(--text-primary);
     text-align: left;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    cursor: pointer;
   }
   .index-name:hover:not(:disabled) {
     text-decoration: underline;

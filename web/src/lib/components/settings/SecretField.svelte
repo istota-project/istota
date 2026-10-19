@@ -55,7 +55,7 @@
   should focus the input as it does in every other field.
 -->
 <Field {label} {hint} {inline} {error} {labelMark} labelled={!showClear}>
-  <div class="secret-row">
+  <div class="secret-row hstack">
     <Input
       {type}
       {value}
@@ -81,12 +81,6 @@
 </Field>
 
 <style>
-  .secret-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
-
   /* The input's own 24rem cap as its basis, so the button follows it rather
      than taking width out of it. */
   .secret-row > :global(input) {

@@ -162,11 +162,11 @@
   {:else if status.connected}
     <div class="status-row">
       <div>
-        <div class="label">Connected as</div>
+        <div class="label muted">Connected as</div>
         <div class="value">{status.email || '—'}</div>
       </div>
       <div>
-        <div class="label">Last sync</div>
+        <div class="label muted">Last sync</div>
         <div class="value">{formatTimestamp(status.last_sync)}</div>
       </div>
     </div>
@@ -238,7 +238,6 @@
   }
   .label {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .value {
     font-size: var(--text-base);

@@ -176,8 +176,8 @@
         <div class="ui-viewer-panel">
           <header class="ui-viewer-header">
             <div class="ui-viewer-heading">
-              <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
-              {#if metadata}<div class="ui-viewer-metadata">{@render metadata()}</div>{/if}
+              <Dialog.Title class="ui-modal-title title-section">{title}</Dialog.Title>
+              {#if metadata}<div class="ui-viewer-metadata caption">{@render metadata()}</div>{/if}
             </div>
             {#if actions}<div class="ui-viewer-actions">{@render actions()}</div>{/if}
             <div class="ui-viewer-close">
@@ -194,7 +194,7 @@
               <div class="ui-viewer-mobile-navigation">{@render previous()}{@render next()}</div>
             {/if}
           </header>
-          {#if description}<Dialog.Description class="ui-modal-description"
+          {#if description}<Dialog.Description class="ui-modal-description description"
               >{description}</Dialog.Description
             >{/if}
           {@render body()}
@@ -203,7 +203,7 @@
       {:else}
         {#if variant === 'palette'}
           <header class="ui-palette-header">
-            <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+            <Dialog.Title class="ui-modal-title title-section">{title}</Dialog.Title>
             {#if dismissible}
               <IconButton
                 label="Close"
@@ -215,9 +215,9 @@
             {/if}
           </header>
         {:else}
-          <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+          <Dialog.Title class="ui-modal-title title-section">{title}</Dialog.Title>
         {/if}
-        {#if description}<Dialog.Description class="ui-modal-description"
+        {#if description}<Dialog.Description class="ui-modal-description description"
             >{description}</Dialog.Description
           >{/if}
         {@render body()}
@@ -250,8 +250,8 @@
     display: flex;
     flex-direction: column;
     /* The panel is pinned to the viewport centre rather than laid out inside a
-		   padded backdrop, so it can't use .overlay-safe — the insets come off its
-		   caps instead. Subtracting both ends of each axis keeps a full-height modal
+		   padded backdrop, so backdrop padding cannot keep it clear of the notch —
+		   the insets come off its caps instead. Subtracting both ends of each axis keeps a full-height modal
 		   inside the safe box once it is centred, and dvh tracks a collapsing mobile
 		   browser toolbar the way the body's height does. Inert where insets are 0. */
     max-width: calc(100vw - 2rem - var(--safe-left) - var(--safe-right));
@@ -261,14 +261,10 @@
     outline: none;
   }
   :global(.ui-modal-title) {
-    font-size: var(--text-base);
-    font-weight: 600;
     margin: 0 0 var(--space-2);
     color: var(--text-primary);
   }
   :global(.ui-modal-description) {
-    font-size: var(--text-sm);
-    color: var(--text-muted);
     margin: 0 0 var(--space-3);
   }
   /* min-height: 0 or the body refuses to shrink below its content and the
@@ -387,8 +383,6 @@
     white-space: nowrap;
   }
   .ui-viewer-metadata {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
     overflow-wrap: anywhere;
   }
   .ui-viewer-actions {

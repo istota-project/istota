@@ -216,7 +216,7 @@
         labelled={false}
         warning={svc.max_level === 'off' ? 'This instance does not offer this service.' : undefined}
       >
-        <div class="level-row">
+        <div class="hstack wrap">
           <Select
             value={pending[svc.service] ?? 'off'}
             options={levelOptions(svc.max_level)}
@@ -319,20 +319,12 @@
   .footnote {
     margin: 0;
   }
-  .level-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
   .actions {
     display: flex;
     gap: var(--space-2);
     margin-top: var(--space-4);
   }
   code {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     word-break: break-all;
   }
 </style>

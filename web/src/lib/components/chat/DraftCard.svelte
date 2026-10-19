@@ -229,7 +229,7 @@
       >
       <!-- In the actions row rather than under the body: it saves the card a
            whole row, and it is where the hand already is. -->
-      <button class="draft-more" type="button" onclick={() => (expanded = true)}>
+      <button class="draft-more link-action" type="button" onclick={() => (expanded = true)}>
         Show the whole message
       </button>
     </div>
@@ -238,7 +238,7 @@
       <span class="micro-label"><Mail size={12} /> Held for approval</span>
       <span class="caption">{reasonLabel}</span>
       {#if placement === 'banner'}
-        <button class="draft-more" type="button" onclick={() => (expanded = false)}>
+        <button class="draft-more link-action" type="button" onclick={() => (expanded = false)}>
           Show less
         </button>
       {/if}
@@ -275,7 +275,7 @@
     {:else}
       <div class="draft-body">{shownBody}</div>
       {#if longBody}
-        <button class="draft-more" type="button" onclick={() => (expanded = !expanded)}>
+        <button class="draft-more link-action" type="button" onclick={() => (expanded = !expanded)}>
           {expanded ? 'Show less' : 'Show the whole message'}
         </button>
       {/if}
@@ -415,7 +415,7 @@
   .draft-edit {
     width: 100%;
     font: inherit;
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     font-size: var(--text-sm);
     color: var(--text-primary);
     background: var(--surface-raised);
@@ -436,16 +436,7 @@
   }
   .draft-more {
     align-self: flex-start;
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
     font-size: var(--text-xs);
-    color: var(--link);
-    cursor: pointer;
-  }
-  .draft-more:hover {
-    text-decoration: underline;
   }
   .draft-also ul {
     margin: var(--space-1) 0 0;

@@ -25,7 +25,7 @@
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { formatMinutes, formatRelative } from '$lib/dateFormat';
+  import { formatMinutes, formatRelative, localDateISO } from '$lib/dateFormat';
 
   let requestedPlaceId = $state<number | null>(null);
   const urlSelection = createUrlSelection<{ place: number | null }>({
@@ -75,9 +75,6 @@
     saveSetting('location.panelOpen', panelOpen);
   });
 
-  function localDate(d: Date = new Date()): string {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
   let places = $derived($locationPlaces);
 
   let currentPos = $derived(
@@ -133,7 +130,7 @@
   async function loadData() {
     if (loadInFlight) return;
     loadInFlight = true;
-    const today = localDate();
+    const today = localDateISO();
     try {
       const [currentResult, pingsResult, summaryResult] = await Promise.allSettled([
         getLocationCurrent(),
@@ -220,42 +217,47 @@
           {#if currentLabel.placeName}
             <span class="place">{currentLabel.placeName}</span>
             {#if currentLabel.visitDuration}
-              <span class="stat">{currentLabel.visitDuration}</span>
+              <span class="stat caption num">{currentLabel.visitDuration}</span>
             {/if}
           {:else}
             <span class="place dim">No place</span>
           {/if}
-          <span class="stat">{currentLabel.ago}</span>
+          <span class="stat caption num">{currentLabel.ago}</span>
           {#if currentLabel.battery}
-            <span class="stat">{currentLabel.battery}</span>
+            <span class="stat caption num">{currentLabel.battery}</span>
           {/if}
         </span>
       {:else if browserPos}
         <span class="current">
           <span class="place dim">Browser location</span>
-          <span class="stat">set up Overland for tracking</span>
+          <span class="stat caption num">set up Overland for tracking</span>
         </span>
       {:else}
-        <span class="stat dim">No location data</span>
+        <span class="stat caption num dim">No location data</span>
       {/if}
       {#if pings.length > 0}
-        <span class="stat">{pings.length} pings</span>
+        <span class="stat caption num">{pings.length} pings</span>
       {/if}
       {#if summary && summary.stops.length > 0}
-        <span class="stat">{summary.stops.length} stops</span>
+        <span class="stat caption num">{summary.stops.length} stops</span>
       {/if}
       {#if summary && summary.transit_pings > 0}
-        <span class="stat">{summary.transit_pings} transit</span>
+        <span class="stat caption num">{summary.transit_pings} transit</span>
       {/if}
       {#if trips.length > 0}
-        <span class="stat">{trips.length} trips</span>
+        <span class="stat caption num">{trips.length} trips</span>
       {/if}
       {#if elevation.range}
-        <span class="stat">{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
+        <span class="stat caption num"
+          >{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
         >
       {/if}
       {#if hasDetails}
-        <button class="stops-btn" onclick={() => (panelOpen = !panelOpen)} type="button">
+        <button
+          class="stops-btn button-reset caption"
+          onclick={() => (panelOpen = !panelOpen)}
+          type="button"
+        >
           {panelOpen ? 'Hide details' : 'Show details'}
         </button>
       {/if}
@@ -306,19 +308,14 @@
 
   .place {
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
 
   .place.dim {
     color: var(--text-dim);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     font-size: var(--text-xs);
-  }
-
-  .stat {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .stat.dim {
@@ -327,13 +324,6 @@
 
   .stops-btn {
     margin-left: auto;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-xs);
-    cursor: pointer;
-    padding: 0;
   }
 
   .stops-btn:hover {

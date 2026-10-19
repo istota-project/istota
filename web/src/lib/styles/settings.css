@@ -1,6 +1,7 @@
 /* Shared styles for settings pages — /settings, /feeds/settings, /money/settings.
    Pages declare a wrapper element with class="settings" and use the
-   .card / .section-header / .grid primitives below.
+   .card / .section-header primitives below. Tables are the global `.table`
+   family in table.css.
 
    Form rows are NOT here: `.field` moved to ui/Field.svelte, which is also
    what styles a bare <input> a caller passes into it. A settings page reaches
@@ -34,31 +35,18 @@
   flex-wrap: wrap;
 }
 
-.settings-header h1 {
-  margin: 0;
-  font-size: var(--text-lg);
-  color: var(--text-primary);
-}
-
-.settings .hint {
+/* Placement only: the type is the global `.description`. A description just
+   under a title sits a step below it; inside a card the `:where()` reset
+   further down zeroes this, since the card's gap already spaces it. Scored at
+   one class so any page rule placing its own description wins outright. */
+.settings :where(.description) {
   margin: var(--space-1) 0 0;
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  max-width: 60ch;
 }
 
-.settings .hint code,
 .settings code {
   background: var(--surface-raised);
   padding: 0 var(--space-1);
   border-radius: var(--radius-sm);
-  font-size: 0.8em;
-}
-
-.settings .header-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
 }
 
 .settings .dirty-badge {
@@ -85,17 +73,11 @@
   align-self: flex-start;
 }
 
-.settings .card h2 {
-  margin: 0;
-  font-size: var(--text-base);
-  color: var(--text-primary);
-}
-
 .settings .card h3 {
   margin: 0;
   font-size: var(--text-sm);
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .settings .section-header {
@@ -104,34 +86,6 @@
   align-items: center;
   gap: var(--space-3);
   flex-wrap: wrap;
-}
-
-.settings .subsection-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  margin: var(--space-2) 0 -0.25rem;
-}
-
-.settings .subsection-heading h2 {
-  margin: 0;
-  font-size: var(--text-base);
-  color: var(--text-primary);
-}
-
-.settings .subsection-heading .hint {
-  margin: 0;
-}
-
-.settings .title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.settings .meta {
-  font-size: var(--text-xs);
-  color: var(--text-dim);
 }
 
 .settings .status-pill {
@@ -151,58 +105,6 @@
   color: var(--text-dim);
 }
 .settings .status-pill.status-unavailable {
-  color: var(--text-dim);
-}
-
-.settings .row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
-}
-
-.settings .flash {
-  font-size: var(--text-xs);
-  color: var(--status-success-fg);
-}
-
-.settings .table-scroll {
-  width: 100%;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-.settings .grid {
-  width: 100%;
-  table-layout: fixed;
-  border-collapse: collapse;
-  font-size: var(--text-sm);
-}
-
-.settings .grid th,
-.settings .grid td {
-  text-align: left;
-  padding: var(--space-2) var(--space-2);
-  border-bottom: 1px solid var(--border-subtle);
-  vertical-align: middle;
-}
-
-.settings .grid th {
-  color: var(--text-dim);
-  font-weight: 500;
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.settings .grid td.actions,
-.settings .grid th.actions {
-  text-align: right;
-  width: 3rem;
-  white-space: nowrap;
-}
-
-.settings .muted {
   color: var(--text-dim);
 }
 

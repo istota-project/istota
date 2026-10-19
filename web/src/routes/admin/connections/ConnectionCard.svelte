@@ -31,7 +31,7 @@
   <header class="connection-head">
     <span class="connection-icon" aria-hidden="true"><Icon size={18} /></span>
     <div class="connection-title">
-      <h2>{title}</h2>
+      <h2 class="title-section">{title}</h2>
       {#if subtitle}
         <p class="caption">{subtitle}</p>
       {/if}

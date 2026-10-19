@@ -239,7 +239,8 @@
         {#if entry.title}
           <h1 class="reader-title">
             {#if permalink}
-              <a href={permalink} target="_blank" rel="noopener">{entry.title}</a>
+              <a class="link-quiet" href={permalink} target="_blank" rel="noopener">{entry.title}</a
+              >
             {:else}{entry.title}{/if}
           </h1>
         {/if}
@@ -361,19 +362,10 @@
   }
 
   .reader-title {
-    font-size: 1rem;
-    line-height: 1.25;
+    font-size: var(--text-lg);
+    line-height: var(--leading-tight);
     margin: 0 0 var(--space-4);
     color: var(--text-primary);
-  }
-
-  .reader-title a {
-    color: inherit;
-    text-decoration: none;
-  }
-
-  .reader-title a:hover {
-    text-decoration: underline;
   }
 
   .reader-hero {
@@ -451,7 +443,7 @@
     justify-content: center;
     width: 64px;
     height: 64px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
        the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.6);
@@ -459,7 +451,7 @@
     /* design-lint-allow-end */
     /* A triangle's optical centre sits left of its bounding box's. */
     padding-left: 5px;
-    transition: background 0.15s ease;
+    transition: background var(--transition-fast);
     pointer-events: none;
   }
 
@@ -479,9 +471,9 @@
     background: rgb(0 0 0 / 0.7);
     color: #fff;
     /* design-lint-allow-end */
-    font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-caps);
   }
 
   .reader-player {
@@ -513,7 +505,7 @@
 
   .reader-content {
     color: var(--text-secondary);
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     font-size: var(--text-base);
     word-break: break-word;
   }
@@ -551,7 +543,7 @@
     background: var(--surface-raised);
     color: var(--text-primary);
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     text-decoration: none;
   }
 

@@ -8,6 +8,8 @@ vi.mock('$app/paths', () => ({ base: '/istota' }));
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
+const copyText = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('$lib/clipboard', () => ({ copyText }));
 import { startStepUp, exportKeepass } from '$lib/api';
 const password = 'fixture-export-password';
 const downloads: string[] = [];
@@ -127,4 +129,16 @@ it('clears the key file on cancel and ignores a late export after navigation', a
   await Promise.resolve();
   expect(downloads).toHaveLength(1);
   expect(screen.queryByText(password)).toBeNull();
+});
+it('copies the export password through copyText', async () => {
+  const writeText = vi.fn(async () => undefined);
+  vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+  render(KeepassExportCard);
+  await fireEvent.click(screen.getByRole('button', { name: 'Export credentials' }));
+  await confirm();
+  await screen.findByText(password);
+  await fireEvent.click(screen.getByRole('button', { name: 'Copy password' }));
+  expect(copyText).toHaveBeenCalledWith(password, { label: 'Password copied' });
+  expect(writeText).not.toHaveBeenCalled();
+  expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy();
 });

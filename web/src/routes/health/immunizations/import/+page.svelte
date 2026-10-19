@@ -124,7 +124,7 @@
 </script>
 
 <div class="header">
-  <h1>Import immunizations</h1>
+  <h1 class="title-page">Import immunizations</h1>
   <Button href="{base}/health/immunizations">Back</Button>
 </div>
 
@@ -161,7 +161,7 @@
       </p>
     </FileDropZone>
 
-    <div class="actions">
+    <div class="actions hstack">
       <Button
         variant="primary"
         disabled={!file || extracting}
@@ -184,7 +184,7 @@
       bind:value={raw}
       placeholder={'INFS Pres Free 6mos-Adult (Fluzone trivalent) (influenza) (Given 11/28/2025)\nTdap (Tetanus, diphtheria, acellular pertussis) (Given 12/1/2016)\nTYDvi (Typhoid, ViCPs) (Given 10/23/2023)'}
     ></textarea>
-    <div class="actions">
+    <div class="actions hstack">
       <Button
         variant="primary"
         disabled={!raw.trim() || parsing}
@@ -201,7 +201,7 @@
 {/if}
 
 {#if extracting}
-  <div class="card extracting">
+  <div class="card extracting muted">
     <span class="spinner" aria-hidden="true"></span>
     Extracting immunizations from the source — this can take a few seconds.
   </div>
@@ -226,13 +226,13 @@
   </div>
 
   {#if documentId !== null && file}
-    <p class="attach-note">
+    <p class="attach-note caption">
       <strong>{file.name}</strong> will be kept as proof and attached to the rows below.
     </p>
   {/if}
 
   <div class="table-scroll">
-    <table class="grid">
+    <table class="table">
       <thead>
         <tr>
           <th>Vaccine</th>
@@ -242,12 +242,12 @@
           {#if mode === 'paste'}
             <th>Source line</th>
           {/if}
-          <th class="row-actions"></th>
+          <th class="col-actions"></th>
         </tr>
       </thead>
       <tbody>
         {#each parsed as row, i (i)}
-          <tr class:warn={row.name === 'Unknown' || !row.date_given}>
+          <tr class:is-warn={row.name === 'Unknown' || !row.date_given}>
             <td>
               <Select
                 value={row.name}
@@ -272,9 +272,9 @@
               <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
             </td>
             {#if mode === 'paste'}
-              <td class="src">{row.source_line}</td>
+              <td class="src cell-truncate">{row.source_line}</td>
             {/if}
-            <td class="row-actions">
+            <td class="col-actions">
               <Button size="sm" onclick={() => removeRow(i)}>Remove</Button>
             </td>
           </tr>
@@ -283,7 +283,7 @@
     </table>
   </div>
 
-  <div class="actions">
+  <div class="actions hstack">
     <Button variant="primary" disabled={importing} onclick={doImport}>
       {importing ? 'Importing…' : `Import ${parsed.length} rows`}
     </Button>
@@ -296,11 +296,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-3);
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
   }
   h2 {
     margin: 0;
@@ -332,7 +327,6 @@
   }
 
   .card {
-    padding: var(--space-3) var(--space-4);
     margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;
@@ -356,15 +350,11 @@
     box-sizing: border-box;
     resize: vertical;
   }
-  .paste:focus {
-    outline: 1px solid var(--accent-blue);
+  /* Not a TextArea yet, so outside the shared focus rule; same border, same token. */
+  .paste:focus-visible {
+    border-color: var(--focus-field-border);
   }
 
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   .card .actions {
     margin-top: var(--space-1);
   }
@@ -377,14 +367,11 @@
     flex-direction: row;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
 
   .attach-note {
     margin: 0 0 var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
   .review-head {
     display: flex;
@@ -397,22 +384,10 @@
     background: var(--surface-raised);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
-    font-size: 0.85em;
   }
 
-  tr.warn td {
-    background: hsla(35, 60%, 60%, 0.08);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
-  }
   td.src {
     max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--text-dim);

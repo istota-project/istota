@@ -148,38 +148,40 @@
   <div class="doc-error">{error}</div>
 {/if}
 
-<ul class="doc-grid">
-  {#each docs as doc (doc.id)}
-    <DocumentCard {doc} {entityType} {entityId} onDetach={askDetach} onDelete={askDelete} />
-  {/each}
-  <li>
-    <!-- The drop zone is the last grid cell rather than a separate band, so
+<div class="doc-grid-frame">
+  <ul class="doc-grid">
+    {#each docs as doc (doc.id)}
+      <DocumentCard {doc} {entityType} {entityId} onDetach={askDetach} onDelete={askDelete} />
+    {/each}
+    <li>
+      <!-- The drop zone is the last grid cell rather than a separate band, so
          "where documents go" and "where documents are" are one target. -->
-    <button
-      type="button"
-      class="dropzone"
-      class:dragging
-      disabled={uploading}
-      ondragover={(e) => {
-        e.preventDefault();
-        dragging = true;
-      }}
-      ondragleave={() => (dragging = false)}
-      ondrop={onDrop}
-      onclick={() => fileInput?.click()}
-    >
-      {uploading ? 'Uploading…' : 'Drop a file, or click to choose'}
-    </button>
-    <input
-      bind:this={fileInput}
-      class="hidden-input"
-      type="file"
-      multiple
-      accept="image/*,application/pdf,text/plain"
-      onchange={(e) => upload((e.currentTarget as HTMLInputElement).files)}
-    />
-  </li>
-</ul>
+      <button
+        type="button"
+        class="dropzone"
+        class:dragging
+        disabled={uploading}
+        ondragover={(e) => {
+          e.preventDefault();
+          dragging = true;
+        }}
+        ondragleave={() => (dragging = false)}
+        ondrop={onDrop}
+        onclick={() => fileInput?.click()}
+      >
+        {uploading ? 'Uploading…' : 'Drop a file, or click to choose'}
+      </button>
+      <input
+        bind:this={fileInput}
+        class="hidden-input"
+        type="file"
+        multiple
+        accept="image/*,application/pdf,text/plain"
+        onchange={(e) => upload((e.currentTarget as HTMLInputElement).files)}
+      />
+    </li>
+  </ul>
+</div>
 
 <ConfirmDialog
   bind:open={confirmOpen}
@@ -192,24 +194,31 @@
 />
 
 <style>
+  /* The grid steps by the width it is given rather than the viewport's: it
+     sits on a page in one place and inside a card in another. Same steps as
+     CardGrid. */
+  .doc-grid-frame {
+    container: doc-grid / inline-size;
+  }
+
   .doc-grid {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
   }
 
-  @media (max-width: 1100px) {
+  @container doc-grid (min-width: 40rem) {
     .doc-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
 
-  @media (max-width: 768px) {
+  @container doc-grid (min-width: 64rem) {
     .doc-grid {
-      grid-template-columns: minmax(0, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
 

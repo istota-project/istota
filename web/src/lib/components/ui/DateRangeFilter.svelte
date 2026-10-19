@@ -67,7 +67,7 @@
 -->
 <div class="date-range">
   {#if labelled}
-    <label class="date-cap" for="{uid}-from">{fromLabel.replace(/ date$/i, '')}</label>
+    <label class="date-cap caption" for="{uid}-from">{fromLabel.replace(/ date$/i, '')}</label>
   {/if}
   <span class="date-field" class:date-unset={!from}>
     <input
@@ -78,12 +78,12 @@
       {max}
       aria-label={fromLabel}
     />
-    {#if !from}<span class="date-ph" aria-hidden="true">{fromPlaceholder}</span>{/if}
+    {#if !from}<span class="date-ph caption" aria-hidden="true">{fromPlaceholder}</span>{/if}
   </span>
   {#if labelled}
-    <label class="date-cap" for="{uid}-to">{toLabel.replace(/ date$/i, '')}</label>
+    <label class="date-cap caption" for="{uid}-to">{toLabel.replace(/ date$/i, '')}</label>
   {:else}
-    <span class="date-sep">{separator}</span>
+    <span class="date-sep caption">{separator}</span>
   {/if}
   <span class="date-field" class:date-unset={!to}>
     <input
@@ -94,7 +94,7 @@
       {max}
       aria-label={toLabel}
     />
-    {#if !to}<span class="date-ph" aria-hidden="true">{toPlaceholder}</span>{/if}
+    {#if !to}<span class="date-ph caption" aria-hidden="true">{toPlaceholder}</span>{/if}
   </span>
 </div>
 
@@ -150,8 +150,6 @@
     flex: 0 0 auto;
     /* The row's spacing, in the one place it is wanted (see .date-range). */
     padding: 0 var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   /* Paint only. Height, corner and leading come from the field tier the
@@ -166,7 +164,7 @@
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--text-xs);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     /* design-lint-allow: hairline nudge below --space-1, matching the two
        filters this replaces. */
     padding: 0.2rem var(--space-2);
@@ -189,9 +187,7 @@
     display: none;
     align-items: center;
     padding: 0 calc(var(--space-2) + 1px);
-    font-size: var(--text-xs);
-    line-height: 1.2;
-    color: var(--text-dim);
+    line-height: var(--leading-tight);
     pointer-events: none;
   }
 

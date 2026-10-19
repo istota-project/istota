@@ -1,14 +1,5 @@
 <script lang="ts">
-  import {
-    Folder,
-    Link,
-    Minus,
-    Users,
-    ArrowUp,
-    ArrowDown,
-    ArrowUpDown,
-    RefreshCw,
-  } from '@lucide/svelte';
+  import { Folder, Link, Minus, Users, ArrowUp, ArrowDown, RefreshCw } from '@lucide/svelte';
   import type {
     DriveItem,
     WorkspaceListing,
@@ -24,6 +15,8 @@
     ConfirmDialog,
     KebabMenu,
     EmptyState,
+    SortHeader,
+    sortAria,
     type KebabItem,
   } from '$lib/components/ui';
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
@@ -31,6 +24,7 @@
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { fileIcon } from './filePresentation';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { createTableSort } from '$lib/ui/tableSort.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
     listing = null,
@@ -93,11 +87,16 @@
           })),
   );
   type SortKey = 'name' | 'size' | 'modified';
-  const saved = loadSetting<{ key?: string; descending?: boolean } | null>('workspace.sort', null);
-  let sortKey = $state<SortKey>(
-    saved?.key === 'size' || saved?.key === 'modified' ? saved.key : 'name',
-  );
-  let descending = $state(saved?.descending === true);
+  const COLUMNS: { key: SortKey; label: string; class: string }[] = [
+    { key: 'name', label: 'Name', class: '' },
+    { key: 'size', label: 'Size', class: 'size num' },
+    { key: 'modified', label: 'Modified', class: 'modified' },
+  ];
+  // A name reads A to Z first; a size or a date biggest and newest first.
+  const sort = createTableSort<SortKey>('workspace.sort', ['name', 'size', 'modified'], {
+    initial: { key: 'name', direction: 'ascending' },
+    firstDirection: (key) => (key === 'name' ? 'ascending' : 'descending'),
+  });
   let foldersFirst = $state(loadSetting<boolean>('workspace.foldersFirst', true) !== false);
   let query = $state('');
   let selectedKeys = $state<string[]>([]);
@@ -113,17 +112,17 @@
       if (foldersFirst && (a.kind === 'dir') !== (b.kind === 'dir'))
         return a.kind === 'dir' ? -1 : 1;
       let order = 0;
-      if (sortKey === 'name')
+      if (sort.key === 'name')
         order = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
       else {
-        const av = sortKey === 'size' ? a.size : a.modified ? Date.parse(a.modified) : null;
-        const bv = sortKey === 'size' ? b.size : b.modified ? Date.parse(b.modified) : null;
+        const av = sort.key === 'size' ? a.size : a.modified ? Date.parse(a.modified) : null;
+        const bv = sort.key === 'size' ? b.size : b.modified ? Date.parse(b.modified) : null;
         if (av === null && bv !== null) return 1;
         if (bv === null && av !== null) return -1;
         order = (av ?? 0) - (bv ?? 0);
       }
       return (
-        (descending ? -order : order) ||
+        (sort.descending ? -order : order) ||
         a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
       );
     });
@@ -139,11 +138,6 @@
     folderContext;
     selectedKeys = [];
   });
-  function sort(key: SortKey) {
-    descending = key === sortKey ? !descending : key !== 'name';
-    sortKey = key;
-    saveSetting('workspace.sort', { key: sortKey, descending });
-  }
   function toggle(key: string) {
     selectedKeys = selectedKeys.includes(key)
       ? selectedKeys.filter((item) => item !== key)
@@ -229,17 +223,17 @@
   <div class="mobile-sort">
     <Select
       ariaLabel="Sort files"
-      value={sortKey}
+      value={sort.key}
       options={[
         { value: 'name', label: 'Name' },
         { value: 'modified', label: 'Modified' },
         { value: 'size', label: 'Size' },
       ]}
-      onValueChange={(value) => sort(value as SortKey)}
+      onValueChange={(value) => sort.toggle(value as SortKey)}
     /><IconButton
-      label={descending ? 'Sort ascending' : 'Sort descending'}
-      onclick={() => sort(sortKey)}
-      >{#if descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
+      label={sort.descending ? 'Sort ascending' : 'Sort descending'}
+      onclick={() => sort.toggle(sort.key)}
+      >{#if sort.descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
     >
   </div>
   {#if onRefresh}<IconButton
@@ -280,10 +274,10 @@
   onConfirm={deleteSelected}
 />
 {#if entries.length}
-  <table aria-label="Files">
+  <table class="table table--fixed table--interactive" aria-label="Files">
     <thead
       ><tr>
-        <th scope="col" class="selection-column"
+        <th scope="col" class="col-select"
           ><input
             type="checkbox"
             aria-label="Select all visible items"
@@ -296,25 +290,17 @@
                 : [])}
           /></th
         >
-        {#each [{ key: 'name', label: 'Name' }, { key: 'size', label: 'Size' }, { key: 'modified', label: 'Modified' }] as column}
-          <th
-            scope="col"
-            class={column.key === 'name' ? '' : column.key}
-            aria-sort={sortKey === column.key ? (descending ? 'descending' : 'ascending') : 'none'}
-          >
-            <button
-              class="sort-button touch-target"
-              aria-label={`Sort by ${column.key}`}
-              onclick={() => sort(column.key as SortKey)}
-              >{column.label}{#if sortKey !== column.key}<ArrowUpDown
-                  size={14}
-                />{:else if descending}<ArrowDown size={14} />{:else}<ArrowUp
-                  size={14}
-                />{/if}</button
-            >
+        {#each COLUMNS as column (column.key)}
+          <th scope="col" class={column.class} aria-sort={sortAria(sort.directionOf(column.key))}>
+            <SortHeader
+              label={column.label}
+              class="touch-target"
+              direction={sort.directionOf(column.key)}
+              onclick={() => sort.toggle(column.key)}
+            />
           </th>
         {/each}
-        <th scope="col" class="actions-column" aria-label="Actions"></th>
+        <th scope="col" class="col-actions" aria-label="Actions"></th>
       </tr></thead
     >
     <tbody>
@@ -322,8 +308,8 @@
         {@const iso = entry.modified}
         {@const actions = menuItems(entry)}
         {@const EntryIcon = fileIcon(entry.name, entry.mime_type)}
-        <tr class:selected={selectedKeys.includes(entry.key)}>
-          <td class="selection-column"
+        <tr class:is-selected={selectedKeys.includes(entry.key)}>
+          <td class="col-select"
             ><input
               type="checkbox"
               aria-label={`Select ${entry.name}`}
@@ -349,6 +335,7 @@
                   >
                 {:else if entry.kind === 'file' && place.kind === 'nextcloud'}
                   <button
+                    class="button-reset"
                     type="button"
                     onclick={() =>
                       viewer.openFile(entry.path, {
@@ -359,15 +346,17 @@
                 {:else if entry.kind === 'file' && entry.web_url}
                   <a href={entry.web_url} target="_blank" rel="noopener noreferrer">{entry.name}</a>
                 {:else if entry.kind === 'file' && place.view_root}
-                  <button type="button" onclick={() => viewer.openFile(entry.ref!)}
-                    >{entry.name}</button
+                  <button
+                    class="button-reset"
+                    type="button"
+                    onclick={() => viewer.openFile(entry.ref!)}>{entry.name}</button
                   >
                 {:else}
-                  <span>{entry.name}</span>
+                  <span class="truncate">{entry.name}</span>
                 {/if}
                 {#if entry.share}
                   <span
-                    class="share-marker"
+                    class="share-marker caption"
                     role="img"
                     aria-label={`Shared · ${entry.share.count} ${entry.share.kind} shares`}
                     title={`Nextcloud ${entry.share.kind} shares`}
@@ -377,20 +366,20 @@
                     >
                   </span>
                 {/if}
-                {#if entry.kind === 'link'}<span class="caption marker-label"
+                {#if entry.kind === 'link'}<span class="caption marker-label truncate"
                     >Symbolic link · not followed</span
-                  >{:else if entry.kind === 'other'}<span class="caption marker-label"
+                  >{:else if entry.kind === 'other'}<span class="caption marker-label truncate"
                     >Not a regular file</span
                   >{/if}
               </div>
             </div>
           </td>
-          <td class="size muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
+          <td class="size num muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
           <td class="modified muted"
             >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
               >{:else}—{/if}</td
           >
-          <td class="actions-column">
+          <td class="col-actions">
             {#if actions.length}
               <KebabMenu items={actions} ariaLabel={`Actions for ${entry.name}`} />
             {/if}
@@ -462,13 +451,8 @@
   .mobile-sort {
     display: none;
   }
-  .selection-column {
-    width: 2rem;
-    text-align: center;
-    padding-inline: var(--space-2);
-  }
-  .selection-column + th,
-  .selection-column + td {
+  .col-select + th,
+  .col-select + td {
     padding-inline-start: 0;
   }
   input[type='checkbox'] {
@@ -476,30 +460,11 @@
     accent-color: var(--accent);
     cursor: pointer;
   }
-  .sort-button {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-  }
-  tr.selected {
-    background: var(--surface-raised);
-  }
   .delete-errors {
     padding: var(--space-2) var(--space-3);
   }
   .delete-errors p {
     margin: 0;
-  }
-  .entry-label > span:not(.share-marker) {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   @media (max-width: 640px) {
     .mobile-sort {
@@ -511,39 +476,10 @@
     .file-controls {
       gap: var(--space-2);
     }
-    th,
-    td {
-      padding-inline: var(--space-2);
-    }
   }
 
-  .actions-column {
-    width: 3rem;
-    text-align: center;
-    padding-inline: var(--space-1);
-  }
-
-  table {
-    width: 100%;
-    table-layout: fixed;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-  }
-  th {
-    text-align: left;
-    font-weight: 500;
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
-  th,
-  td {
-    padding: var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-  }
   .size {
     width: 6rem;
-    text-align: right;
-    white-space: nowrap;
   }
   .modified {
     width: 9rem;
@@ -578,11 +514,6 @@
     white-space: nowrap;
   }
   .entry-label button {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    cursor: pointer;
     overflow-wrap: anywhere;
   }
   .entry-label a:hover,
@@ -595,11 +526,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-  tbody tr:hover {
-    background: var(--surface-card);
   }
   .listing-notes {
     padding: var(--space-3);

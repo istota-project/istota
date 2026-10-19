@@ -403,7 +403,7 @@
   </div>
 
   {#if activeSource}
-    <p class="source-note">
+    <p class="source-note caption">
       {activeSource.description}
       {#if activeSource.available}
         <span class="source-meta">
@@ -475,7 +475,7 @@
   </div>
 
   <div class="log-footer">
-    <span class="log-count">{records.length} shown</span>
+    <span class="log-count caption num">{records.length} shown</span>
     {#if records.length > 0}
       <Button variant="secondary" size="sm" onclick={copyAll}>Copy</Button>
     {/if}
@@ -539,17 +539,11 @@
 
   .source-note {
     margin: 0 0 var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .source-meta {
     display: block;
     margin-top: var(--space-1);
-  }
-
-  .source-meta code {
-    font-family: var(--font-mono);
   }
 
   /* The reader itself: a fixed-height scroll pane rather than a growing page,
@@ -566,7 +560,7 @@
     padding: var(--space-2);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
 
   .log-row {
@@ -580,7 +574,7 @@
   }
 
   .log-row:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .log-time {
@@ -592,7 +586,7 @@
     /* Fixed width, or a WARNING row shifts every column after it (the same
        reason a status chip needs a min-width). */
     min-width: 4.5rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .lvl-error .log-level {
@@ -668,8 +662,6 @@
 
   .log-count {
     flex: 1;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   @media (max-width: 640px) {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { getAccounts, type AccountRow } from '$lib/money/api';
@@ -19,6 +19,9 @@
   let accounts: AccountRow[] = $state([]);
   let sidebarOpen = $state(false);
   let filterTimeout: ReturnType<typeof setTimeout> | null = null;
+  onDestroy(() => {
+    if (filterTimeout) clearTimeout(filterTimeout);
+  });
 
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 11 }, (_, i) => currentYear - i);
@@ -263,7 +266,7 @@
   .active-filter .clear {
     color: var(--text-dim);
     font-size: var(--text-sm);
-    line-height: 1;
+    line-height: var(--leading-none);
   }
 
   /* The chip precedes the toolbar in the DOM because on a wide screen it sits
@@ -340,11 +343,11 @@
   }
 
   .acct-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .acct-btn.selected {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
     color: var(--text-primary);
   }
 

@@ -227,7 +227,7 @@
     </div>
     {#snippet table(rows: Row[], label: string, ownerHeading: string)}
       <div class="table-scroll">
-        <table class="grid briefings-grid" aria-label={label}>
+        <table class="table table--fixed briefings-grid" aria-label={label}>
           <thead
             ><tr
               ><th scope="col" class="col-owner">{ownerHeading}</th>
@@ -260,7 +260,9 @@
                     >{STATE_LABEL[row.state]}</Badge
                   >
                 </td>
-                <td class="col-last">{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td>
+                <td class="col-last truncate"
+                  >{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td
+                >
                 <td class="col-actions">
                   <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />
                 </td>
@@ -348,9 +350,6 @@
     margin: 0;
     overflow-wrap: anywhere;
   }
-  .briefings-grid code {
-    font-size: var(--text-xs);
-  }
   /* Briefing is the unsized column: the min-width reserves it 12rem past the
      sized ones, and adminTables.test.ts holds the sum. */
   .briefings-grid {
@@ -370,15 +369,6 @@
   }
   .col-last {
     width: 6.5rem;
-  }
-  td.col-last {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .briefings-grid .col-actions {
-    width: 2.5rem;
-    text-align: right;
   }
   /* Narrow: keep every column and scroll sideways; the min-width tightens
      with Owner and Schedule. */

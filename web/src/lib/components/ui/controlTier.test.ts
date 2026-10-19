@@ -141,7 +141,7 @@ describe('controls resolve the tier channel', () => {
       // too, in the same file.
       const css = read(file);
       expect(css).toMatch(/font:\s*inherit/);
-      expect(css).toMatch(/line-height:\s*1\.2/);
+      expect(css).toMatch(/line-height:\s*var\(--leading-tight\)/);
     },
   );
 
@@ -150,7 +150,7 @@ describe('controls resolve the tier channel', () => {
     // at 1.2 with the same padding and min-height, so a second value here
     // would only reintroduce the mismatch it was compensating for.
     const css = read('Select.svelte');
-    expect(css).not.toMatch(/line-height:\s*1\.5/);
+    expect(css).not.toMatch(/line-height:\s*(1\.5|var\(--leading-normal\))/);
   });
 
   it('leaves no tier control sizing its own box in px', () => {

@@ -33,6 +33,9 @@ vi.mock('$lib/components/chat/autocomplete/providers', () => ({
   getInheritedBrain: vi.fn(async () => null),
 }));
 
+const copyText = vi.hoisted(() => vi.fn(async () => true));
+vi.mock('$lib/clipboard', () => ({ copyText }));
+
 import RoomSettings from './RoomSettings.svelte';
 import {
   getBaseModelChoices,
@@ -68,6 +71,22 @@ function mount(r: ChatRoom, onSave = vi.fn()) {
     },
   });
 }
+
+describe('RoomSettings — room token', () => {
+  it('copies the token through copyText', async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    try {
+      mount(room());
+      await fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      expect(copyText).toHaveBeenCalledWith('web-alice-abc');
+      expect(writeText).not.toHaveBeenCalled();
+      expect(await screen.findByRole('button', { name: 'Copied!' })).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 const CLAUDE: SelectableBrain = {
   kind: 'claude_code',

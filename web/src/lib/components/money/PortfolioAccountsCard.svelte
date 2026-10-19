@@ -115,7 +115,7 @@
   {:else if loaded && rows.length === 0}
     <EmptyState>No portfolio accounts yet. They appear with the first positions import.</EmptyState>
   {:else}
-    <p class="card-hint">
+    <p class="card-hint caption">
       Excluded accounts stay imported but are hidden from every chart and total. Group and type
       drive the Portfolio filters — a group is any label worth filtering by (an owner, a purpose).
       Edits save with the page's Save button.
@@ -126,13 +126,13 @@
     <datalist id="portfolio-account-groups">
       {#each groupSuggestions as g (g)}<option value={g}></option>{/each}
     </datalist>
-    <ul class="account-list">
+    <ul class="divided-list">
       {#each rows as row (row.account.id)}
         <li class="account-row" class:excluded={row.excluded}>
           <div class="account-head">
-            <span class="account-name">{row.account.account_name}</span>
+            <span class="account-name title-card">{row.account.account_name}</span>
             {#if row.account.account_number}
-              <code class="account-number">{row.account.account_number}</code>
+              <code class="account-number code-chip">{row.account.account_number}</code>
             {/if}
           </div>
           <div class="account-controls control-row">
@@ -172,22 +172,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
-  .account-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .account-row {
-    padding: var(--space-2) 0;
-  }
-
-  .account-row + .account-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .account-head {
@@ -204,18 +188,11 @@
   }
 
   .account-name {
-    font-size: var(--text-sm);
-    font-weight: 600;
     color: var(--text-primary);
   }
 
   .account-number {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-dim);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .account-controls {

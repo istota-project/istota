@@ -7,14 +7,19 @@
 
    In source order, which is also cascade order:
      - the box-sizing reset
-     - the named shared blocks: .micro-label, .caption, .muted,
+     - the layout utilities: .hstack, .vstack, .wrap, .list-reset, .truncate,
+       .button-reset (ahead of the roles, so a role on the same element wins)
+     - the named shared blocks: .micro-label, .caption, .muted, .description,
+       the heading base and .title-page / .title-section / .title-card,
+       the code element with .mono and .code-chip, .num,
        .spinner + @keyframes spin, .banner and its status variants
      - one global :focus-visible ring, and the text-field exception to it
      - the iOS date-input and 16px-zoom-floor fixes (see @media pointer:coarse)
      - .touch-target, the coarse-pointer hit-area overlay (24px floor;
        --touch-target-w / --touch-target-h override it at the call site)
      - .control-row (the field tier) and .content-frame (the content column)
-     - body / a base rules, .nav-hang, .overlay-safe
+     - body / a base rules, .link-action / .link-quiet / .link-muted,
+       .visually-hidden
 
    Each block carries its own rationale below; AGENTS.md "Small shared blocks"
    is the index. Pinned by contentFrame / controlTier / touchZoom / dateInputs
@@ -24,6 +29,59 @@
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Layout utilities: the rows, stacks, list resets, truncations and button
+   resets that were written out byte-for-byte in twenty-odd files each. One
+   class, so a page rule can still override any of it and keeps only what it
+   adds. The gaps are the commonest values; a call site that wants another
+   sets --hstack-gap / --vstack-gap rather than a second rule. Not `.row`:
+   that name meant "a wrapping row of controls" under .settings. They come
+   before every role class below so a role on the same element wins a tie:
+   `button-reset caption` keeps the caption's size and colour. */
+.hstack {
+  display: flex;
+  align-items: center;
+  gap: var(--hstack-gap, var(--space-2));
+}
+
+.vstack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vstack-gap, var(--space-3));
+}
+
+.wrap {
+  flex-wrap: wrap;
+}
+
+.list-reset {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* min-width: 0 is what lets a flex or grid child shrink below its text, which
+   the trio alone does not: without it an ellipsis never appears in a row. */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* A <button> that should read as its content: a name, a row, a caret. The
+   line-height pin is the rule under "Sizing and layout" in web/AGENTS.md:
+   `font: inherit` alone resets it. */
+.button-reset {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  line-height: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
 /* The small uppercase heading over a section, a sidebar list, or a definition
@@ -36,8 +94,8 @@
 .micro-label {
   color: var(--text-dim);
   font-size: var(--text-xs);
-  font-weight: 500;
-  letter-spacing: 0.05em;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
 }
 
@@ -66,6 +124,75 @@
   color: var(--text-muted);
 }
 
+/* The line under a page, card or modal title: what the thing above is for.
+   One step up from a caption and on the brighter of the two dim tokens,
+   because it is read rather than glanced at. Was `.settings .hint`, scoped to
+   the settings shell, and `Modal`'s own description and seven page copies
+   besides. The measure is the one geometry it carries: a sentence that runs
+   the width of a 980px card is hard to follow. */
+.description {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  max-width: 60ch;
+}
+
+/* Every heading starts at the semibold weight with no margin, so none falls
+   back to the browser's bold 700 and its em margins. Weightless, so any
+   class or page rule wins. Rendered content (`.prose`: feed entries, the
+   briefings reader, workspace markdown) keeps the browser's heading rhythm,
+   or an article's own headings would collapse onto its paragraphs. */
+:where(h1, h2, h3, h4):not(:where(.prose, .prose *)) {
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
+/* The three title steps. Typography only, like .micro-label: a page title, a
+   card title and a section title each want different space around them.
+   Nine page-title styles, three section-title weights and eight card-title
+   variants were written out before these; the card title sits a weight
+   under the section title above it. */
+.title-page {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.title-section {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.title-card {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+/* Code. The element rule gives every inline <code> the mono face a step under
+   the text around it; `.mono` is the face alone, for a path or an id that is
+   not code; `.code-chip` is the small raised chip that seven cards drew by
+   hand around a symbol, an account number or a rule value. */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.code-chip {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--surface-raised);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+/* Digits that line up: a count, a figure in a column, a value that changes
+   in place. Proportional digits make a ticking count shift its neighbours. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
 /* An inline "working…" spinner, beside its label. Declared in three files,
    and @keyframes is scoped per component in Svelte — so the three were three
    separate animations driving three separate rules. */
@@ -75,7 +202,7 @@
   height: 0.85rem;
   border: 2px solid var(--border-default);
   border-top-color: var(--text-muted);
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   animation: spin 0.8s linear infinite;
 }
 
@@ -144,13 +271,51 @@
 /* A definition list as a two-column grid: the <dt> at its content width, the
    <dd> filling the rest. Four files carried it, differing only in the column
    gap — /admin's rows are short pairs that read better further apart — so
-   that one value is a hook, the way cards.css does --card-min. */
+   that one value is a hook, the way cards.css does --card-min. The value
+   track is `minmax(0, 1fr)` and the <dd> wraps anywhere, so a long path or id
+   breaks inside its cell instead of widening the card (two cards overrode the
+   track to get that). The dt colour and the dd reset were restated by four
+   callers; they are defaults here, scored at one element so any class on the
+   cell wins. */
 .kv {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--space-1) var(--kv-gap, var(--space-3));
   margin: 0;
   font-size: var(--text-sm);
+}
+
+:where(.kv) > dt {
+  color: var(--text-dim);
+}
+
+:where(.kv) > dd,
+:where(.kv-stacked) > div > dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The stacked form: each pair a small block with the label above the value,
+   the blocks flowing into as many columns as fit (encounter and vaccine
+   facts). The markup wraps each pair in a <div>, which is what lets a pair be
+   a grid item. --kv-track is the narrowest a column may get, --kv-gap the
+   space between columns. */
+.kv-stacked {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--kv-track, 8rem), 100%), 1fr));
+  gap: var(--space-2) var(--kv-gap, var(--space-4));
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+:where(.kv-stacked) > div > dt {
+  margin-bottom: 0.15rem;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
 }
 
 /* A card's header row: the title at one end, its actions or timestamp at the
@@ -181,9 +346,10 @@
    text input as focus-visible however it was focused, so unlike a button they
    draw the ring on a plain mouse click too — which reads as an error state
    rather than a focus hint. They keep a caret and their own focus styling, so
-   the ring is dropped for them alone. Checkboxes, radios and the
-   input-as-button types are left out: they have no caret, and nothing but the
-   ring would show that they are focused. */
+   the ring is dropped for them alone; the rule after this one is what stands
+   in for it. Checkboxes, radios and the input-as-button types are left out:
+   they have no caret, and nothing but the ring would show that they are
+   focused. */
 input:not(
     [type='checkbox'],
     [type='radio'],
@@ -195,6 +361,20 @@ input:not(
 textarea:focus-visible,
 select:focus-visible {
   outline: none;
+}
+
+/* A text field's focus state: its border in --focus-field-border. The Input
+   and TextArea primitives, the full-width Select trigger that sits among them,
+   and the raw controls a Field still styles. Element-qualified so it outranks
+   a component's resting border (one class plus the scope hash) and stays
+   under `.invalid`, so a rejected value keeps its red border while focused. */
+input.ui-input:focus-visible,
+textarea.ui-textarea:focus-visible,
+button.ui-select-trigger--full:focus-visible,
+.field input:where(:not([type='checkbox'], [type='radio'], .ui-input)):focus-visible,
+.field select:focus-visible,
+.field textarea:where(:not(.ui-textarea)):focus-visible {
+  border-color: var(--focus-field-border);
 }
 
 /* iOS Safari gives date/time inputs a native control with an intrinsic content
@@ -444,7 +624,7 @@ input[type='week']::-webkit-date-and-time-value {
   :where(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color'])),
 .control-row :where(select) {
   min-height: var(--control-height-md);
-  line-height: 1.2;
+  line-height: var(--leading-tight);
 }
 
 /* Scrollbars are left entirely to the platform. Do NOT add `::-webkit-scrollbar`
@@ -483,7 +663,7 @@ body {
   font-family: var(--font-sans);
   background: var(--surface-base);
   color: var(--text-primary);
-  line-height: 1.5;
+  line-height: var(--leading-normal);
   display: flex;
   flex-direction: column;
 }
@@ -495,39 +675,54 @@ a:hover {
   color: var(--accent-hover);
 }
 
-/* Use on a flex nav container whose first chip/link is the leftmost element of
-   its row. Pulls the row left by one chip's horizontal padding so chip TEXT
-   visually aligns with the heading text on the row above. */
-.nav-hang {
-  margin-inline-start: calc(-1 * var(--chip-padding-x));
+/* Three link looks outside `.prose`, which owns content links.
+
+   `.link-action` is a <button> drawn as a content link, for an action that
+   sits inside a sentence ("+2 more", "Show the whole message") where a
+   bordered Button would break the line. `font: inherit` takes the line-height
+   with it, so it is pinned back beside it.
+
+   `.link-quiet` is a row or title link that reads as text until pointed at;
+   `.link-muted` is the same on the muted step, for a secondary link (a
+   source, "open in Files"). Both keep their colour on hover, where the bare
+   `a:hover` would brighten it, and show the underline instead. */
+.link-action {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+  color: var(--link);
+  cursor: pointer;
 }
 
-/* Safe-area padding for a viewport-pinned overlay backdrop.
-
-   There is no way to enforce this from above: a `position: fixed` element is
-   out of the document flow, so no ancestor's padding — not .app-content's, not
-   AppShell's — reaches it. Every full-bleed overlay has to carry the insets
-   itself, and this is that expression written once instead of per component.
-
-   Apply it to the BACKDROP, not the panel: the scrim must still run edge to
-   edge (it covers the status-bar strip, which is the point), and it is the
-   backdrop's padding that keeps the panel inside it clear of the notch, the
-   Dynamic Island and the home indicator. A panel sized against the backdrop
-   should use `max-height: 100%`, which resolves against the padded content box
-   and so tracks the insets for free.
-
-   Set --overlay-pad-block / --overlay-pad-inline to the padding the overlay
-   wants where there are no insets (desktop, and any browser tab); each edge
-   then takes whichever of the two is larger, so this is inert there. */
-.overlay-safe {
-  padding-top: max(var(--overlay-pad-block, 1rem), var(--safe-top));
-  padding-bottom: max(var(--overlay-pad-block, 1rem), var(--safe-bottom));
-  padding-left: max(var(--overlay-pad-inline, 1rem), var(--safe-left));
-  padding-right: max(var(--overlay-pad-inline, 1rem), var(--safe-right));
+.link-quiet {
+  color: var(--text-primary);
+  text-decoration: none;
 }
 
-/* Text a screen reader reads and the page does not show. The same block was
-   hand-copied per component (NoticeDrawer, chat Message, TaskReachIcon). */
+.link-muted {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.link-action:hover {
+  color: var(--link);
+  text-decoration: underline;
+}
+
+.link-quiet:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
+.link-muted:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
+}
+
+/* Text a screen reader reads and the page does not show. NoticeDrawer, chat
+   Message and TaskReachIcon each carried a copy before this. */
 .visually-hidden {
   position: absolute;
   width: 1px;

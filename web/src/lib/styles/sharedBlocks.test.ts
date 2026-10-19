@@ -97,7 +97,19 @@ describe('.kv', () => {
 
   it('is a two-column grid: label at content width, value filling the rest', () => {
     expect(body).toBeDefined();
-    expect(body).toContain('grid-template-columns: max-content 1fr');
+    // minmax(0, …), so a long path or id in a value wraps inside its cell
+    // rather than widening the card; two cards had overridden the track to
+    // get that.
+    expect(body).toContain('grid-template-columns: max-content minmax(0, 1fr)');
+  });
+
+  it('carries the label colour and the value reset its callers used to restate', () => {
+    expect(ruleBody(cascade, ':where(.kv) > dt')).toContain('color: var(--text-dim)');
+    const at = cascade.indexOf('\n:where(.kv) > dd,');
+    expect(at).toBeGreaterThan(-1);
+    const dd = cascade.slice(at, cascade.indexOf('}', at));
+    expect(dd).toContain('margin: 0');
+    expect(dd).toContain('overflow-wrap: anywhere');
   });
 
   it('takes its column gap from a hook, so a wide table can open it up', () => {

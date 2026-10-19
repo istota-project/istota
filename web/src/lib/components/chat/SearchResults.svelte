@@ -63,7 +63,7 @@
     <ul class="cards">
       {#each data.results as r, i (i)}
         <li class="card" class:memory={isMemory(r)}>
-          <div class="result-head">
+          <div class="hstack caption">
             <span class="icon" aria-hidden="true">
               {#if isMemory(r)}
                 <FileText size={14} />
@@ -134,19 +134,12 @@
   /* Not the global .card-head, which is a row with a title at one end and
      its actions at the other. This is a one-end meta line — an icon and the
      source it came from — so it keeps its own name. */
-  .result-head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
   .icon {
     display: inline-flex;
     color: var(--text-dim);
   }
   .source {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-secondary);
   }
   .date {
@@ -156,7 +149,7 @@
   .summary {
     font-size: var(--text-sm);
     color: var(--text-primary);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
   .card-actions {
     display: flex;

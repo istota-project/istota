@@ -82,7 +82,7 @@
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else}
-    <p class="card-hint">
+    <p class="card-hint caption">
       The distinct values recent imports carried, and the account each one posted to when it was
       last seen. Values falling through to <code>Expenses:Uncategorized</code> come first — that is the
       list a rule is worth writing for. An edit made since a sync is not reflected here; run it through
@@ -92,10 +92,10 @@
     {#if loaded && ordered.length === 0}
       <EmptyState>No imports yet.</EmptyState>
     {:else}
-      <ul class="cov-list">
+      <ul class="divided-list">
         {#each ordered as row (row.value)}
           <li class="cov-row">
-            <span class="cov-value">{row.value}</span>
+            <span class="cov-value code-chip">{row.value}</span>
             <span class="cov-account muted">{row.posted_account ?? '—'}</span>
             {#if isFallthrough(row)}
               <Badge variant="warn">no rule</Badge>
@@ -119,14 +119,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
-  .cov-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
 
   .cov-row {
@@ -134,21 +126,11 @@
     flex-wrap: wrap;
     align-items: baseline;
     gap: var(--space-1) var(--space-2);
-    padding: var(--space-2) 0;
     font-size: var(--text-sm);
   }
 
-  .cov-row + .cov-row {
-    border-top: 1px solid var(--border-subtle);
-  }
-
   .cov-value {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-primary);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .cov-account {

@@ -314,7 +314,7 @@
   }
 
   .share-map-area {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .share-map-attribution {

@@ -147,8 +147,8 @@
        shows nothing but the centered message. A failed filtered load keeps
        it: the filter is the only way to change what failed. -->
   <div class="header">
-    <h1>Labs</h1>
-    <div class="actions">
+    <h1 class="title-page">Labs</h1>
+    <div class="actions hstack">
       <Select
         value={specimen}
         options={specimenOptions}
@@ -313,16 +313,6 @@
     align-items: center;
     margin-bottom: var(--space-4);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
 
   .drafts {
     background: var(--surface-card);
@@ -354,7 +344,7 @@
     font-size: var(--text-sm);
   }
   .drafts a:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .spreadsheet {
     background: var(--surface-card);
@@ -364,7 +354,9 @@
   }
   .scroll {
     overflow: auto;
-    max-height: calc(100vh - 200px);
+    /* design-lint-allow: lib/viewport.ts writes --app-height and --kb-height at
+       runtime; this is body's own height expression, less the page chrome. */
+    max-height: calc(var(--app-height, 100dvh) - var(--kb-height, 0px) - 200px);
   }
   table {
     border-collapse: separate;
@@ -388,7 +380,7 @@
     text-align: center;
     padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--border-subtle);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -412,7 +404,7 @@
     text-decoration: underline;
   }
   .date {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   /* Category banner row — section divider running across the markers it
@@ -424,8 +416,8 @@
   .cat-cell {
     text-align: left;
     font-size: var(--text-xs);
-    font-weight: 500;
-    letter-spacing: 0.05em;
+    font-weight: var(--weight-medium);
+    letter-spacing: var(--tracking-caps);
     color: var(--text-muted);
     text-transform: uppercase;
     padding: var(--space-1) var(--space-2);
@@ -455,7 +447,7 @@
   }
   .marker-name {
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     /* The fixed column width clips overlong names to an ellipsis (full
 		   name lives on the link's title tooltip). Keeping the column a fixed
 		   width is what keeps the ref column's sticky offset exact. */
@@ -466,7 +458,7 @@
     text-overflow: ellipsis;
   }
   .marker-unit {
-    font-size: 10px;
+    font-size: var(--text-2xs);
     color: var(--text-dim);
     white-space: nowrap;
     /* Yield before the name: under a space deficit the unit collapses
@@ -478,10 +470,10 @@
     text-overflow: ellipsis;
   }
   .ref {
-    font-size: 10px;
+    font-size: var(--text-2xs);
     color: var(--text-dim);
     font-style: italic;
-    font-weight: 400;
+    font-weight: var(--weight-regular);
   }
   tbody td {
     text-align: center;
@@ -610,18 +602,19 @@
   tbody td.flag-C {
     background: var(--status-critical-bg);
     color: var(--status-critical-fg);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   /* Subtle full-row highlight on hover to make scanning a marker's values
 	   across dates easier. An inset overlay lightens every cell uniformly
 	   over its own background (tinted data, opaque frozen columns, flag
 	   cells) without replacing the base colour. Hover-capable devices only,
-	   and not on the category banner rows. */
+	   and not on the category banner rows. Mixed from --text-primary so it
+	   darkens on the light theme and lightens on the dark one. */
   @media (hover: hover) {
     tbody tr:not(.cat-row):hover td,
     tbody tr:not(.cat-row):hover th {
-      box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.025);
+      box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--text-primary) 4%, transparent);
     }
   }
 
@@ -657,7 +650,7 @@
     }
     .drafts a > :nth-child(4) {
       grid-column: 1 / -1;
-      font-size: 11px;
+      font-size: var(--text-2xs);
     }
     .spreadsheet {
       border-radius: 0;
@@ -666,7 +659,8 @@
       margin: 0 -0.75rem;
     }
     .scroll {
-      max-height: calc(100vh - 160px);
+      /* design-lint-allow: runtime viewport tokens, as above. */
+      max-height: calc(var(--app-height, 100dvh) - var(--kb-height, 0px) - 160px);
     }
     /* Marker name stays pinned; the reference column scrolls away
 		   horizontally because it's secondary and would eat the narrow

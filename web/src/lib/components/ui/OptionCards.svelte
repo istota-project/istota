@@ -76,7 +76,12 @@
   keys move the selection, as in a native radio group, and skip a disabled
   card.
 -->
-<div class="option-cards" role="radiogroup" aria-label={label}>
+<div
+  class="option-cards vstack"
+  style:--vstack-gap="var(--space-2)"
+  role="radiogroup"
+  aria-label={label}
+>
   {#each options as option, index (option.value)}
     {@const checked = option.value === value}
     <button
@@ -93,11 +98,11 @@
     >
       <span class="dot" aria-hidden="true"></span>
       <span class="text">
-        <span class="title"
+        <span class="title title-card"
           >{option.title}{#if option.badge}<Badge variant="info" size="sm">{option.badge}</Badge
             >{/if}</span
         >
-        {#if option.description}<span class="description">{option.description}</span>{/if}
+        {#if option.description}<span class="caption">{option.description}</span>{/if}
       </span>
     </button>
     {#if checked && selected}
@@ -107,12 +112,6 @@
 </div>
 
 <style>
-  .option-cards {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
   .option-card {
     display: flex;
     align-items: flex-start;
@@ -124,7 +123,7 @@
     background: var(--surface-card);
     color: var(--text-primary);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     cursor: pointer;
     transition: border-color var(--transition-fast);
@@ -143,7 +142,7 @@
   }
 
   .option-card[aria-disabled='true'] {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 
@@ -154,7 +153,7 @@
     height: 1em;
     margin-top: 0.2em;
     border: 1px solid var(--border-hover);
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     box-sizing: border-box;
   }
 
@@ -174,13 +173,6 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
-    font-size: var(--text-sm);
-    font-weight: 600;
-  }
-
-  .description {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .option-detail {

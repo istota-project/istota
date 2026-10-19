@@ -102,7 +102,7 @@
      stylesheet loaded last was the one in effect. Defined once here, where the
      pages that use them live, scoped under a frame class this layout owns.
      Mirrors .health-frame; deliberately not named .money-*, which is the
-     record-table shell owned by routes/money/+layout.svelte. */
+     page chrome imported by routes/money/+layout.svelte. */
   :global(.report-frame .section-header) {
     display: flex;
     align-items: baseline;
@@ -115,15 +115,11 @@
     margin-top: 0;
   }
 
+  /* The trigger carries .button-reset; this is its type and layout. */
   :global(.report-frame .section-toggle) {
-    background: none;
-    border: none;
     color: var(--text-primary);
-    font: inherit;
     font-size: var(--text-base);
-    font-weight: 600;
-    cursor: pointer;
-    padding: 0;
+    font-weight: var(--weight-semibold);
     display: flex;
     align-items: center;
     gap: var(--space-2);

@@ -62,7 +62,7 @@
       ><Asterisk size="100%" strokeWidth={3.5} /></span
     >
   {:else}
-    <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
+    <span class="count-pill num" class:muted={tone === 'muted'} {title}>{shown}</span>
   {/if}
 {/if}
 
@@ -79,8 +79,8 @@
     background: var(--accent);
     color: var(--surface-base);
     font-size: var(--text-xs);
-    font-weight: 600;
-    line-height: 1;
+    font-weight: var(--weight-semibold);
+    line-height: var(--leading-none);
   }
   /* Same pill, stated rather than announced: the badge fill drops to the
      surface every other quiet chip uses and the digits to muted text. */

@@ -131,7 +131,7 @@
   }
 </script>
 
-<div class="step">
+<div class="vstack">
   <p>Choose how you and anyone you invite will open Istota once it is set up.</p>
   <OptionCards
     label="How people reach Istota"
@@ -143,7 +143,7 @@
     }}
   >
     {#snippet selected(value)}
-      <div class="fields">
+      <div class="vstack">
         {#if value === 'local'}
           {#if !openedHere}
             <NoticeBanner
@@ -251,13 +251,6 @@
 </div>
 
 <style>
-  .step,
-  .fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   p {
     margin: 0;
   }

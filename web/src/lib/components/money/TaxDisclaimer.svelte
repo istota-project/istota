@@ -30,7 +30,7 @@
 
   .gaps-label {
     margin: 0 0 var(--space-1);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   ul {

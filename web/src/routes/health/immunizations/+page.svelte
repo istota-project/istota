@@ -24,7 +24,7 @@
     PageLoading,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
-  import { formatDate as formatIsoDate } from '$lib/dateFormat';
+  import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
 
   let loading = $state(true);
   let error = $state('');
@@ -36,7 +36,7 @@
 
   let formOpen = $state(false);
   let formName = $state('Influenza');
-  let formDate = $state(new Date().toISOString().slice(0, 10));
+  let formDate = $state(localDateISO());
   let formProduct = $state('');
   let formFacility = $state('');
   let formLot = $state('');
@@ -156,8 +156,8 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Immunizations</h1>
-    <div class="actions">
+    <h1 class="title-page">Immunizations</h1>
+    <div class="actions hstack">
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Log dose'}
       </Button>
@@ -234,7 +234,7 @@
             class="card interactive"
             href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
           >
-            <span class="name">{c.display_name}</span>
+            <span class="name title-card">{c.display_name}</span>
             <Badge variant={immunizationStatusVariant(c.status)}
               >{immunizationStatusLabel(c.status)}</Badge
             >
@@ -275,7 +275,7 @@
                 class="card interactive"
                 href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
               >
-                <span class="name">{c.display_name}</span>
+                <span class="name title-card">{c.display_name}</span>
                 <Badge variant={immunizationStatusVariant(c.status)}
                   >{immunizationStatusLabel(c.status)}</Badge
                 >
@@ -296,12 +296,12 @@
     {/if}
 
     {#if other.length > 0}
-      <h3>Other recorded</h3>
+      <h3 class="micro-label">Other recorded</h3>
       <ul class="cards card-grid">
         {#each other as c (c.name)}
           <li>
             <div class="card">
-              <span class="name">{c.display_name}</span>
+              <span class="name title-card">{c.display_name}</span>
               <Badge variant="neutral">
                 {c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
               </Badge>
@@ -330,17 +330,17 @@
     {#if history.length === 0}
       <EmptyState size="sm">No immunizations recorded yet.</EmptyState>
     {:else}
-      <div class="table-scroll">
-        <table class="grid" aria-label="Immunization history">
+      <div class="table-scroll table--cards">
+        <table class="table" aria-label="Immunization history">
           <thead>
             <tr>
               <th>Date</th>
               <th>Vaccine</th>
-              <th>Product</th>
-              <th>Dose label</th>
-              <th>Facility</th>
-              <th>Notes</th>
-              <th class="row-actions"></th>
+              <th class="card-hidden">Product</th>
+              <th class="card-hidden">Dose label</th>
+              <th class="card-hidden">Facility</th>
+              <th class="card-hidden">Notes</th>
+              <th class="col-actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -351,10 +351,10 @@
               <tr>
                 <td class="date">
                   <time datetime={i.date_given}>{formatDate(i.date_given)}</time>{#if details}<span
-                      class="mobile-details">{` · ${details}`}</span
+                      class="card-only">{` · ${details}`}</span
                     >{/if}
                 </td>
-                <td class="vaccine">
+                <td class="vaccine cell-primary">
                   <a
                     class="link"
                     href="{base}/health/immunizations/vaccine?name={encodeURIComponent(i.name)}"
@@ -362,11 +362,11 @@
                     {i.name}
                   </a>
                 </td>
-                <td class="detail">{i.product_name || ''}</td>
-                <td class="detail">{i.dose_label || ''}</td>
-                <td class="detail">{i.facility || ''}</td>
-                <td class="notes">{i.notes || ''}</td>
-                <td class="row-actions">
+                <td class="card-hidden">{i.product_name || ''}</td>
+                <td class="card-hidden">{i.dose_label || ''}</td>
+                <td class="card-hidden">{i.facility || ''}</td>
+                <td class="notes card-hidden cell-truncate">{i.notes || ''}</td>
+                <td class="col-actions">
                   <div class="row-actions-inner">
                     <KebabMenu
                       ariaLabel="Immunization actions"
@@ -406,16 +406,6 @@
     align-items: center;
     margin-bottom: var(--space-4);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
 
   .quick-form {
     background: var(--surface-card);
@@ -429,29 +419,12 @@
   }
   .quick-form .row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);
   }
   .quick-form :global(.field.full) {
     grid-column: 1 / -1;
     margin-top: var(--space-1);
-  }
-  .quick-form input,
-  .quick-form textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    line-height: 1.4;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  .quick-form textarea {
-    resize: vertical;
-    font-family: inherit;
   }
   .quick-form details.advanced > summary {
     color: var(--text-muted);
@@ -468,11 +441,6 @@
   }
   .coverage h3 {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .cards {
     list-style: none;
@@ -491,13 +459,10 @@
     align-items: flex-start;
     gap: var(--space-2);
     width: 100%;
-    padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
   }
   .card .name {
-    font-weight: 500;
-    font-size: var(--text-sm);
-    line-height: 1.35;
+    line-height: var(--leading-snug);
   }
   .card-body {
     margin-top: auto;
@@ -533,25 +498,14 @@
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     font-size: var(--text-sm);
     max-width: 240px;
   }
 
-  .mobile-details {
-    display: none;
-  }
   td.notes {
     max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--text-muted);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
   }
   .row-actions-inner {
     display: flex;
@@ -589,61 +543,25 @@
     }
   }
 
-  @media (max-width: 639px) {
-    .history table.grid,
-    .history tbody {
-      display: block;
-    }
-    .history thead {
-      display: none;
-    }
-    .history tbody tr {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      gap: var(--space-1) 0;
-      padding: var(--space-3) 0;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .history table.grid tbody td {
-      display: block;
-      min-width: 0;
-      max-width: 100%;
-      padding: 0;
-      border: 0;
-      overflow-wrap: anywhere;
-    }
-    .history table.grid tbody td.vaccine {
-      order: -2;
-      flex: 1 1 calc(100% - var(--touch-comfort));
-      padding-right: var(--space-2);
+  /* The card layout is the table family's (.table--cards); what is left is
+     this record's: the name a step larger, the date line muted, and both
+     cut to one line, which only a card wants. */
+  @container (max-width: 40rem) {
+    td.vaccine {
       font-size: var(--text-base);
     }
-    .history table.grid tbody td.row-actions {
-      order: -1;
-      flex: 0 0 var(--touch-comfort);
-      align-self: flex-start;
+    td.date {
+      color: var(--text-muted);
     }
-    .history .row-actions-inner {
-      min-height: var(--touch-min);
-      align-items: center;
-    }
-    .history table.grid tbody td.vaccine,
-    .history table.grid tbody td.date {
+    td.vaccine,
+    td.date {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .history td.date {
-      flex-basis: 100%;
-      color: var(--text-muted);
-    }
-    .mobile-details {
-      display: inline;
-    }
-    .history table.grid tbody td.detail,
-    .history table.grid tbody td.notes {
-      display: none;
+    .row-actions-inner {
+      min-height: var(--touch-min);
+      align-items: center;
     }
   }
 </style>

@@ -301,7 +301,7 @@
           {#if selectedPlace && (statsLoading || placeStats)}
             <div class="stats-panel">
               <div class="stats-header">
-                <span class="stats-name">{selectedPlace.name}</span>
+                <span class="stats-name title-card">{selectedPlace.name}</span>
                 <div class="stats-actions">
                   <IconButton
                     class="stats-edit touch-target"
@@ -333,25 +333,30 @@
               {:else if placeStats && placeStats.total_visits > 0}
                 <div class="stats-grid">
                   <div class="stat">
-                    <span class="stat-value">{placeStats.total_visits}</span>
-                    <span class="stat-label"
+                    <span class="stat-value num">{placeStats.total_visits}</span>
+                    <span class="stat-label caption"
                       >{placeStats.total_visits === 1 ? 'visit' : 'visits'}</span
                     >
                   </div>
                   <div class="stat">
-                    <span class="stat-value">{formatDuration(placeStats.avg_duration_min)}</span>
-                    <span class="stat-label">avg</span>
+                    <span class="stat-value num">{formatDuration(placeStats.avg_duration_min)}</span
+                    >
+                    <span class="stat-label caption">avg</span>
                   </div>
                   <div class="stat">
-                    <span class="stat-value">{formatDuration(placeStats.longest_visit_min)}</span>
-                    <span class="stat-label">longest</span>
+                    <span class="stat-value num"
+                      >{formatDuration(placeStats.longest_visit_min)}</span
+                    >
+                    <span class="stat-label caption">longest</span>
                   </div>
                   <div class="stat">
-                    <span class="stat-value">{formatDuration(placeStats.total_duration_min)}</span>
-                    <span class="stat-label">total</span>
+                    <span class="stat-value num"
+                      >{formatDuration(placeStats.total_duration_min)}</span
+                    >
+                    <span class="stat-label caption">total</span>
                   </div>
                 </div>
-                <div class="stats-dates">
+                <div class="stats-dates caption">
                   <span>First: {formatDate(placeStats.first_visit)}</span>
                   <span>Last: {formatDate(placeStats.last_visit)}</span>
                 </div>
@@ -455,11 +460,6 @@
     margin-bottom: var(--space-2);
   }
 
-  .stats-name {
-    font-size: var(--text-sm);
-    font-weight: 500;
-  }
-
   .stats-actions {
     display: flex;
     gap: 0.15rem;
@@ -485,21 +485,14 @@
 
   .stat-value {
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
-  }
-
-  .stat-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .stats-dates {
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .stats-loading,
@@ -522,7 +515,7 @@
     color: inherit;
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     cursor: pointer;
     padding: 0.2rem var(--space-3);
     border-radius: var(--radius-sm);
@@ -534,11 +527,11 @@
   }
 
   .place-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .place-btn.selected {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
     color: var(--text-primary);
   }
 
@@ -546,5 +539,6 @@
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

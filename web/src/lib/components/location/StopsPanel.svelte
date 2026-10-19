@@ -31,13 +31,13 @@
   {/if}
   {#if trips.length > 0}
     <div class="panel-section">
-      <div class="panel-label">Trips</div>
+      <div class="panel-label micro-label">Trips</div>
       <TripList {trips} {onTripClick} />
     </div>
   {/if}
   {#if summary && summary.stops.length > 0}
     <div class="panel-section">
-      <div class="panel-label">Stops</div>
+      <div class="panel-label micro-label">Stops</div>
       <StopTimeline stops={summary.stops} {onStopClick} />
     </div>
   {/if}
@@ -65,11 +65,6 @@
   }
 
   .panel-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
     margin-bottom: var(--space-1);
   }
 </style>

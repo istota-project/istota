@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import {
     ApiError,
     getTaxEstimate,
@@ -26,6 +27,7 @@
   let w2Months = $state(12);
 
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(debounceTimer));
 
   async function loadInitial() {
     loading = true;
@@ -208,10 +210,10 @@
     <div class="tax-layout">
       <!-- Inputs -->
       <section class="input-section">
-        <h2>Inputs</h2>
+        <h2 class="title-section">Inputs</h2>
         <div class="input-card">
           <div class="input-group">
-            <label class="input-label" for="w2-income">W-2 income YTD</label>
+            <label class="input-label caption" for="w2-income">W-2 income YTD</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input id="w2-income" type="number" bind:value={w2Income} oninput={scheduleRecalc} />
@@ -219,7 +221,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="w2-fed">Federal withholding YTD</label>
+            <label class="input-label caption" for="w2-fed">Federal withholding YTD</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -232,7 +234,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="w2-state">State withholding YTD</label>
+            <label class="input-label caption" for="w2-state">State withholding YTD</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -245,7 +247,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="w2-months">W-2 employment months</label>
+            <label class="input-label caption" for="w2-months">W-2 employment months</label>
             <div class="input-field">
               <input
                 id="w2-months"
@@ -255,12 +257,12 @@
                 bind:value={w2Months}
                 oninput={scheduleRecalc}
               />
-              <span class="input-suffix">of 12</span>
+              <span class="input-suffix caption">of 12</span>
             </div>
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="fed-est">Federal estimated paid</label>
+            <label class="input-label caption" for="fed-est">Federal estimated paid</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -273,7 +275,7 @@
           </div>
 
           <div class="input-group">
-            <label class="input-label" for="state-est">State estimated paid</label>
+            <label class="input-label caption" for="state-est">State estimated paid</label>
             <div class="input-field">
               <span class="input-prefix">$</span>
               <input
@@ -286,7 +288,7 @@
           </div>
         </div>
 
-        <div class="input-meta">
+        <div class="input-meta caption">
           <span>Q{data.quarter} {data.tax_year}</span>
           <span>{data.filing_status.toUpperCase()}</span>
           <span
@@ -297,7 +299,7 @@
 
       <!-- Results -->
       <section class="results-section">
-        <h2>Estimate</h2>
+        <h2 class="title-section">Estimate</h2>
 
         <div class="summary-cards">
           <StatTile
@@ -331,33 +333,35 @@
         </div>
 
         <div class="breakdown-table">
-          <div class="breakdown-header">
+          <div class="record-header micro-label">
             <span class="breakdown-label"></span>
-            <span class="breakdown-val">Federal</span>
-            {#if showState}<span class="breakdown-val">{stateColumnLabel}</span>{/if}
+            <span class="breakdown-val num">Federal</span>
+            {#if showState}<span class="breakdown-val num">{stateColumnLabel}</span>{/if}
           </div>
 
-          <div class="breakdown-group-label">Income</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Income</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">SE income (YTD)</span>
-            <span class="breakdown-val">{fmtDollar(data.se_income_ytd)}</span>
-            {#if showState}<span class="breakdown-val"></span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.se_income_ytd)}</span>
+            {#if showState}<span class="breakdown-val num"></span>{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">SE income (annualized)</span>
-            <span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span
+            <span class="breakdown-val num">{fmtDollar(data.se_income_annualized)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.se_income_annualized)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">W-2 income (annualized)</span>
-            <span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span
+            <span class="breakdown-val num">{fmtDollar(data.w2_income_annualized)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.w2_income_annualized)}</span
               >{/if}
           </div>
           <details class="info-panel">
             <summary>How income is annualized</summary>
-            <p>
+            <p class="caption">
               This uses the IRS annualized-income method (Form 2210). For the Q{data.quarter}
               payment, SE income is pulled from the ledger through the first
               {data.annualization_months} months of the year and annualized &times;{(
@@ -377,27 +381,27 @@
             </p>
           </details>
 
-          <div class="breakdown-group-label">Self-employment tax</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Self-employment tax</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">SE tax</span>
-            <span class="breakdown-val">{fmtDollar(data.se_tax)}</span>
-            {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.se_tax)}</span>
+            {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Half SE deduction</span>
-            <span class="breakdown-val">{fmtDollar(data.half_se_deduction)}</span>
-            {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.half_se_deduction)}</span>
+            {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
           </div>
           {#if data.additional_medicare_tax > 0}
-            <div class="breakdown-row">
+            <div class="record-row record-row--tree">
               <span class="breakdown-label">Additional Medicare tax (0.9%)</span>
-              <span class="breakdown-val">{fmtDollar(data.additional_medicare_tax)}</span>
-              {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+              <span class="breakdown-val num">{fmtDollar(data.additional_medicare_tax)}</span>
+              {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
             </div>
           {/if}
           <details class="info-panel">
             <summary>How SE tax works</summary>
-            <p>
+            <p class="caption">
               SE tax is 15.3% (12.4% Social Security + 2.9% Medicare) on {fmtPct(
                 data.se_taxable_fraction,
               )} of net SE income. The taxable base is {fmtDollar(seTaxableBase)}.
@@ -416,20 +420,20 @@
             </p>
           </details>
 
-          <div class="breakdown-group-label">Tax calculation</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Tax calculation</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label"
-              >AGI{#if showState && stateBasisLabel}<span class="basis-note">
+              >AGI{#if showState && stateBasisLabel}<span class="basis-note caption">
                   · state basis: {stateBasisLabel}</span
                 >{/if}</span
             >
-            <span class="breakdown-val">{fmtDollar(data.federal_agi)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_agi)}</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.federal_agi)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_agi)}</span>{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Standard deduction</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_standard_deduction)}</span>
-            {#if showState}<span class="breakdown-val"
+            <span class="breakdown-val num">{fmtDollar(data.federal_standard_deduction)}</span>
+            {#if showState}<span class="breakdown-val num"
                 >{fmtDollar(data.state_standard_deduction)}</span
               >{/if}
           </div>
@@ -437,47 +441,51 @@
             <!-- Illinois, Indiana and Michigan carry an exemption instead of a
                  standard deduction. Without this row the gap between AGI and
                  taxable income has nothing explaining it. -->
-            <div class="breakdown-row">
+            <div class="record-row record-row--tree">
               <span class="breakdown-label">Personal exemption</span>
-              <span class="breakdown-val dim">n/a</span>
-              <span class="breakdown-val">{fmtDollar(data.state_personal_exemption)}</span>
+              <span class="breakdown-val num dim">n/a</span>
+              <span class="breakdown-val num">{fmtDollar(data.state_personal_exemption)}</span>
             </div>
           {/if}
           {#if data.qbi_deduction > 0}
-            <div class="breakdown-row">
+            <div class="record-row record-row--tree">
               <span class="breakdown-label">QBI deduction</span>
-              <span class="breakdown-val">{fmtDollar(data.qbi_deduction)}</span>
+              <span class="breakdown-val num">{fmtDollar(data.qbi_deduction)}</span>
               {#if showState}
                 <!-- Already inside the base for a federal-taxable-income state,
                      rather than excluded from it. -->
-                <span class="breakdown-val dim">{stateStartsFromTaxable ? 'included' : 'n/a'}</span>
+                <span class="breakdown-val num dim"
+                  >{stateStartsFromTaxable ? 'included' : 'n/a'}</span
+                >
               {/if}
             </div>
           {/if}
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Taxable income</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_taxable_income)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_taxable_income)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_taxable_income)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.state_taxable_income)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Income tax</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_tax)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_tax)}</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.federal_tax)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_tax)}</span>{/if}
           </div>
-          <div class="breakdown-row highlight">
+          <div class="record-row record-row--tree highlight">
             <span class="breakdown-label">Total liability</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_total_liability)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_total_liability)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_total_liability)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.state_total_liability)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Effective tax rate</span>
-            <span class="breakdown-val combined">{fmtPct(effectiveTaxRate)}</span>
+            <span class="breakdown-val num combined">{fmtPct(effectiveTaxRate)}</span>
           </div>
           <details class="info-panel">
             <summary>How tax liability is computed</summary>
-            <p>
+            <p class="caption">
               AGI = annualized SE income + annualized W-2 income - half SE deduction. Federal
               taxable income = AGI - standard deduction ({fmtDollar(
                 data.federal_standard_deduction,
@@ -509,34 +517,36 @@
             </p>
           </details>
 
-          <div class="breakdown-group-label">Credits and payments</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Credits and payments</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Withholding (annualized)</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_withholding)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_withholding)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_withholding)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_withholding)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Estimated payments made</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_estimated_paid)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_estimated_paid)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_estimated_paid)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.state_estimated_paid)}</span
               >{/if}
           </div>
-          <div class="breakdown-row highlight">
+          <div class="record-row record-row--tree highlight">
             <span class="breakdown-label">Net due</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_net_due)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_net_due)}</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.federal_net_due)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_net_due)}</span
+              >{/if}
           </div>
-          <div class="breakdown-row result">
+          <div class="record-row result">
             <span class="breakdown-label">Due this quarter (Q{data.quarter})</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_quarterly_amount)}</span>
-            {#if showState}<span class="breakdown-val"
+            <span class="breakdown-val num">{fmtDollar(data.federal_quarterly_amount)}</span>
+            {#if showState}<span class="breakdown-val num"
                 >{fmtDollar(data.state_quarterly_amount)}</span
               >{/if}
           </div>
           <details class="info-panel">
             <summary>How the quarterly amount is determined</summary>
-            <p>
+            <p class="caption">
               {#if method === 'annualized'}
                 Net due = total annual liability - annualized withholding - estimated payments
                 already made. Federal installments are 25% each quarter.
@@ -549,7 +559,7 @@
               {/if}
             </p>
             {#if data.se_income_annualized > 0}
-              <p>
+              <p class="caption">
                 The SE income bears an effective marginal rate of ~{fmtPct(seEffectiveRate)} when stacked
                 on top of W-2 income, because it's taxed at the household's marginal bracket (not starting
                 from zero).
@@ -608,9 +618,6 @@
   }
 
   section h2 {
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: var(--text-primary);
     margin: 0 0 var(--space-2) var(--space-1);
   }
 
@@ -629,11 +636,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-  }
-
-  .input-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .input-field {
@@ -674,12 +676,12 @@
 
   .input-suffix {
     padding: var(--space-1) var(--space-2) var(--space-1) 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
+  /* The border is the wrapper's, so the shared text-field focus rule cannot
+     reach it; this is that rule's colour on the box that draws the edge. */
   .input-field:focus-within {
-    border-color: var(--text-muted);
+    border-color: var(--focus-field-border);
   }
 
   .input-meta {
@@ -687,8 +689,6 @@
     gap: var(--space-3);
     margin-top: var(--space-1);
     padding: 0 var(--space-1);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   /* Summary cards */
@@ -714,42 +714,27 @@
     overflow: hidden;
   }
 
-  .breakdown-header {
-    display: flex;
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-    border-bottom: 1px solid var(--border-subtle);
+  /* Not tappable rows, so the record row's hover fill and rounded corners go:
+     the table draws its own card. */
+  .breakdown-table .record-row {
+    background: none;
+    border-radius: 0;
   }
 
-  .breakdown-group-label {
-    padding: var(--space-2) var(--space-3) 0.15rem;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    font-weight: 500;
-    border-top: 1px solid var(--border-subtle);
+  .highlight {
+    font-weight: var(--weight-semibold);
   }
 
-  .breakdown-row {
-    display: flex;
-    padding: 0.2rem var(--space-3);
-    font-size: var(--text-sm);
-  }
-
-  .breakdown-row.highlight {
-    font-weight: 600;
-    padding-top: var(--space-1);
-    padding-bottom: var(--space-1);
-  }
-
-  .breakdown-row.result {
-    font-weight: 600;
+  .breakdown-table .result {
+    font-weight: var(--weight-semibold);
     background: var(--surface-raised);
-    padding-top: var(--space-2);
-    padding-bottom: var(--space-2);
+  }
+
+  /* One column gap for the header, tree and result rows, so the fixed-width
+     figures line up whether or not the state column is shown. */
+  .breakdown-table .record-header,
+  .breakdown-table .record-row {
+    gap: var(--space-1);
   }
 
   .breakdown-label {
@@ -759,9 +744,6 @@
 
   .breakdown-val {
     width: 8rem;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-primary);
   }
 
   .breakdown-val.dim {
@@ -771,17 +753,6 @@
   .breakdown-val.combined {
     width: 16rem;
     color: var(--text-muted);
-  }
-
-  .breakdown-header .breakdown-label {
-    color: transparent;
-  }
-
-  .breakdown-header .breakdown-val {
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
   }
 
   /* Info panels */
@@ -802,7 +773,7 @@
 
   .info-panel summary::before {
     content: '+ ';
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
   }
 
   .info-panel[open] summary::before {
@@ -815,9 +786,7 @@
 
   .info-panel p {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
 
   .state-notice {
@@ -839,7 +808,7 @@
 
   .prov-label {
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-secondary);
   }
 
@@ -848,14 +817,11 @@
     font-size: var(--text-xs);
   }
 
-  .basis-note {
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
-
+  /* In-app cross-references, so the interactive blue rather than the amber
+     of a content link (web/AGENTS.md, Color). */
   .settings-link a,
   .state-notice a {
-    color: var(--link);
+    color: var(--accent-blue);
   }
 
   /* 640px, the app's narrow breakpoint, rather than a one-off 720px. */

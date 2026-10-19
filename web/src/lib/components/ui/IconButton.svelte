@@ -112,8 +112,8 @@
 
   .icon-btn:hover:not(:disabled),
   .icon-btn.active {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   .icon-btn.danger:hover:not(:disabled) {
@@ -149,7 +149,7 @@
     flex-shrink: 0;
     width: 2.35em;
     height: 2.35em;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
   }
 
   .icon-btn-round :global(svg) {

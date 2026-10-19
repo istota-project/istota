@@ -27,15 +27,17 @@
     type KebabItem,
     type SelectOption,
     PageLoading,
+    SortHeader,
+    Badge,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
-  import SortHeader from '$lib/components/money/SortHeader.svelte';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import { formatDate } from '$lib/dateFormat';
   import { formatDecimal as formatAmount } from '$lib/format';
   import { notifyError } from '$lib/stores/notices';
-  import { loadSort, nextSort, saveSort, sortRows, type TableSort } from '$lib/money/tableSort';
+  import { createTableSort, sortRows } from '$lib/ui/tableSort.svelte';
+  import { billingStatusVariant } from '$lib/money/status';
   import { workExportItems } from '$lib/money/workExport';
   import { Download } from '@lucide/svelte';
 
@@ -58,10 +60,10 @@
   let clientFilter = $state('');
   let periodFilter = $state('');
   type SortKey = 'date' | 'invoice';
-  const SORT_STORAGE = 'money.work.sort';
-  let sort: TableSort<SortKey> = $state(
-    loadSort<SortKey>(SORT_STORAGE, ['date', 'invoice'], { key: 'date', descending: true }),
-  );
+  const sort = createTableSort<SortKey>('money.work.sort', ['date', 'invoice'], {
+    initial: { key: 'date', direction: 'descending' },
+    firstDirection: 'descending',
+  });
 
   // uid of the entry currently running an action (disables its menu items).
   let busyUid = $state('');
@@ -305,11 +307,6 @@
     ),
   );
 
-  function sortBy(key: SortKey) {
-    sort = nextSort(sort, key);
-    saveSort(SORT_STORAGE, sort);
-  }
-
   function statusOf(entry: WorkEntryRow): 'draft' | 'posted' | 'paid' {
     if (entry.paid_date) return 'paid';
     if (entry.invoice) return 'posted';
@@ -416,15 +413,14 @@
   {:else if entries.length === 0}
     <EmptyState>No work entries found.</EmptyState>
   {:else}
-    <div class="money-table">
-      <div class="money-table-header">
+    <div class="record-list">
+      <div class="record-header micro-label">
         <span class="work-index">#</span>
         <SortHeader
           label="Date"
           class="work-date"
-          active={sort.key === 'date'}
-          descending={sort.descending}
-          onclick={() => sortBy('date')}
+          direction={sort.directionOf('date')}
+          onclick={() => sort.toggle('date')}
         />
         <span class="work-client">Client</span>
         <span class="work-service">Service</span>
@@ -433,17 +429,16 @@
           label="Invoice"
           name="invoice number"
           class="work-invoice"
-          active={sort.key === 'invoice'}
-          descending={sort.descending}
-          onclick={() => sortBy('invoice')}
+          direction={sort.directionOf('invoice')}
+          onclick={() => sort.toggle('invoice')}
         />
-        <span class="work-status money-status">Status</span>
-        <span class="work-amount money-amount">Amount</span>
-        <span class="money-kebab-spacer"></span>
+        <span class="work-status">Status</span>
+        <span class="work-amount num">Amount</span>
+        <span class="col-actions"></span>
       </div>
       {#each sorted as entry (entry.uid || `${entry.date}-${entry.index}`)}
         {@const warning = warningText(entry)}
-        <div class="money-table-row">
+        <div class="record-row">
           <span class="work-index" title="Display index — shifts as entries are added">
             {entry.index ?? ''}
           </span>
@@ -452,19 +447,18 @@
           <span class="work-service">
             {entry.service_name}
             {#if entry.description}
-              <span class="work-desc">{entry.description}</span>
+              <span class="work-desc caption">{entry.description}</span>
             {/if}
           </span>
           <span class="work-qty">{formatQty(entry)}</span>
           <span class="work-invoice">{entry.invoice || '—'}</span>
-          <span
-            class="work-status money-status"
-            class:status-paid={statusOf(entry) === 'paid'}
-            class:status-posted={statusOf(entry) === 'posted'}
-            class:status-draft={statusOf(entry) === 'draft'}>{statusLabel(entry)}</span
+          <span class="work-status"
+            ><Badge size="sm" variant={billingStatusVariant(statusOf(entry))}
+              >{statusLabel(entry)}</Badge
+            ></span
           >
           <span
-            class="work-amount money-amount"
+            class="work-amount num"
             title={entry.invoice
               ? 'Computed at the current rate — the invoice is the record of what was billed.'
               : undefined}
@@ -548,15 +542,15 @@
     flex-shrink: 0;
   }
 
-  /* Columns only — the toolbar/list/header/row/chip shell is shared, in
-     routes/money/+layout.svelte. */
+  /* Columns only — the record rows are table.css's, the toolbar is
+     moneyTable.css's. */
 
   /* Left-aligned so the first character sits on the same edge as the invoice
      number one tab over — right-aligning it in the slot floated the whole
      table ~1.3rem inward. The fixed slot still keeps Date from shifting
      between one- and two-digit indices. */
   .work-index {
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-dim);
     flex-shrink: 0;
@@ -583,7 +577,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     color: var(--text-primary);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
 
   .work-service {
@@ -596,9 +590,7 @@
   }
 
   .work-desc {
-    color: var(--text-dim);
     margin-left: var(--space-2);
-    font-size: var(--text-xs);
   }
 
   .work-qty {
@@ -612,7 +604,7 @@
 
   /* Fixed slot, so an uninvoiced row's dash keeps Status in line. */
   .work-content :global(.work-invoice) {
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
     white-space: nowrap;
@@ -624,6 +616,7 @@
      slot it starts shifting the Amount column per row again. */
   .work-status {
     min-width: 5rem;
+    flex-shrink: 0;
   }
 
   .work-amount {
@@ -638,8 +631,10 @@
   }
 
   @media (max-width: 640px) {
+    /* Too narrow for a status column. */
     .work-index,
     .work-qty,
+    .work-status,
     .work-content :global(.work-invoice) {
       display: none;
     }

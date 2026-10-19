@@ -107,7 +107,7 @@
         >{i < shown.length - 1 ? ', ' : ''}{/each}
       {#if !open && list.length > SHOWN_ADDRESSES}
         {' '}<button
-          class="mail-link"
+          class="mail-link link-action"
           type="button"
           onclick={() => (expandedLists = { ...expandedLists, [label]: true })}
           >+{list.length - SHOWN_ADDRESSES} more</button
@@ -174,7 +174,7 @@
           data-testid="mail-state">{stateLabel}</span
         >
         {#if card.state === 'held' && card.notePath}
-          <a class="mail-link" href="{base}{card.notePath}" data-sveltekit-reload
+          <a class="mail-link link-action" href="{base}{card.notePath}" data-sveltekit-reload
             >Open in your private chat</a
           >
         {/if}
@@ -189,7 +189,7 @@
     {/if}
     {#if card.rest}
       <button
-        class="mail-link mail-quoted-toggle"
+        class="mail-link link-action mail-quoted-toggle"
         type="button"
         aria-expanded={quotedShown}
         onclick={() => (quotedShown = !quotedShown)}
@@ -286,7 +286,7 @@
   .mail-subject {
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     overflow-wrap: anywhere;
   }
@@ -321,21 +321,12 @@
     color: var(--text-muted);
   }
   .mail-link {
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    font: inherit;
     font-size: var(--text-xs);
-    cursor: pointer;
-  }
-  .mail-link:hover {
-    text-decoration: underline;
   }
   .mail-body {
     margin-top: var(--space-2);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-primary);
     overflow-wrap: anywhere;
   }

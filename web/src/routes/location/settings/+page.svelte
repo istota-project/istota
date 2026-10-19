@@ -143,11 +143,11 @@
           <div class="provision">
             <QrCode value={qrPayload} label="Location provisioning code" />
             <div class="provision-copy">
-              <p class="hint">
+              <p class="description">
                 Scan this from <strong>This device</strong> below, in the app on the phone. It is shown
                 once — leaving this page loses it, and the next device needs a new token.
               </p>
-              <p class="hint">
+              <p class="description">
                 For the third-party Overland app, which cannot scan, paste this URL instead. It
                 carries the same token and is shown only now, for the same reason.
               </p>
@@ -155,7 +155,7 @@
             </div>
           </div>
         {:else}
-          <p class="hint">
+          <p class="description">
             The token is stored encrypted and never sent back to the browser, so it can only be
             shown at the moment it is generated. Generating a new one immediately cuts off every
             device currently using the old one, which is also how you revoke a lost phone.
@@ -217,16 +217,11 @@
   .webhook-url {
     display: block;
     padding: var(--space-2) var(--space-2);
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-family: var(--font-mono);
     word-break: break-all;
   }
 
-  .kv dt {
-    color: var(--text-dim);
-  }
-
   .kv dd {
-    margin: 0;
     color: var(--text-secondary);
   }
 </style>

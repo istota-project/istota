@@ -132,9 +132,20 @@
     color: var(--text-muted);
   }
 
-  .field :global(input:not([type='checkbox'])),
-  .field :global(select),
-  .field :global(textarea) {
+  /* The descendant rules below are inside :where(), so they weigh no more than
+     the field's own class: any class on the control outranks them, which is
+     how Input's `monospace` and `invalid` stay visible inside a field. They
+     exist for the raw controls still written inside a Field; the width cap is
+     the only part that reaches the Input and TextArea primitives too. */
+  .field :global(:where(input:not([type='checkbox']), select, textarea)) {
+    width: 100%;
+    max-width: 24rem;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .field
+    :global(:where(input:not([type='checkbox'], .ui-input), select, textarea:not(.ui-textarea))) {
     background: var(--surface-base);
     color: var(--text-primary);
     border: 1px solid var(--border-default);
@@ -142,30 +153,23 @@
     padding: var(--space-1) var(--space-2);
     font: inherit;
     font-size: var(--text-sm);
-    width: 100%;
-    max-width: 24rem;
-    min-width: 0;
-    box-sizing: border-box;
   }
 
   /* `font: inherit` above is a shorthand and carries the body's 1.5 leading
-     with it, at a specificity no weightless rule can correct — so an input
-     here grew past the field tier it sits in the moment iOS floored its text
-     at 16px. Pinned beside the shorthand rather than centrally for that
-     reason. Textareas keep the inherited leading: they are sized by their
-     rows and read as prose. */
-  .field :global(input:not([type='checkbox'])),
-  .field :global(select) {
-    line-height: 1.2;
+     with it, so an input here grew past the field tier it sits in the moment
+     iOS floored its text at 16px. Pinned beside the shorthand rather than
+     centrally for that reason. Textareas keep the inherited leading: they are
+     sized by their rows and read as prose, and they stay in the sans face
+     unless they are a TextArea with `monospace`. */
+  .field :global(:where(input:not([type='checkbox'], .ui-input), select)) {
+    line-height: var(--leading-tight);
   }
 
-  .field :global(textarea) {
-    font-family: var(--font-mono);
+  .field :global(:where(textarea:not(.ui-textarea))) {
     resize: vertical;
   }
 
-  .field-wide :global(textarea),
-  .field-wide :global(input) {
+  .field-wide :global(:where(textarea, input)) {
     max-width: 36rem;
   }
 

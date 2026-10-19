@@ -779,37 +779,4 @@
       display: none;
     }
   }
-
-  :global(.app-nav-menu) {
-    min-width: 9rem;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-1);
-    z-index: var(--z-popover);
-    box-shadow: var(--shadow-md);
-    outline: none;
-  }
-
-  :global(.app-nav-menu-link) {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-base);
-    color: var(--text-muted);
-    text-decoration: none;
-    border-radius: var(--radius-sm);
-    outline: none;
-  }
-
-  :global(.app-nav-menu-link:hover),
-  :global(.app-nav-menu-link[data-highlighted]) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
-  }
-
-  :global(.app-nav-menu-link.active) {
-    color: var(--text-primary);
-  }
 </style>

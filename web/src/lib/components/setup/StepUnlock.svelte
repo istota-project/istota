@@ -33,7 +33,7 @@
   }
 </script>
 
-<form class="unlock" onsubmit={submit} novalidate>
+<form class="vstack" onsubmit={submit} novalidate>
   <p>
     Setup printed a code where it started: in the terminal where it was run, or on your server's
     console. Type it here to continue.
@@ -65,12 +65,6 @@
 </form>
 
 <style>
-  .unlock {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   .where summary {
     width: fit-content;
     color: var(--link);

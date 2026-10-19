@@ -379,8 +379,8 @@
        centring it in the space left under this header. -->
   <div class="header">
     <div>
-      <h1>Documents</h1>
-      <p class="sub">
+      <h1 class="title-page">Documents</h1>
+      <p class="sub caption">
         <!-- Never "N on file" once the walk stopped early: the count would be
              a claim about the store rather than about what is loaded. -->
         {#if truncated.documents}
@@ -429,16 +429,16 @@
 {:else if rows.length === 0}
   <EmptyState>Every document is attached to a record.</EmptyState>
 {:else}
-  <div class="table-scroll" class:refreshing bind:this={documentList}>
+  <div class="table-scroll table--cards" class:refreshing bind:this={documentList}>
     <!-- svelte-ignore a11y_no_redundant_roles (Explicit roles preserve table semantics when Safari lays out rows as grids.) -->
-    <table class="grid documents-grid" aria-label="Health documents" role="table">
+    <table class="table table--flush documents-grid" aria-label="Health documents" role="table">
       <thead role="rowgroup">
         <tr role="row">
           <th scope="col" class="document-column">Document</th>
-          <th scope="col" class="size-column">Size</th>
-          <th scope="col" class="added-column">Added</th>
+          <th scope="col" class="size-column num card-hidden">Size</th>
+          <th scope="col" class="added-column card-hidden">Added</th>
           <th scope="col" class="links-column">Attached to</th>
-          <th scope="col" class="actions"><span class="visually-hidden">Actions</span></th>
+          <th scope="col" class="col-actions"><span class="visually-hidden">Actions</span></th>
         </tr>
       </thead>
       <tbody role="rowgroup">
@@ -449,8 +449,8 @@
             class:search-target={selectedDocumentId === doc.id}
             class:busy={busy.has(doc.id)}
           >
-            <td class="document-column">
-              <div class="document-title">
+            <td class="document-column cell-primary">
+              <div class="document-title hstack">
                 <a
                   class="name"
                   href={doc.url}
@@ -458,16 +458,16 @@
                   title={documentName(doc)}>{documentName(doc)}</a
                 >
                 <Badge size="sm">{sourceLabel(doc.source)}</Badge>
-                <span class="mobile-meta caption"
+                <span class="mobile-meta card-only caption"
                   >{formatBytes(doc.byte_size)}<span aria-hidden="true"> · </span><time
                     datetime={doc.created_at}>{formatDate(doc.created_at)}</time
                   ></span
                 >
               </div>
-              {#if doc.notes}<p class="notes" title={doc.notes}>{doc.notes}</p>{/if}
+              {#if doc.notes}<p class="notes caption" title={doc.notes}>{doc.notes}</p>{/if}
             </td>
-            <td class="size-column">{formatBytes(doc.byte_size)}</td>
-            <td class="added-column"
+            <td class="size-column num card-hidden">{formatBytes(doc.byte_size)}</td>
+            <td class="added-column card-hidden"
               ><time datetime={doc.created_at}>{formatDate(doc.created_at)}</time></td
             >
             <td class="links-column">
@@ -501,7 +501,7 @@
                 {/if}
               </div>
             </td>
-            <td class="actions">
+            <td class="col-actions">
               <KebabMenu items={menu(doc)} ariaLabel="Document actions" />
             </td>
           </tr>
@@ -521,7 +521,7 @@
       if (!open) attachForId = null;
     }}
   >
-    <div class="attach-form">
+    <div class="vstack">
       <!-- `labelled={false}` on both: a Select's trigger is a <button>, so
            inside a <label> it becomes that label's implicit control and
            clicking the caption opens the dropdown. See web/AGENTS.md. -->
@@ -592,22 +592,14 @@
     margin-bottom: var(--space-4);
   }
 
-  h1 {
-    margin: 0;
-    font-size: var(--text-lg);
-    font-weight: 600;
-  }
-
   .sub {
     margin: var(--space-1) 0 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .name {
     color: var(--accent-blue);
     text-decoration: none;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -618,19 +610,10 @@
     text-decoration: underline;
   }
 
-  .document-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .document-title :global(.badge) {
     flex-shrink: 0;
   }
 
-  .mobile-meta {
-    display: none;
-  }
   .mobile-meta > span {
     margin-inline: var(--space-1);
   }
@@ -644,54 +627,38 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     margin: var(--space-1) 0 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
 
-  .documents-grid {
-    display: block;
-  }
-  .documents-grid thead {
-    display: block;
-  }
-  .documents-grid tbody {
-    display: grid;
-    grid-auto-rows: 1fr;
-  }
-  .documents-grid tr {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 5rem 8rem minmax(12rem, 24%) 2rem;
-  }
-  .grid.documents-grid td {
-    min-width: 0;
-    align-content: center;
-  }
-
-  .grid.documents-grid th:first-child,
-  .grid.documents-grid td:first-child {
-    padding-left: 0;
-  }
-
-  .grid.documents-grid th:last-child,
-  .grid.documents-grid td:last-child {
-    padding-right: 0;
-  }
-
-  .grid.documents-grid .size-column {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
+  /* As a table the rows are grids, so every row shares one set of column
+     tracks and rows come out equal in height. Below 40rem the table family's
+     card layout takes over (.table--cards), which is why this sits in the
+     wide half of the same container query. */
+  @container (width > 40rem) {
+    .documents-grid,
+    .documents-grid thead {
+      display: block;
+    }
+    .documents-grid tbody {
+      display: grid;
+      grid-auto-rows: 1fr;
+    }
+    .documents-grid tr {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 5rem 8rem minmax(12rem, 24%) 2rem;
+    }
+    .documents-grid td {
+      min-width: 0;
+      align-content: center;
+    }
   }
 
   .added-column {
     white-space: nowrap;
   }
+  td.size-column,
   td.added-column {
     color: var(--text-muted);
-  }
-  .actions {
-    text-align: right;
   }
 
   .links {
@@ -771,7 +738,7 @@
   .detach:disabled,
   .attach:disabled {
     cursor: default;
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
 
   .busy {
@@ -784,33 +751,12 @@
     opacity: 0.7;
   }
 
-  .attach-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  @media (max-width: 768px) {
-    .documents-grid thead {
-      display: none;
-    }
+  /* The card layout is the table family's (.table--cards); these are this
+     record's own: the name on a line of its own above the badge and the
+     size-and-date line, a wider gap before the attachments, squarer chips. */
+  @container (max-width: 40rem) {
     .documents-grid tr {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-content: start;
-      gap: var(--space-2) var(--space-3);
-      padding: var(--space-3) 0;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .grid.documents-grid tbody tr td {
-      align-content: start;
-      width: auto;
-      min-width: 0;
-      padding: 0;
-      border: 0;
-    }
-    .grid.documents-grid tbody tr .size-column,
-    .grid.documents-grid tbody tr .added-column {
-      display: none;
+      row-gap: var(--space-2);
     }
     .document-title {
       flex-wrap: wrap;
@@ -819,23 +765,12 @@
     .name {
       flex-basis: 100%;
     }
-    .mobile-meta {
-      display: inline;
-    }
-    .links-column {
-      grid-column: 1 / -1;
-    }
-    .actions {
-      grid-column: 2;
-      grid-row: 1;
-      align-self: start;
-    }
-    .links {
-      gap: var(--space-1);
-    }
     .link-chip {
       border-radius: var(--radius-sm);
     }
+  }
+
+  @media (max-width: 768px) {
     .header {
       margin-bottom: var(--space-2);
     }

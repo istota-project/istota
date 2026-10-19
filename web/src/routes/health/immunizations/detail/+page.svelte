@@ -111,7 +111,7 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Immunization detail</h1>
+    <h1 class="title-page">Immunization detail</h1>
     <div class="actions">
       <Button href="{base}/health/immunizations">Back</Button>
       {#if immunization}
@@ -131,7 +131,7 @@
 {:else if error}
   <div class="center-msg error">{error}</div>
 {:else if immunization}
-  <form class="card form" onsubmit={save}>
+  <form class="card form vstack" onsubmit={save}>
     <div class="row">
       <Field label="Vaccine name">
         <input type="text" bind:value={immunization.name} required />
@@ -238,7 +238,7 @@
   </form>
 
   <section class="linked">
-    <h2>Proof of immunization</h2>
+    <h2 class="micro-label">Proof of immunization</h2>
     <DocumentList entityType="immunization" entityId={immunization.id} {documents} />
   </section>
 
@@ -247,8 +247,8 @@
       <h2 class="micro-label">Linked encounter</h2>
       <a class="card linked-card" href="{base}/health/history/encounter?id={encounter.id}">
         <div class="card-head">
-          <span class="badge type-other">{encounter.encounter_type}</span>
-          <span class="date">{encounter.encounter_date}</span>
+          <Badge>{encounter.encounter_type}</Badge>
+          <span class="date caption">{encounter.encounter_date}</span>
         </div>
         {#if encounter.provider || encounter.facility}
           <div class="caption">
@@ -281,23 +281,12 @@
     margin-bottom: var(--space-4);
     flex-wrap: wrap;
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
-  }
   .actions {
     display: flex;
     gap: var(--space-2);
     flex-wrap: wrap;
   }
 
-  .card {
-    padding: var(--space-3) var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   .form .row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
@@ -340,9 +329,5 @@
   .card-head {
     align-items: center;
     margin-bottom: var(--space-2);
-  }
-  .date {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 </style>

@@ -16,6 +16,7 @@
     type DismissedCluster,
   } from '$lib/api';
   import { segmentTrips, type Trip } from '$lib/location-path';
+  import { localDateISO } from '$lib/dateFormat';
   import { elevationSummary } from '$lib/location-elevation';
   import {
     locationPlaces,
@@ -109,10 +110,7 @@
 
   let places = $derived($locationPlaces);
 
-  function localDate(d: Date = new Date()): string {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-  const today = localDate();
+  const today = localDateISO();
   let isSingleDay = $derived(startStr === endStr);
 
   // Trips are derived from the same filtered-ping pipeline the map draws, so
@@ -130,13 +128,13 @@
   function yesterday(): string {
     const d = new Date();
     d.setDate(d.getDate() - 1);
-    return localDate(d);
+    return localDateISO(d);
   }
 
   function thisWeekStart(): string {
     const d = new Date();
     d.setDate(d.getDate() - d.getDay());
-    return localDate(d);
+    return localDateISO(d);
   }
 
   function thisMonthStart(): string {
@@ -346,28 +344,33 @@
 
     <div class="stats-bar">
       {#if pings.length > 0}
-        <span class="stat">{pings.length} pings</span>
+        <span class="stat caption num">{pings.length} pings</span>
       {/if}
       {#if summary && pings.length > 0}
-        <span class="stat">{summary.stops.length} stops</span>
-        <span class="stat">{summary.transit_pings} transit</span>
+        <span class="stat caption num">{summary.stops.length} stops</span>
+        <span class="stat caption num">{summary.transit_pings} transit</span>
       {/if}
       {#if showDiscover && clusters.length > 0}
-        <span class="stat">{clusters.length} unknown</span>
+        <span class="stat caption num">{clusters.length} unknown</span>
       {/if}
       {#if !isSingleDay}
         {@const uniquePlaces = new Set(pings.filter((p) => p.place).map((p) => p.place))}
-        <span class="stat">{uniquePlaces.size} places</span>
+        <span class="stat caption num">{uniquePlaces.size} places</span>
       {/if}
       {#if isSingleDay && trips.length > 0}
-        <span class="stat">{trips.length} trips</span>
+        <span class="stat caption num">{trips.length} trips</span>
       {/if}
       {#if elevation.range}
-        <span class="stat">{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
+        <span class="stat caption num"
+          >{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
         >
       {/if}
       {#if (summary && summary.stops.length > 0) || trips.length > 0 || elevation.show}
-        <button class="stops-btn" onclick={() => (panelOpen = !panelOpen)} type="button">
+        <button
+          class="stops-btn button-reset caption"
+          onclick={() => (panelOpen = !panelOpen)}
+          type="button"
+        >
           {panelOpen ? 'Hide details' : 'Show details'}
         </button>
       {/if}
@@ -431,20 +434,8 @@
     flex-shrink: 0;
   }
 
-  .stat {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
   .stops-btn {
     margin-left: auto;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--text-xs);
-    cursor: pointer;
-    padding: 0;
   }
 
   .stops-btn:hover {
@@ -452,7 +443,7 @@
   }
 
   .chip-count {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     opacity: 0.8;
     margin-left: var(--space-1);
   }

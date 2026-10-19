@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { CardGrid, PageLoading } from '$lib/components/ui';
+  import { CardGrid, EmptyState, PageLoading } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -424,6 +424,10 @@
     }
   }
 
+  const emptyMessage = $derived(
+    $showStarred ? 'No starred entries.' : $showUnseen ? 'No unread entries.' : 'No entries yet.',
+  );
+
   // Track which card the cursor most recently entered so 'f' has a target.
   let focusedEntryId: number | null = $state(null);
 </script>
@@ -433,6 +437,8 @@
     <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
+  {:else if entries.length === 0}
+    <EmptyState>{emptyMessage}</EmptyState>
   {:else}
     <div
       class="feed-grid"
@@ -475,7 +481,7 @@
   {/if}
 </div>
 
-{#if !loading && !error}
+{#if !loading && !error && entries.length > 0}
   <div class="status-badge">{entries.length} / {total}</div>
 {/if}
 
@@ -555,9 +561,9 @@
     position: absolute;
     top: 0.4rem;
     right: 0.4rem;
-    font-size: 0.55rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-caps);
     padding: 0.1rem var(--space-2);
     background: var(--scrim-pill-bg);
     color: var(--scrim-pill-fg);
@@ -634,7 +640,7 @@
     justify-content: center;
     width: 56px;
     height: 56px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     /* design-lint-allow-begin: fixed chrome — a dark scrim over media, so both
        the scrim and the glyph on it are fixed in both themes. */
     background: rgb(0 0 0 / 0.6);
@@ -643,7 +649,7 @@
     /* Nudge the glyph off centre — a triangle's optical centre sits left
 		   of its bounding box's. */
     padding-left: 4px;
-    transition: background 0.15s ease;
+    transition: background var(--transition-fast);
     pointer-events: none;
   }
 
@@ -737,9 +743,9 @@
     background: rgb(0 0 0 / 0.7);
     color: #fff;
     /* design-lint-allow-end */
-    font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--tracking-caps);
     pointer-events: none;
   }
 
@@ -802,7 +808,7 @@
     color: #fff;
     /* design-lint-allow-end */
     font-size: 1.2rem;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     pointer-events: none;
   }
 
@@ -835,16 +841,7 @@
   .feed-grid :global(.card-body h3) {
     margin: 0;
     padding: var(--space-2) var(--space-3) var(--space-1);
-    font-size: 0.8rem;
-    font-weight: 600;
-  }
-
-  .feed-grid :global(.card-body h3 a) {
-    color: var(--text-primary);
-    text-decoration: none;
-  }
-  .feed-grid :global(.card-body h3 a:hover) {
-    text-decoration: underline;
+    font-size: var(--text-base);
   }
 
   /* Excerpt — body copy is kept in lockstep with the reader popup's
@@ -855,7 +852,7 @@
     margin: 0;
     padding: var(--space-2) var(--space-3);
     font-size: var(--text-base);
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     color: var(--text-secondary);
     word-break: break-word;
   }

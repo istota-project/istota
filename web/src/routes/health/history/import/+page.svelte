@@ -125,7 +125,7 @@
 </script>
 
 <div class="header">
-  <h1>Import encounter</h1>
+  <h1 class="title-page">Import encounter</h1>
   <Button href="{base}/health/history">Back</Button>
 </div>
 
@@ -141,7 +141,7 @@
     </p>
   </FileDropZone>
 
-  <div class="actions">
+  <div class="actions hstack">
     <Button
       variant="primary"
       disabled={!file || extracting}
@@ -157,7 +157,7 @@
 {/if}
 
 {#if extracting}
-  <div class="card extracting">
+  <div class="card extracting muted">
     <span class="spinner" aria-hidden="true"></span>
     Extracting encounter from the source — this can take a few seconds.
   </div>
@@ -182,7 +182,7 @@
   </div>
 
   {#if documentId !== null && file}
-    <p class="attach-note">
+    <p class="attach-note caption">
       <strong>{file.name}</strong> will be kept and attached to the records below.
     </p>
   {/if}
@@ -194,7 +194,7 @@
         <Button size="sm" onclick={() => removeRow(i)}>Remove encounter</Button>
       </div>
 
-      <div class="grid">
+      <div class="enc-fields">
         <Field label="Date">
           <input type="date" bind:value={row.encounter_date} />
         </Field>
@@ -247,20 +247,20 @@
       </Field>
 
       <div class="diag-head">
-        <h3>Diagnoses ({row.diagnoses.length})</h3>
+        <h3 class="micro-label">Diagnoses ({row.diagnoses.length})</h3>
         <Button size="sm" onclick={() => addDiagnosis(row)}>+ Add diagnosis</Button>
       </div>
 
       {#if row.diagnoses.length > 0}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="table">
             <thead>
               <tr>
                 <th>Name</th>
                 <th>ICD-10</th>
                 <th>Status</th>
                 <th>Severity</th>
-                <th class="row-actions"></th>
+                <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
@@ -317,7 +317,7 @@
                       fullWidth
                     />
                   </td>
-                  <td class="row-actions">
+                  <td class="col-actions">
                     <Button size="sm" onclick={() => removeDiagnosis(row, j)}>Remove</Button>
                   </td>
                 </tr>
@@ -329,7 +329,7 @@
     </div>
   {/each}
 
-  <div class="actions">
+  <div class="actions hstack">
     <Button variant="primary" disabled={importing} onclick={doImport}>
       {importing
         ? 'Importing…'
@@ -345,25 +345,14 @@
     align-items: center;
     margin-bottom: var(--space-3);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
-  }
   h2 {
     margin: 0;
   }
   h3 {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-dim);
-    font-weight: 500;
     margin: 0;
   }
 
   .card {
-    padding: var(--space-3) var(--space-4);
     margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;
@@ -375,11 +364,6 @@
     margin: 0;
   }
 
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   .card .actions {
     margin-top: var(--space-1);
   }
@@ -392,14 +376,11 @@
     flex-direction: row;
     align-items: center;
     gap: var(--space-2);
-    color: var(--text-muted);
     font-size: var(--text-sm);
   }
 
   .attach-note {
     margin: 0 0 var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
   .review-head {
     display: flex;
@@ -419,14 +400,14 @@
     gap: var(--space-3);
   }
   .enc-card.warn {
-    background: hsla(35, 60%, 60%, 0.08);
+    background: var(--row-warn-bg);
   }
   .enc-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
   }
-  .grid {
+  .enc-fields {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);
@@ -459,12 +440,7 @@
 
   /* Compact inputs inside the diagnoses table — mirrors the immunization
 	   review-table sizing so the nested grid doesn't overpower the card. */
-  table.grid input {
+  table input {
     padding: var(--space-1) var(--space-2);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
   }
 </style>

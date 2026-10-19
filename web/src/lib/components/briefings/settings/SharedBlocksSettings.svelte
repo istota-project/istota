@@ -280,7 +280,7 @@
     <EmptyState>No shared blocks yet.</EmptyState>
   {:else}
     <div class="table-scroll">
-      <table class="grid sb-table">
+      <table class="table sb-table">
         <thead>
           <tr>
             <th>Name</th>
@@ -288,7 +288,7 @@
             <th class="col-render">Render</th>
             <th>Trust</th>
             <th>Last run</th>
-            <th class="actions"></th>
+            <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody>
@@ -296,18 +296,18 @@
             <tr>
               <td class="sb-name">
                 <strong>{b.name}</strong>
-                {#if !b.enabled}<span class="muted small"> (disabled)</span>{/if}
+                {#if !b.enabled}<span class="caption"> (disabled)</span>{/if}
                 {#if b.status.has_content}
-                  <div class="muted small sb-preview" title={b.status.value_preview ?? ''}>
+                  <div class="caption sb-preview" title={b.status.value_preview ?? ''}>
                     {(b.status.value_preview ?? '').slice(0, 60)}
                   </div>
                 {/if}
               </td>
               <td class="nowrap"><code>{b.cron}</code></td>
-              <td class="col-render"><span class="render-pill">{b.render_mode}</span></td>
-              <td class="small">{b.trusted ? 'trusted' : 'untrusted'}</td>
-              <td class="small nowrap">{fmtLastRun(b.status.last_run_at)}</td>
-              <td class="actions">
+              <td class="col-render"><span class="status-pill">{b.render_mode}</span></td>
+              <td>{b.trusted ? 'trusted' : 'untrusted'}</td>
+              <td class="nowrap">{fmtLastRun(b.status.last_run_at)}</td>
+              <td class="col-actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
               </td>
             </tr>
@@ -327,7 +327,7 @@
     }}
     width="40rem"
   >
-    <div class="shared-editor">
+    <div class="vstack">
       {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
       <div class="sb-grid">
         <SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
@@ -368,13 +368,13 @@
         </SettingsField>
       </div>
 
-      <div class="shared-sources">
+      <div class="vstack" style:--vstack-gap="var(--space-2)">
         <div class="shared-sources-head">
-          <span class="field-label">Sources</span>
+          <span class="field-label muted">Sources</span>
           <Button variant="secondary" size="sm" onclick={addSharedSource}>+ Add source</Button>
         </div>
         {#if sharedDraft.sources.length === 0}
-          <p class="muted small">No sources — add at least one browse/markets/email source.</p>
+          <p class="caption">No sources — add at least one browse/markets/email source.</p>
         {/if}
         {#each sharedDraft.sources as src, i (i)}
           <div class="sb-source">
@@ -437,36 +437,17 @@
   .col-render {
     width: 7rem;
   }
-  .render-pill {
-    display: inline-block;
-    font-size: var(--text-xs);
-    /* design-lint-allow: hairline vertical inset for a one-line pill. */
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    color: var(--text-muted);
-  }
-  .muted.small {
-    font-size: var(--text-xs);
-  }
 
   /* Admin shared-blocks editor */
   .nowrap {
     white-space: nowrap;
   }
-  /* The global .grid is table-layout:fixed/width:100%, which squishes this
-	   table's six content columns on mobile. Keep a natural min-width so
-	   .table-scroll scrolls horizontally instead of overlapping columns. The
-	   floor used to be 44rem to fit three text action buttons; the actions are a
+  /* A natural min-width, so .table-scroll scrolls this table's six content
+	   columns horizontally on a phone instead of overlapping them. The floor
+	   used to be 44rem to fit three text action buttons; the actions are a
 	   kebab now, so only the content columns set it. */
   .sb-table {
-    table-layout: auto;
     min-width: 34rem;
-  }
-  .sb-table td.actions,
-  .sb-table th.actions {
-    width: 1%;
-    white-space: nowrap;
   }
   .sb-name {
     min-width: 9rem;
@@ -477,11 +458,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .shared-editor {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
   /* Two-column field row that top-aligns, so a field with a hint doesn't push
 	   its sibling's input out of line (unlike .inline-fields' flex-end). */
   .sb-grid {
@@ -490,11 +466,6 @@
     gap: var(--space-2) var(--space-4);
     align-items: start;
   }
-  .shared-sources {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
   .shared-sources-head {
     display: flex;
     align-items: center;
@@ -502,7 +473,6 @@
   }
   .field-label {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   /* Type + the source's config fields flow inline by default, wrapping on
 	   narrow widths. The remove button pins to the top-right corner. */
@@ -533,8 +503,8 @@
     position: absolute;
     top: 0.35rem;
     right: 0.4rem;
-    font-size: 1.25rem;
-    line-height: 1;
+    font-size: var(--text-xl);
+    line-height: var(--leading-none);
   }
   @container settings (max-width: 560px) {
     .sb-grid {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { Chart, DoughnutController, ArcElement, Tooltip, Legend } from 'chart.js';
   import {
     getPortfolioSummary,
@@ -152,6 +152,9 @@
       if (geoCanvas) charts.push(buildDonut(geoCanvas, s.by_geography));
     });
   });
+  onDestroy(() => {
+    while (charts.length) charts.pop()?.destroy();
+  });
 </script>
 
 {#if loading}
@@ -212,18 +215,20 @@
     </div>
 
     <div class="micro-label holdings-label">Holdings</div>
-    <div class="money-table-header holdings-header">
-      <span class="col-symbol">Symbol</span>
-      <span class="col-desc">Description</span>
-      <span class="col-class">Class</span>
-      <span class="money-amount col-qty">Qty</span>
-      <span class="money-amount col-value">Value</span>
-      <span class="money-amount col-gain">P&amp;L</span>
-      <span class="money-amount col-gainpct">P&amp;L %</span>
-    </div>
+    <!-- Header inside the row container, as on portfolio history and every
+         other record list, so the labels travel with the columns they name. -->
     <div class="holdings-table">
+      <div class="record-header micro-label holdings-header">
+        <span class="col-symbol">Symbol</span>
+        <span class="col-desc">Description</span>
+        <span class="col-class caption">Class</span>
+        <span class="num col-qty">Qty</span>
+        <span class="num col-value">Value</span>
+        <span class="num col-gain">P&amp;L</span>
+        <span class="num col-gainpct">P&amp;L %</span>
+      </div>
       {#each summary.holdings as holding (holding.symbol)}
-        <div class="money-table-row holdings-row">
+        <div class="record-row holdings-row">
           <span class="col-symbol symbol">
             {#if holding.symbol === 'CASH'}
               {holding.symbol}
@@ -234,22 +239,22 @@
             {/if}
           </span>
           <span class="col-desc desc" title={holding.description}>{holding.description}</span>
-          <span class="col-class class-label">
+          <span class="col-class caption class-label">
             {holding.asset_class}{holding.sub_class && holding.sub_class !== 'Unclassified'
               ? ` · ${holding.sub_class}`
               : ''}
           </span>
-          <span class="money-amount col-qty">{qty(holding.quantity)}</span>
-          <span class="money-amount col-value">{usd(holding.value, 2)}</span>
+          <span class="num col-qty">{qty(holding.quantity)}</span>
+          <span class="num col-value">{usd(holding.value, 2)}</span>
           <span
-            class="money-amount col-gain"
+            class="num col-gain"
             class:positive={(holding.gain ?? 0) > 0}
             class:negative={(holding.gain ?? 0) < 0}
           >
             {usd(holding.gain, 2)}
           </span>
           <span
-            class="money-amount col-gainpct"
+            class="num col-gainpct"
             class:positive={(holding.gain_pct ?? 0) > 0}
             class:negative={(holding.gain_pct ?? 0) < 0}
           >
@@ -315,7 +320,7 @@
   }
 
   .symbol {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .symbol a {
@@ -344,8 +349,6 @@
   .col-class {
     width: 13rem;
     flex-shrink: 0;
-    color: var(--text-muted);
-    font-size: var(--text-xs);
   }
 
   .col-qty {
@@ -364,7 +367,7 @@
     width: 4.5rem;
   }
 
-  @media (max-width: 860px) {
+  @media (max-width: 768px) {
     .donut-grid {
       grid-template-columns: minmax(0, 1fr);
     }

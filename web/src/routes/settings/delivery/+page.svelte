@@ -253,7 +253,7 @@
           }}
         />
         {#if relayDeliveryUnavailable(profile).length > 0}
-          <p class="hint">
+          <p class="description">
             Not set up for your account: {relayDeliveryUnavailable(profile).join(', ')}.
           </p>
         {/if}

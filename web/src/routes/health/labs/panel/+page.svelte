@@ -224,7 +224,7 @@
   {:else if panel}
     <div class="header">
       <div class="header-meta">
-        <a href="{base}/health/labs" class="back">← Labs</a>
+        <a href="{base}/health/labs" class="back link-muted">← Labs</a>
         {#if editing}
           <div class="header-edit">
             <Field label="Collected">
@@ -258,14 +258,14 @@
             </label>
           </div>
         {:else}
-          <h1>
+          <h1 class="title-page">
             {formatDate(panel.drawn_at)}
             <span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
             {#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
             {#if panel.specimen}<span class="type">· {specimenLabel(panel.specimen)}</span>{/if}
           </h1>
           {#if panel.encounter_id != null}
-            <div class="encounter-link">
+            <div class="encounter-link muted">
               <span class="encounter-label">Linked to encounter:</span>
               <a href="{base}/health/history/encounter?id={panel.encounter_id}">
                 {linkedEncounter ? encounterLabel(linkedEncounter) : `#${panel.encounter_id}`}
@@ -296,86 +296,88 @@
 
     <div class="split">
       <div class="biomarker-table">
-        <table class="grid grid--dense">
-          <thead>
-            <tr>
-              <th>Marker</th>
-              <th>Value</th>
-              <th>Unit</th>
-              <th>Lab range</th>
-              <th>Flag</th>
-              {#if editing}<th></th>{/if}
-            </tr>
-          </thead>
-          <tbody>
-            {#each biomarkers as b, i (b.id)}
-              <tr class:flag-row={b.flag}>
-                <td>
-                  {#if editing}
-                    <input bind:value={b.name} placeholder="Hemoglobin" />
-                  {:else}
-                    <a
-                      class="marker-link"
-                      href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
-                    >
-                      {b.display_name || b.name}
-                    </a>
-                  {/if}
-                </td>
-                <td>
-                  {#if editing}
-                    <input type="number" step="any" bind:value={b.value} />
-                  {:else}
-                    {b.value}
-                  {/if}
-                </td>
-                <td>
-                  {#if editing}
-                    <input bind:value={b.unit} placeholder="g/dL" />
-                  {:else}
-                    {b.unit}
-                  {/if}
-                </td>
-                <td>
-                  {#if editing}
-                    <input
-                      type="number"
-                      step="any"
-                      bind:value={b.ref_range_low}
-                      placeholder="low"
-                    />
-                    <input
-                      type="number"
-                      step="any"
-                      bind:value={b.ref_range_high}
-                      placeholder="high"
-                    />
-                  {:else if b.ref_range_low != null || b.ref_range_high != null}
-                    {b.ref_range_low ?? '—'} – {b.ref_range_high ?? '—'}
-                  {:else}
-                    —
-                  {/if}
-                </td>
-                <td>
-                  {#if b.flag}<span class="flag flag-{b.flag}">{b.flag}</span>{/if}
-                </td>
-                {#if editing}
-                  <td>
-                    <IconButton
-                      class="del touch-target"
-                      size="sm"
-                      danger
-                      label="Remove biomarker"
-                      onclick={() => removeRow(i)}
-                    >
-                      <X size={13} />
-                    </IconButton>
-                  </td>
-                {/if}
+        <div class="table-scroll">
+          <table class="table table--dense">
+            <thead>
+              <tr>
+                <th>Marker</th>
+                <th>Value</th>
+                <th>Unit</th>
+                <th>Lab range</th>
+                <th>Flag</th>
+                {#if editing}<th></th>{/if}
               </tr>
-            {/each}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {#each biomarkers as b, i (b.id)}
+                <tr class:is-danger={b.flag}>
+                  <td>
+                    {#if editing}
+                      <input bind:value={b.name} placeholder="Hemoglobin" />
+                    {:else}
+                      <a
+                        class="marker-link link-quiet"
+                        href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
+                      >
+                        {b.display_name || b.name}
+                      </a>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if editing}
+                      <input type="number" step="any" bind:value={b.value} />
+                    {:else}
+                      {b.value}
+                    {/if}
+                  </td>
+                  <td>
+                    {#if editing}
+                      <input bind:value={b.unit} placeholder="g/dL" />
+                    {:else}
+                      {b.unit}
+                    {/if}
+                  </td>
+                  <td>
+                    {#if editing}
+                      <input
+                        type="number"
+                        step="any"
+                        bind:value={b.ref_range_low}
+                        placeholder="low"
+                      />
+                      <input
+                        type="number"
+                        step="any"
+                        bind:value={b.ref_range_high}
+                        placeholder="high"
+                      />
+                    {:else if b.ref_range_low != null || b.ref_range_high != null}
+                      {b.ref_range_low ?? '—'} – {b.ref_range_high ?? '—'}
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                  <td>
+                    {#if b.flag}<span class="flag flag-{b.flag}">{b.flag}</span>{/if}
+                  </td>
+                  {#if editing}
+                    <td>
+                      <IconButton
+                        class="del touch-target"
+                        size="sm"
+                        danger
+                        label="Remove biomarker"
+                        onclick={() => removeRow(i)}
+                      >
+                        <X size={13} />
+                      </IconButton>
+                    </td>
+                  {/if}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
         {#if editing}
           <Button onclick={addRow}>+ Add biomarker</Button>
         {/if}
@@ -383,13 +385,18 @@
 
       {#if source.available}
         <div class="source">
-          <div class="source-header">Source document</div>
+          <div class="source-header muted">Source document</div>
           {#if source.mime?.startsWith('image/')}
             <img src={healthPanelSourceUrl(id)} alt="Lab report" />
           {:else}
             <embed src={healthPanelSourceUrl(id)} type={source.mime || 'application/pdf'} />
           {/if}
-          <a class="source-link" href={healthPanelSourceUrl(id)} target="_blank" rel="noopener">
+          <a
+            class="source-link caption"
+            href={healthPanelSourceUrl(id)}
+            target="_blank"
+            rel="noopener"
+          >
             Open in new tab
           </a>
         </div>
@@ -423,18 +430,14 @@
   }
   .back {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
   }
   h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
     margin: var(--space-1) 0;
   }
   .lab,
   .type {
     color: var(--text-muted);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
   }
   .header-meta {
     display: flex;
@@ -448,22 +451,11 @@
     gap: var(--space-2) var(--space-3);
     max-width: 32rem;
   }
-  .header-edit input {
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-1) var(--space-2);
-    min-width: 0;
-  }
   .header-edit .full-row {
     grid-column: 1 / -1;
   }
   .encounter-link {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .encounter-label {
     color: var(--text-dim);
@@ -487,7 +479,7 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: var(--space-4);
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1023px) {
     .split {
       grid-template-columns: 1fr;
     }
@@ -503,16 +495,6 @@
     font-size: var(--text-xs);
     padding: 0.15rem var(--space-1);
   }
-  .marker-link {
-    color: var(--text-primary);
-    text-decoration: none;
-  }
-  .marker-link:hover {
-    text-decoration: underline;
-  }
-  .flag-row {
-    background: rgba(204, 102, 102, 0.06);
-  }
   .flag {
     display: inline-flex;
     justify-content: center;
@@ -521,7 +503,7 @@
     padding: 0 var(--space-2);
     border-radius: var(--radius-pill);
     font-size: var(--text-xs);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
   }
   .flag-H {
     background: var(--status-danger-bg);
@@ -551,7 +533,6 @@
   }
   .source-header {
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
   .source img {
     width: 100%;
@@ -560,9 +541,5 @@
   .source embed {
     width: 100%;
     height: 600px;
-  }
-  .source-link {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 </style>

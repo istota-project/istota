@@ -98,50 +98,50 @@
       </section>
       {#if user.features.chat}
         <a href="{base}/chat" class="feature-card">
-          <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
-          <div class="feature-desc">Talk to Istota in the app</div>
+          <div class="feature-title title-section"><MessageSquare aria-hidden="true" />Chat</div>
+          <div class="feature-desc description">Talk to Istota in the app</div>
         </a>
       {/if}
       {#if user.features.workspace}
         <a href="{base}/files" class="feature-card">
-          <div class="feature-title"><FolderOpen aria-hidden="true" />Files</div>
-          <div class="feature-desc">Your files and pins</div>
+          <div class="feature-title title-section"><FolderOpen aria-hidden="true" />Files</div>
+          <div class="feature-desc description">Your files and pins</div>
         </a>
       {/if}
       {#if user.features.groups}
         <a href="{base}/groups/" class="feature-card">
-          <div class="feature-title"><Users aria-hidden="true" />Groups</div>
-          <div class="feature-desc">Notebooks, members, rooms</div>
+          <div class="feature-title title-section"><Users aria-hidden="true" />Groups</div>
+          <div class="feature-desc description">Notebooks, members, rooms</div>
         </a>
       {/if}
       {#if user.features.briefings}
         <a href="{base}/briefings" class="feature-card">
-          <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
-          <div class="feature-desc">Briefings and archive</div>
+          <div class="feature-title title-section"><Newspaper aria-hidden="true" />Briefings</div>
+          <div class="feature-desc description">Briefings and archive</div>
         </a>
       {/if}
       {#if user.features.feeds}
         <a href="{base}/feeds" class="feature-card">
-          <div class="feature-title"><Rss aria-hidden="true" />Feeds</div>
-          <div class="feature-desc">RSS feed reader</div>
+          <div class="feature-title title-section"><Rss aria-hidden="true" />Feeds</div>
+          <div class="feature-desc description">RSS feed reader</div>
         </a>
       {/if}
       {#if user.features.location}
         <a href="{base}/location" class="feature-card">
-          <div class="feature-title"><MapPin aria-hidden="true" />Location</div>
-          <div class="feature-desc">GPS tracking and map</div>
+          <div class="feature-title title-section"><MapPin aria-hidden="true" />Location</div>
+          <div class="feature-desc description">GPS tracking and map</div>
         </a>
       {/if}
       {#if user.features.money}
         <a href="{base}/money" class="feature-card">
-          <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
-          <div class="feature-desc">Accounts and reports</div>
+          <div class="feature-title title-section"><Wallet aria-hidden="true" />Money</div>
+          <div class="feature-desc description">Accounts and reports</div>
         </a>
       {/if}
       {#if user.features.health}
         <a href="{base}/health" class="feature-card">
-          <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
-          <div class="feature-desc">Body stats and lab results</div>
+          <div class="feature-title title-section"><HeartPulse aria-hidden="true" />Health</div>
+          <div class="feature-desc description">Body stats and lab results</div>
         </a>
       {/if}
     </div>
@@ -192,13 +192,13 @@
   }
   .welcome-greeting {
     margin: 0;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: 0.95rem;
     color: var(--text-primary);
   }
   .welcome-note {
     margin: var(--space-1) 0 0;
-    font-size: 0.85rem;
+    font-size: var(--text-base);
     color: var(--text-muted);
     /* A plus-address is one unbroken token and can be long; on a phone it would
 		   otherwise run past the card's edge rather than wrap. */
@@ -239,17 +239,6 @@
       grid-template-rows: none;
     }
   }
-  /* Two tiles a row on a phone. The auto-fit wall drops to one column below
-     about 430px, where a single tile per row scrolls the module list off the
-     screen. Above 640px auto-fit already gives two or more. */
-  @media (max-width: 640px) {
-    .feature-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .feature-card {
-      padding: var(--space-4);
-    }
-  }
   .feature-card {
     display: block;
     background: var(--surface-card);
@@ -260,14 +249,24 @@
     transition: background var(--transition-fast);
   }
   .feature-card:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
+  }
+  /* Two tiles a row on a phone. The auto-fit wall drops to one column below
+     about 430px, where a single tile per row scrolls the module list off the
+     screen. Above 640px auto-fit already gives two or more. After the base
+     rules, which it overrides at equal specificity. */
+  @media (max-width: 640px) {
+    .feature-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .feature-card {
+      padding: var(--space-4);
+    }
   }
   .feature-title {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-weight: 600;
-    font-size: 0.9rem;
     margin-bottom: var(--space-1);
     color: var(--text-primary);
   }
@@ -279,9 +278,5 @@
     width: 1.15em;
     height: 1.15em;
     color: var(--accent-amber);
-  }
-  .feature-desc {
-    font-size: 0.8rem;
-    color: var(--text-muted);
   }
 </style>

@@ -220,3 +220,28 @@ describe('transaction selection history', () => {
     );
   });
 });
+
+describe('transactions layout lifecycle', () => {
+  it('drops a pending filter debounce when it unmounts', async () => {
+    const view = mount();
+    const input = await screen.findByPlaceholderText('Filter by tag, payee...');
+    vi.useFakeTimers();
+    try {
+      await fireEvent.input(input, { target: { value: 'groceries' } });
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(get(filterText)).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('money load failures', () => {
+  // A rejection that is not an Error still reaches the page's error state.
+  it('shows a message for a thrown string', async () => {
+    vi.mocked(getAccounts).mockRejectedValue('offline');
+    render(AccountsPage);
+    expect(await screen.findByText('Failed to load accounts')).toBeTruthy();
+  });
+});

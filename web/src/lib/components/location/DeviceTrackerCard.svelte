@@ -296,7 +296,7 @@
 
 {#if !available}
   <SettingsCard title="This device">
-    <p class="hint">
+    <p class="description">
       Background tracking is set up per device, in the Istota app. Open the app on the phone you
       want to track and come back to this page there.
     </p>
@@ -311,9 +311,9 @@
     {#if note}<p class="tracker-note">{note}</p>{/if}
 
     {#if !status}
-      <p class="hint">Reading the tracker…</p>
+      <p class="description">Reading the tracker…</p>
     {:else if !status.configured}
-      <p class="hint">
+      <p class="description">
         Not provisioned yet. Generate a token above on another screen, then scan the code it shows.
       </p>
       {#if canScan}
@@ -332,7 +332,7 @@
            a <button> becomes the label's implicit control, and clicking the
            caption "Tracking" would stop the tracker. -->
       <SettingsField label="Tracking" warning={trackingWarning} labelled={false}>
-        <div class="tracker-row">
+        <div class="hstack">
           <!-- "Paused" rather than "On", because On beside an hours-old
                last-sent time is the reading that sends someone looking for a
                fault. It is deliberately not styled as a problem: nothing is
@@ -470,12 +470,6 @@
 {/if}
 
 <style>
-  .tracker-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .tracker-state {
     font-size: var(--text-sm);
     color: var(--text-dim);
@@ -519,17 +513,12 @@
   }
 
   .tracker-id {
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     word-break: break-all;
   }
 
-  .kv dt {
-    color: var(--text-dim);
-  }
-
   .kv dd {
-    margin: 0;
     color: var(--text-secondary);
   }
 

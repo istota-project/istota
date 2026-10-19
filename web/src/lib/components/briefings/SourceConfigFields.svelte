@@ -274,6 +274,7 @@
     <SettingsField
       label="Sender filters"
       hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com"
+      labelled={false}
     >
       <div class="chip-list">
         {#each senders as s (s)}
@@ -286,10 +287,11 @@
           <span class="caption">No senders yet.</span>
         {/if}
       </div>
-      <div class="chip-add">
+      <div class="hstack">
         <input
           type="text"
           placeholder="*@example.com"
+          aria-label="Add a sender pattern"
           bind:value={newSender}
           onkeydown={(e) => {
             if (e.key === 'Enter') {
@@ -492,16 +494,8 @@
     border: none;
     cursor: pointer;
     color: var(--text-muted);
-    font-size: 1rem;
-    line-height: 1;
+    font-size: var(--text-lg);
+    line-height: var(--leading-none);
     padding: 0;
-  }
-  .chip-add {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
-  .chip-add input {
-    max-width: 16rem;
   }
 </style>

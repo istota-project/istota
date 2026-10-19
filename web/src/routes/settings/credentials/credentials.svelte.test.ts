@@ -45,7 +45,8 @@ it('groups card actions and uses the shared checkbox field', async () => {
     'Save backup key',
   ]) {
     const button = screen.getByRole('button', { name });
-    expect(button.parentElement?.classList.contains('row'), name).toBe(true);
+    expect(button.parentElement?.classList.contains('hstack'), name).toBe(true);
+    expect(button.parentElement?.classList.contains('wrap'), name).toBe(true);
   }
   expect(
     screen

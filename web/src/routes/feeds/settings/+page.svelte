@@ -376,23 +376,23 @@
         <div class="diag-grid card-grid">
           <div class="diag">
             <span class="diag-value">{diagnostics.total_feeds}</span>
-            <span class="diag-label">subscriptions</span>
+            <span class="diag-label caption">subscriptions</span>
           </div>
           <div class="diag">
             <span class="diag-value">{diagnostics.total_entries}</span>
-            <span class="diag-label">entries stored</span>
+            <span class="diag-label caption">entries stored</span>
           </div>
           <div class="diag">
             <span class="diag-value">{diagnostics.unread_entries}</span>
-            <span class="diag-label">unread</span>
+            <span class="diag-label caption">unread</span>
           </div>
           <div class="diag" class:bad={diagnostics.error_feeds > 0}>
             <span class="diag-value">{diagnostics.error_feeds}</span>
-            <span class="diag-label">in error</span>
+            <span class="diag-label caption">in error</span>
           </div>
           <div class="diag wide">
             <span class="diag-value">{formatDate(diagnostics.last_poll_at)}</span>
-            <span class="diag-label">last poll</span>
+            <span class="diag-label caption">last poll</span>
           </div>
         </div>
       </SettingsCard>
@@ -504,14 +504,14 @@
         <EmptyState>No categories yet. Categories group feeds in the sidebar.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="table table--fixed">
             <thead>
               <tr>
                 <th class="col-slug">Slug</th>
                 <th class="col-title">Title</th>
                 <th class="num col-count">Feeds</th>
-                <th class="actions col-order">Order</th>
-                <th class="actions col-remove"></th>
+                <th class="col-actions col-order">Order</th>
+                <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
@@ -534,7 +534,7 @@
                     />
                   </td>
                   <td class="num col-count">{count}</td>
-                  <td class="actions col-order">
+                  <td class="col-actions col-order">
                     <IconButton
                       size="sm"
                       label="Move up"
@@ -550,7 +550,7 @@
                       disabled={idx === config.categories.length - 1}>↓</IconButton
                     >
                   </td>
-                  <td class="actions col-remove">
+                  <td class="col-actions">
                     <KebabMenu items={categoryMenu(idx)} ariaLabel="Category actions" />
                   </td>
                 </tr>
@@ -569,7 +569,7 @@
         <EmptyState>No subscriptions yet. Add one above, or import an OPML file.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="table table--fixed">
             <thead>
               <tr>
                 <th class="type">Type</th>
@@ -577,14 +577,15 @@
                 <th class="col-category">Category</th>
                 <th class="num col-interval">Interval</th>
                 <th class="col-state">Last fetch</th>
-                <th class="actions"></th>
+                <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
               {#each config.feeds as feed, idx (feed.url + idx)}
                 {@const state = feedStateByUrl[feed.url]}
-                <tr class:has-error={state && state.error_count > 0}>
-                  <td class="type"><span class="type-pill">{detectSourceType(feed.url)}</span></td>
+                <tr class:is-danger={state && state.error_count > 0}>
+                  <td class="type"><span class="status-pill">{detectSourceType(feed.url)}</span></td
+                  >
                   <td class="col-title">
                     <div class="title-cell">
                       <span class="title-text">{feed.title || feed.url}</span>
@@ -600,7 +601,7 @@
                   <td class="col-state">
                     {#if state}
                       <div class="state">
-                        <span>{formatDate(state.last_fetched_at)}</span>
+                        <span class="truncate">{formatDate(state.last_fetched_at)}</span>
                         {#if state.last_error}
                           <span class="state-error" title={state.last_error}>
                             {state.error_count}× err: {state.last_error.slice(0, 60)}
@@ -611,7 +612,7 @@
                       <span class="muted">never</span>
                     {/if}
                   </td>
-                  <td class="actions">
+                  <td class="col-actions">
                     <KebabMenu items={feedMenu(idx)} ariaLabel="Subscription actions" />
                   </td>
                 </tr>
@@ -623,17 +624,19 @@
     </SettingsCard>
 
     <SettingsCard title="OPML">
-      <p class="hint">
+      <p class="description">
         Import subscriptions from an OPML export, or download the current list as OPML. Legacy
         bridger URLs (<code>localhost:8900/tumblr/…</code>,
         <code>localhost:8900/arena/…</code>) are rewritten to <code>tumblr:</code>
         / <code>arena:</code> on import.
       </p>
-      <div class="opml-actions">
+      <div class="hstack wrap">
         <Button onclick={() => fileInput?.click()} disabled={importing}>
           {importing ? 'Importing…' : 'Import OPML…'}
         </Button>
-        <a class="opml-link" href={exportOpmlUrl()} download="feeds.opml"> Download OPML </a>
+        <a class="opml-link link-muted" href={exportOpmlUrl()} download="feeds.opml">
+          Download OPML
+        </a>
       </div>
       <input
         bind:this={fileInput}
@@ -658,7 +661,7 @@
       if (!o) cancelModal();
     }}
   >
-    <div class="modal-body">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <SettingsField label="URL">
         <input
           type="text"
@@ -707,7 +710,7 @@
       if (!o) cancelModal();
     }}
   >
-    <div class="modal-body">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <SettingsField label="Slug">
         <input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
       </SettingsField>
@@ -733,7 +736,7 @@
       if (!o) cancelModal();
     }}
   >
-    <div class="modal-body">
+    <div class="vstack" style:--vstack-gap="var(--space-2)">
       <SettingsField label="URL">
         <input type="text" bind:value={editing.draft.url} />
       </SettingsField>
@@ -792,7 +795,7 @@
 {/if}
 
 <style>
-  /* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
+  /* Shared .settings/.card/.field/.banner/.icon-btn primitives live in
 	   web/src/lib/styles/settings.css (imported by app.css). Only feeds-specific
 	   styling (diagnostics, type pill, title cell, container queries) stays. */
 
@@ -820,13 +823,8 @@
 
   .diag-value {
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
-  }
-
-  .diag-label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .col-title {
@@ -885,39 +883,17 @@
     padding: 0;
     overflow-wrap: anywhere;
     word-break: break-all;
-    line-height: 1.3;
+    line-height: var(--leading-tight);
   }
 
-  .grid tbody tr.has-error {
-    background: rgba(204, 102, 102, 0.05);
-  }
-
-  .grid td.type,
-  .grid th.type {
+  .type {
     width: 4.5rem;
   }
 
-  .grid td.num,
-  .grid th.num {
-    text-align: right;
-    white-space: nowrap;
-  }
-
-  /* Row actions are a single kebab; only the reorder column still holds a pair
-	   of icon buttons, so it keeps the wider width under its own class. */
-  .grid td.actions,
-  .grid th.actions {
-    width: 3rem;
-  }
-
-  .grid td.col-order,
-  .grid th.col-order {
-    width: 4.5rem;
-  }
-
-  .grid td.col-remove,
-  .grid th.col-remove {
-    width: 2.75rem;
+  /* Row actions are a single kebab at the table's own width; only the reorder
+	   column holds a pair of icon buttons, so it asks for more. */
+  .col-order {
+    --table-actions-width: 4.5rem;
   }
 
   /* A borderless cell editor, not a field: the box appears on hover/focus so a
@@ -926,7 +902,7 @@
      leading pin, or the row's own height is set by this cell's 1.5 leading and
      it sits taller than the IconButtons in the cells beside it. The transparent
      border is what keeps the box from shifting when it appears. */
-  .grid input[type='text'] {
+  .col-title input[type='text'] {
     width: 100%;
     background: transparent;
     color: var(--text-primary);
@@ -935,22 +911,17 @@
     padding: 0.2rem var(--space-1);
     font: inherit;
     font-size: var(--text-sm);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     min-height: var(--control-height-md);
   }
 
-  .grid input[type='text']:focus,
-  .grid input[type='text']:hover {
+  .col-title input[type='text']:focus,
+  .col-title input[type='text']:hover {
     background: var(--surface-base);
   }
 
-  .type-pill {
-    display: inline-block;
-    font-size: var(--text-xs);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    color: var(--text-muted);
+  .col-title input[type='text']:focus-visible {
+    border-color: var(--focus-field-border);
   }
 
   .state {
@@ -962,12 +933,6 @@
     overflow: hidden;
   }
 
-  .state > span:first-child {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .state-error {
     color: var(--status-danger-fg);
     max-width: 32ch;
@@ -976,27 +941,8 @@
     white-space: nowrap;
   }
 
-  .opml-actions {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-    flex-wrap: wrap;
-  }
-
   .opml-link {
     font-size: var(--text-sm);
-    color: var(--text-muted);
-    text-decoration: underline;
-  }
-
-  .opml-link:hover {
-    color: var(--text-primary);
-  }
-
-  .modal-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
   }
 
   /* Container-based: hide low-priority table columns as the content area
@@ -1016,8 +962,7 @@
       display: none;
     }
 
-    .grid td.type,
-    .grid th.type {
+    .type {
       width: 3rem;
     }
 
@@ -1029,24 +974,8 @@
       width: 7rem;
     }
 
-    .grid td.actions,
-    .grid th.actions {
-      width: 2.75rem;
-    }
-
-    .grid td.col-order,
-    .grid th.col-order {
-      width: 4rem;
-    }
-
-    .grid td.col-remove,
-    .grid th.col-remove {
-      width: 2.5rem;
-    }
-
-    .grid th,
-    .grid td {
-      padding: var(--space-2) var(--space-2);
+    .col-order {
+      --table-actions-width: 4rem;
     }
   }
 

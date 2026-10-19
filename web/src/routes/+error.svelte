@@ -157,7 +157,9 @@
   h1 {
     margin: 0;
     font-size: 1.35rem;
-    font-weight: 500;
+    /* heading-weight: the error page's one large line sits under a thin-stroke
+       glyph and reads as a statement, not a page title, so it is lighter. */
+    font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
 
@@ -165,7 +167,7 @@
     margin: 0.15rem 0 0;
     max-width: 34rem;
     font-size: var(--text-base);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-muted);
     text-wrap: pretty;
   }
@@ -179,9 +181,9 @@
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
     background: var(--surface-card);
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-sm);
-    line-height: 1.45;
+    line-height: var(--leading-snug);
     color: var(--text-secondary);
     /* A message can be a URL or an unbroken token; keep it inside the box. */
     overflow-wrap: anywhere;
@@ -206,7 +208,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-base);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     text-decoration: none;
     cursor: pointer;
     transition:
@@ -216,8 +218,8 @@
   }
 
   .action:hover {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   /* The bot's identity accent, not the interactive blue — this is the one

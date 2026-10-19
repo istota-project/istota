@@ -85,8 +85,8 @@
   <div class="report-content">
     <Collapsible.Root bind:open={incomeOpen}>
       <div class="section-header">
-        <Collapsible.Trigger class="section-toggle">
-          <span class="caret" class:open={incomeOpen}>&#9654;</span>
+        <Collapsible.Trigger class="section-toggle button-reset">
+          <span class="record-caret" class:is-open={incomeOpen}>&#9654;</span>
           Income
         </Collapsible.Trigger>
         <span class="section-total income">{formatAmount(totals.income, totals.currency)}</span>
@@ -102,8 +102,8 @@
 
     <Collapsible.Root bind:open={expenseOpen}>
       <div class="section-header">
-        <Collapsible.Trigger class="section-toggle">
-          <span class="caret" class:open={expenseOpen}>&#9654;</span>
+        <Collapsible.Trigger class="section-toggle button-reset">
+          <span class="record-caret" class:is-open={expenseOpen}>&#9654;</span>
           Expenses
         </Collapsible.Trigger>
         <span class="section-total expense">{formatAmount(totals.expenses, totals.currency)}</span>
@@ -127,16 +127,15 @@
 {/if}
 
 {#snippet treeNode(node: AccountNode)}
-  <div
-    class="money-table-row money-table-row--tree"
-    style="padding-left: {0.75 + node.depth * 1.25}rem"
-  >
-    <button class="tree-name" type="button" onclick={() => navigateToAccount(node.fullName)}
-      >{node.name}</button
+  <div class="record-row record-row--tree" style="padding-left: {0.75 + node.depth * 1.25}rem">
+    <button
+      class="record-name button-reset"
+      type="button"
+      onclick={() => navigateToAccount(node.fullName)}>{node.name}</button
     >
     {#if node.balance}
       <span
-        class="tree-balance"
+        class="tree-balance num"
         class:income={node.fullName.startsWith('Income:')}
         class:expense={node.fullName.startsWith('Expenses:')}
       >
@@ -152,7 +151,7 @@
 <style>
   .section-total {
     margin-left: auto;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-variant-numeric: tabular-nums;
     font-size: var(--text-base);
   }
@@ -164,43 +163,12 @@
     color: var(--money-expense);
   }
 
-  .caret {
-    font-size: 0.5rem;
-    color: var(--text-dim);
-    transition: transform var(--transition-fast);
-    display: inline-block;
-  }
-
-  .caret.open {
-    transform: rotate(90deg);
-  }
-
   .tree-section {
     padding: var(--space-1) 0 var(--space-2);
   }
 
-  .tree-name {
-    flex: 1;
-    min-width: 0;
-    background: none;
-    border: none;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-    padding: 0;
-    text-align: left;
-  }
-
-  .tree-name:hover {
-    color: var(--text-primary);
-  }
-
   .tree-balance {
     margin-left: auto;
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-primary);
   }
 
   .tree-balance.income {
@@ -219,13 +187,13 @@
   }
 
   .net-label {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: var(--text-base);
   }
 
   .net-amount {
     margin-left: auto;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     font-size: var(--text-base);
     font-variant-numeric: tabular-nums;
   }

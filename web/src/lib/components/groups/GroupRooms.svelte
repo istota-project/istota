@@ -34,7 +34,7 @@
 
 <SettingsCard title="Rooms" description="Linked chat rooms you can open, most recent first.">
   {#if ordered.length}
-    <ul class="rooms">
+    <ul class="rooms list-reset">
       {#each ordered as room (room.token)}
         <li>
           <span class="entry-icon" aria-hidden="true"><MessageSquare size={16} /></span>
@@ -54,11 +54,6 @@
 </SettingsCard>
 
 <style>
-  .rooms {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .rooms li {
     display: flex;
     align-items: center;

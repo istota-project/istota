@@ -87,7 +87,7 @@
     color: var(--text-dim);
     cursor: pointer;
     padding: 0 0.1rem;
-    line-height: 1;
+    line-height: var(--leading-none);
     border-radius: var(--radius-sm);
     flex-shrink: 0;
     transition: color var(--transition-fast);
@@ -128,8 +128,8 @@
   }
 
   :global(.ui-kebab-item[data-highlighted]) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
   :global(.ui-kebab-item[data-disabled]) {
     opacity: 0.4;

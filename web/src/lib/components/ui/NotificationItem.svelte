@@ -81,7 +81,7 @@
 <div class="notification-item" class:unseen={!item.seen_at}>
   <button
     type="button"
-    class="item-open"
+    class="item-open button-reset"
     onclick={() => onOpen(item)}
     aria-label="Open notification: {item.title}"
   >
@@ -130,7 +130,7 @@
   }
 
   .notification-item:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .item-open {
@@ -139,14 +139,8 @@
     display: flex;
     align-items: flex-start;
     gap: var(--space-2);
-    padding: 0;
-    border: none;
-    background: none;
-    font: inherit;
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
-    cursor: pointer;
-    color: inherit;
     /* The row is full-bleed inside its own padding, so the global focus ring
        would paint outside the item's box and over its neighbour. */
     outline-offset: calc(-1 * var(--focus-ring-width));
@@ -163,7 +157,7 @@
        the other. */
     /* design-lint-allow: sub---space-1 optical nudge, centring a 0.5rem dot on a line box */
     margin-top: 0.35rem;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-dim);
   }
 
@@ -203,7 +197,7 @@
      new rather than as important — severity is the dot's job. */
   .unseen .item-title {
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .item-meta {

@@ -728,7 +728,7 @@
       </p>
     {/if}
     {#if audience?.sources.length}
-      <ul class="sources">
+      <ul class="sources list-reset">
         {#each audience.sources.filter((a) => author || a.owner_id === me) as approval (approval.source_id)}
           {@const status = approvalStatus(approval)}
           <li>
@@ -783,7 +783,7 @@
           'Preview is private and sends nothing. Generate now publishes a new edition to members.'}
       </p>
       {#if runs.length}
-        <ul class="runs">
+        <ul class="runs list-reset">
           {#each runs as r (r.id)}
             <li>
               <span class="run-date"
@@ -895,12 +895,6 @@
     flex-direction: column;
     gap: var(--space-1);
     margin: 0 0 var(--space-3);
-  }
-  .sources,
-  .runs {
-    list-style: none;
-    margin: 0;
-    padding: 0;
   }
   .sources li,
   .runs li {

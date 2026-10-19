@@ -85,29 +85,29 @@
 {:else}
   <div class="account-list">
     {#each visibleNodes as node (node.fullName)}
-      <div
-        class="money-table-row money-table-row--tree"
-        style="padding-left: {0.75 + node.depth * 1.25}rem"
-      >
+      <div class="record-row record-row--tree" style="padding-left: {0.75 + node.depth * 1.25}rem">
         <button
-          class="account-toggle"
+          class="account-toggle button-reset"
           type="button"
           onclick={() => (node.children.length > 0 ? toggleExpand(node.fullName) : null)}
         >
           {#if node.children.length > 0}
-            <span class="caret" class:open={expandedSet.has(node.fullName) || !!$accountFilter}
-              >&#9654;</span
+            <span
+              class="record-caret"
+              class:is-open={expandedSet.has(node.fullName) || !!$accountFilter}>&#9654;</span
             >
           {:else}
             <span class="caret-spacer"></span>
           {/if}
         </button>
-        <button class="account-name" type="button" onclick={() => navigateToAccount(node.fullName)}
-          >{node.name}</button
+        <button
+          class="record-name button-reset"
+          type="button"
+          onclick={() => navigateToAccount(node.fullName)}>{node.name}</button
         >
         {#if node.balance}
           <span
-            class="account-balance"
+            class="account-balance num"
             class:income={node.fullName.startsWith('Income:')}
             class:expense={node.fullName.startsWith('Expenses:')}
             >{displayBalance(node.balance, node.fullName)}</span
@@ -130,22 +130,6 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    color: inherit;
-  }
-
-  .caret {
-    font-size: 0.5rem;
-    color: var(--text-dim);
-    transition: transform var(--transition-fast);
-    display: inline-block;
-  }
-
-  .caret.open {
-    transform: rotate(90deg);
   }
 
   .caret-spacer {
@@ -153,28 +137,8 @@
     display: inline-block;
   }
 
-  .account-name {
-    flex: 1;
-    min-width: 0;
-    background: none;
-    border: none;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-    padding: 0;
-    text-align: left;
-  }
-
-  .account-name:hover {
-    color: var(--text-primary);
-  }
-
   .account-balance {
     margin-left: auto;
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-primary);
   }
 
   .account-balance.income {

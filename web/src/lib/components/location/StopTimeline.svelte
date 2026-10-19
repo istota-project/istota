@@ -34,7 +34,7 @@
         </div>
         <div class="timeline-content">
           <div class="stop-name">{stop.location}</div>
-          <div class="stop-time">
+          <div class="stop-time muted">
             {stop.arrived}{#if stop.departed && stop.departed !== stop.arrived}
               &ndash; {stop.departed}{/if}
             {#if duration(stop.arrived, stop.departed)}
@@ -70,7 +70,7 @@
   }
 
   .timeline-item:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .timeline-dot-col {
@@ -85,7 +85,7 @@
   .dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-primary);
     flex-shrink: 0;
   }
@@ -105,7 +105,7 @@
 
   .stop-name {
     font-size: var(--text-base);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -113,7 +113,6 @@
 
   .stop-time {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     margin-top: 0.1rem;
   }
 

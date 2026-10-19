@@ -125,7 +125,7 @@
         <Icon size={16} />
       </span>
       <p class="notice-message">
-        <span class="notice-severity-label">{LABELS[notice.severity]}:</span>
+        <span class="visually-hidden">{LABELS[notice.severity]}:</span>
         {notice.message}
         {#if notice.count > 1}
           <span class="notice-count" data-testid="notice-count">{countLabel(notice.count)}</span>
@@ -143,7 +143,7 @@
       {/if}
       <button
         type="button"
-        class="notice-dismiss touch-target"
+        class="notice-dismiss button-reset touch-target"
         aria-label="Dismiss notification"
         onclick={dismissCurrent}
       >
@@ -153,11 +153,16 @@
   {/if}
 </div>
 
-<span class="notice-announce" data-testid="notice-announce-polite" aria-live="polite"
-  >{politeText}</span
+<!-- notice-announce has no rule of its own; tests find the live regions by it. -->
+<span
+  class="visually-hidden notice-announce"
+  data-testid="notice-announce-polite"
+  aria-live="polite">{politeText}</span
 >
-<span class="notice-announce" data-testid="notice-announce-assertive" aria-live="assertive"
-  >{assertiveText}</span
+<span
+  class="visually-hidden notice-announce"
+  data-testid="notice-announce-assertive"
+  aria-live="assertive">{assertiveText}</span
 >
 
 <style>
@@ -229,20 +234,6 @@
     flex: 1;
   }
 
-  /* Carries the severity to a screen reader that navigates to the band, since
-     the icon is decorative and colour alone cannot be the signal. */
-  .notice-severity-label,
-  .notice-announce {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    border: 0;
-  }
-
   .notice-count {
     opacity: 0.75;
     font-variant-numeric: tabular-nums;
@@ -250,7 +241,7 @@
 
   .notice-action {
     font: inherit;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     flex-shrink: 0;
     background: none;
     border: 1px solid currentColor;
@@ -266,20 +257,14 @@
   .notice-dismiss {
     --touch-target-w: var(--touch-comfort);
     --touch-target-h: var(--touch-comfort);
-    font: inherit;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     width: 1.5em;
     height: 1.5em;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 50%;
-    color: inherit;
+    border-radius: var(--radius-round);
     opacity: 0.75;
-    cursor: pointer;
   }
 
   .notice-dismiss:hover {

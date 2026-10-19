@@ -43,7 +43,7 @@
     border-radius: var(--control-radius);
     font-size: var(--text-sm);
     font-family: inherit;
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     transition: all var(--transition-fast);
     user-select: none;
     cursor: pointer;

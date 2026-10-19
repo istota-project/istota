@@ -8,6 +8,7 @@
   } from '$lib/money/workEntryPayload';
   import { Modal, Button, Field, Select, type SelectOption } from '$lib/components/ui';
   import { formatDecimal } from '$lib/format';
+  import { localDateISO } from '$lib/dateFormat';
 
   interface Props {
     /** The entry being edited, or null when adding. */
@@ -40,14 +41,7 @@
   // Greenwich logging work in the evening got tomorrow pre-filled onto a
   // billable record — and the list below renders dates in local time, so the
   // field visibly disagreed with "today".
-  const today = localToday();
-
-  function localToday(): string {
-    const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    return `${now.getFullYear()}-${month}-${day}`;
-  }
+  const today = localDateISO();
 
   let date = $state(untrack(() => entry?.date ?? today));
   let client = $state(untrack(() => entry?.client ?? ''));
@@ -192,49 +186,49 @@
   width="400px"
 >
   <label class="field">
-    <span>Date</span>
+    <span class="caption">Date</span>
     <input type="date" bind:value={date} />
   </label>
 
   <label class="field">
-    <span>Client</span>
+    <span class="caption">Client</span>
     <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
   </label>
 
   <label class="field">
-    <span>Service</span>
+    <span class="caption">Service</span>
     <Select bind:value={service} options={serviceOptions} fullWidth ariaLabel="Service" />
   </label>
 
   {#if wants === 'qty'}
     <label class="field">
-      <span>{selectedService?.type === 'days' ? 'Days' : 'Hours'}</span>
+      <span class="caption">{selectedService?.type === 'days' ? 'Days' : 'Hours'}</span>
       <input type="text" inputmode="decimal" bind:value={qty} placeholder="e.g. 3" />
     </label>
   {:else if wants === 'amount'}
     <label class="field">
-      <span>Amount</span>
+      <span class="caption">Amount</span>
       <input type="text" inputmode="decimal" bind:value={amount} placeholder="e.g. 1200" />
     </label>
   {:else if selectedService}
-    <p class="field-note">Flat-rate service — quantity is not used.</p>
+    <p class="field-note caption">Flat-rate service — quantity is not used.</p>
   {/if}
 
   <label class="field">
-    <span>Discount</span>
+    <span class="caption">Discount</span>
     <input type="text" inputmode="decimal" bind:value={discount} placeholder="0" />
   </label>
 
   <label class="field">
-    <span>Description</span>
+    <span class="caption">Description</span>
     <input type="text" data-multiline="true" bind:value={description} placeholder="Optional" />
   </label>
 
   <label class="field">
-    <span>Entity</span>
+    <span class="caption">Entity</span>
     <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
     {#if !entity && selectedClient?.entity}
-      <span class="field-hint">Defaults to {selectedClient.entity}</span>
+      <span class="caption">Defaults to {selectedClient.entity}</span>
     {/if}
   </label>
 
@@ -272,11 +266,6 @@
     margin-bottom: var(--space-3);
   }
 
-  .field span {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
   .field input[type='text'],
   .field input[type='date'] {
     background: var(--surface-base);
@@ -288,14 +277,7 @@
     border-radius: var(--radius-sm);
   }
 
-  .field-hint {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
-
   .field-note {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     margin: 0 0 var(--space-3);
   }
 

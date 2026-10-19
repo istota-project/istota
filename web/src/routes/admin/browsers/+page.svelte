@@ -72,7 +72,7 @@
     {:else}
       <section class="card">
         <div class="table-scroll">
-          <table class="grid browser-grid">
+          <table class="table table--fixed browser-grid">
             <thead><tr><th>User</th><th>Slot</th><th>Idle</th><th>Console</th></tr></thead>
             <tbody>
               {#each report.instances as instance (instance.user)}

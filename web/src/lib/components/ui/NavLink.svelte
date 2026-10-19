@@ -26,7 +26,7 @@
     align-items: center;
     min-height: var(--control-height-sm);
     font-size: var(--text-sm);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     color: var(--text-muted);
     text-decoration: none;
     padding: 0.15rem var(--chip-padding-x);
@@ -39,7 +39,7 @@
   }
 
   .nav-link.active {
-    background: var(--surface-raised);
+    background: var(--selected-bg);
     color: var(--text-primary);
   }
 </style>

@@ -165,7 +165,7 @@
 
     {#snippet table(rows: AdminStatsJob[], label: string)}
       <div class="table-scroll">
-        <table class="grid jobs-grid" aria-label={label}>
+        <table class="table table--fixed jobs-grid" aria-label={label}>
           <thead
             ><tr
               ><th scope="col" class="col-user">User</th>
@@ -195,7 +195,7 @@
                 <td class="col-state">
                   <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
                 </td>
-                <td class="col-last"
+                <td class="col-last truncate"
                   >{job.last_run_at ? formatRelative(job.last_run_at) : 'Never'}</td
                 >
                 <td class="num col-failures" class:failing={job.consecutive_failures > 0}
@@ -287,9 +287,6 @@
   .cell-main {
     overflow-wrap: anywhere;
   }
-  .jobs-grid code {
-    font-size: var(--text-xs);
-  }
   .last-error summary {
     cursor: pointer;
   }
@@ -299,10 +296,6 @@
     color: var(--status-danger-fg);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-  }
-  .num {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
   }
   .failing {
     color: var(--status-danger-fg);
@@ -324,17 +317,8 @@
   .col-last {
     width: 6.5rem;
   }
-  td.col-last {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .col-failures {
     width: 5rem;
-  }
-  .jobs-grid .col-actions {
-    width: 2.5rem;
-    text-align: right;
   }
   /* Narrow: keep every column and scroll sideways; the min-width tightens
      with User and Schedule. */

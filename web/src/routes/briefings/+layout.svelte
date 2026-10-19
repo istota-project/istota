@@ -696,14 +696,14 @@
                   entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
               >
                 <span class="archive-line">
-                  <span class="archive-subject">{row.title}</span>
-                  <time class="archive-date" datetime={entry.at} title={fmtDate(entry.at)}
+                  <span class="archive-subject title-card">{row.title}</span>
+                  <time class="archive-date caption" datetime={entry.at} title={fmtDate(entry.at)}
                     >{formatRelative(entry.at)}</time
                   >
                 </span>
-                <span class="archive-audience">
+                <span class="archive-audience caption">
                   {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
-                  <span>{row.audience}</span>
+                  <span class="truncate">{row.audience}</span>
                   <CountPill count={row.unread ? 1 : 0} title="Unread" shape="inline-mark" />
                   {#if row.unread}<span class="visually-hidden">, unread</span>{/if}
                 </span>
@@ -782,8 +782,6 @@
   .archive-subject {
     flex: 1;
     min-width: 0;
-    font-size: var(--text-sm);
-    font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -791,8 +789,6 @@
 
   .archive-date {
     flex-shrink: 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
 
@@ -801,8 +797,6 @@
     align-items: center;
     gap: var(--space-1);
     min-width: 0;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .archive-preview {
@@ -812,15 +806,9 @@
     line-clamp: 2;
     overflow: hidden;
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     color: var(--text-muted);
     overflow-wrap: anywhere;
-  }
-
-  .archive-audience span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Pull the unread mark in to 2px from the audience, the feeds sidebar's gap. */
@@ -863,8 +851,8 @@
   }
 
   .load-more:hover:not(:disabled) {
-    background: var(--surface-raised);
-    color: var(--text-primary);
+    background: var(--hover-bg);
+    color: var(--hover-fg);
   }
 
   .sidebar-error {

@@ -251,10 +251,10 @@
     {#if data.credentials.length === 0}
       <EmptyState>No credentials yet.</EmptyState>
     {:else}
-      <ul class="cred-list">
+      <ul class="divided-list">
         {#each data.credentials as credential (credential.name)}
           <li class="cred-row" data-testid="credential-{credential.name}">
-            <code class="cred-name">{credential.name}</code>
+            <code class="cred-name code-chip">{credential.name}</code>
             <div class="cred-main">
               {#if credential.hosts.length}
                 <span class="cred-hosts">{credential.hosts.join(', ')}</span>
@@ -262,9 +262,9 @@
                 <span class="cred-warn">{noSiteLine(credential)}</span>
               {/if}
               {#if credential.grant}
-                <span class="cred-meta">{grantSummary(credential.grant)}</span>
+                <span class="caption">{grantSummary(credential.grant)}</span>
               {:else}
-                <span class="cred-meta cred-warn">No access yet</span>
+                <span class="caption cred-warn">No access yet</span>
               {/if}
             </div>
             <div class="cred-badges">
@@ -285,7 +285,7 @@
       </ul>
     {/if}
   {/if}
-  <div class="row">
+  <div class="hstack wrap">
     <Button variant="secondary" size="sm" onclick={showDeleted}>Recently deleted credentials</Button
     >
   </div>
@@ -414,30 +414,14 @@
 />
 
 <style>
-  .cred-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
   .cred-row {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) 0;
-  }
-
-  .cred-row + .cred-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .cred-name {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-primary);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
     flex: 0 1 9rem;
     min-width: 0;
     overflow-wrap: anywhere;
@@ -458,11 +442,6 @@
 
   .cred-main > .cred-warn:first-child {
     font-size: var(--text-sm);
-  }
-
-  .cred-meta {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .cred-warn {
@@ -523,7 +502,7 @@
   /* On a phone the name and the menu share the first line and the rest wraps
      under them, so a long host list is not squeezed into a sliver beside the
      badges. */
-  @media (max-width: 600px) {
+  @media (max-width: 640px) {
     .cred-row {
       flex-wrap: wrap;
     }

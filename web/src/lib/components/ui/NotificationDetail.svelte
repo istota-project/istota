@@ -128,7 +128,7 @@
     overflow-wrap: anywhere;
     color: var(--text-secondary);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
   }
 
   .detail-note {

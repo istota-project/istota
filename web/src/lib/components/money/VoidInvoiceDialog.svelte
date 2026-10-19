@@ -106,7 +106,7 @@
     {/if}
   </div>
 
-  <div class="fields">
+  <div class="vstack">
     <Field label="Reason">
       <Input bind:value={reason} placeholder="Optional" />
     </Field>
@@ -165,12 +165,6 @@
   .amount {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-  }
-
-  .fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
 
   .form-error {

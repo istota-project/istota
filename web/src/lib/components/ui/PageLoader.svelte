@@ -28,7 +28,7 @@
     pointer-events: none;
     /* A load that finishes this fast never shows a bar at all. */
     opacity: 0;
-    animation: page-loader-in 120ms ease-out 150ms forwards;
+    animation: page-loader-in var(--duration-fast) ease-out 150ms forwards;
   }
 
   .page-loader-bar {

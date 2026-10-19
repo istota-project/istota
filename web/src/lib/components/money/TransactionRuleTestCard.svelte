@@ -149,7 +149,7 @@
 </script>
 
 <SettingsCard title="Test a transaction">
-  <p class="card-hint">
+  <p class="card-hint caption">
     A made-up transaction run through the ordered pass, against the enabled rules in this scope —
     the same set an import is scored against, so a disabled rule is absent here as it is there.
     Nothing is written.
@@ -216,7 +216,7 @@
           <div class="res-row">
             <span class="micro-label">Posting account</span>
             {#if resolution.posting_account}
-              <code class="res-value">{resolution.posting_account}</code>
+              <code class="res-value code-chip">{resolution.posting_account}</code>
             {:else}
               <span class="muted"
                 >no rule filled this slot — falls back to Expenses:Uncategorized</span
@@ -226,7 +226,7 @@
           <div class="res-row">
             <span class="micro-label">Contra account</span>
             {#if resolution.contra_account}
-              <code class="res-value">{resolution.contra_account}</code>
+              <code class="res-value code-chip">{resolution.contra_account}</code>
             {:else}
               <span class="muted">no rule filled this slot — falls back to the default account</span
               >
@@ -243,7 +243,7 @@
         {/if}
 
         <h4 class="micro-label trace-head">Trace</h4>
-        <ul class="trace-list">
+        <ul class="divided-list">
           {#each trace as entry (entry.rule_id)}
             {@const outcome = outcomeOf(entry)}
             <li class="trace-row">
@@ -265,8 +265,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .test-form {
@@ -295,6 +293,14 @@
     padding-top: var(--space-3);
   }
 
+  .result h4 {
+    margin: var(--space-3) 0 var(--space-2);
+  }
+
+  .result h4:first-child {
+    margin-top: 0;
+  }
+
   .res-row {
     display: flex;
     flex-wrap: wrap;
@@ -302,14 +308,6 @@
     gap: var(--space-2);
     padding: var(--space-1) 0;
     font-size: var(--text-sm);
-  }
-
-  .res-value {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .skip-line {
@@ -322,12 +320,6 @@
     margin-top: var(--space-3);
   }
 
-  .trace-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
   .trace-row {
     display: flex;
     flex-wrap: wrap;
@@ -335,10 +327,6 @@
     gap: var(--space-1) var(--space-2);
     padding: var(--space-1) 0;
     font-size: var(--text-xs);
-  }
-
-  .trace-row + .trace-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .trace-rule {

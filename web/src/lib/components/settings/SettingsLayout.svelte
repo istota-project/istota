@@ -34,11 +34,11 @@
   {#if !loading && (title || description || headerActions)}
     <header class="settings-header">
       <div>
-        {#if title}<h1>{title}</h1>{/if}
-        {#if description}<p class="hint">{description}</p>{/if}
+        {#if title}<h1 class="title-page">{title}</h1>{/if}
+        {#if description}<p class="description">{description}</p>{/if}
       </div>
       {#if headerActions}
-        <div class="header-actions">{@render headerActions()}</div>
+        <div class="hstack">{@render headerActions()}</div>
       {/if}
     </header>
   {/if}

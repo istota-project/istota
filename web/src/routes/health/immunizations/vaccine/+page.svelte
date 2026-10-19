@@ -75,7 +75,7 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>{ref?.display_name || name}</h1>
+    <h1 class="title-page">{ref?.display_name || name}</h1>
     <Button href="{base}/health/immunizations">Back</Button>
   </div>
 {/if}
@@ -95,7 +95,7 @@
         >
         <span class="caption">{ref.category} · {ref.schedule}</span>
       </div>
-      <dl class="grid-stats">
+      <dl class="kv-stacked">
         <div>
           <dt>Last given</dt>
           <dd>{formatDate(entry.last_given)}</dd>
@@ -110,14 +110,16 @@
         </div>
         {#if entry.days_until_due !== null}
           <div>
-            <dt>{entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}</dt>
+            <dt>
+              {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
+            </dt>
             <dd>{Math.abs(entry.days_until_due)}</dd>
           </div>
         {/if}
       </dl>
     {/if}
     {#if ref.description}
-      <p class="description">{ref.description}</p>
+      <p class="ref-description">{ref.description}</p>
     {/if}
     {#if ref.typical_age_range}
       <p class="caption">Typical age range: {ref.typical_age_range}</p>
@@ -132,13 +134,13 @@
   {:else if explainer && explainer.summary}
     <details class="card explainer">
       <summary>
-        <span class="label">About this vaccine</span>
+        <span class="label micro-label">About this vaccine</span>
         <span class="chev" aria-hidden="true">›</span>
       </summary>
       <div class="content">
         <p class="summary">{explainer.summary}</p>
         {#if explainer.why_it_matters.length > 0}
-          <h3>Why it matters</h3>
+          <h3 class="micro-label">Why it matters</h3>
           <ul>
             {#each explainer.why_it_matters as item (item)}
               <li>{item}</li>
@@ -158,7 +160,7 @@
       <EmptyState size="sm">No doses recorded yet.</EmptyState>
     {:else}
       <div class="table-scroll">
-        <table class="grid">
+        <table class="table">
           <thead>
             <tr>
               <th>Date</th>
@@ -166,7 +168,7 @@
               <th>Dose label</th>
               <th>Facility</th>
               <th>Notes</th>
-              <th class="row-actions"></th>
+              <th class="col-actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -176,8 +178,8 @@
                 <td>{i.product_name || '—'}</td>
                 <td>{i.dose_label || '—'}</td>
                 <td>{i.facility || '—'}</td>
-                <td class="notes">{i.notes || '—'}</td>
-                <td class="row-actions">
+                <td class="notes cell-truncate">{i.notes || '—'}</td>
+                <td class="col-actions">
                   <KebabMenu
                     ariaLabel="Immunization actions"
                     items={[
@@ -201,11 +203,6 @@
     align-items: center;
     margin-bottom: var(--space-4);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
-  }
 
   .card {
     /* The layout owns .card's box and reads its padding from this hook. A
@@ -221,29 +218,14 @@
     align-items: center;
     margin-bottom: var(--space-2);
   }
-  .grid-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
-    gap: var(--space-3) var(--space-4);
-    margin: 0;
-  }
-  dt {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 0.15rem;
-  }
   dd {
-    margin: 0;
-    font-size: var(--text-sm);
     color: var(--text-primary);
   }
-  .description {
+  .ref-description {
     margin: var(--space-3) 0 0;
     font-size: var(--text-sm);
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
 
@@ -274,18 +256,11 @@
   details.explainer > summary::-webkit-details-marker {
     display: none;
   }
-  details.explainer > summary .label {
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-dim);
-    font-weight: 500;
-  }
   details.explainer > summary .chev {
     color: var(--text-dim);
-    font-size: 1rem;
-    line-height: 1;
-    transition: transform 0.15s ease;
+    font-size: var(--text-lg);
+    line-height: var(--leading-none);
+    transition: transform var(--transition-fast);
   }
   details.explainer[open] > summary .chev {
     transform: rotate(90deg);
@@ -301,17 +276,12 @@
   }
   .explainer h3 {
     margin: var(--space-3) 0 var(--space-2);
-    font-size: var(--text-xs);
-    font-weight: 500;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
   .explainer .summary {
     margin: 0;
     font-size: var(--text-base);
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
     max-width: 75ch;
   }
   .explainer ul {
@@ -319,7 +289,7 @@
     padding-left: 1.1rem;
     font-size: var(--text-base);
     color: var(--text-secondary);
-    line-height: 1.55;
+    line-height: var(--leading-relaxed);
   }
   .explainer li {
     margin: 0.2rem 0;
@@ -343,15 +313,7 @@
   }
   td.notes {
     max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--text-muted);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
   }
 
   /* Light theme overrides — dark rules above untouched. */

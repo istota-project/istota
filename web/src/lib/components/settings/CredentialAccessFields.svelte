@@ -28,7 +28,7 @@
   }: Props = $props();
 </script>
 
-<div class="access-fields">
+<div class="access-fields vstack">
   <Field
     label="Room scope"
     labelled={false}
@@ -49,7 +49,7 @@
     </p>{/if}
   {#if scope === 'rooms'}
     <fieldset class="access-rooms">
-      <legend>Rooms</legend>
+      <legend class="muted">Rooms</legend>
       <div class="room-options">
         {#each rooms as room (room.token)}
           <Field label={room.name} checkbox>
@@ -78,12 +78,6 @@
 </div>
 
 <style>
-  .access-fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   .access-fields .caption,
   .access-fields .form-error {
     margin: 0;
@@ -100,7 +94,6 @@
     padding: 0;
     margin-bottom: var(--space-2);
     font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .room-options {

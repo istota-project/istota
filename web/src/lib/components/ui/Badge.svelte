@@ -34,10 +34,10 @@
     align-items: center;
     font-size: var(--text-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     padding: 0.1rem var(--space-2);
     border-radius: var(--radius-pill);
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     /* A status label that wraps mid-word stops reading as one token, and its
        column then shifts row by row. */
     white-space: nowrap;
@@ -52,7 +52,7 @@
     /* design-lint-allow: the admin dashboard's compact chip, below --space-1. */
     padding: 0.05rem var(--space-2);
     font-size: var(--text-2xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .badge-danger {

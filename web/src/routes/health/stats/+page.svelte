@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { page } from '$app/state';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { theme } from '$lib/stores/theme';
@@ -404,6 +404,12 @@
     range = rangeSel.current()?.range ?? '90d';
     selectionReady = true;
   });
+  onDestroy(() => {
+    for (const metric of Object.keys(charts)) {
+      charts[metric]?.destroy();
+      delete charts[metric];
+    }
+  });
 </script>
 
 {#if !loading && !error}
@@ -436,12 +442,12 @@
       {@const v = formatLatestValue(metric)}
       <button class="card interactive" onclick={() => openEntry(metric)} type="button">
         <header>
-          <span class="label">{metricLabel(metric)}</span>
-          <span class="count">{(seriesByMetric[metric] || []).length} pts</span>
+          <span class="label micro-label">{metricLabel(metric)}</span>
+          <span class="count caption num">{(seriesByMetric[metric] || []).length} pts</span>
         </header>
-        <div class="value">
+        <div class="value num">
           {#if v}
-            {v.value}<span class="unit">{v.unit}</span>
+            {v.value}<span class="unit muted">{v.unit}</span>
           {:else}
             —
           {/if}
@@ -465,16 +471,16 @@
         type="button"
       >
         <header>
-          <span class="label">Blood Pressure</span>
-          <span class="count">
+          <span class="label micro-label">Blood Pressure</span>
+          <span class="count caption num">
             {Math.max(
               (seriesByMetric.blood_pressure_systolic || []).length,
               (seriesByMetric.blood_pressure_diastolic || []).length,
             )} pts
           </span>
         </header>
-        <div class="value">
-          {bpHeadline() || '—'}<span class="unit">mmHg</span>
+        <div class="value num">
+          {bpHeadline() || '—'}<span class="unit muted">mmHg</span>
         </div>
         <div class="chart">
           <canvas bind:this={canvases['blood_pressure']}></canvas>
@@ -499,7 +505,7 @@
       />
     </Field>
     <Field label="Value" labelled={false}>
-      <div class="value-row">
+      <div class="value-row hstack">
         <Input type="number" step="any" bind:value={formValue} required aria-label="Value" />
         {#if LOG_UNIT_CHOICES[formMetric]}
           <select class="unit-select" bind:value={formUnit} aria-label="Unit">
@@ -508,7 +514,7 @@
             {/each}
           </select>
         {:else}
-          <span class="unit-static">{METRIC_UNITS[formMetric]}</span>
+          <span class="unit-static muted">{METRIC_UNITS[formMetric]}</span>
         {/if}
       </div>
     </Field>
@@ -562,7 +568,7 @@
     cursor: pointer;
   }
   .log-btn:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
   .card {
     font: inherit;
@@ -576,25 +582,14 @@
     justify-content: space-between;
     align-items: baseline;
   }
-  .label {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-  }
   .value {
     font-size: 1.6rem;
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     margin-top: var(--space-1);
-    line-height: 1.1;
+    line-height: var(--leading-tight);
   }
   .unit {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     margin-left: var(--space-1);
   }
   .chart {
@@ -607,11 +602,6 @@
     margin-top: var(--space-1);
   }
 
-  .value-row {
-    display: flex;
-    gap: var(--space-2);
-    align-items: center;
-  }
   /* :global because the value input is an <Input> now — Svelte prunes a rule
      whose subject sits inside a component. */
   .value-row :global(input) {
@@ -629,7 +619,6 @@
   }
   .unit-static {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     padding: var(--space-1) 0.2rem;
   }
   .modal-actions {

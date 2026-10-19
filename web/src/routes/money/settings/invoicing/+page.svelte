@@ -378,7 +378,7 @@
       <div class="entity-grid card-grid">
         {#each entities as entity (entity.key)}
           <div class="entity">
-            <div class="entity-head">
+            <div class="entity-head title-card">
               <span>{entity.name}</span>
               <span class="entity-key">
                 <code>{entity.key}</code>
@@ -432,14 +432,14 @@
       <EmptyState>No services yet. Add what you bill for.</EmptyState>
     {:else}
       <div class="table-scroll">
-        <table class="grid">
+        <table class="table">
           <thead>
             <tr>
               <th>Service</th>
               <th>Type</th>
               <th class="num">Rate</th>
               <th>Income account</th>
-              <th class="actions" aria-label="Actions"></th>
+              <th class="col-actions" aria-label="Actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -454,7 +454,7 @@
                   {svc.type === 'other' ? '—' : `$${formatRate(svc.rate)}`}
                 </td>
                 <td class="muted"><code>{svc.income_account || '—'}</code></td>
-                <td class="actions">
+                <td class="col-actions">
                   <KebabMenu items={serviceMenu(svc)} ariaLabel="Service actions" />
                 </td>
               </tr>
@@ -480,14 +480,14 @@
       <EmptyState>No clients yet. Add the first one you invoice.</EmptyState>
     {:else}
       <div class="table-scroll">
-        <table class="grid">
+        <table class="table">
           <thead>
             <tr>
               <th>Client</th>
               <th>Entity</th>
               <th>Terms</th>
               <th>Schedule</th>
-              <th class="actions" aria-label="Actions"></th>
+              <th class="col-actions" aria-label="Actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -508,7 +508,7 @@
                     ? `${client.schedule}, day ${client.schedule_day}`
                     : client.schedule}
                 </td>
-                <td class="actions">
+                <td class="col-actions">
                   <KebabMenu items={clientMenu(client)} ariaLabel="Client actions" />
                 </td>
               </tr>
@@ -568,9 +568,10 @@
 />
 
 <style>
-  /* Shared .settings/.card/.field/.grid/.banner primitives live in
-	   web/src/lib/styles/settings.css (imported by app.css). Only money-specific
-	   styling (kv, entity grid, numeric column tweaks) stays. */
+  /* Shared .settings/.card/.field/.banner primitives live in
+	   web/src/lib/styles/settings.css and the tables in table.css (both
+	   imported by app.css). Only money-specific styling (kv, entity grid)
+	   stays. */
 
   .kv.compact {
     /* design-lint-allow: sub---space-1 hairline between the rows of a compact
@@ -579,14 +580,8 @@
     font-size: var(--text-xs);
   }
 
-  .kv dt {
-    color: var(--text-dim);
-  }
-
   .kv dd {
-    margin: 0;
     color: var(--text-secondary);
-    word-break: break-word;
   }
 
   .kv dd.pre {
@@ -613,36 +608,15 @@
     justify-content: space-between;
     align-items: baseline;
     gap: var(--space-2);
-    font-weight: 600;
     color: var(--text-primary);
-    font-size: var(--text-sm);
   }
 
   .entity-key {
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    font-weight: 400;
+    font-weight: var(--weight-regular);
     color: var(--text-dim);
     font-size: var(--text-xs);
-  }
-
-  /* Money's services table sizes by content; shared .settings .grid uses
-	   fixed layout, so opt back to auto here. */
-  .grid {
-    table-layout: auto;
-  }
-
-  .grid th.num,
-  .grid td.num {
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .grid th.actions,
-  .grid td.actions {
-    width: 1.5rem;
-    text-align: right;
   }
 </style>

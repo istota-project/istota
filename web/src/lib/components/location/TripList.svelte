@@ -40,13 +40,13 @@
         ></span>
         <div class="trip-info">
           <span class="trip-time">{formatTime(trip.start_time)} - {formatTime(trip.end_time)}</span>
-          <span class="trip-details">
+          <span class="trip-details caption">
             {formatDist(trip.distance_m)}
             {#if trip.max_speed}&middot; {formatSpeed(trip.max_speed)}{/if}
             &middot; {tripDuration(trip)}
           </span>
         </div>
-        <span class="trip-activity"
+        <span class="trip-activity caption"
           >{ACTIVITY_LABELS[trip.activity_type] ?? trip.activity_type}</span
         >
       </button>
@@ -78,13 +78,13 @@
   }
 
   .trip-item:hover {
-    background: var(--surface-raised);
+    background: var(--hover-bg);
   }
 
   .trip-dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     flex-shrink: 0;
   }
 
@@ -100,14 +100,7 @@
     color: var(--text-primary);
   }
 
-  .trip-details {
-    font-size: 0.65rem;
-    color: var(--text-dim);
-  }
-
   .trip-activity {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
     flex-shrink: 0;
   }
 </style>

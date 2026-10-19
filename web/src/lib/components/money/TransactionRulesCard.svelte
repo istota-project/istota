@@ -399,7 +399,7 @@
     <div class="banner error">{loadError}</div>
   {/if}
   {#if everLoaded || !loadError}
-    <p class="card-hint">
+    <p class="card-hint caption">
       One ordered pass per imported transaction, low priority first. A rule fills its slot only if
       that slot is still empty, so first match wins per slot and a <code>skip</code> ends the pass.
       An empty slot falls back to <code>Expenses:Uncategorized</code> and the profile's default account.
@@ -521,7 +521,7 @@
         <EmptyState>No rules in this scope yet.</EmptyState>
       {/if}
     {:else}
-      <ul class="rule-list">
+      <ul class="divided-list">
         {#each rules as rule (rule.id)}
           <li class="rule-row" class:off={!rule.enabled}>
             {#if editingId === rule.id}
@@ -626,11 +626,11 @@
                 </div>
               </div>
             {:else}
-              <div class="rule-line">
+              <div class="hstack">
                 <span class="rule-prio" title="Priority">{rule.priority}</span>
                 <span class="rule-desc">
                   <span class="muted">{rule.field} {rule.match_kind}</span>
-                  <code class="rule-value">{rule.match_value}</code>
+                  <code class="rule-value code-chip">{rule.match_value}</code>
                   <span class="muted">→</span>
                   <span class="rule-target">{outcomeOf(rule)}</span>
                   <span class="rule-scope muted">{scopeLabel(rule.ledger, rule.source)}</span>
@@ -664,8 +664,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .scope-row {
@@ -713,30 +711,10 @@
     gap: var(--space-1);
   }
 
-  .rule-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .rule-row {
-    padding: var(--space-2) 0;
-  }
-
-  .rule-row + .rule-row {
-    border-top: 1px solid var(--border-subtle);
-  }
-
   /* A disabled rule stays in the list — the editor has to show it — and reads
      as inert rather than being hidden, since only an import ignores it. */
   .rule-row.off .rule-desc {
     opacity: 0.6;
-  }
-
-  .rule-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
   }
 
   .rule-prio {
@@ -757,14 +735,6 @@
     font-size: var(--text-sm);
     color: var(--text-primary);
     overflow-wrap: anywhere;
-  }
-
-  .rule-value {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .rule-target {

@@ -219,12 +219,12 @@
   onOpenChange={handleOpenChange}
   width="420px"
 >
-  <div class="form-grid">
+  <div class="vstack" style:--vstack-gap="var(--space-2)">
     {#if isEdit}
       <div class="static-key">
         <span>Key</span>
         <code>{entity?.key}</code>
-        <small>The key is the identity — clients reference it by name.</small>
+        <small class="caption">The key is the identity — clients reference it by name.</small>
       </div>
     {:else}
       <SettingsField label="Key" hint="Short identifier clients point at." error={keyError}>
@@ -323,12 +323,6 @@
 </Modal>
 
 <style>
-  .form-grid {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
   .static-key {
     display: flex;
     flex-direction: column;
@@ -341,13 +335,7 @@
   }
 
   .static-key code {
-    font-size: var(--text-xs);
     color: var(--text-secondary);
-  }
-
-  .static-key small {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   /* Type is the global .form-error; only the space above it is this form's. */

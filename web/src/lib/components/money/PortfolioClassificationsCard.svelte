@@ -238,7 +238,7 @@
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else}
-    <p class="card-hint">
+    <p class="card-hint caption">
       New symbols classify themselves on import (ticker lookup, marked <em>auto</em>); edit a row to
       override — your edit always wins, and an automatic guess never replaces one. Auto-classify
       fills in anything still unclassified. Classifications reclassify all history at read time.
@@ -298,14 +298,14 @@
     {#if loaded && classifications.length === 0}
       <EmptyState>No classifications yet.</EmptyState>
     {:else}
-      <ul class="cls-list">
+      <ul class="divided-list">
         {#each classifications as cls (cls.symbol)}
           <li class="cls-row">
             {#if editingSymbol === cls.symbol}
               <div class="cls-form control-row">
                 <div class="ctl ctl-symbol">
                   <span class="micro-label">Symbol</span>
-                  <code class="cls-symbol">{cls.symbol}</code>
+                  <code class="cls-symbol code-chip">{cls.symbol}</code>
                 </div>
                 <div class="ctl">
                   <span class="micro-label" aria-hidden="true">Asset class</span>
@@ -355,8 +355,8 @@
                 </div>
               </div>
             {:else}
-              <div class="cls-line">
-                <code class="cls-symbol">{cls.symbol}</code>
+              <div class="hstack">
+                <code class="cls-symbol code-chip">{cls.symbol}</code>
                 <!-- Written without template whitespace so the line reads
                      exactly "Class · Sub · Geo" with no stray gaps. -->
                 <span class="cls-desc"
@@ -390,8 +390,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .cls-form {
@@ -422,33 +420,8 @@
     gap: var(--space-1);
   }
 
-  .cls-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .cls-row {
-    padding: var(--space-2) 0;
-  }
-
-  .cls-row + .cls-row {
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .cls-line {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-
   .cls-symbol {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-primary);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
     min-width: 3rem;
     text-align: center;
   }

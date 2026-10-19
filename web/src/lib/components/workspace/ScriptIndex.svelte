@@ -68,7 +68,7 @@
     {#if broken.length}
       <div class="broken">
         <NoticeBanner title="Jobs refer to missing files" collapsed={false}>
-          <ul>
+          <ul class="list-reset">
             {#each broken as item (item.path)}
               <li>
                 <strong>{item.path}</strong>: {item.referenced_by.map(scriptRefLabel).join(', ')}
@@ -80,14 +80,14 @@
     {/if}
     {#if files.length}
       <IndexCaption {caption} {reachNote} />
-      <ul>
+      <ul class="list-reset">
         {#each files as file (file.path)}
           {@const viewPath = `${index.scripts_view_path}/${file.path}`}
-          <li class="index-row">
+          <li class="record-row record-row--divided index-row">
             <div class="index-text">
               <button
                 type="button"
-                class="index-name"
+                class="index-name button-reset truncate"
                 title={file.path}
                 onclick={() => onOpen(viewPath)}>{file.path}</button
               >
@@ -116,11 +116,6 @@
 </section>
 
 <style>
-  .index ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
   .broken {
     padding: var(--space-3) var(--space-3) 0;
   }
@@ -132,13 +127,9 @@
     margin: 0;
     padding: var(--space-3);
   }
+  /* A record row (table.css), ruled like the file table beside it. */
   .index-row {
-    display: flex;
     align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
   }
   .index-text {
     display: flex;
@@ -149,17 +140,8 @@
   .index-name {
     align-self: flex-start;
     max-width: 100%;
-    padding: 0;
-    border: 0;
-    background: none;
-    font: inherit;
-    line-height: inherit;
     color: var(--text-primary);
     text-align: left;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    cursor: pointer;
   }
   .index-name:hover {
     text-decoration: underline;

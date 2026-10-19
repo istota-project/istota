@@ -13,6 +13,7 @@
     type Specimen,
   } from '$lib/api';
   import { Button, EmptyState, Field, FileDropZone, Select } from '$lib/components/ui';
+  import { localDateISO } from '$lib/dateFormat';
 
   const flagOptions = [
     { value: '', label: '—' },
@@ -36,7 +37,7 @@
 
   // Panel-level metadata — uploaded with a placeholder date, replaced from
   // the LLM extraction, then editable before confirm.
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateISO();
   let drawnAt = $state(today);
   let labName = $state('');
   let panelType = $state('');
@@ -168,11 +169,11 @@
 </script>
 
 <div class="page">
-  <a class="back" href="{base}/health/labs">← Labs</a>
-  <h1>Upload lab results</h1>
+  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
+  <h1 class="title-page">Upload lab results</h1>
 
   {#if panelId == null}
-    <div class="card">
+    <div class="card vstack">
       <FileDropZone bind:file>
         <p>Drop or paste a PDF or image of the lab report here, or use the file picker.</p>
         <p class="caption">
@@ -229,7 +230,7 @@
           </div>
         {/if}
 
-        <h2>Extracted biomarkers</h2>
+        <h2 class="title-section">Extracted biomarkers</h2>
 
         {#if extracting}
           <div class="loading extracting">
@@ -251,48 +252,52 @@
               >No biomarkers extracted yet. Add rows manually, or retry extraction.</EmptyState
             >
           {:else}
-            <table class="grid grid--dense">
-              <thead>
-                <tr>
-                  <th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th>Flag</th
-                  ><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each extracted as b, i (b.id)}
+            <div class="table-scroll">
+              <table class="table table--dense">
+                <thead>
                   <tr>
-                    <td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
-                    <td><input type="number" step="any" bind:value={b.value} /></td>
-                    <td><input bind:value={b.unit} placeholder="g/dL" /></td>
-                    <td class="range-pair">
-                      <input
-                        type="number"
-                        step="any"
-                        bind:value={b.ref_range_low}
-                        placeholder="low"
-                      />
-                      <input
-                        type="number"
-                        step="any"
-                        bind:value={b.ref_range_high}
-                        placeholder="high"
-                      />
-                    </td>
-                    <td>
-                      <Select
-                        value={b.flag ?? ''}
-                        options={flagOptions}
-                        onValueChange={(v) => (b.flag = v === '' ? null : v)}
-                        ariaLabel="Flag"
-                      />
-                    </td>
-                    <td
-                      ><button class="del" type="button" onclick={() => removeRow(i)}>×</button></td
-                    >
+                    <th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th
+                      >Flag</th
+                    ><th></th>
                   </tr>
-                {/each}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {#each extracted as b, i (b.id)}
+                    <tr>
+                      <td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
+                      <td><input type="number" step="any" bind:value={b.value} /></td>
+                      <td><input bind:value={b.unit} placeholder="g/dL" /></td>
+                      <td class="range-pair">
+                        <input
+                          type="number"
+                          step="any"
+                          bind:value={b.ref_range_low}
+                          placeholder="low"
+                        />
+                        <input
+                          type="number"
+                          step="any"
+                          bind:value={b.ref_range_high}
+                          placeholder="high"
+                        />
+                      </td>
+                      <td>
+                        <Select
+                          value={b.flag ?? ''}
+                          options={flagOptions}
+                          onValueChange={(v) => (b.flag = v === '' ? null : v)}
+                          ariaLabel="Flag"
+                        />
+                      </td>
+                      <td
+                        ><button class="del" type="button" onclick={() => removeRow(i)}>×</button
+                        ></td
+                      >
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
           {/if}
 
           {#if error}<div class="banner error">{error}</div>{/if}
@@ -312,7 +317,7 @@
       </div>
 
       <div class="source">
-        <div class="source-header">Source preview</div>
+        <div class="source-header muted">Source preview</div>
         {#if mime?.startsWith('image/')}
           <img src={healthPanelSourceUrl(panelId)} alt="Lab report" />
         {:else}
@@ -331,24 +336,9 @@
   }
   .back {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: 500;
-    margin: 0;
   }
   h2 {
-    font-size: var(--text-base);
-    font-weight: 500;
     margin: 0 0 var(--space-2);
-  }
-  .card {
-    padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
   .metadata {
     display: grid;
@@ -387,7 +377,7 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: var(--space-4);
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1023px) {
     .split {
       grid-template-columns: 1fr;
     }
@@ -421,7 +411,6 @@
   }
   .source-header {
     font-size: var(--text-sm);
-    color: var(--text-muted);
     margin-bottom: var(--space-2);
   }
   .source img {

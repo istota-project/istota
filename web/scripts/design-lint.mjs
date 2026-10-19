@@ -8,6 +8,9 @@
 //                      Modal or ConfirmDialog
 //   deep-import        a ui primitive imported by file path instead of the barrel
 //   stray-money-global a .money-* shell class defined outside routes/money/+layout.svelte
+//   off-scale-breakpoint  an @media width that is not one of the three steps
+//                      (max-width 640/768/1023px, min-width 641/769/1024px),
+//                      checked in the style layers too
 //   undefined-token    a bare var(--x) naming a property nothing defines
 //   undefined-token-fallback  the same, but with a written fallback, so it renders
 //

@@ -1,0 +1,98 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
+import type { TaxEstimateResponse } from '$lib/money/api';
+
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
+vi.mock('$app/paths', () => ({ base: '/istota' }));
+vi.mock('$lib/money/api', async (original) => ({
+  ...(await original<typeof import('$lib/money/api')>()),
+  getTaxEstimate: vi.fn(),
+  recalculateTaxEstimate: vi.fn(),
+}));
+import { getTaxEstimate, recalculateTaxEstimate } from '$lib/money/api';
+import Page from './+page.svelte';
+
+const ZERO_FIELDS = [
+  'se_income_ytd',
+  'se_income_annualized',
+  'w2_income',
+  'w2_income_annualized',
+  'se_tax',
+  'half_se_deduction',
+  'additional_medicare_tax',
+  'federal_agi',
+  'federal_standard_deduction',
+  'federal_taxable_income',
+  'federal_tax',
+  'qbi_deduction',
+  'state_agi',
+  'state_standard_deduction',
+  'state_taxable_income',
+  'state_personal_exemption',
+  'state_tax',
+  'federal_withholding',
+  'state_withholding',
+  'federal_estimated_paid',
+  'state_estimated_paid',
+  'federal_total_liability',
+  'state_total_liability',
+  'federal_net_due',
+  'state_net_due',
+  'federal_quarterly_amount',
+  'state_quarterly_amount',
+  'quarters_remaining',
+  'ss_wage_base',
+];
+
+function estimate(): TaxEstimateResponse {
+  return {
+    ...Object.fromEntries(ZERO_FIELDS.map((name) => [name, 0])),
+    status: 'ok',
+    tax_year: 2026,
+    quarter: 1,
+    method: 'annualized',
+    filing_status: 'single',
+    w2_months: 12,
+    annualization_months: 3,
+    se_taxable_fraction: 0.9235,
+    state_installment_schedule: [],
+    state: '',
+    state_name: '',
+    state_starts_from: '',
+    state_available: false,
+    state_unavailable_reason: 'no_state',
+    federal_rates: {
+      year: 2026,
+      requested_year: 2026,
+      is_fallback: false,
+      is_stale: false,
+      overridden: false,
+      source: 'fixture',
+      source_url: '',
+      verified_on: '',
+    },
+    state_rates: null,
+  } as unknown as TaxEstimateResponse;
+}
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe('taxes recalculation debounce', () => {
+  it('does not recalculate after the page has unmounted', async () => {
+    vi.mocked(getTaxEstimate).mockResolvedValue(estimate());
+    vi.mocked(recalculateTaxEstimate).mockResolvedValue(estimate());
+    const view = render(Page);
+    const input = await screen.findByLabelText('W-2 income YTD');
+    vi.useFakeTimers();
+    await fireEvent.input(input, { target: { value: '1000' } });
+    view.unmount();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(recalculateTaxEstimate).not.toHaveBeenCalled();
+  });
+});

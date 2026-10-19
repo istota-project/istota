@@ -36,8 +36,11 @@
   <div class="card-head">
     <!-- The whole card is not a link: the kebab lives inside it, and a
          nested interactive element inside an anchor is not addressable. -->
-    <a class="name" href={doc.url} onclick={(event) => openDocumentImage(event, doc)} title={name}
-      >{name}</a
+    <a
+      class="name title-card"
+      href={doc.url}
+      onclick={(event) => openDocumentImage(event, doc)}
+      title={name}>{name}</a
     >
     <KebabMenu items={menu} ariaLabel="Document actions" />
   </div>
@@ -45,12 +48,12 @@
     <span class="tag">{mimeLabel(doc.mime)}</span>
     <span class="tag source-{doc.source}">{doc.source}</span>
   </div>
-  <div class="doc-meta">
+  <div class="doc-meta caption">
     <span>{formatBytes(doc.byte_size)}</span>
     <span>{formatDate(doc.created_at)}</span>
   </div>
   {#if doc.notes}
-    <p class="notes">{doc.notes}</p>
+    <p class="notes caption">{doc.notes}</p>
   {/if}
 </li>
 
@@ -74,10 +77,8 @@
 
   .name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: 500;
     color: var(--accent-blue);
-    line-height: 1.35;
+    line-height: var(--leading-snug);
     text-decoration: none;
     /* A long scanner-generated filename must not widen its grid column. */
     overflow-wrap: anywhere;
@@ -106,14 +107,10 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
   }
 
   .notes {
     margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
   }
 </style>

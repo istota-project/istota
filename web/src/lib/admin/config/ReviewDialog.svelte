@@ -261,6 +261,10 @@
 {/if}
 
 <style>
+  h3 {
+    margin: var(--space-3) 0 var(--space-2);
+  }
+
   .problems {
     margin: 0 0 var(--space-3);
     padding-left: var(--space-4);
@@ -276,7 +280,7 @@
   }
 
   .restart-note {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
   }
 
   .review-note {

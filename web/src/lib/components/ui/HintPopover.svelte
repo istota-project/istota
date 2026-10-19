@@ -73,11 +73,11 @@
     /* em-relative so the badge tracks the text-size preference. */
     width: 1.15em;
     height: 1.15em;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     border: 1px solid var(--border-default);
     color: var(--text-muted);
     font-size: var(--text-xs);
-    line-height: 1;
+    line-height: var(--leading-none);
     cursor: help;
     user-select: none;
     flex: none;
@@ -106,7 +106,7 @@
     border-radius: var(--radius-sm);
     padding: var(--space-2) var(--space-2);
     font-size: var(--text-xs);
-    line-height: 1.45;
+    line-height: var(--leading-snug);
     /* A config field's doc is paragraphs separated by blank lines. */
     white-space: pre-line;
     box-shadow: var(--shadow-md);

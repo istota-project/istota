@@ -17,7 +17,7 @@ it('requires the current password and ends the session after a successful change
   const onSignedOut = vi.fn();
   vi.mocked(changePassword).mockResolvedValue({ signed_out: true });
   render(SecurityCard, { auth, onSignedOut });
-  expect(screen.getByText(/signs you out of every session/i)).toHaveClass('hint');
+  expect(screen.getByText(/signs you out of every session/i)).toHaveClass('description');
   expect(screen.getByLabelText('Login email')).toHaveValue(auth.email);
   expect(screen.getByLabelText('Login email')).toHaveAttribute('readonly');
   await fireEvent.input(screen.getByLabelText('Current password'), {
@@ -41,7 +41,7 @@ it('shows passwordless users their login email and the reset-page action', () =>
     '/istota/auth/reset',
   );
   expect(screen.getByLabelText('Login email')).toHaveValue(auth.email);
-  expect(screen.getByText(/You sign in with an email link/)).toHaveClass('hint');
+  expect(screen.getByText(/You sign in with an email link/)).toHaveClass('description');
   expect(screen.getByRole('link', { name: 'Set a password' }).parentElement).toHaveClass('actions');
 });
 

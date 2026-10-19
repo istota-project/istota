@@ -197,14 +197,20 @@
         <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="grid users-grid" aria-label="Users">
+          <table
+            class="table table--fixed table--interactive table--on-card users-grid"
+            aria-label="Users"
+          >
             <thead
               ><tr
                 ><th scope="col" class="col-user">User</th>
-                <th scope="col">Email</th><th scope="col" class="access">Sign-in</th><th
+                <th scope="col" class="col-email">Email</th><th scope="col" class="col-access"
+                  >Sign-in</th
+                ><th scope="col" class="col-last-login">Last login</th><th
                   scope="col"
-                  class="last-login">Last login</th
-                ><th scope="col" class="user-actions" aria-label="Actions"></th></tr
+                  class="col-actions"
+                  aria-label="Actions"
+                ></th></tr
               ></thead
             >
             <tbody>
@@ -219,22 +225,22 @@
                       isAdmin={user.is_admin}
                     />
                   </td>
-                  <td class="email-cell" title={user.identity?.email}
+                  <td class="col-email truncate" title={user.identity?.email}
                     >{user.identity?.email ?? '—'}</td
                   >
-                  <td class="access">
+                  <td class="col-access">
                     <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
                       >{signInStateLabel(user.identity, user.state)}</Badge
                     >
                   </td>
-                  <td class="last-login"
+                  <td class="col-last-login truncate"
                     >{user.identity
                       ? user.identity.last_login_at
                         ? formatRelative(user.identity.last_login_at)
                         : 'Never'
                       : '—'}</td
                   >
-                  <td class="user-actions">
+                  <td class="col-actions">
                     <KebabMenu
                       items={userActions(user)}
                       ariaLabel="Actions for {user.display_name || user.user_id}"
@@ -256,7 +262,7 @@
           <div class="orphan-row">
             <div>
               <div class="user-name">{user.user_id}</div>
-              <div class="user-detail">{user.identity?.email}</div>
+              <div class="user-detail caption">{user.identity?.email}</div>
             </div>
             <Button
               variant="danger"
@@ -283,7 +289,7 @@
     <Field label="Email"><Input type="email" bind:value={email} required disabled={busy} /></Field>
     <Field label="Display name (optional)"><Input bind:value={displayName} disabled={busy} /></Field
     >
-    <p class="form-note">
+    <p class="form-note description">
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
     <div class="form-actions dialog-actions">
@@ -335,8 +341,6 @@
   }
   .form-note {
     margin: 0;
-    color: var(--text-muted);
-    font-size: var(--text-sm);
   }
   .user-name {
     display: flex;
@@ -347,30 +351,10 @@
   }
   .user-detail {
     margin-top: var(--space-1);
-    color: var(--text-muted);
-    font-size: var(--text-xs);
     overflow-wrap: anywhere;
-  }
-  .access {
-    width: 8rem;
   }
   .row-clickable {
     cursor: pointer;
-  }
-  .row-clickable:hover {
-    background: var(--surface-raised);
-  }
-  .last-login {
-    width: 7rem;
-  }
-  td.last-login {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .users-grid .user-actions {
-    width: 2.5rem;
-    text-align: right;
   }
   .orphan-row {
     display: flex;
@@ -379,23 +363,34 @@
     align-items: center;
     gap: var(--space-3);
   }
+  /* Email is the unsized column: the min-width reserves it 10rem past the
+     sized ones (the actions column is table.css's 2.5rem), and
+     adminTables.test.ts holds the sum. */
+  .users-grid {
+    min-width: 38.5rem;
+  }
   .col-user {
     width: 11rem;
   }
-  .email-cell {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .col-access {
+    width: 8rem;
   }
+  .col-last-login {
+    width: 7rem;
+  }
+  /* Narrow: Last login and Sign-in go (the user editor shows both), so the
+     table fits a phone's card rather than scrolls; the longest sign-in badge
+     needs about 8rem, which a phone does not have beside the email. */
   @container settings (max-width: 40rem) {
-    .last-login {
+    .users-grid {
+      min-width: 15rem;
+    }
+    .col-last-login,
+    .col-access {
       display: none;
     }
     .col-user {
-      width: 30%;
-    }
-    .access {
-      width: 25%;
+      width: 7rem;
     }
   }
 </style>

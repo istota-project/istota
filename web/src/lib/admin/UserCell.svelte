@@ -33,7 +33,7 @@
     margin-right: var(--space-2);
   }
   .username {
-    font-weight: 500;
+    font-weight: var(--weight-medium);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -45,9 +45,9 @@
     /* design-lint-allow: Preserve the compact badge used by the Status users table. */
     padding: 0.05rem var(--space-2);
     font-size: var(--text-2xs);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: var(--tracking-caps);
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
     color: var(--accent-amber);

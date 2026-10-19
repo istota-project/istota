@@ -136,20 +136,20 @@
   .frontmatter pre {
     margin: var(--space-2) 0 0;
     font-size: var(--text-xs);
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     color: var(--text-secondary);
   }
 
   /* `.markdown` is sized for chat turns, where every heading is body size. A
      file is a document, so its outline shows here. */
   .document .markdown {
-    line-height: 1.65;
+    line-height: var(--leading-relaxed);
   }
   .document .markdown :global(h1),
   .document .markdown :global(h2),
   .document .markdown :global(h3),
   .document .markdown :global(h4) {
-    line-height: 1.3;
+    line-height: var(--leading-tight);
     color: var(--text-primary);
   }
   .document .markdown :global(h1) {

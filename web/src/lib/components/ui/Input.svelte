@@ -65,7 +65,7 @@
        rule trying to correct that from outside. Pinned here, next to the
        shorthand that would otherwise win. The value centres in the box that
        min-height gives it, so the leading is not what should set the height. */
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     /* Inert on its own — the text and padding already exceed this — but it is
        how the input joins a `.control-row`, where the container raises both
        compact tiers to the field height and every control in the row settles
@@ -75,7 +75,7 @@
   }
 
   .ui-input:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

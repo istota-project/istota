@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { exportKeepass, type StepUpProof } from '$lib/api';
+  import { copyText } from '$lib/clipboard';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
   import { formatDate } from '$lib/dateFormat';
   import { Button, Field, Modal } from '$lib/components/ui';
@@ -79,12 +80,8 @@
   }
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(password);
-      copied = true;
-    } catch {
-      error = 'Could not copy. Select the password and copy it yourself.';
-    }
+    // A refusal is reported by copyText; the password stays on screen to copy by hand.
+    copied = await copyText(password, { label: 'Password copied' });
   }
 </script>
 
@@ -99,12 +96,12 @@
   >
     <input type="checkbox" bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
   </Field>
-  {#if useKeyfile}<p class="hint">
+  {#if useKeyfile}<p class="description">
       Save the key file when it downloads. You will need both it and the export password to open the
       KeePass file.
     </p>{/if}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  <div class="row">
+  <div class="hstack wrap">
     <Button
       variant="primary"
       size="sm"

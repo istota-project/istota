@@ -604,13 +604,13 @@
     <div class="config-toolbar control-row">
       <Input bind:value={filter} placeholder="Filter settings…" aria-label="Filter settings" />
       {#if filter.trim()}
-        <span class="match-count">{matchCount} matching</span>
+        <span class="match-count caption">{matchCount} matching</span>
       {/if}
     </div>
 
     {#if !filter.trim()}
       <section class="card">
-        <header class="section-header"><h2>Admins</h2></header>
+        <header class="section-header"><h2 class="title-section">Admins</h2></header>
         <AdminsEditor
           users={view.admins.users}
           candidates={view.admins.candidates ?? []}
@@ -624,7 +624,7 @@
 
       {#if orphanSecrets.length}
         <section class="card">
-          <header class="section-header"><h2>Credentials</h2></header>
+          <header class="section-header"><h2 class="title-section">Credentials</h2></header>
           {#each orphanSecrets as secret (secret.name)}
             {@render standaloneSecret(secret)}
           {/each}
@@ -638,7 +638,7 @@
 
     {#each sections as section (section.key)}
       <section class="card config-section">
-        <header class="section-header"><h2>{section.label}</h2></header>
+        <header class="section-header"><h2 class="title-section">{section.label}</h2></header>
         {#each section.fields as field (field.key)}
           {#if field.key === 'servarr.apps' && appsForm}
             <ServarrAppsEditor
@@ -801,8 +801,6 @@
   }
 
   .match-count {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     white-space: nowrap;
   }
 
@@ -828,7 +826,7 @@
   }
 
   .notice-part-title {
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 

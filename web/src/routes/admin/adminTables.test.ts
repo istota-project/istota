@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { blockAfter, readCascade } from '$lib/styles/cascade';
 
 /**
  * The admin tables that leave one column unsized.
  *
- * Each is `.grid`, which the settings shell defines as `table-layout: fixed;
- * width: 100%`. Under fixed layout a declared column width is honoured and the
+ * Each is `.table .table--fixed`, which table.css defines as `table-layout:
+ * fixed; width: 100%`. Under fixed layout a declared column width is honoured and the
  * column left unsized gets whatever is left over — so each table deliberately
  * leaves its widest-content column unsized, and the table's own `min-width` is
  * what buys it room. The wrapping `.table-scroll` then scrolls horizontally.
@@ -139,12 +140,25 @@ const declaredFor = (
 };
 
 /**
+ * The actions column's width when a page leaves it to table.css: the
+ * `--table-actions-width` the table family declares on `.table`.
+ */
+const ACTIONS_DEFAULT = (() => {
+  const value = blockAfter(readCascade(), '.table {')?.match(/--table-actions-width:\s*([^;]+);/);
+  if (!value) throw new Error('table.css declares no --table-actions-width on .table');
+  return value[1].trim();
+})();
+
+/**
  * A page spells a column two ways — `.users-grid .col-user` and, in places, a
  * bare `.col-user`. The scoped spelling is the more specific of the two and
- * wins wherever both exist, so ask for it first.
+ * wins wherever both exist, so ask for it first. The actions column takes
+ * table.css's width unless the page sets one.
  */
 const declared = (sheet: Sheet, width: number, grid: string, column: string, prop: string) =>
-  declaredFor(sheet, width, `${grid} ${column}`, prop) ?? declaredFor(sheet, width, column, prop);
+  declaredFor(sheet, width, `${grid} ${column}`, prop) ??
+  declaredFor(sheet, width, column, prop) ??
+  (column === '.col-actions' && prop === 'width' ? ACTIONS_DEFAULT : undefined);
 
 /**
  * A length in rem. Everything these tables declare has to be rem, so the check
@@ -219,6 +233,24 @@ const TABLES: Table[] = [
     floor: 12,
   },
   {
+    // The Users page. Email is the unsized column and truncates with an
+    // ellipsis, so it can give more up than the others: five and a half rem
+    // on a phone, where the table fits the card rather than scrolling.
+    page: 'src/routes/admin/users/+page.svelte',
+    grid: '.users-grid',
+    unsized: '.col-email',
+    sized: ['.col-user', '.col-access', '.col-last-login', '.col-actions'],
+    floor: 5.5,
+  },
+  {
+    // The Groups page. Group holds the name over the id, which wraps.
+    page: 'src/routes/admin/groups/+page.svelte',
+    grid: '.groups-grid',
+    unsized: '.col-group',
+    sized: ['.col-kind', '.col-created', '.col-status'],
+    floor: 10,
+  },
+  {
     // The Briefings page's Personal and Group tables (one snippet). The
     // Briefing column holds the title over its name; twelve rem, as for Job.
     page: 'src/routes/admin/briefings/+page.svelte',
@@ -284,7 +316,9 @@ for (const table of TABLES) {
       // The sum above is only as good as `sized`: a column added to the page
       // and not to this list drops out of the sum and inflates the leftover.
       const source = readFileSync(join(process.cwd(), table.page), 'utf8');
-      const tableAt = source.search(new RegExp(`class="grid ${grid.slice(1)}"`));
+      const tableAt = source.search(
+        new RegExp(`<table\\s+class="table table--fixed[^"]* ${grid.slice(1)}"`),
+      );
       expect(tableAt, `${table.page} has no <table> for ${grid}`).toBeGreaterThan(-1);
       const head = source.slice(tableAt, source.indexOf('</thead', tableAt));
       const columns = [...head.matchAll(/<th\b[^>]*class="([^"]*)"/g)].flatMap(([, classes]) =>

@@ -688,7 +688,7 @@
          line. It lived in a hover bar that floated over a continuation row's
          first line, where nothing reserved space for it (ISSUE-691). -->
     {#if showMeta}
-      <span class="meta-footer">{meta.join(' · ')}</span>
+      <span class="meta-footer caption">{meta.join(' · ')}</span>
     {/if}
   </div>
 {/snippet}
@@ -698,7 +698,7 @@
      hidden action row. -->
 {#snippet starredLabel()}
   {#if message.starred}
-    <span class="starred-label">Starred</span>
+    <span class="visually-hidden starred-label">Starred</span>
   {/if}
 {/snippet}
 
@@ -919,7 +919,7 @@
           label={author}
         />
       {:else if revealed}
-        <time class="hover-time">{time}</time>
+        <time class="hover-time caption">{time}</time>
       {/if}
     </div>
 
@@ -967,7 +967,7 @@
               {/if}
               {#if canExpandExternal}
                 <button
-                  class="external-toggle"
+                  class="external-toggle link-action"
                   onclick={(e) => {
                     bodyExpanded = !bodyExpanded;
                     if (e.detail > 0) e.currentTarget.blur();
@@ -1311,14 +1311,9 @@
     border-left: 4px solid var(--accent-amber);
     pointer-events: none;
   }
+  /* Hidden by the global .visually-hidden; kept out of a copied selection
+     across the transcript. */
   .starred-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    /* Kept out of a copied selection across the transcript. */
     user-select: none;
   }
 
@@ -1327,9 +1322,7 @@
   .meta-footer {
     margin-left: auto;
     min-width: 0;
-    font-size: var(--text-xs);
-    line-height: 1.6;
-    color: var(--text-dim);
+    line-height: var(--leading-relaxed);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     /* A narrow row trims the tail (tool count, then duration) rather than
@@ -1414,8 +1407,8 @@
       background var(--transition-fast);
   }
   .turn-action:hover {
-    color: var(--text-primary);
-    background: var(--surface-raised);
+    color: var(--hover-fg);
+    background: var(--hover-bg);
   }
   .turn-action.danger:hover {
     color: var(--status-danger-fg);
@@ -1464,7 +1457,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     text-align: left;
     cursor: pointer;
   }
@@ -1514,7 +1507,7 @@
     color: var(--text-muted);
     font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.2;
+    line-height: var(--leading-tight);
     padding: 0.05rem var(--space-2);
     cursor: pointer;
     max-width: 12rem;
@@ -1563,10 +1556,8 @@
 
   /* Continuation-row timestamp, revealed with the row. */
   .hover-time {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
     opacity: 0;
-    line-height: 1.6;
+    line-height: var(--leading-relaxed);
     transition: opacity var(--transition-fast);
     font-variant-numeric: tabular-nums;
   }
@@ -1584,7 +1575,7 @@
   }
   .author {
     font-size: var(--text-base);
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     flex-shrink: 0;
   }
@@ -1600,7 +1591,7 @@
 
   .body {
     font-size: var(--text-base);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-primary);
     word-break: break-word;
     max-width: var(--chat-body-max);
@@ -1620,7 +1611,7 @@
     margin: var(--space-2) 0;
     border-left: 2px solid var(--status-warn-fg);
     font-size: var(--text-xs);
-    line-height: 1.45;
+    line-height: var(--leading-snug);
   }
   /* The executor backticks the brain and model names; the default `code` run
 	   is sized off body text and would out-weigh the notice around it. */
@@ -1706,6 +1697,26 @@
     color: var(--status-danger-fg);
   }
 
+  /* An `@name` mention (ISSUE-578), from `renderMarkdown` and from the user-row
+     splitter. Global because most arrive through `{@html}`, held under the two
+     row roots so it cannot leak. A user's own text is rendered verbatim, outside
+     `.markdown`, and the two must look alike. The viewer's own mention is the
+     stronger wash, so a reader can find what addresses them. */
+  .cmd-row :global(.mention),
+  .msg :global(.mention) {
+    padding: 0 0.2em;
+    border-radius: var(--radius-sm);
+    color: var(--accent-blue);
+    background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+    white-space: nowrap;
+  }
+  .cmd-row :global(.mention-self),
+  .msg :global(.mention-self) {
+    font-weight: var(--weight-semibold);
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent-blue) 30%, transparent);
+  }
+
   /* A turn that arrived from outside the room. A filled, ruled block rather
 	   than the bare bubble every other user row is — an ordinary turn has no
 	   surface of its own, so *having* one is what reads as "not from in here",
@@ -1775,17 +1786,8 @@
   .external-toggle {
     flex: 0 0 auto;
     margin-left: auto;
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    font: inherit;
     font-size: var(--text-xs);
-    line-height: 1.4;
-    cursor: pointer;
-  }
-  .external-toggle:hover {
-    text-decoration: underline;
+    line-height: var(--leading-snug);
   }
   /* The one line standing in for a withheld body. Single-line and clipped: it
 	   is a preview, not a shortened message, and letting it wrap would make
@@ -1793,7 +1795,7 @@
   .external-preview {
     margin-top: var(--space-1);
     font-size: var(--text-sm);
-    line-height: 1.4;
+    line-height: var(--leading-snug);
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1934,7 +1936,7 @@
   .cmd-output {
     max-width: var(--chat-body-max);
     font-size: var(--text-sm);
-    line-height: 1.5;
+    line-height: var(--leading-normal);
     color: var(--text-secondary);
     background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
@@ -2000,7 +2002,7 @@
   .dot {
     width: 6px;
     height: 6px;
-    border-radius: 50%;
+    border-radius: var(--radius-round);
     background: var(--text-muted);
     animation: pulse 1.1s ease-in-out infinite;
   }
