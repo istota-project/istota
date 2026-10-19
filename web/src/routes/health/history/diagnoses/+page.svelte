@@ -346,8 +346,8 @@
       <div class="banner error">{formError}</div>
     {/if}
     <div class="form-actions">
-      <Button variant="primary" type="submit" disabled={saving}>
-        {saving ? 'Saving…' : editing ? 'Save changes' : 'Save'}
+      <Button variant="primary" type="submit" loading={saving}>
+        {editing ? 'Save changes' : 'Save'}
       </Button>
     </div>
   </form>

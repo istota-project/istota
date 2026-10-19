@@ -282,8 +282,14 @@
           Disconnect
         </Button>
       {:else}
-        <Button variant="primary" {...browserLink} disabled={busy || nothingRequested}>
-          {busy ? 'Connecting…' : 'Connect'}
+        <Button
+          variant="primary"
+          {...browserLink}
+          disabled={nothingRequested}
+          loading={busy}
+          loadingLabel="Connecting…"
+        >
+          Connect
         </Button>
       {/if}
     </div>

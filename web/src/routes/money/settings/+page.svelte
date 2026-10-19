@@ -166,19 +166,12 @@
               <Button
                 variant="primary"
                 size="sm"
-                disabled={loginBusy ||
-                  !loginEmail ||
-                  !loginPassword ||
-                  (!!loginChallenge && !loginCode)}
+                disabled={!loginEmail || !loginPassword || (!!loginChallenge && !loginCode)}
+                loading={loginBusy}
+                loadingLabel={loginChallenge ? 'Verifying…' : 'Logging in…'}
                 type="submit"
               >
-                {loginBusy
-                  ? loginChallenge
-                    ? 'Verifying…'
-                    : 'Logging in…'
-                  : loginChallenge
-                    ? 'Verify code'
-                    : 'Login & save cookies'}
+                {loginChallenge ? 'Verify code' : 'Login & save cookies'}
               </Button>
               {#if loginChallenge}
                 <Button variant="secondary" size="sm" disabled={loginBusy} onclick={resetLogin}>

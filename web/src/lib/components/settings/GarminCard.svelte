@@ -174,11 +174,11 @@
       </div>
     {/if}
     <div class="actions">
-      <Button variant="primary" onclick={syncNow} disabled={busy}>
-        {busy ? 'Working…' : 'Sync health data'}
+      <Button variant="primary" onclick={syncNow} loading={busy} loadingLabel="Working…">
+        Sync health data
       </Button>
-      <Button variant="secondary" onclick={importTracks} disabled={busy}>
-        {busy ? 'Working…' : 'Import GPS tracks'}
+      <Button variant="secondary" onclick={importTracks} loading={busy} loadingLabel="Working…">
+        Import GPS tracks
       </Button>
       <Button variant="secondary" onclick={doDisconnect} disabled={busy}>Disconnect</Button>
     </div>
@@ -193,8 +193,14 @@
       />
     </Field>
     <div class="actions">
-      <Button variant="primary" onclick={submitMfa} disabled={busy || !mfaCodeInput}>
-        {busy ? 'Verifying…' : 'Verify'}
+      <Button
+        variant="primary"
+        onclick={submitMfa}
+        disabled={!mfaCodeInput}
+        loading={busy}
+        loadingLabel="Verifying…"
+      >
+        Verify
       </Button>
       <Button variant="secondary" onclick={() => (mode = 'idle')} disabled={busy}>Cancel</Button>
     </div>
@@ -212,9 +218,11 @@
       <Button
         variant="primary"
         onclick={startConnect}
-        disabled={busy || !emailInput || !passwordInput}
+        disabled={!emailInput || !passwordInput}
+        loading={busy}
+        loadingLabel="Connecting…"
       >
-        {busy ? 'Connecting…' : 'Connect'}
+        Connect
       </Button>
     </div>
   {/if}

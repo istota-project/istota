@@ -227,10 +227,12 @@
             variant="secondary"
             size="sm"
             disabled={removing !== null}
+            loading={removing === device.id}
+            loadingLabel="Removing…"
             onclick={() => removeDevice(device.id)}
             ariaLabel={`Remove device ending ${device.token_tail}`}
           >
-            {removing === device.id ? 'Removing…' : 'Remove'}
+            Remove
           </Button>
         </li>
       {/each}

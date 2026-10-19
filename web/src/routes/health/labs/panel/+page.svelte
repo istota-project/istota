@@ -282,8 +282,8 @@
           {/if}
         {:else}
           <Button onclick={() => (editing = false)} disabled={saving}>Cancel</Button>
-          <Button variant="primary" onclick={() => save(true)} disabled={saving}>
-            {saving ? 'Saving…' : 'Save + confirm'}
+          <Button variant="primary" onclick={() => save(true)} loading={saving}>
+            Save + confirm
           </Button>
         {/if}
         <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>

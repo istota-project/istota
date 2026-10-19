@@ -288,8 +288,14 @@
 
     <div class="card-actions">
       <Button variant="secondary" size="sm" {...reconnectLink}>Reconnect</Button>
-      <Button variant="secondary" size="sm" onclick={startDisconnect} disabled={busy}>
-        {busy ? 'Disconnecting…' : 'Disconnect'}
+      <Button
+        variant="secondary"
+        size="sm"
+        onclick={startDisconnect}
+        loading={busy}
+        loadingLabel="Disconnecting…"
+      >
+        Disconnect
       </Button>
     </div>
     {#if inBrowser}{@render browserNote()}{/if}

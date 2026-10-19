@@ -306,8 +306,8 @@
     </div>
 
     <div class="actions hstack">
-      <Button variant="primary" disabled={importing} onclick={doImport}>
-        {importing ? 'Importing…' : `Import ${parsed.length} rows`}
+      <Button variant="primary" loading={importing} loadingLabel="Importing…" onclick={doImport}>
+        Import {parsed.length} rows
       </Button>
     </div>
   {/if}

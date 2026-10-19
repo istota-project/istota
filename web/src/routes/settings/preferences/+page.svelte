@@ -272,9 +272,10 @@
           variant="secondary"
           size="sm"
           onclick={() => (confirmingClearOffline = true)}
-          disabled={clearingOffline}
+          loading={clearingOffline}
+          loadingLabel="Clearing…"
         >
-          {clearingOffline ? 'Clearing…' : 'Clear offline data'}
+          Clear offline data
         </Button>
       </div>
     </Card>
