@@ -168,7 +168,7 @@ def _get_user_db_path(user_id: str):
     return _user_contexts[user_id].db_path
 
 
-def reload_config() -> None:
+def reload_config() -> bool:
     """Reload config, token map, user contexts, and places cache.
 
     Tokens are the user's `location_ingest_tokens` rows plus the legacy
@@ -179,7 +179,8 @@ def reload_config() -> None:
     and their requests fall through to the 403 path.
 
     A failure reading the framework database (locked, or the token table not
-    migrated yet) keeps the previous dicts rather than emptying them.
+    migrated yet) keeps the previous dicts rather than emptying them, and
+    returns False so a signalled reload can be retried.
 
     The three dicts are rebound under ``_lock`` as a single block so any
     reader holding the lock sees a consistent snapshot.
@@ -210,7 +211,7 @@ def reload_config() -> None:
             "could not read disabled accounts; keeping the previous location token map",
             exc_info=True,
         )
-        return
+        return False
 
     # user_id -> (ctx, places, legacy token or None)
     candidates: dict[str, tuple[LocationContext, list, str | None]] = {}
@@ -249,7 +250,7 @@ def reload_config() -> None:
             "could not read location_ingest_tokens; keeping the previous location token map",
             exc_info=True,
         )
-        return
+        return False
 
     token_map: dict[str, tuple[str, int | None]] = {}
     for user_id, (_ctx, _places, legacy) in candidates.items():
@@ -277,6 +278,7 @@ def reload_config() -> None:
     logger.info(
         "Loaded location config: %d user(s) with tokens", len(user_contexts),
     )
+    return True
 
 
 def _record_last_used(row_id: int, token_hash: str) -> None:
@@ -318,7 +320,10 @@ def _maybe_reload_for_signal() -> None:
     concurrent uvicorn threads produce one rebuild rather than one each. A
     reload that then fails stays claimed: it means config loading is broken,
     and re-attempting it on every subsequent ping would rescan every user's
-    DB in a tight loop. SIGHUP and restart remain the way out.
+    DB in a tight loop. SIGHUP and restart remain the way out. A reload that
+    kept the previous map because `istota.db` could not be read is different:
+    the change it was signalled for has not applied, so the stamp is handed
+    back and the next request retries.
     """
     global _sentinel_stamp
 
@@ -335,13 +340,21 @@ def _maybe_reload_for_signal() -> None:
     with _lock:
         if stamp <= _sentinel_stamp:
             return
+        previous_stamp = _sentinel_stamp
         _sentinel_stamp = stamp
 
     logger.info("location ingest reload signalled; rebuilding token map")
     try:
-        reload_config()
+        rebuilt = reload_config()
     except Exception:
         logger.exception("failed to reload location ingest config")
+        return
+    if rebuilt is False:
+        # The map was kept, so the signalled change (often a removal) has not
+        # applied yet: hand the stamp back so the next request retries.
+        with _lock:
+            if _sentinel_stamp == stamp:
+                _sentinel_stamp = previous_stamp
 
 
 def _load_if_never_loaded() -> None:

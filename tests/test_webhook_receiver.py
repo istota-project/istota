@@ -171,3 +171,26 @@ def test_a_failed_row_read_keeps_the_previous_map(db_path):
 
     assert wr._token_map == before
     assert "alice" in wr._user_contexts
+
+
+def test_a_kept_map_hands_the_signal_back_for_a_retry(db_path):
+    """A removal whose reload hit a locked database applies on the next request."""
+    from istota.location import ingest_signal
+
+    row_id, tok = _mint(db_path, "alice")
+    cfg = _make_config(db_path, {"alice": UserConfig(display_name="Alice")})
+    wr = _reload(cfg)
+    with db.get_db(db_path) as conn:
+        assert ingest_tokens.delete_token(conn, "alice", row_id)
+    ingest_signal.signal_reload(db_path)
+
+    def locked(conn, user_ids):
+        raise sqlite3.OperationalError("database is locked")
+
+    with patch.object(wr, "load_config", return_value=cfg):
+        with patch.object(ingest_tokens, "all_token_hashes", locked):
+            wr._maybe_reload_for_signal()
+        assert hash_token(tok) in wr._token_map
+        wr._maybe_reload_for_signal()
+
+    assert hash_token(tok) not in wr._token_map

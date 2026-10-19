@@ -3099,6 +3099,25 @@ class TestIngestTokenSecretSignals:
         assert resp.status_code == 200
         assert ingest_signal.reload_stamp(self._db_path) > before
 
+    async def test_clearing_the_token_signals(self, tmp_path, client, app):
+        """The Overland card's Clear revokes the shared token on the next request."""
+        from istota.credentials import store as secrets_store
+        from istota.location import ingest_signal
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        secrets_store.set_secret(self._db_path, "alice", "overland", "ingest_token", "t")
+        before = ingest_signal.reload_stamp(self._db_path)
+        cookies = await self._login(client, app)
+        resp = await client.delete(
+            "/istota/api/settings/secrets/overland/ingest_token",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert ingest_signal.reload_stamp(self._db_path) > before
+
     async def test_unrelated_secret_write_does_not_signal(self, tmp_path, client, app):
         from istota.location import ingest_signal
 

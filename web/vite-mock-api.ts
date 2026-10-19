@@ -3373,9 +3373,11 @@ const locationDevicesHandler: MockHandler = ({ url, method, body }) => {
     if (req.kind === 'app' && (!deviceId || !MOCK_UUID.test(deviceId))) {
       return { __status: 400, detail: 'device_id must be a UUID' };
     }
-    const label =
-      (typeof req.label === 'string' ? req.label.trim().slice(0, 64) : '') ||
-      (req.kind === 'app' ? 'iPhone' : 'QR code');
+    const trimmed = typeof req.label === 'string' ? req.label.trim() : '';
+    if (trimmed.length > 64) {
+      return { __status: 400, detail: 'label must be at most 64 characters' };
+    }
+    const label = trimmed || (req.kind === 'app' ? 'iPhone' : 'QR code');
     // Shaped like the real one: 43 url-safe characters, returned once.
     const token = Array.from({ length: 43 }, () =>
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.charAt(
@@ -3386,7 +3388,11 @@ const locationDevicesHandler: MockHandler = ({ url, method, body }) => {
     const existing = deviceId ? mockLocationDevices.find((d) => d.device_id === deviceId) : null;
     let id: number;
     if (existing) {
-      Object.assign(existing, { label, token_tail: token.slice(-4), created_at: now });
+      Object.assign(existing, {
+        token_tail: token.slice(-4),
+        created_at: now,
+        last_used_at: null,
+      });
       id = existing.id;
     } else {
       if (mockLocationDevices.length >= MOCK_LOCATION_DEVICE_CAP) {

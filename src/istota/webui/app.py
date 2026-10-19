@@ -15595,6 +15595,8 @@ async def settings_delete_secret(
         )
 
     deleted = secrets_store.delete_secret(_config.db_path, user["username"], service, key)
+    if deleted:
+        _signal_ingest_reload_if_needed(service, key)
     return {"ok": True, "deleted": deleted}
 
 

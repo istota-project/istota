@@ -65,7 +65,7 @@ There are two ways to add a device.
 
 When the server refuses a configured phone's token (the tracker reports "token rejected", usually because the row was removed), the card says so and offers "Set up again", which mints a new token and reconfigures the tracker without starting or stopping it. Points the tracker held while refused are sent on its next send.
 
-Ingest tokens are not tied to a web session. Signing out, a session expiring or a password change leaves a tracker running. A token stops working when it is removed from the list, when the account is disabled, or when the location module is off for the user.
+Ingest tokens are not tied to a web session. Signing out, a session expiring or a password change leaves a tracker running. A token stops working when it is removed from the list or when the account is disabled, on the device's next request either way. Turning the location module off for the user also stops it, but only once the receiver next reloads (a restart, a SIGHUP, or any token change), since nothing signals the receiver when a module is turned off.
 
 The routes, all under `/istota/api`:
 
