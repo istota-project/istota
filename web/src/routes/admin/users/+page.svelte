@@ -18,6 +18,7 @@
     ConfirmDialog,
     EmptyState,
     FormModal,
+    FormStack,
     KebabMenu,
     NoticeBanner,
     type KebabItem,
@@ -284,20 +285,19 @@
   onSubmit={submit}
   onCancel={() => (formOpen = false)}
 >
-  <div class="user-form">
+  <FormStack gap={4} disabled={busy}>
     <Field
       label="User ID"
       warning="This becomes a directory name: 1–32 lowercase letters, digits, dots, underscores or hyphens; start with a letter or digit."
     >
-      <Input aria-label="User ID" bind:value={userId} required disabled={busy} />
+      <Input aria-label="User ID" bind:value={userId} required />
     </Field>
-    <Field label="Email"><Input type="email" bind:value={email} required disabled={busy} /></Field>
-    <Field label="Display name (optional)"><Input bind:value={displayName} disabled={busy} /></Field
-    >
+    <Field label="Email"><Input type="email" bind:value={email} required /></Field>
+    <Field label="Display name" optional><Input bind:value={displayName} /></Field>
     <p class="form-note description">
       New users can sign in immediately. Their background work starts after the next daemon reload.
     </p>
-  </div>
+  </FormStack>
 </FormModal>
 
 {#if editing}
@@ -325,11 +325,6 @@
 />
 
 <style>
-  .user-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
   .form-note {
     margin: 0;
   }

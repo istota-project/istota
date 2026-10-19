@@ -18,6 +18,8 @@
     ConfirmDialog,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     Select,
     type SelectOption,
     PageLoading,
@@ -135,8 +137,8 @@
   <div class="center-msg error">{error}</div>
 {:else if immunization}
   <Card as="div">
-    <form class="form vstack" onsubmit={save}>
-      <div class="row">
+    <FormStack as="form" onsubmit={save}>
+      <FormGrid>
         <Field label="Vaccine name">
           <Input type="text" bind:value={immunization.name} required />
         </Field>
@@ -218,8 +220,8 @@
               (immunization!.cvx_code = (e.currentTarget as HTMLInputElement).value || null)}
           />
         </Field>
-      </div>
-      <Field label="Notes" class="full">
+      </FormGrid>
+      <Field label="Notes">
         <TextArea
           rows={3}
           value={immunization.notes ?? ''}
@@ -239,7 +241,7 @@
       <div class="form-actions">
         <Button variant="primary" type="submit" loading={saving}>Save</Button>
       </div>
-    </form>
+    </FormStack>
   </Card>
 
   <section class="linked">
@@ -292,16 +294,6 @@
     flex-wrap: wrap;
   }
 
-  .form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
-    gap: var(--space-3);
-  }
-  /* Scoped to this page's own form: a bare :global(.field.full) leaks
-     app-wide, which is the hazard the money report pages already hit. */
-  .form :global(.field.full) {
-    grid-column: 1 / -1;
-  }
   .linked {
     margin-top: 1.25rem;
   }

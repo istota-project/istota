@@ -19,6 +19,8 @@
     ConfirmDialog,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     KebabMenu,
     Select,
     type SelectOption,
@@ -170,57 +172,61 @@
 {/if}
 
 {#if formOpen}
-  <form class="quick-form" onsubmit={submit}>
-    <div class="row">
-      <Field label="Vaccine">
-        <Select
-          value={formName}
-          options={vaccineOptions}
-          onValueChange={(v) => (formName = v)}
-          ariaLabel="Vaccine"
-          fullWidth
-        />
-      </Field>
-      <Field label="Date">
-        <Input type="date" bind:value={formDate} required />
-      </Field>
-      <Field label="Product">
-        <Input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
-      </Field>
-      <Field label="Facility">
-        <Input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
-      </Field>
-    </div>
-    <details class="advanced">
-      <summary>More fields</summary>
-      <div class="row">
-        <Field label="Lot number">
-          <Input type="text" bind:value={formLot} />
-        </Field>
-        <Field label="Route">
-          <Select
-            value={formRoute}
-            options={routeOptions}
-            onValueChange={(v) => (formRoute = v)}
-            ariaLabel="Route"
-            fullWidth
-          />
-        </Field>
-        <Field label="Site">
-          <Input type="text" bind:value={formSite} placeholder="left deltoid" />
-        </Field>
-      </div>
-      <Field label="Notes" class="full">
-        <TextArea bind:value={formNotes} rows={2} />
-      </Field>
-    </details>
-    {#if formError}
-      <div class="banner error">{formError}</div>
-    {/if}
-    <div class="form-actions">
-      <Button variant="primary" type="submit" loading={saving}>Save</Button>
-    </div>
-  </form>
+  <div class="entry-form">
+    <Card>
+      <FormStack as="form" onsubmit={submit}>
+        <FormGrid>
+          <Field label="Vaccine">
+            <Select
+              value={formName}
+              options={vaccineOptions}
+              onValueChange={(v) => (formName = v)}
+              ariaLabel="Vaccine"
+              fullWidth
+            />
+          </Field>
+          <Field label="Date">
+            <Input type="date" bind:value={formDate} required />
+          </Field>
+          <Field label="Product">
+            <Input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
+          </Field>
+          <Field label="Facility">
+            <Input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
+          </Field>
+        </FormGrid>
+        <details class="advanced">
+          <summary>More fields</summary>
+          <FormGrid>
+            <Field label="Lot number">
+              <Input type="text" bind:value={formLot} />
+            </Field>
+            <Field label="Route">
+              <Select
+                value={formRoute}
+                options={routeOptions}
+                onValueChange={(v) => (formRoute = v)}
+                ariaLabel="Route"
+                fullWidth
+              />
+            </Field>
+            <Field label="Site">
+              <Input type="text" bind:value={formSite} placeholder="left deltoid" />
+            </Field>
+          </FormGrid>
+          <Field label="Notes" class="notes">
+            <TextArea bind:value={formNotes} rows={2} />
+          </Field>
+        </details>
+        {#if formError}
+          <div class="banner error">{formError}</div>
+        {/if}
+        <div class="form-actions">
+          <Button variant="primary" type="submit" loading={saving}>Save</Button>
+        </div>
+      </FormStack>
+    </Card>
+  </div>
 {/if}
 
 {#if loading}
@@ -411,26 +417,14 @@
     margin-bottom: var(--space-4);
   }
 
-  .quick-form {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
+  .entry-form {
     margin-bottom: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
-  .quick-form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
-  }
-  .quick-form :global(.field.full) {
-    grid-column: 1 / -1;
+  /* The notes sit under the grid inside the disclosure, where no gap reaches. */
+  .advanced :global(.notes) {
     margin-top: var(--space-1);
   }
-  .quick-form details.advanced > summary {
+  details.advanced > summary {
     color: var(--text-muted);
     font-size: var(--text-sm);
     cursor: pointer;

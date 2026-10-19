@@ -6,7 +6,7 @@
     type KeepassImportPreview,
     type KeepassImportItem,
   } from '$lib/api';
-  import { Button, Field, Input, Card, Checkbox } from '$lib/components/ui';
+  import { Button, Field, FormStack, Input, Card, Checkbox } from '$lib/components/ui';
 
   let { onImported }: { onImported?: () => void } = $props();
   let file: File | null = $state(null);
@@ -136,10 +136,9 @@
     {#each groups as group}
       {@const items = preview.items.filter((item) => item.status === group.status)}
       {#if items.length}
-        <fieldset>
-          <legend class="muted">{group.label}</legend>
+        <FormStack legend={group.label} gap={2}>
           {#each items as item}
-            <div>
+            <div class="item">
               <Field label={item.name} checkbox>
                 <Checkbox
                   checked={selected.includes(item.name)}
@@ -157,7 +156,7 @@
               {#if item.reason}<p class="caption">{item.reason}</p>{/if}
             </div>
           {/each}
-        </fieldset>
+        </FormStack>
       {/if}
     {/each}
   {/if}
@@ -186,19 +185,7 @@
 </Card>
 
 <style>
-  fieldset {
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    display: grid;
-    gap: var(--space-2);
+  .item {
     overflow-wrap: anywhere;
-  }
-
-  legend {
-    padding: 0;
-    margin-bottom: var(--space-2);
-    font-size: var(--text-sm);
   }
 </style>

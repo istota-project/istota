@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { AuthError, changePassword, type UserAuth } from '$lib/api';
-  import { Button, Input, Card, Field } from '$lib/components/ui';
+  import { Button, Input, Card, Field, FormStack } from '$lib/components/ui';
 
   let { auth, onSignedOut }: { auth?: UserAuth; onSignedOut: () => void } = $props();
   let currentPassword = $state('');
@@ -43,24 +43,17 @@
       <Input type="email" value={auth.email ?? ''} autocomplete="username" readonly />
     </Field>
     {#if auth.can_change_password}
-      <form onsubmit={submit} class="vstack">
+      <FormStack as="form" onsubmit={submit} disabled={busy}>
         <Field label="Current password">
           <Input
             type="password"
             autocomplete="current-password"
             bind:value={currentPassword}
             required
-            disabled={busy}
           />
         </Field>
         <Field label="New password">
-          <Input
-            type="password"
-            autocomplete="new-password"
-            bind:value={newPassword}
-            required
-            disabled={busy}
-          />
+          <Input type="password" autocomplete="new-password" bind:value={newPassword} required />
         </Field>
         <Field label="Confirm new password">
           <Input
@@ -68,7 +61,6 @@
             autocomplete="new-password"
             bind:value={confirmPassword}
             required
-            disabled={busy}
           />
         </Field>
         {#if error}<p class="banner error" role="alert">{error}</p>{/if}
@@ -81,7 +73,7 @@
             loadingLabel="Changing password…">Change password</Button
           >
         </div>
-      </form>
+      </FormStack>
     {:else}
       <div class="actions hstack wrap">
         <Button href="{base}/auth/reset" variant="secondary" size="sm">Set a password</Button>

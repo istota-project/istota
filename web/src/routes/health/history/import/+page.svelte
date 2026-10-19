@@ -13,6 +13,7 @@
     Card,
     Field,
     FileDropZone,
+    FormGrid,
     Select,
     type SelectOption,
     Input,
@@ -202,7 +203,7 @@
           <Button size="sm" onclick={() => removeRow(i)}>Remove encounter</Button>
         </div>
 
-        <div class="enc-fields">
+        <FormGrid>
           <Field label="Date">
             <Input type="date" bind:value={row.encounter_date} />
           </Field>
@@ -236,9 +237,9 @@
               oninput={(e) => (row.specialty = (e.currentTarget as HTMLInputElement).value || null)}
             />
           </Field>
-        </div>
+        </FormGrid>
 
-        <Field label="Reason" class="full">
+        <Field label="Reason">
           <Input
             type="text"
             value={row.reason || ''}
@@ -246,7 +247,7 @@
           />
         </Field>
 
-        <Field label="Notes" class="full">
+        <Field label="Notes">
           <TextArea
             rows={3}
             value={row.notes || ''}
@@ -414,11 +415,6 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-  }
-  .enc-fields {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
   }
   .diag-head {
     display: flex;

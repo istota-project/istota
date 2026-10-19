@@ -7,7 +7,7 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import { Field, FormModal, Input, Checkbox, SecretField } from '$lib/components/ui';
+  import { Field, FormModal, FormStack, Input, Checkbox, SecretField } from '$lib/components/ui';
   import { notifySuccess } from '$lib/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
 
@@ -159,7 +159,7 @@
   onSubmit={save}
   onCancel={cancel}
 >
-  <fieldset class="cred-form" disabled={busy}>
+  <FormStack disabled={busy}>
     <div class="cred-field">
       <Field label="Name" error={errors.name}>
         <Input
@@ -288,20 +288,10 @@
         </div>
       </div>
     </details>
-  </fieldset>
+  </FormStack>
 </FormModal>
 
 <style>
-  .cred-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-  }
-
   .cred-field {
     display: flex;
     flex-direction: column;

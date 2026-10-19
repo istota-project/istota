@@ -1,6 +1,6 @@
 <script lang="ts">
   import { unlockSetup, SetupApiError } from '$lib/api';
-  import { Button, Field, Input } from '$lib/components/ui';
+  import { Button, Field, FormStack, Input } from '$lib/components/ui';
 
   interface Props {
     /** Under the field: why the last code was refused, the address's included. */
@@ -33,7 +33,7 @@
   }
 </script>
 
-<form class="vstack" onsubmit={submit} novalidate>
+<FormStack as="form" onsubmit={submit} novalidate>
   <p>
     Setup printed a code where it started: in the terminal where it was run, or on your server's
     console. Type it here to continue.
@@ -62,7 +62,7 @@
     <Button variant="primary" type="submit" loading={busy} loadingLabel="Checking…">Continue</Button
     >
   </div>
-</form>
+</FormStack>
 
 <style>
   .where summary {

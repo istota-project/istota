@@ -18,9 +18,12 @@
   import {
     Badge,
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     KebabMenu,
     Select,
     type KebabItem,
@@ -257,41 +260,45 @@
   <div class="center-msg error">{error}</div>
 {:else if encounter}
   {#if editing}
-    <form class="form" onsubmit={save}>
-      <div class="row">
-        <Field label="Date">
-          <Input type="date" bind:value={form.encounter_date} required />
-        </Field>
-        <Field label="Type">
-          <Select
-            value={form.encounter_type ?? ''}
-            options={editTypeSelectOptions}
-            onValueChange={(v) => (form.encounter_type = v)}
-            ariaLabel="Type"
-            fullWidth
-          />
-        </Field>
-        <Field label="Provider">
-          <Input type="text" bind:value={form.provider} />
-        </Field>
-        <Field label="Facility">
-          <Input type="text" bind:value={form.facility} />
-        </Field>
-        <Field label="Specialty">
-          <Input type="text" bind:value={form.specialty} />
-        </Field>
-      </div>
-      <Field label="Reason" class="full">
-        <Input type="text" bind:value={form.reason} />
-      </Field>
-      <Field label="Notes" class="full">
-        <TextArea bind:value={form.notes} rows={5} />
-      </Field>
-      <div class="form-actions">
-        <Button onclick={() => (editing = false)}>Cancel</Button>
-        <Button variant="primary" type="submit" loading={saving}>Save</Button>
-      </div>
-    </form>
+    <div class="entry-form">
+      <Card>
+        <FormStack as="form" onsubmit={save}>
+          <FormGrid>
+            <Field label="Date">
+              <Input type="date" bind:value={form.encounter_date} required />
+            </Field>
+            <Field label="Type">
+              <Select
+                value={form.encounter_type ?? ''}
+                options={editTypeSelectOptions}
+                onValueChange={(v) => (form.encounter_type = v)}
+                ariaLabel="Type"
+                fullWidth
+              />
+            </Field>
+            <Field label="Provider">
+              <Input type="text" bind:value={form.provider} />
+            </Field>
+            <Field label="Facility">
+              <Input type="text" bind:value={form.facility} />
+            </Field>
+            <Field label="Specialty">
+              <Input type="text" bind:value={form.specialty} />
+            </Field>
+          </FormGrid>
+          <Field label="Reason">
+            <Input type="text" bind:value={form.reason} />
+          </Field>
+          <Field label="Notes">
+            <TextArea bind:value={form.notes} rows={5} />
+          </Field>
+          <div class="form-actions">
+            <Button onclick={() => (editing = false)}>Cancel</Button>
+            <Button variant="primary" type="submit" loading={saving}>Save</Button>
+          </div>
+        </FormStack>
+      </Card>
+    </div>
   {:else}
     <section class="meta">
       <dl class="kv-stacked">
@@ -563,23 +570,8 @@
     border-radius: var(--radius-sm);
   }
 
-  .form {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+  .entry-form {
     margin-bottom: var(--space-4);
-  }
-  .form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
-  }
-  .form :global(.field.full) {
-    grid-column: 1 / -1;
   }
   /* The diagnoses grid keeps the shared grid geometry but moves the card
      chrome from the anchor onto the <li>, since the card holds a kebab

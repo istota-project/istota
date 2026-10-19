@@ -16,6 +16,8 @@
     DateRangeFilter,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     Select,
     type SelectOption,
     PageLoading,
@@ -234,78 +236,82 @@
 {/if}
 
 {#if formOpen}
-  <form class="quick-form" onsubmit={submit}>
-    <div class="row">
-      <Field label="Date">
-        <Input type="date" bind:value={formDate} required />
-      </Field>
-      <Field label="Type">
-        <Select
-          value={formType}
-          options={formTypeOptions}
-          onValueChange={(v) => (formType = v)}
-          ariaLabel="Type"
-          fullWidth
-        />
-      </Field>
-      <Field label="Provider">
-        <Input type="text" bind:value={formProvider} placeholder="Dr. Smith" />
-      </Field>
-      <Field label="Facility">
-        <Input type="text" bind:value={formFacility} placeholder="Riverside Clinic" />
-      </Field>
-      <Field label="Specialty">
-        <Input type="text" bind:value={formSpecialty} placeholder="cardiology" />
-      </Field>
-    </div>
-    <Field label="Reason" class="full">
-      <Input
-        type="text"
-        bind:value={formReason}
-        placeholder="Chief complaint or reason for visit"
-      />
-    </Field>
-    <Field label="Notes" class="full">
-      <TextArea bind:value={formNotes} rows={3} placeholder="Findings, follow-ups, …" />
-    </Field>
+  <div class="entry-form">
+    <Card>
+      <FormStack as="form" onsubmit={submit}>
+        <FormGrid>
+          <Field label="Date">
+            <Input type="date" bind:value={formDate} required />
+          </Field>
+          <Field label="Type">
+            <Select
+              value={formType}
+              options={formTypeOptions}
+              onValueChange={(v) => (formType = v)}
+              ariaLabel="Type"
+              fullWidth
+            />
+          </Field>
+          <Field label="Provider">
+            <Input type="text" bind:value={formProvider} placeholder="Dr. Smith" />
+          </Field>
+          <Field label="Facility">
+            <Input type="text" bind:value={formFacility} placeholder="Riverside Clinic" />
+          </Field>
+          <Field label="Specialty">
+            <Input type="text" bind:value={formSpecialty} placeholder="cardiology" />
+          </Field>
+        </FormGrid>
+        <Field label="Reason">
+          <Input
+            type="text"
+            bind:value={formReason}
+            placeholder="Chief complaint or reason for visit"
+          />
+        </Field>
+        <Field label="Notes">
+          <TextArea bind:value={formNotes} rows={3} placeholder="Findings, follow-ups, …" />
+        </Field>
 
-    <div class="full conditions-field">
-      <span class="field-label caption">Conditions</span>
-      {#if stagedConditions.length}
-        <ul class="staged">
-          {#each stagedConditions as d (d.id)}
-            <li>
-              <span>{conditionOptionLabel(d)}</span>
-              <button
-                type="button"
-                class="unstage"
-                onclick={() => unstageCondition(d.id)}
-                aria-label="Remove {d.name}">×</button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      <Select
-        value={formConditionPick}
-        options={conditionOptions}
-        onValueChange={stageCondition}
-        placeholder={conditionOptions.length
-          ? 'Link an existing condition…'
-          : 'No conditions to link'}
-        disabled={conditionOptions.length === 0}
-        ariaLabel="Link an existing condition"
-        fullWidth
-      />
-    </div>
+        <div class="conditions-field">
+          <span class="field-label caption">Conditions</span>
+          {#if stagedConditions.length}
+            <ul class="staged">
+              {#each stagedConditions as d (d.id)}
+                <li>
+                  <span>{conditionOptionLabel(d)}</span>
+                  <button
+                    type="button"
+                    class="unstage"
+                    onclick={() => unstageCondition(d.id)}
+                    aria-label="Remove {d.name}">×</button
+                  >
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          <Select
+            value={formConditionPick}
+            options={conditionOptions}
+            onValueChange={stageCondition}
+            placeholder={conditionOptions.length
+              ? 'Link an existing condition…'
+              : 'No conditions to link'}
+            disabled={conditionOptions.length === 0}
+            ariaLabel="Link an existing condition"
+            fullWidth
+          />
+        </div>
 
-    {#if formError}
-      <div class="banner error">{formError}</div>
-    {/if}
-    <div class="form-actions">
-      <Button variant="primary" type="submit" loading={saving}>Save</Button>
-    </div>
-  </form>
+        {#if formError}
+          <div class="banner error">{formError}</div>
+        {/if}
+        <div class="form-actions">
+          <Button variant="primary" type="submit" loading={saving}>Save</Button>
+        </div>
+      </FormStack>
+    </Card>
+  </div>
 {/if}
 
 <div class="filter-bar control-row">
@@ -428,20 +434,8 @@
     }
   }
 
-  .quick-form {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
+  .entry-form {
     margin-bottom: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  .quick-form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
   }
   /* Not a <label>: the control is a Select whose trigger is a button, and
      wrapping it would make clicking the field name open the dropdown. */

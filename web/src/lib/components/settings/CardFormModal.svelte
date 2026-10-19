@@ -7,7 +7,7 @@
     type WalletCard,
     type WalletBilling,
   } from '$lib/api';
-  import { Field, FormModal, Input } from '$lib/components/ui';
+  import { Field, FormModal, FormStack, Input } from '$lib/components/ui';
   let {
     card = null,
     onClose,
@@ -91,7 +91,7 @@
   onSubmit={save}
   onCancel={close}
 >
-  <fieldset class="card-form" disabled={busy}>
+  <FormStack disabled={busy}>
     <Field label="Label" error={errors.label}><Input bind:value={label} autocomplete="off" /></Field
     >
     {#if !start}
@@ -131,17 +131,5 @@
       >
     {/each}
     {#if errors.billing}<p class="banner error" role="alert">{errors.billing}</p>{/if}
-  </fieldset>
+  </FormStack>
 </FormModal>
-
-<style>
-  .card-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-  }
-</style>

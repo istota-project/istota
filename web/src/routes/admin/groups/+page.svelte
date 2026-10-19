@@ -6,6 +6,7 @@
     Input,
     Field,
     FormModal,
+    FormStack,
     ConfirmDialog,
     EmptyState,
     Badge,
@@ -474,8 +475,7 @@
     <Field label="Kind" hint="A display label, such as family or team."
       ><Input bind:value={kind} disabled={busy} /></Field
     >
-    <fieldset disabled={busy}>
-      <legend>Initial owners</legend>
+    <FormStack legend="Initial owners" gap={2} disabled={busy}>
       <p>
         Choose at least one existing, enabled user. Owners can manage membership and read and edit
         the shared notebook.
@@ -491,7 +491,7 @@
         >{/each}
       {#if !busy && !users.length}<EmptyState size="sm">No enabled users are available.</EmptyState
         >{/if}
-    </fieldset>
+    </FormStack>
   </div>
 </FormModal>
 <ConfirmDialog
@@ -513,19 +513,6 @@
 <style>
   .create-fields p {
     margin: 0;
-  }
-  fieldset {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    margin: 0;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    padding: var(--space-3);
-  }
-  legend {
-    padding-inline: var(--space-1);
-    font-weight: var(--weight-medium);
   }
   .row-clickable {
     cursor: pointer;

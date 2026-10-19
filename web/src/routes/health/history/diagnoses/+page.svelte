@@ -12,9 +12,12 @@
   } from '$lib/api';
   import {
     Button,
+    Card,
     ConfirmDialog,
     EmptyState,
     Field,
+    FormGrid,
+    FormStack,
     KebabMenu,
     Modal,
     Select,
@@ -272,85 +275,89 @@
 {/if}
 
 {#if formOpen}
-  <form class="form" onsubmit={submit}>
-    {#if editing}
-      <div class="form-title muted">Editing <strong>{editing.name}</strong></div>
-    {/if}
-    <div class="row">
-      <Field label="Name *" class="full">
-        <Input type="text" bind:value={formName} required placeholder="e.g. Hypertension" />
-      </Field>
-      <Field label="Status">
-        <Select
-          value={formStatus}
-          options={statusOptions}
-          onValueChange={(v) => (formStatus = v as 'active' | 'chronic' | 'resolved')}
-          ariaLabel="Status"
-          fullWidth
-        />
-      </Field>
-      <Field label="ICD-10">
-        <Input type="text" bind:value={formIcd10} placeholder="K64.0" />
-      </Field>
-      <Field label="Severity">
-        <Select
-          value={formSeverity}
-          options={severityOptions}
-          onValueChange={(v) => (formSeverity = v as '' | 'mild' | 'moderate' | 'severe')}
-          ariaLabel="Severity"
-          fullWidth
-        />
-      </Field>
-      <Field label="Date diagnosed">
-        <Input type="date" bind:value={formDateDiagnosed} />
-      </Field>
-      {#if formStatus === 'resolved'}
-        <Field label="Date resolved">
-          <Input type="date" bind:value={formDateResolved} />
-        </Field>
-      {/if}
-    </div>
-    <!-- Not a <label>: the control is a Select whose trigger is a button, and
+  <div class="entry-form">
+    <Card>
+      <FormStack as="form" onsubmit={submit}>
+        {#if editing}
+          <div class="form-title muted">Editing <strong>{editing.name}</strong></div>
+        {/if}
+        <FormGrid>
+          <Field label="Name" required class="grid-full">
+            <Input type="text" bind:value={formName} required placeholder="e.g. Hypertension" />
+          </Field>
+          <Field label="Status">
+            <Select
+              value={formStatus}
+              options={statusOptions}
+              onValueChange={(v) => (formStatus = v as 'active' | 'chronic' | 'resolved')}
+              ariaLabel="Status"
+              fullWidth
+            />
+          </Field>
+          <Field label="ICD-10">
+            <Input type="text" bind:value={formIcd10} placeholder="K64.0" />
+          </Field>
+          <Field label="Severity">
+            <Select
+              value={formSeverity}
+              options={severityOptions}
+              onValueChange={(v) => (formSeverity = v as '' | 'mild' | 'moderate' | 'severe')}
+              ariaLabel="Severity"
+              fullWidth
+            />
+          </Field>
+          <Field label="Date diagnosed">
+            <Input type="date" bind:value={formDateDiagnosed} />
+          </Field>
+          {#if formStatus === 'resolved'}
+            <Field label="Date resolved">
+              <Input type="date" bind:value={formDateResolved} />
+            </Field>
+          {/if}
+        </FormGrid>
+        <!-- Not a <label>: the control is a Select whose trigger is a button, and
          wrapping it would make clicking the field name open the dropdown. -->
-    <div class="full encounters-field">
-      <span class="field-label caption">Linked encounters</span>
-      {#if stagedEncounters.length}
-        <ul class="staged">
-          {#each stagedEncounters as e (e.id)}
-            <li>
-              <span>{encounterLabelFor(e)}</span>
-              <button
-                type="button"
-                class="unstage"
-                onclick={() => unstageEncounter(e.id)}
-                aria-label="Remove {encounterLabelFor(e)}">×</button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/if}
-      <Select
-        value={formEncounterPick}
-        options={encounterOptions}
-        onValueChange={stageEncounter}
-        placeholder={encounterOptions.length ? 'Link an encounter…' : 'No encounters to link'}
-        disabled={encounterOptions.length === 0}
-        ariaLabel="Link an encounter"
-        fullWidth
-      />
-    </div>
-    <Field label="Notes" class="full">
-      <TextArea bind:value={formNotes} rows={3} />
-    </Field>
-    {#if formError}
-      <div class="banner error">{formError}</div>
-    {/if}
-    <div class="form-actions">
-      <Button variant="primary" type="submit" loading={saving}>
-        {editing ? 'Save changes' : 'Save'}
-      </Button>
-    </div>
-  </form>
+        <div class="encounters-field">
+          <span class="field-label caption">Linked encounters</span>
+          {#if stagedEncounters.length}
+            <ul class="staged">
+              {#each stagedEncounters as e (e.id)}
+                <li>
+                  <span>{encounterLabelFor(e)}</span>
+                  <button
+                    type="button"
+                    class="unstage"
+                    onclick={() => unstageEncounter(e.id)}
+                    aria-label="Remove {encounterLabelFor(e)}">×</button
+                  >
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          <Select
+            value={formEncounterPick}
+            options={encounterOptions}
+            onValueChange={stageEncounter}
+            placeholder={encounterOptions.length ? 'Link an encounter…' : 'No encounters to link'}
+            disabled={encounterOptions.length === 0}
+            ariaLabel="Link an encounter"
+            fullWidth
+          />
+        </div>
+        <Field label="Notes">
+          <TextArea bind:value={formNotes} rows={3} />
+        </Field>
+        {#if formError}
+          <div class="banner error">{formError}</div>
+        {/if}
+        <div class="form-actions">
+          <Button variant="primary" type="submit" loading={saving}>
+            {editing ? 'Save changes' : 'Save'}
+          </Button>
+        </div>
+      </FormStack>
+    </Card>
+  </div>
 {/if}
 
 {#snippet conditionCard(d: Diagnosis, transition: 'resolve' | 'reactivate' | null)}
@@ -524,15 +531,8 @@
     text-decoration: underline;
   }
 
-  .form {
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    padding: var(--space-3) var(--space-4);
+  .entry-form {
     margin-bottom: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
   }
   .form-title {
     font-size: var(--text-sm);
@@ -540,14 +540,6 @@
   .form-title strong {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
-  }
-  .form .row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    gap: var(--space-3);
-  }
-  .form :global(.field.full) {
-    grid-column: 1 / -1;
   }
   .encounters-field {
     display: flex;
