@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Card, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { Badge, Card, KebabMenu, type KebabItem } from '$lib/components/ui';
   import type { DocumentEntity, HealthDocument } from '$lib/api';
   import { documentName, openDocumentImage, formatBytes, mimeLabel } from '$lib/health/documents';
   import { formatDate } from '$lib/dateFormat';
@@ -46,8 +46,8 @@
       <KebabMenu items={menu} ariaLabel="Document actions" />
     </div>
     <div class="tags">
-      <span class="tag">{mimeLabel(doc.mime)}</span>
-      <span class="tag source-{doc.source}">{doc.source}</span>
+      <Badge tone="subtle" uppercase={false}>{mimeLabel(doc.mime)}</Badge>
+      <Badge tone="subtle" uppercase={false}>{doc.source}</Badge>
     </div>
     <div class="doc-meta caption">
       <span>{formatBytes(doc.byte_size)}</span>
@@ -96,14 +96,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1);
-  }
-
-  .tag {
-    font-size: var(--text-2xs);
-    color: var(--text-muted);
-    background: var(--surface-raised);
-    border-radius: var(--radius-pill);
-    padding: 0.05rem var(--space-2);
   }
 
   .doc-meta {

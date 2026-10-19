@@ -79,6 +79,7 @@
     display: inline-flex;
     min-height: var(--control-height-sm);
     align-items: center;
+    gap: var(--space-1);
     padding: 0.15rem var(--chip-padding-x);
     border: none;
     border-radius: var(--control-radius);
@@ -127,7 +128,6 @@
   }
 
   .chip.removable {
-    gap: var(--space-1);
     cursor: default;
     max-width: 100%;
     min-width: 0;

@@ -406,9 +406,9 @@
             <a href="{base}/health/labs/panel?id={p.id}">
               <h3 class="name title-card">{formatDate(p.drawn_at)}</h3>
               <div class="hstack wrap">
-                <span class="count-tag">
+                <Badge tone="subtle" uppercase={false}>
                   {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
-                </span>
+                </Badge>
               </div>
               <div class="card-meta caption">
                 {#if p.lab_name}<span>{p.lab_name}</span>{/if}
@@ -558,13 +558,6 @@
   }
   .icd {
     color: var(--text-muted);
-  }
-  .count-tag {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    background: var(--surface-raised);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-sm);
   }
 
   .entry-form {

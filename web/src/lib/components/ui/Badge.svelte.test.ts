@@ -42,6 +42,37 @@ describe('Badge', () => {
     expect(container.querySelector('.badge-danger')).toBeNull();
     expect(container.querySelector('.badge-warn')).toBeNull();
   });
+
+  it('is solid and uppercase unless asked otherwise', () => {
+    const { container } = render(Badge, { children: text('x') });
+    const badge = container.querySelector('.badge')!;
+    expect(badge).not.toHaveClass('badge-subtle');
+    expect(badge).not.toHaveClass('badge-lower');
+  });
+
+  it('draws the lowercase neutral pill as tone="subtle" uppercase={false}', () => {
+    const { container } = render(Badge, {
+      tone: 'subtle',
+      uppercase: false,
+      variant: 'success',
+      children: text('Configured'),
+    });
+    const badge = container.querySelector('.badge')!;
+    expect(badge).toHaveClass('badge-subtle', 'badge-lower', 'badge-success');
+    expect(badge).toHaveTextContent('Configured');
+  });
+
+  it('puts an icon before the text and passes a placement class', () => {
+    const icon = createRawSnippet(() => ({ render: () => '<svg data-testid="glyph"></svg>' }));
+    const { container } = render(Badge, {
+      icon,
+      class: 'reach',
+      children: text('Tasks can read'),
+    });
+    const badge = container.querySelector('.badge.reach')!;
+    expect(badge.firstElementChild).toBe(screen.getByTestId('glyph'));
+    expect(badge).toHaveTextContent('Tasks can read');
+  });
 });
 
 describe('IconButton', () => {

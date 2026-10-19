@@ -13,6 +13,7 @@
     type SelectOption,
     Field,
     Checkbox,
+    Chip,
   } from '$lib/components/ui';
 
   interface Props {
@@ -275,10 +276,9 @@
     <Field label="Sender filters" hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com">
       <div class="chip-list">
         {#each senders as s (s)}
-          <span class="chip">
-            {s}
-            <button type="button" title="Remove" onclick={() => removeSender(s)}>×</button>
-          </span>
+          <Chip size="xs" removable removeLabel="Remove {s}" onremove={() => removeSender(s)}
+            >{s}</Chip
+          >
         {/each}
         {#if senders.length === 0}
           <span class="caption">No senders yet.</span>
@@ -470,25 +470,5 @@
     flex-wrap: wrap;
     gap: var(--space-1);
     margin-bottom: var(--space-2);
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--text-xs);
-    padding: 0.1rem 0.2rem 0.1rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    color: var(--text-secondary);
-  }
-  .chip button {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: var(--text-lg);
-    line-height: var(--leading-none);
-    padding: 0;
   }
 </style>

@@ -6,16 +6,8 @@
   let { access }: { access: WorkspaceAccess } = $props();
 </script>
 
-<Badge size="sm" variant={accessVariant(access)}
-  ><span class="reach-label"
-    >{#if reachesTasks(access)}<Bot size={12} aria-hidden="true" />{/if}{accessLabel(access)}</span
-  ></Badge
->
+{#snippet bot()}<Bot size={12} aria-hidden="true" />{/snippet}
 
-<style>
-  .reach-label {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-  }
-</style>
+<Badge size="sm" variant={accessVariant(access)} icon={reachesTasks(access) ? bot : undefined}
+  >{accessLabel(access)}</Badge
+>

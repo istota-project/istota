@@ -29,7 +29,7 @@ describe('email sender filters', () => {
 
   it('still removes a sender from its own button', async () => {
     const onChange = mountSenders();
-    await fireEvent.click(screen.getAllByTitle('Remove')[0]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove news@example.com' }));
     expect(onChange).toHaveBeenCalledWith({ senders: ['*@example.org'] });
   });
 

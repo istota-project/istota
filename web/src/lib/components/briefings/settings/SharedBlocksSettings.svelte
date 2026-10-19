@@ -22,6 +22,7 @@
     Checkbox,
     Input,
     TextArea,
+    Badge,
   } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
@@ -309,7 +310,9 @@
                 {/if}
               </td>
               <td class="nowrap"><code>{b.cron}</code></td>
-              <td class="col-render"><span class="status-pill">{b.render_mode}</span></td>
+              <td class="col-render"
+                ><Badge tone="subtle" uppercase={false}>{b.render_mode}</Badge></td
+              >
               <td>{b.trusted ? 'trusted' : 'untrusted'}</td>
               <td class="nowrap">{fmtLastRun(b.status.last_run_at)}</td>
               <td class="col-actions">

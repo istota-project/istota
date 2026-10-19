@@ -1,6 +1,13 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
-  import { Card, ConfirmDialog, EmptyState, SecretField } from '$lib/components/ui';
+  import {
+    Badge,
+    Card,
+    ConfirmDialog,
+    EmptyState,
+    SecretField,
+    type BadgeVariant,
+  } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
 
@@ -10,6 +17,13 @@
   }
 
   let { service, onChanged }: Props = $props();
+
+  const STATUS_VARIANT: Record<ServiceCardData['status'], BadgeVariant> = {
+    configured: 'success',
+    partial: 'warn',
+    missing: 'neutral',
+    unavailable: 'neutral',
+  };
 
   function statusLabel(s: ServiceCardData['status']): string {
     switch (s) {
@@ -96,9 +110,9 @@
 
 <Card title={service.label} description={service.hint || undefined} data-status={service.status}>
   {#snippet status()}
-    <span class="status-pill status-{service.status}">
+    <Badge tone="subtle" uppercase={false} variant={STATUS_VARIANT[service.status]}>
       {statusLabel(service.status)}
-    </span>
+    </Badge>
   {/snippet}
   {#snippet actions()}
     {#if service.last_updated}
@@ -172,8 +186,6 @@
 />
 
 <style>
-  /* The status pill is settings.css's `.settings .status-pill`: this card is
-	   used inside the settings page frame. */
   .used-by {
     margin: 0;
   }

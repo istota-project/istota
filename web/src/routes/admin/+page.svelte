@@ -15,6 +15,7 @@
   import {
     Avatar,
     AvatarPicker,
+    Badge,
     Card,
     CardGrid,
     Field,
@@ -464,7 +465,7 @@
               <dt>Endpoint</dt>
               <dd class="endpoint">
                 <span class="endpoint-url">{m.endpoint}</span>
-                {#if m.provider}<span class="effort-chip endpoint-provider">{m.provider}</span>{/if}
+                {#if m.provider}<Badge size="sm" variant="info">{m.provider}</Badge>{/if}
               </dd>
             {/if}
           </dl>
@@ -473,7 +474,7 @@
             <dt>Default</dt>
             <dd class="hstack">
               <code>{m.default_model}</code>
-              {#if m.default_effort}<span class="effort-chip">{m.default_effort}</span>{/if}
+              {#if m.default_effort}<Badge size="sm" variant="info">{m.default_effort}</Badge>{/if}
             </dd>
             {#each m.roles as r (r.role)}
               <dt>{r.role}</dt>
@@ -498,7 +499,7 @@
               <div class="cell-label micro-label">Rooms may select</div>
               <div class="room-selectable">
                 {#each m.room_selectable as kind (kind)}
-                  <span class="effort-chip">{brainLabel(kind)}</span>
+                  <Badge size="sm" variant="info">{brainLabel(kind)}</Badge>
                 {/each}
               </div>
             </div>
@@ -655,7 +656,7 @@
                   </td>
                   <td class="num col-failed">
                     {#if u.tasks_failed_24h > 0}
-                      <span class="failed-pill">{u.tasks_failed_24h}</span>
+                      <Badge variant="danger" uppercase={false}>{u.tasks_failed_24h}</Badge>
                     {:else}
                       0
                     {/if}
@@ -1160,15 +1161,6 @@
     gap: var(--space-1);
   }
 
-  .failed-pill {
-    display: inline-block;
-    padding: 0.05rem var(--space-2);
-    background: rgba(255, 90, 90, 0.15);
-    color: var(--status-danger-fg);
-    border-radius: var(--radius-pill);
-    font-size: var(--text-xs);
-  }
-
   code {
     color: var(--text-secondary);
   }
@@ -1233,18 +1225,6 @@
   .endpoint-url {
     font-family: var(--font-mono);
     word-break: break-all;
-  }
-
-  .effort-chip {
-    display: inline-block;
-    padding: 0.05rem var(--space-2);
-    font-size: var(--text-2xs);
-    font-weight: var(--weight-semibold);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    border-radius: var(--radius-pill);
-    background: var(--status-info-bg);
-    color: var(--status-info-fg);
   }
 
   .room-selectable {

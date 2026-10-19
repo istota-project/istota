@@ -9,6 +9,7 @@
     type GoogleScopeLevel,
   } from '$lib/api';
   import {
+    Badge,
     Button,
     ConfirmDialog,
     EmptyState,
@@ -176,11 +177,11 @@
 -->
 {#snippet statusPill()}
   {#if status?.enabled}
-    <span class="status-pill status-{status.connected ? 'configured' : 'missing'}">
+    <Badge tone="subtle" uppercase={false} variant={status.connected ? 'success' : 'neutral'}>
       {status.connected ? 'Connected' : 'Not connected'}
-    </span>
+    </Badge>
     {#if status.connected && status.missing_scopes.length > 0}
-      <span class="status-pill status-partial">Reconnect needed</span>
+      <Badge tone="subtle" uppercase={false} variant="warn">Reconnect needed</Badge>
     {/if}
   {/if}
 {/snippet}

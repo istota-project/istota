@@ -13,6 +13,7 @@
     type NextcloudTokenStatus,
   } from '$lib/api';
   import {
+    Badge,
     Button,
     ConfirmDialog,
     Select,
@@ -234,9 +235,9 @@
 {/snippet}
 
 {#snippet statusPill()}
-  <span class="status-pill status-{token.connected ? 'configured' : 'missing'}">
+  <Badge tone="subtle" uppercase={false} variant={token.connected ? 'success' : 'neutral'}>
     {token.connected ? 'Connected' : 'Not connected'}
-  </span>
+  </Badge>
 {/snippet}
 
 <Card

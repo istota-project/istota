@@ -30,6 +30,7 @@
     Card,
     Field,
     Input,
+    Badge,
   } from '$lib/components/ui';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
   import FeedSubscriptionModal, {
@@ -542,7 +543,8 @@
               {#each config.feeds as feed, idx (feed.url + idx)}
                 {@const state = feedStateByUrl[feed.url]}
                 <tr class:is-danger={state && state.error_count > 0}>
-                  <td class="type"><span class="status-pill">{detectSourceType(feed.url)}</span></td
+                  <td class="type"
+                    ><Badge tone="subtle" uppercase={false}>{detectSourceType(feed.url)}</Badge></td
                   >
                   <td class="col-title">
                     <div class="title-cell">

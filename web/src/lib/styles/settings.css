@@ -55,26 +55,6 @@
   color: var(--status-warn-fg);
 }
 
-.settings .status-pill {
-  font-size: var(--text-xs);
-  padding: 0.05rem var(--space-2);
-  border-radius: var(--radius-pill);
-  background: var(--surface-raised);
-  color: var(--text-muted);
-}
-.settings .status-pill.status-configured {
-  color: var(--status-success-fg);
-}
-.settings .status-pill.status-partial {
-  color: var(--status-warn-fg);
-}
-.settings .status-pill.status-missing {
-  color: var(--text-dim);
-}
-.settings .status-pill.status-unavailable {
-  color: var(--text-dim);
-}
-
 @media (max-width: 768px) {
   .settings {
     padding: var(--space-4) var(--space-3) 3rem;

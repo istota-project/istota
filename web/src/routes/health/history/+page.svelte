@@ -23,6 +23,8 @@
     PageLoading,
     Input,
     TextArea,
+    Badge,
+    Chip,
   } from '$lib/components/ui';
   import {
     conditionOptionLabel,
@@ -30,6 +32,7 @@
     resolveById,
   } from '$lib/health/conditions';
   import { formatDate, localDateISO } from '$lib/dateFormat';
+  import { severityVariant } from '$lib/health/status';
 
   // Suggested types — the server accepts any free-text encounter_type, so
   // these are just defaults for the dropdowns. Unknown types from the API
@@ -279,12 +282,11 @@
             <ul class="staged">
               {#each stagedConditions as d (d.id)}
                 <li>
-                  <span>{conditionOptionLabel(d)}</span>
-                  <button
-                    type="button"
-                    class="unstage"
-                    onclick={() => unstageCondition(d.id)}
-                    aria-label="Remove {d.name}">×</button
+                  <Chip
+                    size="xs"
+                    removable
+                    removeLabel="Remove {d.name}"
+                    onremove={() => unstageCondition(d.id)}>{conditionOptionLabel(d)}</Chip
                   >
                 </li>
               {/each}
@@ -345,8 +347,8 @@
             <li>
               <Card href="{base}/health/history/encounter?id={e.id}">
                 <div class="card-head">
-                  <span class="badge {typeBadgeClass(e.encounter_type)}"
-                    >{typeLabel(e.encounter_type)}</span
+                  <Badge class="encounter-type {typeBadgeClass(e.encounter_type)}"
+                    >{typeLabel(e.encounter_type)}</Badge
                   >
                   <span class="date caption">{formatDate(e.encounter_date)}</span>
                 </div>
@@ -382,7 +384,7 @@
                 <a href="{base}/health/history/diagnoses">
                   <span class="name">{d.name}</span>
                   {#if d.severity}
-                    <span class="severity sev-{d.severity}">{d.severity}</span>
+                    <Badge size="sm" variant={severityVariant(d.severity)}>{d.severity}</Badge>
                   {/if}
                 </a>
               </li>
@@ -453,37 +455,11 @@
     flex-wrap: wrap;
     gap: var(--space-2);
   }
+  /* A long label wraps inside its chip rather than running past the page
+     gutter on a phone. */
   .staged li {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 0.1rem var(--space-1) 0.1rem 0.55rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    font-size: var(--text-xs);
-    /* A condition name can be a full clinical phrase — wrap inside the chip
-       rather than letting one chip run past the page gutter on a phone. */
+    min-width: 0;
     max-width: 100%;
-    min-width: 0;
-    box-sizing: border-box;
-  }
-  .staged li span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-  .unstage {
-    background: none;
-    border: none;
-    padding: 0 0.15rem;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-sm);
-    line-height: var(--leading-none);
-    cursor: pointer;
-  }
-  .unstage:hover {
-    color: var(--text-primary);
   }
 
   /* The money section-tools pattern: a `control-row` so the Select and the
@@ -542,60 +518,51 @@
     font-size: var(--text-sm);
   }
 
-  /* Badge palette tuned for the dark surface: each canonical encounter
-	   type gets its own hue via HSLA so they share intensity. type-other
-	   is the catch-all for unknown free-text types. */
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    padding: 0.1rem var(--space-2);
-    border-radius: var(--radius-pill);
-    font-weight: var(--weight-medium);
-  }
+  /* The encounter-type palette, tuned for the dark surface: each canonical
+	   type gets its own hue via HSLA so they share intensity, handed to Badge
+	   through its categorical --badge-bg / --badge-fg. type-other is the
+	   catch-all for unknown free-text types. */
   /* design-lint-allow-begin: categorical palette — the hue names the encounter
      type (visit / procedure / imaging / dental), not a severity. Folding these
      onto the status scale would make a routine visit and a screening the same
      color. Each carries an explicit light value because the tinted fills are
      tuned per hue rather than derived from a token pair. */
-  .badge.type-visit {
-    background: hsla(210, 45%, 65%, 0.22);
-    color: #b6ccea;
+  .card-head :global(.encounter-type.type-visit) {
+    --badge-bg: hsla(210, 45%, 65%, 0.22);
+    --badge-fg: #b6ccea;
   }
-  .badge.type-procedure {
-    background: hsla(35, 60%, 60%, 0.22);
-    color: #e6b96b;
+  .card-head :global(.encounter-type.type-procedure) {
+    --badge-bg: hsla(35, 60%, 60%, 0.22);
+    --badge-fg: #e6b96b;
   }
-  .badge.type-screening {
-    background: hsla(195, 50%, 60%, 0.22);
-    color: #9cd5ea;
+  .card-head :global(.encounter-type.type-screening) {
+    --badge-bg: hsla(195, 50%, 60%, 0.22);
+    --badge-fg: #9cd5ea;
   }
-  .badge.type-hospitalization {
-    background: hsla(0, 55%, 60%, 0.25);
-    color: #f0a09c;
+  .card-head :global(.encounter-type.type-hospitalization) {
+    --badge-bg: hsla(0, 55%, 60%, 0.25);
+    --badge-fg: #f0a09c;
   }
-  .badge.type-er {
-    background: hsla(0, 60%, 55%, 0.32);
-    color: #ff9d96;
+  .card-head :global(.encounter-type.type-er) {
+    --badge-bg: hsla(0, 60%, 55%, 0.32);
+    --badge-fg: #ff9d96;
   }
-  .badge.type-telehealth {
-    background: hsla(145, 40%, 55%, 0.22);
-    color: #9bd6a6;
+  .card-head :global(.encounter-type.type-telehealth) {
+    --badge-bg: hsla(145, 40%, 55%, 0.22);
+    --badge-fg: #9bd6a6;
   }
-  .badge.type-imaging {
-    background: hsla(280, 45%, 65%, 0.22);
-    color: #d0aeec;
+  .card-head :global(.encounter-type.type-imaging) {
+    --badge-bg: hsla(280, 45%, 65%, 0.22);
+    --badge-fg: #d0aeec;
   }
-  .badge.type-dental {
-    background: hsla(185, 45%, 60%, 0.22);
-    color: #95d2dc;
+  .card-head :global(.encounter-type.type-dental) {
+    --badge-bg: hsla(185, 45%, 60%, 0.22);
+    --badge-fg: #95d2dc;
   }
   /* design-lint-allow-end */
-  .badge.type-other {
-    background: hsla(220, 8%, 60%, 0.18);
-    color: var(--text-muted);
+  .card-head :global(.encounter-type.type-other) {
+    --badge-bg: hsla(220, 8%, 60%, 0.18);
+    --badge-fg: var(--text-muted);
   }
 
   .sidebar {
@@ -677,56 +644,32 @@
     line-height: var(--leading-snug);
     overflow-wrap: anywhere;
   }
-  /* Metrics copied from the admin dashboard's .effort-chip / .admin-badge so
-	   the small identity chips read as one family across the app. */
-  .severity {
-    display: inline-block;
-    flex: 0 0 auto;
-    padding: 0.05rem var(--space-2);
-    font-size: var(--text-2xs);
-    font-weight: var(--weight-semibold);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    border-radius: var(--radius-pill);
-  }
-  .severity.sev-mild {
-    background: hsla(145, 40%, 55%, 0.18);
-    color: var(--status-success-fg);
-  }
-  .severity.sev-moderate {
-    background: hsla(35, 60%, 60%, 0.22);
-    color: var(--status-warn-fg);
-  }
-  .severity.sev-severe {
-    background: hsla(0, 60%, 55%, 0.28);
-    color: var(--status-danger-fg);
-  }
 
   /* design-lint-allow-begin: light half of the categorical encounter-type
      palette above. */
-  :global(:root[data-theme='light']) .badge.type-visit {
-    color: #2563b0;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-visit) {
+    --badge-fg: #2563b0;
   }
-  :global(:root[data-theme='light']) .badge.type-procedure {
-    color: #946a00;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-procedure) {
+    --badge-fg: #946a00;
   }
-  :global(:root[data-theme='light']) .badge.type-screening {
-    color: #2563b0;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-screening) {
+    --badge-fg: #2563b0;
   }
-  :global(:root[data-theme='light']) .badge.type-hospitalization {
-    color: #c0271d;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-hospitalization) {
+    --badge-fg: #c0271d;
   }
-  :global(:root[data-theme='light']) .badge.type-er {
-    color: #c0271d;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-er) {
+    --badge-fg: #c0271d;
   }
-  :global(:root[data-theme='light']) .badge.type-telehealth {
-    color: #15803d;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-telehealth) {
+    --badge-fg: #15803d;
   }
-  :global(:root[data-theme='light']) .badge.type-imaging {
-    color: #7c3aed;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-imaging) {
+    --badge-fg: #7c3aed;
   }
-  :global(:root[data-theme='light']) .badge.type-dental {
-    color: #0d8f7e;
+  :global(:root[data-theme='light']) .card-head :global(.encounter-type.type-dental) {
+    --badge-fg: #0d8f7e;
   }
   /* design-lint-allow-end */
 </style>

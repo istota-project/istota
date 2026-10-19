@@ -23,7 +23,7 @@
     type BiomarkerTrend,
   } from '$lib/api';
   import { formatDate } from '$lib/dateFormat';
-  import { EmptyState, PageLoading } from '$lib/components/ui';
+  import { Badge, EmptyState, PageLoading } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -314,17 +314,17 @@
   {#if latestDirection()}
     <section class="alert alert-{latestDirection()}">
       <header>
-        <span class="alert-pill"
-          >{latestDirection() === 'high' ? 'ABOVE RANGE' : 'BELOW RANGE'}</span
+        <Badge variant={latestDirection() === 'high' ? 'danger' : 'info'}
+          >{latestDirection() === 'high' ? 'Above range' : 'Below range'}</Badge
         >
         <span class="alert-title">
           What a {latestDirection()}
           {ref?.display_name || trend.name} reading can indicate
         </span>
         {#if explainer?.source === 'fallback'}
-          <span class="alert-tag" title="LLM unavailable — generic copy">generic</span>
+          <Badge size="sm" tone="subtle" title="LLM unavailable — generic copy">generic</Badge>
         {:else if explainer?.source === 'generated'}
-          <span class="alert-tag" title="Freshly generated">new</span>
+          <Badge size="sm" tone="subtle" title="Freshly generated">new</Badge>
         {/if}
       </header>
       {#if explainerLoading}
@@ -479,32 +479,10 @@
     margin-bottom: var(--space-2);
     flex-wrap: wrap;
   }
-  .alert-pill {
-    font-size: var(--text-xs);
-    font-weight: var(--weight-semibold);
-    padding: 0.15rem 0.55rem;
-    border-radius: var(--radius-pill);
-    background: rgba(204, 102, 102, 0.25);
-    color: var(--status-danger-fg);
-    letter-spacing: var(--tracking-caps);
-  }
-  .alert-low .alert-pill {
-    background: rgba(122, 163, 216, 0.25);
-    color: var(--status-info-fg);
-  }
   .alert-title {
     font-size: var(--text-base);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
-  }
-  .alert-tag {
-    font-size: var(--text-2xs);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
   }
   .alert .summary {
     font-size: var(--text-sm);

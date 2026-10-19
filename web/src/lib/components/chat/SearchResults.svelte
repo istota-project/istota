@@ -1,7 +1,7 @@
 <script lang="ts">
   import { CornerDownRight, MessageSquare, FileText } from '@lucide/svelte';
   import type { SearchResultsData, SearchResultItem } from '$lib/stores/segments';
-  import { EmptyState } from '$lib/components/ui';
+  import { Chip, EmptyState } from '$lib/components/ui';
 
   let {
     data,
@@ -83,14 +83,10 @@
           <div class="summary">{r.summary}</div>
           <div class="card-actions">
             {#if canJump(r)}
-              <button
-                class="jump-btn"
-                type="button"
-                onclick={() => onJump?.(r.room_token!, r.task_id!)}
-              >
-                <CornerDownRight size={12} />
+              <Chip size="xs" class="jump-btn" onclick={() => onJump?.(r.room_token!, r.task_id!)}>
+                <CornerDownRight size={12} aria-hidden="true" />
                 Jump to reply
-              </button>
+              </Chip>
             {:else if r.talk_link}
               <a class="talk-link" href={r.talk_link} target="_blank" rel="noopener noreferrer">
                 Open in Talk
@@ -153,22 +149,6 @@
   }
   .card-actions {
     display: flex;
-  }
-  .jump-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-pill);
-    color: var(--text-muted);
-    font-size: var(--text-xs);
-    padding: 0.15rem 0.55rem;
-    cursor: pointer;
-  }
-  .jump-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--text-dim);
   }
   .talk-link {
     font-size: var(--text-xs);

@@ -21,6 +21,7 @@
     Sidebar,
     SidebarToggle,
     KebabMenu,
+    Badge,
     Chip,
     ConfirmDialog,
     CountPill,
@@ -1264,31 +1265,34 @@
         />
       {/snippet}
       {#snippet nav()}
-        {#if brainBadge}
-          {#if canEditBrain}
-            <button
-              class="model-badge brain-badge"
-              type="button"
-              title="Room brain — click to change"
-              onclick={() => activeRoom && (settingsRoom = activeRoom)}
-            >
-              {brainBadge}
-            </button>
-          {:else}
-            <span class="model-badge brain-badge brain-badge-static" title="Room brain">
-              {brainBadge}
-            </span>
-          {/if}
-        {/if}
-        {#if modelBadge}
-          <button
-            class="model-badge"
-            type="button"
-            title="Room model default — click to change"
-            onclick={() => activeRoom && (settingsRoom = activeRoom)}
-          >
-            {modelBadge}
-          </button>
+        {#if brainBadge || modelBadge}
+          <span class="room-badges">
+            {#if brainBadge}
+              {#if canEditBrain}
+                <Chip
+                  size="xs"
+                  class="model-badge brain-badge"
+                  title="Room brain — click to change"
+                  onclick={() => activeRoom && (settingsRoom = activeRoom)}>{brainBadge}</Chip
+                >
+              {:else}
+                <Badge
+                  tone="subtle"
+                  uppercase={false}
+                  class="model-badge brain-badge brain-badge-static"
+                  title="Room brain">{brainBadge}</Badge
+                >
+              {/if}
+            {/if}
+            {#if modelBadge}
+              <Chip
+                size="xs"
+                class="model-badge"
+                title="Room model default — click to change"
+                onclick={() => activeRoom && (settingsRoom = activeRoom)}>{modelBadge}</Chip
+              >
+            {/if}
+          </span>
         {/if}
       {/snippet}
       {#snippet tools()}
@@ -1779,51 +1783,24 @@
 </AppShell>
 
 <style>
-  /* Room model-default badge beside the header title. Clickable → opens the
-	   room-settings modal. Only shown when the room has a standing default. */
-  .model-badge {
+  /* The room's brain pin and model default beside the header title, Chip's
+	   xs look; either opens the room-settings modal. */
+  .room-badges {
     display: inline-flex;
     align-items: center;
-    font: inherit;
-    font-size: var(--text-xs);
-    line-height: var(--leading-none);
-    color: var(--text-muted);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    padding: 0.2rem var(--space-2);
-    cursor: pointer;
-    white-space: nowrap;
-    transition:
-      color var(--transition-fast),
-      border-color var(--transition-fast);
-  }
-  .model-badge:hover {
-    color: var(--text-primary);
-    border-color: var(--border-hover);
+    gap: var(--chip-gap);
   }
 
   /* The brain pin, in the interactive blue rather than the model badge's
 	   muted gray — two overrides sitting side by side have to be tellable
 	   apart at a glance, and they are set in the same modal, so shape is not
 	   available to separate them. Blue rather than a status color on purpose:
-	   a pinned brain is a choice someone made, not a severity. */
-  .brain-badge {
+	   a pinned brain is a choice someone made, not a severity. Read-only
+	   where the user cannot change the pin: same colour, minus the
+	   affordance. */
+  .room-badges :global(.brain-badge) {
     color: var(--accent-blue);
-    border-color: var(--accent-blue);
-  }
-  .brain-badge:hover {
-    color: var(--accent-blue);
-    border-color: var(--accent-blue);
-    background: var(--hover-bg);
-  }
-  /* Read-only where the user cannot change the pin: same colour, because it
-	   still says which brain the room is on, minus the affordance. */
-  .brain-badge-static {
-    cursor: default;
-  }
-  .brain-badge-static:hover {
-    background: var(--surface-base);
+    box-shadow: inset 0 0 0 1px var(--accent-blue);
   }
 
   .chat-pane {

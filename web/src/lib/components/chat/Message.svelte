@@ -15,7 +15,7 @@
     renderGroups,
   } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
-  import { Avatar, Button, IconButton } from '$lib/components/ui';
+  import { Avatar, Badge, Button, Chip, IconButton } from '$lib/components/ui';
   import ActivityTrace from './ActivityTrace.svelte';
   import ConfirmationCard from './ConfirmationCard.svelte';
   import DraftCard from './DraftCard.svelte';
@@ -741,18 +741,17 @@
 {#snippet aboutChip()}
   {#if message.aboutRoom}
     {#if message.aboutRoom.name !== null && onOpenRoom}
-      <button
+      <Chip
+        size="xs"
         class="room-chip about-chip"
-        type="button"
         title="Open the room"
         onclick={() => onOpenRoom?.(message.aboutRoom!.token)}
+        ><span class="truncate">re: {message.aboutRoom.name}</span></Chip
       >
-        re: {message.aboutRoom.name}
-      </button>
     {:else}
-      <span class="room-chip about-chip">
-        re: {message.aboutRoom.name ?? 'a room you left'}
-      </span>
+      <Badge tone="subtle" uppercase={false} class="room-chip about-chip"
+        ><span class="truncate">re: {message.aboutRoom.name ?? 'a room you left'}</span></Badge
+      >
     {/if}
   {/if}
 {/snippet}
@@ -816,9 +815,9 @@
       {#if botVoice}<span class="author bot">{botName}</span>{/if}
       {#if time}<time class="stamp">{time}</time>{/if}
       {#if showRoomChip}
-        <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
-          {message.roomName}
-        </button>
+        <Chip size="xs" class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)}
+          ><span class="truncate">{message.roomName}</span></Chip
+        >
       {/if}
       {@render aboutChip()}
       <!-- Only a notice gets the panel. A bot-voice row (a private reply, a
@@ -933,14 +932,12 @@
           <span class="author" class:bot={!isUser}>{author}</span>
           {#if time}<time class="stamp">{time}</time>{/if}
           {#if showRoomChip}
-            <button
+            <Chip
+              size="xs"
               class="room-chip"
               onclick={() => onRoomClick?.(message.roomToken!)}
-              type="button"
-              title="Go to room"
+              title="Go to room"><span class="truncate">{message.roomName}</span></Chip
             >
-              {message.roomName}
-            </button>
           {/if}
           {@render aboutChip()}
         </div>
@@ -1499,28 +1496,10 @@
   }
 
   /* Room label chip (aggregate views): a small clickable room tag in the
-	   author header that jumps into the room. */
-  .room-chip {
-    background: var(--surface-raised);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-pill);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-xs);
-    line-height: var(--leading-tight);
-    padding: 0.05rem var(--space-2);
-    cursor: pointer;
+	   author header that jumps into the room. The look is Chip's xs; a long
+	   room name is cut here. */
+  .content :global(.room-chip) {
     max-width: 12rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    transition:
-      color var(--transition-fast),
-      border-color var(--transition-fast);
-  }
-  .room-chip:hover {
-    color: var(--text-primary);
-    border-color: var(--text-dim);
   }
 
   .gutter {
@@ -1879,10 +1858,6 @@
 	   around it. A system row is always its own group (there is no continuation
 	   case for a notice), so it takes the fresh-group top padding unconditionally
 	   rather than through a class. */
-  /* A span when the room cannot be opened: no pointer, no hover. */
-  span.about-chip {
-    cursor: default;
-  }
   .cmd-row {
     display: flex;
     gap: var(--chat-avatar-gap);
@@ -1890,7 +1865,7 @@
     padding: var(--space-2) var(--chat-row-inline);
     position: relative;
   }
-  .cmd-row .room-chip {
+  .cmd-row .content :global(.room-chip) {
     margin-bottom: var(--space-1);
   }
   /* Both are inline, so they share the header line; `inline-block` is what

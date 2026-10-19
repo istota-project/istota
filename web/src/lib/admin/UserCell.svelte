@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Avatar } from '$lib/components/ui';
+  import { Avatar, Badge } from '$lib/components/ui';
 
   let {
     userId,
@@ -17,7 +17,7 @@
     <Avatar kind="user" {userId} label={displayName || userId} />
   </span>
   <span class="username">{displayName || userId}</span>
-  {#if isAdmin}<span class="admin-badge">admin</span>{/if}
+  {#if isAdmin}<Badge size="sm" class="admin-badge">admin</Badge>{/if}
 </span>
 
 <style>
@@ -38,22 +38,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .admin-badge {
-    display: inline-block;
+  /* The bot's amber marks the role, a kind rather than a severity. */
+  .user-cell :global(.admin-badge) {
     flex-shrink: 0;
     margin-left: var(--space-2);
-    /* design-lint-allow: Preserve the compact badge used by the Status users table. */
-    padding: 0.05rem var(--space-2);
-    font-size: var(--text-2xs);
-    font-weight: var(--weight-semibold);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    border-radius: var(--radius-pill);
-    background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
-    color: var(--accent-amber);
+    --badge-bg: color-mix(in srgb, var(--accent-amber) 18%, transparent);
+    --badge-fg: var(--accent-amber);
   }
   @media (max-width: 640px) {
-    .admin-badge {
+    .user-cell :global(.admin-badge) {
       display: none;
     }
   }

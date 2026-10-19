@@ -27,6 +27,7 @@
     PageLoading,
     Input,
     TextArea,
+    Chip,
   } from '$lib/components/ui';
   import {
     encounterOptionLabel,
@@ -324,12 +325,11 @@
             <ul class="staged">
               {#each stagedEncounters as e (e.id)}
                 <li>
-                  <span>{encounterLabelFor(e)}</span>
-                  <button
-                    type="button"
-                    class="unstage"
-                    onclick={() => unstageEncounter(e.id)}
-                    aria-label="Remove {encounterLabelFor(e)}">×</button
+                  <Chip
+                    size="xs"
+                    removable
+                    removeLabel="Remove {encounterLabelFor(e)}"
+                    onremove={() => unstageEncounter(e.id)}>{encounterLabelFor(e)}</Chip
                   >
                 </li>
               {/each}
@@ -555,37 +555,11 @@
     flex-wrap: wrap;
     gap: var(--space-2);
   }
+  /* A long label wraps inside its chip rather than running past the page
+     gutter on a phone. */
   .staged li {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 0.1rem var(--space-1) 0.1rem 0.55rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-pill);
-    font-size: var(--text-xs);
-    /* An encounter label carries date, type and provider — wrap inside the
-       chip rather than running past the page gutter on a phone. */
+    min-width: 0;
     max-width: 100%;
-    min-width: 0;
-    box-sizing: border-box;
-  }
-  .staged li span {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-  .unstage {
-    background: none;
-    border: none;
-    padding: 0 0.15rem;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--text-sm);
-    line-height: var(--leading-none);
-    cursor: pointer;
-  }
-  .unstage:hover {
-    color: var(--text-primary);
   }
 
   /* Each condition group sizes its card grid by its own width, in

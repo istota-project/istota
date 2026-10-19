@@ -12,7 +12,7 @@
     type TransactionSelection,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
+  import { Chip, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
   import { Search } from '@lucide/svelte';
 
   let { children } = $props();
@@ -169,9 +169,13 @@
 
 <div class="money-section-header">
   {#if $selectedAccount}
-    <button class="active-filter" onclick={() => selectAccount($selectedAccount)} type="button">
-      {$selectedAccount} <span class="clear">&times;</span>
-    </button>
+    <Chip
+      size="xs"
+      removable
+      class="active-filter"
+      removeLabel="Clear the account filter"
+      onremove={() => selectAccount($selectedAccount)}>{$selectedAccount}</Chip
+    >
   {/if}
   <div class="money-section-tools control-row">
     <!-- The one placement that isn't a ShellHeader leading slot: the accounts
@@ -250,31 +254,6 @@
 {/snippet}
 
 <style>
-  .active-filter {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    background: var(--surface-raised);
-    border: none;
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: 0.2rem 0.55rem;
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-    transition: background var(--transition-fast);
-  }
-
-  .active-filter:hover {
-    background: var(--border-default);
-  }
-
-  .active-filter .clear {
-    color: var(--text-dim);
-    font-size: var(--text-sm);
-    line-height: var(--leading-none);
-  }
-
   /* The chip precedes the toolbar in the DOM because on a wide screen it sits
      at the section's leading edge, with the tools pushed right by their own
      auto margin — one row, reading left to right. Below 768px the header wraps
@@ -285,7 +264,7 @@
      section nav — and hangs the chip beneath it. `order` rather than moving
      the markup, so the wide layout and the tab order are both untouched. */
   @media (max-width: 768px) {
-    .active-filter {
+    .money-section-header :global(.active-filter) {
       order: 1;
     }
   }
