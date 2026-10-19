@@ -3318,6 +3318,112 @@ const mockSecrets: Record<string, Record<string, string>> = {
   overland: {},
 };
 
+/**
+ * Per-device location ingest tokens, as `GET /location/devices` lists them.
+ * The legacy shared token is `mockSecrets.overland.ingest_token`, as on the
+ * server, so the module-services card and the device list agree about it.
+ */
+const mockLocationDevices: Array<{
+  id: number;
+  kind: 'app' | 'code';
+  device_id: string | null;
+  label: string;
+  token_tail: string;
+  created_at: string;
+  last_used_at: string | null;
+}> = [
+  {
+    id: 1,
+    kind: 'code',
+    device_id: null,
+    label: 'QR code',
+    token_tail: 'x9Qa',
+    created_at: new Date(Date.now() - 12 * 86400_000).toISOString(),
+    last_used_at: new Date(Date.now() - 40 * 60_000).toISOString(),
+  },
+];
+let mockLocationDeviceNextId = 2;
+const MOCK_LOCATION_DEVICE_CAP = 20;
+const MOCK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const locationDevicesHandler: MockHandler = ({ url, method, body }) => {
+  const path = url.split('?')[0];
+  if (!path.startsWith('/istota/api/location/devices')) return undefined;
+  if (path === '/istota/api/location/devices' && method === 'GET') {
+    const devices = [...mockLocationDevices].sort((a, b) =>
+      b.created_at.localeCompare(a.created_at),
+    );
+    return { devices, legacy_token: Boolean(mockSecrets.overland?.ingest_token) };
+  }
+  if (path === '/istota/api/location/devices' && method === 'POST') {
+    if (mockDisabledModules.has('location')) {
+      return {
+        __status: 409,
+        detail:
+          'The location module is off for this user, so an ingest token ' +
+          'would not be accepted. Enable it in Settings first.',
+      };
+    }
+    const req = (body ?? {}) as { kind?: unknown; device_id?: unknown; label?: unknown };
+    if (req.kind !== 'app' && req.kind !== 'code') {
+      return { __status: 400, detail: "kind must be 'app' or 'code'" };
+    }
+    const deviceId =
+      req.kind === 'app' && typeof req.device_id === 'string' ? req.device_id.toUpperCase() : null;
+    if (req.kind === 'app' && (!deviceId || !MOCK_UUID.test(deviceId))) {
+      return { __status: 400, detail: 'device_id must be a UUID' };
+    }
+    const label =
+      (typeof req.label === 'string' ? req.label.trim().slice(0, 64) : '') ||
+      (req.kind === 'app' ? 'iPhone' : 'QR code');
+    // Shaped like the real one: 43 url-safe characters, returned once.
+    const token = Array.from({ length: 43 }, () =>
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.charAt(
+        Math.floor(Math.random() * 64),
+      ),
+    ).join('');
+    const now = new Date().toISOString();
+    const existing = deviceId ? mockLocationDevices.find((d) => d.device_id === deviceId) : null;
+    let id: number;
+    if (existing) {
+      Object.assign(existing, { label, token_tail: token.slice(-4), created_at: now });
+      id = existing.id;
+    } else {
+      if (mockLocationDevices.length >= MOCK_LOCATION_DEVICE_CAP) {
+        return {
+          __status: 409,
+          detail: `This account already has ${MOCK_LOCATION_DEVICE_CAP} devices. Remove one first.`,
+        };
+      }
+      id = mockLocationDeviceNextId++;
+      mockLocationDevices.push({
+        id,
+        kind: req.kind,
+        device_id: deviceId,
+        label,
+        token_tail: token.slice(-4),
+        created_at: now,
+        last_used_at: null,
+      });
+    }
+    const endpoint = 'https://example.invalid/webhooks/location';
+    return { __status: 201, id, token, endpoint, webhook_url: `${endpoint}?token=${token}` };
+  }
+  if (path === '/istota/api/location/devices/legacy' && method === 'DELETE') {
+    if (!mockSecrets.overland?.ingest_token) return { __status: 404, detail: 'no shared token' };
+    delete mockSecrets.overland.ingest_token;
+    return { ok: true };
+  }
+  const m = path.match(/^\/istota\/api\/location\/devices\/(\d+)$/);
+  if (m && method === 'DELETE') {
+    const index = mockLocationDevices.findIndex((d) => d.id === Number(m[1]));
+    if (index < 0) return { __status: 404, detail: 'device not found' };
+    mockLocationDevices.splice(index, 1);
+    return { ok: true };
+  }
+  return undefined;
+};
+
 interface ServiceSchema {
   service: string;
   label: string;
@@ -7573,38 +7679,6 @@ const handlers: MockHandler[] = [
       mockSecrets.monarch = { session_id: 'mock-session', csrftoken: 'mock-csrf' };
       return { ok: true };
     }
-    // Ahead of the generic secret matcher below, which this path resembles.
-    // (It could not actually be claimed by it — that pattern is anchored with
-    // `/` excluded from both groups, so it cannot match three segments — but
-    // reading the two in the other order invites the assumption that it can.)
-    if (
-      url === '/istota/api/settings/secrets/overland/ingest_token/generate' &&
-      method === 'POST'
-    ) {
-      if (mockDisabledModules.has('location')) {
-        // __status, not a bare {error}: the real endpoint answers 409 and the
-        // page reads the message off it. Returning 200 here would make the
-        // dev-mode failure a TypeError on an absent webhook_url instead.
-        return {
-          __status: 409,
-          detail:
-            'The location module is off for this user, so an ingest token ' +
-            'would not be accepted. Enable it in Settings first.',
-        };
-      }
-      // Shaped like the real one: 43 url-safe characters, returned once.
-      const token = Array.from({ length: 43 }, () =>
-        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.charAt(
-          Math.floor(Math.random() * 64),
-        ),
-      ).join('');
-      mockSecrets.overland = { ...(mockSecrets.overland ?? {}), ingest_token: token };
-      return {
-        ok: true,
-        token,
-        webhook_url: `https://example.invalid/webhooks/location?token=${token}`,
-      };
-    }
     const m = url.match(/^\/istota\/api\/settings\/secrets\/([^/]+)\/([^/?]+)$/);
     if (!m) return undefined;
     const [, service, key] = m;
@@ -9130,6 +9204,7 @@ const handlers: MockHandler[] = [
       },
     };
   },
+  locationDevicesHandler,
 
   ({ url }) => (url.startsWith('/istota/api/location/current') ? mockCurrent : undefined),
 
