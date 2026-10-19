@@ -343,8 +343,8 @@
        load. -->
   <LoadState {loading} {error} empty={entries.length === 0}>
     {#snippet header()}
-      <div class="money-toolbar control-row">
-        <span class="money-result-count">
+      <div class="money-toolbar toolbar toolbar--bar control-row">
+        <span class="caption num">
           {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
         </span>
         <!-- Every width here is pinned, because the row does not wrap: a trigger
@@ -364,7 +364,7 @@
              right way round anyway — a half-read client name still says which
              client, where a clipped "Invoiced" and "Uninvoiced" are the same
              word. -->
-        <div class="filters">
+        <div class="filters toolbar">
           <Select
             value={statusFilter}
             options={statusOptions}
@@ -503,9 +503,6 @@
      below its own content as a toolbar item, or the truncation never gets a
      chance to happen. */
   .filters {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
     flex-wrap: nowrap;
     min-width: 0;
   }

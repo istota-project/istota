@@ -196,9 +196,11 @@
     loadingLabel="Loading briefings…"
   >
     {#if personal}
-      <div class="filter-row">
+      <div class="filter-row toolbar control-row">
         <Input
           type="search"
+          size="toolbar"
+          class="filter-input"
           aria-label="Filter briefings"
           placeholder="Filter by owner, group or title"
           bind:value={filter}
@@ -309,13 +311,11 @@
 
 <style>
   .filter-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    flex-wrap: nowrap;
     margin-bottom: var(--space-4);
     max-width: 36rem;
   }
-  .filter-row :global(.ui-input) {
+  .filter-row :global(.filter-input) {
     flex: 1;
   }
   .cell-main {

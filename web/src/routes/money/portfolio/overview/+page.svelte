@@ -164,9 +164,9 @@
     </EmptyState>
   {/snippet}
   {#if summary}
-    <div class="money-toolbar">
+    <div class="money-toolbar toolbar toolbar--bar">
       <!-- Lone child of a space-between toolbar, so it needs the push right. -->
-      <span class="money-result-count as-of">
+      <span class="caption num as-of">
         As of {summary.exported_at.slice(0, 10)}
         {#if summary.exported_at_estimated}(estimated date){/if}
         · {summary.position_count} positions

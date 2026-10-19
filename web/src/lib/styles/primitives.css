@@ -543,6 +543,40 @@ input[type='week']::-webkit-date-and-time-value {
   --control-radius: var(--radius-sm);
 }
 
+/* A row of controls over a list or a pane: filters, a search, a selection's
+   actions, a result count. Layout only, so it composes with `.control-row`,
+   which a toolbar mixing a text input with buttons carries as well for the
+   field tier. A class rather than a component, because no two toolbars hold
+   the same things.
+
+   min-height reserves the field tier's height whether or not the bar holds a
+   control: a bar with only a count sits as tall as one with filters, so the
+   list under it starts at one height on every tab. `.toolbar--bar` is the
+   strip form, inset and ruled off from what it sits above; its min-height
+   counts its padding (border-box). A count in a toolbar is `.caption .num`,
+   and takes the tier height too, centred in it, so it lands at the same
+   height whether the bar fits one line or wraps to two. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-height: var(--control-height-lg);
+}
+
+.toolbar--bar {
+  min-height: calc(var(--control-height-lg) + var(--space-4));
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.toolbar > .caption {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height-lg);
+}
+
 /* The wide-dashboard content column. A module whose pages are grids, charts
    and wide tables — health, money's portfolio — marks the box its content
    lives in with this, and the column stops growing at `--content-max` and

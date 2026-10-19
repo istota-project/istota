@@ -226,8 +226,8 @@
     empty={transactions.length === 0}
   >
     {#snippet header()}
-      <div class="money-toolbar control-row">
-        <span class="money-result-count">{total.toLocaleString()} entries</span>
+      <div class="money-toolbar toolbar toolbar--bar control-row">
+        <span class="caption num">{total.toLocaleString()} entries</span>
       </div>
     {/snippet}
     {#snippet emptyState()}

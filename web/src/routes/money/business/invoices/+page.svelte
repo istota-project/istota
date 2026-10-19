@@ -281,10 +281,8 @@
 <div class="invoices-content">
   <LoadState {loading} {error} empty={invoices.length === 0}>
     {#snippet header()}
-      <div class="money-toolbar control-row">
-        <span class="money-result-count"
-          >{invoiceCount} invoices ({outstandingCount} outstanding)</span
-        >
+      <div class="money-toolbar toolbar toolbar--bar control-row">
+        <span class="caption num">{invoiceCount} invoices ({outstandingCount} outstanding)</span>
         <div class="hstack">
           <Button variant="secondary" onclick={() => (manualOpen = true)}>New manual invoice</Button
           >

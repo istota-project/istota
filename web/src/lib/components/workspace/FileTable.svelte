@@ -205,7 +205,7 @@
   }
 </script>
 
-<div class="file-controls control-row">
+<div class="file-controls toolbar control-row">
   <div class="file-filter">
     <Input
       aria-label="Filter files"
@@ -244,7 +244,7 @@
       onclick={onRefresh}><RefreshCw size={16} /></IconButton
     >{/if}
 </div>
-<div class="selection-toolbar">
+<div class="selection-toolbar toolbar">
   <span class="muted" role="status"
     >{selectedEntries.length
       ? `${selectedEntries.length} selected`
@@ -405,23 +405,20 @@
 {/if}
 
 <style>
-  .file-controls,
-  .selection-toolbar,
   .mobile-sort {
     display: flex;
     align-items: center;
     gap: var(--space-3);
   }
+  /* Inset like a bar but not ruled: the folder bar above draws the rule. */
   .file-controls,
   .selection-toolbar {
     padding: var(--space-2) var(--space-3);
-    flex-wrap: wrap;
     font-size: var(--text-sm);
   }
   .selection-toolbar {
     min-height: calc(var(--control-height-md) + 2 * var(--space-2));
     flex-wrap: nowrap;
-    gap: var(--space-2);
   }
   .selection-toolbar [role='status'] {
     flex: 1;

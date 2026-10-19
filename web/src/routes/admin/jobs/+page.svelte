@@ -133,9 +133,11 @@
     loadingLabel="Loading scheduled jobs…"
   >
     {#if jobs}
-      <div class="filter-row">
+      <div class="filter-row toolbar control-row">
         <Input
           type="search"
+          size="toolbar"
+          class="filter-input"
           aria-label="Filter scheduled jobs"
           placeholder="Filter by user or job"
           bind:value={filter}
@@ -251,13 +253,11 @@
 
 <style>
   .filter-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    flex-wrap: nowrap;
     margin-bottom: var(--space-4);
     max-width: 36rem;
   }
-  .filter-row :global(.ui-input) {
+  .filter-row :global(.filter-input) {
     flex: 1;
   }
   .cell-main {

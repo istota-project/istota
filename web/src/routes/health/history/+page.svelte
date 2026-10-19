@@ -316,7 +316,7 @@
   </div>
 {/if}
 
-<div class="filter-bar control-row">
+<div class="filter-bar toolbar control-row">
   <Select
     value={typeFilter}
     options={typeFilterOptions}
@@ -438,10 +438,7 @@
 	   third shorter than the inputs beside it; without nowrap the range broke
 	   into a three-line column on a phone. */
   .filter-bar {
-    display: flex;
     flex-wrap: nowrap;
-    align-items: center;
-    gap: var(--space-2);
     margin-bottom: var(--space-4);
   }
 

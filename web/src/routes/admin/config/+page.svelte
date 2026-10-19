@@ -598,10 +598,16 @@
         {/key}
       {/if}
 
-      <div class="config-toolbar control-row">
-        <Input bind:value={filter} placeholder="Filter settings…" aria-label="Filter settings" />
+      <div class="config-toolbar toolbar control-row">
+        <Input
+          bind:value={filter}
+          size="toolbar"
+          class="filter-input"
+          placeholder="Filter settings…"
+          aria-label="Filter settings"
+        />
         {#if filter.trim()}
-          <span class="match-count caption">{matchCount} matching</span>
+          <span class="match-count caption num">{matchCount} matching</span>
         {/if}
       </div>
 
@@ -776,15 +782,13 @@
 
 <style>
   .config-toolbar {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
+    flex-wrap: nowrap;
     margin-bottom: var(--space-3);
   }
 
   /* See the same rule in admin/logs: Input is full-width by default, which is
      right in a settings form and wrong for a filter box. */
-  .config-toolbar :global(input) {
+  .config-toolbar :global(.filter-input) {
     max-width: 22rem;
   }
 

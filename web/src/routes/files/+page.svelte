@@ -572,7 +572,7 @@
       <EmptyState>No files or connections are available.</EmptyState>
     {/snippet}
     {#if view}
-      <div class="folder-toolbar">
+      <div class="folder-toolbar toolbar toolbar--bar">
         <nav aria-label="Folder path">
           <ol>
             <li>
@@ -647,7 +647,7 @@
     {:else if !place}
       <EmptyState>This place is no longer available.</EmptyState>
     {:else}
-      <div class="folder-toolbar">
+      <div class="folder-toolbar toolbar toolbar--bar">
         <nav aria-label="Folder path">
           <ol>
             {#if parentView}
@@ -938,13 +938,7 @@
     accent-color: var(--accent);
   }
   .folder-toolbar {
-    display: flex;
-    align-items: center;
     justify-content: space-between;
-    flex-wrap: wrap;
-    gap: var(--space-3);
-    padding: var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
     font-size: var(--text-sm);
   }
   nav {

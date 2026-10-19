@@ -343,14 +343,14 @@
       No snapshots yet. Import a positions CSV to start the history.
     </EmptyState>
   {/snippet}
-  <div class="money-toolbar">
+  <div class="money-toolbar toolbar toolbar--bar">
     <div class="toolbar-left control-row">
       {#if symbol}
         <span class="symbol-title">{symbol}</span>
         <BackLink href="{base}/money/portfolio/history" label="All holdings" />
       {/if}
     </div>
-    <span class="money-result-count">
+    <span class="caption num">
       {snapshots.length} snapshot{snapshots.length === 1 ? '' : 's'}
     </span>
   </div>

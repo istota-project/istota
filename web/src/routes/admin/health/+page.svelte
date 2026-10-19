@@ -138,7 +138,7 @@
           · a {report.pending.deep ? 'deep ' : ''}run is waiting for the daemon{/if}
       </p>
 
-      <div class="health-toolbar control-row">
+      <div class="health-toolbar toolbar control-row">
         <div class="counts">
           <Badge variant="success">{report.summary.ok} ok</Badge>
           {#if report.summary.warn}<Badge variant="warn">{report.summary.warn} warn</Badge>{/if}
@@ -193,11 +193,7 @@
   }
 
   .health-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
   }
 
   .counts,

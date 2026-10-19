@@ -363,7 +363,7 @@
   <!-- A field tier row: two Selects, two text inputs, a Chip and a Button in
        one bar. Without the scope the inputs are the only members iOS floors at
        16px, so on a phone they stand a head above everything beside them. -->
-  <div class="log-toolbar control-row">
+  <div class="log-toolbar toolbar control-row">
     <Select
       value={sourceId}
       options={sourceOptions}
@@ -383,9 +383,22 @@
          against the logger name as well as the message, so typing a namespace
          narrows to it (a substring rather than a prefix, which is the more
          forgiving of the two when you are guessing at a name). -->
-    <Input bind:value={query} placeholder="Search…" aria-label="Search log text" />
+    <Input
+      bind:value={query}
+      size="toolbar"
+      class="log-filter"
+      placeholder="Search…"
+      aria-label="Search log text"
+    />
     {#if isTaskSource}
-      <Input bind:value={userFilter} placeholder="User" aria-label="Filter by user" monospace />
+      <Input
+        bind:value={userFilter}
+        size="toolbar"
+        class="log-filter"
+        placeholder="User"
+        aria-label="Filter by user"
+        monospace
+      />
     {/if}
     <!-- Grouped so the actions can be broken onto a row of their own under
          768px. `display: contents` above that breakpoint, so on a wide screen
@@ -500,10 +513,6 @@
   }
 
   .log-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
     margin-bottom: var(--space-3);
   }
 
@@ -512,7 +521,7 @@
      here rather than in the component: full-width is right in a settings form.
      :global() because the subject is inside a component — scoped to the
      toolbar, so it is placement, not a leak. */
-  .log-toolbar :global(input) {
+  .log-toolbar :global(.log-filter) {
     min-width: 9rem;
     max-width: 16rem;
   }

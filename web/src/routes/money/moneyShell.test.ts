@@ -21,7 +21,11 @@ import { join } from 'node:path';
 
 const read = (sheet: string): string =>
   readFileSync(join(process.cwd(), 'src/lib/styles', sheet), 'utf8');
-const sheets = { moneyTable: read('moneyTable.css'), table: read('table.css') };
+const sheets = {
+  moneyTable: read('moneyTable.css'),
+  table: read('table.css'),
+  primitives: read('primitives.css'),
+};
 
 /** The declarations inside a top-level rule. */
 const ruleBody = (selector: string, sheet: keyof typeof sheets = 'moneyTable'): string => {
@@ -31,32 +35,50 @@ const ruleBody = (selector: string, sheet: keyof typeof sheets = 'moneyTable'): 
   return css.slice(start, css.indexOf('}', start));
 };
 
-describe('.money-result-count', () => {
+// The money toolbar is the shared `.toolbar.toolbar--bar` and its count is
+// `.caption .num`; the invariants below moved to primitives.css with them.
+describe('a count in a toolbar', () => {
   // The count's own line box is shorter than the tier, so left to itself its
   // position is decided by whatever else is in the bar: on a toolbar that fits
   // on one line the min-height's leftover is split above and below it, and on
   // one that wraps there is no leftover and it sits flush on the padding — a
   // ~6px jump between two pages that look identical otherwise.
   it('reserves the field-tier height so its position does not depend on its siblings', () => {
-    expect(ruleBody('.money-result-count')).toMatch(/min-height:\s*var\(--control-height-lg\)/);
+    expect(ruleBody('.toolbar > .caption', 'primitives')).toMatch(
+      /min-height:\s*var\(--control-height-lg\)/,
+    );
   });
 
   it('centres its own text in that reserved box', () => {
     // min-height alone would only make the box taller and leave the text at the
     // top of it, which is the same defect pointing the other way.
-    const body = ruleBody('.money-result-count');
+    const body = ruleBody('.toolbar > .caption', 'primitives');
     expect(body).toMatch(/display:\s*inline-flex/);
     expect(body).toMatch(/align-items:\s*center/);
   });
 });
 
-describe('.money-toolbar', () => {
+describe('.toolbar--bar', () => {
   it('reserves a control row whether or not it holds controls', () => {
     // What makes a count-only bar the same height as one with filters, so the
     // table under it starts at the same place on every tab.
-    expect(ruleBody('.money-toolbar')).toMatch(
+    expect(ruleBody('.toolbar--bar', 'primitives')).toMatch(
       /min-height:\s*calc\(var\(--control-height-lg\)\s*\+\s*var\(--space-4\)\)/,
     );
+  });
+
+  it('is what every money toolbar is drawn with', () => {
+    const pages = [
+      'transactions/+page.svelte',
+      'business/work/+page.svelte',
+      'business/invoices/+page.svelte',
+      'portfolio/history/+page.svelte',
+      'portfolio/overview/+page.svelte',
+    ];
+    for (const page of pages) {
+      const source = readFileSync(join(process.cwd(), 'src/routes/money', page), 'utf8');
+      expect(source, page).toMatch(/class="money-toolbar toolbar toolbar--bar/);
+    }
   });
 });
 
