@@ -698,7 +698,7 @@
      hidden action row. -->
 {#snippet starredLabel()}
   {#if message.starred}
-    <span class="starred-label">Starred</span>
+    <span class="visually-hidden starred-label">Starred</span>
   {/if}
 {/snippet}
 
@@ -1311,14 +1311,9 @@
     border-left: 4px solid var(--accent-amber);
     pointer-events: none;
   }
+  /* Hidden by the global .visually-hidden; kept out of a copied selection
+     across the transcript. */
   .starred-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    /* Kept out of a copied selection across the transcript. */
     user-select: none;
   }
 
@@ -1704,6 +1699,26 @@
   .msg.error .body,
   .cmd-output.error {
     color: var(--status-danger-fg);
+  }
+
+  /* An `@name` mention (ISSUE-578), from `renderMarkdown` and from the user-row
+     splitter. Global because most arrive through `{@html}`, held under the two
+     row roots so it cannot leak. A user's own text is rendered verbatim, outside
+     `.markdown`, and the two must look alike. The viewer's own mention is the
+     stronger wash, so a reader can find what addresses them. */
+  .cmd-row :global(.mention),
+  .msg :global(.mention) {
+    padding: 0 0.2em;
+    border-radius: var(--radius-sm);
+    color: var(--accent-blue);
+    background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+    white-space: nowrap;
+  }
+  .cmd-row :global(.mention-self),
+  .msg :global(.mention-self) {
+    font-weight: 600;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent-blue) 30%, transparent);
   }
 
   /* A turn that arrived from outside the room. A filled, ruled block rather

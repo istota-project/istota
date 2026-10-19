@@ -922,8 +922,9 @@
   :global(.current-position-marker) {
     width: 14px;
     height: 14px;
-    background: #4aff7f;
-    border: 2px solid #111;
+    background: var(--map-marker-live);
+    /* The page surface, so the dot keeps a contrasting ring on either theme's tiles. */
+    border: 2px solid var(--surface-base);
     border-radius: 50%;
     box-shadow: 0 0 0 0 rgba(74, 255, 127, 0.4);
     animation: pulse 2s ease-out infinite;
@@ -940,7 +941,7 @@
 
   /* Browser-geolocation fallback marker — orange to differentiate from tracker pings */
   :global(.current-position-marker.browser) {
-    background: #ff9800;
+    background: var(--map-marker-browser);
     box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.4);
     animation: pulse-browser 2s ease-out infinite;
   }
@@ -959,7 +960,7 @@
     width: 18px;
     height: 18px;
     background: #ffc107;
-    border: 2px solid #111;
+    border: 2px solid var(--surface-base);
     border-radius: 50%;
     cursor: grab;
     box-shadow: 0 0 0 3px rgba(255, 193, 7, 0.3);
@@ -969,69 +970,32 @@
     cursor: grabbing;
   }
 
-  /* Dark theme for MapLibre controls */
+  /* MapLibre controls on the theme's own surfaces. */
   :global(.maplibregl-ctrl-group) {
-    background: #1a1a1a !important;
-    border: 1px solid #333 !important;
+    background: var(--surface-card) !important;
+    border: 1px solid var(--border-default) !important;
     border-radius: 0.4rem !important;
   }
 
   :global(.maplibregl-ctrl-group button) {
-    border-color: #333 !important;
+    border-color: var(--border-default) !important;
   }
 
   :global(.maplibregl-ctrl-group button:not(:disabled):hover) {
-    background-color: #222 !important;
+    background-color: var(--surface-raised) !important;
   }
 
   :global(.maplibregl-ctrl-group button span) {
-    filter: invert(0.8);
+    filter: var(--map-icon-filter);
   }
 
   :global(.maplibregl-ctrl-attrib) {
-    background: rgba(17, 17, 17, 0.7) !important;
-    color: #666 !important;
+    background: color-mix(in srgb, var(--surface-base) 70%, transparent) !important;
+    color: var(--text-dim) !important;
     font-size: 0.65rem !important;
   }
 
   :global(.maplibregl-ctrl-attrib a) {
-    color: #888 !important;
-  }
-
-  /* Light theme — markers keep a contrasting border against light tiles, and
-	   the MapLibre controls/attribution flip to a light surface with dark icons.
-	   The dark rules above are untouched. */
-  :global(:root[data-theme='light'] .current-position-marker),
-  :global(:root[data-theme='light'] .place-drag-marker) {
-    border-color: #fff;
-  }
-  /* The bright tracker green washes out on light tiles — darken the dot. */
-  :global(:root[data-theme='light'] .current-position-marker) {
-    background: #16a34a;
-  }
-  /* Keep the browser-geolocation marker orange on light tiles too — the green
-	   override above otherwise wins on specificity and recolors it. */
-  :global(:root[data-theme='light'] .current-position-marker.browser) {
-    background: #ea580c;
-  }
-  :global(:root[data-theme='light'] .maplibregl-ctrl-group) {
-    background: #fff !important;
-    border-color: var(--border-default) !important;
-  }
-  :global(:root[data-theme='light'] .maplibregl-ctrl-group button) {
-    border-color: #d4d4d8 !important;
-  }
-  :global(:root[data-theme='light'] .maplibregl-ctrl-group button:not(:disabled):hover) {
-    background-color: #ececef !important;
-  }
-  :global(:root[data-theme='light'] .maplibregl-ctrl-group button span) {
-    filter: none;
-  }
-  :global(:root[data-theme='light'] .maplibregl-ctrl-attrib) {
-    background: rgba(255, 255, 255, 0.75) !important;
-    color: #555 !important;
-  }
-  :global(:root[data-theme='light'] .maplibregl-ctrl-attrib a) {
-    color: #2563b0 !important;
+    color: var(--text-muted) !important;
   }
 </style>

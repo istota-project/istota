@@ -106,23 +106,6 @@
   flex-wrap: wrap;
 }
 
-.settings .subsection-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  margin: var(--space-2) 0 -0.25rem;
-}
-
-.settings .subsection-heading h2 {
-  margin: 0;
-  font-size: var(--text-base);
-  color: var(--text-primary);
-}
-
-.settings .subsection-heading .hint {
-  margin: 0;
-}
-
 .settings .title {
   display: flex;
   align-items: center;
@@ -159,11 +142,6 @@
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
-}
-
-.settings .flash {
-  font-size: var(--text-xs);
-  color: var(--status-success-fg);
 }
 
 .settings .table-scroll {

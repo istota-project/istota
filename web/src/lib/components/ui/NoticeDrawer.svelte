@@ -125,7 +125,7 @@
         <Icon size={16} />
       </span>
       <p class="notice-message">
-        <span class="notice-severity-label">{LABELS[notice.severity]}:</span>
+        <span class="visually-hidden">{LABELS[notice.severity]}:</span>
         {notice.message}
         {#if notice.count > 1}
           <span class="notice-count" data-testid="notice-count">{countLabel(notice.count)}</span>
@@ -153,11 +153,16 @@
   {/if}
 </div>
 
-<span class="notice-announce" data-testid="notice-announce-polite" aria-live="polite"
-  >{politeText}</span
+<!-- notice-announce has no rule of its own; tests find the live regions by it. -->
+<span
+  class="visually-hidden notice-announce"
+  data-testid="notice-announce-polite"
+  aria-live="polite">{politeText}</span
 >
-<span class="notice-announce" data-testid="notice-announce-assertive" aria-live="assertive"
-  >{assertiveText}</span
+<span
+  class="visually-hidden notice-announce"
+  data-testid="notice-announce-assertive"
+  aria-live="assertive">{assertiveText}</span
 >
 
 <style>
@@ -227,20 +232,6 @@
     margin: 0;
     min-width: 0;
     flex: 1;
-  }
-
-  /* Carries the severity to a screen reader that navigates to the band, since
-     the icon is decorative and colour alone cannot be the signal. */
-  .notice-severity-label,
-  .notice-announce {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    border: 0;
   }
 
   .notice-count {

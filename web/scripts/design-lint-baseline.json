@@ -1,8 +1,4 @@
 {
-  "src/lib/components/FeedReader.svelte": {
-    "redefined-primitive": 3,
-    "off-scale-space": 5
-  },
   "src/lib/components/briefings/SourceConfigFields.svelte": {
     "off-scale-space": 5,
     "redefined-primitive": 2
@@ -15,14 +11,17 @@
     "off-scale-space": 2
   },
   "src/lib/components/chat/Message.svelte": {
-    "off-scale-space": 7
+    "off-scale-space": 5
   },
   "src/lib/components/chat/RoomSettings.svelte": {
     "redefined-primitive": 3,
-    "off-scale-space": 2
+    "off-scale-space": 1
   },
   "src/lib/components/chat/SearchResults.svelte": {
     "off-scale-space": 2
+  },
+  "src/lib/components/FeedReader.svelte": {
+    "off-scale-space": 5
   },
   "src/lib/components/health/DocumentCard.svelte": {
     "off-scale-space": 1
@@ -88,7 +87,7 @@
     "off-scale-space": 5
   },
   "src/lib/styles/settings.css": {
-    "off-scale-space": 5
+    "off-scale-space": 4
   },
   "src/lib/styles/sidebar.css": {
     "off-scale-space": 2
@@ -100,18 +99,11 @@
     "off-scale-space": 2
   },
   "src/routes/admin/+page.svelte": {
-    "off-scale-space": 10,
-    "redefined-primitive": 1,
+    "off-scale-space": 6,
     "raw-color": 1
   },
   "src/routes/briefings/+layout.svelte": {
     "off-scale-space": 1
-  },
-  "src/routes/briefings/+page.svelte": {
-    "off-scale-space": 1
-  },
-  "src/routes/briefings/settings/+page.svelte": {
-    "off-scale-space": 6
   },
   "src/routes/chat/+page.svelte": {
     "off-scale-space": 2
@@ -151,7 +143,7 @@
     "off-scale-space": 3
   },
   "src/routes/health/labs/+page.svelte": {
-    "raw-color": 3,
+    "raw-color": 2,
     "off-scale-space": 2
   },
   "src/routes/health/labs/marker/+page.svelte": {

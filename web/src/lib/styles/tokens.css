@@ -89,6 +89,11 @@
   /* The WhatsApp surface glyph in the room list, the chat header and a texted
 	   turn's provenance line (ISSUE-584). A brand cue, not a severity. */
   --accent-whatsapp: #5fd07a;
+  /* The location map's current-position dot: live tracker green, and orange for
+	   a browser-geolocation fallback. Darker in light, where the bright green
+	   washes out on light tiles. */
+  --map-marker-live: #4aff7f;
+  --map-marker-browser: #ff9800;
   /* Links inside rendered body content — chat markdown, the briefings reader,
 	   feed entries. Amber, following the bot's accent. Kept as its own token
 	   rather than using --accent-amber directly so a link can be retuned without
@@ -214,6 +219,10 @@
 	   date filters that carried it each needed BOTH halves and each wrote them
 	   several hundred lines apart. */
   --calendar-icon-filter: invert(0.7);
+
+  /* The same again for MapLibre's control glyphs, which ship dark: lifted on
+	   the dark theme's control surface, untouched on light. */
+  --map-icon-filter: invert(0.8);
 
   /* Radii. --radius-sm is 4px at the unscaled root, matching the px literals it
 	   replaces, but stays in rem so it tracks the text-scale preference like the
@@ -508,6 +517,8 @@
   --accent-amber: #b9740a;
   --accent-blue: #2563b0;
   --accent-whatsapp: #1c8043;
+  --map-marker-live: #16a34a;
+  --map-marker-browser: #ea580c;
   --link: var(--accent-amber);
 
   /* Categorical chips. */
@@ -564,4 +575,5 @@
   --sigil-filter: invert(1);
   /* The glyph already ships dark, so on white it needs nothing done to it. */
   --calendar-icon-filter: none;
+  --map-icon-filter: none;
 }

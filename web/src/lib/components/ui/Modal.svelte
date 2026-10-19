@@ -250,8 +250,8 @@
     display: flex;
     flex-direction: column;
     /* The panel is pinned to the viewport centre rather than laid out inside a
-		   padded backdrop, so it can't use .overlay-safe — the insets come off its
-		   caps instead. Subtracting both ends of each axis keeps a full-height modal
+		   padded backdrop, so backdrop padding cannot keep it clear of the notch —
+		   the insets come off its caps instead. Subtracting both ends of each axis keeps a full-height modal
 		   inside the safe box once it is centred, and dvh tracks a collapsing mobile
 		   browser toolbar the way the body's height does. Inert where insets are 0. */
     max-width: calc(100vw - 2rem - var(--safe-left) - var(--safe-right));
