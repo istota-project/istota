@@ -19,13 +19,9 @@
    `auto-fill`) so a single card stretches to fill instead of stranding a
    min-width card beside empty phantom tracks.
 
-   The card *visual* (surface / border / radius) is intentionally NOT here:
-   `.card` already means different things across the app (bordered content
-   cards, borderless feed + cash-flow tiles, `--border-subtle` settings cards
-   via `.settings .card`), so a global `.card` rule would leak a border onto
-   the borderless ones. Each module owns its card surface; the health module's
-   shared card visual lives scoped in health/+layout.svelte, mirroring how
-   settings.css scopes `.settings .card`. */
+   The card *visual* (surface / border / radius) is not here: it is the
+   `Card` component in ui/, with its variants for the bordered, borderless,
+   inset, raised and outline looks. */
 
 /* The content pane a `CardGrid` sits in: one inset on every side, which the
    grid also uses as its gap, so the space around the cards is the space
