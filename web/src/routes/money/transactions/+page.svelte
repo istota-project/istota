@@ -244,15 +244,15 @@
   {:else if transactions.length === 0}
     <EmptyState>No transactions found.</EmptyState>
   {:else}
-    <div class="txn-scroll" class:faded={loading}>
+    <div class="record-list txn-scroll" class:faded={loading}>
       {#each grouped as group (group.date)}
-        <div class="date-header">{formatDate(group.date)}</div>
+        <div class="record-group micro-label">{formatDate(group.date)}</div>
         {#each group.rows as txn, i (group.date + '-' + i)}
           {@const key = txnKey(txn)}
           {@const isExpanded = expandedKeys.has(key)}
           <div
-            class="money-table-row"
-            class:expanded={isExpanded}
+            class="record-row"
+            class:is-expanded={isExpanded}
             role="button"
             tabindex="0"
             aria-expanded={isExpanded}
@@ -281,7 +281,7 @@
               type="button">{shortAccount(txn.account)}</button
             >
             <span
-              class="txn-amount"
+              class="txn-amount num"
               class:income={txn.account.startsWith('Income:')}
               class:expense={txn.account.startsWith('Expenses:')}
               >{displayBalance(txn.position, txn.account)}</span
@@ -289,20 +289,20 @@
             <KebabMenu items={[{ label: 'Edit transaction', onSelect: () => openEdit(txn) }]} />
           </div>
           {#if isExpanded}
-            <div class="postings">
+            <div class="record-detail postings">
               {#if postingsLoading.has(key)}
-                <div class="posting-row">
+                <div class="record-detail-row">
                   <span class="posting-account caption">Loading...</span>
                 </div>
               {:else if postingsCache.has(key)}
                 {#each postingsCache.get(key) ?? [] as posting}
-                  <div class="posting-row">
+                  <div class="record-detail-row">
                     <button
                       class="posting-account button-reset caption"
                       onclick={() => navigateToAccount(posting.account)}
                       type="button">{posting.account}</button
                     >
-                    <span class="posting-amount">{posting.position}</span>
+                    <span class="posting-amount num">{posting.position}</span>
                   </div>
                 {/each}
               {/if}
@@ -344,33 +344,14 @@
   }
 
   /* Transactions scrolls here rather than in .money-section-body, so this is
-	   where the bottom safe area goes (see the money layout's insetBottom note). */
+     where the bottom safe area goes (see the money layout's insetBottom note). */
   .txn-scroll {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 0 var(--space-2);
-    padding-bottom: max(0.5rem, var(--safe-bottom));
+    padding-bottom: max(var(--space-2), var(--safe-bottom));
     transition: opacity var(--transition-fast);
   }
 
   .txn-scroll.faded {
     opacity: 0.5;
-  }
-
-  .date-header {
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    font-weight: var(--weight-medium);
-    padding: var(--space-3) var(--space-3) var(--space-1);
-    border-top: 1px solid var(--border-subtle);
-    margin-top: var(--space-1);
-  }
-
-  .date-header:first-child {
-    border-top: none;
-    margin-top: 0;
   }
 
   .txn-main {
@@ -405,10 +386,6 @@
   }
 
   .txn-amount {
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
     min-width: 6rem;
   }
 
@@ -420,18 +397,8 @@
   }
 
   .postings {
-    padding: 0.15rem var(--space-3) var(--space-2) 2.5rem;
-    background: var(--surface-card);
-    border-radius: 0 0 0.25rem 0.25rem;
-    margin-top: -0.15rem;
-  }
-
-  .posting-row {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-3);
-    padding: 0.15rem 0;
-    font-size: var(--text-xs);
+    /* design-lint-allow: under the payee, past the row's 0.75rem edge. */
+    --record-detail-indent: 2.5rem;
   }
 
   .posting-account {
@@ -444,9 +411,6 @@
 
   .posting-amount {
     margin-left: auto;
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
   }
 

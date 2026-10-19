@@ -46,7 +46,7 @@
     <IndexCaption {caption} {reachNote} />
     <ul class="list-reset">
       {#each files as file (file.name)}
-        <li class="index-row">
+        <li class="record-row record-row--divided index-row">
           <div class="index-text">
             <button
               type="button"
@@ -74,13 +74,9 @@
 </section>
 
 <style>
+  /* A record row (table.css), ruled like the file table beside it. */
   .index-row {
-    display: flex;
     align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
   }
   .index-text {
     display: flex;

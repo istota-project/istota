@@ -256,7 +256,7 @@ describe('sorting and download', () => {
   });
 
   function order(): string[] {
-    return [...document.querySelectorAll('.money-table-row .work-desc')].map(
+    return [...document.querySelectorAll('.record-row .work-desc')].map(
       (el) => el.textContent?.trim() ?? '',
     );
   }

@@ -84,7 +84,7 @@
     "off-scale-space": 2
   },
   "src/lib/styles/moneyTable.css": {
-    "off-scale-space": 5
+    "off-scale-space": 1
   },
   "src/lib/styles/settings.css": {
     "off-scale-space": 4
@@ -159,7 +159,7 @@
     "off-scale-space": 3
   },
   "src/routes/money/business/invoices/+page.svelte": {
-    "off-scale-space": 3
+    "off-scale-space": 1
   },
   "src/routes/money/business/work/+page.svelte": {
     "off-scale-space": 1
@@ -168,13 +168,10 @@
     "off-scale-space": 2
   },
   "src/routes/money/taxes/+page.svelte": {
-    "off-scale-space": 3
+    "off-scale-space": 1
   },
   "src/routes/money/transactions/+layout.svelte": {
     "off-scale-space": 4
-  },
-  "src/routes/money/transactions/+page.svelte": {
-    "off-scale-space": 3
   },
   "src/routes/settings/preferences/+page.svelte": {
     "off-scale-space": 1

@@ -25,12 +25,13 @@
     KebabMenu,
     type KebabItem,
     PageLoading,
+    SortHeader,
   } from '$lib/components/ui';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
   import ManualInvoiceDialog from '$lib/components/money/ManualInvoiceDialog.svelte';
-  import SortHeader from '$lib/components/money/SortHeader.svelte';
-  import { loadSort, nextSort, saveSort, sortRows, type TableSort } from '$lib/money/tableSort';
+  import { createTableSort, sortRows } from '$lib/ui/tableSort.svelte';
+  import { billingStatusVariant } from '$lib/money/status';
   import { workExportItems } from '$lib/money/workExport';
   import { Download } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
@@ -44,10 +45,10 @@
   let invoiceCount = $state(0);
   let outstandingCount = $state(0);
   type SortKey = 'date' | 'number';
-  const SORT_STORAGE = 'money.invoices.sort';
-  let sort: TableSort<SortKey> = $state(
-    loadSort<SortKey>(SORT_STORAGE, ['date', 'number'], { key: 'date', descending: true }),
-  );
+  const sort = createTableSort<SortKey>('money.invoices.sort', ['date', 'number'], {
+    initial: { key: 'date', direction: 'descending' },
+    firstDirection: 'descending',
+  });
   let reviews: InvoicePaymentReview[] = $state([]);
   let reviewsCollapsed = $state(true);
   let busyReview = $state('');
@@ -266,11 +267,6 @@
     ),
   );
 
-  function sortBy(key: SortKey) {
-    sort = nextSort(sort, key);
-    saveSort(SORT_STORAGE, sort);
-  }
-
   function displayStatus(status: string): string {
     if (status === 'outstanding') return 'posted';
     return status;
@@ -349,35 +345,33 @@
   {:else if invoices.length === 0}
     <EmptyState>No invoices found.</EmptyState>
   {:else}
-    <div class="money-table">
-      <div class="money-table-header">
+    <div class="record-list">
+      <div class="record-header micro-label">
         <SortHeader
           label="Invoice"
           name="invoice number"
           class="inv-number"
-          active={sort.key === 'number'}
-          descending={sort.descending}
-          onclick={() => sortBy('number')}
+          direction={sort.directionOf('number')}
+          onclick={() => sort.toggle('number')}
         />
         <span class="inv-client">Client</span>
         <SortHeader
           label="Date"
           class="inv-date"
-          active={sort.key === 'date'}
-          descending={sort.descending}
-          onclick={() => sortBy('date')}
+          direction={sort.directionOf('date')}
+          onclick={() => sort.toggle('date')}
         />
-        <span class="inv-status money-status">Status</span>
-        <span class="inv-amount money-amount">Amount</span>
-        <span class="money-kebab-spacer"></span>
+        <span class="inv-status">Status</span>
+        <span class="inv-amount num">Amount</span>
+        <span class="col-actions"></span>
       </div>
       {#each sorted as inv (inv.invoice_number)}
         {@const key = inv.invoice_number}
         {@const isExpanded = expandedKeys.has(key)}
         {@const voided = inv.status === 'voided'}
         <div
-          class="money-table-row"
-          class:expanded={isExpanded}
+          class="record-row"
+          class:is-expanded={isExpanded}
           class:voided
           role="button"
           tabindex="0"
@@ -410,27 +404,33 @@
           </span>
           <span class="inv-date">{formatDate(inv.date)}</span>
           {#if voided}
-            <span class="inv-status inv-voided" title={voidSummary(inv)}>
+            <span class="inv-status" title={voidSummary(inv)}>
               <Badge size="sm">Voided</Badge>
             </span>
           {:else}
-            <span
-              class="inv-status money-status"
-              class:status-paid={inv.status === 'paid'}
-              class:status-posted={inv.status === 'outstanding'}
-              class:status-draft={inv.status === 'draft'}>{displayStatus(inv.status)}</span
+            <span class="inv-status"
+              ><Badge
+                size="sm"
+                variant={billingStatusVariant(
+                  inv.status === 'paid'
+                    ? 'paid'
+                    : inv.status === 'outstanding'
+                      ? 'posted'
+                      : 'draft',
+                )}>{displayStatus(inv.status)}</Badge
+              ></span
             >
           {/if}
-          <span class="inv-amount money-amount">${formatAmount(inv.total)}</span>
+          <span class="inv-amount num">${formatAmount(inv.total)}</span>
           <KebabMenu items={menuItems(inv)} ariaLabel="Actions for {inv.invoice_number}" />
         </div>
         {#if isExpanded}
-          <div class="inv-details">
+          <div class="record-detail">
             {#if detailsLoading.has(key)}
-              <div class="detail-row"><span class="detail-desc">Loading...</span></div>
+              <div class="record-detail-row"><span class="detail-desc">Loading...</span></div>
             {:else if detailsCache.has(key)}
               {#each detailsCache.get(key) ?? [] as item}
-                <div class="detail-row">
+                <div class="record-detail-row">
                   <span class="detail-desc">
                     {item.description}
                     {#if item.detail}
@@ -443,7 +443,7 @@
                   {#if item.discount > 0}
                     <span class="detail-discount">-${formatAmount(item.discount)}</span>
                   {/if}
-                  <span class="detail-amount">${formatAmount(item.amount)}</span>
+                  <span class="detail-amount num">${formatAmount(item.amount)}</span>
                 </div>
               {/each}
             {/if}
@@ -484,19 +484,13 @@
 
 <style>
   /* Muted rather than hidden: a voided number stays on record. */
-  .money-table-row.voided .inv-client,
-  .money-table-row.voided .inv-amount {
+  .voided .inv-client,
+  .voided .inv-amount {
     color: var(--text-dim);
   }
 
-  .money-table-row.voided .inv-amount {
+  .voided .inv-amount {
     text-decoration: line-through;
-  }
-
-  .inv-voided {
-    display: inline-flex;
-    justify-content: center;
-    flex-shrink: 0;
   }
 
   .payment-review + .payment-review {
@@ -523,8 +517,8 @@
     min-height: 0;
   }
 
-  /* Columns only — the toolbar/list/header/row/chip shell is shared, in
-     routes/money/+layout.svelte. */
+  /* Columns only — the record rows are table.css's, the toolbar is
+     moneyTable.css's. */
 
   .invoices-content :global(.inv-number) {
     font-family: var(--font-mono);
@@ -563,26 +557,13 @@
   /* Snug around the longest label ("posted") in caps: a slot much wider than
      the text turns the chip into a mostly-empty capsule. */
   .inv-status {
+    display: inline-flex;
     min-width: 4rem;
+    flex-shrink: 0;
   }
 
   .inv-amount {
     min-width: 5.5rem;
-  }
-
-  .inv-details {
-    padding: 0.15rem var(--space-3) var(--space-2) var(--space-8);
-    background: var(--surface-card);
-    border-radius: 0 0 0.25rem 0.25rem;
-    margin-top: -0.15rem;
-  }
-
-  .detail-row {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-3);
-    padding: 0.15rem 0;
-    font-size: var(--text-xs);
   }
 
   .detail-desc {
@@ -610,9 +591,6 @@
 
   .detail-amount {
     margin-left: auto;
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
     min-width: 4rem;
   }
@@ -621,8 +599,8 @@
     .invoices-content :global(.inv-date) {
       display: none;
     }
-    /* The shared shell hides the status chip at this width, so the invoice
-       number carries the status colors instead — same tokens as the chip. */
+    /* No status column at this width, so the invoice number carries the
+       status colors instead — the chip's own tokens. */
     .invoices-content :global(.inv-number) {
       min-width: 5.25rem;
       padding: 0.1rem var(--space-2);
@@ -642,14 +620,14 @@
       color: var(--text-muted);
       background: var(--surface-badge);
     }
-    .inv-voided {
+    .inv-status {
       display: none;
     }
     .inv-amount {
       min-width: 4rem;
     }
-    .inv-details {
-      padding-left: var(--space-3);
+    .record-detail {
+      --record-detail-indent: var(--space-3);
     }
     .detail-qty {
       display: none;

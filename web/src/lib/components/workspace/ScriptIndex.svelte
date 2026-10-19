@@ -83,7 +83,7 @@
       <ul class="list-reset">
         {#each files as file (file.path)}
           {@const viewPath = `${index.scripts_view_path}/${file.path}`}
-          <li class="index-row">
+          <li class="record-row record-row--divided index-row">
             <div class="index-text">
               <button
                 type="button"
@@ -127,13 +127,9 @@
     margin: 0;
     padding: var(--space-3);
   }
+  /* A record row (table.css), ruled like the file table beside it. */
   .index-row {
-    display: flex;
     align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
   }
   .index-text {
     display: flex;

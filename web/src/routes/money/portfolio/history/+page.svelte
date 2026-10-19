@@ -368,19 +368,19 @@
     </div>
 
     <div class="micro-label snapshots-label">Snapshots</div>
-    <!-- Header inside the .money-table scroller (the work/invoices shape), so
+    <!-- Header inside the .record-list scroller (the work/invoices shape), so
          the labels travel with the columns they name if the row has to scroll,
          and the section fits the viewport instead of pushing the page wide. -->
-    <div class="money-table">
-      <div class="money-table-header">
+    <div class="record-list">
+      <div class="record-header micro-label">
         <span class="col-date">Exported</span>
         <span class="col-source">Source file</span>
-        <span class="money-amount col-positions">Positions</span>
-        <span class="money-amount col-total">Total value</span>
-        <span class="money-kebab-spacer"></span>
+        <span class="num col-positions">Positions</span>
+        <span class="num col-total">Total value</span>
+        <span class="col-actions"></span>
       </div>
       {#each snapshots as snapshot (snapshot.id)}
-        <div class="money-table-row">
+        <div class="record-row">
           <span class="col-date">
             {snapshot.exported_at.slice(0, 16).replace('T', ' ')}
             {#if snapshot.exported_at_estimated}
@@ -390,8 +390,8 @@
           <span class="col-source" title={snapshot.source_file ?? snapshot.source}>
             {snapshot.source_file ?? snapshot.source}
           </span>
-          <span class="money-amount col-positions">{snapshot.position_count}</span>
-          <span class="money-amount col-total">{usd(snapshot.total_value, 2)}</span>
+          <span class="num col-positions">{snapshot.position_count}</span>
+          <span class="num col-total">{usd(snapshot.total_value, 2)}</span>
           <KebabMenu items={snapshotMenu(snapshot)} ariaLabel="Snapshot actions" />
         </div>
       {/each}
@@ -409,7 +409,7 @@
   onCancel={() => (confirmDeleteId = null)}
 />
 
-<!-- A diff is a list, and it borrows the money record-table shell so its rows
+<!-- A diff is a list, and it borrows the record rows (table.css) so its rows
      read like every other money table — but it is sized to those columns
      rather than to the screen. 900px is the five fixed columns plus room for
      the account name to be worth reading; `min()` collapses it to the phone's
@@ -441,19 +441,19 @@
               {section.label}
               <span class="diff-count">{section.rows.length}</span>
             </div>
-            <div class="money-table diff-table">
-              <div class="money-table-header">
+            <div class="record-list diff-table">
+              <div class="record-header micro-label">
                 <span class="diff-col-symbol">Symbol</span>
                 <span class="diff-col-account">Account</span>
-                <span class="money-amount diff-col-qty">Qty</span>
-                <span class="money-amount diff-col-value">Value</span>
+                <span class="num diff-col-qty">Qty</span>
+                <span class="num diff-col-value">Value</span>
               </div>
               {#each section.rows as entry (entry.account_name + entry.symbol)}
-                <div class="money-table-row">
+                <div class="record-row">
                   <span class="diff-col-symbol diff-symbol">{entry.symbol}</span>
                   <span class="diff-col-account">{entry.account_name}</span>
-                  <span class="money-amount diff-col-qty">{qty(entry.quantity)}</span>
-                  <span class="money-amount diff-col-value">{usd(entry.value, 2)}</span>
+                  <span class="num diff-col-qty">{qty(entry.quantity)}</span>
+                  <span class="num diff-col-value">{usd(entry.value, 2)}</span>
                 </div>
               {/each}
             </div>
@@ -466,20 +466,20 @@
             Changed
             <span class="diff-count">{diff.changed.length}</span>
           </div>
-          <div class="money-table diff-table">
-            <div class="money-table-header">
+          <div class="record-list diff-table">
+            <div class="record-header micro-label">
               <span class="diff-col-symbol">Symbol</span>
               <span class="diff-col-account">Account</span>
-              <span class="money-amount diff-col-qty">Qty</span>
-              <span class="money-amount diff-col-value">Value</span>
-              <span class="money-amount diff-col-change">Change</span>
+              <span class="num diff-col-qty">Qty</span>
+              <span class="num diff-col-value">Value</span>
+              <span class="num diff-col-change">Change</span>
             </div>
             {#each diff.changed as entry (entry.account_name + entry.symbol)}
               {@const delta = entry.value_to - entry.value_from}
-              <div class="money-table-row">
+              <div class="record-row">
                 <span class="diff-col-symbol diff-symbol">{entry.symbol}</span>
                 <span class="diff-col-account">{entry.account_name}</span>
-                <span class="money-amount diff-col-qty">
+                <span class="num diff-col-qty">
                   {#if entry.quantity_from === entry.quantity_to}
                     {qty(entry.quantity_to)}
                   {:else}
@@ -488,13 +488,13 @@
                     {qty(entry.quantity_to)}
                   {/if}
                 </span>
-                <span class="money-amount diff-col-value">
+                <span class="num diff-col-value">
                   <span class="diff-was">{usd(entry.value_from, 2)}</span>
                   <span class="diff-arrow">→</span>
                   {usd(entry.value_to, 2)}
                 </span>
                 <span
-                  class="money-amount diff-col-change"
+                  class="num diff-col-change"
                   class:positive={delta > 0}
                   class:negative={delta < 0}
                 >
@@ -598,8 +598,8 @@
      --surface-card, which is the panel's own colour in here, so there is no
      fill for the inset to protect — and pulling the table out with a negative
      margin instead left the body 0.75rem horizontally scrollable. */
-  .diff-table .money-table-header,
-  .diff-table .money-table-row {
+  .diff-table .record-header,
+  .diff-table .record-row {
     padding-inline: 0;
   }
 
@@ -675,8 +675,8 @@
        inline edge, and it owns the row rhythm — this table used to tighten the
        block padding to a hairline, which put it at a different row height from
        every non-portfolio money table on the same phone. */
-    .money-table-header,
-    .money-table-row {
+    .record-header,
+    .record-row {
       gap: var(--space-2);
       font-size: var(--text-xs);
     }
@@ -717,7 +717,7 @@
        VTI rows are indistinguishable. It wraps to its own line under the
        symbol instead, and the symbol takes over as the flexible column so the
        numbers still land on the table's right edge. */
-    .diff-table .money-table-row {
+    .diff-table .record-row {
       flex-wrap: wrap;
       row-gap: 0;
     }
@@ -736,7 +736,7 @@
 
     /* No longer a column of its own, so it has no label — the symbol column
        label stands for the pair. */
-    .diff-table .money-table-header .diff-col-account {
+    .diff-table .record-header .diff-col-account {
       display: none;
     }
 

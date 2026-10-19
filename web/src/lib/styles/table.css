@@ -217,3 +217,174 @@
 .divided-list > li + li {
   border-top: 1px solid var(--border-subtle);
 }
+
+/* Record rows ---------------------------------------------------------------
+   The div-row family: a list of records laid out as flex rows rather than a
+   <table>, for a list whose rows expand, nest or carry a kebab, and whose
+   columns are flex widths a page sets. Generalised from money's record shell
+   (money-prefixed until it moved here), which work, invoices, transactions,
+   accounts, the three report trees, the portfolio tables, the taxes breakdown
+   and the file pane's index lists had each re-implemented in part.
+
+   No row separators: rows are told apart by the hover fill, rounded so a
+   full-bleed fill lines up with the section header's inset. A page styles its
+   own columns (widths, alignment, a breakpoint that hides one) and nothing
+   else; the inline edge is the rows' own 0.75rem. The header and group label
+   take `.micro-label` in markup for their type, so neither restates it. */
+
+/* No inline padding: rows carry it, so a row's hover fill spans the full
+   width and its text still starts on the section header's left edge. */
+.record-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 0 var(--space-2);
+}
+
+.record-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  /* design-lint-allow: a hairline under the header rule, below --space-1. */
+  margin-bottom: 0.15rem;
+}
+
+/* One row rhythm for every record list, at both breakpoints. The block
+   padding is deliberately NOT tightened on a phone: a list row is a touch
+   target (most of them expand, and all of them carry a kebab), and the two
+   portfolio tables that did tighten it were the only ones that did, so the
+   same table read at two different heights depending on which tab you were
+   on. A page that needs to fit more columns on a narrow screen narrows its
+   gap, its type and its columns; the vertical rhythm is the shell's.
+   `--tree` below is the one other rhythm, and it is a different kind of thing
+   rather than the same thing smaller. */
+.record-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+  text-align: left;
+  width: 100%;
+}
+
+.record-row:hover,
+.record-row.is-expanded {
+  background: var(--surface-card);
+}
+
+/* Only expandable rows are clickable; a plain row shouldn't claim to be. */
+.record-row[role='button'] {
+  cursor: pointer;
+}
+
+.record-row:focus-visible {
+  outline-offset: calc(-1 * var(--focus-ring-width));
+}
+
+/* A tree row: an account hierarchy, a report's nested totals, the taxes
+   breakdown. Denser than a list row because it is a column of many short
+   lines, not a table of records. The four implementations this replaced
+   differed only in these two values. */
+.record-row--tree {
+  gap: var(--space-1);
+  /* design-lint-allow: the tree rhythm, between --space-1 and --space-2. */
+  padding-block: 0.2rem;
+}
+
+/* A list told apart by a rule under every row instead of the hover alone (the
+   file pane's index lists, which sit beside the file table's ruled rows). The
+   fill keeps square corners so it meets the rule. */
+.record-row--divided {
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+}
+
+/* A label over a run of rows: the transactions date, a taxes group. */
+.record-group {
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: var(--space-1);
+}
+
+/* The first group, and one directly under the header's own rule, needs no
+   rule of its own. */
+.record-group:first-child,
+.record-header + .record-group {
+  border-top: none;
+  margin-top: 0;
+}
+
+/* The panel an expanded row opens (an invoice's lines, a transaction's
+   postings). It tucks under the row's fill and shares it, so the two read as
+   one block. --record-detail-indent is where its text starts, under the
+   row's first column. */
+.record-detail {
+  --record-detail-indent: var(--space-8);
+  /* design-lint-allow: the panel's top tuck, below --space-1. */
+  padding: 0.15rem var(--space-3) var(--space-2) var(--record-detail-indent);
+  background: var(--surface-card);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  /* design-lint-allow: pulls the panel up under the row's fill. */
+  margin-top: -0.15rem;
+}
+
+.record-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  /* design-lint-allow: the detail line rhythm, below --space-1. */
+  padding: 0.15rem 0;
+  font-size: var(--text-xs);
+}
+
+/* Cells. One class each, so a page's column rule outranks them. */
+:where(.record-header, .record-row, .record-detail-row) .num {
+  text-align: right;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Reserves the width of the trailing KebabMenu in the header, so the labels
+   line up with the values under them. */
+:where(.record-header) .col-actions {
+  width: 1.1rem;
+  flex-shrink: 0;
+}
+
+/* A tree row's name: the account or line it names, a button that opens it. */
+:where(.record-row) .record-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+:where(.record-row) .record-name:hover {
+  color: var(--text-primary);
+}
+
+/* The disclosure triangle on a tree node or a collapsible section. */
+.record-caret {
+  display: inline-block;
+  font-size: 0.5rem;
+  color: var(--text-dim);
+  transition: transform var(--transition-fast);
+}
+
+.record-caret.is-open {
+  transform: rotate(90deg);
+}
+
+/* Every other cell in a row is text and wants the row's baseline; the kebab
+   is an icon control with no text of its own, so its baseline is the bottom
+   edge of the 15px glyph box, which `baseline` then lines up with the text
+   baseline and leaves the icon hanging a few pixels above the row's optical
+   centre. Set here rather than on KebabMenu itself: a card header that lets
+   its title wrap pins its kebab to the top on purpose (health's
+   DocumentCard), and `align-self` would outrank that. */
+.record-row .ui-kebab-trigger {
+  align-self: center;
+}

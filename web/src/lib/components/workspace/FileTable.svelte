@@ -1,14 +1,5 @@
 <script lang="ts">
-  import {
-    Folder,
-    Link,
-    Minus,
-    Users,
-    ArrowUp,
-    ArrowDown,
-    ArrowUpDown,
-    RefreshCw,
-  } from '@lucide/svelte';
+  import { Folder, Link, Minus, Users, ArrowUp, ArrowDown, RefreshCw } from '@lucide/svelte';
   import type {
     DriveItem,
     WorkspaceListing,
@@ -24,6 +15,8 @@
     ConfirmDialog,
     KebabMenu,
     EmptyState,
+    SortHeader,
+    sortAria,
     type KebabItem,
   } from '$lib/components/ui';
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
@@ -31,6 +24,7 @@
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { fileIcon } from './filePresentation';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
+  import { createTableSort } from '$lib/ui/tableSort.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
   let {
     listing = null,
@@ -93,11 +87,16 @@
           })),
   );
   type SortKey = 'name' | 'size' | 'modified';
-  const saved = loadSetting<{ key?: string; descending?: boolean } | null>('workspace.sort', null);
-  let sortKey = $state<SortKey>(
-    saved?.key === 'size' || saved?.key === 'modified' ? saved.key : 'name',
-  );
-  let descending = $state(saved?.descending === true);
+  const COLUMNS: { key: SortKey; label: string; class: string }[] = [
+    { key: 'name', label: 'Name', class: '' },
+    { key: 'size', label: 'Size', class: 'size num' },
+    { key: 'modified', label: 'Modified', class: 'modified' },
+  ];
+  // A name reads A to Z first; a size or a date biggest and newest first.
+  const sort = createTableSort<SortKey>('workspace.sort', ['name', 'size', 'modified'], {
+    initial: { key: 'name', direction: 'ascending' },
+    firstDirection: (key) => (key === 'name' ? 'ascending' : 'descending'),
+  });
   let foldersFirst = $state(loadSetting<boolean>('workspace.foldersFirst', true) !== false);
   let query = $state('');
   let selectedKeys = $state<string[]>([]);
@@ -113,17 +112,17 @@
       if (foldersFirst && (a.kind === 'dir') !== (b.kind === 'dir'))
         return a.kind === 'dir' ? -1 : 1;
       let order = 0;
-      if (sortKey === 'name')
+      if (sort.key === 'name')
         order = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
       else {
-        const av = sortKey === 'size' ? a.size : a.modified ? Date.parse(a.modified) : null;
-        const bv = sortKey === 'size' ? b.size : b.modified ? Date.parse(b.modified) : null;
+        const av = sort.key === 'size' ? a.size : a.modified ? Date.parse(a.modified) : null;
+        const bv = sort.key === 'size' ? b.size : b.modified ? Date.parse(b.modified) : null;
         if (av === null && bv !== null) return 1;
         if (bv === null && av !== null) return -1;
         order = (av ?? 0) - (bv ?? 0);
       }
       return (
-        (descending ? -order : order) ||
+        (sort.descending ? -order : order) ||
         a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
       );
     });
@@ -139,11 +138,6 @@
     folderContext;
     selectedKeys = [];
   });
-  function sort(key: SortKey) {
-    descending = key === sortKey ? !descending : key !== 'name';
-    sortKey = key;
-    saveSetting('workspace.sort', { key: sortKey, descending });
-  }
   function toggle(key: string) {
     selectedKeys = selectedKeys.includes(key)
       ? selectedKeys.filter((item) => item !== key)
@@ -229,17 +223,17 @@
   <div class="mobile-sort">
     <Select
       ariaLabel="Sort files"
-      value={sortKey}
+      value={sort.key}
       options={[
         { value: 'name', label: 'Name' },
         { value: 'modified', label: 'Modified' },
         { value: 'size', label: 'Size' },
       ]}
-      onValueChange={(value) => sort(value as SortKey)}
+      onValueChange={(value) => sort.toggle(value as SortKey)}
     /><IconButton
-      label={descending ? 'Sort ascending' : 'Sort descending'}
-      onclick={() => sort(sortKey)}
-      >{#if descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
+      label={sort.descending ? 'Sort ascending' : 'Sort descending'}
+      onclick={() => sort.toggle(sort.key)}
+      >{#if sort.descending}<ArrowDown size={16} />{:else}<ArrowUp size={16} />{/if}</IconButton
     >
   </div>
   {#if onRefresh}<IconButton
@@ -296,22 +290,14 @@
                 : [])}
           /></th
         >
-        {#each [{ key: 'name', label: 'Name' }, { key: 'size', label: 'Size' }, { key: 'modified', label: 'Modified' }] as column}
-          <th
-            scope="col"
-            class={column.key === 'name' ? '' : column.key === 'size' ? 'size num' : column.key}
-            aria-sort={sortKey === column.key ? (descending ? 'descending' : 'ascending') : 'none'}
-          >
-            <button
-              class="sort-button touch-target"
-              aria-label={`Sort by ${column.key}`}
-              onclick={() => sort(column.key as SortKey)}
-              >{column.label}{#if sortKey !== column.key}<ArrowUpDown
-                  size={14}
-                />{:else if descending}<ArrowDown size={14} />{:else}<ArrowUp
-                  size={14}
-                />{/if}</button
-            >
+        {#each COLUMNS as column (column.key)}
+          <th scope="col" class={column.class} aria-sort={sortAria(sort.directionOf(column.key))}>
+            <SortHeader
+              label={column.label}
+              class="touch-target"
+              direction={sort.directionOf(column.key)}
+              onclick={() => sort.toggle(column.key)}
+            />
           </th>
         {/each}
         <th scope="col" class="col-actions" aria-label="Actions"></th>
@@ -472,17 +458,6 @@
   input[type='checkbox'] {
     margin: 0;
     accent-color: var(--accent);
-    cursor: pointer;
-  }
-  .sort-button {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
     cursor: pointer;
   }
   .delete-errors {

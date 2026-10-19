@@ -425,3 +425,36 @@ describe('no rule writes a role out under another name', () => {
     }
   });
 });
+
+/**
+ * The record list's header and group label are divs, so unlike a `th` they can
+ * take `.micro-label` in markup — and do, rather than table.css writing the set
+ * out a second time. Their rules carry a border, which the copy detector above
+ * reads as a component, so this holds the split itself: no type in the rule,
+ * the class on every element.
+ */
+describe('record headers take .micro-label', () => {
+  const table = stripComments(readFileSync(join(SRC, 'lib/styles/table.css'), 'utf8'));
+  const TYPE = /(^|\s)(color|font-size|font-weight|letter-spacing|text-transform)\s*:/;
+
+  for (const selector of ['.record-header', '.record-group']) {
+    it(`${selector} writes no type of its own`, () => {
+      const body = ruleBody(table, selector);
+      expect(body, `${selector} in table.css`).toBeDefined();
+      expect(body).not.toMatch(TYPE);
+    });
+  }
+
+  it('every record header and group label in markup carries the class', () => {
+    const offenders: string[] = [];
+    for (const f of sourceFiles('.svelte')) {
+      const markup = readFileSync(f, 'utf8').split('<style')[0];
+      for (const m of markup.matchAll(/class="([^"]*)"/g)) {
+        const classes = m[1].split(/\s+/);
+        const named = classes.includes('record-header') || classes.includes('record-group');
+        if (named && !classes.includes('micro-label')) offenders.push(`${rel(f)}: ${m[1]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});

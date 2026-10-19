@@ -1,5 +1,6 @@
 <script lang="ts">
-  // The record-table shell every money list page is built out of. A plain
+  // The page chrome every money list page is built out of (its record rows
+  // are table.css's). A plain
   // stylesheet rather than 380 lines of :global() in this file's own style
   // block, and imported here rather than from app.css so it stays on the
   // money route chunk instead of downloading on every page.

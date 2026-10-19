@@ -356,23 +356,23 @@
       <div class="breakdowns">
         <Collapsible.Root bind:open={incomeOpen}>
           <div class="section-header">
-            <Collapsible.Trigger class="section-toggle">
-              <span class="caret" class:open={incomeOpen}>&#9654;</span>
+            <Collapsible.Trigger class="section-toggle button-reset">
+              <span class="record-caret" class:is-open={incomeOpen}>&#9654;</span>
               Income
             </Collapsible.Trigger>
           </div>
           <Collapsible.Content>
             <div class="breakdown-list">
               {#each sortedIncome as [account, amount]}
-                <div class="money-table-row money-table-row--tree">
+                <div class="record-row record-row--tree">
                   <button
-                    class="breakdown-name"
+                    class="record-name button-reset"
                     type="button"
                     onclick={() => navigateToAccount(account)}
                   >
                     {shortAccountName(account)}
                   </button>
-                  <span class="breakdown-amount income">
+                  <span class="breakdown-amount num income">
                     {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
                       amount,
                       activeMonth.income,
@@ -386,23 +386,23 @@
 
         <Collapsible.Root bind:open={expenseOpen}>
           <div class="section-header">
-            <Collapsible.Trigger class="section-toggle">
-              <span class="caret" class:open={expenseOpen}>&#9654;</span>
+            <Collapsible.Trigger class="section-toggle button-reset">
+              <span class="record-caret" class:is-open={expenseOpen}>&#9654;</span>
               Expenses
             </Collapsible.Trigger>
           </div>
           <Collapsible.Content>
             <div class="breakdown-list">
               {#each sortedExpenses as [account, amount]}
-                <div class="money-table-row money-table-row--tree">
+                <div class="record-row record-row--tree">
                   <button
-                    class="breakdown-name"
+                    class="record-name button-reset"
                     type="button"
                     onclick={() => navigateToAccount(account)}
                   >
                     {shortAccountName(account)}
                   </button>
-                  <span class="breakdown-amount expense">
+                  <span class="breakdown-amount num expense">
                     {formatAmount(amount, activeMonth.currency)} ({pctOfTotal(
                       amount,
                       activeMonth.expenses,
@@ -461,47 +461,17 @@
      do, so an inset here only pushed them a step deeper than the same rows on
      the sibling reports. */
 
-  .caret {
-    font-size: 0.5rem;
-    color: var(--text-dim);
-    transition: transform var(--transition-fast);
-    display: inline-block;
-  }
-
-  .caret.open {
-    transform: rotate(90deg);
-  }
-
   .breakdown-list {
     padding: var(--space-1) 0 var(--space-2);
   }
 
-  /* The per-account rows are `.money-table-row--tree` from the money layout,
-     the same shell the balance-sheet and income-statement trees use. They had
-     been a private copy of it that differed in exactly one value — a 0.25rem
-     block padding against the tree's 0.2rem — so the three reports sat at two
-     row heights. Only the columns are styled here. */
-  .breakdown-name {
-    flex: 1;
-    min-width: 0;
-    background: none;
-    border: none;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-    padding: 0;
-    text-align: left;
-  }
-
-  .breakdown-name:hover {
-    color: var(--text-primary);
-  }
-
+  /* The per-account rows are `.record-row--tree` from table.css, the same
+     shell the balance-sheet and income-statement trees use. They had been a
+     private copy of it that differed in exactly one value — a 0.25rem block
+     padding against the tree's 0.2rem — so the three reports sat at two row
+     heights. Only the columns are styled here. */
   .breakdown-amount {
     margin-left: auto;
-    text-align: right;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
   }
 
   @media (max-width: 640px) {

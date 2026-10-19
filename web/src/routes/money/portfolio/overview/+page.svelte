@@ -215,18 +215,20 @@
     </div>
 
     <div class="micro-label holdings-label">Holdings</div>
-    <div class="money-table-header holdings-header">
-      <span class="col-symbol">Symbol</span>
-      <span class="col-desc">Description</span>
-      <span class="col-class caption">Class</span>
-      <span class="money-amount col-qty">Qty</span>
-      <span class="money-amount col-value">Value</span>
-      <span class="money-amount col-gain">P&amp;L</span>
-      <span class="money-amount col-gainpct">P&amp;L %</span>
-    </div>
+    <!-- Header inside the row container, as on portfolio history and every
+         other record list, so the labels travel with the columns they name. -->
     <div class="holdings-table">
+      <div class="record-header micro-label holdings-header">
+        <span class="col-symbol">Symbol</span>
+        <span class="col-desc">Description</span>
+        <span class="col-class caption">Class</span>
+        <span class="num col-qty">Qty</span>
+        <span class="num col-value">Value</span>
+        <span class="num col-gain">P&amp;L</span>
+        <span class="num col-gainpct">P&amp;L %</span>
+      </div>
       {#each summary.holdings as holding (holding.symbol)}
-        <div class="money-table-row holdings-row">
+        <div class="record-row holdings-row">
           <span class="col-symbol symbol">
             {#if holding.symbol === 'CASH'}
               {holding.symbol}
@@ -242,17 +244,17 @@
               ? ` · ${holding.sub_class}`
               : ''}
           </span>
-          <span class="money-amount col-qty">{qty(holding.quantity)}</span>
-          <span class="money-amount col-value">{usd(holding.value, 2)}</span>
+          <span class="num col-qty">{qty(holding.quantity)}</span>
+          <span class="num col-value">{usd(holding.value, 2)}</span>
           <span
-            class="money-amount col-gain"
+            class="num col-gain"
             class:positive={(holding.gain ?? 0) > 0}
             class:negative={(holding.gain ?? 0) < 0}
           >
             {usd(holding.gain, 2)}
           </span>
           <span
-            class="money-amount col-gainpct"
+            class="num col-gainpct"
             class:positive={(holding.gain_pct ?? 0) > 0}
             class:negative={(holding.gain_pct ?? 0) < 0}
           >

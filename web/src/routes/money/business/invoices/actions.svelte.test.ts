@@ -448,7 +448,7 @@ describe('sorting', () => {
   });
 
   function numbers(): string[] {
-    return [...document.querySelectorAll('.money-table-row .inv-number')].map(
+    return [...document.querySelectorAll('.record-row .inv-number')].map(
       (el) => el.textContent?.trim() ?? '',
     );
   }

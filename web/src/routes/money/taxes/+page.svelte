@@ -333,28 +333,30 @@
         </div>
 
         <div class="breakdown-table">
-          <div class="breakdown-header">
+          <div class="record-header micro-label">
             <span class="breakdown-label"></span>
-            <span class="breakdown-val">Federal</span>
-            {#if showState}<span class="breakdown-val">{stateColumnLabel}</span>{/if}
+            <span class="breakdown-val num">Federal</span>
+            {#if showState}<span class="breakdown-val num">{stateColumnLabel}</span>{/if}
           </div>
 
-          <div class="breakdown-group-label">Income</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Income</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">SE income (YTD)</span>
-            <span class="breakdown-val">{fmtDollar(data.se_income_ytd)}</span>
-            {#if showState}<span class="breakdown-val"></span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.se_income_ytd)}</span>
+            {#if showState}<span class="breakdown-val num"></span>{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">SE income (annualized)</span>
-            <span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.se_income_annualized)}</span
+            <span class="breakdown-val num">{fmtDollar(data.se_income_annualized)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.se_income_annualized)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">W-2 income (annualized)</span>
-            <span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.w2_income_annualized)}</span
+            <span class="breakdown-val num">{fmtDollar(data.w2_income_annualized)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.w2_income_annualized)}</span
               >{/if}
           </div>
           <details class="info-panel">
@@ -379,22 +381,22 @@
             </p>
           </details>
 
-          <div class="breakdown-group-label">Self-employment tax</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Self-employment tax</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">SE tax</span>
-            <span class="breakdown-val">{fmtDollar(data.se_tax)}</span>
-            {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.se_tax)}</span>
+            {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Half SE deduction</span>
-            <span class="breakdown-val">{fmtDollar(data.half_se_deduction)}</span>
-            {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.half_se_deduction)}</span>
+            {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
           </div>
           {#if data.additional_medicare_tax > 0}
-            <div class="breakdown-row">
+            <div class="record-row record-row--tree">
               <span class="breakdown-label">Additional Medicare tax (0.9%)</span>
-              <span class="breakdown-val">{fmtDollar(data.additional_medicare_tax)}</span>
-              {#if showState}<span class="breakdown-val dim">n/a</span>{/if}
+              <span class="breakdown-val num">{fmtDollar(data.additional_medicare_tax)}</span>
+              {#if showState}<span class="breakdown-val num dim">n/a</span>{/if}
             </div>
           {/if}
           <details class="info-panel">
@@ -418,20 +420,20 @@
             </p>
           </details>
 
-          <div class="breakdown-group-label">Tax calculation</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Tax calculation</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label"
               >AGI{#if showState && stateBasisLabel}<span class="basis-note caption">
                   · state basis: {stateBasisLabel}</span
                 >{/if}</span
             >
-            <span class="breakdown-val">{fmtDollar(data.federal_agi)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_agi)}</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.federal_agi)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_agi)}</span>{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Standard deduction</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_standard_deduction)}</span>
-            {#if showState}<span class="breakdown-val"
+            <span class="breakdown-val num">{fmtDollar(data.federal_standard_deduction)}</span>
+            {#if showState}<span class="breakdown-val num"
                 >{fmtDollar(data.state_standard_deduction)}</span
               >{/if}
           </div>
@@ -439,43 +441,47 @@
             <!-- Illinois, Indiana and Michigan carry an exemption instead of a
                  standard deduction. Without this row the gap between AGI and
                  taxable income has nothing explaining it. -->
-            <div class="breakdown-row">
+            <div class="record-row record-row--tree">
               <span class="breakdown-label">Personal exemption</span>
-              <span class="breakdown-val dim">n/a</span>
-              <span class="breakdown-val">{fmtDollar(data.state_personal_exemption)}</span>
+              <span class="breakdown-val num dim">n/a</span>
+              <span class="breakdown-val num">{fmtDollar(data.state_personal_exemption)}</span>
             </div>
           {/if}
           {#if data.qbi_deduction > 0}
-            <div class="breakdown-row">
+            <div class="record-row record-row--tree">
               <span class="breakdown-label">QBI deduction</span>
-              <span class="breakdown-val">{fmtDollar(data.qbi_deduction)}</span>
+              <span class="breakdown-val num">{fmtDollar(data.qbi_deduction)}</span>
               {#if showState}
                 <!-- Already inside the base for a federal-taxable-income state,
                      rather than excluded from it. -->
-                <span class="breakdown-val dim">{stateStartsFromTaxable ? 'included' : 'n/a'}</span>
+                <span class="breakdown-val num dim"
+                  >{stateStartsFromTaxable ? 'included' : 'n/a'}</span
+                >
               {/if}
             </div>
           {/if}
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Taxable income</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_taxable_income)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_taxable_income)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_taxable_income)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.state_taxable_income)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Income tax</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_tax)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_tax)}</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.federal_tax)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_tax)}</span>{/if}
           </div>
-          <div class="breakdown-row highlight">
+          <div class="record-row record-row--tree highlight">
             <span class="breakdown-label">Total liability</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_total_liability)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_total_liability)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_total_liability)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.state_total_liability)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Effective tax rate</span>
-            <span class="breakdown-val combined">{fmtPct(effectiveTaxRate)}</span>
+            <span class="breakdown-val num combined">{fmtPct(effectiveTaxRate)}</span>
           </div>
           <details class="info-panel">
             <summary>How tax liability is computed</summary>
@@ -511,28 +517,30 @@
             </p>
           </details>
 
-          <div class="breakdown-group-label">Credits and payments</div>
-          <div class="breakdown-row">
+          <div class="record-group micro-label">Credits and payments</div>
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Withholding (annualized)</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_withholding)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_withholding)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_withholding)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_withholding)}</span
               >{/if}
           </div>
-          <div class="breakdown-row">
+          <div class="record-row record-row--tree">
             <span class="breakdown-label">Estimated payments made</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_estimated_paid)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_estimated_paid)}</span
+            <span class="breakdown-val num">{fmtDollar(data.federal_estimated_paid)}</span>
+            {#if showState}<span class="breakdown-val num"
+                >{fmtDollar(data.state_estimated_paid)}</span
               >{/if}
           </div>
-          <div class="breakdown-row highlight">
+          <div class="record-row record-row--tree highlight">
             <span class="breakdown-label">Net due</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_net_due)}</span>
-            {#if showState}<span class="breakdown-val">{fmtDollar(data.state_net_due)}</span>{/if}
+            <span class="breakdown-val num">{fmtDollar(data.federal_net_due)}</span>
+            {#if showState}<span class="breakdown-val num">{fmtDollar(data.state_net_due)}</span
+              >{/if}
           </div>
-          <div class="breakdown-row result">
+          <div class="record-row result">
             <span class="breakdown-label">Due this quarter (Q{data.quarter})</span>
-            <span class="breakdown-val">{fmtDollar(data.federal_quarterly_amount)}</span>
-            {#if showState}<span class="breakdown-val"
+            <span class="breakdown-val num">{fmtDollar(data.federal_quarterly_amount)}</span>
+            {#if showState}<span class="breakdown-val num"
                 >{fmtDollar(data.state_quarterly_amount)}</span
               >{/if}
           </div>
@@ -706,42 +714,20 @@
     overflow: hidden;
   }
 
-  .breakdown-header {
-    display: flex;
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    font-weight: var(--weight-medium);
-    border-bottom: 1px solid var(--border-subtle);
+  /* Not tappable rows, so the record row's hover fill and rounded corners go:
+     the table draws its own card. */
+  .breakdown-table .record-row {
+    background: none;
+    border-radius: 0;
   }
 
-  .breakdown-group-label {
-    padding: var(--space-2) var(--space-3) 0.15rem;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-    font-weight: var(--weight-medium);
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .breakdown-row {
-    display: flex;
-    padding: 0.2rem var(--space-3);
-    font-size: var(--text-sm);
-  }
-
-  .breakdown-row.highlight {
+  .highlight {
     font-weight: var(--weight-semibold);
-    padding-top: var(--space-1);
-    padding-bottom: var(--space-1);
   }
 
-  .breakdown-row.result {
+  .breakdown-table .result {
     font-weight: var(--weight-semibold);
     background: var(--surface-raised);
-    padding-top: var(--space-2);
-    padding-bottom: var(--space-2);
   }
 
   .breakdown-label {
@@ -751,9 +737,6 @@
 
   .breakdown-val {
     width: 8rem;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-primary);
   }
 
   .breakdown-val.dim {
@@ -763,17 +746,6 @@
   .breakdown-val.combined {
     width: 16rem;
     color: var(--text-muted);
-  }
-
-  .breakdown-header .breakdown-label {
-    color: transparent;
-  }
-
-  .breakdown-header .breakdown-val {
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-    font-weight: var(--weight-medium);
   }
 
   /* Info panels */

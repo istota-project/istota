@@ -30,7 +30,7 @@
     <IndexCaption {caption} {reachNote} />
     <ul class="list-reset">
       {#each places as place (place.id)}
-        <li class="index-row">
+        <li class="record-row record-row--divided index-row">
           <a
             class="index-name"
             href={href(place.id)}
@@ -52,14 +52,10 @@
 </section>
 
 <style>
+  /* A record row (table.css), ruled like the file table beside it. */
   .index-row {
-    display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-sm);
   }
   .index-name {
     display: flex;
