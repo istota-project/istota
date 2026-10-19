@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, waitFor, fireEvent, screen } from '@testing-library/svelte';
+import { render, cleanup, waitFor, fireEvent, screen, within } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
 import { goto } from '$app/navigation';
@@ -29,6 +29,11 @@ import {
 import Layout from './+layout.svelte';
 import Page from './+page.svelte';
 import Harness from '$lib/currentUserHarness.test.svelte';
+
+const viewLink = (name: string) =>
+  within(screen.getByRole('navigation', { name: 'Views' })).getByRole('link', {
+    name: new RegExp(`^${name}`),
+  });
 
 const children = (() => {}) as unknown as import('svelte').Snippet;
 const feeds: Feed[] = [
@@ -130,17 +135,17 @@ describe('feed selection history', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'News 1' }));
     expect(currentUrl()).toBe('/istota/feeds/?category=10');
     expect(get(selectedCategoryId)).toBe(10);
-    await fireEvent.click(screen.getByRole('button', { name: 'Starred' }));
+    await fireEvent.click(viewLink('Starred'));
     expect(currentUrl()).toBe('/istota/feeds/?view=starred');
     expect(get(selectedCategoryId)).toBe(0);
     expect(get(showStarred)).toBe(true);
-    await fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
+    await fireEvent.click(viewLink('Unread'));
     expect(currentUrl()).toBe('/istota/feeds/?view=unread');
     expect(get(showStarred)).toBe(false);
     expect(get(showUnseen)).toBe(true);
-    await fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
+    await fireEvent.click(viewLink('Unread'));
     expect(__history.entries).toHaveLength(4);
-    await fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    await fireEvent.click(viewLink('All'));
     expect(currentUrl()).toBe('/istota/feeds/');
     expect(get(showUnseen)).toBe(false);
     expect(__history.entries).toHaveLength(5);
@@ -287,8 +292,8 @@ describe('feed selection history', () => {
     const scrollRoot = document.querySelector('.shell-main') as HTMLElement;
     scrollRoot.scrollTo = vi.fn();
     await waitFor(() => expect(getFeeds).toHaveBeenCalledWith({ limit: '1', offset: '0' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Starred' }));
+    await fireEvent.click(viewLink('Unread'));
+    await fireEvent.click(viewLink('Starred'));
     vi.mocked(getFeeds).mockClear();
     __history.back();
     await waitFor(() => expect(get(showUnseen)).toBe(true));

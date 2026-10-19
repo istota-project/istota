@@ -88,7 +88,7 @@ const groupNames = () =>
   [...document.querySelectorAll('.room-list-threads .room-name')].map((e) => e.textContent?.trim());
 const groupToggle = () => screen.getByRole('button', { name: /Email threads/ });
 const unreadPill = () =>
-  [...document.querySelectorAll('.view-btn')]
+  [...document.querySelectorAll('nav[aria-label="Views"] a')]
     .find((b) => b.textContent?.includes('Unread'))!
     .querySelector('[title$="unread"]');
 

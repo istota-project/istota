@@ -8,13 +8,14 @@
     MessageSquare,
     Cloud,
     ChevronDown,
-    Circle,
     Star,
     CheckCheck,
     Users,
     PowerOff,
   } from '@lucide/svelte';
   import PhoneSurfaceIcon from '$lib/components/chat/PhoneSurfaceIcon.svelte';
+  import ViewFilters from '$lib/components/ViewFilters.svelte';
+  import { base } from '$app/paths';
   import {
     AppShell,
     ShellHeader,
@@ -1393,36 +1394,13 @@
     >
       <!-- Cross-room views, above the rooms list (mirrors the feeds sidebar's
 			     All / Unread / Starred entries). Selecting one deselects the room. -->
-      <div class="views">
-        <button
-          class="view-btn"
-          class:active={$view === 'all'}
-          onclick={() => selectView('all')}
-          type="button"
-        >
-          <span class="view-name">All</span>
-        </button>
-        <button
-          class="view-btn"
-          class:active={$view === 'unread'}
-          onclick={() => selectView('unread')}
-          type="button"
-        >
-          <Circle size={12} />
-          <span class="view-name">Unread</span>
-          <CountPill count={unreadTotal} title={`${unreadTotal} unread`} />
-        </button>
-        <button
-          class="view-btn"
-          class:active={$view === 'starred'}
-          onclick={() => selectView('starred')}
-          type="button"
-        >
-          <Star size={12} />
-          <span class="view-name">Starred</span>
-          <CountPill count={starredTotal} tone="muted" title={`${starredTotal} starred`} />
-        </button>
-      </div>
+      <ViewFilters
+        current={$view === 'room' ? null : $view}
+        href={(v) => `${base}/chat/?view=${v}`}
+        onselect={selectView}
+        unread={unreadTotal}
+        starred={starredTotal}
+      />
 
       <!-- Sits with the rooms list it adds to, below the cross-room views. -->
       <div class="room-new">
@@ -2002,11 +1980,6 @@
     color: var(--text-dim);
     text-transform: uppercase;
   }
-
-  /* Cross-room view entries above the rooms list — styled like the feeds
-	   sidebar's All / Unread / Starred buttons (.feed-btn.special). */
-  /* .views / .view-btn / .view-name (the All / Unread / Starred block) come
-	   from web/src/lib/styles/sidebar.css, shared with the feeds sidebar. */
 
   /* No horizontal padding: this sits inside .sidebar-list, which already
 	   insets its children, so the button lines up with the rows around it. */

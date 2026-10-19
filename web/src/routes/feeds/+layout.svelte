@@ -33,7 +33,8 @@
     CountPill,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
-  import { LayoutGrid, List, Cog, Star, CheckCheck, Circle } from '@lucide/svelte';
+  import { LayoutGrid, List, Cog, CheckCheck } from '@lucide/svelte';
+  import ViewFilters from '$lib/components/ViewFilters.svelte';
   import { notifyError } from '$lib/stores/notices';
   import { createUrlSelection, type Params } from '$lib/navigation/urlSelection.svelte';
 
@@ -163,18 +164,6 @@
 
   function handleCategoryClick(categoryId: number) {
     pickSelection({ ...all, category: $selectedCategoryId === categoryId ? 0 : categoryId });
-  }
-
-  function handleAllClick() {
-    pickSelection(all);
-  }
-
-  function handleUnreadClick() {
-    pickSelection({ ...all, view: 'unread' });
-  }
-
-  function handleStarredClick() {
-    pickSelection({ ...all, view: 'starred' });
   }
 
   const markAllTargetTitle = createConfirm<string>();
@@ -310,40 +299,19 @@
       >
         <!-- Cross-feed views, above the feed list. Mirrors the chat sidebar's
 			     All / Unread / Starred entries so the two read the same. -->
-        <div class="views">
-          <button
-            class="view-btn"
-            class:active={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen}
-            onclick={handleAllClick}
-            type="button"
-          >
-            <span class="view-name">All</span>
-          </button>
-          <button
-            class="view-btn"
-            class:active={$showUnseen && !$showStarred && !$selectedFeedId}
-            onclick={handleUnreadClick}
-            type="button"
-          >
-            <Circle size={12} />
-            <span class="view-name">Unread</span>
-            <CountPill count={$feedCounts.unread} title={`${$feedCounts.unread} unread`} />
-          </button>
-          <button
-            class="view-btn"
-            class:active={$showStarred}
-            onclick={handleStarredClick}
-            type="button"
-          >
-            <Star size={12} />
-            <span class="view-name">Starred</span>
-            <CountPill
-              count={$feedCounts.starred}
-              tone="muted"
-              title={`${$feedCounts.starred} starred`}
-            />
-          </button>
-        </div>
+        <ViewFilters
+          current={!$selectedFeedId && !$selectedCategoryId && !$showStarred && !$showUnseen
+            ? 'all'
+            : $showStarred
+              ? 'starred'
+              : $showUnseen && !$selectedFeedId
+                ? 'unread'
+                : null}
+          href={(v) => readerUrl({ ...all, view: v === 'all' ? '' : v })}
+          onselect={(v) => pickSelection({ ...all, view: v === 'all' ? '' : v })}
+          unread={$feedCounts.unread}
+          starred={$feedCounts.starred}
+        />
         {#each groupedFeeds as [category, catFeeds] (category)}
           {@const catId = catFeeds[0]?.category.id ?? 0}
           <CategoryGroup
@@ -428,8 +396,6 @@
     text-align: left;
   }
 
-  /* .views / .view-btn / .view-name (the All / Unread / Starred block) come
-	   from web/src/lib/styles/sidebar.css, shared with the chat sidebar. */
   .feed-btn:hover {
     background: var(--hover-bg);
   }
