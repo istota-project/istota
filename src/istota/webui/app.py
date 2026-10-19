@@ -12857,6 +12857,11 @@ async def push_devices_list(user: dict = Depends(_require_api_auth)):
     return await asyncio.to_thread(_push_devices_list, user["username"])
 
 
+_CONNECTION_BINDING = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# The native generation reaches JavaScript as a number, which is exact only this far.
+_MAX_SAFE_INTEGER = 2**53 - 1
+
+
 @api_router.post("/push/devices")
 async def push_devices_register(request: Request, user: dict = Depends(_require_api_auth)):
     _verify_origin(request)
@@ -12868,8 +12873,20 @@ async def push_devices_register(request: Request, user: dict = Depends(_require_
         body = json.loads(raw)
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(400, "invalid JSON") from None
-    if not isinstance(body, dict) or set(body) - {"token", "environment", "platform", "app_version"}:
+    if not isinstance(body, dict) or set(body) - {
+        "token", "environment", "platform", "app_version", "connection_binding", "connection_generation",
+    }:
         raise HTTPException(400, "invalid device registration")
+    # The generic iOS shell names its native connection; older binaries send neither field.
+    binding = body.get("connection_binding")
+    generation = body.get("connection_generation")
+    if ("connection_binding" in body) != ("connection_generation" in body):
+        raise HTTPException(400, "invalid connection binding")
+    if "connection_binding" in body and (
+        not isinstance(binding, str) or not _CONNECTION_BINDING.fullmatch(binding)
+        or type(generation) is not int or not 1 <= generation <= _MAX_SAFE_INTEGER
+    ):
+        raise HTTPException(400, "invalid connection binding")
     token = body.get("token")
     environment = body.get("environment")
     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64,200}", token):

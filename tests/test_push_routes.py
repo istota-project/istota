@@ -165,3 +165,44 @@ async def test_legacy_login_requires_fresh_sign_in_before_enrollment(client):  #
     assert "Sign out and sign in again" in response.json()["detail"]
     with db.get_db(_db_path()) as conn:
         assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0
+
+
+BINDING = "0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51"
+BOUND = {**BODY, "app_version": "0.12.0", "connection_binding": BINDING, "connection_generation": 3}
+
+
+def _binding_row():
+    with db.get_db(_db_path()) as conn:
+        return tuple(conn.execute("SELECT connection_binding, connection_generation FROM push_devices").fetchone())
+
+
+async def test_generic_shell_binding_is_stored_and_legacy_reregistration_clears_it(client):  # noqa: F811
+    cookies = await _login(client, "alice")
+    bound = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BOUND)
+    assert bound.status_code == 200
+    assert _binding_row() == (BINDING, 3)
+    # The same token from an older binary is a legacy enrollment again, not a bound one.
+    legacy = await client.post(URL, cookies=cookies, headers=ORIGIN, json=BODY)
+    assert legacy.json() == bound.json()
+    assert _binding_row() == (None, None)
+    again = await client.post(URL, cookies=cookies, headers=ORIGIN, json={**BOUND, "connection_generation": 4})
+    assert again.json() == bound.json()
+    assert _binding_row() == (BINDING, 4)
+    listed, = (await client.get(URL, cookies=cookies)).json()["devices"]
+    assert "connection_binding" not in listed
+
+
+@pytest.mark.parametrize("patch", [
+    {"connection_generation": None}, {"connection_binding": None},
+    {"connection_binding": BINDING.upper()}, {"connection_binding": "not-a-uuid"},
+    {"connection_binding": "{" + BINDING + "}"}, {"connection_binding": 7},
+    {"connection_generation": 0}, {"connection_generation": -1}, {"connection_generation": True},
+    {"connection_generation": 1.5}, {"connection_generation": "3"}, {"connection_generation": 2**53},
+])
+async def test_invalid_binding_is_400(client, patch):  # noqa: F811
+    cookies = await _login(client, "alice")
+    body = {key: value for key, value in {**BOUND, **patch}.items() if value is not None}
+    response = await client.post(URL, cookies=cookies, headers=ORIGIN, json=body)
+    assert response.status_code == 400
+    with db.get_db(_db_path()) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM push_devices").fetchone()[0] == 0

@@ -50,6 +50,12 @@ An outer proxy must expose the compatibility endpoint without cookies, Basic Aut
 
 A self-hosted operator must not receive the app publisher's APNs signing key. A generic app can connect without push; permission granted by iOS alone does not establish a delivery path. Use the existing operator push diagnostic to test APNs acceptance, which is still not proof that an alert appeared on the device.
 
+### Connection-bound push registration
+
+The generic iOS app (0.12.0 and later) adds `connection_binding`, a lowercase UUID, and `connection_generation`, a positive integer, to `POST /istota/api/push/devices`. Both are optional, but they are sent together or not at all. Older apps send neither and keep their current registrations and payloads. For a bound registration, every alert's `istota` routing object repeats both values, and the app does not open an alert whose values are not its current connection. Badge-only updates carry no routing.
+
+The binding limits what a tap opens. It does not stop iOS from displaying an alert or applying a badge that an old server already sent, and removing a registration on the phone does not remove it from the server. If the app could not reach the old server when it disconnected, remove the device under Settings > Notifications on that server.
+
 ## iOS browser sign-in
 
 The server supports browser approval and a one-use session handoff for mobile protocol 1. Deploy this compatibility work before distributing a binary that consumes it. Ordinary browser sign-in and older iOS clients retain their existing redirects when no mobile request is pending.

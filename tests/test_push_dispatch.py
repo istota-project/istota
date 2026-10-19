@@ -503,3 +503,50 @@ def test_revocation_during_send_stops_remaining_alerts(setup, monkeypatch):
     monkeypatch.setattr(apns, "send", revoke_after_first)
     dispatch.run_push_dispatch(config)
     assert len(sent) == 1
+
+
+BINDING = "0f8e4b0c-2a6d-4c4e-9a43-6d2f1b8e7c51"
+
+
+def test_generic_shell_routing_names_its_own_binding_and_legacy_payloads_are_unchanged(setup):
+    config, now, sent = setup
+    with db.get_db(config.db_path) as conn:
+        legacy = register(conn)
+        bound = devices.register_device(conn, "alice", "ef" * 32, "sandbox", "ios", "0.12.0",
+                                        auth_method="nextcloud", auth_epoch=0,
+                                        connection_binding=BINDING, connection_generation=2)
+        room = db.create_web_chat_room(conn, "alice", "Work")
+        mid = message(conn, room, now[0] - 20)
+        notification(conn, now[0])
+    dispatch.run_push_dispatch(config)
+    routed = {(device, p["istota"]["kind"]): p["istota"] for _, device, p, _ in sent}
+    assert routed[(legacy, "chat")] == {"kind": "chat", "room_token": room.token, "room_id": room.id}
+    assert set(routed[(legacy, "notification")]) == {"kind", "notification_id", "link"}
+    for kind in ("chat", "notification"):
+        target = routed[(bound, kind)]
+        assert target["connection_binding"] == BINDING and target["connection_generation"] == 2
+        assert {k: v for k, v in target.items() if not k.startswith("connection_")} == routed[(legacy, kind)]
+    with db.get_db(config.db_path) as conn:
+        db.set_room_read_state(conn, room.token, "web", mid, "alice")
+        store.dismiss(conn, routed[(legacy, "notification")]["notification_id"], "alice", by="web")
+    dispatch.run_push_dispatch(config)
+    # A badge-only update has no routing and so no binding: the OS applies it before any app code runs.
+    assert [s[2] for s in sent[4:]] == [{"aps": {"badge": 0}}, {"aps": {"badge": 0}}]
+
+
+def test_bound_routing_survives_the_payload_bound(setup):
+    config, now, sent = setup
+    with db.get_db(config.db_path) as conn:
+        devices.register_device(conn, "alice", TOKEN_BOUND, "sandbox", "ios", "0.12.0",
+                                auth_method="nextcloud", auth_epoch=0,
+                                connection_binding=BINDING, connection_generation=2**53 - 1)
+        room = db.create_web_chat_room(conn, "alice", "W" * 5000)
+        message(conn, room, now[0] - 20, "x" * 5000)
+    dispatch.run_push_dispatch(config)
+    (_, _, payload, _), = sent
+    assert payload["istota"]["connection_binding"] == BINDING
+    assert payload["istota"]["connection_generation"] == 2**53 - 1
+    assert len(dispatch.json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) <= 4096
+
+
+TOKEN_BOUND = "ef" * 32

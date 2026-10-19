@@ -2674,6 +2674,9 @@ CREATE TABLE IF NOT EXISTS push_devices (
     auth_method TEXT,
     auth_epoch INTEGER,
     auth_session_id TEXT,
+    -- Set only by the generic iOS shell: the native connection that enrolled, echoed in alert routing.
+    connection_binding TEXT,
+    connection_generation INTEGER,
     last_badge INTEGER NOT NULL DEFAULT -1,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
