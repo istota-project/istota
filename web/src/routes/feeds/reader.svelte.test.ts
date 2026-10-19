@@ -252,3 +252,12 @@ it.each([false, true])(
     expect(invalidateNavUnreadCounts).toHaveBeenCalledTimes(fails ? 0 : 1);
   },
 );
+
+it('says the list is empty rather than drawing an empty grid and a 0 / 0 badge', async () => {
+  api.getFeeds.mockResolvedValue({ entries: [], total: 0 } as never);
+  render(Page);
+  expect(await screen.findByText('No entries yet.')).toBeTruthy();
+  expect(document.querySelector('.empty-state')).not.toBeNull();
+  expect(document.querySelector('.card-slot')).toBeNull();
+  expect(screen.queryByText('0 / 0')).toBeNull();
+});

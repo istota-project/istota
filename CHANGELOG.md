@@ -102,6 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Health forms west of UTC no longer pre-fill tomorrow's date in the evening, a briefing's "Sender filters" caption no longer removes the first sender when clicked, and pressing Enter on a place's category dropdown or radius slider no longer saves the place. An empty Feeds list now says so instead of showing a blank grid and "0 / 0".
 - On a phone, the Admin → Scheduled jobs and Admin → Briefings tables keep every column and scroll sideways, instead of squeezing the job or briefing name until it ran down the page one letter per line.
 - Admin → Configuration scrolls more smoothly on a phone: the browser now skips drawing the settings sections that are off screen.
 

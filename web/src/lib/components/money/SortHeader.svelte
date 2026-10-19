@@ -17,7 +17,7 @@
   const spoken = $derived(name ?? label.toLowerCase());
   const description = $derived(
     active
-      ? `Sorted by ${spoken}, ${descending ? 'newest first' : 'oldest first'}. Reverse the order`
+      ? `Sorted by ${spoken}, ${descending ? 'descending' : 'ascending'}. Reverse the order`
       : `Sort by ${spoken}`,
   );
 </script>

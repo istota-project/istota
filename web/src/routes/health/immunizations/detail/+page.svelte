@@ -247,7 +247,7 @@
       <h2 class="micro-label">Linked encounter</h2>
       <a class="card linked-card" href="{base}/health/history/encounter?id={encounter.id}">
         <div class="card-head">
-          <span class="badge type-other">{encounter.encounter_type}</span>
+          <Badge>{encounter.encounter_type}</Badge>
           <span class="date">{encounter.encounter_date}</span>
         </div>
         {#if encounter.provider || encounter.facility}

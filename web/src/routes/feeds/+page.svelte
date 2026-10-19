@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { CardGrid, PageLoading } from '$lib/components/ui';
+  import { CardGrid, EmptyState, PageLoading } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -424,6 +424,10 @@
     }
   }
 
+  const emptyMessage = $derived(
+    $showStarred ? 'No starred entries.' : $showUnseen ? 'No unread entries.' : 'No entries yet.',
+  );
+
   // Track which card the cursor most recently entered so 'f' has a target.
   let focusedEntryId: number | null = $state(null);
 </script>
@@ -433,6 +437,8 @@
     <PageLoading />
   {:else if error}
     <div class="center-msg error">{error}</div>
+  {:else if entries.length === 0}
+    <EmptyState>{emptyMessage}</EmptyState>
   {:else}
     <div
       class="feed-grid"
@@ -475,7 +481,7 @@
   {/if}
 </div>
 
-{#if !loading && !error}
+{#if !loading && !error && entries.length > 0}
   <div class="status-badge">{entries.length} / {total}</div>
 {/if}
 
