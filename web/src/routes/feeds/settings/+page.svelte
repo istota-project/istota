@@ -504,14 +504,14 @@
         <EmptyState>No categories yet. Categories group feeds in the sidebar.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="table table--fixed">
             <thead>
               <tr>
                 <th class="col-slug">Slug</th>
                 <th class="col-title">Title</th>
                 <th class="num col-count">Feeds</th>
-                <th class="actions col-order">Order</th>
-                <th class="actions col-remove"></th>
+                <th class="col-actions col-order">Order</th>
+                <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
@@ -534,7 +534,7 @@
                     />
                   </td>
                   <td class="num col-count">{count}</td>
-                  <td class="actions col-order">
+                  <td class="col-actions col-order">
                     <IconButton
                       size="sm"
                       label="Move up"
@@ -550,7 +550,7 @@
                       disabled={idx === config.categories.length - 1}>↓</IconButton
                     >
                   </td>
-                  <td class="actions col-remove">
+                  <td class="col-actions">
                     <KebabMenu items={categoryMenu(idx)} ariaLabel="Category actions" />
                   </td>
                 </tr>
@@ -569,7 +569,7 @@
         <EmptyState>No subscriptions yet. Add one above, or import an OPML file.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="table table--fixed">
             <thead>
               <tr>
                 <th class="type">Type</th>
@@ -577,14 +577,15 @@
                 <th class="col-category">Category</th>
                 <th class="num col-interval">Interval</th>
                 <th class="col-state">Last fetch</th>
-                <th class="actions"></th>
+                <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
               {#each config.feeds as feed, idx (feed.url + idx)}
                 {@const state = feedStateByUrl[feed.url]}
-                <tr class:has-error={state && state.error_count > 0}>
-                  <td class="type"><span class="type-pill">{detectSourceType(feed.url)}</span></td>
+                <tr class:is-danger={state && state.error_count > 0}>
+                  <td class="type"><span class="status-pill">{detectSourceType(feed.url)}</span></td
+                  >
                   <td class="col-title">
                     <div class="title-cell">
                       <span class="title-text">{feed.title || feed.url}</span>
@@ -611,7 +612,7 @@
                       <span class="muted">never</span>
                     {/if}
                   </td>
-                  <td class="actions">
+                  <td class="col-actions">
                     <KebabMenu items={feedMenu(idx)} ariaLabel="Subscription actions" />
                   </td>
                 </tr>
@@ -794,7 +795,7 @@
 {/if}
 
 <style>
-  /* Shared .settings/.card/.field/.grid/.banner/.icon-btn primitives live in
+  /* Shared .settings/.card/.field/.banner/.icon-btn primitives live in
 	   web/src/lib/styles/settings.css (imported by app.css). Only feeds-specific
 	   styling (diagnostics, type pill, title cell, container queries) stays. */
 
@@ -885,36 +886,14 @@
     line-height: var(--leading-tight);
   }
 
-  .grid tbody tr.has-error {
-    background: var(--row-danger-bg);
-  }
-
-  .grid td.type,
-  .grid th.type {
+  .type {
     width: 4.5rem;
   }
 
-  .grid td.num,
-  .grid th.num {
-    text-align: right;
-    white-space: nowrap;
-  }
-
-  /* Row actions are a single kebab; only the reorder column still holds a pair
-	   of icon buttons, so it keeps the wider width under its own class. */
-  .grid td.actions,
-  .grid th.actions {
-    width: 3rem;
-  }
-
-  .grid td.col-order,
-  .grid th.col-order {
-    width: 4.5rem;
-  }
-
-  .grid td.col-remove,
-  .grid th.col-remove {
-    width: 2.75rem;
+  /* Row actions are a single kebab at the table's own width; only the reorder
+	   column holds a pair of icon buttons, so it asks for more. */
+  .col-order {
+    --table-actions-width: 4.5rem;
   }
 
   /* A borderless cell editor, not a field: the box appears on hover/focus so a
@@ -923,7 +902,7 @@
      leading pin, or the row's own height is set by this cell's 1.5 leading and
      it sits taller than the IconButtons in the cells beside it. The transparent
      border is what keeps the box from shifting when it appears. */
-  .grid input[type='text'] {
+  .col-title input[type='text'] {
     width: 100%;
     background: transparent;
     color: var(--text-primary);
@@ -936,22 +915,13 @@
     min-height: var(--control-height-md);
   }
 
-  .grid input[type='text']:focus,
-  .grid input[type='text']:hover {
+  .col-title input[type='text']:focus,
+  .col-title input[type='text']:hover {
     background: var(--surface-base);
   }
 
-  .grid input[type='text']:focus-visible {
+  .col-title input[type='text']:focus-visible {
     border-color: var(--focus-field-border);
-  }
-
-  .type-pill {
-    display: inline-block;
-    font-size: var(--text-xs);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    color: var(--text-muted);
   }
 
   .state {
@@ -992,8 +962,7 @@
       display: none;
     }
 
-    .grid td.type,
-    .grid th.type {
+    .type {
       width: 3rem;
     }
 
@@ -1005,24 +974,8 @@
       width: 7rem;
     }
 
-    .grid td.actions,
-    .grid th.actions {
-      width: 2.75rem;
-    }
-
-    .grid td.col-order,
-    .grid th.col-order {
-      width: 4rem;
-    }
-
-    .grid td.col-remove,
-    .grid th.col-remove {
-      width: 2.5rem;
-    }
-
-    .grid th,
-    .grid td {
-      padding: var(--space-2) var(--space-2);
+    .col-order {
+      --table-actions-width: 4rem;
     }
   }
 

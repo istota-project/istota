@@ -253,14 +253,14 @@
 
       {#if row.diagnoses.length > 0}
         <div class="table-scroll">
-          <table class="grid">
+          <table class="table">
             <thead>
               <tr>
                 <th>Name</th>
                 <th>ICD-10</th>
                 <th>Status</th>
                 <th>Severity</th>
-                <th class="row-actions"></th>
+                <th class="col-actions"></th>
               </tr>
             </thead>
             <tbody>
@@ -317,7 +317,7 @@
                       fullWidth
                     />
                   </td>
-                  <td class="row-actions">
+                  <td class="col-actions">
                     <Button size="sm" onclick={() => removeDiagnosis(row, j)}>Remove</Button>
                   </td>
                 </tr>
@@ -440,12 +440,7 @@
 
   /* Compact inputs inside the diagnoses table — mirrors the immunization
 	   review-table sizing so the nested grid doesn't overpower the card. */
-  table.grid input {
+  table input {
     padding: var(--space-1) var(--space-2);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
   }
 </style>

@@ -112,7 +112,7 @@
     "off-scale-space": 4
   },
   "src/routes/feeds/settings/+page.svelte": {
-    "off-scale-space": 5
+    "off-scale-space": 4
   },
   "src/routes/health/history/+page.svelte": {
     "off-scale-space": 8,
@@ -124,7 +124,7 @@
     "raw-color": 3
   },
   "src/routes/health/history/encounter/+page.svelte": {
-    "off-scale-space": 3
+    "off-scale-space": 2
   },
   "src/routes/health/immunizations/+page.svelte": {
     "off-scale-space": 2
@@ -133,7 +133,7 @@
     "off-scale-space": 1
   },
   "src/routes/health/immunizations/vaccine/+page.svelte": {
-    "off-scale-space": 3
+    "off-scale-space": 2
   },
   "src/routes/health/labs/+page.svelte": {
     "raw-color": 2,

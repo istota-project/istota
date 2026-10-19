@@ -420,7 +420,16 @@ describe('off-scale-breakpoint', () => {
 });
 
 describe('redefined-primitive', () => {
-  it.each(['.btn', '.badge', '.icon-btn', '.field', '.chip'])('flags %s', (cls) => {
+  it.each([
+    '.btn',
+    '.badge',
+    '.icon-btn',
+    '.field',
+    '.chip',
+    '.table',
+    '.table-scroll',
+    '.divided-list',
+  ])('flags %s', (cls) => {
     expect(rules(`<style>\n  ${cls} {\n    color: red;\n  }\n</style>`)).toContain(
       'redefined-primitive',
     );
@@ -457,6 +466,27 @@ describe('redefined-primitive', () => {
 
   it('allows an unrelated class that merely starts the same way', () => {
     expect(rules('<style>\n  .btn-group {\n    display: flex;\n  }\n</style>')).not.toContain(
+      'redefined-primitive',
+    );
+  });
+
+  it('flags a table rule written from the table class', () => {
+    expect(rules('<style>\n  .table th {\n    padding: 0;\n  }\n</style>')).toContain(
+      'redefined-primitive',
+    );
+  });
+
+  it('allows table.css, which owns the table family', () => {
+    expect(rules('.table th {\n  padding: 0;\n}', 'src/lib/styles/table.css')).not.toContain(
+      'redefined-primitive',
+    );
+  });
+
+  it('allows a table modifier and a placement under the page container', () => {
+    expect(rules('<style>\n  .table--dense {\n    color: red;\n  }\n</style>')).not.toContain(
+      'redefined-primitive',
+    );
+    expect(rules('<style>\n  .card .table-scroll {\n    margin: 0;\n  }\n</style>')).not.toContain(
       'redefined-primitive',
     );
   });

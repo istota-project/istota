@@ -84,7 +84,7 @@
       }}>Add card</Button
     >{/snippet}
   {#if cards.length === 0}<EmptyState>No cards yet.</EmptyState>{/if}
-  <ul class="list-reset">
+  <ul class="divided-list">
     {#each cards as card (card.id)}
       <li class="card-row">
         <div class="card-main">
@@ -136,10 +136,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) 0;
-  }
-  .card-row + .card-row {
-    border-top: 1px solid var(--border-subtle);
   }
   .card-main {
     display: flex;

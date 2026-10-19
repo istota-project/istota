@@ -280,10 +280,10 @@
   onConfirm={deleteSelected}
 />
 {#if entries.length}
-  <table aria-label="Files">
+  <table class="table table--fixed table--interactive" aria-label="Files">
     <thead
       ><tr>
-        <th scope="col" class="selection-column"
+        <th scope="col" class="col-select"
           ><input
             type="checkbox"
             aria-label="Select all visible items"
@@ -299,7 +299,7 @@
         {#each [{ key: 'name', label: 'Name' }, { key: 'size', label: 'Size' }, { key: 'modified', label: 'Modified' }] as column}
           <th
             scope="col"
-            class={column.key === 'name' ? '' : column.key}
+            class={column.key === 'name' ? '' : column.key === 'size' ? 'size num' : column.key}
             aria-sort={sortKey === column.key ? (descending ? 'descending' : 'ascending') : 'none'}
           >
             <button
@@ -314,7 +314,7 @@
             >
           </th>
         {/each}
-        <th scope="col" class="actions-column" aria-label="Actions"></th>
+        <th scope="col" class="col-actions" aria-label="Actions"></th>
       </tr></thead
     >
     <tbody>
@@ -322,8 +322,8 @@
         {@const iso = entry.modified}
         {@const actions = menuItems(entry)}
         {@const EntryIcon = fileIcon(entry.name, entry.mime_type)}
-        <tr class:selected={selectedKeys.includes(entry.key)}>
-          <td class="selection-column"
+        <tr class:is-selected={selectedKeys.includes(entry.key)}>
+          <td class="col-select"
             ><input
               type="checkbox"
               aria-label={`Select ${entry.name}`}
@@ -388,12 +388,12 @@
               </div>
             </div>
           </td>
-          <td class="size muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
+          <td class="size num muted">{entry.size === null ? '—' : formatBytes(entry.size)}</td>
           <td class="modified muted"
             >{#if iso}<time datetime={iso} title={formatDateTime(iso)}>{formatDate(iso)}</time
               >{:else}—{/if}</td
           >
-          <td class="actions-column">
+          <td class="col-actions">
             {#if actions.length}
               <KebabMenu items={actions} ariaLabel={`Actions for ${entry.name}`} />
             {/if}
@@ -465,13 +465,8 @@
   .mobile-sort {
     display: none;
   }
-  .selection-column {
-    width: 2rem;
-    text-align: center;
-    padding-inline: var(--space-2);
-  }
-  .selection-column + th,
-  .selection-column + td {
+  .col-select + th,
+  .col-select + td {
     padding-inline-start: 0;
   }
   input[type='checkbox'] {
@@ -490,9 +485,6 @@
     font: inherit;
     cursor: pointer;
   }
-  tr.selected {
-    background: var(--selected-bg);
-  }
   .delete-errors {
     padding: var(--space-2) var(--space-3);
   }
@@ -509,39 +501,10 @@
     .file-controls {
       gap: var(--space-2);
     }
-    th,
-    td {
-      padding-inline: var(--space-2);
-    }
   }
 
-  .actions-column {
-    width: 3rem;
-    text-align: center;
-    padding-inline: var(--space-1);
-  }
-
-  table {
-    width: 100%;
-    table-layout: fixed;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-  }
-  th {
-    text-align: left;
-    font-weight: var(--weight-medium);
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-  }
-  th,
-  td {
-    padding: var(--space-3);
-    border-bottom: 1px solid var(--border-subtle);
-  }
   .size {
     width: 6rem;
-    text-align: right;
-    white-space: nowrap;
   }
   .modified {
     width: 9rem;
@@ -588,9 +551,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-  }
-  tbody tr:hover {
-    background: var(--surface-card);
   }
   .listing-notes {
     padding: var(--space-3);

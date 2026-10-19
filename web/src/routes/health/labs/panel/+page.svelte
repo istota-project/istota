@@ -297,7 +297,7 @@
     <div class="split">
       <div class="biomarker-table">
         <div class="table-scroll">
-          <table class="grid grid--dense">
+          <table class="table table--dense">
             <thead>
               <tr>
                 <th>Marker</th>
@@ -310,7 +310,7 @@
             </thead>
             <tbody>
               {#each biomarkers as b, i (b.id)}
-                <tr class:flag-row={b.flag}>
+                <tr class:is-danger={b.flag}>
                   <td>
                     {#if editing}
                       <input bind:value={b.name} placeholder="Hemoglobin" />
@@ -494,9 +494,6 @@
     font: inherit;
     font-size: var(--text-xs);
     padding: 0.15rem var(--space-1);
-  }
-  .flag-row {
-    background: var(--row-danger-bg);
   }
   .flag {
     display: inline-flex;

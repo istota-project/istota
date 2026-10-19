@@ -95,22 +95,22 @@
         >
         <span class="caption">{ref.category} · {ref.schedule}</span>
       </div>
-      <dl class="grid-stats">
+      <dl class="kv-stacked">
         <div>
-          <dt class="micro-label">Last given</dt>
+          <dt>Last given</dt>
           <dd>{formatDate(entry.last_given)}</dd>
         </div>
         <div>
-          <dt class="micro-label">Doses recorded</dt>
+          <dt>Doses recorded</dt>
           <dd>{entry.dose_count}</dd>
         </div>
         <div>
-          <dt class="micro-label">Next due</dt>
+          <dt>Next due</dt>
           <dd>{formatDate(entry.next_due)}</dd>
         </div>
         {#if entry.days_until_due !== null}
           <div>
-            <dt class="micro-label">
+            <dt>
               {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
             </dt>
             <dd>{Math.abs(entry.days_until_due)}</dd>
@@ -160,7 +160,7 @@
       <EmptyState size="sm">No doses recorded yet.</EmptyState>
     {:else}
       <div class="table-scroll">
-        <table class="grid">
+        <table class="table">
           <thead>
             <tr>
               <th>Date</th>
@@ -168,7 +168,7 @@
               <th>Dose label</th>
               <th>Facility</th>
               <th>Notes</th>
-              <th class="row-actions"></th>
+              <th class="col-actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -178,8 +178,8 @@
                 <td>{i.product_name || '—'}</td>
                 <td>{i.dose_label || '—'}</td>
                 <td>{i.facility || '—'}</td>
-                <td class="notes">{i.notes || '—'}</td>
-                <td class="row-actions">
+                <td class="notes cell-truncate">{i.notes || '—'}</td>
+                <td class="col-actions">
                   <KebabMenu
                     ariaLabel="Immunization actions"
                     items={[
@@ -218,18 +218,7 @@
     align-items: center;
     margin-bottom: var(--space-2);
   }
-  .grid-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
-    gap: var(--space-3) var(--space-4);
-    margin: 0;
-  }
-  dt {
-    margin-bottom: 0.15rem;
-  }
   dd {
-    margin: 0;
-    font-size: var(--text-sm);
     color: var(--text-primary);
   }
   .ref-description {
@@ -324,15 +313,7 @@
   }
   td.notes {
     max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--text-muted);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
   }
 
   /* Light theme overrides — dark rules above untouched. */

@@ -579,7 +579,7 @@
           <h2 class="title-section">Users</h2>
         </header>
         <div class="table-scroll">
-          <table class="grid users-grid">
+          <table class="table table--fixed users-grid">
             <thead>
               <tr>
                 <th class="col-user">User</th>
@@ -906,7 +906,7 @@
             {#each Object.entries(stats.modules) as [name, mod] (name)}
               <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
                 <div class="module-name title-section">{name}</div>
-                <dl class="module-fields">
+                <dl class="kv module-fields">
                   {#each Object.entries(mod) as [k, v] (k)}
                     <dt>{fieldLabel(k)}</dt>
                     <dd>
@@ -934,8 +934,9 @@
 </div>
 
 <style>
-  /* Layout primitives (.settings / .card / .grid / .banner / .placeholder /
-	   .section-header) come from web/src/lib/styles/settings.css.
+  /* Layout primitives (.settings / .card / .banner / .placeholder /
+	   .section-header) come from web/src/lib/styles/settings.css, the table
+	   from table.css.
 	   Admin-specific bits below: KPIs, source bars, dot indicators. */
 
   /* Page metadata, not content. It sat in the app bar until the admin sidebar
@@ -979,11 +980,6 @@
   .dot-source {
     width: 6px;
     height: 6px;
-  }
-
-  .num {
-    text-align: right;
-    white-space: nowrap;
   }
 
   /* The tiles themselves are `StatTile`; this sizes the wall they sit in. */
@@ -1060,7 +1056,7 @@
     min-width: 58.5rem;
   }
 
-  /* .grid is table-layout: fixed, so a cell min-width is ignored and unsized
+  /* The table is fixed layout, so a cell min-width is ignored and unsized
 	   columns split the table evenly. Size the narrow columns explicitly and
 	   leave 24h activity auto so it soaks up whatever is left — it carries the
 	   stacked bar plus the per-source chips and needs the room; username and
@@ -1212,19 +1208,11 @@
   }
 
   .module-fields {
-    display: grid;
-    grid-template-columns: max-content 1fr;
     gap: 0.1rem var(--space-3);
-    margin: 0;
     font-size: var(--text-xs);
   }
 
-  .module-fields dt {
-    color: var(--text-dim);
-  }
-
   .module-fields dd {
-    margin: 0;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
@@ -1233,14 +1221,6 @@
      apart than the shared default. */
   .kv {
     --kv-gap: var(--space-6);
-  }
-
-  .kv dt {
-    color: var(--text-dim);
-  }
-
-  .kv dd {
-    margin: 0;
   }
 
   /* Models / brain backend */
@@ -1304,7 +1284,7 @@
 
   /* Mobile: keep every column and scroll the table sideways, the same treatment
 	   the briefings tables get. Hiding columns was the previous answer and it did
-	   not survive two more of them. `.grid` is table-layout: fixed, so the widths
+	   not survive two more of them. The table is fixed layout, so the widths
 	   below are honoured whatever the screen is, and dropping the table's
 	   min-width never made it narrower — it made `col-24h`, the one column left
 	   auto on purpose, absorb everything that no longer fit. Once Tokens and Cost
@@ -1321,7 +1301,7 @@
     }
     /* Tighten the columns whose content has a known short bound, so that scroll
 		   stays as short as it can be, and leave the numeric ones at a width their
-		   strings fit. Nothing sets `overflow` on a `.grid` cell, so a number too
+		   strings fit. Nothing sets `overflow` on a table cell, so a number too
 		   wide for its box paints over the column beside it rather than wrapping —
 		   `toLocaleString` puts commas in but no break opportunity. Total is the one
 		   that bit: it keeps its (widened) desktop width here rather than the 3.5rem

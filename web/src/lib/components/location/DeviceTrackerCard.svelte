@@ -518,12 +518,7 @@
     word-break: break-all;
   }
 
-  .kv dt {
-    color: var(--text-dim);
-  }
-
   .kv dd {
-    margin: 0;
     color: var(--text-secondary);
   }
 

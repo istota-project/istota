@@ -92,7 +92,7 @@
     {#if loaded && ordered.length === 0}
       <EmptyState>No imports yet.</EmptyState>
     {:else}
-      <ul class="list-reset">
+      <ul class="divided-list">
         {#each ordered as row (row.value)}
           <li class="cov-row">
             <span class="cov-value code-chip">{row.value}</span>
@@ -126,12 +126,7 @@
     flex-wrap: wrap;
     align-items: baseline;
     gap: var(--space-1) var(--space-2);
-    padding: var(--space-2) 0;
     font-size: var(--text-sm);
-  }
-
-  .cov-row + .cov-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .cov-value {

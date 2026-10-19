@@ -85,47 +85,6 @@
 	   this mirrors how settings.css scopes `.settings .card`. Pages set their
 	   own padding/layout on `.card`; this owns surface + border + radius. Add
 	   `class="card interactive"` for a clickable card (cursor + hover border). */
-  /* Record-table shell, mirroring .money-table* in routes/money/+layout.svelte.
-     Six pages had their own copy of this — table.grid three times byte for
-     byte, plus grid-tbl, .biomarker-table and .review-table — differing only
-     in cell padding and header weight. `--dense` is that difference kept as an
-     explicit choice: the review and biomarker editors are input-bearing
-     tables, where tighter cells are deliberate rather than drift. */
-  .health-frame :global(.table-scroll) {
-    width: 100%;
-    overflow-x: auto;
-    /* Momentum scrolling on iOS. Exactly one of the four copies had it, so a
-       table that scrolled sideways felt native on one page and not the rest. */
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .health-frame :global(table.grid) {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-  }
-
-  .health-frame :global(table.grid th),
-  .health-frame :global(table.grid td) {
-    text-align: left;
-    padding: var(--space-2) var(--space-2);
-    border-bottom: 1px solid var(--border-subtle);
-    vertical-align: middle;
-  }
-
-  .health-frame :global(table.grid th) {
-    color: var(--text-dim);
-    font-weight: var(--weight-medium);
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
-  }
-
-  .health-frame :global(table.grid--dense th),
-  .health-frame :global(table.grid--dense td) {
-    padding: var(--space-1) var(--space-2);
-  }
-
   /* The .msg boxes this replaced each carried their own margin-bottom —
      0.75rem on six pages, 0.5rem on one. Restored once for the module rather
      than as twelve page rules re-forking the primitive; the majority value

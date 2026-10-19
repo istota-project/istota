@@ -232,7 +232,7 @@
   {/if}
 
   <div class="table-scroll">
-    <table class="grid">
+    <table class="table">
       <thead>
         <tr>
           <th>Vaccine</th>
@@ -242,12 +242,12 @@
           {#if mode === 'paste'}
             <th>Source line</th>
           {/if}
-          <th class="row-actions"></th>
+          <th class="col-actions"></th>
         </tr>
       </thead>
       <tbody>
         {#each parsed as row, i (i)}
-          <tr class:warn={row.name === 'Unknown' || !row.date_given}>
+          <tr class:is-warn={row.name === 'Unknown' || !row.date_given}>
             <td>
               <Select
                 value={row.name}
@@ -272,9 +272,9 @@
               <Badge variant={confidenceVariant(row.confidence)}>{row.confidence}</Badge>
             </td>
             {#if mode === 'paste'}
-              <td class="src">{row.source_line}</td>
+              <td class="src cell-truncate">{row.source_line}</td>
             {/if}
-            <td class="row-actions">
+            <td class="col-actions">
               <Button size="sm" onclick={() => removeRow(i)}>Remove</Button>
             </td>
           </tr>
@@ -386,19 +386,8 @@
     border-radius: var(--radius-sm);
   }
 
-  tr.warn td {
-    background: var(--row-warn-bg);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
-  }
   td.src {
     max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--text-dim);

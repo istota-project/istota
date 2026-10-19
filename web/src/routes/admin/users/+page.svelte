@@ -197,14 +197,17 @@
         <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
       {:else}
         <div class="table-scroll">
-          <table class="grid users-grid" aria-label="Users">
+          <table class="table table--fixed table--interactive users-grid" aria-label="Users">
             <thead
               ><tr
                 ><th scope="col" class="col-user">User</th>
-                <th scope="col">Email</th><th scope="col" class="access">Sign-in</th><th
+                <th scope="col" class="col-email">Email</th><th scope="col" class="col-access"
+                  >Sign-in</th
+                ><th scope="col" class="col-last-login">Last login</th><th
                   scope="col"
-                  class="last-login">Last login</th
-                ><th scope="col" class="user-actions" aria-label="Actions"></th></tr
+                  class="col-actions"
+                  aria-label="Actions"
+                ></th></tr
               ></thead
             >
             <tbody>
@@ -219,22 +222,22 @@
                       isAdmin={user.is_admin}
                     />
                   </td>
-                  <td class="truncate" title={user.identity?.email}
+                  <td class="col-email truncate" title={user.identity?.email}
                     >{user.identity?.email ?? '—'}</td
                   >
-                  <td class="access">
+                  <td class="col-access">
                     <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
                       >{signInStateLabel(user.identity, user.state)}</Badge
                     >
                   </td>
-                  <td class="last-login truncate"
+                  <td class="col-last-login truncate"
                     >{user.identity
                       ? user.identity.last_login_at
                         ? formatRelative(user.identity.last_login_at)
                         : 'Never'
                       : '—'}</td
                   >
-                  <td class="user-actions">
+                  <td class="col-actions">
                     <KebabMenu
                       items={userActions(user)}
                       ariaLabel="Actions for {user.display_name || user.user_id}"
@@ -347,21 +350,8 @@
     margin-top: var(--space-1);
     overflow-wrap: anywhere;
   }
-  .access {
-    width: 8rem;
-  }
   .row-clickable {
     cursor: pointer;
-  }
-  .row-clickable:hover {
-    background: var(--hover-bg);
-  }
-  .last-login {
-    width: 7rem;
-  }
-  .users-grid .user-actions {
-    width: 2.5rem;
-    text-align: right;
   }
   .orphan-row {
     display: flex;
@@ -370,18 +360,35 @@
     align-items: center;
     gap: var(--space-3);
   }
+  /* Email is the unsized column: the min-width reserves it 10rem past the
+     sized ones (the actions column is table.css's 2.5rem), and
+     adminTables.test.ts holds the sum. */
+  .users-grid {
+    min-width: 38.5rem;
+  }
   .col-user {
     width: 11rem;
   }
+  .col-access {
+    width: 8rem;
+  }
+  .col-last-login {
+    width: 7rem;
+  }
+  /* Narrow: Last login goes and the rest tighten to what a phone has, about
+     18.5rem inside the card at 375px, so the table fits rather than scrolls. */
   @container settings (max-width: 40rem) {
-    .last-login {
+    .users-grid {
+      min-width: 18.5rem;
+    }
+    .col-last-login {
       display: none;
     }
     .col-user {
-      width: 30%;
+      width: 5.5rem;
     }
-    .access {
-      width: 25%;
+    .col-access {
+      width: 5rem;
     }
   }
 </style>

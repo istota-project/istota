@@ -298,7 +298,7 @@
     {#if loaded && classifications.length === 0}
       <EmptyState>No classifications yet.</EmptyState>
     {:else}
-      <ul class="list-reset">
+      <ul class="divided-list">
         {#each classifications as cls (cls.symbol)}
           <li class="cls-row">
             {#if editingSymbol === cls.symbol}
@@ -418,14 +418,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-  }
-
-  .cls-row {
-    padding: var(--space-2) 0;
-  }
-
-  .cls-row + .cls-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .cls-symbol {

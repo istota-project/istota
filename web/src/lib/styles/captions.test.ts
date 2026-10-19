@@ -179,16 +179,11 @@ const READING_SURFACE = [
 ];
 
 /**
- * Column headers, which write the micro-label type because a `<th>` cannot
- * take a class from a stylesheet. Each goes when the table family lands and
- * `.table thead th` carries the type once, in table.css; until then a header
- * here is a known copy rather than a new one.
+ * The column header, which writes the micro-label type because a `<th>` cannot
+ * take a class from a stylesheet. The table family carries it once, in
+ * table.css; tables.test.ts fails a component that writes it again.
  */
-const TABLE_HEADERS = [
-  'lib/styles/settings.css|.settings .grid th',
-  'routes/health/+layout.svelte|.health-frame :global(table.grid th)',
-  'routes/health/labs/marker/+page.svelte|.history th',
-];
+const TABLE_HEADERS = ['lib/styles/table.css|.table thead th'];
 
 /** Where role copies may not be written: every stylesheet but the role's own. */
 const scanned = (): { file: string; css: string }[] => {

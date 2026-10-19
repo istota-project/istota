@@ -372,7 +372,7 @@
     <section class="about">
       <h2 class="title-section">About this marker</h2>
       <p class="description">{ref.description}</p>
-      <dl>
+      <dl class="kv">
         <dt class="micro-label">Reference range</dt>
         <dd>
           {formatRange(trend.ref_range_low, trend.ref_range_high)}
@@ -391,20 +391,20 @@
   {#if trend.points.length > 0}
     <section class="history">
       <h2 class="title-section">History</h2>
-      <table>
+      <table class="table">
         <thead>
           <tr>
             <th>Date</th>
-            <th>Value</th>
+            <th class="num">Value</th>
             <th>Unit</th>
             <th>Flag</th>
           </tr>
         </thead>
         <tbody>
           {#each [...trend.points].reverse() as p}
-            <tr class:flag-row={p.flag}>
+            <tr class:is-danger={p.flag}>
               <td>{formatDate(p.drawn_at)}</td>
-              <td>{p.value}</td>
+              <td class="num">{p.value}</td>
               <td>{p.unit}</td>
               <td>
                 {#if p.flag}<span class="flag flag-{p.flag}">{p.flag}</span>{/if}
@@ -571,15 +571,7 @@
     line-height: var(--leading-relaxed);
     margin: 0 0 var(--space-3);
   }
-  .about dl {
-    display: grid;
-    grid-template-columns: 9rem 1fr;
-    gap: var(--space-1) var(--space-3);
-    font-size: var(--text-sm);
-    margin: 0;
-  }
   .about dd {
-    margin: 0;
     color: var(--text-primary);
   }
   .history {
@@ -587,27 +579,6 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-card);
     padding: var(--space-4);
-  }
-  .history table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  .history th,
-  .history td {
-    padding: var(--space-2) var(--space-2);
-    text-align: left;
-    font-size: var(--text-sm);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .history th {
-    color: var(--text-dim);
-    font-weight: var(--weight-regular);
-    text-transform: uppercase;
-    font-size: var(--text-xs);
-    letter-spacing: var(--tracking-caps);
-  }
-  .flag-row {
-    background: var(--row-danger-bg);
   }
   .flag {
     display: inline-flex;

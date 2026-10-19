@@ -271,13 +271,51 @@ code {
 /* A definition list as a two-column grid: the <dt> at its content width, the
    <dd> filling the rest. Four files carried it, differing only in the column
    gap — /admin's rows are short pairs that read better further apart — so
-   that one value is a hook, the way cards.css does --card-min. */
+   that one value is a hook, the way cards.css does --card-min. The value
+   track is `minmax(0, 1fr)` and the <dd> wraps anywhere, so a long path or id
+   breaks inside its cell instead of widening the card (two cards overrode the
+   track to get that). The dt colour and the dd reset were restated by four
+   callers; they are defaults here, scored at one element so any class on the
+   cell wins. */
 .kv {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--space-1) var(--kv-gap, var(--space-3));
   margin: 0;
   font-size: var(--text-sm);
+}
+
+:where(.kv) > dt {
+  color: var(--text-dim);
+}
+
+:where(.kv) > dd,
+:where(.kv-stacked) > div > dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The stacked form: each pair a small block with the label above the value,
+   the blocks flowing into as many columns as fit (encounter and vaccine
+   facts). The markup wraps each pair in a <div>, which is what lets a pair be
+   a grid item. --kv-track is the narrowest a column may get, --kv-gap the
+   space between columns. */
+.kv-stacked {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--kv-track, 8rem), 100%), 1fr));
+  gap: var(--space-2) var(--kv-gap, var(--space-4));
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+:where(.kv-stacked) > div > dt {
+  margin-bottom: 0.15rem;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
 }
 
 /* A card's header row: the title at one end, its actions or timestamp at the

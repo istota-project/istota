@@ -168,9 +168,13 @@ function offScaleBreakpoints(line) {
 // second .btn system that inverted what `primary` meant — filled in one, an
 // outlined blue in the other — and with .btn.danger rendering red on three
 // pages and grey-until-hover on two. The rule names the classes the ui/
-// primitives own; each is exempt in the component that defines it.
+// primitives own; each is exempt in the component that defines it. The table
+// family joined them: `.table`, `.table-scroll` and `.divided-list` are
+// table.css's, after three copies of one table shell, two scroll wrappers and
+// eight divided lists. A page places them under its own container
+// (`.card .table-scroll`), which the anchor at the line start lets through.
 const REDEFINED_PRIMITIVE =
-  /^\s*(?::global\()?\.(?:btn|badge|icon-btn|field|chip)\b(?![\w-])[^{]*\{\s*$/;
+  /^\s*(?::global\()?\.(?:btn|badge|icon-btn|field|chip|table|table-scroll|divided-list)\b(?![\w-])[^{]*\{\s*$/;
 
 // An empty state is the `EmptyState` component and nothing else. Before it
 // there were seven spellings — a global `.empty`, `.money-table-empty`,
@@ -221,8 +225,9 @@ export const RULES = [
       'src/lib/components/ui/IconButton.svelte',
       'src/lib/components/ui/Field.svelte',
       'src/lib/components/ui/Chip.svelte',
+      'src/lib/styles/table.css',
     ],
-    hint: 'this class belongs to a ui/ primitive — use the component instead',
+    hint: 'this class belongs to a ui/ primitive or table.css — use it rather than restyling it',
   },
   {
     id: 'hand-rolled-empty-state',

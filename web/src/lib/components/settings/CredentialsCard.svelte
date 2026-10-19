@@ -251,7 +251,7 @@
     {#if data.credentials.length === 0}
       <EmptyState>No credentials yet.</EmptyState>
     {:else}
-      <ul class="list-reset">
+      <ul class="divided-list">
         {#each data.credentials as credential (credential.name)}
           <li class="cred-row" data-testid="credential-{credential.name}">
             <code class="cred-name code-chip">{credential.name}</code>
@@ -418,11 +418,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) 0;
-  }
-
-  .cred-row + .cred-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .cred-name {

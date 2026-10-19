@@ -330,17 +330,17 @@
     {#if history.length === 0}
       <EmptyState size="sm">No immunizations recorded yet.</EmptyState>
     {:else}
-      <div class="table-scroll">
-        <table class="grid" aria-label="Immunization history">
+      <div class="table-scroll table--cards">
+        <table class="table" aria-label="Immunization history">
           <thead>
             <tr>
               <th>Date</th>
               <th>Vaccine</th>
-              <th>Product</th>
-              <th>Dose label</th>
-              <th>Facility</th>
-              <th>Notes</th>
-              <th class="row-actions"></th>
+              <th class="card-hidden">Product</th>
+              <th class="card-hidden">Dose label</th>
+              <th class="card-hidden">Facility</th>
+              <th class="card-hidden">Notes</th>
+              <th class="col-actions"></th>
             </tr>
           </thead>
           <tbody>
@@ -351,10 +351,10 @@
               <tr>
                 <td class="date">
                   <time datetime={i.date_given}>{formatDate(i.date_given)}</time>{#if details}<span
-                      class="mobile-details">{` · ${details}`}</span
+                      class="card-only">{` · ${details}`}</span
                     >{/if}
                 </td>
-                <td class="vaccine">
+                <td class="vaccine cell-primary">
                   <a
                     class="link"
                     href="{base}/health/immunizations/vaccine?name={encodeURIComponent(i.name)}"
@@ -362,11 +362,11 @@
                     {i.name}
                   </a>
                 </td>
-                <td class="detail">{i.product_name || ''}</td>
-                <td class="detail">{i.dose_label || ''}</td>
-                <td class="detail">{i.facility || ''}</td>
-                <td class="notes">{i.notes || ''}</td>
-                <td class="row-actions">
+                <td class="card-hidden">{i.product_name || ''}</td>
+                <td class="card-hidden">{i.dose_label || ''}</td>
+                <td class="card-hidden">{i.facility || ''}</td>
+                <td class="notes card-hidden cell-truncate">{i.notes || ''}</td>
+                <td class="col-actions">
                   <div class="row-actions-inner">
                     <KebabMenu
                       ariaLabel="Immunization actions"
@@ -503,20 +503,9 @@
     max-width: 240px;
   }
 
-  .mobile-details {
-    display: none;
-  }
   td.notes {
     max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--text-muted);
-  }
-  td.row-actions,
-  th.row-actions {
-    text-align: right;
-    white-space: nowrap;
   }
   .row-actions-inner {
     display: flex;
@@ -554,61 +543,25 @@
     }
   }
 
-  @media (max-width: 640px) {
-    .history table.grid,
-    .history tbody {
-      display: block;
-    }
-    .history thead {
-      display: none;
-    }
-    .history tbody tr {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: baseline;
-      gap: var(--space-1) 0;
-      padding: var(--space-3) 0;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .history table.grid tbody td {
-      display: block;
-      min-width: 0;
-      max-width: 100%;
-      padding: 0;
-      border: 0;
-      overflow-wrap: anywhere;
-    }
-    .history table.grid tbody td.vaccine {
-      order: -2;
-      flex: 1 1 calc(100% - var(--touch-comfort));
-      padding-right: var(--space-2);
+  /* The card layout is the table family's (.table--cards); what is left is
+     this record's: the name a step larger, the date line muted, and both
+     cut to one line, which only a card wants. */
+  @container (max-width: 40rem) {
+    td.vaccine {
       font-size: var(--text-base);
     }
-    .history table.grid tbody td.row-actions {
-      order: -1;
-      flex: 0 0 var(--touch-comfort);
-      align-self: flex-start;
+    td.date {
+      color: var(--text-muted);
     }
-    .history .row-actions-inner {
-      min-height: var(--touch-min);
-      align-items: center;
-    }
-    .history table.grid tbody td.vaccine,
-    .history table.grid tbody td.date {
+    td.vaccine,
+    td.date {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .history td.date {
-      flex-basis: 100%;
-      color: var(--text-muted);
-    }
-    .mobile-details {
-      display: inline;
-    }
-    .history table.grid tbody td.detail,
-    .history table.grid tbody td.notes {
-      display: none;
+    .row-actions-inner {
+      min-height: var(--touch-min);
+      align-items: center;
     }
   }
 </style>

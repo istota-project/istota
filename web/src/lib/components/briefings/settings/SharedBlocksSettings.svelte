@@ -280,7 +280,7 @@
     <EmptyState>No shared blocks yet.</EmptyState>
   {:else}
     <div class="table-scroll">
-      <table class="grid sb-table">
+      <table class="table sb-table">
         <thead>
           <tr>
             <th>Name</th>
@@ -288,7 +288,7 @@
             <th class="col-render">Render</th>
             <th>Trust</th>
             <th>Last run</th>
-            <th class="actions"></th>
+            <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody>
@@ -304,10 +304,10 @@
                 {/if}
               </td>
               <td class="nowrap"><code>{b.cron}</code></td>
-              <td class="col-render"><span class="render-pill">{b.render_mode}</span></td>
+              <td class="col-render"><span class="status-pill">{b.render_mode}</span></td>
               <td>{b.trusted ? 'trusted' : 'untrusted'}</td>
               <td class="nowrap">{fmtLastRun(b.status.last_run_at)}</td>
-              <td class="actions">
+              <td class="col-actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
               </td>
             </tr>
@@ -437,33 +437,17 @@
   .col-render {
     width: 7rem;
   }
-  .render-pill {
-    display: inline-block;
-    font-size: var(--text-xs);
-    /* design-lint-allow: hairline vertical inset for a one-line pill. */
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-pill);
-    background: var(--surface-raised);
-    color: var(--text-muted);
-  }
 
   /* Admin shared-blocks editor */
   .nowrap {
     white-space: nowrap;
   }
-  /* The global .grid is table-layout:fixed/width:100%, which squishes this
-	   table's six content columns on mobile. Keep a natural min-width so
-	   .table-scroll scrolls horizontally instead of overlapping columns. The
-	   floor used to be 44rem to fit three text action buttons; the actions are a
+  /* A natural min-width, so .table-scroll scrolls this table's six content
+	   columns horizontally on a phone instead of overlapping them. The floor
+	   used to be 44rem to fit three text action buttons; the actions are a
 	   kebab now, so only the content columns set it. */
   .sb-table {
-    table-layout: auto;
     min-width: 34rem;
-  }
-  .sb-table td.actions,
-  .sb-table th.actions {
-    width: 1%;
-    white-space: nowrap;
   }
   .sb-name {
     min-width: 9rem;

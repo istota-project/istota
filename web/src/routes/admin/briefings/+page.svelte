@@ -227,7 +227,7 @@
     </div>
     {#snippet table(rows: Row[], label: string, ownerHeading: string)}
       <div class="table-scroll">
-        <table class="grid briefings-grid" aria-label={label}>
+        <table class="table table--fixed briefings-grid" aria-label={label}>
           <thead
             ><tr
               ><th scope="col" class="col-owner">{ownerHeading}</th>
@@ -369,10 +369,6 @@
   }
   .col-last {
     width: 6.5rem;
-  }
-  .briefings-grid .col-actions {
-    width: 2.5rem;
-    text-align: right;
   }
   /* Narrow: keep every column and scroll sideways; the min-width tightens
      with Owner and Schedule. */

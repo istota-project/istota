@@ -243,7 +243,7 @@
         {/if}
 
         <h4 class="micro-label trace-head">Trace</h4>
-        <ul class="list-reset">
+        <ul class="divided-list">
           {#each trace as entry (entry.rule_id)}
             {@const outcome = outcomeOf(entry)}
             <li class="trace-row">
@@ -327,10 +327,6 @@
     gap: var(--space-1) var(--space-2);
     padding: var(--space-1) 0;
     font-size: var(--text-xs);
-  }
-
-  .trace-row + .trace-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .trace-rule {

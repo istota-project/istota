@@ -253,7 +253,7 @@
             >
           {:else}
             <div class="table-scroll">
-              <table class="grid grid--dense">
+              <table class="table table--dense">
                 <thead>
                   <tr>
                     <th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th

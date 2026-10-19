@@ -292,36 +292,36 @@
     </form>
   {:else}
     <section class="meta">
-      <dl>
+      <dl class="kv-stacked">
         <div>
-          <dt class="micro-label">Date</dt>
+          <dt>Date</dt>
           <dd>{formatDate(encounter.encounter_date)}</dd>
         </div>
         <div>
-          <dt class="micro-label">Type</dt>
+          <dt>Type</dt>
           <dd>{typeLabel(encounter.encounter_type)}</dd>
         </div>
         {#if encounter.provider}
           <div>
-            <dt class="micro-label">Provider</dt>
+            <dt>Provider</dt>
             <dd>{encounter.provider}</dd>
           </div>
         {/if}
         {#if encounter.facility}
           <div>
-            <dt class="micro-label">Facility</dt>
+            <dt>Facility</dt>
             <dd>{encounter.facility}</dd>
           </div>
         {/if}
         {#if encounter.specialty}
           <div>
-            <dt class="micro-label">Specialty</dt>
+            <dt>Specialty</dt>
             <dd>{encounter.specialty}</dd>
           </div>
         {/if}
         {#if encounter.reason}
           <div>
-            <dt class="micro-label">Reason</dt>
+            <dt>Reason</dt>
             <dd>{encounter.reason}</dd>
           </div>
         {/if}
@@ -471,17 +471,10 @@
     padding: var(--space-3) var(--space-4);
   }
   .meta dl {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
-    gap: var(--space-2) var(--space-6);
-    margin: 0;
-  }
-  .meta dt {
-    margin-bottom: 0.15rem;
+    --kv-track: 11.5rem;
+    --kv-gap: var(--space-6);
   }
   .meta dd {
-    margin: 0;
-    font-size: var(--text-sm);
     color: var(--text-primary);
   }
 

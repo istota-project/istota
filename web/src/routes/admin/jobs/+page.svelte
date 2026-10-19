@@ -165,7 +165,7 @@
 
     {#snippet table(rows: AdminStatsJob[], label: string)}
       <div class="table-scroll">
-        <table class="grid jobs-grid" aria-label={label}>
+        <table class="table table--fixed jobs-grid" aria-label={label}>
           <thead
             ><tr
               ><th scope="col" class="col-user">User</th>
@@ -297,9 +297,6 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  .num {
-    text-align: right;
-  }
   .failing {
     color: var(--status-danger-fg);
   }
@@ -322,10 +319,6 @@
   }
   .col-failures {
     width: 5rem;
-  }
-  .jobs-grid .col-actions {
-    width: 2.5rem;
-    text-align: right;
   }
   /* Narrow: keep every column and scroll sideways; the min-width tightens
      with User and Schedule. */

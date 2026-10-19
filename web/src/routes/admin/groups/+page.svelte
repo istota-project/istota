@@ -255,13 +255,14 @@
           >No groups yet. Create one to choose its first owners.</EmptyState
         >
       {:else}<div class="table-scroll">
-          <table class="grid groups-grid" aria-label="Groups">
+          <table class="table table--fixed table--interactive groups-grid" aria-label="Groups">
             <thead
               ><tr
-                ><th scope="col">Group</th><th scope="col" class="col-kind">Kind</th><th
-                  scope="col"
-                  class="col-created">Created</th
-                ><th scope="col" class="col-status">Status</th></tr
+                ><th scope="col" class="col-group">Group</th><th scope="col" class="col-kind"
+                  >Kind</th
+                ><th scope="col" class="col-created">Created</th><th scope="col" class="col-status"
+                  >Status</th
+                ></tr
               ></thead
             >
             <tbody>
@@ -269,7 +270,7 @@
                 <!-- The row is a shortcut; the name button is the keyboard route. -->
                 <tr
                   class="row-clickable"
-                  class:selected={item.group_id === selected}
+                  class:is-selected={item.group_id === selected}
                   class:archived={item.archived_at}
                   onclick={() => !busy && selection.push(item.group_id)}
                 >
@@ -382,7 +383,7 @@
       <SettingsCard title="Membership history">
         {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState>{:else}
           <div class="table-scroll">
-            <table class="grid" aria-label="Membership history">
+            <table class="table table--fixed" aria-label="Membership history">
               <thead
                 ><tr
                   ><th scope="col">Member</th><th scope="col" class="col-role">Role</th><th
@@ -520,13 +521,6 @@
   .row-clickable {
     cursor: pointer;
   }
-  .row-clickable:hover,
-  .row-clickable.selected {
-    background: var(--hover-bg);
-  }
-  .row-clickable.selected td:first-child {
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
   .row-clickable.archived .group-name {
     color: var(--text-muted);
   }
@@ -535,6 +529,11 @@
     font-weight: var(--weight-medium);
     text-align: left;
     overflow-wrap: anywhere;
+  }
+  /* Group is the unsized column: the min-width reserves it 10rem past the
+     sized ones, and adminTables.test.ts holds the sum. */
+  .groups-grid {
+    min-width: 33rem;
   }
   .col-kind,
   .col-role {
@@ -577,6 +576,9 @@
     font-size: var(--text-sm);
   }
   @container settings (max-width: 40rem) {
+    .groups-grid {
+      min-width: 18rem;
+    }
     .col-created,
     .col-kind {
       display: none;

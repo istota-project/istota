@@ -160,28 +160,32 @@
   {:else if shown.length === 0 && previewed}
     <p class="caption">Nothing to invoice for these filters.</p>
   {:else if shown.length > 0}
-    <div class="preview" role="table" aria-label="Invoices">
-      <div class="preview-row preview-head caption" role="row">
-        <span role="columnheader">Invoice</span>
-        <span role="columnheader">Client</span>
-        <span role="columnheader">Group</span>
-        <span role="columnheader">Entries</span>
-        <span role="columnheader" class="total">Total</span>
-      </div>
-      {#each shown as inv (inv.invoice_number)}
-        <div class="preview-row" role="row">
-          <span role="cell" class="number">{inv.invoice_number}</span>
-          <span role="cell">{inv.client}</span>
-          <span role="cell">{inv.group}</span>
-          <span role="cell" class="entries">
-            {#each inv.entry_descriptions as description, i (i)}
-              <span>{description || '(no description)'}</span>
-            {/each}
-          </span>
-          <span role="cell" class="total">${formatAmount(inv.total)}</span>
-        </div>
-      {/each}
-    </div>
+    <table class="table table--fixed table--dense table--flush preview" aria-label="Invoices">
+      <thead>
+        <tr>
+          <th scope="col" class="col-number">Invoice</th>
+          <th scope="col" class="col-client">Client</th>
+          <th scope="col" class="col-group">Group</th>
+          <th scope="col" class="col-entries">Entries</th>
+          <th scope="col" class="col-total num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each shown as inv (inv.invoice_number)}
+          <tr>
+            <td class="col-number number">{inv.invoice_number}</td>
+            <td class="col-client">{inv.client}</td>
+            <td class="col-group">{inv.group}</td>
+            <td class="col-entries entries">
+              {#each inv.entry_descriptions as description, i (i)}
+                <span>{description || '(no description)'}</span>
+              {/each}
+            </td>
+            <td class="col-total num">${formatAmount(inv.total)}</td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   {/if}
 
   {#if step !== 'filters'}
@@ -218,18 +222,28 @@
 </Modal>
 
 <style>
+  /* Half the table's inline padding, so neighbouring cells sit a --space-2
+     apart, as the grid this was before set them. Client and Group share what
+     the fixed columns leave with Entries, which gets the larger share. */
   .preview {
-    display: flex;
-    flex-direction: column;
+    --table-cell-px: var(--space-1);
   }
 
-  .preview-row {
-    display: grid;
-    grid-template-columns: 6.5rem minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr) 5.5rem;
-    gap: var(--space-2);
-    padding: var(--space-1) 0;
-    border-bottom: 1px solid var(--border-subtle);
-    align-items: baseline;
+  .preview td {
+    vertical-align: baseline;
+    overflow-wrap: anywhere;
+  }
+
+  .col-number {
+    width: 6.5rem;
+  }
+
+  .col-entries {
+    width: 35%;
+  }
+
+  .col-total {
+    width: 5.5rem;
   }
 
   .number {
@@ -243,11 +257,6 @@
     color: var(--text-secondary);
   }
 
-  .total {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-
   .notice {
     margin: var(--space-3) 0 0;
   }
@@ -257,11 +266,17 @@
   }
 
   @media (max-width: 640px) {
-    .preview-row {
-      grid-template-columns: 6rem minmax(0, 1fr) 5rem;
+    .col-number {
+      width: 6rem;
     }
-    .preview-row > :nth-child(2),
-    .preview-row > :nth-child(3) {
+    .col-entries {
+      width: auto;
+    }
+    .col-total {
+      width: 5rem;
+    }
+    .col-client,
+    .col-group {
       display: none;
     }
   }

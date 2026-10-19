@@ -126,7 +126,7 @@
     <datalist id="portfolio-account-groups">
       {#each groupSuggestions as g (g)}<option value={g}></option>{/each}
     </datalist>
-    <ul class="list-reset">
+    <ul class="divided-list">
       {#each rows as row (row.account.id)}
         <li class="account-row" class:excluded={row.excluded}>
           <div class="account-head">
@@ -172,14 +172,6 @@
 <style>
   .card-hint {
     margin: 0 0 var(--space-2);
-  }
-
-  .account-row {
-    padding: var(--space-2) 0;
-  }
-
-  .account-row + .account-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   .account-head {

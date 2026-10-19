@@ -521,7 +521,7 @@
         <EmptyState>No rules in this scope yet.</EmptyState>
       {/if}
     {:else}
-      <ul class="list-reset">
+      <ul class="divided-list">
         {#each rules as rule (rule.id)}
           <li class="rule-row" class:off={!rule.enabled}>
             {#if editingId === rule.id}
@@ -709,14 +709,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-  }
-
-  .rule-row {
-    padding: var(--space-2) 0;
-  }
-
-  .rule-row + .rule-row {
-    border-top: 1px solid var(--border-subtle);
   }
 
   /* A disabled rule stays in the list — the editor has to show it — and reads

@@ -1,6 +1,7 @@
 /* Shared styles for settings pages — /settings, /feeds/settings, /money/settings.
    Pages declare a wrapper element with class="settings" and use the
-   .card / .section-header / .grid primitives below.
+   .card / .section-header primitives below. Tables are the global `.table`
+   family in table.css.
 
    Form rows are NOT here: `.field` moved to ui/Field.svelte, which is also
    what styles a bare <input> a caller passes into it. A settings page reaches
@@ -105,42 +106,6 @@
 }
 .settings .status-pill.status-unavailable {
   color: var(--text-dim);
-}
-
-.settings .table-scroll {
-  width: 100%;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-.settings .grid {
-  width: 100%;
-  table-layout: fixed;
-  border-collapse: collapse;
-  font-size: var(--text-sm);
-}
-
-.settings .grid th,
-.settings .grid td {
-  text-align: left;
-  padding: var(--space-2) var(--space-2);
-  border-bottom: 1px solid var(--border-subtle);
-  vertical-align: middle;
-}
-
-.settings .grid th {
-  color: var(--text-dim);
-  font-weight: var(--weight-medium);
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-caps);
-}
-
-.settings .grid td.actions,
-.settings .grid th.actions {
-  text-align: right;
-  width: 3rem;
-  white-space: nowrap;
 }
 
 @media (max-width: 768px) {
