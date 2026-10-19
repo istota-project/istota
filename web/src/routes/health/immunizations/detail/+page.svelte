@@ -22,9 +22,9 @@
     FormStack,
     Select,
     type SelectOption,
-    PageLoading,
     Input,
     TextArea,
+    LoadState,
   } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
@@ -111,165 +111,161 @@
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
-       this header. -->
-  <div class="header">
-    <h1 class="title-page">Immunization detail</h1>
-    <div class="actions">
-      <Button href="{base}/health/immunizations">Back</Button>
-      {#if immunization}
-        <Button
-          href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
-        >
-          View all {immunization.name}
-        </Button>
-        <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
-      {/if}
+<LoadState {loading} {error} empty={!immunization}>
+  {#snippet header()}
+    <div class="header">
+      <h1 class="title-page">Immunization detail</h1>
+      <div class="actions">
+        <Button href="{base}/health/immunizations">Back</Button>
+        {#if immunization}
+          <Button
+            href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
+          >
+            View all {immunization.name}
+          </Button>
+          <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
+        {/if}
+      </div>
     </div>
-  </div>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if immunization}
-  <Card as="div">
-    <FormStack as="form" onsubmit={save}>
-      <FormGrid>
-        <Field label="Vaccine name">
-          <Input type="text" bind:value={immunization.name} required />
-        </Field>
-        <Field label="Date given">
-          <Input type="date" bind:value={immunization.date_given} required />
-        </Field>
-        <Field label="Product">
-          <Input
-            type="text"
-            value={immunization.product_name ?? ''}
+  {/snippet}
+  {#snippet emptyState()}
+    <EmptyState>Immunization not found.</EmptyState>
+  {/snippet}
+  {#if immunization}
+    <Card as="div">
+      <FormStack as="form" onsubmit={save}>
+        <FormGrid>
+          <Field label="Vaccine name">
+            <Input type="text" bind:value={immunization.name} required />
+          </Field>
+          <Field label="Date given">
+            <Input type="date" bind:value={immunization.date_given} required />
+          </Field>
+          <Field label="Product">
+            <Input
+              type="text"
+              value={immunization.product_name ?? ''}
+              oninput={(e) =>
+                (immunization!.product_name = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Manufacturer">
+            <Input
+              type="text"
+              value={immunization.manufacturer ?? ''}
+              oninput={(e) =>
+                (immunization!.manufacturer = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Dose label">
+            <Input
+              type="text"
+              value={immunization.dose_label ?? ''}
+              oninput={(e) =>
+                (immunization!.dose_label = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Lot number">
+            <Input
+              type="text"
+              value={immunization.lot_number ?? ''}
+              oninput={(e) =>
+                (immunization!.lot_number = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Route">
+            <Select
+              value={immunization.route ?? ''}
+              options={routeOptions}
+              onValueChange={(v) => {
+                if (immunization) immunization.route = v || null;
+              }}
+              ariaLabel="Route"
+              fullWidth
+            />
+          </Field>
+          <Field label="Site">
+            <Input
+              type="text"
+              value={immunization.site ?? ''}
+              oninput={(e) =>
+                (immunization!.site = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Administered by">
+            <Input
+              type="text"
+              value={immunization.administered_by ?? ''}
+              oninput={(e) =>
+                (immunization!.administered_by =
+                  (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="Facility">
+            <Input
+              type="text"
+              value={immunization.facility ?? ''}
+              oninput={(e) =>
+                (immunization!.facility = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+          <Field label="CVX code">
+            <Input
+              type="text"
+              value={immunization.cvx_code ?? ''}
+              oninput={(e) =>
+                (immunization!.cvx_code = (e.currentTarget as HTMLInputElement).value || null)}
+            />
+          </Field>
+        </FormGrid>
+        <Field label="Notes">
+          <TextArea
+            rows={3}
+            value={immunization.notes ?? ''}
             oninput={(e) =>
-              (immunization!.product_name = (e.currentTarget as HTMLInputElement).value || null)}
+              (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
           />
         </Field>
-        <Field label="Manufacturer">
-          <Input
-            type="text"
-            value={immunization.manufacturer ?? ''}
-            oninput={(e) =>
-              (immunization!.manufacturer = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Dose label">
-          <Input
-            type="text"
-            value={immunization.dose_label ?? ''}
-            oninput={(e) =>
-              (immunization!.dose_label = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Lot number">
-          <Input
-            type="text"
-            value={immunization.lot_number ?? ''}
-            oninput={(e) =>
-              (immunization!.lot_number = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Route">
-          <Select
-            value={immunization.route ?? ''}
-            options={routeOptions}
-            onValueChange={(v) => {
-              if (immunization) immunization.route = v || null;
-            }}
-            ariaLabel="Route"
-            fullWidth
-          />
-        </Field>
-        <Field label="Site">
-          <Input
-            type="text"
-            value={immunization.site ?? ''}
-            oninput={(e) =>
-              (immunization!.site = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Administered by">
-          <Input
-            type="text"
-            value={immunization.administered_by ?? ''}
-            oninput={(e) =>
-              (immunization!.administered_by = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="Facility">
-          <Input
-            type="text"
-            value={immunization.facility ?? ''}
-            oninput={(e) =>
-              (immunization!.facility = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-        <Field label="CVX code">
-          <Input
-            type="text"
-            value={immunization.cvx_code ?? ''}
-            oninput={(e) =>
-              (immunization!.cvx_code = (e.currentTarget as HTMLInputElement).value || null)}
-          />
-        </Field>
-      </FormGrid>
-      <Field label="Notes">
-        <TextArea
-          rows={3}
-          value={immunization.notes ?? ''}
-          oninput={(e) =>
-            (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
-        />
-      </Field>
-      <div class="caption">
-        Source: {immunization.source}
-        {#if immunization.created_at}
-          · Created: {immunization.created_at}
-        {/if}
-      </div>
-      {#if formError}
-        <div class="banner error">{formError}</div>
-      {/if}
-      <div class="form-actions">
-        <Button variant="primary" type="submit" loading={saving}>Save</Button>
-      </div>
-    </FormStack>
-  </Card>
-
-  <section class="linked">
-    <h2 class="micro-label">Proof of immunization</h2>
-    <DocumentList entityType="immunization" entityId={immunization.id} {documents} />
-  </section>
-
-  {#if encounter}
-    <section class="linked">
-      <h2 class="micro-label">Linked encounter</h2>
-      <Card href="{base}/health/history/encounter?id={encounter.id}">
-        <div class="card-head">
-          <Badge>{encounter.encounter_type}</Badge>
-          <span class="date caption">{encounter.encounter_date}</span>
+        <div class="caption">
+          Source: {immunization.source}
+          {#if immunization.created_at}
+            · Created: {immunization.created_at}
+          {/if}
         </div>
-        {#if encounter.provider || encounter.facility}
-          <div class="caption">
-            {encounter.provider || ''}{encounter.provider && encounter.facility
-              ? ' · '
-              : ''}{encounter.facility || ''}
-          </div>
+        {#if formError}
+          <div class="banner error">{formError}</div>
         {/if}
-      </Card>
+        <div class="form-actions">
+          <Button variant="primary" type="submit" loading={saving}>Save</Button>
+        </div>
+      </FormStack>
+    </Card>
+
+    <section class="linked">
+      <h2 class="micro-label">Proof of immunization</h2>
+      <DocumentList entityType="immunization" entityId={immunization.id} {documents} />
     </section>
+
+    {#if encounter}
+      <section class="linked">
+        <h2 class="micro-label">Linked encounter</h2>
+        <Card href="{base}/health/history/encounter?id={encounter.id}">
+          <div class="card-head">
+            <Badge>{encounter.encounter_type}</Badge>
+            <span class="date caption">{encounter.encounter_date}</span>
+          </div>
+          {#if encounter.provider || encounter.facility}
+            <div class="caption">
+              {encounter.provider || ''}{encounter.provider && encounter.facility
+                ? ' · '
+                : ''}{encounter.facility || ''}
+            </div>
+          {/if}
+        </Card>
+      </section>
+    {/if}
   {/if}
-{:else}
-  <EmptyState>Immunization not found.</EmptyState>
-{/if}
+</LoadState>
 
 <ConfirmDialog
   bind:open={confirmDelete}

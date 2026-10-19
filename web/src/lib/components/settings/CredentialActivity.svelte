@@ -26,7 +26,7 @@
       >Refresh</Button
     >{/snippet}
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  {#if busy && !rows.length}<p>Loading activity…</p>
+  {#if busy && !rows.length}<p class="caption">Loading activity…</p>
   {:else if !rows.length}<p>No credential activity yet.</p>
   {:else}
     <ul>

@@ -192,7 +192,7 @@
   status={statusPill}
 >
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="caption">Loading…</p>
   {:else if !status}
     <EmptyState>Google status is unavailable.</EmptyState>
   {:else if !status.enabled}

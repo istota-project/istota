@@ -163,7 +163,7 @@
   description="Enabled categories send alerts and count toward the app badge. These choices do not change your inbox, its bell count or delivery to email and Talk."
 >
   {#if categoriesLoading}
-    <p class="description">Loading categories…</p>
+    <p class="caption">Loading categories…</p>
   {:else if categoriesError}
     <p class="banner error" role="alert">{categoriesError}</p>
     <Button variant="secondary" size="sm" onclick={loadCategories}>Retry categories</Button>
@@ -214,7 +214,7 @@
   <p class="description">iOS notification settings control whether alerts appear on each device.</p>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}
   {#if loading}
-    <p class="description">Loading devices…</p>
+    <p class="caption">Loading devices…</p>
   {:else if devices.length}
     <ul class="devices">
       {#each devices as device (device.id)}

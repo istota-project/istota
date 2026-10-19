@@ -24,10 +24,10 @@
     Select,
     type KebabItem,
     type SelectOption,
-    PageLoading,
     Input,
     TextArea,
     Chip,
+    LoadState,
   } from '$lib/components/ui';
   import {
     encounterOptionLabel,
@@ -403,11 +403,7 @@
   </li>
 {/snippet}
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <section>
     <h2 class="micro-label">Active <span class="count">{active.length}</span></h2>
     {#if active.length === 0}
@@ -453,7 +449,7 @@
       {/if}
     {/if}
   </section>
-{/if}
+</LoadState>
 
 {#if documentsFor}
   <Modal

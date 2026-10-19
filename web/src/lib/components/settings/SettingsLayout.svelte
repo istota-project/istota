@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PageLoading } from '$lib/components/ui';
+  import { LoadState } from '$lib/components/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -50,9 +50,7 @@
     <div class="banner info">{info}</div>
   {/if}
 
-  {#if loading}
-    <PageLoading />
-  {:else}
+  <LoadState {loading}>
     {@render children()}
-  {/if}
+  </LoadState>
 </div>

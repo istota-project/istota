@@ -46,7 +46,7 @@
   }}
 >
   {#if error}<p class="form-error" role="alert">{error}</p>{/if}
-  {#if loading}<p>Loading history…</p>
+  {#if loading}<p class="caption">Loading history…</p>
   {:else if !rows.length}<p>No saved versions.</p>
   {:else}
     <p>Restoring replaces the current fields. Their current values are kept in history.</p>

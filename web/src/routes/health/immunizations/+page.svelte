@@ -25,9 +25,9 @@
     KebabMenu,
     Select,
     type SelectOption,
-    PageLoading,
     Input,
     TextArea,
+    LoadState,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
@@ -230,11 +230,7 @@
   </div>
 {/if}
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <section class="coverage">
     <h2 class="micro-label">Coverage</h2>
     <ul class="cards card-grid">
@@ -399,7 +395,7 @@
       </div>
     {/if}
   </section>
-{/if}
+</LoadState>
 
 <ConfirmDialog
   bind:open={deleteTargetId.open}

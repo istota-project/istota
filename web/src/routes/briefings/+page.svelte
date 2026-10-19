@@ -22,7 +22,7 @@
   } from '$lib/stores/briefings';
   import GroupEdition from '$lib/components/briefings/GroupEdition.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
-  import { Button, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
+  import { Button, EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
 
   let groupTarget = $state<BriefingTarget | null>(null);
   $effect(() => {
@@ -192,43 +192,49 @@
         selection={$selectedGroupEdition}
         groupLabel={groupTarget?.label ?? $selectedGroupEdition.group}
       />{/key}
-  {:else if loading}
-    <PageLoading />
-  {:else if error}
-    <p class="center-msg error">{error}</p>
-  {:else if current}
-    {#if readErrorId === current.id && current.id === $selectedBriefingId && !loading}
-      <div class="banner error" role="alert">
-        Could not mark this briefing as read.
-        <Button size="sm" onclick={() => acknowledgeRead(current!.id)}>Retry</Button>
-      </div>
-    {/if}
-    {#key current.id}<BriefingEdition edition={current} {editableBlockIds} onEditBlock={editBlock}>
-        {#snippet actions()}
-          <KebabMenu
-            ariaLabel="Briefing actions"
-            items={[
-              { label: 'Delete', danger: true, onSelect: () => briefingDeleteRequest.set(current) },
-            ]}
-          />
-        {/snippet}
-      </BriefingEdition>{/key}
-  {:else if $briefingArchiveCount === null}
-    <PageLoading />
-  {:else if $briefingArchiveError}
-    <!-- Ahead of the empty state and behind everything else: a briefing already
-         on screen stays readable through a failed refresh, but an archive that
-         could not be fetched must not read as an archive with nothing in it. -->
-    <p class="center-msg error">{$briefingArchiveError}</p>
   {:else}
-    <EmptyState
-      title="No briefings yet"
-      actionLabel="Set up briefings"
-      actionHref="{base}/briefings/settings"
-    >
-      Once a scheduled briefing runs it will appear here. The schedule and content blocks are set up
-      in settings.
-    </EmptyState>
+    <LoadState {loading} {error}>
+      {#if current}
+        {#if readErrorId === current.id && current.id === $selectedBriefingId && !loading}
+          <div class="banner error" role="alert">
+            Could not mark this briefing as read.
+            <Button size="sm" onclick={() => acknowledgeRead(current!.id)}>Retry</Button>
+          </div>
+        {/if}
+        {#key current.id}<BriefingEdition
+            edition={current}
+            {editableBlockIds}
+            onEditBlock={editBlock}
+          >
+            {#snippet actions()}
+              <KebabMenu
+                ariaLabel="Briefing actions"
+                items={[
+                  {
+                    label: 'Delete',
+                    danger: true,
+                    onSelect: () => briefingDeleteRequest.set(current),
+                  },
+                ]}
+              />
+            {/snippet}
+          </BriefingEdition>{/key}
+      {:else}
+        <!-- Ahead of the empty state and behind everything else: a briefing already
+             on screen stays readable through a failed refresh, but an archive that
+             could not be fetched must not read as an archive with nothing in it. -->
+        <LoadState loading={$briefingArchiveCount === null} error={$briefingArchiveError}>
+          <EmptyState
+            title="No briefings yet"
+            actionLabel="Set up briefings"
+            actionHref="{base}/briefings/settings"
+          >
+            Once a scheduled briefing runs it will appear here. The schedule and content blocks are
+            set up in settings.
+          </EmptyState>
+        </LoadState>
+      {/if}
+    </LoadState>
   {/if}
 </div>
 

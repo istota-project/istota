@@ -24,8 +24,8 @@
     NoticeBanner,
     KebabMenu,
     type KebabItem,
-    PageLoading,
     SortHeader,
+    LoadState,
   } from '$lib/components/ui';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
   import GenerateInvoicesDialog from '$lib/components/money/GenerateInvoicesDialog.svelte';
@@ -279,72 +279,64 @@
 </script>
 
 <div class="invoices-content">
-  <!-- Held back behind both whole-pane states, so the pane shows nothing but
-       the centered message. The bar used to stay put (with only its count
-       dropped) to stop the table shifting up and back down on a reload; that
-       shift cannot happen now, because the table is not on screen while
-       loading — bar and table arrive together. On error the count is also a
-       lie: it reports 0 invoices of a list that failed to load. -->
-  {#if !loading && !error}
-    <div class="money-toolbar control-row">
-      <span class="money-result-count"
-        >{invoiceCount} invoices ({outstandingCount} outstanding)</span
-      >
-      <div class="hstack">
-        <Button variant="secondary" onclick={() => (manualOpen = true)}>New manual invoice</Button>
-        <Button variant="primary" onclick={() => (generateOpen = true)}>Generate invoices</Button>
-        <KebabMenu items={workExportItems()} icon={Download} ariaLabel="Download work log" />
+  <LoadState {loading} {error} empty={invoices.length === 0}>
+    {#snippet header()}
+      <div class="money-toolbar control-row">
+        <span class="money-result-count"
+          >{invoiceCount} invoices ({outstandingCount} outstanding)</span
+        >
+        <div class="hstack">
+          <Button variant="secondary" onclick={() => (manualOpen = true)}>New manual invoice</Button
+          >
+          <Button variant="primary" onclick={() => (generateOpen = true)}>Generate invoices</Button>
+          <KebabMenu items={workExportItems()} icon={Download} ariaLabel="Download work log" />
+        </div>
       </div>
-    </div>
-  {/if}
-
-  {#if !loading && !error && reviews.length > 0}
-    <div class="money-notice-bar">
-      <NoticeBanner
-        title={`Payments to review (${reviews.length})`}
-        bind:collapsed={reviewsCollapsed}
-      >
-        {#each reviews as review (review.ledger_txn_id)}
-          <div class="payment-review">
-            <p>${formatAmount(review.amount)} on {formatDate(review.txn_date)} — {review.payee}</p>
-            <p class="muted">{review.account}</p>
-            <div class="review-actions">
-              {#each review.candidate_details as candidate (candidate.invoice_number)}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  disabled={!!busyReview}
-                  onclick={() => handleReview(review, candidate.invoice_number)}
-                >
-                  Settle {candidate.invoice_number} ({candidate.client}, ${formatAmount(
-                    candidate.total,
-                  )})
-                </Button>
-              {/each}
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={!!busyReview}
-                onclick={() => handleReview(review)}
-              >
-                Not an invoice payment
-              </Button>
-            </div>
-            {#if busyReview === review.ledger_txn_id}<p role="status">Saving…</p>{/if}
-          </div>
-        {/each}
-        {#if reviewError}<p class="form-error" role="alert">{reviewError}</p>{/if}
-      </NoticeBanner>
-    </div>
-  {/if}
-
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if invoices.length === 0}
-    <EmptyState>No invoices found.</EmptyState>
-  {:else}
+      {#if reviews.length > 0}
+        <div class="money-notice-bar">
+          <NoticeBanner
+            title={`Payments to review (${reviews.length})`}
+            bind:collapsed={reviewsCollapsed}
+          >
+            {#each reviews as review (review.ledger_txn_id)}
+              <div class="payment-review">
+                <p>
+                  ${formatAmount(review.amount)} on {formatDate(review.txn_date)} — {review.payee}
+                </p>
+                <p class="muted">{review.account}</p>
+                <div class="review-actions">
+                  {#each review.candidate_details as candidate (candidate.invoice_number)}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!!busyReview}
+                      onclick={() => handleReview(review, candidate.invoice_number)}
+                    >
+                      Settle {candidate.invoice_number} ({candidate.client}, ${formatAmount(
+                        candidate.total,
+                      )})
+                    </Button>
+                  {/each}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!!busyReview}
+                    onclick={() => handleReview(review)}
+                  >
+                    Not an invoice payment
+                  </Button>
+                </div>
+                {#if busyReview === review.ledger_txn_id}<p role="status">Saving…</p>{/if}
+              </div>
+            {/each}
+            {#if reviewError}<p class="form-error" role="alert">{reviewError}</p>{/if}
+          </NoticeBanner>
+        </div>
+      {/if}
+    {/snippet}
+    {#snippet emptyState()}
+      <EmptyState>No invoices found.</EmptyState>
+    {/snippet}
     <div class="record-list">
       <div class="record-header micro-label">
         <SortHeader
@@ -451,7 +443,7 @@
         {/if}
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if voiding}

@@ -8,7 +8,7 @@
     type GroupBriefingRun,
     type BriefingDelivery,
   } from '$lib/api';
-  import { PageLoading } from '$lib/components/ui';
+  import { LoadState } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import type { GroupEditionSelection } from '$lib/stores/briefings';
   import BriefingEdition from './BriefingEdition.svelte';
@@ -67,37 +67,38 @@
   });
 </script>
 
-{#if loading && !run}
-  <PageLoading />
-{:else if error && !run}
-  <p class="center-msg error">{error}</p>
-{:else if run && definition}
-  {#if error}<div class="banner error" role="alert">{error}</div>{/if}
-  <BriefingEdition
-    showMetadata={false}
-    edition={{
-      id: run.id,
-      briefing_name: definition.name,
-      subject: run.subject ?? definition.title,
-      body_md: run.body_md,
-      document: run.document ?? null,
-      read_at: null,
-      generated_at: run.published_at || run.created_at || '',
-      task_id: null,
-      delivered_to: [],
-    }}
-  >
-    {#snippet meta()}
-      {@const at = run!.published_at || run!.created_at || ''}
-      <p class="caption edition-meta">
-        <span class="group-label"><Users size={13} aria-hidden="true" />{groupLabel}</span>
-        <time datetime={at}>{formatDateTime(at, { dateStyle: 'medium', timeStyle: 'short' })}</time>
-        {#if !definition!.deleted}<span>Delivered by {channelLabel(definition!.channel)}</span>{/if}
-        {#if summary}<span>{summary}</span>{/if}
-      </p>
-    {/snippet}
-  </BriefingEdition>
-{/if}
+<LoadState loading={loading && !run} error={run ? null : error}>
+  {#if run && definition}
+    {#if error}<div class="banner error" role="alert">{error}</div>{/if}
+    <BriefingEdition
+      showMetadata={false}
+      edition={{
+        id: run.id,
+        briefing_name: definition.name,
+        subject: run.subject ?? definition.title,
+        body_md: run.body_md,
+        document: run.document ?? null,
+        read_at: null,
+        generated_at: run.published_at || run.created_at || '',
+        task_id: null,
+        delivered_to: [],
+      }}
+    >
+      {#snippet meta()}
+        {@const at = run!.published_at || run!.created_at || ''}
+        <p class="caption edition-meta">
+          <span class="group-label"><Users size={13} aria-hidden="true" />{groupLabel}</span>
+          <time datetime={at}
+            >{formatDateTime(at, { dateStyle: 'medium', timeStyle: 'short' })}</time
+          >
+          {#if !definition!.deleted}<span>Delivered by {channelLabel(definition!.channel)}</span
+            >{/if}
+          {#if summary}<span>{summary}</span>{/if}
+        </p>
+      {/snippet}
+    </BriefingEdition>
+  {/if}
+</LoadState>
 
 <style>
   .group-label {

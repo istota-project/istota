@@ -49,7 +49,7 @@
     Select,
     type KebabItem,
     type SelectOption,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
   import {
     attachOptions,
@@ -369,61 +369,53 @@
   });
 </script>
 
-{#if !loading && !loadError}
-  <!-- Held back while loading so the pane centres its message rather than
-       centring it in the space left under this header. -->
-  <div class="header">
-    <div>
-      <h1 class="title-page">Documents</h1>
-      <p class="sub caption">
-        <!-- Never "N on file" once the walk stopped early: the count would be
-             a claim about the store rather than about what is loaded. -->
-        {#if truncated.documents}
-          showing the {documents.length} most recent
-        {:else}
-          {documents.length}
-          {documents.length === 1 ? 'document' : 'documents'} on file
-        {/if}
-      </p>
+<LoadState {loading} error={loadError} empty={rows.length === 0}>
+  {#snippet header()}
+    <div class="header">
+      <div>
+        <h1 class="title-page">Documents</h1>
+        <p class="sub caption">
+          <!-- Never "N on file" once the walk stopped early: the count would be
+               a claim about the store rather than about what is loaded. -->
+          {#if truncated.documents}
+            showing the {documents.length} most recent
+          {:else}
+            {documents.length}
+            {documents.length === 1 ? 'document' : 'documents'} on file
+          {/if}
+        </p>
+      </div>
+      {#if unattachedCount > 0 || unattachedOnly}
+        <!-- Rendered while the filter is on even at zero, so turning it off is
+             always reachable. `aria-pressed` because `checked` only draws the
+             state; see the Chip component's own note. -->
+        <Chip
+          checked={unattachedOnly}
+          aria-pressed={unattachedOnly}
+          onclick={() => (unattachedOnly = !unattachedOnly)}
+        >
+          {unattachedCount} unattached
+        </Chip>
+      {/if}
     </div>
-    {#if unattachedCount > 0 || unattachedOnly}
-      <!-- Rendered while the filter is on even at zero, so turning it off is
-           always reachable. `aria-pressed` because `checked` only draws the
-           state; see the Chip component's own note. -->
-      <Chip
-        checked={unattachedOnly}
-        aria-pressed={unattachedOnly}
-        onclick={() => (unattachedOnly = !unattachedOnly)}
-      >
-        {unattachedCount} unattached
-      </Chip>
+    {#if pageNotice}
+      <div class="page-notice">
+        <NoticeBanner title="Some records are not shown" variant="warn" collapsed={false}
+          >{pageNotice}</NoticeBanner
+        >
+      </div>
     {/if}
-  </div>
-{/if}
-
-<!-- Held back on a load failure alongside the header above it: that branch
-     replaces the pane, so there is no table and no picker for this to be
-     about, and the flags are whatever the last successful load left. -->
-{#if pageNotice && !loadError}
-  <div class="page-notice">
-    <NoticeBanner title="Some records are not shown" variant="warn" collapsed={false}
-      >{pageNotice}</NoticeBanner
-    >
-  </div>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if loadError}
-  <div class="center-msg error">{loadError}</div>
-{:else if documents.length === 0}
-  <EmptyState>
-    Nothing uploaded yet. Documents attach to a visit, a condition or a vaccination from those
-    pages, and every one of them shows up here.
-  </EmptyState>
-{:else if rows.length === 0}
-  <EmptyState>Every document is attached to a record.</EmptyState>
-{:else}
+  {/snippet}
+  {#snippet emptyState()}
+    {#if documents.length === 0}
+      <EmptyState>
+        Nothing uploaded yet. Documents attach to a visit, a condition or a vaccination from those
+        pages, and every one of them shows up here.
+      </EmptyState>
+    {:else}
+      <EmptyState>Every document is attached to a record.</EmptyState>
+    {/if}
+  {/snippet}
   <div class="table-scroll table--cards" class:refreshing bind:this={documentList}>
     <!-- svelte-ignore a11y_no_redundant_roles (Explicit roles preserve table semantics when Safari lays out rows as grids.) -->
     <table class="table table--flush documents-grid" aria-label="Health documents" role="table">
@@ -504,7 +496,7 @@
       </tbody>
     </table>
   </div>
-{/if}
+</LoadState>
 
 {#if attachFor}
   <FormModal

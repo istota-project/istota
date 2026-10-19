@@ -12,7 +12,7 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, Button, Card, EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, Card, EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -70,133 +70,129 @@
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
-       this header. -->
-  <div class="header">
-    <h1 class="title-page">{ref?.display_name || name}</h1>
-    <Button href="{base}/health/immunizations">Back</Button>
-  </div>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if !ref}
-  <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState>
-{:else}
-  <div class="vaccine">
-    <Card class="coverage-card">
-      {#if entry}
-        <div class="status-row">
-          <Badge variant={immunizationStatusVariant(entry.status)}
-            >{immunizationStatusLabel(entry.status)}</Badge
-          >
-          <span class="caption">{ref.category} · {ref.schedule}</span>
-        </div>
-        <dl class="kv-stacked">
-          <div>
-            <dt>Last given</dt>
-            <dd>{formatDate(entry.last_given)}</dd>
+<LoadState {loading} {error} empty={!ref}>
+  {#snippet header()}
+    <div class="header">
+      <h1 class="title-page">{ref?.display_name || name}</h1>
+      <Button href="{base}/health/immunizations">Back</Button>
+    </div>
+  {/snippet}
+  {#snippet emptyState()}
+    <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState
+    >
+  {/snippet}
+  {#if ref}
+    <div class="vaccine">
+      <Card class="coverage-card">
+        {#if entry}
+          <div class="status-row">
+            <Badge variant={immunizationStatusVariant(entry.status)}
+              >{immunizationStatusLabel(entry.status)}</Badge
+            >
+            <span class="caption">{ref.category} · {ref.schedule}</span>
           </div>
-          <div>
-            <dt>Doses recorded</dt>
-            <dd>{entry.dose_count}</dd>
-          </div>
-          <div>
-            <dt>Next due</dt>
-            <dd>{formatDate(entry.next_due)}</dd>
-          </div>
-          {#if entry.days_until_due !== null}
+          <dl class="kv-stacked">
             <div>
-              <dt>
-                {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
-              </dt>
-              <dd>{Math.abs(entry.days_until_due)}</dd>
+              <dt>Last given</dt>
+              <dd>{formatDate(entry.last_given)}</dd>
             </div>
-          {/if}
-        </dl>
-      {/if}
-      {#if ref.description}
-        <p class="ref-description">{ref.description}</p>
-      {/if}
-      {#if ref.typical_age_range}
-        <p class="caption">Typical age range: {ref.typical_age_range}</p>
-      {/if}
-    </Card>
-
-    {#if explainerLoading}
-      <Card class="coverage-card explainer-placeholder">
-        <h2 class="micro-label">About this vaccine</h2>
-        <p class="muted">Loading…</p>
+            <div>
+              <dt>Doses recorded</dt>
+              <dd>{entry.dose_count}</dd>
+            </div>
+            <div>
+              <dt>Next due</dt>
+              <dd>{formatDate(entry.next_due)}</dd>
+            </div>
+            {#if entry.days_until_due !== null}
+              <div>
+                <dt>
+                  {entry.days_until_due < 0 ? 'Days overdue' : 'Days until due'}
+                </dt>
+                <dd>{Math.abs(entry.days_until_due)}</dd>
+              </div>
+            {/if}
+          </dl>
+        {/if}
+        {#if ref.description}
+          <p class="ref-description">{ref.description}</p>
+        {/if}
+        {#if ref.typical_age_range}
+          <p class="caption">Typical age range: {ref.typical_age_range}</p>
+        {/if}
       </Card>
-    {:else if explainer && explainer.summary}
-      <details class="explainer">
-        <summary>
-          <span class="label micro-label">About this vaccine</span>
-          <span class="chev" aria-hidden="true">›</span>
-        </summary>
-        <div class="content">
-          <p class="summary">{explainer.summary}</p>
-          {#if explainer.why_it_matters.length > 0}
-            <h3 class="micro-label">Why it matters</h3>
-            <ul>
-              {#each explainer.why_it_matters as item (item)}
-                <li>{item}</li>
-              {/each}
-            </ul>
-          {/if}
-          {#if explainer.disclaimer}
-            <p class="disclaimer">{explainer.disclaimer}</p>
-          {/if}
-        </div>
-      </details>
-    {/if}
 
-    <section class="history">
-      <h2 class="micro-label">Dose history</h2>
-      {#if history.length === 0}
-        <EmptyState size="sm">No doses recorded yet.</EmptyState>
-      {:else}
-        <div class="table-scroll">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Product</th>
-                <th>Dose label</th>
-                <th>Facility</th>
-                <th>Notes</th>
-                <th class="col-actions"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each history as i (i.id)}
-                <tr>
-                  <td>{formatDate(i.date_given)}</td>
-                  <td>{i.product_name || '—'}</td>
-                  <td>{i.dose_label || '—'}</td>
-                  <td>{i.facility || '—'}</td>
-                  <td class="notes cell-truncate">{i.notes || '—'}</td>
-                  <td class="col-actions">
-                    <KebabMenu
-                      ariaLabel="Immunization actions"
-                      items={[
-                        { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
-                      ]}
-                    />
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+      {#if explainerLoading}
+        <Card class="coverage-card explainer-placeholder">
+          <h2 class="micro-label">About this vaccine</h2>
+          <p class="caption">Loading…</p>
+        </Card>
+      {:else if explainer && explainer.summary}
+        <details class="explainer">
+          <summary>
+            <span class="label micro-label">About this vaccine</span>
+            <span class="chev" aria-hidden="true">›</span>
+          </summary>
+          <div class="content">
+            <p class="summary">{explainer.summary}</p>
+            {#if explainer.why_it_matters.length > 0}
+              <h3 class="micro-label">Why it matters</h3>
+              <ul>
+                {#each explainer.why_it_matters as item (item)}
+                  <li>{item}</li>
+                {/each}
+              </ul>
+            {/if}
+            {#if explainer.disclaimer}
+              <p class="disclaimer">{explainer.disclaimer}</p>
+            {/if}
+          </div>
+        </details>
       {/if}
-    </section>
-  </div>
-{/if}
+
+      <section class="history">
+        <h2 class="micro-label">Dose history</h2>
+        {#if history.length === 0}
+          <EmptyState size="sm">No doses recorded yet.</EmptyState>
+        {:else}
+          <div class="table-scroll">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Product</th>
+                  <th>Dose label</th>
+                  <th>Facility</th>
+                  <th>Notes</th>
+                  <th class="col-actions"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each history as i (i.id)}
+                  <tr>
+                    <td>{formatDate(i.date_given)}</td>
+                    <td>{i.product_name || '—'}</td>
+                    <td>{i.dose_label || '—'}</td>
+                    <td>{i.facility || '—'}</td>
+                    <td class="notes cell-truncate">{i.notes || '—'}</td>
+                    <td class="col-actions">
+                      <KebabMenu
+                        ariaLabel="Immunization actions"
+                        items={[
+                          { label: 'Edit', href: `${base}/health/immunizations/detail?id=${i.id}` },
+                        ]}
+                      />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </section>
+    </div>
+  {/if}
+</LoadState>
 
 <style>
   .header {

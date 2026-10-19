@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Button, Card, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, Card, NoticeBanner, LoadState } from '$lib/components/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);
@@ -46,60 +46,64 @@
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if loading}
-    <PageLoading label="Loading browsers…" />
-  {:else if failed || report?.status === 'unavailable'}
-    <div class="center-msg error" role="status">Browser service is unavailable.</div>
-  {:else if report?.status === 'disabled'}
-    <div class="center-msg">Browser service is disabled.</div>
-  {:else if report}
-    <NoticeBanner title="Browsers start on demand" bind:collapsed={aboutCollapsed}>
-      <p>
-        Browse with a retained session to make a browser available here. The scheduler reads the
-        browser pool every 15 seconds and this page refreshes every ten, without starting browsers
-        or keeping idle browsers alive.
-      </p>
-      <p>VNC opens in a new tab and uses the deployment’s VNC authentication and network access.</p>
-    </NoticeBanner>
-    {#if !report.console_configured}
-      <div class="banner info">
-        No external VNC URL is configured. Set a reachable viewer URL without an embedded password
-        to enable Open VNC links.
-      </div>
-    {/if}
-    {#if report.instances.length === 0}
-      <Card><p class="caption">No live browsers.</p></Card>
-    {:else}
-      <Card>
-        <div class="table-scroll">
-          <table class="table table--fixed browser-grid">
-            <thead><tr><th>User</th><th>Slot</th><th>Idle</th><th>Console</th></tr></thead>
-            <tbody>
-              {#each report.instances as instance (instance.user)}
-                <tr>
-                  <td class="browser-user">{instance.user}</td><td>{instance.slot}</td><td
-                    >{idle(instance.idle_seconds)}</td
-                  >
-                  <td
-                    >{#if instance.url}<Button
-                        variant="secondary"
-                        size="sm"
-                        href={instance.url}
-                        target="_blank"
-                        rel="noopener noreferrer">Open VNC</Button
-                      >{:else}<span class="caption">Unavailable</span>{/if}</td
-                  >
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+  <LoadState
+    {loading}
+    error={failed || report?.status === 'unavailable' ? 'Browser service is unavailable.' : null}
+    loadingLabel="Loading browsers…"
+  >
+    {#if report?.status === 'disabled'}
+      <div class="center-msg">Browser service is disabled.</div>
+    {:else if report}
+      <NoticeBanner title="Browsers start on demand" bind:collapsed={aboutCollapsed}>
+        <p>
+          Browse with a retained session to make a browser available here. The scheduler reads the
+          browser pool every 15 seconds and this page refreshes every ten, without starting browsers
+          or keeping idle browsers alive.
+        </p>
+        <p>
+          VNC opens in a new tab and uses the deployment’s VNC authentication and network access.
+        </p>
+      </NoticeBanner>
+      {#if !report.console_configured}
+        <div class="banner info">
+          No external VNC URL is configured. Set a reachable viewer URL without an embedded password
+          to enable Open VNC links.
         </div>
-      </Card>
+      {/if}
+      {#if report.instances.length === 0}
+        <Card><p class="caption">No live browsers.</p></Card>
+      {:else}
+        <Card>
+          <div class="table-scroll">
+            <table class="table table--fixed browser-grid">
+              <thead><tr><th>User</th><th>Slot</th><th>Idle</th><th>Console</th></tr></thead>
+              <tbody>
+                {#each report.instances as instance (instance.user)}
+                  <tr>
+                    <td class="browser-user">{instance.user}</td><td>{instance.slot}</td><td
+                      >{idle(instance.idle_seconds)}</td
+                    >
+                    <td
+                      >{#if instance.url}<Button
+                          variant="secondary"
+                          size="sm"
+                          href={instance.url}
+                          target="_blank"
+                          rel="noopener noreferrer">Open VNC</Button
+                        >{:else}<span class="caption">Unavailable</span>{/if}</td
+                    >
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      {/if}
+      {#if report.as_of}
+        <p class="caption">As of {new Date(report.as_of).toLocaleTimeString()}</p>
+      {/if}
     {/if}
-    {#if report.as_of}
-      <p class="caption">As of {new Date(report.as_of).toLocaleTimeString()}</p>
-    {/if}
-  {/if}
+  </LoadState>
 </div>
 
 <style>

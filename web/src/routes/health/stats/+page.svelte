@@ -39,8 +39,8 @@
     Input,
     FormModal,
     Select,
-    PageLoading,
     ToggleGroup,
+    LoadState,
   } from '$lib/components/ui';
   import { formatDate } from '$lib/dateFormat';
 
@@ -412,30 +412,23 @@
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back behind both whole-pane states, so the pane shows nothing but
-       the centered message rather than centering it in the space left under
-       this header. -->
-  <div class="bar">
-    <ToggleGroup
-      label="Range"
-      options={RANGE_OPTIONS}
-      value={range}
-      onValueChange={(r) => (range = r as Range)}
-    />
-    <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
-  </div>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if metricsToShow().length === 0 && !hasBp()}
-  <EmptyState actionLabel="Log your first measurement" onaction={() => openEntry()}>
-    No measurements yet.
-  </EmptyState>
-{:else}
+<LoadState {loading} {error} empty={metricsToShow().length === 0 && !hasBp()}>
+  {#snippet header()}
+    <div class="bar">
+      <ToggleGroup
+        label="Range"
+        options={RANGE_OPTIONS}
+        value={range}
+        onValueChange={(r) => (range = r as Range)}
+      />
+      <button class="log-btn" onclick={() => openEntry()} type="button">+ Log measurement</button>
+    </div>
+  {/snippet}
+  {#snippet emptyState()}
+    <EmptyState actionLabel="Log your first measurement" onaction={() => openEntry()}>
+      No measurements yet.
+    </EmptyState>
+  {/snippet}
   <div class="grid card-grid" style="--card-min: 380px;">
     {#each metricsToShow() as metric (metric)}
       {@const v = formatLatestValue(metric)}
@@ -484,7 +477,7 @@
       </Card>
     {/if}
   </div>
-{/if}
+</LoadState>
 
 <!-- The unit picker inside the value's box, for a metric logged in more than
      one unit. Top level, since a snippet written inside a component's tag

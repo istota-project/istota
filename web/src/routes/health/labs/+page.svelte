@@ -13,7 +13,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, Select, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Select, LoadState } from '$lib/components/ui';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -207,104 +207,105 @@
   </div>
 {/if}
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if specimen && matrix && matrix.panels.length === 0 && drafts.length === 0}
-  <EmptyState>No confirmed {specimen} panels on file.</EmptyState>
-{:else if matrix && matrix.panels.length === 0 && drafts.length === 0}
-  <EmptyState actionLabel="Upload your first lab report" actionHref="{base}/health/labs/upload">
-    No lab results on file yet.
-  </EmptyState>
-{:else if matrix}
-  {#if drafts.length > 0}
-    <section class="drafts">
-      <h2 class="micro-label">Pending review</h2>
-      <ul>
-        {#each drafts as p (p.id)}
-          <li>
-            <a href="{base}/health/labs/panel?id={p.id}">
-              <Badge variant="warn">Draft</Badge>
-              <span>{formatDate(p.drawn_at)}</span>
-              <span class="muted">{p.lab_name || '—'}</span>
-              <span class="muted">{p.panel_type || ''}</span>
-            </a>
-          </li>
-        {/each}
-      </ul>
-    </section>
-  {/if}
+<LoadState {loading} {error} empty={!!matrix && matrix.panels.length === 0 && drafts.length === 0}>
+  {#snippet emptyState()}
+    {#if specimen}
+      <EmptyState>No confirmed {specimen} panels on file.</EmptyState>
+    {:else}
+      <EmptyState actionLabel="Upload your first lab report" actionHref="{base}/health/labs/upload">
+        No lab results on file yet.
+      </EmptyState>
+    {/if}
+  {/snippet}
+  {#if matrix}
+    {#if drafts.length > 0}
+      <section class="drafts">
+        <h2 class="micro-label">Pending review</h2>
+        <ul>
+          {#each drafts as p (p.id)}
+            <li>
+              <a href="{base}/health/labs/panel?id={p.id}">
+                <Badge variant="warn">Draft</Badge>
+                <span>{formatDate(p.drawn_at)}</span>
+                <span class="muted">{p.lab_name || '—'}</span>
+                <span class="muted">{p.panel_type || ''}</span>
+              </a>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
 
-  {#if matrix.panels.length === 0}
-    <EmptyState actionLabel="Upload a lab report" actionHref="{base}/health/labs/upload">
-      {specimen ? `No confirmed ${specimen} panels yet.` : 'No confirmed panels yet.'}
-      {#if drafts.length > 0}
-        Review the draft above to add it to your history.
-      {/if}
-    </EmptyState>
-  {:else}
-    <section class="spreadsheet">
-      <div class="scroll">
-        <!-- Markers run down the sticky left axis (one row each); draw
-			     dates run across as scrolling columns. The marker names stay
-			     pinned while you scroll sideways through dates (ISSUE-108). -->
-        <table>
-          <thead>
-            <tr class="dates">
-              <th class="sticky-left marker-col">Marker</th>
-              <th class="sticky-left ref-col">Range</th>
-              {#each matrix.panels as p (p.id)}
-                <th class="date-cell">
-                  <a
-                    href="{base}/health/labs/panel?id={p.id}"
-                    class="date-link"
-                    title={[p.lab_name, p.specimen && specimenLabel(p.specimen)]
-                      .filter(Boolean)
-                      .join(' · ') || undefined}
-                  >
-                    <span class="date">{formatDate(p.drawn_at)}</span>
-                  </a>
-                </th>
-              {/each}
-            </tr>
-          </thead>
-          <tbody>
-            {#each matrix.categories as cat, ci (cat.name)}
-              <tr class="cat-row" class:section-start={ci > 0} data-category={cat.name}>
-                <th class="sticky-left cat-cell" colspan="2">{categoryLabel(cat.name)}</th>
-                <td class="cat-band" colspan={matrix.panels.length}></td>
-              </tr>
-              {#each cat.markers as mk (mk.name)}
-                <tr data-category={cat.name}>
-                  <th class="sticky-left marker-col">
+    {#if matrix.panels.length === 0}
+      <EmptyState actionLabel="Upload a lab report" actionHref="{base}/health/labs/upload">
+        {specimen ? `No confirmed ${specimen} panels yet.` : 'No confirmed panels yet.'}
+        {#if drafts.length > 0}
+          Review the draft above to add it to your history.
+        {/if}
+      </EmptyState>
+    {:else}
+      <section class="spreadsheet">
+        <div class="scroll">
+          <!-- Markers run down the sticky left axis (one row each); draw
+  			     dates run across as scrolling columns. The marker names stay
+  			     pinned while you scroll sideways through dates (ISSUE-108). -->
+          <table>
+            <thead>
+              <tr class="dates">
+                <th class="sticky-left marker-col">Marker</th>
+                <th class="sticky-left ref-col">Range</th>
+                {#each matrix.panels as p (p.id)}
+                  <th class="date-cell">
                     <a
-                      href="{base}/health/labs/marker?name={encodeMarker(mk.name)}"
-                      class="marker-link"
-                      title={mk.display_name}
+                      href="{base}/health/labs/panel?id={p.id}"
+                      class="date-link"
+                      title={[p.lab_name, p.specimen && specimenLabel(p.specimen)]
+                        .filter(Boolean)
+                        .join(' · ') || undefined}
                     >
-                      <span class="marker-name">{shortHeader(mk.name)}</span>
-                      {#if mk.unit}<span class="marker-unit">{mk.unit}</span>{/if}
+                      <span class="date">{formatDate(p.drawn_at)}</span>
                     </a>
                   </th>
-                  <th class="sticky-left ref-col ref"
-                    >{formatRange(mk.ref_range_low, mk.ref_range_high)}</th
-                  >
-                  {#each matrix.panels as p (p.id)}
-                    {@const c = cell(p.id, mk.name)}
-                    <td class="data-cell {flagClass(c?.flag ?? null)}">
-                      {#if c}{c.value}{/if}
-                    </td>
-                  {/each}
+                {/each}
+              </tr>
+            </thead>
+            <tbody>
+              {#each matrix.categories as cat, ci (cat.name)}
+                <tr class="cat-row" class:section-start={ci > 0} data-category={cat.name}>
+                  <th class="sticky-left cat-cell" colspan="2">{categoryLabel(cat.name)}</th>
+                  <td class="cat-band" colspan={matrix.panels.length}></td>
                 </tr>
+                {#each cat.markers as mk (mk.name)}
+                  <tr data-category={cat.name}>
+                    <th class="sticky-left marker-col">
+                      <a
+                        href="{base}/health/labs/marker?name={encodeMarker(mk.name)}"
+                        class="marker-link"
+                        title={mk.display_name}
+                      >
+                        <span class="marker-name">{shortHeader(mk.name)}</span>
+                        {#if mk.unit}<span class="marker-unit">{mk.unit}</span>{/if}
+                      </a>
+                    </th>
+                    <th class="sticky-left ref-col ref"
+                      >{formatRange(mk.ref_range_low, mk.ref_range_high)}</th
+                    >
+                    {#each matrix.panels as p (p.id)}
+                      {@const c = cell(p.id, mk.name)}
+                      <td class="data-cell {flagClass(c?.flag ?? null)}">
+                        {#if c}{c.value}{/if}
+                      </td>
+                    {/each}
+                  </tr>
+                {/each}
               {/each}
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    </section>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    {/if}
   {/if}
-{/if}
+</LoadState>
 
 <style>
   .header {

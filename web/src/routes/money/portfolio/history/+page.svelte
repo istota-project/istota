@@ -37,7 +37,7 @@
     EmptyState,
     KebabMenu,
     Modal,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import { portfolioGroupBy, type PortfolioGroupBy } from '$lib/money/stores/portfolio';
@@ -337,15 +337,12 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if snapshots.length === 0}
-  <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
-    No snapshots yet. Import a positions CSV to start the history.
-  </EmptyState>
-{:else}
+<LoadState {loading} {error} empty={snapshots.length === 0}>
+  {#snippet emptyState()}
+    <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
+      No snapshots yet. Import a positions CSV to start the history.
+    </EmptyState>
+  {/snippet}
   <div class="money-toolbar">
     <div class="toolbar-left control-row">
       {#if symbol}
@@ -399,7 +396,7 @@
       {/each}
     </div>
   </div>
-{/if}
+</LoadState>
 
 <ConfirmDialog
   bind:open={confirmDeleteId.open}

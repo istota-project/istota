@@ -27,9 +27,9 @@
     Select,
     type KebabItem,
     type SelectOption,
-    PageLoading,
     SortHeader,
     Badge,
+    LoadState,
   } from '$lib/components/ui';
   import WorkEntryForm from '$lib/components/money/WorkEntryForm.svelte';
   import VoidInvoiceDialog from '$lib/components/money/VoidInvoiceDialog.svelte';
@@ -341,65 +341,61 @@
        centered message rather than centering it in the space left below. On
        error the count is also a lie: it reports 0 of something that failed to
        load. -->
-  {#if !loading && !error}
-    <div class="money-toolbar control-row">
-      <span class="money-result-count">
-        {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
-      </span>
-      <!-- Every width here is pinned, because the row does not wrap: a trigger
-           sized to its own selection re-flows the whole row each time you use
-           it, and on a phone that meant Add entry dropping to a line of its
-           own. Status and period take the longest label they can ever hold
-           ("Uninvoiced", a four-digit year). Client cannot be sized that way —
-           its labels are user data of no bounded length — so it takes a width
-           that reads most names rather than one that fits them all; raise it if
-           yours are longer, at the cost of the widths below.
+  <LoadState {loading} {error} empty={entries.length === 0}>
+    {#snippet header()}
+      <div class="money-toolbar control-row">
+        <span class="money-result-count">
+          {totals.uninvoiced_count} uninvoiced &middot; ${formatAmount(totals.uninvoiced_amount)}
+        </span>
+        <!-- Every width here is pinned, because the row does not wrap: a trigger
+             sized to its own selection re-flows the whole row each time you use
+             it, and on a phone that meant Add entry dropping to a line of its
+             own. Status and period take the longest label they can ever hold
+             ("Uninvoiced", a four-digit year). Client cannot be sized that way —
+             its labels are user data of no bounded length — so it takes a width
+             that reads most names rather than one that fits them all; raise it if
+             yours are longer, at the cost of the widths below.
 
-           Below ~400px the row runs out of room and the labels give ground
-           instead of it breaking. Which one gives way is not the order you
-           might expect: flex-shrink takes pixels in proportion to width, so
-           Client loses the most, but Status is the first to ellipsis because
-           it is the one carrying a label that nearly fills it. That is the
-           right way round anyway — a half-read client name still says which
-           client, where a clipped "Invoiced" and "Uninvoiced" are the same
-           word. -->
-      <div class="filters">
-        <Select
-          value={statusFilter}
-          options={statusOptions}
-          ariaLabel="Status filter"
-          widthChars={9}
-          onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
-        />
-        <Select
-          bind:value={clientFilter}
-          options={clientFilterOptions}
-          ariaLabel="Client filter"
-          widthChars={10}
-        />
-        <Select
-          bind:value={periodFilter}
-          options={periodOptions}
-          ariaLabel="Period filter"
-          widthChars={4}
-        />
-        <Button variant="primary" onclick={openAdd}>Add entry</Button>
-        <KebabMenu
-          items={workExportItems(periodFilter || undefined)}
-          icon={Download}
-          ariaLabel="Download work log"
-        />
+             Below ~400px the row runs out of room and the labels give ground
+             instead of it breaking. Which one gives way is not the order you
+             might expect: flex-shrink takes pixels in proportion to width, so
+             Client loses the most, but Status is the first to ellipsis because
+             it is the one carrying a label that nearly fills it. That is the
+             right way round anyway — a half-read client name still says which
+             client, where a clipped "Invoiced" and "Uninvoiced" are the same
+             word. -->
+        <div class="filters">
+          <Select
+            value={statusFilter}
+            options={statusOptions}
+            ariaLabel="Status filter"
+            widthChars={9}
+            onValueChange={(v) => (statusFilter = v as WorkStatusFilter)}
+          />
+          <Select
+            bind:value={clientFilter}
+            options={clientFilterOptions}
+            ariaLabel="Client filter"
+            widthChars={10}
+          />
+          <Select
+            bind:value={periodFilter}
+            options={periodOptions}
+            ariaLabel="Period filter"
+            widthChars={4}
+          />
+          <Button variant="primary" onclick={openAdd}>Add entry</Button>
+          <KebabMenu
+            items={workExportItems(periodFilter || undefined)}
+            icon={Download}
+            ariaLabel="Download work log"
+          />
+        </div>
       </div>
-    </div>
-  {/if}
-
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if entries.length === 0}
-    <EmptyState>No work entries found.</EmptyState>
-  {:else}
+    {/snippet}
+    {#snippet emptyState()}
+      <EmptyState>No work entries found.</EmptyState>
+    {/snippet}
     <div class="record-list">
       <div class="record-header micro-label">
         <span class="work-index">#</span>
@@ -459,7 +455,7 @@
         {/if}
       {/each}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if formOpen}

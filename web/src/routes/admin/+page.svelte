@@ -20,7 +20,7 @@
     CardGrid,
     Field,
     StatTile,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
@@ -345,579 +345,582 @@
 <!-- The AppShell + ShellHeader live in admin/+layout.svelte, shared with the
      Configuration and Logs sections. This page is the Status section's body. -->
 <div class="settings admin-page card-pane">
-  {#if loading && !stats}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if stats}
-    {@const live = stats}
-    <!-- Rows of three rather than one column, which left most of a wide
-         screen empty. Masonry was tried and read as a jumble: the cards are
-         close enough in height that equal rows line up better than packed
-         columns. Order sets the rows: status, models and activity; Users at
-         full width; the usage meters; the usage splits and the bot icon;
-         Modules at full width. A card marked `data-fill` widens into the
-         empty tracks after it when it ends up last in a row. -->
-    <CardGrid columns={3}>
-      <!-- The installation at a glance: is it running, what is it, who uses
-           it, what runs on its own, and is its data safe. Storage was a card
-           of its own and folded in here, since its rows answer the last of
-           those questions. -->
-      {@const adminCount = stats.users.filter((u) => u.is_admin).length}
-      {@const jobErrors = stats.scheduler?.last_errors?.length ?? 0}
-      <Card title={identity.user.bot_name || 'Istota'} class="installation">
-        {#snippet icon()}
-          <span class="install-avatar">
-            <Avatar
-              kind="bot"
-              version={identity.user.avatars?.bot ?? null}
-              label={identity.user.bot_name || 'Istota'}
-            />
-          </span>
-        {/snippet}
-        {#snippet actions()}
-          <span class="health">
-            <span
-              class="dot"
-              class:dot-ok={live.system.scheduler_healthy && !live.brain_status?.degraded}
-              class:dot-warn={live.system.scheduler_healthy && live.brain_status?.degraded}
-              class:dot-bad={!live.system.scheduler_healthy}
-            ></span>
-            {#if !live.system.scheduler_healthy}
-              Stale
-            {:else if live.brain_status?.degraded}
-              Degraded
-            {:else}
-              Healthy
-            {/if}
-          </span>
-        {/snippet}
-        <p class="caption">
-          {#if stats.system.scheduler_healthy && stats.brain_status?.degraded}
-            {#if stats.brain_status.active}
-              On fallback ({brainLabel(stats.brain_status.active)}), {brainLabel(
-                stats.brain_status.primary,
-              )} down
-            {:else}
-              {brainLabel(stats.brain_status.primary)} down, no fallback
-            {/if}
-          {:else}
-            Scheduler last active {formatTimestamp(stats.system.last_scheduler_run)}
-          {/if}
-        </p>
-        <dl class="kv">
-          <dt>Version</dt>
-          <dd>
-            {stats.system.version} <span class="muted">· Python {stats.system.python_version}</span>
-          </dd>
-          <dt>Web uptime</dt>
-          <dd>{formatDuration(stats.system.uptime_seconds)}</dd>
-          {#if stats.storage.mode}
-            <dt>Storage</dt>
-            <dd>{STORAGE_MODE_LABELS[stats.storage.mode] ?? stats.storage.mode}</dd>
-          {/if}
-          <dt>Users</dt>
-          <dd>
-            {formatNumber(stats.users.length)}
-            {#if adminCount > 0}{' '}<span class="muted">· {adminCount} admin</span>{/if}
-          </dd>
-          {#if stats.scheduler}
-            <dt>Scheduled jobs</dt>
-            <dd>
-              <a href="{base}/admin/jobs">{formatNumber(stats.scheduler.jobs_active)} active</a>
-              {#if stats.scheduler.jobs_paused > 0}{' '}<span class="muted"
-                  >· {stats.scheduler.jobs_paused} paused</span
-                >{/if}
-              {#if jobErrors > 0}{' '}<span class="job-errors"
-                  >· {jobErrors} recent {jobErrors === 1 ? 'error' : 'errors'}</span
-                >{/if}
-            </dd>
-          {/if}
-          <dt>Database</dt>
-          <dd>{formatBytes(stats.storage.db_size_bytes)}</dd>
-          <dt>Backups</dt>
-          <dd>
-            {formatNumber(stats.storage.backups_count)}
-            <span class="muted">· last {formatTimestamp(stats.storage.last_backup)}</span>
-          </dd>
-          {#if stats.storage.nextcloud_configured}
-            <dt>Nextcloud mount</dt>
-            <dd>
-              <span
-                class="dot"
-                class:dot-ok={stats.storage.nextcloud_mount_healthy}
-                class:dot-bad={!stats.storage.nextcloud_mount_healthy}
-              ></span>
-              {stats.storage.nextcloud_mount_healthy ? 'Healthy' : 'Unavailable'}
-            </dd>
-          {/if}
-        </dl>
-      </Card>
-
-      <!-- Models / brain backend -->
-      {#if stats.models && !stats.models.error}
-        {@const m = stats.models}
-        <Card title="Models">
-          <dl class="kv model-kv">
-            <dt>Brain</dt>
-            <dd>{brainLabel(m.brain_kind)}</dd>
-            {#if m.endpoint}
-              <dt>Endpoint</dt>
-              <dd class="endpoint">
-                <span class="endpoint-url">{m.endpoint}</span>
-                {#if m.provider}<Badge size="sm" variant="info">{m.provider}</Badge>{/if}
-              </dd>
-            {/if}
-          </dl>
-
-          <dl class="kv model-kv role-kv">
-            <dt>Default</dt>
-            <dd class="hstack">
-              <code>{m.default_model}</code>
-              {#if m.default_effort}<Badge size="sm" variant="info">{m.default_effort}</Badge>{/if}
-            </dd>
-            {#each m.roles as r (r.role)}
-              <dt>{r.role}</dt>
-              <dd class="hstack"><code>{r.resolved}</code></dd>
-            {/each}
-          </dl>
-
-          {#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
-            <div class="overrides">
-              <div class="cell-label micro-label">Source-type routing</div>
-              <dl class="kv model-kv">
-                {#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
-                  <dt>{src}</dt>
-                  <dd>{brainLabel(kind)}</dd>
-                {/each}
-              </dl>
-            </div>
-          {/if}
-
-          {#if m.room_selectable && m.room_selectable.length > 0}
-            <div class="overrides">
-              <div class="cell-label micro-label">Rooms may select</div>
-              <div class="room-selectable">
-                {#each m.room_selectable as kind (kind)}
-                  <Badge size="sm" variant="info">{brainLabel(kind)}</Badge>
-                {/each}
-              </div>
-            </div>
-          {/if}
-        </Card>
-      {/if}
-
-      <!-- Tasks. Fills its row when it ends up alone in it, as at two columns,
-           where Users after it starts a row of its own. -->
-      <Card title="Task activity" data-fill>
-        <div class="kpi-grid card-grid">
-          <StatTile
-            label="Interactive 24h"
-            sub="{stats.tasks.interactive_avg_per_day_30d}/day (30d)"
-          >
-            {formatNumber(stats.tasks.interactive_24h)}
-          </StatTile>
-          <!-- De-emphasized by colour alone. The row reads as one set of figures,
-             so stepping this one's size down as well made it look like a
-             different kind of measurement rather than a quieter one. -->
-          <StatTile
-            label="Automated 24h"
-            sub="{formatNumber(stats.tasks.automated_avg_per_day_30d)}/day (30d)"
-            valueColor="var(--text-muted)"
-          >
-            {formatNumber(stats.tasks.automated_24h)}
-          </StatTile>
-          <!-- Command and skill tasks call no model; the feed poller alone is
-             hundreds a day per user, so they are counted apart from Automated. -->
-          <StatTile
-            label="Job runs 24h"
-            sub="{formatNumber(stats.tasks.no_model_avg_per_day_30d ?? 0)}/day (30d) · no model"
-            valueColor="var(--text-muted)"
-          >
-            {formatNumber(stats.tasks.no_model_24h ?? 0)}
-          </StatTile>
-          <StatTile label="Avg duration">{stats.tasks.avg_duration_seconds}s</StatTile>
-          <StatTile
-            label="Failed 24h"
-            sub="{(stats.tasks.error_rate_24h * 100).toFixed(2)}% error rate"
-            valueColor={stats.tasks.failed_24h > 0 ? 'var(--status-warn-fg)' : ''}
-          >
-            {stats.tasks.failed_24h}
-          </StatTile>
-          <StatTile label="Total tasks" class="col-total-kpi">
-            {formatNumber(stats.tasks.total)}
-          </StatTile>
-        </div>
-        {#if Object.keys(stats.tasks.by_source).length > 0}
-          {@const maxN = Math.max(...Object.values(stats.tasks.by_source))}
-          <div class="source-bars">
-            {#each Object.entries(stats.tasks.by_source).sort((a, b) => b[1] - a[1]) as [src, count] (src)}
-              {@const failed = stats.tasks.failed_by_source_24h?.[src] ?? 0}
-              <div class="source-row">
-                <div class="source-label">
-                  <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
-                  <span class="truncate">{src}</span>
-                </div>
-                <div class="source-bar">
-                  <div
-                    class="source-fill"
-                    style="width: {(count / maxN) * 100}%; background: {sourceColor(src)};"
-                  ></div>
-                </div>
-                <div class="source-count">
-                  {formatNumber(count)}{#if failed > 0}<span
-                      class="failed-inline"
-                      title="failed in 24h">·{failed} failed</span
-                    >{/if}
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </Card>
-
-      <!-- Users -->
-      <Card title="Users" data-width="full">
-        <div class="table-scroll">
-          <table class="table table--fixed users-grid">
-            <thead>
-              <tr>
-                <th class="col-user">User</th>
-                <th class="num col-total">Total</th>
-                <th class="col-24h">24h activity</th>
-                <th class="num col-failed">Failed</th>
-                <th class="num col-avg">Avg/day</th>
-                <th
-                  class="num col-tokens"
-                  title="Tokens in the last 24h. Includes spend with no task row — a nightly sleep cycle, health OCR — so this can exceed what the task counts suggest."
-                  >Tokens 24h</th
-                >
-                <th
-                  class="num col-cost"
-                  title="Money actually spent in the last 24h. A subscription's list-price equivalent and a catalog estimate are not spend, so they show a dash rather than a figure."
-                  >Cost 24h</th
-                >
-                <th
-                  class="col-active"
-                  title="Most recent interactive task. Scheduled jobs, briefings, heartbeats and subtasks don't count."
-                  >Last active</th
-                >
-              </tr>
-            </thead>
-            <tbody>
-              {#each stats.users as u (u.username)}
-                {@const segments = userSegments(u)}
-                {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
-                <tr>
-                  <td>
-                    <UserCell
-                      userId={u.username}
-                      displayName={u.display_name}
-                      isAdmin={u.is_admin}
-                    />
-                  </td>
-                  <td class="num col-total">{formatNumber(u.tasks_total)}</td>
-                  <td class="source-cell">
-                    <div class="source-summary">
-                      <span class="muted">int</span>
-                      <strong>{u.tasks_interactive_24h}</strong>
-                      <span class="sep">·</span>
-                      <span class="muted">auto</span>
-                      <strong>{formatNumber(u.tasks_automated_24h)}</strong>
-                      <span class="sep">·</span>
-                      <span class="muted">jobs</span>
-                      <strong>{formatNumber(u.tasks_no_model_24h ?? 0)}</strong>
-                    </div>
-                    {#if totalSeg > 0}
-                      <div class="stack-bar" aria-label="24h source breakdown">
-                        {#each segments as seg (seg.source)}
-                          <span
-                            class="stack-seg"
-                            style="width: {(seg.count / totalSeg) * 100}%; background: {sourceColor(
-                              seg.source,
-                            )};"
-                            title={segmentTooltip(seg)}
-                          ></span>
-                        {/each}
-                      </div>
-                      <div class="source-list">
-                        {#each segments as seg (seg.source)}
-                          <span class="source-pill caption" title={segmentTooltip(seg)}>
-                            <span
-                              class="dot dot-source"
-                              style="background: {sourceColor(seg.source)};"
-                            ></span>
-                            {seg.source}
-                            {formatNumber(seg.count)}
-                          </span>
-                        {/each}
-                      </div>
-                    {/if}
-                  </td>
-                  <td class="num col-failed">
-                    {#if u.tasks_failed_24h > 0}
-                      <Badge variant="danger" uppercase={false}>{u.tasks_failed_24h}</Badge>
-                    {:else}
-                      0
-                    {/if}
-                  </td>
-                  <td class="num col-avg">{u.tasks_avg_per_day}</td>
-                  <td class="num col-tokens" title={usageOriginTitle(u)}
-                    >{formatNumber(u.usage_tokens_24h)}</td
-                  >
-                  <td class="num col-cost">{formatCost(u.usage_cost_24h)}</td>
-                  <!-- truncate: past thirty days this is a localized date, which can outgrow
-                       the column. td only; the header's two words are meant to wrap. -->
-                  <td class="col-active truncate">{formatTimestamp(u.last_active)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <!-- Claude Code subscription. Above Token usage and separate from it, which
-         is the whole point of the pair: on a subscription deployment the cost
-         column below is deliberately all dashes — a plan-equivalent list price
-         is not spend — and these windows are the budget that column cannot
-         report. Folding them into one card would put a live external reading
-         with its own failure mode under the same heading as an aggregate over
-         `task_usage`, leaving one card half-stale and half-fresh with two error
-         branches. Two cards each say one thing. -->
-      <!-- The key is absent unless there is a card to draw: the backend omits it
-         when Claude Code is neither the brain nor the fallback, and when the
-         reading could not be obtained. So this one guard is the whole gate. It
-         used to render a "Plan limits unavailable" note instead of vanishing,
-         so an operator who expected the reading learned why — right while a
-         missing reading meant something was wrong, and wrong once we learned the
-         endpoint will not serve the long-lived setup-token credential both
-         server shapes deploy. That note was permanent on those hosts and named
-         nothing anyone could do. `runtime.subscription_usage` carries the reason
-         now, as a SKIP. -->
-      {#if stats.subscription && (stats.subscription.windows ?? []).length > 0}
-        {@const sub = stats.subscription}
-        <Card title="Claude Code subscription">
-          <!-- Extra usage is a tile in this grid rather than a footer line
-               under it, so the card reads as one row of meters the way the
-               system banner above does. It is last because it is the one
-               figure here that is money rather than a share of a plan
-               window. -->
-          <div class="kpi-grid card-grid">
-            {#each sub.windows ?? [] as w (w.key)}
-              <StatTile
-                label={w.label}
-                sub={formatResetIn(w.resets_in_seconds)}
-                valueColor={utilizationColor(w.percent, sub.warn_percent, sub.high_percent)}
-              >
-                {formatUtilization(w.percent)}
-              </StatTile>
-            {/each}
-            {#if sub.spend?.enabled}
-              <StatTile
-                label="Extra usage"
-                sub={formatSpendCap(sub.spend)}
-                valueColor={utilizationColor(sub.spend.percent, sub.warn_percent, sub.high_percent)}
-              >
-                {formatSpendUsed(sub.spend)}
-              </StatTile>
-            {/if}
-          </div>
-          <p class="usage-note caption">
-            Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
-              — reading is stale{#if sub.error}: {sub.error}{/if}
-            {/if}
-          </p>
-        </Card>
-      {/if}
-
-      <!-- Token usage. Per-model, per-brain and per-origin live here; per-user
-         lives on the Users rows above, beside that user's task counts.
-         Duplicating per-user here would give the same data two places to
-         disagree. -->
-      {#if stats.usage && !stats.usage.error && stats.usage.totals_30d}
-        {@const u24 = stats.usage.totals_24h}
-        {@const u30 = stats.usage.totals_30d}
-        <Card title="Token usage">
-          <div class="kpi-grid card-grid">
-            <StatTile label="Tokens 24h" sub="{formatNumber(u30.total_tokens)} (30d)">
-              {formatNumber(u24?.total_tokens ?? 0)}
-            </StatTile>
-            <StatTile label="Cost 24h" sub="{formatCost(u30.cost_by_basis)} (30d)">
-              {formatCost(u24?.cost_by_basis)}
-            </StatTile>
-            <StatTile label="Cache hit rate" sub="30d">
-              {formatPercent(u30.cache_hit_rate)}
-            </StatTile>
-            <!-- The two context measures are a first and a max over per-request
-               prompt sizes. They do not sum, so they are never shown beside a
-               token total as though they were the same kind of number. -->
-            <StatTile label="Avg initial context" sub="30d, measured rows only">
-              {formatContext(u30.avg_initial_context_tokens)}
-            </StatTile>
-            <StatTile label="Avg peak context" sub="30d, measured rows only">
-              {formatContext(u30.avg_peak_context_tokens)}
-            </StatTile>
-          </div>
-
-          <!-- Two honesty counters. A tmux-brain task spends real tokens and
-             writes no row, and the native brain records no context; a synthetic
-             zero for either would make this pane complete and wrong. -->
-          {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0 || (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
-            <p class="usage-note caption">
-              {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0}
-                {formatNumber(stats.usage.unmeasured_tasks_24h ?? 0)} task(s) in the last 24h recorded
-                no usage.
-              {/if}
-              {#if (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
-                {formatNumber(stats.usage.context_unmeasured_rows_30d ?? 0)} task row(s) in 30d carry
-                no context measurement.
-              {/if}
-            </p>
-          {/if}
-        </Card>
-      {:else if stats.usage?.error}
-        <Card title="Token usage">
-          <p class="usage-note caption">Usage stats unavailable: {stats.usage.error}</p>
-        </Card>
-      {/if}
-
-      <!-- Where the tokens went, one split per card so the three read as a row. -->
-      {#if stats.usage && !stats.usage.error}
-        {#if (stats.usage?.by_model_30d ?? []).length > 0}
-          <Card title="Tokens by model">
-            {#snippet actions()}
-              <span class="caption"
-                >30d{#if (live.usage?.by_model_30d_omitted ?? 0) > 0}
-                  · top 5 of {(live.usage?.by_model_30d ?? []).length +
-                    (live.usage?.by_model_30d_omitted ?? 0)}{/if}</span
-              >
-            {/snippet}
-            <div class="usage-rows">
-              {#each stats.usage?.by_model_30d ?? [] as g (g.key)}
-                <div class="usage-row">
-                  <div class="truncate">{g.key}</div>
-                  <div class="usage-num">{formatNumber(g.total_tokens)}</div>
-                  <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
-                </div>
-              {/each}
-            </div>
-          </Card>
-        {/if}
-        {#if (stats.usage?.by_brain_30d ?? []).length > 0}
-          <Card title="Tokens by brain">
-            {#snippet actions()}
-              <span class="caption">30d</span>
-            {/snippet}
-            <div class="usage-rows">
-              {#each stats.usage?.by_brain_30d ?? [] as g (g.key)}
-                <div class="usage-row">
-                  <div class="truncate">{g.key}</div>
-                  <div class="usage-num">{formatNumber(g.total_tokens)}</div>
-                  <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
-                </div>
-              {/each}
-            </div>
-          </Card>
-        {/if}
-        {#if (stats.usage?.by_origin_24h ?? []).length > 0}
-          <Card title="Tokens by origin">
-            {#snippet actions()}
-              <span class="caption">24h</span>
-            {/snippet}
-            <div class="usage-rows">
-              {#each stats.usage?.by_origin_24h ?? [] as g (g.key)}
-                <div class="usage-row">
-                  <div class="truncate">{g.key}</div>
-                  <div class="usage-num">{formatNumber(g.total_tokens)}</div>
-                  <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
-                </div>
-              {/each}
-            </div>
-          </Card>
-        {/if}
-      {/if}
-
-      <!-- Bot icon.
-         The one control on a page of read-only cards, so it sits at the foot
-         rather than above the status an operator scans first. A card here and
-         not a pane of its own: the admin dashboard is one page, and a single
-         upload control does not earn a section in the sidebar. It fills its
-         row because the cards before it are optional: without the
-         subscription card it would sit alone before Modules. -->
-      <Card title="Bot icon" data-fill>
-        <Field label="Picture" wide error={botIconError} warning={botIconNote}>
-          <AvatarPicker
-            pickLabel="Choose the bot icon"
-            prompt="Click the icon to choose a file, or drop or paste one here."
-            accept={AVATAR_ACCEPT}
-            busyLabel={botIconBusyLabel}
-            removable={!!identity.user.avatars?.bot}
-            onPick={(file) => void uploadBotIcon(file)}
-            onRemove={removeBotIcon}
-          >
-            {#snippet preview()}
-              <!-- Named rather than decorative: here the picture is the thing
-                 being edited, and the only other signal is whether Remove
-                 exists. -->
+  <LoadState {loading} {error} hasData={!!stats}>
+    {#if stats}
+      {@const live = stats}
+      <!-- Rows of three rather than one column, which left most of a wide
+           screen empty. Masonry was tried and read as a jumble: the cards are
+           close enough in height that equal rows line up better than packed
+           columns. Order sets the rows: status, models and activity; Users at
+           full width; the usage meters; the usage splits and the bot icon;
+           Modules at full width. A card marked `data-fill` widens into the
+           empty tracks after it when it ends up last in a row. -->
+      <CardGrid columns={3}>
+        <!-- The installation at a glance: is it running, what is it, who uses
+             it, what runs on its own, and is its data safe. Storage was a card
+             of its own and folded in here, since its rows answer the last of
+             those questions. -->
+        {@const adminCount = stats.users.filter((u) => u.is_admin).length}
+        {@const jobErrors = stats.scheduler?.last_errors?.length ?? 0}
+        <Card title={identity.user.bot_name || 'Istota'} class="installation">
+          {#snippet icon()}
+            <span class="install-avatar">
               <Avatar
                 kind="bot"
                 version={identity.user.avatars?.bot ?? null}
                 label={identity.user.bot_name || 'Istota'}
-                alt="The bot icon"
               />
-            {/snippet}
-          </AvatarPicker>
-        </Field>
-        <p class="description">
-          Shown wherever the web UI names the bot. It applies to everyone on this deployment.
-          {#if stats.storage.nextcloud_username}
-            This is not the picture Nextcloud shows for
-            <code>{stats.storage.nextcloud_username}</code>, and changing it here does not change
-            that one — set it in Nextcloud if you want them to match.
-          {:else}
-            This is separate from the bot's Nextcloud profile picture, which Nextcloud shows in
-            Talk; changing it here does not change that one.
-          {/if}
-        </p>
-      </Card>
+            </span>
+          {/snippet}
+          {#snippet actions()}
+            <span class="health">
+              <span
+                class="dot"
+                class:dot-ok={live.system.scheduler_healthy && !live.brain_status?.degraded}
+                class:dot-warn={live.system.scheduler_healthy && live.brain_status?.degraded}
+                class:dot-bad={!live.system.scheduler_healthy}
+              ></span>
+              {#if !live.system.scheduler_healthy}
+                Stale
+              {:else if live.brain_status?.degraded}
+                Degraded
+              {:else}
+                Healthy
+              {/if}
+            </span>
+          {/snippet}
+          <p class="caption">
+            {#if stats.system.scheduler_healthy && stats.brain_status?.degraded}
+              {#if stats.brain_status.active}
+                On fallback ({brainLabel(stats.brain_status.active)}), {brainLabel(
+                  stats.brain_status.primary,
+                )} down
+              {:else}
+                {brainLabel(stats.brain_status.primary)} down, no fallback
+              {/if}
+            {:else}
+              Scheduler last active {formatTimestamp(stats.system.last_scheduler_run)}
+            {/if}
+          </p>
+          <dl class="kv">
+            <dt>Version</dt>
+            <dd>
+              {stats.system.version}
+              <span class="muted">· Python {stats.system.python_version}</span>
+            </dd>
+            <dt>Web uptime</dt>
+            <dd>{formatDuration(stats.system.uptime_seconds)}</dd>
+            {#if stats.storage.mode}
+              <dt>Storage</dt>
+              <dd>{STORAGE_MODE_LABELS[stats.storage.mode] ?? stats.storage.mode}</dd>
+            {/if}
+            <dt>Users</dt>
+            <dd>
+              {formatNumber(stats.users.length)}
+              {#if adminCount > 0}{' '}<span class="muted">· {adminCount} admin</span>{/if}
+            </dd>
+            {#if stats.scheduler}
+              <dt>Scheduled jobs</dt>
+              <dd>
+                <a href="{base}/admin/jobs">{formatNumber(stats.scheduler.jobs_active)} active</a>
+                {#if stats.scheduler.jobs_paused > 0}{' '}<span class="muted"
+                    >· {stats.scheduler.jobs_paused} paused</span
+                  >{/if}
+                {#if jobErrors > 0}{' '}<span class="job-errors"
+                    >· {jobErrors} recent {jobErrors === 1 ? 'error' : 'errors'}</span
+                  >{/if}
+              </dd>
+            {/if}
+            <dt>Database</dt>
+            <dd>{formatBytes(stats.storage.db_size_bytes)}</dd>
+            <dt>Backups</dt>
+            <dd>
+              {formatNumber(stats.storage.backups_count)}
+              <span class="muted">· last {formatTimestamp(stats.storage.last_backup)}</span>
+            </dd>
+            {#if stats.storage.nextcloud_configured}
+              <dt>Nextcloud mount</dt>
+              <dd>
+                <span
+                  class="dot"
+                  class:dot-ok={stats.storage.nextcloud_mount_healthy}
+                  class:dot-bad={!stats.storage.nextcloud_mount_healthy}
+                ></span>
+                {stats.storage.nextcloud_mount_healthy ? 'Healthy' : 'Unavailable'}
+              </dd>
+            {/if}
+          </dl>
+        </Card>
 
-      <!-- Modules -->
-      {#if Object.keys(stats.modules).length > 0}
-        <Card title="Modules" data-width="full">
-          <div class="module-grid card-grid">
-            {#each Object.entries(stats.modules) as [name, mod] (name)}
-              <Card
-                as="div"
-                variant="inset"
-                padding="sm"
-                class={moduleErrorCount(mod) > 0 ? 'module-card module-warn' : 'module-card'}
-              >
-                <div class="module-name title-section">{name}</div>
-                <dl class="kv module-fields">
-                  {#each Object.entries(mod) as [k, v] (k)}
-                    <dt>{fieldLabel(k)}</dt>
-                    <dd>
-                      {v === null
-                        ? '—'
-                        : TIMESTAMP_KEYS.has(k)
-                          ? formatTimestamp(String(v))
-                          : String(v)}
-                    </dd>
+        <!-- Models / brain backend -->
+        {#if stats.models && !stats.models.error}
+          {@const m = stats.models}
+          <Card title="Models">
+            <dl class="kv model-kv">
+              <dt>Brain</dt>
+              <dd>{brainLabel(m.brain_kind)}</dd>
+              {#if m.endpoint}
+                <dt>Endpoint</dt>
+                <dd class="endpoint">
+                  <span class="endpoint-url">{m.endpoint}</span>
+                  {#if m.provider}<Badge size="sm" variant="info">{m.provider}</Badge>{/if}
+                </dd>
+              {/if}
+            </dl>
+
+            <dl class="kv model-kv role-kv">
+              <dt>Default</dt>
+              <dd class="hstack">
+                <code>{m.default_model}</code>
+                {#if m.default_effort}<Badge size="sm" variant="info">{m.default_effort}</Badge
+                  >{/if}
+              </dd>
+              {#each m.roles as r (r.role)}
+                <dt>{r.role}</dt>
+                <dd class="hstack"><code>{r.resolved}</code></dd>
+              {/each}
+            </dl>
+
+            {#if m.source_type_overrides && Object.keys(m.source_type_overrides).length > 0}
+              <div class="overrides">
+                <div class="cell-label micro-label">Source-type routing</div>
+                <dl class="kv model-kv">
+                  {#each Object.entries(m.source_type_overrides) as [src, kind] (src)}
+                    <dt>{src}</dt>
+                    <dd>{brainLabel(kind)}</dd>
                   {/each}
                 </dl>
-              </Card>
-            {/each}
+              </div>
+            {/if}
+
+            {#if m.room_selectable && m.room_selectable.length > 0}
+              <div class="overrides">
+                <div class="cell-label micro-label">Rooms may select</div>
+                <div class="room-selectable">
+                  {#each m.room_selectable as kind (kind)}
+                    <Badge size="sm" variant="info">{brainLabel(kind)}</Badge>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </Card>
+        {/if}
+
+        <!-- Tasks. Fills its row when it ends up alone in it, as at two columns,
+             where Users after it starts a row of its own. -->
+        <Card title="Task activity" data-fill>
+          <div class="kpi-grid card-grid">
+            <StatTile
+              label="Interactive 24h"
+              sub="{stats.tasks.interactive_avg_per_day_30d}/day (30d)"
+            >
+              {formatNumber(stats.tasks.interactive_24h)}
+            </StatTile>
+            <!-- De-emphasized by colour alone. The row reads as one set of figures,
+               so stepping this one's size down as well made it look like a
+               different kind of measurement rather than a quieter one. -->
+            <StatTile
+              label="Automated 24h"
+              sub="{formatNumber(stats.tasks.automated_avg_per_day_30d)}/day (30d)"
+              valueColor="var(--text-muted)"
+            >
+              {formatNumber(stats.tasks.automated_24h)}
+            </StatTile>
+            <!-- Command and skill tasks call no model; the feed poller alone is
+               hundreds a day per user, so they are counted apart from Automated. -->
+            <StatTile
+              label="Job runs 24h"
+              sub="{formatNumber(stats.tasks.no_model_avg_per_day_30d ?? 0)}/day (30d) · no model"
+              valueColor="var(--text-muted)"
+            >
+              {formatNumber(stats.tasks.no_model_24h ?? 0)}
+            </StatTile>
+            <StatTile label="Avg duration">{stats.tasks.avg_duration_seconds}s</StatTile>
+            <StatTile
+              label="Failed 24h"
+              sub="{(stats.tasks.error_rate_24h * 100).toFixed(2)}% error rate"
+              valueColor={stats.tasks.failed_24h > 0 ? 'var(--status-warn-fg)' : ''}
+            >
+              {stats.tasks.failed_24h}
+            </StatTile>
+            <StatTile label="Total tasks" class="col-total-kpi">
+              {formatNumber(stats.tasks.total)}
+            </StatTile>
+          </div>
+          {#if Object.keys(stats.tasks.by_source).length > 0}
+            {@const maxN = Math.max(...Object.values(stats.tasks.by_source))}
+            <div class="source-bars">
+              {#each Object.entries(stats.tasks.by_source).sort((a, b) => b[1] - a[1]) as [src, count] (src)}
+                {@const failed = stats.tasks.failed_by_source_24h?.[src] ?? 0}
+                <div class="source-row">
+                  <div class="source-label">
+                    <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
+                    <span class="truncate">{src}</span>
+                  </div>
+                  <div class="source-bar">
+                    <div
+                      class="source-fill"
+                      style="width: {(count / maxN) * 100}%; background: {sourceColor(src)};"
+                    ></div>
+                  </div>
+                  <div class="source-count">
+                    {formatNumber(count)}{#if failed > 0}<span
+                        class="failed-inline"
+                        title="failed in 24h">·{failed} failed</span
+                      >{/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </Card>
+
+        <!-- Users -->
+        <Card title="Users" data-width="full">
+          <div class="table-scroll">
+            <table class="table table--fixed users-grid">
+              <thead>
+                <tr>
+                  <th class="col-user">User</th>
+                  <th class="num col-total">Total</th>
+                  <th class="col-24h">24h activity</th>
+                  <th class="num col-failed">Failed</th>
+                  <th class="num col-avg">Avg/day</th>
+                  <th
+                    class="num col-tokens"
+                    title="Tokens in the last 24h. Includes spend with no task row — a nightly sleep cycle, health OCR — so this can exceed what the task counts suggest."
+                    >Tokens 24h</th
+                  >
+                  <th
+                    class="num col-cost"
+                    title="Money actually spent in the last 24h. A subscription's list-price equivalent and a catalog estimate are not spend, so they show a dash rather than a figure."
+                    >Cost 24h</th
+                  >
+                  <th
+                    class="col-active"
+                    title="Most recent interactive task. Scheduled jobs, briefings, heartbeats and subtasks don't count."
+                    >Last active</th
+                  >
+                </tr>
+              </thead>
+              <tbody>
+                {#each stats.users as u (u.username)}
+                  {@const segments = userSegments(u)}
+                  {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
+                  <tr>
+                    <td>
+                      <UserCell
+                        userId={u.username}
+                        displayName={u.display_name}
+                        isAdmin={u.is_admin}
+                      />
+                    </td>
+                    <td class="num col-total">{formatNumber(u.tasks_total)}</td>
+                    <td class="source-cell">
+                      <div class="source-summary">
+                        <span class="muted">int</span>
+                        <strong>{u.tasks_interactive_24h}</strong>
+                        <span class="sep">·</span>
+                        <span class="muted">auto</span>
+                        <strong>{formatNumber(u.tasks_automated_24h)}</strong>
+                        <span class="sep">·</span>
+                        <span class="muted">jobs</span>
+                        <strong>{formatNumber(u.tasks_no_model_24h ?? 0)}</strong>
+                      </div>
+                      {#if totalSeg > 0}
+                        <div class="stack-bar" aria-label="24h source breakdown">
+                          {#each segments as seg (seg.source)}
+                            <span
+                              class="stack-seg"
+                              style="width: {(seg.count / totalSeg) *
+                                100}%; background: {sourceColor(seg.source)};"
+                              title={segmentTooltip(seg)}
+                            ></span>
+                          {/each}
+                        </div>
+                        <div class="source-list">
+                          {#each segments as seg (seg.source)}
+                            <span class="source-pill caption" title={segmentTooltip(seg)}>
+                              <span
+                                class="dot dot-source"
+                                style="background: {sourceColor(seg.source)};"
+                              ></span>
+                              {seg.source}
+                              {formatNumber(seg.count)}
+                            </span>
+                          {/each}
+                        </div>
+                      {/if}
+                    </td>
+                    <td class="num col-failed">
+                      {#if u.tasks_failed_24h > 0}
+                        <Badge variant="danger" uppercase={false}>{u.tasks_failed_24h}</Badge>
+                      {:else}
+                        0
+                      {/if}
+                    </td>
+                    <td class="num col-avg">{u.tasks_avg_per_day}</td>
+                    <td class="num col-tokens" title={usageOriginTitle(u)}
+                      >{formatNumber(u.usage_tokens_24h)}</td
+                    >
+                    <td class="num col-cost">{formatCost(u.usage_cost_24h)}</td>
+                    <!-- truncate: past thirty days this is a localized date, which can outgrow
+                         the column. td only; the header's two words are meant to wrap. -->
+                    <td class="col-active truncate">{formatTimestamp(u.last_active)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
         </Card>
+
+        <!-- Claude Code subscription. Above Token usage and separate from it, which
+           is the whole point of the pair: on a subscription deployment the cost
+           column below is deliberately all dashes — a plan-equivalent list price
+           is not spend — and these windows are the budget that column cannot
+           report. Folding them into one card would put a live external reading
+           with its own failure mode under the same heading as an aggregate over
+           `task_usage`, leaving one card half-stale and half-fresh with two error
+           branches. Two cards each say one thing. -->
+        <!-- The key is absent unless there is a card to draw: the backend omits it
+           when Claude Code is neither the brain nor the fallback, and when the
+           reading could not be obtained. So this one guard is the whole gate. It
+           used to render a "Plan limits unavailable" note instead of vanishing,
+           so an operator who expected the reading learned why — right while a
+           missing reading meant something was wrong, and wrong once we learned the
+           endpoint will not serve the long-lived setup-token credential both
+           server shapes deploy. That note was permanent on those hosts and named
+           nothing anyone could do. `runtime.subscription_usage` carries the reason
+           now, as a SKIP. -->
+        {#if stats.subscription && (stats.subscription.windows ?? []).length > 0}
+          {@const sub = stats.subscription}
+          <Card title="Claude Code subscription">
+            <!-- Extra usage is a tile in this grid rather than a footer line
+                 under it, so the card reads as one row of meters the way the
+                 system banner above does. It is last because it is the one
+                 figure here that is money rather than a share of a plan
+                 window. -->
+            <div class="kpi-grid card-grid">
+              {#each sub.windows ?? [] as w (w.key)}
+                <StatTile
+                  label={w.label}
+                  sub={formatResetIn(w.resets_in_seconds)}
+                  valueColor={utilizationColor(w.percent, sub.warn_percent, sub.high_percent)}
+                >
+                  {formatUtilization(w.percent)}
+                </StatTile>
+              {/each}
+              {#if sub.spend?.enabled}
+                <StatTile
+                  label="Extra usage"
+                  sub={formatSpendCap(sub.spend)}
+                  valueColor={utilizationColor(
+                    sub.spend.percent,
+                    sub.warn_percent,
+                    sub.high_percent,
+                  )}
+                >
+                  {formatSpendUsed(sub.spend)}
+                </StatTile>
+              {/if}
+            </div>
+            <p class="usage-note caption">
+              Updated {formatTimestamp(sub.fetched_at ?? null)}{#if sub.stale}
+                — reading is stale{#if sub.error}: {sub.error}{/if}
+              {/if}
+            </p>
+          </Card>
+        {/if}
+
+        <!-- Token usage. Per-model, per-brain and per-origin live here; per-user
+           lives on the Users rows above, beside that user's task counts.
+           Duplicating per-user here would give the same data two places to
+           disagree. -->
+        {#if stats.usage && !stats.usage.error && stats.usage.totals_30d}
+          {@const u24 = stats.usage.totals_24h}
+          {@const u30 = stats.usage.totals_30d}
+          <Card title="Token usage">
+            <div class="kpi-grid card-grid">
+              <StatTile label="Tokens 24h" sub="{formatNumber(u30.total_tokens)} (30d)">
+                {formatNumber(u24?.total_tokens ?? 0)}
+              </StatTile>
+              <StatTile label="Cost 24h" sub="{formatCost(u30.cost_by_basis)} (30d)">
+                {formatCost(u24?.cost_by_basis)}
+              </StatTile>
+              <StatTile label="Cache hit rate" sub="30d">
+                {formatPercent(u30.cache_hit_rate)}
+              </StatTile>
+              <!-- The two context measures are a first and a max over per-request
+                 prompt sizes. They do not sum, so they are never shown beside a
+                 token total as though they were the same kind of number. -->
+              <StatTile label="Avg initial context" sub="30d, measured rows only">
+                {formatContext(u30.avg_initial_context_tokens)}
+              </StatTile>
+              <StatTile label="Avg peak context" sub="30d, measured rows only">
+                {formatContext(u30.avg_peak_context_tokens)}
+              </StatTile>
+            </div>
+
+            <!-- Two honesty counters. A tmux-brain task spends real tokens and
+               writes no row, and the native brain records no context; a synthetic
+               zero for either would make this pane complete and wrong. -->
+            {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0 || (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
+              <p class="usage-note caption">
+                {#if (stats.usage.unmeasured_tasks_24h ?? 0) > 0}
+                  {formatNumber(stats.usage.unmeasured_tasks_24h ?? 0)} task(s) in the last 24h recorded
+                  no usage.
+                {/if}
+                {#if (stats.usage.context_unmeasured_rows_30d ?? 0) > 0}
+                  {formatNumber(stats.usage.context_unmeasured_rows_30d ?? 0)} task row(s) in 30d carry
+                  no context measurement.
+                {/if}
+              </p>
+            {/if}
+          </Card>
+        {:else if stats.usage?.error}
+          <Card title="Token usage">
+            <p class="usage-note caption">Usage stats unavailable: {stats.usage.error}</p>
+          </Card>
+        {/if}
+
+        <!-- Where the tokens went, one split per card so the three read as a row. -->
+        {#if stats.usage && !stats.usage.error}
+          {#if (stats.usage?.by_model_30d ?? []).length > 0}
+            <Card title="Tokens by model">
+              {#snippet actions()}
+                <span class="caption"
+                  >30d{#if (live.usage?.by_model_30d_omitted ?? 0) > 0}
+                    · top 5 of {(live.usage?.by_model_30d ?? []).length +
+                      (live.usage?.by_model_30d_omitted ?? 0)}{/if}</span
+                >
+              {/snippet}
+              <div class="usage-rows">
+                {#each stats.usage?.by_model_30d ?? [] as g (g.key)}
+                  <div class="usage-row">
+                    <div class="truncate">{g.key}</div>
+                    <div class="usage-num">{formatNumber(g.total_tokens)}</div>
+                    <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
+                  </div>
+                {/each}
+              </div>
+            </Card>
+          {/if}
+          {#if (stats.usage?.by_brain_30d ?? []).length > 0}
+            <Card title="Tokens by brain">
+              {#snippet actions()}
+                <span class="caption">30d</span>
+              {/snippet}
+              <div class="usage-rows">
+                {#each stats.usage?.by_brain_30d ?? [] as g (g.key)}
+                  <div class="usage-row">
+                    <div class="truncate">{g.key}</div>
+                    <div class="usage-num">{formatNumber(g.total_tokens)}</div>
+                    <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
+                  </div>
+                {/each}
+              </div>
+            </Card>
+          {/if}
+          {#if (stats.usage?.by_origin_24h ?? []).length > 0}
+            <Card title="Tokens by origin">
+              {#snippet actions()}
+                <span class="caption">24h</span>
+              {/snippet}
+              <div class="usage-rows">
+                {#each stats.usage?.by_origin_24h ?? [] as g (g.key)}
+                  <div class="usage-row">
+                    <div class="truncate">{g.key}</div>
+                    <div class="usage-num">{formatNumber(g.total_tokens)}</div>
+                    <div class="usage-cost">{formatCost(g.cost_by_basis)}</div>
+                  </div>
+                {/each}
+              </div>
+            </Card>
+          {/if}
+        {/if}
+
+        <!-- Bot icon.
+           The one control on a page of read-only cards, so it sits at the foot
+           rather than above the status an operator scans first. A card here and
+           not a pane of its own: the admin dashboard is one page, and a single
+           upload control does not earn a section in the sidebar. It fills its
+           row because the cards before it are optional: without the
+           subscription card it would sit alone before Modules. -->
+        <Card title="Bot icon" data-fill>
+          <Field label="Picture" wide error={botIconError} warning={botIconNote}>
+            <AvatarPicker
+              pickLabel="Choose the bot icon"
+              prompt="Click the icon to choose a file, or drop or paste one here."
+              accept={AVATAR_ACCEPT}
+              busyLabel={botIconBusyLabel}
+              removable={!!identity.user.avatars?.bot}
+              onPick={(file) => void uploadBotIcon(file)}
+              onRemove={removeBotIcon}
+            >
+              {#snippet preview()}
+                <!-- Named rather than decorative: here the picture is the thing
+                   being edited, and the only other signal is whether Remove
+                   exists. -->
+                <Avatar
+                  kind="bot"
+                  version={identity.user.avatars?.bot ?? null}
+                  label={identity.user.bot_name || 'Istota'}
+                  alt="The bot icon"
+                />
+              {/snippet}
+            </AvatarPicker>
+          </Field>
+          <p class="description">
+            Shown wherever the web UI names the bot. It applies to everyone on this deployment.
+            {#if stats.storage.nextcloud_username}
+              This is not the picture Nextcloud shows for
+              <code>{stats.storage.nextcloud_username}</code>, and changing it here does not change
+              that one — set it in Nextcloud if you want them to match.
+            {:else}
+              This is separate from the bot's Nextcloud profile picture, which Nextcloud shows in
+              Talk; changing it here does not change that one.
+            {/if}
+          </p>
+        </Card>
+
+        <!-- Modules -->
+        {#if Object.keys(stats.modules).length > 0}
+          <Card title="Modules" data-width="full">
+            <div class="module-grid card-grid">
+              {#each Object.entries(stats.modules) as [name, mod] (name)}
+                <Card
+                  as="div"
+                  variant="inset"
+                  padding="sm"
+                  class={moduleErrorCount(mod) > 0 ? 'module-card module-warn' : 'module-card'}
+                >
+                  <div class="module-name title-section">{name}</div>
+                  <dl class="kv module-fields">
+                    {#each Object.entries(mod) as [k, v] (k)}
+                      <dt>{fieldLabel(k)}</dt>
+                      <dd>
+                        {v === null
+                          ? '—'
+                          : TIMESTAMP_KEYS.has(k)
+                            ? formatTimestamp(String(v))
+                            : String(v)}
+                      </dd>
+                    {/each}
+                  </dl>
+                </Card>
+              {/each}
+            </div>
+          </Card>
+        {/if}
+      </CardGrid>
+
+      {#if stats.error}
+        <div class="banner error">Partial data: {stats.error}</div>
       {/if}
-    </CardGrid>
 
-    {#if stats.error}
-      <div class="banner error">Partial data: {stats.error}</div>
+      <p class="refresh-note caption">Auto-refreshes every 60s.</p>
     {/if}
-
-    <p class="refresh-note caption">Auto-refreshes every 60s.</p>
-  {/if}
+  </LoadState>
 </div>
 
 <style>

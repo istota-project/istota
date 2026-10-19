@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PageLoading } from '$lib/components/ui';
+  import { LoadState } from '$lib/components/ui';
   import { goto } from '$app/navigation';
   import { Collapsible } from 'bits-ui';
   import { getReport, type AccountRow } from '$lib/money/api';
@@ -77,11 +77,7 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <div class="report-content">
     <Collapsible.Root bind:open={incomeOpen}>
       <div class="section-header">
@@ -124,7 +120,7 @@
       </span>
     </div>
   </div>
-{/if}
+</LoadState>
 
 {#snippet treeNode(node: AccountNode)}
   <div class="record-row record-row--tree" style="padding-left: {0.75 + node.depth * 1.25}rem">

@@ -15,7 +15,7 @@
     EmptyState,
     Input,
     KebabMenu,
-    PageLoading,
+    LoadState,
     type KebabItem,
     Card,
   } from '$lib/components/ui';
@@ -127,98 +127,100 @@
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if jobs === null && !loadError}
-    <PageLoading label="Loading scheduled jobs…" />
-  {:else if jobs === null}
-    <div class="center-msg error">{loadError}</div>
-  {:else}
-    <div class="filter-row">
-      <Input
-        type="search"
-        aria-label="Filter scheduled jobs"
-        placeholder="Filter by user or job"
-        bind:value={filter}
-      />
-      <span class="caption">{runningCount} running · {jobs.length - runningCount} stopped</span>
-    </div>
-
-    {#snippet table(rows: AdminStatsJob[], label: string)}
-      <div class="table-scroll">
-        <table class="table table--fixed jobs-grid" aria-label={label}>
-          <thead
-            ><tr
-              ><th scope="col" class="col-user">User</th>
-              <th scope="col" class="col-job">Job</th>
-              <th scope="col" class="col-schedule">Schedule</th>
-              <th scope="col" class="col-state">State</th>
-              <th scope="col" class="col-last">Last run</th>
-              <th scope="col" class="num col-failures">Failures</th>
-              <th scope="col" class="col-actions" aria-label="Actions"></th></tr
-            ></thead
-          >
-          <tbody>
-            {#each rows as job (job.id)}
-              {@const state = stateOf(job)}
-              <tr>
-                <td class="col-user">{job.user_id}</td>
-                <td class="col-job">
-                  <div class="cell-main">{job.name}</div>
-                  {#if job.last_error}
-                    <details class="last-error">
-                      <summary class="caption">Last error</summary>
-                      <pre>{job.last_error}</pre>
-                    </details>
-                  {/if}
-                </td>
-                <td class="col-schedule"><code>{job.cron}</code></td>
-                <td class="col-state">
-                  <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
-                </td>
-                <td class="col-last truncate"
-                  >{job.last_run_at ? formatRelative(job.last_run_at) : 'Never'}</td
-                >
-                <td class="num col-failures" class:failing={job.consecutive_failures > 0}
-                  >{job.consecutive_failures}</td
-                >
-                <td class="col-actions">
-                  <KebabMenu
-                    items={rowActions(job)}
-                    ariaLabel="Actions for {job.user_id}/{job.name}"
-                  />
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+  <LoadState
+    loading={jobs === null && !loadError}
+    error={loadError}
+    loadingLabel="Loading scheduled jobs…"
+  >
+    {#if jobs}
+      <div class="filter-row">
+        <Input
+          type="search"
+          aria-label="Filter scheduled jobs"
+          placeholder="Filter by user or job"
+          bind:value={filter}
+        />
+        <span class="caption">{runningCount} running · {jobs.length - runningCount} stopped</span>
       </div>
-    {/snippet}
 
-    <Card
-      title="User jobs"
-      description="Jobs from each user's CRON.md. Disabling writes the change to that file, so the user can turn the job back on with !cron enable. Deleting removes it from the file."
-    >
-      {#if userJobs.length}
-        {@render table(userJobs, 'User jobs')}
-      {:else if needle}
-        <EmptyState size="sm">No user jobs match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No user jobs yet.</EmptyState>
-      {/if}
-    </Card>
+      {#snippet table(rows: AdminStatsJob[], label: string)}
+        <div class="table-scroll">
+          <table class="table table--fixed jobs-grid" aria-label={label}>
+            <thead
+              ><tr
+                ><th scope="col" class="col-user">User</th>
+                <th scope="col" class="col-job">Job</th>
+                <th scope="col" class="col-schedule">Schedule</th>
+                <th scope="col" class="col-state">State</th>
+                <th scope="col" class="col-last">Last run</th>
+                <th scope="col" class="num col-failures">Failures</th>
+                <th scope="col" class="col-actions" aria-label="Actions"></th></tr
+              ></thead
+            >
+            <tbody>
+              {#each rows as job (job.id)}
+                {@const state = stateOf(job)}
+                <tr>
+                  <td class="col-user">{job.user_id}</td>
+                  <td class="col-job">
+                    <div class="cell-main">{job.name}</div>
+                    {#if job.last_error}
+                      <details class="last-error">
+                        <summary class="caption">Last error</summary>
+                        <pre>{job.last_error}</pre>
+                      </details>
+                    {/if}
+                  </td>
+                  <td class="col-schedule"><code>{job.cron}</code></td>
+                  <td class="col-state">
+                    <Badge size="sm" variant={STATE_VARIANT[state]}>{STATE_LABEL[state]}</Badge>
+                  </td>
+                  <td class="col-last truncate"
+                    >{job.last_run_at ? formatRelative(job.last_run_at) : 'Never'}</td
+                  >
+                  <td class="num col-failures" class:failing={job.consecutive_failures > 0}
+                    >{job.consecutive_failures}</td
+                  >
+                  <td class="col-actions">
+                    <KebabMenu
+                      items={rowActions(job)}
+                      ariaLabel="Actions for {job.user_id}/{job.name}"
+                    />
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/snippet}
 
-    <Card
-      title="Module pollers"
-      description="Jobs a module keeps for each user who has it on. They can be disabled but not deleted, since the module would create them again."
-    >
-      {#if moduleJobs.length}
-        {@render table(moduleJobs, 'Module pollers')}
-      {:else if needle}
-        <EmptyState size="sm">No module pollers match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No module pollers.</EmptyState>
-      {/if}
-    </Card>
-  {/if}
+      <Card
+        title="User jobs"
+        description="Jobs from each user's CRON.md. Disabling writes the change to that file, so the user can turn the job back on with !cron enable. Deleting removes it from the file."
+      >
+        {#if userJobs.length}
+          {@render table(userJobs, 'User jobs')}
+        {:else if needle}
+          <EmptyState size="sm">No user jobs match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No user jobs yet.</EmptyState>
+        {/if}
+      </Card>
+
+      <Card
+        title="Module pollers"
+        description="Jobs a module keeps for each user who has it on. They can be disabled but not deleted, since the module would create them again."
+      >
+        {#if moduleJobs.length}
+          {@render table(moduleJobs, 'Module pollers')}
+        {:else if needle}
+          <EmptyState size="sm">No module pollers match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No module pollers.</EmptyState>
+        {/if}
+      </Card>
+    {/if}
+  </LoadState>
 </div>
 
 <ConfirmDialog

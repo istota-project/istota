@@ -64,4 +64,5 @@ export { default as SearchResultRow } from './SearchResultRow.svelte';
 // The pane's loading state and the one fixed loader it raises (ISSUE-752).
 export { default as PageLoading } from './PageLoading.svelte';
 export { default as PageLoader } from './PageLoader.svelte';
+export { default as LoadState } from './LoadState.svelte';
 export { default as LoadingOctopus } from './LoadingOctopus.svelte';

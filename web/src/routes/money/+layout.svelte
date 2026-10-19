@@ -21,7 +21,7 @@
     Chip,
     Sidebar,
     SidebarToggle,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { MONEY_SETTINGS_SECTIONS } from '$lib/money/settingsSections';
@@ -122,11 +122,7 @@
   }
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <!-- insetBottom only on settings. Every other money section puts its own
        scroller inside the shell (.money-section-body, or transactions'
        .txn-scroll), so the shell's inset would land *below* that scroller as a
@@ -227,7 +223,7 @@
 
     {@render children()}
   </AppShell>
-{/if}
+</LoadState>
 
 <style>
   /* Global because the class lands on bits-ui's trigger; the money- prefix keeps it

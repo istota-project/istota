@@ -152,7 +152,7 @@
     {:else if error}
       <p role="alert">{error}</p>
     {:else if !preview}
-      <p class="muted">Loading…</p>
+      <p class="caption">Loading…</p>
     {:else}
       {#if preview.truncated}<p class="muted">
           Showing the first 1 MiB. Download for the full file.

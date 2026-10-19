@@ -156,7 +156,7 @@
   description="Connect once for both Health and Location. Sync daily summaries (sleep, stress, body battery, steps, SpO₂, HRV, VO₂ max, resting HR, body composition) into your stats, and import GPS tracks from watch-recorded runs, hikes, and walks into your location history."
 >
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="caption">Loading…</p>
   {:else if status.connected}
     <div class="status-row">
       <div>

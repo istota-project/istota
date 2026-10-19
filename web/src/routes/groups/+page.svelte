@@ -9,7 +9,7 @@
     Button,
     CardGrid,
     EmptyState,
-    PageLoading,
+    LoadState,
     Card,
   } from '$lib/components/ui';
   import { getGroups, getGroup, AuthError, type GroupSummary, type GroupDetail } from '$lib/api';
@@ -163,42 +163,47 @@
       </div>
     </Sidebar>
   {/snippet}
-  {#if loading || detailLoading}<PageLoading label="Loading groups…" />
-  {:else if error}<div class="center-msg error">
-      <p>{error}</p>
-      <Button onclick={() => load()}>Retry</Button>
-    </div>
-  {:else if !groups.length}<EmptyState
-      title="No groups"
-      actionLabel={user.is_admin ? 'Manage groups' : undefined}
-      actionHref={user.is_admin ? `${base}/admin/groups/` : undefined}
-      >You do not belong to any groups.</EmptyState
-    >
-  {:else if detail && selected}
-    <div class="settings groups-page card-pane">
-      {#key detail.group_id}
-        {#if detail.system_key === 'all_users'}
-          <p class="caption">
-            The notebook, files and retained briefing history are shared with all current and future
-            installation users, including editions published before they joined.
-          </p>
-        {/if}
-        <CardGrid masonry>
-          <div class="wide" data-width="wide"><GroupNotebook groupId={detail.group_id} /></div>
-          <Card title="Members">
-            {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
-            <GroupMembers group={detail} onChanged={changed} />
-          </Card>
-          <GroupRooms rooms={detail.rooms} />
-          {#if detail.capabilities.read_briefings}<GroupBriefings
-              groupId={detail.group_id}
-              canAuthor={!!detail.capabilities.author_briefings}
-            />{/if}
-          {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
-        </CardGrid>
-      {/key}
-    </div>
-  {/if}
+  <LoadState
+    loading={loading || detailLoading}
+    {error}
+    loadingLabel="Loading groups…"
+    onRetry={() => load()}
+    empty={!groups.length}
+  >
+    {#snippet emptyState()}
+      <EmptyState
+        title="No groups"
+        actionLabel={user.is_admin ? 'Manage groups' : undefined}
+        actionHref={user.is_admin ? `${base}/admin/groups/` : undefined}
+        >You do not belong to any groups.</EmptyState
+      >
+    {/snippet}
+    {#if detail && selected}
+      <div class="settings groups-page card-pane">
+        {#key detail.group_id}
+          {#if detail.system_key === 'all_users'}
+            <p class="caption">
+              The notebook, files and retained briefing history are shared with all current and
+              future installation users, including editions published before they joined.
+            </p>
+          {/if}
+          <CardGrid masonry>
+            <div class="wide" data-width="wide"><GroupNotebook groupId={detail.group_id} /></div>
+            <Card title="Members">
+              {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
+              <GroupMembers group={detail} onChanged={changed} />
+            </Card>
+            <GroupRooms rooms={detail.rooms} />
+            {#if detail.capabilities.read_briefings}<GroupBriefings
+                groupId={detail.group_id}
+                canAuthor={!!detail.capabilities.author_briefings}
+              />{/if}
+            {#if user.features.workspace}<GroupFiles groupId={detail.group_id} />{/if}
+          </CardGrid>
+        {/key}
+      </div>
+    {/if}
+  </LoadState>
 </AppShell>
 
 <style>

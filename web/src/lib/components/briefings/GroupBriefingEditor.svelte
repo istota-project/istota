@@ -37,7 +37,7 @@
     MultiSelect,
     NoticeBanner,
     OptionCards,
-    PageLoading,
+    LoadState,
     Select,
     type KebabItem,
     type SelectOption,
@@ -537,285 +537,290 @@
   });
 </script>
 
-{#if loading && !saved}
-  <PageLoading />
-{:else if !saved}
-  <p class="center-msg error">
-    {accessLost ? 'This briefing is not available to you.' : 'Could not load this briefing.'}
-  </p>
-{:else}
-  {#if accessLost}
-    <NoticeBanner title="You can no longer edit this briefing" variant="danger" collapsed={false}>
-      Its group, or your role in the group, has changed. Reload to see what you can still do.
-    </NoticeBanner>
-  {/if}
+<LoadState
+  loading={loading && !saved}
+  error={saved
+    ? null
+    : accessLost
+      ? 'This briefing is not available to you.'
+      : 'Could not load this briefing.'}
+>
+  {#if saved}
+    {#if accessLost}
+      <NoticeBanner title="You can no longer edit this briefing" variant="danger" collapsed={false}>
+        Its group, or your role in the group, has changed. Reload to see what you can still do.
+      </NoticeBanner>
+    {/if}
 
-  {#if showsDefinition}
-    <Card title="Schedule and delivery">
-      {#if held}
-        <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
-          This briefing will not run until an administrator resumes it.
-        </NoticeBanner>
-      {/if}
-      <FormStack disabled={busy || accessLost}>
-        <Field label="Title" hint="Shown on every edition, followed by its date.">
-          <Input bind:value={title} placeholder={derivedTitle(name)} />
-        </Field>
-        <FormGrid min="12rem">
-          <Field
-            label="Schedule"
-            hint="A cron expression, for example 0 7 * * 1-5 for weekdays at 07:00."
-          >
-            <Input bind:value={cron} monospace />
+    {#if showsDefinition}
+      <Card title="Schedule and delivery">
+        {#if held}
+          <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
+            This briefing will not run until an administrator resumes it.
+          </NoticeBanner>
+        {/if}
+        <FormStack disabled={busy || accessLost}>
+          <Field label="Title" hint="Shown on every edition, followed by its date.">
+            <Input bind:value={title} placeholder={derivedTitle(name)} />
           </Field>
-          <Field label="Timezone" hint="One schedule for everyone in the group.">
-            <Input bind:value={timezone} />
-          </Field>
+          <FormGrid min="12rem">
+            <Field
+              label="Schedule"
+              hint="A cron expression, for example 0 7 * * 1-5 for weekdays at 07:00."
+            >
+              <Input bind:value={cron} monospace />
+            </Field>
+            <Field label="Timezone" hint="One schedule for everyone in the group.">
+              <Input bind:value={timezone} />
+            </Field>
+            <Field
+              label="Delivery"
+              hint="Each member receives it at their own address for this channel. Every edition is also readable in Briefings."
+            >
+              <Select
+                value={channel}
+                options={channels.map((c) => ({ value: c, label: channelLabel(c) }))}
+                onValueChange={(v) => (channel = v)}
+                ariaLabel="Delivery"
+                fullWidth
+              />
+            </Field>
+          </FormGrid>
           <Field
-            label="Delivery"
-            hint="Each member receives it at their own address for this channel. Every edition is also readable in Briefings."
+            label="Excluded members"
+            hint="Excluded members get no copies or notifications of this briefing, but can still read its editions."
           >
-            <Select
-              value={channel}
-              options={channels.map((c) => ({ value: c, label: channelLabel(c) }))}
-              onValueChange={(v) => (channel = v)}
-              ariaLabel="Delivery"
-              fullWidth
+            <MultiSelect
+              value={excludedUsers}
+              options={[
+                ...memberOptions,
+                ...excludedUsers
+                  .filter((id) => !memberOptions.some((m) => m.value === id))
+                  .map((id) => ({ value: id, label: `${id} (left the group)` })),
+              ]}
+              onValueChange={(next) => (excludedUsers = next)}
+              placeholder="Search members…"
+              emptyLabel="Nobody excluded."
+              ariaLabel="Excluded members"
             />
           </Field>
-        </FormGrid>
-        <Field
-          label="Excluded members"
-          hint="Excluded members get no copies or notifications of this briefing, but can still read its editions."
-        >
-          <MultiSelect
-            value={excludedUsers}
-            options={[
-              ...memberOptions,
-              ...excludedUsers
-                .filter((id) => !memberOptions.some((m) => m.value === id))
-                .map((id) => ({ value: id, label: `${id} (left the group)` })),
-            ]}
-            onValueChange={(next) => (excludedUsers = next)}
-            placeholder="Search members…"
-            emptyLabel="Nobody excluded."
-            ariaLabel="Excluded members"
-          />
-        </Field>
-        <Field
-          label="Enabled"
-          checkbox
-          hint="When on, each scheduled run publishes an edition and sends it to members."
-          warning={enabled && blocker ? blocker : undefined}
-        >
-          <Checkbox bind:checked={enabled} disabled={held} />
-        </Field>
-      </FormStack>
-    </Card>
-
-    <Card title="Content">
-      <FormStack disabled={busy || accessLost}>
-        <OptionCards
-          options={[
-            {
-              value: 'prompt',
-              title: 'Write instructions',
-              description: 'The model writes each edition from your instructions and any sources.',
-            },
-            {
-              value: 'blocks',
-              title: 'Build from blocks',
-              description: 'Ordered sections, each from its own sources, as in personal briefings.',
-            },
-          ]}
-          bind:value={mode}
-          label="How the content is made"
-        />
-        {#if mode === 'prompt'}
           <Field
-            label="Instructions"
-            wide
-            hint="Used to write each edition. Never sent to public research."
-          >
-            <TextArea rows={4} bind:value={prompt} />
-          </Field>
-          <Field
-            label="Research the web first"
+            label="Enabled"
             checkbox
-            hint="A separate step reads public pages before the edition is written. It never sees the group's notebook, files or anyone's personal sources."
+            hint="When on, each scheduled run publishes an edition and sends it to members."
+            warning={enabled && blocker ? blocker : undefined}
           >
-            <Checkbox bind:checked={researchEnabled} />
+            <Checkbox bind:checked={enabled} disabled={held} />
           </Field>
-          {#if researchEnabled}
-            <Field
-              label="What to research"
-              wide
-              hint="Sent to the research step, so keep anything private out of it."
-            >
-              <TextArea rows={3} bind:value={researchPrompt} />
-            </Field>
-          {/if}
-          <p class="micro-label">Sources (optional)</p>
-        {/if}
-        {#if unsupported.length}
-          <NoticeBanner title="Some sources cannot be used by a group" collapsed={false}>
-            Remove {unsupported.map((s) => s.kind).join(', ')}, or replace them with a personal file
-            or calendar that its owner shares.
-          </NoticeBanner>
-        {/if}
-        {#if switchedOff.length}
-          <NoticeBanner title="Some sources are switched off" collapsed={false}>
-            Group briefings have no switched-off sources. Turn each one on or remove it.
-          </NoticeBanner>
-        {/if}
-        {#key `${group}/${name}`}
-          <BlockBuilder
-            briefingName={name}
-            {blocks}
-            templates={templatesForGroup}
-            sourceKinds={SOURCE_KINDS}
-            {browseOptions}
-            rssOptions={[]}
-            {sharedBlockOptions}
-            feedsAvailable={false}
-            localDraft
-            allowSourceDisable={false}
-            userId={me}
-            fileOptions={resources.files}
-            calendarOptions={resources.calendars}
-            onChange={updateBlocks}
+        </FormStack>
+      </Card>
+
+      <Card title="Content">
+        <FormStack disabled={busy || accessLost}>
+          <OptionCards
+            options={[
+              {
+                value: 'prompt',
+                title: 'Write instructions',
+                description:
+                  'The model writes each edition from your instructions and any sources.',
+              },
+              {
+                value: 'blocks',
+                title: 'Build from blocks',
+                description:
+                  'Ordered sections, each from its own sources, as in personal briefings.',
+              },
+            ]}
+            bind:value={mode}
+            label="How the content is made"
           />
-        {/key}
-      </FormStack>
-    </Card>
-  {/if}
-
-  <Card title={author ? 'Audience and sharing' : 'Your shared sources'}>
-    {#if author && audience}
-      <p class="summary">
-        {#if channel === 'in_app'}
-          {audience.member_count - audience.excluded} of {audience.member_count} members are notified
-          in Briefings{#if audience.excluded}, {audience.excluded} excluded{/if}.
-        {:else}
-          {audience.deliverable} of {audience.member_count} members get it by {channelLabel(
-            channel,
-          ).toLowerCase()}{#if audience.excluded}, {audience.excluded} excluded{/if}{#if audience.muted},
-            {audience.muted} muted{/if}{#if audience.missing_destination},
-            {audience.missing_destination} without an address{/if}.
-        {/if}
-        <span class="caption">
-          {allUsers
-            ? 'Everyone on this installation, including people who join later, can read past editions.'
-            : 'Current and future members can read past editions.'}
-        </span>
-      </p>
-      <Field
-        label="The instructions include personal information"
-        checkbox
-        hint="Instructions are shared with the same audience as the sources. Nothing detects personal information for you."
-      >
-        <Checkbox bind:checked={personalInformation} disabled={busy} />
-      </Field>
-      {#if personalInformation}
-        <Field
-          label="I agree to share them with everyone who can read this briefing, now and later"
-          checkbox
-        >
-          <Checkbox bind:checked={acknowledged} disabled={busy} />
-        </Field>
-      {/if}
-    {:else if !author}
-      <p class="caption">
-        Only the group's owners can change this briefing. You can review the sources you share with
-        it.
-      </p>
-    {/if}
-    {#if audience?.sources.length}
-      <ul class="sources list-reset">
-        {#each audience.sources.filter((a) => author || a.owner_id === me) as approval (approval.source_id)}
-          {@const status = approvalStatus(approval)}
-          <li>
-            <span class="source-text">
-              <span
-                >{ownerName(approval.owner_id)}
-                {approval.resource.kind === 'personal_calendar' ? 'calendar' : 'file'} · {contributionLabel(
-                  approval.resource,
-                  resources.calendars,
-                )}</span
+          {#if mode === 'prompt'}
+            <Field
+              label="Instructions"
+              wide
+              hint="Used to write each edition. Never sent to public research."
+            >
+              <TextArea rows={4} bind:value={prompt} />
+            </Field>
+            <Field
+              label="Research the web first"
+              checkbox
+              hint="A separate step reads public pages before the edition is written. It never sees the group's notebook, files or anyone's personal sources."
+            >
+              <Checkbox bind:checked={researchEnabled} />
+            </Field>
+            {#if researchEnabled}
+              <Field
+                label="What to research"
+                wide
+                hint="Sent to the research step, so keep anything private out of it."
               >
-              <span class="caption"
-                >{approval.resource.kind === 'personal_calendar'
-                  ? calendarDisclosure(approval.resource.config)
-                  : 'Whole file'}</span
-              >
-            </span>
-            <Badge variant={status.variant} size="sm">{status.label}</Badge>
-            {#if approval.owner_id === me && !accessLost}
-              <Button size="sm" onclick={() => (reviewing = approval)}
-                >{approval.approved ? 'Manage' : 'Review'}</Button
-              >
+                <TextArea rows={3} bind:value={researchPrompt} />
+              </Field>
             {/if}
-          </li>
-        {/each}
-      </ul>
-    {:else if author}
-      <p class="caption">No personal sources. Nothing private is shared with this group.</p>
+            <p class="micro-label">Sources (optional)</p>
+          {/if}
+          {#if unsupported.length}
+            <NoticeBanner title="Some sources cannot be used by a group" collapsed={false}>
+              Remove {unsupported.map((s) => s.kind).join(', ')}, or replace them with a personal
+              file or calendar that its owner shares.
+            </NoticeBanner>
+          {/if}
+          {#if switchedOff.length}
+            <NoticeBanner title="Some sources are switched off" collapsed={false}>
+              Group briefings have no switched-off sources. Turn each one on or remove it.
+            </NoticeBanner>
+          {/if}
+          {#key `${group}/${name}`}
+            <BlockBuilder
+              briefingName={name}
+              {blocks}
+              templates={templatesForGroup}
+              sourceKinds={SOURCE_KINDS}
+              {browseOptions}
+              rssOptions={[]}
+              {sharedBlockOptions}
+              feedsAvailable={false}
+              localDraft
+              allowSourceDisable={false}
+              userId={me}
+              fileOptions={resources.files}
+              calendarOptions={resources.calendars}
+              onChange={updateBlocks}
+            />
+          {/key}
+        </FormStack>
+      </Card>
     {/if}
-    {#if author && dirty}
-      <p class="caption">Save your changes to update these numbers and approvals.</p>
-    {/if}
-  </Card>
 
-  {#if author}
-    <Card title="Editions">
-      {#snippet actions()}
-        <Button
-          size="sm"
-          variant="secondary"
-          onclick={() => run('preview')}
-          disabled={!canGenerate || !!runBlocker || busy || !!pending}>Preview</Button
+    <Card title={author ? 'Audience and sharing' : 'Your shared sources'}>
+      {#if author && audience}
+        <p class="summary">
+          {#if channel === 'in_app'}
+            {audience.member_count - audience.excluded} of {audience.member_count} members are notified
+            in Briefings{#if audience.excluded}, {audience.excluded} excluded{/if}.
+          {:else}
+            {audience.deliverable} of {audience.member_count} members get it by {channelLabel(
+              channel,
+            ).toLowerCase()}{#if audience.excluded}, {audience.excluded} excluded{/if}{#if audience.muted},
+              {audience.muted} muted{/if}{#if audience.missing_destination},
+              {audience.missing_destination} without an address{/if}.
+          {/if}
+          <span class="caption">
+            {allUsers
+              ? 'Everyone on this installation, including people who join later, can read past editions.'
+              : 'Current and future members can read past editions.'}
+          </span>
+        </p>
+        <Field
+          label="The instructions include personal information"
+          checkbox
+          hint="Instructions are shared with the same audience as the sources. Nothing detects personal information for you."
         >
-        <Button
-          size="sm"
-          onclick={() => run('publish')}
-          disabled={!canGenerate || !!runBlocker || busy || !!pending}>Generate now</Button
-        >
-      {/snippet}
-      <p class="caption">
-        {runBlocker ||
-          'Preview is private and sends nothing. Generate now publishes a new edition to members.'}
-      </p>
-      {#if runs.length}
-        <ul class="runs list-reset">
-          {#each runs as r (r.id)}
+          <Checkbox bind:checked={personalInformation} disabled={busy} />
+        </Field>
+        {#if personalInformation}
+          <Field
+            label="I agree to share them with everyone who can read this briefing, now and later"
+            checkbox
+          >
+            <Checkbox bind:checked={acknowledged} disabled={busy} />
+          </Field>
+        {/if}
+      {:else if !author}
+        <p class="caption">
+          Only the group's owners can change this briefing. You can review the sources you share
+          with it.
+        </p>
+      {/if}
+      {#if audience?.sources.length}
+        <ul class="sources list-reset">
+          {#each audience.sources.filter((a) => author || a.owner_id === me) as approval (approval.source_id)}
+            {@const status = approvalStatus(approval)}
             <li>
-              <span class="run-date"
-                >{formatDateTime(r.published_at || r.created_at || '', {
-                  dateStyle: 'medium',
-                  timeStyle: 'short',
-                })}</span
-              >
-              <Badge variant={STATE_VARIANTS[r.state] ?? 'neutral'} size="sm"
-                >{r.mode === 'preview' && r.state === 'preview_ready'
-                  ? 'Preview'
-                  : (STATE_LABELS[r.state] ?? r.state)}</Badge
-              >
-              <span class="caption run-summary">{deliverySummary(r)}</span>
-              {#if runMenu(r).length}
-                <KebabMenu items={runMenu(r)} ariaLabel="Edition actions" />
-              {:else}<span class="kebab-spacer"></span>{/if}
+              <span class="source-text">
+                <span
+                  >{ownerName(approval.owner_id)}
+                  {approval.resource.kind === 'personal_calendar' ? 'calendar' : 'file'} · {contributionLabel(
+                    approval.resource,
+                    resources.calendars,
+                  )}</span
+                >
+                <span class="caption"
+                  >{approval.resource.kind === 'personal_calendar'
+                    ? calendarDisclosure(approval.resource.config)
+                    : 'Whole file'}</span
+                >
+              </span>
+              <Badge variant={status.variant} size="sm">{status.label}</Badge>
+              {#if approval.owner_id === me && !accessLost}
+                <Button size="sm" onclick={() => (reviewing = approval)}
+                  >{approval.approved ? 'Manage' : 'Review'}</Button
+                >
+              {/if}
             </li>
           {/each}
         </ul>
-        {#if runs.length < runsTotal}<p class="caption">
-            Showing the latest {runs.length} of {runsTotal}.
-          </p>{/if}
-      {:else}
-        <EmptyState size="sm">No editions yet.</EmptyState>
+      {:else if author}
+        <p class="caption">No personal sources. Nothing private is shared with this group.</p>
+      {/if}
+      {#if author && dirty}
+        <p class="caption">Save your changes to update these numbers and approvals.</p>
       {/if}
     </Card>
+
+    {#if author}
+      <Card title="Editions">
+        {#snippet actions()}
+          <Button
+            size="sm"
+            variant="secondary"
+            onclick={() => run('preview')}
+            disabled={!canGenerate || !!runBlocker || busy || !!pending}>Preview</Button
+          >
+          <Button
+            size="sm"
+            onclick={() => run('publish')}
+            disabled={!canGenerate || !!runBlocker || busy || !!pending}>Generate now</Button
+          >
+        {/snippet}
+        <p class="caption">
+          {runBlocker ||
+            'Preview is private and sends nothing. Generate now publishes a new edition to members.'}
+        </p>
+        {#if runs.length}
+          <ul class="runs list-reset">
+            {#each runs as r (r.id)}
+              <li>
+                <span class="run-date"
+                  >{formatDateTime(r.published_at || r.created_at || '', {
+                    dateStyle: 'medium',
+                    timeStyle: 'short',
+                  })}</span
+                >
+                <Badge variant={STATE_VARIANTS[r.state] ?? 'neutral'} size="sm"
+                  >{r.mode === 'preview' && r.state === 'preview_ready'
+                    ? 'Preview'
+                    : (STATE_LABELS[r.state] ?? r.state)}</Badge
+                >
+                <span class="caption run-summary">{deliverySummary(r)}</span>
+                {#if runMenu(r).length}
+                  <KebabMenu items={runMenu(r)} ariaLabel="Edition actions" />
+                {:else}<span class="kebab-spacer"></span>{/if}
+              </li>
+            {/each}
+          </ul>
+          {#if runs.length < runsTotal}<p class="caption">
+              Showing the latest {runs.length} of {runsTotal}.
+            </p>{/if}
+        {:else}
+          <EmptyState size="sm">No editions yet.</EmptyState>
+        {/if}
+      </Card>
+    {/if}
   {/if}
-{/if}
+</LoadState>
 
 {#if reviewing}
   <SourceApprovalDialog

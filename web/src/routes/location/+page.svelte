@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PageLoading } from '$lib/components/ui';
+  import { LoadState } from '$lib/components/ui';
   import { onMount, onDestroy } from 'svelte';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import {
@@ -191,11 +191,7 @@
 </script>
 
 <div class="page-fill">
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else}
+  <LoadState {loading} {error}>
     <div class="map-area">
       <LocationMap
         bind:this={mapComponent}
@@ -273,7 +269,7 @@
       />
       <ElevationProfile summary={elevation} />
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
 <style>

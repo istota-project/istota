@@ -2,12 +2,11 @@
   import IndexCaption from './IndexCaption.svelte';
   import type { WorkspaceScriptsIndex } from '$lib/api';
   import {
-    Button,
     EmptyState,
     KebabMenu,
+    LoadState,
     NoticeBanner,
     type KebabItem,
-    PageLoading,
   } from '$lib/components/ui';
   import { formatDate, formatDateTime } from '$lib/dateFormat';
   import { brokenKind, scriptRefLabel, scriptUsage, type ScriptKind } from './scriptFiles';
@@ -57,62 +56,60 @@
 </script>
 
 <section class="index" aria-label={label}>
-  {#if error}
-    <div class="center-msg error">
-      <p>{error}</p>
-      <Button variant="secondary" onclick={onRetry}>Retry</Button>
-    </div>
-  {:else if loading}
-    <PageLoading />
-  {:else if index}
-    {#if broken.length}
-      <div class="broken">
-        <NoticeBanner title="Jobs refer to missing files" collapsed={false}>
-          <ul class="list-reset">
-            {#each broken as item (item.path)}
-              <li>
-                <strong>{item.path}</strong>: {item.referenced_by.map(scriptRefLabel).join(', ')}
-              </li>
-            {/each}
-          </ul>
-        </NoticeBanner>
-      </div>
-    {/if}
-    {#if files.length}
-      <IndexCaption {caption} {reachNote} />
-      <ul class="list-reset">
-        {#each files as file (file.path)}
-          {@const viewPath = `${index.scripts_view_path}/${file.path}`}
-          <li class="record-row record-row--divided index-row">
-            <div class="index-text">
-              <button
-                type="button"
-                class="index-name button-reset truncate"
-                title={file.path}
-                onclick={() => onOpen(viewPath)}>{file.path}</button
+  <LoadState {loading} {error} {onRetry}>
+    {#if index}
+      {#if broken.length}
+        <div class="broken">
+          <NoticeBanner title="Jobs refer to missing files" collapsed={false}>
+            <ul class="list-reset">
+              {#each broken as item (item.path)}
+                <li>
+                  <strong>{item.path}</strong>: {item.referenced_by.map(scriptRefLabel).join(', ')}
+                </li>
+              {/each}
+            </ul>
+          </NoticeBanner>
+        </div>
+      {/if}
+      {#if files.length}
+        <IndexCaption {caption} {reachNote} />
+        <ul class="list-reset">
+          {#each files as file (file.path)}
+            {@const viewPath = `${index.scripts_view_path}/${file.path}`}
+            <li class="record-row record-row--divided index-row">
+              <div class="index-text">
+                <button
+                  type="button"
+                  class="index-name button-reset truncate"
+                  title={file.path}
+                  onclick={() => onOpen(viewPath)}>{file.path}</button
+                >
+                <span class="caption">{file.description || 'No description'}</span>
+                <span class="caption">{scriptUsage(file)}</span>
+              </div>
+              <time
+                class="caption index-detail"
+                datetime={file.modified}
+                title={formatDateTime(file.modified)}>{formatDate(file.modified)}</time
               >
-              <span class="caption">{file.description || 'No description'}</span>
-              <span class="caption">{scriptUsage(file)}</span>
-            </div>
-            <time
-              class="caption index-detail"
-              datetime={file.modified}
-              title={formatDateTime(file.modified)}>{formatDate(file.modified)}</time
-            >
-            <KebabMenu
-              ariaLabel={`Actions for ${file.path}`}
-              items={[{ label: 'Open', onSelect: () => onOpen(viewPath) }, revealAction(viewPath)]}
-            />
-          </li>
-        {/each}
-      </ul>
-    {:else}
-      <EmptyState>{empty}</EmptyState>
+              <KebabMenu
+                ariaLabel={`Actions for ${file.path}`}
+                items={[
+                  { label: 'Open', onSelect: () => onOpen(viewPath) },
+                  revealAction(viewPath),
+                ]}
+              />
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <EmptyState>{empty}</EmptyState>
+      {/if}
+      {#each notes as note}
+        <p class="caption index-note" role="status">{note}</p>
+      {/each}
     {/if}
-    {#each notes as note}
-      <p class="caption index-note" role="status">{note}</p>
-    {/each}
-  {/if}
+  </LoadState>
 </section>
 
 <style>

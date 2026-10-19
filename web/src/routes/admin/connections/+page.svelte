@@ -15,7 +15,7 @@
     type AdminServarrConnection,
     type AdminWhatsAppConnection,
   } from '$lib/api';
-  import { Button, ConfirmDialog, EmptyState, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, ConfirmDialog, EmptyState, NoticeBanner, LoadState } from '$lib/components/ui';
   import { MessageCircle } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
   import NextcloudCard from './NextcloudCard.svelte';
@@ -657,11 +657,17 @@
 </script>
 
 <div class="settings admin-page connections-page card-pane">
-  {#if loading && !connections}
-    <PageLoading label="Loading connections…" />
-  {:else if error && !connections}
-    <div class="center-msg error">{error}</div>
-  {:else if nextcloud || whatsapp || google || servarr}
+  <LoadState
+    loading={loading && !connections}
+    error={connections ? null : error}
+    loadingLabel="Loading connections…"
+    empty={!(nextcloud || whatsapp || google || servarr)}
+  >
+    {#snippet emptyState()}
+      <!-- Each card reads its own entry by id rather than iterating, so an
+           entry this page has no card for is not drawn. -->
+      <EmptyState>No deployment-level connections are configured.</EmptyState>
+    {/snippet}
     <NoticeBanner
       title="Deployment-level connections"
       variant="info"
@@ -855,11 +861,7 @@
         <ServarrCard connection={servarr} onchecked={() => load({ quiet: true })} />
       {/if}
     </div>
-  {:else}
-    <!-- Each card reads its own entry by id rather than iterating, so an
-         entry this page has no card for is not drawn. -->
-    <EmptyState>No deployment-level connections are configured.</EmptyState>
-  {/if}
+  </LoadState>
 </div>
 
 <style>

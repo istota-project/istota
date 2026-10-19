@@ -20,11 +20,11 @@
     FormStack,
     Select,
     type SelectOption,
-    PageLoading,
     Input,
     TextArea,
     Badge,
     Chip,
+    LoadState,
   } from '$lib/components/ui';
   import {
     conditionOptionLabel,
@@ -330,11 +330,7 @@
   <DateRangeFilter bind:from={sinceFilter} bind:to={untilFilter} onChange={load} />
 </div>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else}
+<LoadState {loading} {error}>
   <div class="layout">
     <section class="timeline">
       {#if encounters.length === 0}
@@ -406,7 +402,7 @@
       {/if}
     </aside>
   </div>
-{/if}
+</LoadState>
 
 <style>
   .header {

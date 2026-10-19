@@ -11,6 +11,7 @@
     KebabMenu,
     Select,
     Card,
+    LoadState,
   } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
@@ -237,9 +238,7 @@
       Auto-classify
     </Button>
   {/snippet}
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {:else}
+  <LoadState scope="card" loading={!loaded} error={loadError}>
     <p class="card-hint caption">
       New symbols classify themselves on import (ticker lookup, marked <em>auto</em>); edit a row to
       override — your edit always wins, and an automatic guess never replaces one. Auto-classify
@@ -293,7 +292,7 @@
       </div>
     </div>
 
-    {#if loaded && classifications.length === 0}
+    {#if classifications.length === 0}
       <EmptyState>No classifications yet.</EmptyState>
     {:else}
       <ul class="divided-list">
@@ -368,7 +367,7 @@
         {/each}
       </ul>
     {/if}
-  {/if}
+  </LoadState>
 </Card>
 
 <ConfirmDialog

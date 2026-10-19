@@ -15,7 +15,7 @@
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { displayBalance } from '$lib/money/utils/accounts';
-  import { EmptyState, KebabMenu, PageLoading } from '$lib/components/ui';
+  import { EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
   import TransactionForm from '$lib/components/money/TransactionForm.svelte';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -219,19 +219,20 @@
 </script>
 
 <div class="txn-content">
-  {#if !loading && !error}
-    <div class="money-toolbar control-row">
-      <span class="money-result-count">{total.toLocaleString()} entries</span>
-    </div>
-  {/if}
-
-  {#if loading && transactions.length === 0}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if transactions.length === 0}
-    <EmptyState>No transactions found.</EmptyState>
-  {:else}
+  <!-- A page change keeps the rows on screen, faded, under the bar. -->
+  <LoadState
+    loading={loading && transactions.length === 0}
+    {error}
+    empty={transactions.length === 0}
+  >
+    {#snippet header()}
+      <div class="money-toolbar control-row">
+        <span class="money-result-count">{total.toLocaleString()} entries</span>
+      </div>
+    {/snippet}
+    {#snippet emptyState()}
+      <EmptyState>No transactions found.</EmptyState>
+    {/snippet}
     <div class="record-list txn-scroll" class:faded={loading}>
       {#each grouped as group (group.date)}
         <div class="record-group micro-label">{formatDate(group.date)}</div>
@@ -309,7 +310,7 @@
         >
       </div>
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
 {#if editingTxn}

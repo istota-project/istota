@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { CardGrid, EmptyState, PageLoading } from '$lib/components/ui';
+  import { CardGrid, EmptyState, LoadState } from '$lib/components/ui';
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     getFeeds,
@@ -433,13 +433,10 @@
 </script>
 
 <div class="feed-page card-pane">
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if entries.length === 0}
-    <EmptyState>{emptyMessage}</EmptyState>
-  {:else}
+  <LoadState {loading} {error} empty={entries.length === 0}>
+    {#snippet emptyState()}
+      <EmptyState>{emptyMessage}</EmptyState>
+    {/snippet}
     <div
       class="feed-grid"
       class:list-view={$viewMode === 'list'}
@@ -478,7 +475,7 @@
         <span class="loading-more">Loading more...</span>
       {/if}
     </div>
-  {/if}
+  </LoadState>
 </div>
 
 {#if !loading && !error && entries.length > 0}

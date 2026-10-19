@@ -155,7 +155,7 @@
   </p>
 
   {#if !ready}
-    <p class="loading">Loading…</p>
+    <p class="caption">Loading…</p>
   {:else}
     <div class="test-form control-row">
       <Field label="Ledger" layout="compact">

@@ -17,7 +17,7 @@
     type ConfigResource,
     type ServarrApp,
   } from '$lib/api';
-  import { Button, Card, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, Card, EmptyState, Input, NoticeBanner, LoadState } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyWarning } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -459,243 +459,241 @@
 </script>
 
 <div class="settings config-page card-pane">
-  {#if loading && !view}
-    <PageLoading />
-  {:else if error && !view}
-    <div class="center-msg error">{error}</div>
-  {:else if view}
-    {#if !view.applier.available}
-      <NoticeBanner title="Read-only: changes are made on the host" variant="info">
-        <p>{view.applier.reason}</p>
-        <p>Credentials are never sent to the browser. A secret shows only whether it is set.</p>
-      </NoticeBanner>
-    {:else if !view.editable}
-      <NoticeBanner
-        title="Read-only view of the running configuration"
-        bind:collapsed={readOnlyCollapsed}
-        variant="info"
-      >
-        <p>
-          This process has no config.toml to change{#if view.config_path}
-            at <code>{view.config_path}</code>{/if}.
-        </p>
-      </NoticeBanner>
-    {/if}
-
-    {#each managedResources.filter((e) => e.resource !== 'config') as entry (entry.resource)}
-      <NoticeBanner
-        title="{RESOURCE_LABELS[entry.resource]} is managed by {entry.source ?? 'a plan'}"
-        variant="warn"
-        collapsed={false}
-      >
-        {@render managedDetail(entry.source)}
-      </NoticeBanner>
-    {/each}
-
-    {#if fileNotice}
-      <NoticeBanner
-        title={fileNotice.title}
-        variant={fileNotice.variant}
-        collapsed={fileNotice.variant === 'info'}
-      >
-        {#if editable && blockingProblems.length}
-          <div class="notice-part">
-            <p class="notice-part-title">Problems to fix first</p>
-            <p>The host refuses a file with these, so the next change has to fix them too.</p>
-            <ul class="problem-list">
-              {#each blockingProblems as problem, i (i)}
-                <li>
-                  {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
-                  {problem.message}
-                </li>
-              {/each}
-            </ul>
-          </div>
-        {/if}
-
-        {#if plainTextCount}
-          <div class="notice-part">
-            <p class="notice-part-title">
-              {plainTextCount === 1
-                ? '1 credential is stored in config.toml in plain text'
-                : `${plainTextCount} credentials are stored in config.toml in plain text`}
-            </p>
-            <p>
-              They work, but anyone who can read config.toml can read them. Moving one to its secret
-              file is done by the host, so the value never reaches this page.
-            </p>
-            {#if unmovableCount}
-              <p>
-                {unmovableCount === inlineSecrets.length
-                  ? 'None of them can'
-                  : `${unmovableCount} of them cannot`} be moved from here{unmovableReason
-                  ? `, because ${unmovableReason}`
-                  : ''}.
-              </p>
-            {/if}
-            {@render warningRows(moveWarnings)}
-            {#if movableLabels.length > 1 || (movableLabels.length === 1 && !moveWarnings.length)}
-              <div class="banner-actions">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={!formEditable}
-                  onclick={toggleMoveAll}
-                  >{allMovesPending
-                    ? 'Keep all in config.toml'
-                    : 'Move all to secret files'}</Button
-                >
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        {#if otherWarnings.length}
-          <div class="notice-part">
-            <p class="notice-part-title">
-              {otherWarnings.length === 1 ? '1 warning' : `${otherWarnings.length} warnings`}
-            </p>
-            <p>Istota loads the file with these. A key it ignores is kept until it is removed.</p>
-            {@render warningRows(otherWarnings)}
-          </div>
-        {/if}
-
-        {#if managedConfig}
-          <div class="notice-part">
-            <p class="notice-part-title">Managed by {managedConfig.source ?? 'a plan'}</p>
-            {@render managedDetail(managedConfig.source)}
-          </div>
-        {/if}
-
-        {#if editable && view.has_comments}
-          <div class="notice-part">
-            <p class="notice-part-title">Comments are not kept</p>
-            <p>
-              Applying a change rewrites the file in Istota's own layout, so its comments and
-              formatting are not kept. The host keeps the previous file as
-              <code>config/config.toml.bak.&lt;timestamp&gt;</code>.
-            </p>
-          </div>
-        {/if}
-      </NoticeBanner>
-    {/if}
-
-    {#if pageNotice}
-      <p class="banner warn" role="status">{pageNotice}</p>
-    {/if}
-
-    {#if requestId !== null}
-      {#key requestId}
-        <RequestProgress
-          {requestId}
-          onApplied={(fresh) => {
-            view = fresh;
-            void loadHistory();
-            void loadServarr();
-          }}
-          onDismiss={() => {
-            requestId = null;
-            void load();
-          }}
-        />
-      {/key}
-    {/if}
-
-    <div class="config-toolbar control-row">
-      <Input bind:value={filter} placeholder="Filter settings…" aria-label="Filter settings" />
-      {#if filter.trim()}
-        <span class="match-count caption">{matchCount} matching</span>
+  <LoadState {loading} {error} hasData={!!view}>
+    {#if view}
+      {#if !view.applier.available}
+        <NoticeBanner title="Read-only: changes are made on the host" variant="info">
+          <p>{view.applier.reason}</p>
+          <p>Credentials are never sent to the browser. A secret shows only whether it is set.</p>
+        </NoticeBanner>
+      {:else if !view.editable}
+        <NoticeBanner
+          title="Read-only view of the running configuration"
+          bind:collapsed={readOnlyCollapsed}
+          variant="info"
+        >
+          <p>
+            This process has no config.toml to change{#if view.config_path}
+              at <code>{view.config_path}</code>{/if}.
+          </p>
+        </NoticeBanner>
       {/if}
-    </div>
 
-    {#if !filter.trim()}
-      <Card title="Admins">
-        <AdminsEditor
-          users={view.admins.users}
-          candidates={view.admins.candidates ?? []}
-          pending={draft.admins}
-          {self}
-          {editable}
-          readOnlyReason={view.admins.read_only_reason}
-          onChange={(admins) => (draft = withAdmins(draft, admins))}
-        />
-      </Card>
+      {#each managedResources.filter((e) => e.resource !== 'config') as entry (entry.resource)}
+        <NoticeBanner
+          title="{RESOURCE_LABELS[entry.resource]} is managed by {entry.source ?? 'a plan'}"
+          variant="warn"
+          collapsed={false}
+        >
+          {@render managedDetail(entry.source)}
+        </NoticeBanner>
+      {/each}
 
-      {#if orphanSecrets.length}
-        <Card title="Credentials">
-          {#each orphanSecrets as secret (secret.name)}
+      {#if fileNotice}
+        <NoticeBanner
+          title={fileNotice.title}
+          variant={fileNotice.variant}
+          collapsed={fileNotice.variant === 'info'}
+        >
+          {#if editable && blockingProblems.length}
+            <div class="notice-part">
+              <p class="notice-part-title">Problems to fix first</p>
+              <p>The host refuses a file with these, so the next change has to fix them too.</p>
+              <ul class="problem-list">
+                {#each blockingProblems as problem, i (i)}
+                  <li>
+                    {#if problem.path.length}<code>{problem.path.join('.')}</code>{/if}
+                    {problem.message}
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+
+          {#if plainTextCount}
+            <div class="notice-part">
+              <p class="notice-part-title">
+                {plainTextCount === 1
+                  ? '1 credential is stored in config.toml in plain text'
+                  : `${plainTextCount} credentials are stored in config.toml in plain text`}
+              </p>
+              <p>
+                They work, but anyone who can read config.toml can read them. Moving one to its
+                secret file is done by the host, so the value never reaches this page.
+              </p>
+              {#if unmovableCount}
+                <p>
+                  {unmovableCount === inlineSecrets.length
+                    ? 'None of them can'
+                    : `${unmovableCount} of them cannot`} be moved from here{unmovableReason
+                    ? `, because ${unmovableReason}`
+                    : ''}.
+                </p>
+              {/if}
+              {@render warningRows(moveWarnings)}
+              {#if movableLabels.length > 1 || (movableLabels.length === 1 && !moveWarnings.length)}
+                <div class="banner-actions">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!formEditable}
+                    onclick={toggleMoveAll}
+                    >{allMovesPending
+                      ? 'Keep all in config.toml'
+                      : 'Move all to secret files'}</Button
+                  >
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          {#if otherWarnings.length}
+            <div class="notice-part">
+              <p class="notice-part-title">
+                {otherWarnings.length === 1 ? '1 warning' : `${otherWarnings.length} warnings`}
+              </p>
+              <p>Istota loads the file with these. A key it ignores is kept until it is removed.</p>
+              {@render warningRows(otherWarnings)}
+            </div>
+          {/if}
+
+          {#if managedConfig}
+            <div class="notice-part">
+              <p class="notice-part-title">Managed by {managedConfig.source ?? 'a plan'}</p>
+              {@render managedDetail(managedConfig.source)}
+            </div>
+          {/if}
+
+          {#if editable && view.has_comments}
+            <div class="notice-part">
+              <p class="notice-part-title">Comments are not kept</p>
+              <p>
+                Applying a change rewrites the file in Istota's own layout, so its comments and
+                formatting are not kept. The host keeps the previous file as
+                <code>config/config.toml.bak.&lt;timestamp&gt;</code>.
+              </p>
+            </div>
+          {/if}
+        </NoticeBanner>
+      {/if}
+
+      {#if pageNotice}
+        <p class="banner warn" role="status">{pageNotice}</p>
+      {/if}
+
+      {#if requestId !== null}
+        {#key requestId}
+          <RequestProgress
+            {requestId}
+            onApplied={(fresh) => {
+              view = fresh;
+              void loadHistory();
+              void loadServarr();
+            }}
+            onDismiss={() => {
+              requestId = null;
+              void load();
+            }}
+          />
+        {/key}
+      {/if}
+
+      <div class="config-toolbar control-row">
+        <Input bind:value={filter} placeholder="Filter settings…" aria-label="Filter settings" />
+        {#if filter.trim()}
+          <span class="match-count caption">{matchCount} matching</span>
+        {/if}
+      </div>
+
+      {#if !filter.trim()}
+        <Card title="Admins">
+          <AdminsEditor
+            users={view.admins.users}
+            candidates={view.admins.candidates ?? []}
+            pending={draft.admins}
+            {self}
+            {editable}
+            readOnlyReason={view.admins.read_only_reason}
+            onChange={(admins) => (draft = withAdmins(draft, admins))}
+          />
+        </Card>
+
+        {#if orphanSecrets.length}
+          <Card title="Credentials">
+            {#each orphanSecrets as secret (secret.name)}
+              {@render standaloneSecret(secret)}
+            {/each}
+          </Card>
+        {/if}
+      {/if}
+
+      {#if sections.length === 0}
+        <EmptyState>No settings match “{filter}”.</EmptyState>
+      {/if}
+
+      {#each sections as section (section.key)}
+        <Card title={section.label} class="config-section">
+          {#each section.fields as field (field.key)}
+            {#if field.key === 'servarr.apps' && appsForm}
+              <ServarrAppsEditor
+                bind:form={appsForm}
+                problems={appsProblems}
+                privateHosts={servarrPrivateHosts}
+                editable={appsEditable}
+                readOnlyReason={field.read_only_reason}
+                onAllowHost={allowHost}
+              />
+            {:else}
+              <FieldControl
+                {field}
+                op={draft.ops[pathKey(field.path)]}
+                secretPending={field.credential ? draft.secrets[field.credential.name] : undefined}
+                secretSource={secretByKey.get(field.key)?.source}
+                editable={formEditable}
+                problem={problemByKey.get(field.path.join('.'))}
+                onOp={setOp}
+                onSecret={setSecret}
+              />
+            {/if}
+          {/each}
+          {#each section.secrets as secret (secret.name)}
             {@render standaloneSecret(secret)}
           {/each}
         </Card>
+      {/each}
+
+      {#if editable && !filter.trim()}
+        <RawEditor
+          initial={view.raw_toml}
+          pending={draft.raw}
+          lockedReason={rawLockedReason}
+          onChange={(text) => (draft = withRaw(draft, text))}
+        />
+      {/if}
+
+      {#if !filter.trim()}
+        <HistoryList
+          requests={history}
+          error={historyError}
+          {restoreBlockedReason}
+          {restoring}
+          onRestore={restore}
+        />
+      {/if}
+
+      {#if reviewing && view.document_digest}
+        <ReviewDialog
+          changeSet={buildChangeSet(combined, view.document_digest)}
+          initialPreview={restored?.preview ?? null}
+          note={restored?.note ?? ''}
+          onClose={closeReview}
+          {onSubmitted}
+          {onConflict}
+          {onRequestOpen}
+        />
       {/if}
     {/if}
-
-    {#if sections.length === 0}
-      <EmptyState>No settings match “{filter}”.</EmptyState>
-    {/if}
-
-    {#each sections as section (section.key)}
-      <Card title={section.label} class="config-section">
-        {#each section.fields as field (field.key)}
-          {#if field.key === 'servarr.apps' && appsForm}
-            <ServarrAppsEditor
-              bind:form={appsForm}
-              problems={appsProblems}
-              privateHosts={servarrPrivateHosts}
-              editable={appsEditable}
-              readOnlyReason={field.read_only_reason}
-              onAllowHost={allowHost}
-            />
-          {:else}
-            <FieldControl
-              {field}
-              op={draft.ops[pathKey(field.path)]}
-              secretPending={field.credential ? draft.secrets[field.credential.name] : undefined}
-              secretSource={secretByKey.get(field.key)?.source}
-              editable={formEditable}
-              problem={problemByKey.get(field.path.join('.'))}
-              onOp={setOp}
-              onSecret={setSecret}
-            />
-          {/if}
-        {/each}
-        {#each section.secrets as secret (secret.name)}
-          {@render standaloneSecret(secret)}
-        {/each}
-      </Card>
-    {/each}
-
-    {#if editable && !filter.trim()}
-      <RawEditor
-        initial={view.raw_toml}
-        pending={draft.raw}
-        lockedReason={rawLockedReason}
-        onChange={(text) => (draft = withRaw(draft, text))}
-      />
-    {/if}
-
-    {#if !filter.trim()}
-      <HistoryList
-        requests={history}
-        error={historyError}
-        {restoreBlockedReason}
-        {restoring}
-        onRestore={restore}
-      />
-    {/if}
-
-    {#if reviewing && view.document_digest}
-      <ReviewDialog
-        changeSet={buildChangeSet(combined, view.document_digest)}
-        initialPreview={restored?.preview ?? null}
-        note={restored?.note ?? ''}
-        onClose={closeReview}
-        {onSubmitted}
-        {onConflict}
-        {onRequestOpen}
-      />
-    {/if}
-  {/if}
+  </LoadState>
 </div>
 
 {#snippet managedDetail(source: string | null)}

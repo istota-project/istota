@@ -3,7 +3,7 @@
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { formatDateTime } from '$lib/dateFormat';
-  import { Badge, Button, Card, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, Card, NoticeBanner, LoadState } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);
@@ -96,92 +96,95 @@
        branch would otherwise unmount the report and both buttons, so a
        transient 500 on the deep button left no way to retry short of a page
        reload, and took the findings the operator was reading with it. -->
-  {#if loading && !report}
-    <PageLoading label="Running checks…" />
-  {:else if error && !report}
-    <div class="center-msg error">{error}</div>
-  {:else if report}
-    <NoticeBanner
-      title={HEADLINE[report.status]}
-      variant={report.status === 'fail' ? 'danger' : report.status === 'warn' ? 'warn' : 'info'}
-      bind:collapsed={aboutCollapsed}
-    >
-      <p>
-        Each check names one thing the code assumes about the machine it is running on — a binary at
-        a path, a writable directory, a mount that is really mounted. The daemon runs them, since it
-        is the process that runs tasks: once when it starts, on an interval after that, and when you
-        ask here. A failure is also sent to the admin channel when it first appears.
+  <LoadState
+    {loading}
+    error={report ? null : error}
+    hasData={!!report}
+    loadingLabel="Running checks…"
+  >
+    {#if report}
+      <NoticeBanner
+        title={HEADLINE[report.status]}
+        variant={report.status === 'fail' ? 'danger' : report.status === 'warn' ? 'warn' : 'info'}
+        bind:collapsed={aboutCollapsed}
+      >
+        <p>
+          Each check names one thing the code assumes about the machine it is running on — a binary
+          at a path, a writable directory, a mount that is really mounted. The daemon runs them,
+          since it is the process that runs tasks: once when it starts, on an interval after that,
+          and when you ask here. A failure is also sent to the admin channel when it first appears.
+        </p>
+        <p>
+          A <strong>skip</strong> is not a problem: it means the check does not apply to this
+          deployment, and the reason is on the row. Only <strong>fail</strong> means something is broken.
+        </p>
+        <p>
+          <strong>Deep checks</strong> spawn a real sandbox namespace and inspect it from the inside,
+          which is slower. Their last result stays on this page until the next deep run.
+        </p>
+      </NoticeBanner>
+
+      {#if error}
+        <div class="banner error">{error}</div>
+      {/if}
+
+      {#if notice}
+        <div class="banner info">{notice}</div>
+      {/if}
+
+      <p class="caption run-times">
+        Last run by the daemon: {when(report.checked_at)}{#if report.deep_checked_at}
+          · deep checks: {when(report.deep_checked_at)}{/if}{#if report.pending}
+          · a {report.pending.deep ? 'deep ' : ''}run is waiting for the daemon{/if}
       </p>
-      <p>
-        A <strong>skip</strong> is not a problem: it means the check does not apply to this
-        deployment, and the reason is on the row. Only <strong>fail</strong> means something is broken.
-      </p>
-      <p>
-        <strong>Deep checks</strong> spawn a real sandbox namespace and inspect it from the inside, which
-        is slower. Their last result stays on this page until the next deep run.
-      </p>
-    </NoticeBanner>
 
-    {#if error}
-      <div class="banner error">{error}</div>
-    {/if}
-
-    {#if notice}
-      <div class="banner info">{notice}</div>
-    {/if}
-
-    <p class="caption run-times">
-      Last run by the daemon: {when(report.checked_at)}{#if report.deep_checked_at}
-        · deep checks: {when(report.deep_checked_at)}{/if}{#if report.pending}
-        · a {report.pending.deep ? 'deep ' : ''}run is waiting for the daemon{/if}
-    </p>
-
-    <div class="health-toolbar control-row">
-      <div class="counts">
-        <Badge variant="success">{report.summary.ok} ok</Badge>
-        {#if report.summary.warn}<Badge variant="warn">{report.summary.warn} warn</Badge>{/if}
-        {#if report.summary.fail}<Badge variant="danger">{report.summary.fail} fail</Badge>{/if}
-        {#if report.summary.skip}<Badge variant="neutral">{report.summary.skip} skip</Badge>{/if}
+      <div class="health-toolbar control-row">
+        <div class="counts">
+          <Badge variant="success">{report.summary.ok} ok</Badge>
+          {#if report.summary.warn}<Badge variant="warn">{report.summary.warn} warn</Badge>{/if}
+          {#if report.summary.fail}<Badge variant="danger">{report.summary.fail} fail</Badge>{/if}
+          {#if report.summary.skip}<Badge variant="neutral">{report.summary.skip} skip</Badge>{/if}
+        </div>
+        <div class="actions">
+          <Button
+            variant="secondary"
+            onclick={() => rerun(false)}
+            loading={running}
+            disabled={deepRunning}
+            loadingLabel="Running…">Re-run</Button
+          >
+          <Button
+            variant="secondary"
+            onclick={() => rerun(true)}
+            loading={deepRunning}
+            disabled={running}
+            loadingLabel="Running deep checks…"
+            title="The daemon spawns a sandbox namespace and inspects it. Slower."
+            >Run deep checks</Button
+          >
+        </div>
       </div>
-      <div class="actions">
-        <Button
-          variant="secondary"
-          onclick={() => rerun(false)}
-          loading={running}
-          disabled={deepRunning}
-          loadingLabel="Running…">Re-run</Button
-        >
-        <Button
-          variant="secondary"
-          onclick={() => rerun(true)}
-          loading={deepRunning}
-          disabled={running}
-          loadingLabel="Running deep checks…"
-          title="The daemon spawns a sandbox namespace and inspects it. Slower."
-          >Run deep checks</Button
-        >
-      </div>
-    </div>
 
-    {#each groups as group (group.name)}
-      <Card title={group.name}>
-        <ul class="check-list">
-          {#each group.checks as check (check.name)}
-            <li class="check" class:muted={check.status === 'skip'}>
-              <div class="check-head">
-                <Badge variant={BADGE[check.status]}>{check.status}</Badge>
-                <code class="check-name">{check.name}</code>
-              </div>
-              <p class="check-detail">{check.detail}</p>
-              {#if check.remedy}
-                <p class="check-remedy caption">{check.remedy}</p>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-      </Card>
-    {/each}
-  {/if}
+      {#each groups as group (group.name)}
+        <Card title={group.name}>
+          <ul class="check-list">
+            {#each group.checks as check (check.name)}
+              <li class="check" class:muted={check.status === 'skip'}>
+                <div class="check-head">
+                  <Badge variant={BADGE[check.status]}>{check.status}</Badge>
+                  <code class="check-name">{check.name}</code>
+                </div>
+                <p class="check-detail">{check.detail}</p>
+                {#if check.remedy}
+                  <p class="check-remedy caption">{check.remedy}</p>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </Card>
+      {/each}
+    {/if}
+  </LoadState>
 </div>
 
 <style>

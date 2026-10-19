@@ -16,6 +16,7 @@
     Badge,
     type KebabItem,
     PageLoading,
+    LoadState,
     Checkbox,
   } from '$lib/components/ui';
   import {
@@ -566,289 +567,287 @@
         >{/if}
     </div>
   {/if}
-  {#if loading}
-    <PageLoading label="Loading files…" />
-  {:else if error}
-    <div class="center-msg error">
-      <p>{error}</p>
-      <Button variant="secondary" onclick={load}>Retry</Button>
-    </div>
-  {:else if !places.length}
-    <EmptyState>No files or connections are available.</EmptyState>
-  {:else if view}
-    <div class="folder-toolbar">
-      <nav aria-label="Folder path">
-        <ol>
-          <li>
-            <a
-              href={viewHref(view)}
-              onclick={(event) => navigateView(event, view!)}
-              aria-current="page">{INDEX_VIEW_LABELS[view]}</a
-            >
-          </li>
-        </ol>
-      </nav>
-    </div>
-    <!-- Disabled, but it still takes a drop, so a file let go here does not navigate the tab away. -->
-    <FileDropZone overlay disabled onFiles={enqueue}>
-      {#if view === 'rooms'}
-        <PlaceIndex
-          label="Rooms"
-          caption="Each room's folder."
-          reachNote={indexReachNote('rooms')}
-          empty="You have no room folders."
-          places={places.filter((item) => item.kind === 'room')}
-          {href}
-          onNavigate={navigate}
-        />
-      {:else if view === 'groups'}
-        <PlaceIndex
-          label="Groups"
-          caption="Folders shared with the groups you belong to."
-          reachNote={indexReachNote('groups')}
-          empty="You have no group folders."
-          places={places.filter((item) => item.kind === 'group')}
-          {href}
-          onNavigate={navigate}
-        />
-      {:else if view === 'scripts' || view === 'prompts'}
-        <ScriptIndex
-          label={INDEX_VIEW_LABELS[view]}
-          kind={view === 'scripts' ? 'script' : 'prompt'}
-          caption={view === 'scripts'
-            ? `Programs in your scripts folder. ${botName} runs them from scheduled jobs and checks.`
-            : 'Prompts in your scripts folder that scheduled jobs read as their instructions.'}
-          empty={view === 'scripts' ? 'No scripts yet.' : 'No prompt files yet.'}
-          reachNote={indexReachNote(view)}
-          index={scriptsIndex}
-          loading={scriptsLoading}
-          error={scriptsError}
-          onOpen={(path) => viewer.openFile(path)}
-          onRetry={loadScripts}
-          {revealAction}
-        />
-      {:else if view === 'config' || view === 'skills'}
-        <ConfigIndex
-          label={INDEX_VIEW_LABELS[view]}
-          caption={view === 'config'
-            ? `${botName} reads these as instructions.`
-            : "Added to a skill's instructions whenever it loads."}
-          empty={view === 'config'
-            ? 'No configuration files are available.'
-            : 'No skills take instructions from you.'}
-          reachNote={indexReachNote(view)}
-          files={configFiles.filter(
-            (file) => file.kind === (view === 'config' ? 'config' : 'skill'),
-          )}
-          loading={configLoading}
-          error={configError}
-          onEdit={editConfigFile}
-          onRetry={retryConfigFiles}
-          {revealAction}
-        />
-      {/if}
-    </FileDropZone>
-  {:else if !place}
-    <EmptyState>This place is no longer available.</EmptyState>
-  {:else}
-    <div class="folder-toolbar">
-      <nav aria-label="Folder path">
-        <ol>
-          {#if parentView}
+  <LoadState {loading} {error} loadingLabel="Loading files…" onRetry={load} empty={!places.length}>
+    {#snippet emptyState()}
+      <EmptyState>No files or connections are available.</EmptyState>
+    {/snippet}
+    {#if view}
+      <div class="folder-toolbar">
+        <nav aria-label="Folder path">
+          <ol>
             <li>
-              <a href={viewHref(parentView)} onclick={(event) => navigateView(event, parentView!)}
-                >{INDEX_VIEW_LABELS[parentView]}</a
-              ><span class="muted" aria-hidden="true">/</span>
-            </li>
-          {/if}
-          <li>
-            <a
-              href={href(place.id)}
-              onclick={(event) => navigate(event, place.id)}
-              aria-current={!selected?.path ? 'page' : undefined}>{place.label}</a
-            >
-          </li>
-          {#each (selected?.path || '').split('/').filter(Boolean) as part, i}
-            {@const parts = selected!.path.split('/').filter(Boolean)}
-            <li>
-              <span class="muted" aria-hidden="true">/</span><a
-                href={href(place.id, parts.slice(0, i + 1).join('/'))}
-                onclick={(event) => navigate(event, place!.id, parts.slice(0, i + 1).join('/'))}
-                aria-current={i === parts.length - 1 ? 'page' : undefined}
-                >{breadcrumbLabel(part)}</a
+              <a
+                href={viewHref(view)}
+                onclick={(event) => navigateView(event, view!)}
+                aria-current="page">{INDEX_VIEW_LABELS[view]}</a
               >
             </li>
-          {/each}
-        </ol>
-      </nav>
-      <div class="folder-actions hstack wrap">
-        {#if place.kind === 'nextcloud'}
-          <Badge size="sm"
-            ><span class="only-you"><BotOff size={12} aria-hidden="true" />Only you</span></Badge
-          >
-        {:else}
-          <ReachBadge access={place.reach.private} />
-        {/if}
-        {#if place.kind === 'group'}
-          <HeaderNav
-            ariaLabel="Group"
-            items={[
-              {
-                label: 'Group overview',
-                href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length) })}`,
-              },
-            ]}
-          />
-        {/if}
-        {#if place.kind === 'drive'}
-          <HeaderNav
-            ariaLabel="Drive location"
-            items={[
-              { label: 'My Drive', href: href('drive'), active: driveRoot === 'root' },
-              {
-                label: 'Shared with me',
-                href: href('drive', 'shared'),
-                active: driveRoot === 'shared',
-              },
-            ]}
-          />
-        {/if}
-        {#if place.id === 'home' && listing && !listingLoading && !listingError}
-          <Button variant="secondary" size="sm" onclick={openFolderDialog}>New folder</Button>
-          <Button size="sm" onclick={() => fileInput?.click()}>Upload</Button>
-          <input
-            bind:this={fileInput}
-            type="file"
-            multiple
-            hidden
-            aria-label="Upload files"
-            onchange={(event) => {
-              enqueue(Array.from(event.currentTarget.files || []));
-              event.currentTarget.value = '';
-            }}
-          />
-        {/if}
-        {#if place.browsable && place.kind !== 'drive'}
-          <Checkbox
-            class="hidden-toggle"
-            label="Show hidden"
-            tone="muted"
-            bind:checked={showHidden}
-            onchange={() => saveSetting('workspace.showHidden', showHidden)}
-          />
-        {/if}
+          </ol>
+        </nav>
       </div>
-    </div>
-    <ReachPanel {place} {notes} {botName} />
-    {#if uploads.length}
-      <section class="uploads" aria-label="Uploads">
-        <div class="upload-heading hstack wrap">
-          <span class="micro-label">Uploads</span>
-          {#if !uploads.some((row) => row.state === 'waiting' || row.state === 'uploading')}
-            <Button size="sm" variant="secondary" onclick={() => (uploads = [])}>Dismiss</Button>
-          {/if}
-        </div>
-        <ul class="list-reset">
-          {#each uploads as row}
-            <li class="upload-row">
-              <span class="upload-name"
-                >{row.file.name}<span class="caption"
-                  >My files{row.path ? ` / ${row.path}` : ''}</span
-                ></span
+      <!-- Disabled, but it still takes a drop, so a file let go here does not navigate the tab away. -->
+      <FileDropZone overlay disabled onFiles={enqueue}>
+        {#if view === 'rooms'}
+          <PlaceIndex
+            label="Rooms"
+            caption="Each room's folder."
+            reachNote={indexReachNote('rooms')}
+            empty="You have no room folders."
+            places={places.filter((item) => item.kind === 'room')}
+            {href}
+            onNavigate={navigate}
+          />
+        {:else if view === 'groups'}
+          <PlaceIndex
+            label="Groups"
+            caption="Folders shared with the groups you belong to."
+            reachNote={indexReachNote('groups')}
+            empty="You have no group folders."
+            places={places.filter((item) => item.kind === 'group')}
+            {href}
+            onNavigate={navigate}
+          />
+        {:else if view === 'scripts' || view === 'prompts'}
+          <ScriptIndex
+            label={INDEX_VIEW_LABELS[view]}
+            kind={view === 'scripts' ? 'script' : 'prompt'}
+            caption={view === 'scripts'
+              ? `Programs in your scripts folder. ${botName} runs them from scheduled jobs and checks.`
+              : 'Prompts in your scripts folder that scheduled jobs read as their instructions.'}
+            empty={view === 'scripts' ? 'No scripts yet.' : 'No prompt files yet.'}
+            reachNote={indexReachNote(view)}
+            index={scriptsIndex}
+            loading={scriptsLoading}
+            error={scriptsError}
+            onOpen={(path) => viewer.openFile(path)}
+            onRetry={loadScripts}
+            {revealAction}
+          />
+        {:else if view === 'config' || view === 'skills'}
+          <ConfigIndex
+            label={INDEX_VIEW_LABELS[view]}
+            caption={view === 'config'
+              ? `${botName} reads these as instructions.`
+              : "Added to a skill's instructions whenever it loads."}
+            empty={view === 'config'
+              ? 'No configuration files are available.'
+              : 'No skills take instructions from you.'}
+            reachNote={indexReachNote(view)}
+            files={configFiles.filter(
+              (file) => file.kind === (view === 'config' ? 'config' : 'skill'),
+            )}
+            loading={configLoading}
+            error={configError}
+            onEdit={editConfigFile}
+            onRetry={retryConfigFiles}
+            {revealAction}
+          />
+        {/if}
+      </FileDropZone>
+    {:else if !place}
+      <EmptyState>This place is no longer available.</EmptyState>
+    {:else}
+      <div class="folder-toolbar">
+        <nav aria-label="Folder path">
+          <ol>
+            {#if parentView}
+              <li>
+                <a href={viewHref(parentView)} onclick={(event) => navigateView(event, parentView!)}
+                  >{INDEX_VIEW_LABELS[parentView]}</a
+                ><span class="muted" aria-hidden="true">/</span>
+              </li>
+            {/if}
+            <li>
+              <a
+                href={href(place.id)}
+                onclick={(event) => navigate(event, place.id)}
+                aria-current={!selected?.path ? 'page' : undefined}>{place.label}</a
               >
-              <span
-                class:form-error={row.state === 'error'}
-                class="upload-status"
-                aria-live="polite"
-              >
-                {row.state === 'waiting'
-                  ? 'Waiting'
-                  : row.state === 'uploading'
-                    ? row.progress === 100
-                      ? 'Saving…'
-                      : `${row.progress}%`
-                    : row.message}
-              </span>
-              {#if row.state === 'uploading'}<progress
-                  max="100"
-                  value={row.progress}
-                  aria-label={`Uploading ${row.file.name}`}
-                ></progress>{/if}
             </li>
-          {/each}
-        </ul>
-      </section>
-    {/if}
-    <FileDropZone
-      overlay
-      disabled={place.id !== 'home' || !listing || listingLoading || !!listingError}
-      onFiles={enqueue}
-    >
-      {#if !place.browsable}
-        <div class="center-msg">
-          {place.kind === 'talk'
-            ? 'Talk attachments are available to tasks, but cannot be browsed here.'
-            : 'This connection is reached through a skill during a task.'}
-        </div>
-      {:else if listingLoading}
-        <PageLoading label="Loading folder…" />
-      {:else if listingError}
-        <div class="center-msg error">
-          {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
-            <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
-            <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
+            {#each (selected?.path || '').split('/').filter(Boolean) as part, i}
+              {@const parts = selected!.path.split('/').filter(Boolean)}
+              <li>
+                <span class="muted" aria-hidden="true">/</span><a
+                  href={href(place.id, parts.slice(0, i + 1).join('/'))}
+                  onclick={(event) => navigate(event, place!.id, parts.slice(0, i + 1).join('/'))}
+                  aria-current={i === parts.length - 1 ? 'page' : undefined}
+                  >{breadcrumbLabel(part)}</a
+                >
+              </li>
+            {/each}
+          </ol>
+        </nav>
+        <div class="folder-actions hstack wrap">
+          {#if place.kind === 'nextcloud'}
+            <Badge size="sm"
+              ><span class="only-you"><BotOff size={12} aria-hidden="true" />Only you</span></Badge
+            >
           {:else}
-            <p>{listingError}</p>
-            <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
+            <ReachBadge access={place.reach.private} />
+          {/if}
+          {#if place.kind === 'group'}
+            <HeaderNav
+              ariaLabel="Group"
+              items={[
+                {
+                  label: 'Group overview',
+                  href: `${base}/groups?${new URLSearchParams({ group: place.id.slice('group:'.length) })}`,
+                },
+              ]}
+            />
+          {/if}
+          {#if place.kind === 'drive'}
+            <HeaderNav
+              ariaLabel="Drive location"
+              items={[
+                { label: 'My Drive', href: href('drive'), active: driveRoot === 'root' },
+                {
+                  label: 'Shared with me',
+                  href: href('drive', 'shared'),
+                  active: driveRoot === 'shared',
+                },
+              ]}
+            />
+          {/if}
+          {#if place.id === 'home' && listing && !listingLoading && !listingError}
+            <Button variant="secondary" size="sm" onclick={openFolderDialog}>New folder</Button>
+            <Button size="sm" onclick={() => fileInput?.click()}>Upload</Button>
+            <input
+              bind:this={fileInput}
+              type="file"
+              multiple
+              hidden
+              aria-label="Upload files"
+              onchange={(event) => {
+                enqueue(Array.from(event.currentTarget.files || []));
+                event.currentTarget.value = '';
+              }}
+            />
+          {/if}
+          {#if place.browsable && place.kind !== 'drive'}
+            <Checkbox
+              class="hidden-toggle"
+              label="Show hidden"
+              tone="muted"
+              bind:checked={showHidden}
+              onchange={() => saveSetting('workspace.showHidden', showHidden)}
+            />
           {/if}
         </div>
-      {:else if driveListing}
-        <FileTable
-          {place}
-          {pins}
-          pinsBusy={pinsBusy || pinsLoading}
-          onTogglePin={togglePin}
-          driveItems={driveListing.items}
-          drivePath={selected?.path || ''}
-          showHidden={true}
-          {href}
-          onNavigate={navigate}
-          onRefresh={() => loadFolder(selected!)}
-        />
-        {#if driveListing.next_page_token}
-          <div class="drive-pagination">
-            {#if moreError}<p class="form-error" role="alert">
-                {moreError === 'drive_not_granted' ? 'Drive access is off' : moreError}
-              </p>{/if}
-            {#if needsConnection(moreError)}
-              <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
-            {:else}
-              <Button
-                variant="secondary"
-                size="sm"
-                loading={moreLoading}
-                loadingLabel="Loading…"
-                onclick={loadMore}>Load more</Button
-              >
+      </div>
+      <ReachPanel {place} {notes} {botName} />
+      {#if uploads.length}
+        <section class="uploads" aria-label="Uploads">
+          <div class="upload-heading hstack wrap">
+            <span class="micro-label">Uploads</span>
+            {#if !uploads.some((row) => row.state === 'waiting' || row.state === 'uploading')}
+              <Button size="sm" variant="secondary" onclick={() => (uploads = [])}>Dismiss</Button>
             {/if}
           </div>
-        {/if}
-      {:else if listing}
-        <FileTable
-          {listing}
-          onDelete={place.id === 'home' ? deleteEntries : undefined}
-          onRefresh={() => loadFolder(selected!)}
-          {place}
-          {showHidden}
-          {href}
-          {pins}
-          pinsBusy={pinsBusy || pinsLoading}
-          onTogglePin={togglePin}
-          onNavigate={navigate}
-        />
+          <ul class="list-reset">
+            {#each uploads as row}
+              <li class="upload-row">
+                <span class="upload-name"
+                  >{row.file.name}<span class="caption"
+                    >My files{row.path ? ` / ${row.path}` : ''}</span
+                  ></span
+                >
+                <span
+                  class:form-error={row.state === 'error'}
+                  class="upload-status"
+                  aria-live="polite"
+                >
+                  {row.state === 'waiting'
+                    ? 'Waiting'
+                    : row.state === 'uploading'
+                      ? row.progress === 100
+                        ? 'Saving…'
+                        : `${row.progress}%`
+                      : row.message}
+                </span>
+                {#if row.state === 'uploading'}<progress
+                    max="100"
+                    value={row.progress}
+                    aria-label={`Uploading ${row.file.name}`}
+                  ></progress>{/if}
+              </li>
+            {/each}
+          </ul>
+        </section>
       {/if}
-    </FileDropZone>
-  {/if}
+      <FileDropZone
+        overlay
+        disabled={place.id !== 'home' || !listing || listingLoading || !!listingError}
+        onFiles={enqueue}
+      >
+        {#if !place.browsable}
+          <div class="center-msg">
+            {place.kind === 'talk'
+              ? 'Talk attachments are available to tasks, but cannot be browsed here.'
+              : 'This connection is reached through a skill during a task.'}
+          </div>
+        {:else if listingLoading}
+          <PageLoading label="Loading folder…" />
+        {:else if listingError}
+          <div class="center-msg error">
+            {#if (place.kind === 'drive' || place.kind === 'nextcloud') && needsConnection(listingError)}
+              <p>{listingError === 'drive_not_granted' ? 'Drive access is off' : listingError}</p>
+              <Button variant="secondary" href={`${base}/settings/connections`}>Connections</Button>
+            {:else}
+              <p>{listingError}</p>
+              <Button variant="secondary" onclick={() => loadFolder(selected!)}>Retry</Button>
+            {/if}
+          </div>
+        {:else if driveListing}
+          <FileTable
+            {place}
+            {pins}
+            pinsBusy={pinsBusy || pinsLoading}
+            onTogglePin={togglePin}
+            driveItems={driveListing.items}
+            drivePath={selected?.path || ''}
+            showHidden={true}
+            {href}
+            onNavigate={navigate}
+            onRefresh={() => loadFolder(selected!)}
+          />
+          {#if driveListing.next_page_token}
+            <div class="drive-pagination">
+              {#if moreError}<p class="form-error" role="alert">
+                  {moreError === 'drive_not_granted' ? 'Drive access is off' : moreError}
+                </p>{/if}
+              {#if needsConnection(moreError)}
+                <Button variant="secondary" href={`${base}/settings/connections`}
+                  >Connections</Button
+                >
+              {:else}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={moreLoading}
+                  loadingLabel="Loading…"
+                  onclick={loadMore}>Load more</Button
+                >
+              {/if}
+            </div>
+          {/if}
+        {:else if listing}
+          <FileTable
+            {listing}
+            onDelete={place.id === 'home' ? deleteEntries : undefined}
+            onRefresh={() => loadFolder(selected!)}
+            {place}
+            {showHidden}
+            {href}
+            {pins}
+            pinsBusy={pinsBusy || pinsLoading}
+            onTogglePin={togglePin}
+            onNavigate={navigate}
+          />
+        {/if}
+      </FileDropZone>
+    {/if}
+  </LoadState>
 </AppShell>
 
 {#if editing}

@@ -19,7 +19,7 @@
     EmptyState,
     Input,
     KebabMenu,
-    PageLoading,
+    LoadState,
     type KebabItem,
     Card,
   } from '$lib/components/ui';
@@ -190,93 +190,95 @@
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if personal === null && !loadError}
-    <PageLoading label="Loading briefings…" />
-  {:else if personal === null}
-    <div class="center-msg error">{loadError}</div>
-  {:else}
-    <div class="filter-row">
-      <Input
-        type="search"
-        aria-label="Filter briefings"
-        placeholder="Filter by owner, group or title"
-        bind:value={filter}
-      />
-    </div>
-    {#snippet table(rows: Row[], label: string, ownerHeading: string)}
-      <div class="table-scroll">
-        <table class="table table--fixed briefings-grid" aria-label={label}>
-          <thead
-            ><tr
-              ><th scope="col" class="col-owner">{ownerHeading}</th>
-              <th scope="col" class="col-briefing">Briefing</th>
-              <th scope="col" class="col-schedule">Schedule</th>
-              <th scope="col" class="col-delivery">Delivery</th>
-              <th scope="col" class="col-state">State</th>
-              <th scope="col" class="col-last">Last run</th>
-              <th scope="col" class="col-actions" aria-label="Actions"></th></tr
-            ></thead
-          >
-          <tbody>
-            {#each rows as row (row.id)}
-              <tr>
-                <td class="col-owner">
-                  <div class="cell-main">{row.owner}</div>
-                  {#if row.owners}<div class="caption">{row.owners}</div>{/if}
-                </td>
-                <td class="col-briefing">
-                  <div class="cell-main">{row.title}</div>
-                  <div class="caption">{row.name}</div>
-                </td>
-                <td class="col-schedule">
-                  <code>{row.cron}</code>
-                  {#if row.timezone}<div class="caption">{row.timezone}</div>{/if}
-                </td>
-                <td class="col-delivery">{row.delivery}</td>
-                <td class="col-state">
-                  <Badge size="sm" variant={STATE_VARIANT[row.state]}
-                    >{STATE_LABEL[row.state]}</Badge
-                  >
-                </td>
-                <td class="col-last truncate"
-                  >{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td
-                >
-                <td class="col-actions">
-                  <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+  <LoadState
+    loading={personal === null && !loadError}
+    error={loadError}
+    loadingLabel="Loading briefings…"
+  >
+    {#if personal}
+      <div class="filter-row">
+        <Input
+          type="search"
+          aria-label="Filter briefings"
+          placeholder="Filter by owner, group or title"
+          bind:value={filter}
+        />
       </div>
-    {/snippet}
+      {#snippet table(rows: Row[], label: string, ownerHeading: string)}
+        <div class="table-scroll">
+          <table class="table table--fixed briefings-grid" aria-label={label}>
+            <thead
+              ><tr
+                ><th scope="col" class="col-owner">{ownerHeading}</th>
+                <th scope="col" class="col-briefing">Briefing</th>
+                <th scope="col" class="col-schedule">Schedule</th>
+                <th scope="col" class="col-delivery">Delivery</th>
+                <th scope="col" class="col-state">State</th>
+                <th scope="col" class="col-last">Last run</th>
+                <th scope="col" class="col-actions" aria-label="Actions"></th></tr
+              ></thead
+            >
+            <tbody>
+              {#each rows as row (row.id)}
+                <tr>
+                  <td class="col-owner">
+                    <div class="cell-main">{row.owner}</div>
+                    {#if row.owners}<div class="caption">{row.owners}</div>{/if}
+                  </td>
+                  <td class="col-briefing">
+                    <div class="cell-main">{row.title}</div>
+                    <div class="caption">{row.name}</div>
+                  </td>
+                  <td class="col-schedule">
+                    <code>{row.cron}</code>
+                    {#if row.timezone}<div class="caption">{row.timezone}</div>{/if}
+                  </td>
+                  <td class="col-delivery">{row.delivery}</td>
+                  <td class="col-state">
+                    <Badge size="sm" variant={STATE_VARIANT[row.state]}
+                      >{STATE_LABEL[row.state]}</Badge
+                    >
+                  </td>
+                  <td class="col-last truncate"
+                    >{row.lastRun ? formatRelative(row.lastRun) : 'Never'}</td
+                  >
+                  <td class="col-actions">
+                    <KebabMenu items={rowActions(row)} ariaLabel="Actions for {row.title}" />
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/snippet}
 
-    <Card
-      title="Personal briefings"
-      description="A paused briefing does not run, and its owner cannot turn it back on until an administrator resumes it."
-    >
-      {#if personalRows.length}
-        {@render table(personalRows, 'Personal briefings', 'Owner')}
-      {:else if needle}
-        <EmptyState size="sm">No personal briefings match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No personal briefings yet.</EmptyState>
-      {/if}
-    </Card>
+      <Card
+        title="Personal briefings"
+        description="A paused briefing does not run, and its owner cannot turn it back on until an administrator resumes it."
+      >
+        {#if personalRows.length}
+          {@render table(personalRows, 'Personal briefings', 'Owner')}
+        {:else if needle}
+          <EmptyState size="sm">No personal briefings match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No personal briefings yet.</EmptyState>
+        {/if}
+      </Card>
 
-    <Card
-      title="Group briefings"
-      description="Deleting a group briefing removes it from the group's settings. Members keep its published editions."
-    >
-      {#if groupRows.length}
-        {@render table(groupRows, 'Group briefings', 'Group')}
-      {:else if needle}
-        <EmptyState size="sm">No group briefings match the filter.</EmptyState>
-      {:else}
-        <EmptyState size="sm">No group briefings yet.</EmptyState>
-      {/if}
-    </Card>
-  {/if}
+      <Card
+        title="Group briefings"
+        description="Deleting a group briefing removes it from the group's settings. Members keep its published editions."
+      >
+        {#if groupRows.length}
+          {@render table(groupRows, 'Group briefings', 'Group')}
+        {:else if needle}
+          <EmptyState size="sm">No group briefings match the filter.</EmptyState>
+        {:else}
+          <EmptyState size="sm">No group briefings yet.</EmptyState>
+        {/if}
+      </Card>
+    {/if}
+  </LoadState>
 </div>
 
 <ConfirmDialog

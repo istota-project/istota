@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EmptyState, Field, Input, Card, Checkbox } from '$lib/components/ui';
+  import { EmptyState, Field, Input, Card, Checkbox, LoadState } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import {
@@ -109,11 +109,12 @@
 </script>
 
 <Card title="Portfolio accounts ({rows.length})">
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {:else if loaded && rows.length === 0}
-    <EmptyState>No portfolio accounts yet. They appear with the first positions import.</EmptyState>
-  {:else}
+  <LoadState scope="card" loading={!loaded} error={loadError} empty={rows.length === 0}>
+    {#snippet emptyState()}
+      <EmptyState
+        >No portfolio accounts yet. They appear with the first positions import.</EmptyState
+      >
+    {/snippet}
     <p class="card-hint caption">
       Excluded accounts stay imported but are hidden from every chart and total. Group and type
       drive the Portfolio filters — a group is any label worth filtering by (an owner, a purpose).
@@ -162,7 +163,7 @@
         </li>
       {/each}
     </ul>
-  {/if}
+  </LoadState>
 </Card>
 
 <style>

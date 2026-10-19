@@ -14,7 +14,7 @@
     NotificationBell,
     SearchButton,
     SearchDialog,
-    PageLoading,
+    LoadState,
     PageLoader,
     type MenuItem,
   } from '$lib/components/ui';
@@ -500,120 +500,124 @@
 
 {#if setupRoute}
   {@render children()}
-{:else if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if user}
-  <SearchDialog bind:open={searchOpen} features={user.features} />
-  <nav class="app-nav">
-    <a href="{base}/" class="app-name">
-      <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
-      Istota
-    </a>
-    <div class="nav-links">
-      <a
-        href="{base}/chat"
-        class:active={isActive('/chat')}
-        aria-label={chatLabel}
-        title={chatLabel}
-      >
-        Chat<CountPill count={chatCount ?? 0} title={chatLabel} shape="mark" />
-      </a>
-      {#if user.features.workspace}
-        <a href="{base}/files" class:active={isActive('/files')}>Files</a>
-      {/if}
-      {#if user.features.groups}
-        <a href="{base}/groups/" class:active={isActive('/groups')}>Groups</a>
-      {/if}
-      {#if user.features.briefings}
-        <a
-          href="{base}/briefings"
-          class:active={isActive('/briefings')}
-          aria-label={briefingsLabel}
-          title={briefingsLabel}
-        >
-          Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} shape="mark" />
+{:else}
+  <LoadState {loading} {error}>
+    {#if user}
+      <SearchDialog bind:open={searchOpen} features={user.features} />
+      <nav class="app-nav">
+        <a href="{base}/" class="app-name">
+          <img class="sigil" src="{base}/octopus-sigil.webp" alt="" width="19" height="20" />
+          Istota
         </a>
-      {/if}
-      {#if user.features.feeds}
-        <a
-          href="{base}/feeds"
-          class:active={isActive('/feeds')}
-          aria-label={feedsLabel}
-          title={feedsLabel}
-        >
-          Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} shape="mark" />
-        </a>
-      {/if}
-      {#if user.features.location}
-        <a href="{base}/location" class:active={isActive('/location')}>Location</a>
-      {/if}
-      {#if user.features.money}
-        <a href="{base}/money" class:active={isActive('/money')}>Money</a>
-      {/if}
-      {#if user.features.health}
-        <a href="{base}/health" class:active={isActive('/health')}>Health</a>
-      {/if}
-      {#if user.features.admin}
-        <a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
-      {/if}
-    </div>
-    <div class="nav-right">
-      <a
-        href="{base}/settings"
-        class="nav-user"
-        class:active={isActive('/settings')}
-        title="Settings"
-      >
-        {user.display_name}
-      </a>
-      <SearchButton
-        onclick={() => {
-          searchOpen = true;
-        }}
-      />
-      <NotificationBell />
-      <button
-        type="button"
-        class="nav-icon-btn touch-target theme-btn"
-        onclick={toggleTheme}
-        title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-        aria-label="Toggle color theme"
-      >
-        {#if $theme === 'dark'}
-          <Sun size={15} />
-        {:else}
-          <Moon size={15} />
-        {/if}
-      </button>
-      <LogoutButton />
-      <Menu items={navMenuItems} label="Sections">
-        {#snippet trigger(props)}
-          <button class="nav-icon-btn touch-target hamburger-btn" aria-label="Open menu" {...props}>
-            <MenuIcon size={18} />
+        <div class="nav-links">
+          <a
+            href="{base}/chat"
+            class:active={isActive('/chat')}
+            aria-label={chatLabel}
+            title={chatLabel}
+          >
+            Chat<CountPill count={chatCount ?? 0} title={chatLabel} shape="mark" />
+          </a>
+          {#if user.features.workspace}
+            <a href="{base}/files" class:active={isActive('/files')}>Files</a>
+          {/if}
+          {#if user.features.groups}
+            <a href="{base}/groups/" class:active={isActive('/groups')}>Groups</a>
+          {/if}
+          {#if user.features.briefings}
+            <a
+              href="{base}/briefings"
+              class:active={isActive('/briefings')}
+              aria-label={briefingsLabel}
+              title={briefingsLabel}
+            >
+              Briefings<CountPill count={briefingsCount ?? 0} title={briefingsLabel} shape="mark" />
+            </a>
+          {/if}
+          {#if user.features.feeds}
+            <a
+              href="{base}/feeds"
+              class:active={isActive('/feeds')}
+              aria-label={feedsLabel}
+              title={feedsLabel}
+            >
+              Feeds<CountPill count={feedsCount ?? 0} title={feedsLabel} shape="mark" />
+            </a>
+          {/if}
+          {#if user.features.location}
+            <a href="{base}/location" class:active={isActive('/location')}>Location</a>
+          {/if}
+          {#if user.features.money}
+            <a href="{base}/money" class:active={isActive('/money')}>Money</a>
+          {/if}
+          {#if user.features.health}
+            <a href="{base}/health" class:active={isActive('/health')}>Health</a>
+          {/if}
+          {#if user.features.admin}
+            <a href="{base}/admin" class:active={isActive('/admin')}>Admin</a>
+          {/if}
+        </div>
+        <div class="nav-right">
+          <a
+            href="{base}/settings"
+            class="nav-user"
+            class:active={isActive('/settings')}
+            title="Settings"
+          >
+            {user.display_name}
+          </a>
+          <SearchButton
+            onclick={() => {
+              searchOpen = true;
+            }}
+          />
+          <NotificationBell />
+          <button
+            type="button"
+            class="nav-icon-btn touch-target theme-btn"
+            onclick={toggleTheme}
+            title={$theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label="Toggle color theme"
+          >
+            {#if $theme === 'dark'}
+              <Sun size={15} />
+            {:else}
+              <Moon size={15} />
+            {/if}
           </button>
-        {/snippet}
-      </Menu>
-    </div>
-  </nav>
-  <main
-    class="app-content"
-    class:app-content-fill={isActive('/') ||
-      isActive('/chat') ||
-      isActive('/files') ||
-      isActive('/groups') ||
-      isActive('/location') ||
-      isActive('/feeds') ||
-      isActive('/money') ||
-      isActive('/health') ||
-      isActive('/briefings') ||
-      isActive('/admin') ||
-      isActive('/settings')}
-  >
-    {@render children()}
-    <FileViewerHost />
-  </main>
+          <LogoutButton />
+          <Menu items={navMenuItems} label="Sections">
+            {#snippet trigger(props)}
+              <button
+                class="nav-icon-btn touch-target hamburger-btn"
+                aria-label="Open menu"
+                {...props}
+              >
+                <MenuIcon size={18} />
+              </button>
+            {/snippet}
+          </Menu>
+        </div>
+      </nav>
+      <main
+        class="app-content"
+        class:app-content-fill={isActive('/') ||
+          isActive('/chat') ||
+          isActive('/files') ||
+          isActive('/groups') ||
+          isActive('/location') ||
+          isActive('/feeds') ||
+          isActive('/money') ||
+          isActive('/health') ||
+          isActive('/briefings') ||
+          isActive('/admin') ||
+          isActive('/settings')}
+      >
+        {@render children()}
+        <FileViewerHost />
+      </main>
+    {/if}
+  </LoadState>
 {/if}
 
 {#if updated.current}

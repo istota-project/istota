@@ -272,6 +272,44 @@ ${PANE}`),
   });
 });
 
+describe('findHeldChromeViolations with LoadState', () => {
+  it('reads a pane LoadState as a whole-pane failure', () => {
+    const found = findHeldChromeViolations(`
+{#if !loading}
+  <div class="money-toolbar"><span>{total} entries</span></div>
+{/if}
+<LoadState {loading} {error}>
+  <div class="rows">…</div>
+</LoadState>`);
+    expect(found).toHaveLength(1);
+  });
+
+  it('passes the same chrome moved into its header snippet', () => {
+    expect(
+      findHeldChromeViolations(`
+<LoadState {loading} {error}>
+  {#snippet header()}
+    <div class="money-toolbar"><span>{total} entries</span></div>
+  {/snippet}
+  <div class="rows">…</div>
+</LoadState>`),
+    ).toEqual([]);
+  });
+
+  it('leaves a card-scope LoadState alone', () => {
+    // A card's failure is a banner inside the card; the page around it renders.
+    expect(
+      findHeldChromeViolations(`
+{#if !loading}
+  <div class="bar">…</div>
+{/if}
+<LoadState scope="card" {loading} {error}>
+  <ul>…</ul>
+</LoadState>`),
+    ).toEqual([]);
+  });
+});
+
 describe('the routes themselves', () => {
   it('render every whole-pane load failure as .center-msg error', () => {
     const offenders: string[] = [];

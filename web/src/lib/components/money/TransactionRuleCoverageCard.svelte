@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Badge, EmptyState, Select, Card } from '$lib/components/ui';
+  import { Badge, EmptyState, Select, Card, LoadState } from '$lib/components/ui';
   import { getTransactionRuleCoverage, type RuleCoverageValue } from '$lib/money/api';
 
   // What recent imports actually carried, and where each value went. The list
@@ -78,9 +78,7 @@
       onValueChange={load}
     />
   {/snippet}
-  {#if loadError}
-    <div class="banner error">{loadError}</div>
-  {:else}
+  <LoadState scope="card" loading={!loaded} error={loadError}>
     <p class="card-hint caption">
       The distinct values recent imports carried, and the account each one posted to when it was
       last seen. Values falling through to <code>Expenses:Uncategorized</code> come first — that is the
@@ -88,7 +86,7 @@
       the test above instead.
     </p>
 
-    {#if loaded && ordered.length === 0}
+    {#if ordered.length === 0}
       <EmptyState>No imports yet.</EmptyState>
     {:else}
       <ul class="divided-list">
@@ -112,7 +110,7 @@
         there is nothing to list — only the count.
       </p>
     {/if}
-  {/if}
+  </LoadState>
 </Card>
 
 <style>

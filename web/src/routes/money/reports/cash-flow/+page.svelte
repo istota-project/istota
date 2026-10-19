@@ -13,7 +13,7 @@
     Tooltip,
     Legend,
   } from 'chart.js';
-  import { Card, EmptyState, StatTile, PageLoading } from '$lib/components/ui';
+  import { Card, EmptyState, StatTile, LoadState } from '$lib/components/ui';
   import { getCashFlow, type CashFlowRow } from '$lib/money/api';
   import { directionColor, INCOME_COLOR, EXPENSE_COLOR } from '$lib/money/direction';
   import { selectedLedger } from '$lib/money/stores/ledger';
@@ -314,13 +314,10 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if months.length === 0}
-  <EmptyState>No data for the selected period.</EmptyState>
-{:else}
+<LoadState {loading} {error} empty={months.length === 0}>
+  {#snippet emptyState()}
+    <EmptyState>No data for the selected period.</EmptyState>
+  {/snippet}
   <div class="cashflow-page">
     <Card as="div" variant="flat" padding="sm" class="chart-container">
       <canvas bind:this={chartCanvas}></canvas>
@@ -416,7 +413,7 @@
       </div>
     {/if}
   </div>
-{/if}
+</LoadState>
 
 <style>
   /* Block rather than the card's flex column: Chart.js sizes the canvas

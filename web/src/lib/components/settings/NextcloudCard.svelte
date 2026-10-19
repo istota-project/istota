@@ -247,7 +247,7 @@
 >
   {#if token.connected}
     {#if loading && !sharing}
-      <p class="muted">Loading…</p>
+      <p class="caption">Loading…</p>
     {:else if loadError}
       <div class="banner error">{loadError}</div>
     {:else if isBotAccount}

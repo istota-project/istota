@@ -37,7 +37,7 @@
     DateRangeFilter,
     EmptyState,
     Select,
-    PageLoading,
+    LoadState,
   } from '$lib/components/ui';
   import { loadSetting, saveSetting } from '$lib/stores/persisted';
 
@@ -305,13 +305,10 @@
     </Chip>
   </div>
 
-  {#if loading}
-    <PageLoading />
-  {:else if error}
-    <div class="center-msg error">{error}</div>
-  {:else if pings.length === 0 && !showDiscover}
-    <EmptyState>No location data for this period</EmptyState>
-  {:else}
+  <LoadState {loading} {error} empty={pings.length === 0 && !showDiscover}>
+    {#snippet emptyState()}
+      <EmptyState>No location data for this period</EmptyState>
+    {/snippet}
     <div class="map-area">
       <LocationMap
         bind:this={mapComponent}
@@ -389,7 +386,7 @@
       {/if}
       <ElevationProfile summary={elevation} />
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
 <ConfirmDialog

@@ -142,7 +142,7 @@
     <p role="alert">{error}</p>
   {:else}
     <div class="pdf-scroll">
-      {#if !document || rendering}<p class="muted" role="status">Loading PDF…</p>{/if}
+      {#if !document || rendering}<p class="caption" role="status">Loading PDF…</p>{/if}
       <div class="pdf-page" bind:this={surface} bind:clientWidth={width}></div>
     </div>
     {#if document}

@@ -22,7 +22,7 @@
     KebabMenu,
     NoticeBanner,
     type KebabItem,
-    PageLoading,
+    LoadState,
     Card,
   } from '$lib/components/ui';
   import { formatRelative } from '$lib/dateFormat';
@@ -163,114 +163,112 @@
 </script>
 
 <div class="settings admin-page card-pane">
-  {#if !view && !error}
-    <PageLoading label="Loading users…" />
-  {:else if !view}
-    <div class="center-msg error">{error}</div>
-  {:else}
-    {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-    {#if notice}<p class="banner success" role="status">{notice}</p>{/if}
-    {#if !view.email_enabled}
-      <p class="banner warn">
-        Email sign-in is not enabled. Sending links and attaching email are unavailable.
-      </p>
-    {/if}
-    <NoticeBanner title="About web access" bind:collapsed={aboutCollapsed}>
-      <p>{disableCopy}</p>
-      <p>{removeCopy}</p>
-      <p>
-        Sign out everywhere ends email and Nextcloud web sessions. These controls do not revoke
-        Nextcloud service credentials.
-      </p>
-    </NoticeBanner>
-    <Card title="Users">
-      {#snippet actions()}
-        <Button variant="primary" size="sm" onclick={add} disabled={busy || !view?.email_enabled}
-          >Add user</Button
-        >
-      {/snippet}
-      {#if view.users.length === 0}
-        <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
-      {:else}
-        <div class="table-scroll">
-          <table
-            class="table table--fixed table--interactive table--on-card users-grid"
-            aria-label="Users"
-          >
-            <thead
-              ><tr
-                ><th scope="col" class="col-user">User</th>
-                <th scope="col" class="col-email">Email</th><th scope="col" class="col-access"
-                  >Sign-in</th
-                ><th scope="col" class="col-last-login">Last login</th><th
-                  scope="col"
-                  class="col-actions"
-                  aria-label="Actions"
-                ></th></tr
-              ></thead
-            >
-            <tbody>
-              {#each view.users as user (user.user_id)}
-                <!-- The row is a shortcut; the kebab's "Edit settings" is the
-                     keyboard route to the same editor. -->
-                <tr class="row-clickable" onclick={() => edit(user)}>
-                  <td>
-                    <UserCell
-                      userId={user.user_id}
-                      displayName={user.display_name}
-                      isAdmin={user.is_admin}
-                    />
-                  </td>
-                  <td class="col-email truncate" title={user.identity?.email}
-                    >{user.identity?.email ?? '—'}</td
-                  >
-                  <td class="col-access">
-                    <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
-                      >{signInStateLabel(user.identity, user.state)}</Badge
-                    >
-                  </td>
-                  <td class="col-last-login truncate"
-                    >{user.identity
-                      ? user.identity.last_login_at
-                        ? formatRelative(user.identity.last_login_at)
-                        : 'Never'
-                      : '—'}</td
-                  >
-                  <td class="col-actions">
-                    <KebabMenu
-                      items={userActions(user)}
-                      ariaLabel="Actions for {user.display_name || user.user_id}"
-                    />
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+  <LoadState loading={!view && !error} error={view ? null : error} loadingLabel="Loading users…">
+    {#if view}
+      {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+      {#if notice}<p class="banner success" role="status">{notice}</p>{/if}
+      {#if !view.email_enabled}
+        <p class="banner warn">
+          Email sign-in is not enabled. Sending links and attaching email are unavailable.
+        </p>
       {/if}
-    </Card>
-    {#if view.orphans.length}
-      <Card
-        title="Identities without profiles"
-        description="These accounts cannot sign in. Restore their profiles with the operator CLI or remove their email login."
-      >
-        {#each view.orphans as user (user.user_id)}
-          <div class="orphan-row">
-            <div>
-              <div class="user-name">{user.user_id}</div>
-              <div class="user-detail caption">{user.identity?.email}</div>
-            </div>
-            <Button
-              variant="danger"
-              size="sm"
-              disabled={busy}
-              onclick={() => requestConfirmation(user, 'remove')}>Remove email login</Button
+      <NoticeBanner title="About web access" bind:collapsed={aboutCollapsed}>
+        <p>{disableCopy}</p>
+        <p>{removeCopy}</p>
+        <p>
+          Sign out everywhere ends email and Nextcloud web sessions. These controls do not revoke
+          Nextcloud service credentials.
+        </p>
+      </NoticeBanner>
+      <Card title="Users">
+        {#snippet actions()}
+          <Button variant="primary" size="sm" onclick={add} disabled={busy || !view?.email_enabled}
+            >Add user</Button
+          >
+        {/snippet}
+        {#if view.users.length === 0}
+          <EmptyState>No users yet. Add a user to send their first invitation.</EmptyState>
+        {:else}
+          <div class="table-scroll">
+            <table
+              class="table table--fixed table--interactive table--on-card users-grid"
+              aria-label="Users"
             >
+              <thead
+                ><tr
+                  ><th scope="col" class="col-user">User</th>
+                  <th scope="col" class="col-email">Email</th><th scope="col" class="col-access"
+                    >Sign-in</th
+                  ><th scope="col" class="col-last-login">Last login</th><th
+                    scope="col"
+                    class="col-actions"
+                    aria-label="Actions"
+                  ></th></tr
+                ></thead
+              >
+              <tbody>
+                {#each view.users as user (user.user_id)}
+                  <!-- The row is a shortcut; the kebab's "Edit settings" is the
+                       keyboard route to the same editor. -->
+                  <tr class="row-clickable" onclick={() => edit(user)}>
+                    <td>
+                      <UserCell
+                        userId={user.user_id}
+                        displayName={user.display_name}
+                        isAdmin={user.is_admin}
+                      />
+                    </td>
+                    <td class="col-email truncate" title={user.identity?.email}
+                      >{user.identity?.email ?? '—'}</td
+                    >
+                    <td class="col-access">
+                      <Badge size="sm" variant={user.identity?.disabled ? 'partial' : 'neutral'}
+                        >{signInStateLabel(user.identity, user.state)}</Badge
+                      >
+                    </td>
+                    <td class="col-last-login truncate"
+                      >{user.identity
+                        ? user.identity.last_login_at
+                          ? formatRelative(user.identity.last_login_at)
+                          : 'Never'
+                        : '—'}</td
+                    >
+                    <td class="col-actions">
+                      <KebabMenu
+                        items={userActions(user)}
+                        ariaLabel="Actions for {user.display_name || user.user_id}"
+                      />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
           </div>
-        {/each}
+        {/if}
       </Card>
+      {#if view.orphans.length}
+        <Card
+          title="Identities without profiles"
+          description="These accounts cannot sign in. Restore their profiles with the operator CLI or remove their email login."
+        >
+          {#each view.orphans as user (user.user_id)}
+            <div class="orphan-row">
+              <div>
+                <div class="user-name">{user.user_id}</div>
+                <div class="user-detail caption">{user.identity?.email}</div>
+              </div>
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={busy}
+                onclick={() => requestConfirmation(user, 'remove')}>Remove email login</Button
+              >
+            </div>
+          {/each}
+        </Card>
+      {/if}
     {/if}
-  {/if}
+  </LoadState>
 </div>
 
 <FormModal

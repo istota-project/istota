@@ -10,7 +10,7 @@
   import { seriesColors } from '$lib/money/portfolioPalette';
   import { chartChrome } from '$lib/chartTheme';
   import { theme } from '$lib/stores/theme';
-  import { Card, EmptyState, NoticeBanner, StatTile, PageLoading } from '$lib/components/ui';
+  import { Card, EmptyState, NoticeBanner, StatTile, LoadState } from '$lib/components/ui';
   import { directionColor } from '$lib/money/direction';
   import { portfolioGroup, portfolioKnownGroups } from '$lib/money/stores/portfolio';
 
@@ -157,114 +157,113 @@
   });
 </script>
 
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if !summary}
-  <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
-    No portfolio snapshots yet. Import a Fidelity Portfolio Positions CSV to get started.
-  </EmptyState>
-{:else}
-  <div class="money-toolbar">
-    <!-- Lone child of a space-between toolbar, so it needs the push right. -->
-    <span class="money-result-count as-of">
-      As of {summary.exported_at.slice(0, 10)}
-      {#if summary.exported_at_estimated}(estimated date){/if}
-      · {summary.position_count} positions
-    </span>
-  </div>
+<LoadState {loading} {error} empty={!summary}>
+  {#snippet emptyState()}
+    <EmptyState actionLabel="Import a snapshot" actionHref="{base}/money/portfolio/import">
+      No portfolio snapshots yet. Import a Fidelity Portfolio Positions CSV to get started.
+    </EmptyState>
+  {/snippet}
+  {#if summary}
+    <div class="money-toolbar">
+      <!-- Lone child of a space-between toolbar, so it needs the push right. -->
+      <span class="money-result-count as-of">
+        As of {summary.exported_at.slice(0, 10)}
+        {#if summary.exported_at_estimated}(estimated date){/if}
+        · {summary.position_count} positions
+      </span>
+    </div>
 
-  {#if unclassified.length > 0}
-    <div class="money-notice-bar spaced">
-      <NoticeBanner variant="info" title="Unclassified symbols">
-        {unclassified.join(', ')} — classify them in
-        <a href="{base}/money/settings">Money settings</a> to complete the allocation charts.
-      </NoticeBanner>
+    {#if unclassified.length > 0}
+      <div class="money-notice-bar spaced">
+        <NoticeBanner variant="info" title="Unclassified symbols">
+          {unclassified.join(', ')} — classify them in
+          <a href="{base}/money/settings">Money settings</a> to complete the allocation charts.
+        </NoticeBanner>
+      </div>
+    {/if}
+
+    <div class="portfolio-body">
+      <div class="summary-cards">
+        <StatTile label="Total value" surface align="center">{usd(summary.total_value)}</StatTile>
+        <StatTile
+          label="Unrealized P&amp;L"
+          surface
+          align="center"
+          valueColor={directionColor(totalGain ?? 0)}
+        >
+          {usd(totalGain)}
+        </StatTile>
+        <StatTile label="Holdings" surface align="center">{summary.holdings.length}</StatTile>
+        <StatTile label="Accounts" surface align="center">{summary.by_account.length}</StatTile>
+      </div>
+
+      <div class="donut-grid">
+        <Card as="div" variant="flat" padding="sm" class="donut-card">
+          <div class="micro-label">Asset class</div>
+          <div class="donut-canvas"><canvas bind:this={classCanvas}></canvas></div>
+        </Card>
+        <Card as="div" variant="flat" padding="sm" class="donut-card">
+          <div class="micro-label">Account type</div>
+          <div class="donut-canvas"><canvas bind:this={typeCanvas}></canvas></div>
+        </Card>
+        <Card as="div" variant="flat" padding="sm" class="donut-card">
+          <div class="micro-label">Geography</div>
+          <div class="donut-canvas"><canvas bind:this={geoCanvas}></canvas></div>
+        </Card>
+      </div>
+
+      <div class="micro-label holdings-label">Holdings</div>
+      <!-- Header inside the row container, as on portfolio history and every
+           other record list, so the labels travel with the columns they name. -->
+      <div class="holdings-table">
+        <div class="record-header micro-label holdings-header">
+          <span class="col-symbol">Symbol</span>
+          <span class="col-desc">Description</span>
+          <span class="col-class caption">Class</span>
+          <span class="num col-qty">Qty</span>
+          <span class="num col-value">Value</span>
+          <span class="num col-gain">P&amp;L</span>
+          <span class="num col-gainpct">P&amp;L %</span>
+        </div>
+        {#each summary.holdings as holding (holding.symbol)}
+          <div class="record-row holdings-row">
+            <span class="col-symbol symbol">
+              {#if holding.symbol === 'CASH'}
+                {holding.symbol}
+              {:else}
+                <a href="{base}/money/portfolio/history?symbol={encodeURIComponent(holding.symbol)}"
+                  >{holding.symbol}</a
+                >
+              {/if}
+            </span>
+            <span class="col-desc desc" title={holding.description}>{holding.description}</span>
+            <span class="col-class caption class-label">
+              {holding.asset_class}{holding.sub_class && holding.sub_class !== 'Unclassified'
+                ? ` · ${holding.sub_class}`
+                : ''}
+            </span>
+            <span class="num col-qty">{qty(holding.quantity)}</span>
+            <span class="num col-value">{usd(holding.value, 2)}</span>
+            <span
+              class="num col-gain"
+              class:positive={(holding.gain ?? 0) > 0}
+              class:negative={(holding.gain ?? 0) < 0}
+            >
+              {usd(holding.gain, 2)}
+            </span>
+            <span
+              class="num col-gainpct"
+              class:positive={(holding.gain_pct ?? 0) > 0}
+              class:negative={(holding.gain_pct ?? 0) < 0}
+            >
+              {pct(holding.gain_pct)}
+            </span>
+          </div>
+        {/each}
+      </div>
     </div>
   {/if}
-
-  <div class="portfolio-body">
-    <div class="summary-cards">
-      <StatTile label="Total value" surface align="center">{usd(summary.total_value)}</StatTile>
-      <StatTile
-        label="Unrealized P&amp;L"
-        surface
-        align="center"
-        valueColor={directionColor(totalGain ?? 0)}
-      >
-        {usd(totalGain)}
-      </StatTile>
-      <StatTile label="Holdings" surface align="center">{summary.holdings.length}</StatTile>
-      <StatTile label="Accounts" surface align="center">{summary.by_account.length}</StatTile>
-    </div>
-
-    <div class="donut-grid">
-      <Card as="div" variant="flat" padding="sm" class="donut-card">
-        <div class="micro-label">Asset class</div>
-        <div class="donut-canvas"><canvas bind:this={classCanvas}></canvas></div>
-      </Card>
-      <Card as="div" variant="flat" padding="sm" class="donut-card">
-        <div class="micro-label">Account type</div>
-        <div class="donut-canvas"><canvas bind:this={typeCanvas}></canvas></div>
-      </Card>
-      <Card as="div" variant="flat" padding="sm" class="donut-card">
-        <div class="micro-label">Geography</div>
-        <div class="donut-canvas"><canvas bind:this={geoCanvas}></canvas></div>
-      </Card>
-    </div>
-
-    <div class="micro-label holdings-label">Holdings</div>
-    <!-- Header inside the row container, as on portfolio history and every
-         other record list, so the labels travel with the columns they name. -->
-    <div class="holdings-table">
-      <div class="record-header micro-label holdings-header">
-        <span class="col-symbol">Symbol</span>
-        <span class="col-desc">Description</span>
-        <span class="col-class caption">Class</span>
-        <span class="num col-qty">Qty</span>
-        <span class="num col-value">Value</span>
-        <span class="num col-gain">P&amp;L</span>
-        <span class="num col-gainpct">P&amp;L %</span>
-      </div>
-      {#each summary.holdings as holding (holding.symbol)}
-        <div class="record-row holdings-row">
-          <span class="col-symbol symbol">
-            {#if holding.symbol === 'CASH'}
-              {holding.symbol}
-            {:else}
-              <a href="{base}/money/portfolio/history?symbol={encodeURIComponent(holding.symbol)}"
-                >{holding.symbol}</a
-              >
-            {/if}
-          </span>
-          <span class="col-desc desc" title={holding.description}>{holding.description}</span>
-          <span class="col-class caption class-label">
-            {holding.asset_class}{holding.sub_class && holding.sub_class !== 'Unclassified'
-              ? ` · ${holding.sub_class}`
-              : ''}
-          </span>
-          <span class="num col-qty">{qty(holding.quantity)}</span>
-          <span class="num col-value">{usd(holding.value, 2)}</span>
-          <span
-            class="num col-gain"
-            class:positive={(holding.gain ?? 0) > 0}
-            class:negative={(holding.gain ?? 0) < 0}
-          >
-            {usd(holding.gain, 2)}
-          </span>
-          <span
-            class="num col-gainpct"
-            class:positive={(holding.gain_pct ?? 0) > 0}
-            class:negative={(holding.gain_pct ?? 0) < 0}
-          >
-            {pct(holding.gain_pct)}
-          </span>
-        </div>
-      {/each}
-    </div>
-  </div>
-{/if}
+</LoadState>
 
 <style>
   .as-of {

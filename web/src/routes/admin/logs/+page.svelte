@@ -16,7 +16,7 @@
     EmptyState,
     Input,
     Select,
-    PageLoading,
+    LoadState,
     CopyButton,
   } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
@@ -429,15 +429,15 @@
   {/if}
 
   <div class="log-pane" bind:this={logEl} onscroll={onScroll}>
-    {#if loading && records.length === 0}
-      <PageLoading />
-    {:else if records.length === 0 && !error}
-      <EmptyState>
-        {applied.q || applied.level || applied.user_id
-          ? 'No entries match these filters.'
-          : 'No entries yet.'}
-      </EmptyState>
-    {:else}
+    <!-- A failed load is the banner above, beside the filters that caused it. -->
+    <LoadState loading={loading && records.length === 0} empty={records.length === 0 && !error}>
+      {#snippet emptyState()}
+        <EmptyState>
+          {applied.q || applied.level || applied.user_id
+            ? 'No entries match these filters.'
+            : 'No entries yet.'}
+        </EmptyState>
+      {/snippet}
       {#if nextBefore}
         <div class="older-row">
           <Button
@@ -477,7 +477,7 @@
           <span class="log-message">{record.message}</span>
         </div>
       {/each}
-    {/if}
+    </LoadState>
   </div>
 
   <div class="log-footer">

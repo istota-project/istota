@@ -23,7 +23,7 @@
     type BiomarkerTrend,
   } from '$lib/api';
   import { formatDate } from '$lib/dateFormat';
-  import { Badge, EmptyState, PageLoading } from '$lib/components/ui';
+  import { Badge, EmptyState, LoadState } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -277,145 +277,139 @@
   });
 </script>
 
-{#if !loading && !error}
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under
-       this header. -->
-  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
-{/if}
-
-{#if loading}
-  <PageLoading />
-{:else if error}
-  <div class="center-msg error">{error}</div>
-{:else if trend}
-  <header class="page-header">
-    <div>
-      <h1 class="title-page">{ref?.display_name || trend.name}</h1>
-      <div class="meta muted">
-        {#if ref}<span class="cat">{ref.category}</span>{/if}
-        {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
-        {#if trend.points.length > 0}
-          <span class="summary caption">{trendSummary()}</span>
-        {/if}
-      </div>
-    </div>
-  </header>
-
-  {#if related.length > 0}
-    <div class="related">
-      <span class="related-label caption">Related:</span>
-      {#each related as r (r.name)}
-        <a href="{base}/health/labs/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
-      {/each}
-    </div>
-  {/if}
-
-  {#if latestDirection()}
-    <section class="alert alert-{latestDirection()}">
-      <header>
-        <Badge variant={latestDirection() === 'high' ? 'danger' : 'info'}
-          >{latestDirection() === 'high' ? 'Above range' : 'Below range'}</Badge
-        >
-        <span class="alert-title">
-          What a {latestDirection()}
-          {ref?.display_name || trend.name} reading can indicate
-        </span>
-        {#if explainer?.source === 'fallback'}
-          <Badge size="sm" tone="subtle" title="LLM unavailable — generic copy">generic</Badge>
-        {:else if explainer?.source === 'generated'}
-          <Badge size="sm" tone="subtle" title="Freshly generated">new</Badge>
-        {/if}
-      </header>
-      {#if explainerLoading}
-        <div class="loading">Generating context…</div>
-      {:else if explainerError}
-        <div class="error-text">{explainerError}</div>
-      {:else if explainer}
-        <p class="summary caption">{explainer.summary}</p>
-        {#if explainer.causes.length > 0}
-          <div class="block">
-            <h3 class="micro-label">What might contribute</h3>
-            <ul>
-              {#each explainer.causes as c}<li>{c}</li>{/each}
-            </ul>
-          </div>
-        {/if}
-        {#if explainer.mitigations.length > 0}
-          <div class="block">
-            <h3 class="micro-label">Things to consider</h3>
-            <ul>
-              {#each explainer.mitigations as m}<li>{m}</li>{/each}
-            </ul>
-          </div>
-        {/if}
-        <footer class="disclaimer">{explainer.disclaimer}</footer>
-      {/if}
-    </section>
-  {/if}
-
-  <section class="chart-card">
-    {#if trend.points.length === 0}
-      <EmptyState>No measurements recorded for this biomarker yet.</EmptyState>
-    {:else}
-      {#if trend.unit_mismatch}
-        <div class="banner warn">
-          Measurements use different units across panels — the chart shows raw values without
-          conversion.
+<LoadState {loading} {error}>
+  {#snippet header()}
+    <a class="back link-muted" href="{base}/health/labs">← Labs</a>
+  {/snippet}
+  {#if trend}
+    <header class="page-header">
+      <div>
+        <h1 class="title-page">{ref?.display_name || trend.name}</h1>
+        <div class="meta muted">
+          {#if ref}<span class="cat">{ref.category}</span>{/if}
+          {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
+          {#if trend.points.length > 0}
+            <span class="summary caption">{trendSummary()}</span>
+          {/if}
         </div>
-      {/if}
-      <div class="chart-wrap"><canvas bind:this={chartCanvas}></canvas></div>
+      </div>
+    </header>
+
+    {#if related.length > 0}
+      <div class="related">
+        <span class="related-label caption">Related:</span>
+        {#each related as r (r.name)}
+          <a href="{base}/health/labs/marker?name={encodeMarker(r.name)}">{r.display_name}</a>
+        {/each}
+      </div>
     {/if}
-  </section>
 
-  {#if ref?.description}
-    <section class="about">
-      <h2 class="title-section">About this marker</h2>
-      <p class="description">{ref.description}</p>
-      <dl class="kv">
-        <dt class="micro-label">Reference range</dt>
-        <dd>
-          {formatRange(trend.ref_range_low, trend.ref_range_high)}
-          {#if trend.unit}{trend.unit}{/if}
-        </dd>
-        {#if ref.aliases.length > 0}
-          <dt class="micro-label">Also called</dt>
-          <dd>{ref.aliases.join(', ')}</dd>
+    {#if latestDirection()}
+      <section class="alert alert-{latestDirection()}">
+        <header>
+          <Badge variant={latestDirection() === 'high' ? 'danger' : 'info'}
+            >{latestDirection() === 'high' ? 'Above range' : 'Below range'}</Badge
+          >
+          <span class="alert-title">
+            What a {latestDirection()}
+            {ref?.display_name || trend.name} reading can indicate
+          </span>
+          {#if explainer?.source === 'fallback'}
+            <Badge size="sm" tone="subtle" title="LLM unavailable — generic copy">generic</Badge>
+          {:else if explainer?.source === 'generated'}
+            <Badge size="sm" tone="subtle" title="Freshly generated">new</Badge>
+          {/if}
+        </header>
+        {#if explainerLoading}
+          <div class="loading">Generating context…</div>
+        {:else if explainerError}
+          <div class="error-text">{explainerError}</div>
+        {:else if explainer}
+          <p class="summary caption">{explainer.summary}</p>
+          {#if explainer.causes.length > 0}
+            <div class="block">
+              <h3 class="micro-label">What might contribute</h3>
+              <ul>
+                {#each explainer.causes as c}<li>{c}</li>{/each}
+              </ul>
+            </div>
+          {/if}
+          {#if explainer.mitigations.length > 0}
+            <div class="block">
+              <h3 class="micro-label">Things to consider</h3>
+              <ul>
+                {#each explainer.mitigations as m}<li>{m}</li>{/each}
+              </ul>
+            </div>
+          {/if}
+          <footer class="disclaimer">{explainer.disclaimer}</footer>
         {/if}
-        <dt class="micro-label">Category</dt>
-        <dd>{ref.category}</dd>
-      </dl>
-    </section>
-  {/if}
+      </section>
+    {/if}
 
-  {#if trend.points.length > 0}
-    <section class="history">
-      <h2 class="title-section">History</h2>
-      <table class="table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th class="num">Value</th>
-            <th>Unit</th>
-            <th>Flag</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each [...trend.points].reverse() as p}
-            <tr class:is-danger={p.flag}>
-              <td>{formatDate(p.drawn_at)}</td>
-              <td class="num">{p.value}</td>
-              <td>{p.unit}</td>
-              <td>
-                {#if p.flag}<span class="flag flag-{p.flag}">{p.flag}</span>{/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+    <section class="chart-card">
+      {#if trend.points.length === 0}
+        <EmptyState>No measurements recorded for this biomarker yet.</EmptyState>
+      {:else}
+        {#if trend.unit_mismatch}
+          <div class="banner warn">
+            Measurements use different units across panels — the chart shows raw values without
+            conversion.
+          </div>
+        {/if}
+        <div class="chart-wrap"><canvas bind:this={chartCanvas}></canvas></div>
+      {/if}
     </section>
+
+    {#if ref?.description}
+      <section class="about">
+        <h2 class="title-section">About this marker</h2>
+        <p class="description">{ref.description}</p>
+        <dl class="kv">
+          <dt class="micro-label">Reference range</dt>
+          <dd>
+            {formatRange(trend.ref_range_low, trend.ref_range_high)}
+            {#if trend.unit}{trend.unit}{/if}
+          </dd>
+          {#if ref.aliases.length > 0}
+            <dt class="micro-label">Also called</dt>
+            <dd>{ref.aliases.join(', ')}</dd>
+          {/if}
+          <dt class="micro-label">Category</dt>
+          <dd>{ref.category}</dd>
+        </dl>
+      </section>
+    {/if}
+
+    {#if trend.points.length > 0}
+      <section class="history">
+        <h2 class="title-section">History</h2>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th class="num">Value</th>
+              <th>Unit</th>
+              <th>Flag</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each [...trend.points].reverse() as p}
+              <tr class:is-danger={p.flag}>
+                <td>{formatDate(p.drawn_at)}</td>
+                <td class="num">{p.value}</td>
+                <td>{p.unit}</td>
+                <td>
+                  {#if p.flag}<span class="flag flag-{p.flag}">{p.flag}</span>{/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </section>
+    {/if}
   {/if}
-{/if}
+</LoadState>
 
 <style>
   .back {
