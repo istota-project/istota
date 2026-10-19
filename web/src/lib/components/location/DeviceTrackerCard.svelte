@@ -5,14 +5,15 @@
    * Everything here reads and writes the native plugin directly — no server
    * round trip, because there is no server-side place to put it. One account
    * can have two phones, so a tracker setting kept in the profile would have
-   * the two devices overwriting each other's row.
+   * the two devices overwriting each other's row. The one server call is the
+   * mint of this phone's own ingest token, on setup.
    *
    * In a browser the card renders one line saying so, rather than nothing at
    * all: a user who set this up on their phone and later opens the page on a
    * laptop would otherwise find the section simply missing and have no way to
    * tell whether that is by design.
    */
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { Button, Select, type SelectOption } from '$lib/components/ui';
@@ -32,8 +33,12 @@
     type TrackerStatus,
     type TrackingProfile,
   } from '$lib/platform/nativeLocation';
+  import { deviceModel } from '$lib/platform/native';
   import { hostOf } from '$lib/location/provisioning';
-  import { getLocationPlaces, type Place } from '$lib/api';
+  import { createLocationDevice, getLocationPlaces, type Place } from '$lib/api';
+
+  /** Called once this phone has a new row on the server, so the device list can show it. */
+  let { onDeviceAdded }: { onDeviceAdded?: () => void | Promise<void> } = $props();
 
   let status: TrackerStatus | null = $state(null);
   let busy = $state(false);
@@ -172,6 +177,140 @@
       return null;
     });
   }
+
+  /**
+   * Mint a token for this phone and hand it to the tracker.
+   *
+   * The server keys an `app` row on the tracker's device id, so doing this
+   * twice replaces the phone's own row rather than adding a second one, and no
+   * other device's token is touched. The row exists from the moment the mint
+   * answers, whatever `configure` says next, so the list is told then.
+   */
+  async function provisionThisDevice(deviceId: string) {
+    const minted = await createLocationDevice({
+      kind: 'app',
+      device_id: deviceId,
+      label: deviceModel(),
+    });
+    void onDeviceAdded?.();
+    try {
+      await configureTracker({ endpoint: minted.endpoint, token: minted.token });
+    } catch (e) {
+      // WRONG_SERVER and INVALID_CONFIGURATION carry a message written for a
+      // person; this one carries a keychain status code.
+      if ((e as { code?: unknown } | null)?.code === 'STORE_FAILED') {
+        throw new Error('The tracker could not save its credentials. Try again.');
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * The permission poll.
+   *
+   * `requestPermissions` resolves as soon as the prompt is up, not when it is
+   * answered, and the plugin sends no event for the answer, so the card asks
+   * once a second for up to a minute. `onDestroy` wakes a pending wait with
+   * `false`, which ends the poll without another read.
+   */
+  const PERMISSION_POLL_MS = 1000;
+  const PERMISSION_POLL_TRIES = 60;
+  let destroyed = false;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let cancelPollWait: (() => void) | null = null;
+
+  function waitForPoll(): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (destroyed) {
+        resolve(false);
+        return;
+      }
+      cancelPollWait = () => resolve(false);
+      pollTimer = setTimeout(() => {
+        pollTimer = null;
+        cancelPollWait = null;
+        resolve(true);
+      }, PERMISSION_POLL_MS);
+    });
+  }
+
+  /** The status once authorization leaves `notDetermined`, the last one read on timeout, or null if the card went away. */
+  async function awaitPermissionAnswer(): Promise<TrackerStatus | null> {
+    let latest: TrackerStatus | null = null;
+    for (let i = 0; i < PERMISSION_POLL_TRIES; i++) {
+      if (!(await waitForPoll())) return null;
+      latest = await trackerStatus();
+      if (!latest || latest.authorization !== 'notDetermined') return latest;
+    }
+    return latest;
+  }
+
+  onDestroy(() => {
+    destroyed = true;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+    cancelPollWait?.();
+    cancelPollWait = null;
+  });
+
+  /**
+   * One tap from "off" to tracking: mint, configure, get permission, start.
+   *
+   * Anything short of a grant leaves the tracker configured and stopped, and
+   * the configured branch's own warning and buttons say what is missing.
+   */
+  async function enable() {
+    await run(async () => {
+      if (!status) return null;
+      await provisionThisDevice(status.deviceId);
+      let current = await trackerStatus();
+      if (!current) return null;
+      if (current.authorization === 'notDetermined') {
+        // Shown while iOS's prompt is up, so the card reads as configured and
+        // waiting rather than as nothing having happened.
+        adopt(current);
+        note = 'Waiting for your answer to the location prompt.';
+        await requestPermissions();
+        const answered = await awaitPermissionAnswer();
+        note = '';
+        if (!answered) return null;
+        current = answered;
+      }
+      if (current.authorization !== 'always' && current.authorization !== 'whenInUse') {
+        return current;
+      }
+      const started = await startTracking(profileChoice);
+      const granted = started?.authorization ?? current.authorization;
+      note =
+        granted === 'always'
+          ? 'Tracking is on.'
+          : 'Tracking is on. iOS will ask again later to allow it in the background.';
+      return started;
+    });
+  }
+
+  /**
+   * A new token for a phone whose old one was removed, and nothing else.
+   *
+   * Tracking state and profile stay as they are: the tracker has been logging
+   * all along and holding the points the server refused, and they go out on
+   * the next send.
+   */
+  async function setUpAgain() {
+    await run(async () => {
+      if (!status) return null;
+      await provisionThisDevice(status.deviceId);
+      note =
+        'This phone has a new token. Points held since it was refused go out on the next send.';
+      return null;
+    });
+  }
+
+  /** GLManager's text for a 401 or 403 from the server. */
+  const tokenRejected = $derived.by(() => {
+    if (!status?.lastError) return false;
+    return status.lastError.includes('token rejected');
+  });
 
   const formatSent = (iso: string | null) => formatRelative(iso, { empty: 'never' });
 
@@ -313,21 +452,30 @@
     {#if !status}
       <p class="description">Reading the tracker…</p>
     {:else if !status.configured}
-      <p class="description">
-        Not provisioned yet. Generate a token above on another screen, then scan the code it shows.
-      </p>
-      {#if canScan}
+      <p class="description">Location tracking is off on this phone.</p>
+      <div class="tracker-actions">
+        <Button variant="primary" size="sm" onclick={enable} disabled={busy}>
+          Turn on location tracking
+        </Button>
+        {#if canScan}
+          <Button variant="secondary" size="sm" onclick={scan} disabled={busy}>
+            Scan a code instead
+          </Button>
+        {/if}
+      </div>
+    {:else}
+      {#if tokenRejected}
+        <p class="tracker-warning">
+          The server no longer accepts this phone's token. It was probably removed from the device
+          list.
+        </p>
         <div class="tracker-actions">
-          <Button variant="primary" size="sm" onclick={scan} disabled={busy}>
-            Scan provisioning code
+          <Button variant="primary" size="sm" onclick={setUpAgain} disabled={busy}>
+            Set up again
           </Button>
         </div>
-      {:else}
-        <p class="tracker-warning">
-          This version of the app cannot scan a code. Update it from TestFlight.
-        </p>
       {/if}
-    {:else}
+
       <!-- labelled={false} because this slot holds buttons: inside a <label>
            a <button> becomes the label's implicit control, and clicking the
            caption "Tracking" would stop the tracker. -->

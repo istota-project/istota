@@ -110,7 +110,7 @@
     <!-- Outside the `info` guard below: this card reads the device, not the
          server, and it is the readout that says whether tracking silently
          stopped. A transient server failure must not be what hides it. -->
-    <DeviceTrackerCard />
+    <DeviceTrackerCard onDeviceAdded={() => devicesCard?.reload()} />
 
     <LocationDevicesCard bind:this={devicesCard} />
 
