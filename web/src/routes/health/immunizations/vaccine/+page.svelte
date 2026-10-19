@@ -12,7 +12,15 @@
     type ImmunizationRef,
     type ImmunizationStatus,
   } from '$lib/api';
-  import { Badge, Button, Card, EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    Card,
+    EmptyState,
+    KebabMenu,
+    LoadState,
+    PageHeader,
+  } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
@@ -72,10 +80,10 @@
 
 <LoadState {loading} {error} empty={!ref}>
   {#snippet header()}
-    <div class="header">
-      <h1 class="title-page">{ref?.display_name || name}</h1>
-      <Button href="{base}/health/immunizations">Back</Button>
-    </div>
+    <PageHeader
+      title={ref?.display_name || name}
+      back={{ href: `${base}/health/immunizations`, label: 'Immunizations' }}
+    />
   {/snippet}
   {#snippet emptyState()}
     <EmptyState>Unknown vaccine "{name}". It may not be in the canonical reference list.</EmptyState
@@ -195,13 +203,6 @@
 </LoadState>
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-4);
-  }
-
   .vaccine :global(.coverage-card) {
     margin-bottom: var(--space-4);
   }

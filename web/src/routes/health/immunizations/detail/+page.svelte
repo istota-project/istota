@@ -25,6 +25,7 @@
     Input,
     TextArea,
     LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
@@ -111,22 +112,23 @@
   });
 </script>
 
+{#snippet doseActions()}
+  {#if immunization}
+    <Button href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}">
+      View all {immunization.name}
+    </Button>
+    <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
+  {/if}
+{/snippet}
+
 <LoadState {loading} {error} empty={!immunization}>
   {#snippet header()}
-    <div class="header">
-      <h1 class="title-page">Immunization detail</h1>
-      <div class="actions">
-        <Button href="{base}/health/immunizations">Back</Button>
-        {#if immunization}
-          <Button
-            href="{base}/health/immunizations/vaccine?name={encodeURIComponent(immunization.name)}"
-          >
-            View all {immunization.name}
-          </Button>
-          <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
-        {/if}
-      </div>
-    </div>
+    <PageHeader
+      title="Immunization detail"
+      back={{ href: `${base}/health/immunizations`, label: 'Immunizations' }}
+      align="start"
+      actions={immunization ? doseActions : undefined}
+    />
   {/snippet}
   {#snippet emptyState()}
     <EmptyState>Immunization not found.</EmptyState>
@@ -276,20 +278,6 @@
 />
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--space-4);
-    margin-bottom: var(--space-4);
-    flex-wrap: wrap;
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
-
   .linked {
     margin-top: 1.25rem;
   }

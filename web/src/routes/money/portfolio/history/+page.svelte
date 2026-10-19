@@ -1,7 +1,6 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { page } from '$app/state';
-  import { goto } from '$app/navigation';
   import { onDestroy, untrack } from 'svelte';
   import {
     Chart,
@@ -30,6 +29,7 @@
   import { theme } from '$lib/stores/theme';
   import { base } from '$app/paths';
   import {
+    BackLink,
     Badge,
     Button,
     Card,
@@ -347,13 +347,7 @@
     <div class="toolbar-left control-row">
       {#if symbol}
         <span class="symbol-title">{symbol}</span>
-        <button
-          type="button"
-          class="clear-symbol button-reset"
-          onclick={() => goto(`${base}/money/portfolio/history`)}
-        >
-          ← All holdings
-        </button>
+        <BackLink href="{base}/money/portfolio/history" label="All holdings" />
       {/if}
     </div>
     <span class="money-result-count">
@@ -524,11 +518,6 @@
 
   .symbol-title {
     font-weight: var(--weight-semibold);
-  }
-
-  .clear-symbol {
-    color: var(--accent-blue);
-    font-size: var(--text-sm);
   }
 
   .history-body {

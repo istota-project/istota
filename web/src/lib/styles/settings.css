@@ -26,14 +26,8 @@
   box-sizing: border-box;
   container-type: inline-size;
   container-name: settings;
-}
-
-.settings-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--space-4);
-  flex-wrap: wrap;
+  /* The column's gap spaces the page header (`PageHeader`) from what follows. */
+  --page-header-gap: 0;
 }
 
 /* Placement only: the type is the global `.description`. A description just
@@ -58,10 +52,6 @@
 @media (max-width: 768px) {
   .settings {
     padding: var(--space-4) var(--space-3) 3rem;
-  }
-  .settings-header {
-    flex-direction: column;
-    align-items: stretch;
   }
 }
 

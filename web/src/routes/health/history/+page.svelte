@@ -25,6 +25,7 @@
     Badge,
     Chip,
     LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import {
     conditionOptionLabel,
@@ -221,16 +222,15 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <div class="header">
-    <h1 class="title-page">Medical history</h1>
-    <div class="actions hstack">
+  <PageHeader title="Medical history">
+    {#snippet actions()}
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Add encounter'}
       </Button>
       <Button href="{base}/health/history/import">Import</Button>
       <Button href="{base}/health/history/diagnoses">Conditions</Button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
 {/if}
 
 {#if formWarning}
@@ -405,33 +405,6 @@
 </LoadState>
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--space-4);
-    margin-bottom: var(--space-4);
-  }
-  /* Three pill buttons plus the title do not fit a phone on one line, and
-	   letting them wrap inside the flex row leaves them ragged against the
-	   title. Give the row its own line instead. */
-  @media (max-width: 768px) {
-    .header {
-      flex-direction: column;
-      align-items: stretch;
-      gap: var(--space-2);
-    }
-    .actions {
-      flex-wrap: wrap;
-    }
-    /* :global because the children are <Button>s now; Svelte prunes a rule
-       whose subject it cannot see, and this one silently stopped applying. */
-    .actions > :global(*) {
-      flex: 1 1 auto;
-      text-align: center;
-    }
-  }
-
   .entry-form {
     margin-bottom: var(--space-4);
   }

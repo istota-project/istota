@@ -50,6 +50,7 @@
     type KebabItem,
     type SelectOption,
     LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import {
     attachOptions,
@@ -369,35 +370,36 @@
   });
 </script>
 
-<LoadState {loading} error={loadError} empty={rows.length === 0}>
-  {#snippet header()}
-    <div class="header">
-      <div>
-        <h1 class="title-page">Documents</h1>
-        <p class="sub caption">
-          <!-- Never "N on file" once the walk stopped early: the count would be
-               a claim about the store rather than about what is loaded. -->
-          {#if truncated.documents}
-            showing the {documents.length} most recent
-          {:else}
-            {documents.length}
-            {documents.length === 1 ? 'document' : 'documents'} on file
-          {/if}
-        </p>
-      </div>
-      {#if unattachedCount > 0 || unattachedOnly}
-        <!-- Rendered while the filter is on even at zero, so turning it off is
+{#snippet unattachedFilter()}
+  <!-- Rendered while the filter is on even at zero, so turning it off is
              always reachable. `aria-pressed` because `checked` only draws the
              state; see the Chip component's own note. -->
-        <Chip
-          checked={unattachedOnly}
-          aria-pressed={unattachedOnly}
-          onclick={() => (unattachedOnly = !unattachedOnly)}
-        >
-          {unattachedCount} unattached
-        </Chip>
-      {/if}
-    </div>
+  <Chip
+    checked={unattachedOnly}
+    aria-pressed={unattachedOnly}
+    onclick={() => (unattachedOnly = !unattachedOnly)}
+  >
+    {unattachedCount} unattached
+  </Chip>
+{/snippet}
+
+<LoadState {loading} error={loadError} empty={rows.length === 0}>
+  {#snippet header()}
+    <PageHeader
+      title="Documents"
+      actions={unattachedCount > 0 || unattachedOnly ? unattachedFilter : undefined}
+    >
+      <p class="sub caption">
+        <!-- Never "N on file" once the walk stopped early: the count would be
+               a claim about the store rather than about what is loaded. -->
+        {#if truncated.documents}
+          showing the {documents.length} most recent
+        {:else}
+          {documents.length}
+          {documents.length === 1 ? 'document' : 'documents'} on file
+        {/if}
+      </p>
+    </PageHeader>
     {#if pageNotice}
       <div class="page-notice">
         <NoticeBanner title="Some records are not shown" variant="warn" collapsed={false}
@@ -557,17 +559,8 @@
     background: var(--status-info-bg);
   }
 
-  .header {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: var(--space-3);
-    margin-bottom: var(--space-4);
-  }
-
   .sub {
-    margin: var(--space-1) 0 0;
+    margin: 0;
   }
 
   .name {
@@ -741,12 +734,6 @@
     }
     .link-chip {
       border-radius: var(--radius-sm);
-    }
-  }
-
-  @media (max-width: 768px) {
-    .header {
-      margin-bottom: var(--space-2);
     }
   }
 </style>

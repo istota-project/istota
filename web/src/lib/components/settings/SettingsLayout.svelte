@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState } from '$lib/components/ui';
+  import { LoadState, PageHeader } from '$lib/components/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -32,15 +32,7 @@
        header. The banners below stay: they are feedback about the last action,
        and a reload should not swallow them. -->
   {#if !loading && (title || description || headerActions)}
-    <header class="settings-header">
-      <div>
-        {#if title}<h1 class="title-page">{title}</h1>{/if}
-        {#if description}<p class="description">{description}</p>{/if}
-      </div>
-      {#if headerActions}
-        <div class="hstack">{@render headerActions()}</div>
-      {/if}
-    </header>
+    <PageHeader title={title || undefined} {description} align="start" actions={headerActions} />
   {/if}
 
   {#if error}

@@ -32,6 +32,7 @@
     Input,
     TextArea,
     LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import { diagnosisStatusVariant } from '$lib/health/status';
   import { linkableConditionOptions } from '$lib/health/conditions';
@@ -234,20 +235,19 @@
   });
 </script>
 
+{#snippet encounterActions()}
+  <Button onclick={startEdit}>Edit</Button>
+  <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
+{/snippet}
+
 <LoadState {loading} {error}>
   {#snippet header()}
-    <div class="header">
-      <div>
-        <a class="back link-muted" href="{base}/health/history">← Medical history</a>
-        <h1 class="title-page">Encounter</h1>
-      </div>
-      {#if encounter && !editing}
-        <div class="actions">
-          <Button onclick={startEdit}>Edit</Button>
-          <Button variant="danger" onclick={() => (confirmDelete = true)}>Delete</Button>
-        </div>
-      {/if}
-    </div>
+    <PageHeader
+      title="Encounter"
+      back={{ href: `${base}/health/history`, label: 'Medical history' }}
+      align="start"
+      actions={encounter && !editing ? encounterActions : undefined}
+    />
   {/snippet}
   {#if encounter}
     {#if editing}
@@ -443,25 +443,8 @@
 />
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: var(--space-4);
-    margin-bottom: var(--space-4);
-  }
-  .back {
-    display: inline-block;
-    font-size: var(--text-xs);
-    margin-bottom: var(--space-1);
-  }
   h2 {
     margin: 1.25rem 0 var(--space-2);
-  }
-
-  .actions {
-    display: flex;
-    gap: var(--space-2);
   }
 
   .meta {

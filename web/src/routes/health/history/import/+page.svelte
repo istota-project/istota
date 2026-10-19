@@ -18,6 +18,7 @@
     type SelectOption,
     Input,
     TextArea,
+    PageHeader,
   } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
@@ -129,10 +130,10 @@
 </script>
 
 <div class="import-page">
-  <div class="header">
-    <h1 class="title-page">Import encounter</h1>
-    <Button href="{base}/health/history">Back</Button>
-  </div>
+  <PageHeader
+    title="Import encounter"
+    back={{ href: `${base}/health/history`, label: 'Medical history' }}
+  />
 
   <Card as="div" class="import-card">
     <FileDropZone bind:file onClear={() => (documentId = null)}>
@@ -351,12 +352,6 @@
 </div>
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-3);
-  }
   h2 {
     margin: 0;
   }

@@ -23,7 +23,7 @@
     type BiomarkerTrend,
   } from '$lib/api';
   import { formatDate } from '$lib/dateFormat';
-  import { Badge, EmptyState, LoadState } from '$lib/components/ui';
+  import { Badge, EmptyState, LoadState, PageHeader } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -278,22 +278,19 @@
 </script>
 
 <LoadState {loading} {error}>
-  {#snippet header()}
-    <a class="back link-muted" href="{base}/health/labs">← Labs</a>
-  {/snippet}
   {#if trend}
-    <header class="page-header">
-      <div>
-        <h1 class="title-page">{ref?.display_name || trend.name}</h1>
-        <div class="meta muted">
-          {#if ref}<span class="cat">{ref.category}</span>{/if}
-          {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
-          {#if trend.points.length > 0}
-            <span class="summary caption">{trendSummary()}</span>
-          {/if}
-        </div>
+    <PageHeader
+      title={ref?.display_name || trend.name}
+      back={{ href: `${base}/health/labs`, label: 'Labs' }}
+    >
+      <div class="meta muted">
+        {#if ref}<span class="cat">{ref.category}</span>{/if}
+        {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
+        {#if trend.points.length > 0}
+          <span class="summary caption">{trendSummary()}</span>
+        {/if}
       </div>
-    </header>
+    </PageHeader>
 
     {#if related.length > 0}
       <div class="related">
@@ -412,12 +409,6 @@
 </LoadState>
 
 <style>
-  .back {
-    font-size: var(--text-xs);
-  }
-  .page-header {
-    margin: var(--space-1) 0 var(--space-4);
-  }
   .meta {
     display: flex;
     gap: var(--space-3);

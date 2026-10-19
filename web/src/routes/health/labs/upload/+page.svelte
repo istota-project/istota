@@ -12,7 +12,16 @@
     type Biomarker,
     type Specimen,
   } from '$lib/api';
-  import { Button, Card, EmptyState, Field, FileDropZone, Select, Input } from '$lib/components/ui';
+  import {
+    Button,
+    Card,
+    EmptyState,
+    Field,
+    FileDropZone,
+    Select,
+    Input,
+    PageHeader,
+  } from '$lib/components/ui';
   import { localDateISO } from '$lib/dateFormat';
 
   const flagOptions = [
@@ -169,8 +178,7 @@
 </script>
 
 <div class="page">
-  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
-  <h1 class="title-page">Upload lab results</h1>
+  <PageHeader title="Upload lab results" back={{ href: `${base}/health/labs`, label: 'Labs' }} />
 
   {#if panelId == null}
     <Card as="div">
@@ -364,9 +372,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-  }
-  .back {
-    font-size: var(--text-xs);
   }
   h2 {
     margin: 0 0 var(--space-2);

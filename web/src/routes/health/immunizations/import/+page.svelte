@@ -20,6 +20,7 @@
     Input,
     TextArea,
     ToggleGroup,
+    PageHeader,
   } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
@@ -134,10 +135,10 @@
 </script>
 
 <div class="import-page">
-  <div class="header">
-    <h1 class="title-page">Import immunizations</h1>
-    <Button href="{base}/health/immunizations">Back</Button>
-  </div>
+  <PageHeader
+    title="Import immunizations"
+    back={{ href: `${base}/health/immunizations`, label: 'Immunizations' }}
+  />
 
   <ToggleGroup
     label="Import from"
@@ -303,12 +304,6 @@
 </div>
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-3);
-  }
   h2 {
     margin: 0;
   }

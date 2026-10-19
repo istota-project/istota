@@ -27,6 +27,7 @@
     type SelectOption,
     LoadState,
     Input,
+    BackLink,
   } from '$lib/components/ui';
   import { X } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
@@ -223,7 +224,7 @@
     {#if panel}
       <div class="header">
         <div class="header-meta">
-          <a href="{base}/health/labs" class="back link-muted">← Labs</a>
+          <BackLink href="{base}/health/labs" label="Labs" />
           {#if editing}
             <div class="header-edit">
               <Field label="Collected">
@@ -450,9 +451,6 @@
     flex-direction: column;
     align-items: stretch;
     gap: var(--space-2);
-  }
-  .back {
-    font-size: var(--text-xs);
   }
   h1 {
     margin: var(--space-1) 0;

@@ -13,7 +13,7 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
-  import { Badge, Button, EmptyState, Select, LoadState } from '$lib/components/ui';
+  import { Badge, Button, EmptyState, Select, LoadState, PageHeader } from '$lib/components/ui';
   import { formatDate as formatIsoDate } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -146,9 +146,8 @@
   <!-- Held back while loading, and on a failed unfiltered load, so the pane
        shows nothing but the centered message. A failed filtered load keeps
        it: the filter is the only way to change what failed. -->
-  <div class="header">
-    <h1 class="title-page">Labs</h1>
-    <div class="actions hstack">
+  <PageHeader title="Labs">
+    {#snippet actions()}
       <Select
         value={specimen}
         options={specimenOptions}
@@ -169,8 +168,8 @@
       />
       <Button href={healthCsvExportUrl()} download="labs.csv">Export CSV</Button>
       <Button variant="primary" href="{base}/health/labs/upload">Upload lab results</Button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
 {/if}
 
 {#if csvSummary}
@@ -308,13 +307,6 @@
 </LoadState>
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-4);
-  }
-
   .drafts {
     background: var(--surface-card);
     border: 1px solid var(--border-default);
@@ -620,25 +612,6 @@
   }
 
   @media (max-width: 768px) {
-    .header {
-      flex-direction: column;
-      align-items: stretch;
-      gap: var(--space-2);
-      margin-bottom: var(--space-3);
-    }
-    .actions {
-      gap: var(--space-1);
-      flex-wrap: nowrap;
-    }
-    /* The toolbar shrinks its buttons on a phone, which Button has no prop
-       for — a size is a fixed choice, not a responsive one. Scoped to this
-       page's own .actions so it cannot reach another module's buttons. */
-    .actions :global(.btn) {
-      padding: 0.2rem var(--space-2);
-      font-size: var(--text-xs);
-      white-space: nowrap;
-      flex: 0 0 auto;
-    }
     .drafts {
       padding: var(--space-3) var(--space-2);
     }

@@ -28,6 +28,7 @@
     TextArea,
     Chip,
     LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import {
     encounterOptionLabel,
@@ -265,15 +266,17 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <div class="header">
-    <div>
-      <a class="back link-muted" href="{base}/health/history">← Medical history</a>
-      <h1 class="title-page">Conditions</h1>
-    </div>
-    <Button onclick={toggleForm}>
-      {formOpen ? 'Cancel' : '+ Add diagnosis'}
-    </Button>
-  </div>
+  <PageHeader
+    title="Conditions"
+    back={{ href: `${base}/health/history`, label: 'Medical history' }}
+    align="start"
+  >
+    {#snippet actions()}
+      <Button onclick={toggleForm}>
+        {formOpen ? 'Cancel' : '+ Add diagnosis'}
+      </Button>
+    {/snippet}
+  </PageHeader>
 {/if}
 
 {#if formOpen}
@@ -486,18 +489,6 @@
 {/if}
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: var(--space-4);
-    margin-bottom: var(--space-4);
-  }
-  .back {
-    display: inline-block;
-    font-size: var(--text-xs);
-    margin-bottom: var(--space-1);
-  }
   h2 {
     margin: var(--space-6) 0 var(--space-2);
     display: flex;

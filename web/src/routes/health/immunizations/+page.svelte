@@ -28,6 +28,7 @@
     Input,
     TextArea,
     LoadState,
+    PageHeader,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
@@ -161,15 +162,14 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <div class="header">
-    <h1 class="title-page">Immunizations</h1>
-    <div class="actions hstack">
+  <PageHeader title="Immunizations">
+    {#snippet actions()}
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Log dose'}
       </Button>
       <Button href="{base}/health/immunizations/import">Import</Button>
-    </div>
-  </div>
+    {/snippet}
+  </PageHeader>
 {/if}
 
 {#if formOpen}
@@ -406,13 +406,6 @@
 />
 
 <style>
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--space-4);
-  }
-
   .entry-form {
     margin-bottom: var(--space-4);
   }
@@ -507,17 +500,10 @@
   }
 
   @media (max-width: 768px) {
-    .header,
     .history-head {
       flex-direction: column;
       align-items: stretch;
       gap: var(--space-2);
-    }
-    .header {
-      margin-bottom: var(--space-3);
-    }
-    .actions {
-      flex-wrap: wrap;
     }
     .history-head :global(.filter-input) {
       max-width: none;

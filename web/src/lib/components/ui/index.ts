@@ -65,4 +65,6 @@ export { default as SearchResultRow } from './SearchResultRow.svelte';
 export { default as PageLoading } from './PageLoading.svelte';
 export { default as PageLoader } from './PageLoader.svelte';
 export { default as LoadState } from './LoadState.svelte';
+export { default as PageHeader } from './PageHeader.svelte';
+export { default as BackLink } from './BackLink.svelte';
 export { default as LoadingOctopus } from './LoadingOctopus.svelte';
