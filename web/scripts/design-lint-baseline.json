@@ -103,7 +103,7 @@
   },
   "src/routes/health/labs/+page.svelte": {
     "raw-color": 2,
-    "off-scale-space": 2
+    "off-scale-space": 1
   },
   "src/routes/health/labs/marker/+page.svelte": {
     "off-scale-space": 5,
