@@ -98,10 +98,10 @@ describe('view counts', () => {
     expect(await screen.findByTitle('5 unread')).toHaveTextContent('5');
     expect(screen.getByTitle('2 starred')).toHaveTextContent('2');
     const art = screen.getByRole('button', { name: /^Example art\s*, unread$/ });
-    expect(art).toHaveClass('has-unread');
+    expect(art.querySelector('.unread')).not.toBeNull();
     expect(art.querySelector('.count-pill.mark.inline')).not.toBeNull();
     const news = screen.getByRole('button', { name: 'Example news' });
-    expect(news).not.toHaveClass('has-unread');
+    expect(news.querySelector('.unread')).toBeNull();
     expect(news.querySelector('.count-pill')).toBeNull();
 
     vi.mocked(getFeedCounts).mockResolvedValue({ unread: 0, starred: 2, unread_by_feed: {} });
@@ -110,7 +110,7 @@ describe('view counts', () => {
     await waitFor(() => expect(screen.queryByTitle('5 unread')).toBeNull());
     expect(screen.getByTitle('2 starred')).toBeInTheDocument();
     const artRead = screen.getByRole('button', { name: 'Example art' });
-    expect(artRead).not.toHaveClass('has-unread');
+    expect(artRead.querySelector('.unread')).toBeNull();
     expect(artRead.querySelector('.count-pill')).toBeNull();
   });
 });

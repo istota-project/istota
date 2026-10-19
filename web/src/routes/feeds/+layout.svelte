@@ -26,6 +26,7 @@
     Sidebar,
     SidebarToggle,
     CategoryGroup,
+    ListRow,
     Chip,
     ToggleGroup,
     Select,
@@ -322,23 +323,20 @@
             onSelect={catId !== 0 ? () => handleCategoryClick(catId) : undefined}
           >
             {#each catFeeds as feed (feed.id)}
-              <button
-                class="feed-btn"
-                class:active={$selectedFeedId === feed.id}
-                class:has-unread={($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}
+              {@const unread = $feedCounts.unread_by_feed[feed.id] ?? 0}
+              {#snippet unreadMark()}
+                <CountPill count={unread} title="Unread" shape="inline-mark" /><span
+                  class="visually-hidden">, unread</span
+                >
+              {/snippet}
+              <ListRow
+                density="sm"
+                active={$selectedFeedId === feed.id}
                 onclick={() => handleFeedClick(feed.id)}
-                type="button"
+                mark={unread > 0 ? unreadMark : undefined}
               >
-                <span class="feed-name">{feed.title}</span>
-                <CountPill
-                  count={$feedCounts.unread_by_feed[feed.id] ?? 0}
-                  title="Unread"
-                  shape="inline-mark"
-                />
-                {#if ($feedCounts.unread_by_feed[feed.id] ?? 0) > 0}<span class="visually-hidden"
-                    >, unread</span
-                  >{/if}
-              </button>
+                <span class:unread={unread > 0}>{feed.title}</span>
+              </ListRow>
             {/each}
           </CategoryGroup>
         {/each}
@@ -378,42 +376,9 @@
     }
   }
 
-  .feed-btn {
-    display: flex;
-    align-items: center;
-    /* The row holds the name and its unread mark only; the mark sits against
-       the name, as the nav's does. */
-    gap: 2px;
-    width: 100%;
-    background: none;
-    border: none;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-    padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm);
-    transition: background var(--transition-fast);
-    text-align: left;
-  }
-
-  .feed-btn:hover {
-    background: var(--hover-bg);
-  }
-
-  .feed-btn.has-unread {
+  /* A source with unread entries reads bolder, as a chat room does. */
+  .unread {
     font-weight: var(--weight-semibold);
     color: var(--text-primary);
-  }
-
-  .feed-btn.active {
-    background: var(--selected-bg);
-    color: var(--text-primary);
-  }
-
-  .feed-name {
-    font-size: var(--text-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 </style>

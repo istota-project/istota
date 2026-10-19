@@ -60,9 +60,6 @@
   "src/lib/styles/settings.css": {
     "off-scale-space": 3
   },
-  "src/lib/styles/sidebar.css": {
-    "off-scale-space": 2
-  },
   "src/routes/+error.svelte": {
     "off-scale-space": 2
   },

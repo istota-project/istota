@@ -12,7 +12,7 @@
     type TransactionSelection,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Chip, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
+  import { Chip, ListRow, Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
   import { Search } from '@lucide/svelte';
 
   let { children } = $props();
@@ -237,14 +237,14 @@
     {:else}
       <span class="caret-spacer"></span>
     {/if}
-    <button
-      class="acct-btn"
-      class:selected={$selectedAccount === node.fullName}
+    <ListRow
+      class="acct-list-row"
+      density="sm"
+      active={$selectedAccount === node.fullName}
       onclick={() => selectAccount(node.fullName)}
-      type="button"
     >
       {node.name}
-    </button>
+    </ListRow>
   </div>
   {#if node.children.length > 0 && expandedSet.has(node.fullName)}
     {#each node.children as child (child.fullName)}
@@ -308,32 +308,11 @@
     flex-shrink: 0;
   }
 
-  .acct-btn {
-    display: block;
+  /* The caret is a button of its own, so it sits beside the row rather than
+     in it; the row takes the rest of the line. */
+  .acct-row :global(.acct-list-row) {
     flex: 1;
     min-width: 0;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: var(--text-sm);
-    cursor: pointer;
-    padding: 0.2rem var(--space-2);
-    border-radius: var(--radius-sm);
-    text-align: left;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    transition: background var(--transition-fast);
-  }
-
-  .acct-btn:hover {
-    background: var(--hover-bg);
-  }
-
-  .acct-btn.selected {
-    background: var(--selected-bg);
-    color: var(--text-primary);
   }
 
   .txn-main {

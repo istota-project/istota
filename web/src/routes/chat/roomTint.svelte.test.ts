@@ -101,7 +101,7 @@ describe('a coloured room row', () => {
     const rows = container.querySelectorAll<HTMLElement>('.room-row');
     expect(rows).toHaveLength(2);
     expect(rows[0].classList.contains('tinted')).toBe(true);
-    expect(rows[0].style.getPropertyValue('--room-tint')).not.toBe('');
+    expect(rows[0].style.getPropertyValue('--row-tint')).not.toBe('');
     expect(rows[1].classList.contains('tinted')).toBe(false);
     expect(container.querySelector('.room-dot')).toBeNull();
   });

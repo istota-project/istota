@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CategoryGroup } from '$lib/components/ui';
+  import { CategoryGroup, ListRow } from '$lib/components/ui';
   import {
     BookOpen,
     FileCode,
@@ -55,49 +55,48 @@
 <section aria-label={label}>
   <CategoryGroup {label} collapsible defaultOpen storageKey="workspace:section:bot">
     {#if home}
-      <a
-        class="view-btn"
-        class:active={current === 'home'}
+      <ListRow
         href={href(home.id)}
-        aria-current={current === 'home' ? 'page' : undefined}
+        active={current === 'home'}
+        title={home.label}
         aria-describedby={reachesTasks(home.reach.private) ? `task-reach-${home.id}` : undefined}
         onclick={(event) => onNavigate(event, home.id)}
       >
-        <House size={14} />
-        <span class="view-name" title={home.label}>{home.label}</span>
-        <TaskReachIcon access={home.reach.private} botName={label} id={`task-reach-${home.id}`} />
-      </a>
+        {#snippet icon()}<span class="entry-icon"><House size={14} /></span>{/snippet}
+        {home.label}
+        {#snippet badge()}
+          <TaskReachIcon access={home.reach.private} botName={label} id={`task-reach-${home.id}`} />
+        {/snippet}
+      </ListRow>
     {/if}
     {#each ENTRIES.filter((entry) => views.includes(entry.view)) as entry (entry.view)}
-      <a
-        class="view-btn"
-        class:active={current === entry.view}
+      <ListRow
         href={viewHref(entry.view)}
+        active={current === entry.view}
         aria-current={current === entry.view ? (viewOpen ? 'page' : 'location') : undefined}
         onclick={(event) => onNavigateView(event, entry.view)}
       >
-        <entry.icon size={14} />
-        <span class="view-name">{entry.label}</span>
-        {#if warnings[entry.view]}
-          <span class="view-warning">
-            <TriangleAlert size={14} role="img" aria-label={warnings[entry.view]} />
-          </span>
-        {/if}
-      </a>
+        {#snippet icon()}<span class="entry-icon"><entry.icon size={14} /></span>{/snippet}
+        {entry.label}
+        {#snippet badge()}
+          {#if warnings[entry.view]}
+            <span class="view-warning">
+              <TriangleAlert size={14} role="img" aria-label={warnings[entry.view]} />
+            </span>
+          {/if}
+        {/snippet}
+      </ListRow>
     {/each}
   </CategoryGroup>
 </section>
 
 <style>
-  .view-btn :global(svg) {
-    flex-shrink: 0;
-  }
-  .view-btn > :global(svg) {
+  .entry-icon {
+    display: inline-flex;
     color: var(--accent-amber);
   }
   .view-warning {
     display: flex;
-    margin-left: auto;
     color: var(--status-warn-fg);
   }
 </style>

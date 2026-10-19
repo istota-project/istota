@@ -76,7 +76,7 @@ it('collects the bot folder entries under one section named for the bot', async 
   const section = await botSection();
   const labels = within(section)
     .getAllByRole('link')
-    .map((link) => link.querySelector('.view-name')?.textContent);
+    .map((link) => link.querySelector('.ui-list-row-label')?.textContent);
   expect(labels).toEqual([
     'My files',
     'Rooms',
@@ -106,7 +106,7 @@ it('marks only My files in the bot section and puts the reach on each index', as
   const marked = within(section)
     .getAllByRole('link')
     .filter((link) => link.querySelector('.task-reach'))
-    .map((link) => link.querySelector('.view-name')?.textContent);
+    .map((link) => link.querySelector('.ui-list-row-label')?.textContent);
   expect(marked).toEqual(['My files']);
   const myFiles = within(section).getByRole('link', { name: 'My files' });
   expect(myFiles).toHaveAccessibleDescription('Helper can read and change these files');
@@ -158,7 +158,7 @@ it('leaves out the entries with nothing behind them', async () => {
     expect(
       within(section)
         .getAllByRole('link')
-        .map((link) => link.querySelector('.view-name')?.textContent),
+        .map((link) => link.querySelector('.ui-list-row-label')?.textContent),
     ).toEqual(['My files', 'Configuration', 'Scripts']),
   );
 });
@@ -180,7 +180,10 @@ it('opens the rooms index in the main area, then a room with a way back', async 
     'aria-current',
     'page',
   );
-  expect(within(section).getByRole('link', { name: 'Rooms' })).toHaveClass('active');
+  expect(within(section).getByRole('link', { name: 'Rooms' })).toHaveAttribute(
+    'aria-current',
+    'location',
+  );
 
   await fireEvent.click(within(crumbs).getByRole('link', { name: 'Rooms' }));
   expect(await screen.findByRole('region', { name: 'Rooms' })).toBeTruthy();

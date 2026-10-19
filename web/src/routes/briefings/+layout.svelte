@@ -33,6 +33,7 @@
   import {
     AppShell,
     ShellHeader,
+    ListRow,
     Sidebar,
     SidebarNav,
     SidebarToggle,
@@ -692,17 +693,18 @@
         {:else}
           {#each entries as entry (entry.kind === 'user' ? `u${entry.item.id}` : `g${entry.item.run_id}`)}
             {@const row = rowView(entry)}
-            <div class="list-row archive-row" class:active={row.active}>
-              <button
-                class="archive-btn"
-                type="button"
-                onclick={() =>
-                  entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
-              >
-                <span class="archive-line">
-                  <span class="archive-subject title-card">{row.title}</span>
-                  <Timestamp class="archive-date caption" value={entry.at} format="relative" />
-                </span>
+            <ListRow
+              class="archive-row"
+              active={row.active}
+              density="sm"
+              onclick={() =>
+                entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
+            >
+              <span class="title-card">{row.title}</span>
+              {#snippet badge()}
+                <Timestamp class="caption num" value={entry.at} format="relative" />
+              {/snippet}
+              {#snippet meta()}
                 <span class="archive-audience caption">
                   {#if entry.kind === 'group'}<Users size={12} aria-hidden="true" />{/if}
                   <span class="truncate">{row.audience}</span>
@@ -710,8 +712,8 @@
                   {#if row.unread}<span class="visually-hidden">, unread</span>{/if}
                 </span>
                 {#if row.preview}<span class="archive-preview">{row.preview}</span>{/if}
-              </button>
-            </div>
+              {/snippet}
+            </ListRow>
           {/each}
           <LoadMore
             onload={loadMore}
@@ -752,48 +754,6 @@
 {/if}
 
 <style>
-  /* The row's layout and hover come from `.sidebar .list-row` in
-     lib/styles/sidebar.css, shared with the chat sidebar. */
-  .archive-btn {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-    background: none;
-    border: none;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
-  .archive-row.active .archive-btn {
-    color: var(--text-primary);
-  }
-
-  .archive-line {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-
-  .archive-subject {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .archive-line :global(.archive-date) {
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-
   .archive-audience {
     display: flex;
     align-items: center;

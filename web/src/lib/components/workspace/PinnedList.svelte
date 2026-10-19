@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { CategoryGroup, KebabMenu, type KebabItem } from '$lib/components/ui';
+  import { CategoryGroup, KebabMenu, ListRow, type KebabItem } from '$lib/components/ui';
   import type { WorkspaceConfigFile, WorkspacePin, WorkspacePlace } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import TaskReachIcon from './TaskReachIcon.svelte';
@@ -77,46 +77,56 @@
       {@const access = pinned?.reach.private ?? null}
       {@const reachId = `task-reach-pin-${pin.id}`}
       {@const describedBy = access && reachesTasks(access) ? reachId : undefined}
-      <div class="list-row pin-row">
-        {#snippet content()}
-          <span class="pin-label truncate" title={pin.name}
-            >{pin.name}{#if !pin.available}<span class="caption">Unavailable</span>{/if}</span
-          >{#if access}<TaskReachIcon
-              {access}
-              {botName}
-              id={reachId}
-              scope={pinScope(pinned)}
-            />{/if}
-        {/snippet}
-        {#if !pin.available}
-          <div class="unavailable">{@render content()}</div>
-        {:else if folder}
-          <a
-            class="view-btn"
-            href={href(folder.place, folder.path)}
-            aria-describedby={describedBy}
-            onclick={(event) => onNavigate(event, folder.place, folder.path)}>{@render content()}</a
-          >
-        {:else if pin.provider === 'drive' && pin.web_url}
-          <a
-            class="view-btn"
-            href={pin.web_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-describedby={describedBy}>{@render content()}</a
-          >
-        {:else if pin.provider === 'workspace' && !pin.is_dir}
-          <button
-            class="view-btn"
-            type="button"
-            aria-describedby={describedBy}
-            onclick={() => viewer.openFile(pin.ref)}>{@render content()}</button
-          >
-        {:else}
-          <div class="unavailable">{@render content()}</div>
-        {/if}
+      {#snippet reach()}
+        {#if access}<TaskReachIcon {access} {botName} id={reachId} scope={pinScope(pinned)} />{/if}
+      {/snippet}
+      {#snippet unavailable()}<span class="caption">Unavailable</span>{/snippet}
+      {#snippet kebab()}
         <KebabMenu ariaLabel={`Actions for ${pin.name}`} items={actions(pin)} />
-      </div>
+      {/snippet}
+      {#if pin.available && folder}
+        <ListRow
+          class="pin-row"
+          density="sm"
+          href={href(folder.place, folder.path)}
+          title={pin.name}
+          aria-describedby={describedBy}
+          onclick={(event) => onNavigate(event, folder.place, folder.path)}
+          badge={reach}
+          trailing={kebab}>{pin.name}</ListRow
+        >
+      {:else if pin.available && pin.provider === 'drive' && pin.web_url}
+        <ListRow
+          class="pin-row"
+          density="sm"
+          href={pin.web_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={pin.name}
+          aria-describedby={describedBy}
+          badge={reach}
+          trailing={kebab}>{pin.name}</ListRow
+        >
+      {:else if pin.available && pin.provider === 'workspace' && !pin.is_dir}
+        <ListRow
+          class="pin-row"
+          density="sm"
+          title={pin.name}
+          aria-describedby={describedBy}
+          onclick={() => viewer.openFile(pin.ref)}
+          badge={reach}
+          trailing={kebab}>{pin.name}</ListRow
+        >
+      {:else}
+        <ListRow
+          class="pin-row"
+          density="sm"
+          title={pin.name}
+          meta={pin.available ? undefined : unavailable}
+          badge={reach}
+          trailing={kebab}><span class="inert">{pin.name}</span></ListRow
+        >
+      {/if}
     {:else}
       <p class="caption">Pin a file or folder to keep it here.</p>
     {/each}
@@ -124,23 +134,7 @@
 </section>
 
 <style>
-  .pin-row .view-btn,
-  .unavailable {
-    flex: 1;
-    min-width: 0;
-    /* No right inset: the kebab beside it carries its own, so the bot icon sits as close to it
-       as the warning icon does to the bot icon in the bot section. */
-    padding: var(--space-1) 0 var(--space-1) var(--space-3);
-    font-size: var(--text-sm);
-    color: inherit;
-  }
-  .unavailable {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
+  .inert {
     color: var(--text-dim);
-  }
-  .pin-label .caption {
-    display: block;
   }
 </style>

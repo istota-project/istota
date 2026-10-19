@@ -161,7 +161,7 @@ describe('reported touch controls', () => {
       ':global(.ui-kebab-trigger)',
       'min-width: var(--touch-min);',
     ],
-    ['lib/styles/sidebar.css', '.sidebar .list-row', 'gap: var(--space-2);'],
+    ['lib/components/ui/ListRow.svelte', '.ui-list-row', 'gap: var(--space-2);'],
     [
       'routes/feeds/+page.svelte',
       '.feed-grid :global(.star-btn)',

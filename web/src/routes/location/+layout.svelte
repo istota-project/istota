@@ -30,6 +30,7 @@
     Sidebar,
     SidebarToggle,
     CategoryGroup,
+    ListRow,
     HeaderNav,
     IconButton,
     Chip,
@@ -361,14 +362,13 @@
         {#each groupedPlaces as [category, catPlaces] (category)}
           <CategoryGroup label={category} count={catPlaces.length} collapsible>
             {#each catPlaces as place (place.id)}
-              <button
-                class="place-btn"
-                class:selected={selectedPlace?.id === place.id}
+              <ListRow
+                density="sm"
+                active={selectedPlace?.id === place.id}
                 onclick={() => handlePlaceClick(place)}
-                type="button"
               >
-                <span class="place-name">{place.name}</span>
-              </button>
+                {place.name}
+              </ListRow>
             {/each}
           </CategoryGroup>
         {/each}
@@ -494,42 +494,5 @@
     white-space: pre-wrap;
     padding: var(--space-1) 0;
     border-top: 1px solid var(--border-subtle);
-  }
-
-  .place-btn {
-    display: block;
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    background: none;
-    border: none;
-    color: inherit;
-    font: inherit;
-    font-size: var(--text-sm);
-    line-height: var(--leading-normal);
-    cursor: pointer;
-    padding: 0.2rem var(--space-3);
-    border-radius: var(--radius-sm);
-    transition: background var(--transition-fast);
-    text-align: left;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .place-btn:hover {
-    background: var(--hover-bg);
-  }
-
-  .place-btn.selected {
-    background: var(--selected-bg);
-    color: var(--text-primary);
-  }
-
-  .place-name {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 </style>
