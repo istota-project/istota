@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { ConfirmDialog } from '$lib/components/ui';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
     deleteDocument,
     getDocument,
@@ -53,11 +54,15 @@
     if (autoload) void refresh();
   });
 
-  let confirmOpen = $state(false);
-  let confirmTitle = $state('');
-  let confirmMessage = $state('');
-  let confirmLabel = $state('Delete');
-  let pendingAction: (() => Promise<void>) | null = $state(null);
+  // What the confirm dialog asks, and the action it runs. A failure rejects
+  // into the dialog, which stays open to say so.
+  const pending = createConfirm<{
+    title: string;
+    message: string;
+    label: string;
+    busyLabel: string;
+    run: () => Promise<void>;
+  }>();
 
   async function refresh() {
     try {
@@ -93,16 +98,18 @@
   }
 
   function askDetach(doc: HealthDocument) {
-    confirmTitle = 'Detach document';
-    confirmMessage =
-      `Are you sure you want to detach "${documentName(doc)}" from this record? ` +
-      'The document itself is kept and stays attached to any other record.';
-    confirmLabel = 'Detach';
-    pendingAction = async () => {
-      await unlinkDocument(doc.id, entity);
-      await refresh();
-    };
-    confirmOpen = true;
+    pending.ask({
+      title: 'Detach document',
+      message:
+        `Are you sure you want to detach "${documentName(doc)}" from this record? ` +
+        'The document itself is kept and stays attached to any other record.',
+      label: 'Detach',
+      busyLabel: 'Detaching…',
+      run: async () => {
+        await unlinkDocument(doc.id, entity);
+        await refresh();
+      },
+    });
   }
 
   async function askDelete(doc: HealthDocument) {
@@ -117,30 +124,19 @@
     } catch {
       otherLinks = 0;
     }
-    confirmTitle = 'Delete document';
     const extra = otherRecordsWarning(otherLinks);
-    confirmMessage =
-      `Are you sure you want to delete "${documentName(doc)}"? ` +
-      `This cannot be undone.${extra ? ` ${extra}` : ''}`;
-    confirmLabel = 'Delete';
-    pendingAction = async () => {
-      await deleteDocument(doc.id);
-      await refresh();
-    };
-    confirmOpen = true;
-  }
-
-  async function runPending() {
-    const action = pendingAction;
-    pendingAction = null;
-    confirmOpen = false;
-    if (!action) return;
-    error = '';
-    try {
-      await action();
-    } catch (e) {
-      error = e instanceof Error ? e.message : 'Action failed';
-    }
+    pending.ask({
+      title: 'Delete document',
+      message:
+        `Are you sure you want to delete "${documentName(doc)}"? ` +
+        `This cannot be undone.${extra ? ` ${extra}` : ''}`,
+      label: 'Delete',
+      busyLabel: 'Deleting…',
+      run: async () => {
+        await deleteDocument(doc.id);
+        await refresh();
+      },
+    });
   }
 </script>
 
@@ -183,15 +179,18 @@
   </ul>
 </div>
 
-<ConfirmDialog
-  bind:open={confirmOpen}
-  title={confirmTitle}
-  message={confirmMessage}
-  {confirmLabel}
-  confirmVariant="danger"
-  onConfirm={runPending}
-  onCancel={() => (pendingAction = null)}
-/>
+{#if pending.target}
+  {@const action = pending.target}
+  <ConfirmDialog
+    bind:open={pending.open}
+    title={action.title}
+    message={action.message}
+    confirmLabel={action.label}
+    busyLabel={action.busyLabel}
+    confirmVariant="danger"
+    onConfirm={action.run}
+  />
+{/if}
 
 <style>
   /* The grid steps by the width it is given rather than the viewport's: it

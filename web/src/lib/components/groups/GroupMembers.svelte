@@ -120,8 +120,9 @@
     error = '';
     removeOpen = true;
   }
-  async function removeMember() {
-    if (busy) return;
+  // A refusal is reported in the dialog, which stays open (resolves false).
+  async function removeMember(): Promise<boolean> {
+    if (busy) return false;
     busy = true;
     error = '';
     try {
@@ -134,8 +135,10 @@
       else await deleteGroupMember(group.group_id, userId, payload);
       removeOpen = false;
       await onChanged(!administration && userId === user.username);
+      return true;
     } catch (e) {
       report(e);
+      return false;
     } finally {
       busy = false;
     }
@@ -300,7 +303,7 @@
   bind:open={removeOpen}
   title={!administration && userId === user.username ? 'Leave group' : 'Remove member'}
   confirmLabel={!administration && userId === user.username ? 'Leave' : 'Remove'}
-  confirmDisabled={busy}
+  busyLabel={!administration && userId === user.username ? 'Leaving…' : 'Removing…'}
   onConfirm={removeMember}
 >
   {#snippet body()}

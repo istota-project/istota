@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { untrack } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -123,7 +124,7 @@
   let runsTotal = $state(0);
   let deliveries = $state<Record<number, BriefingDelivery>>({});
   let viewing = $state<GroupBriefingRun | null>(null);
-  let retrying = $state<GroupBriefingRun | null>(null);
+  const retrying = createConfirm<GroupBriefingRun>();
   let pending = $state<GroupBriefingRun | null>(null);
 
   const author = $derived(!accessLost && !!saved?.capabilities.author_briefings);
@@ -396,8 +397,8 @@
   });
 
   async function retry() {
-    const target = retrying;
-    retrying = null;
+    const target = retrying.target;
+    retrying.cancel();
     if (!target) return;
     busy = true;
     try {
@@ -464,7 +465,7 @@
       items.push({ label: 'View preview', onSelect: () => openRun(r) });
     const d = deliveries[r.id];
     if (d && (d.counts.failed || d.counts.uncertain))
-      items.push({ label: 'Retry failed deliveries', onSelect: () => (retrying = r) });
+      items.push({ label: 'Retry failed deliveries', onSelect: () => retrying.ask(r) });
     return items;
   }
   function approvalStatus(a: BriefingSourceApproval): {
@@ -858,17 +859,16 @@
   </Modal>
 {/if}
 
-{#if retrying}
+{#if retrying.target}
   <ConfirmDialog
-    open={true}
+    bind:open={retrying.open}
     title="Retry failed deliveries"
-    message={deliveries[retrying.id]?.counts.uncertain
+    message={deliveries[retrying.target.id]?.counts.uncertain
       ? 'Are you sure you want to resend this edition where delivery failed or is uncertain? An uncertain delivery may already have arrived, so those members could get it twice.'
       : 'Are you sure you want to resend this edition where delivery failed? Nothing is generated again.'}
     confirmLabel="Retry"
     confirmVariant="primary"
     onConfirm={retry}
-    onCancel={() => (retrying = null)}
   />
 {/if}
 

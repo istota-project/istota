@@ -188,17 +188,20 @@
       busy = false;
     }
   }
-  async function archive() {
-    if (busy || !group) return;
+  // A refusal is reported in the dialog, which stays open (resolves false).
+  async function archive(): Promise<boolean> {
+    if (busy || !group) return false;
     busy = true;
     formError = '';
     try {
       await archiveAdminGroup(group.group_id, { revision: group.revision, confirm: true });
       archiveOpen = false;
       await refresh();
+      return true;
     } catch (e) {
       formError = message(e);
       if (!archiveOpen) detailError = formError;
+      return false;
     } finally {
       busy = false;
     }
@@ -498,7 +501,7 @@
   bind:open={archiveOpen}
   title="Archive group"
   confirmLabel="Archive"
-  confirmDisabled={busy}
+  busyLabel="Archiving…"
   onConfirm={archive}
 >
   {#snippet body()}<p>

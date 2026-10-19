@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import {
     Badge,
@@ -116,7 +117,7 @@
   let editEnabled = $state('true');
   let editBusy = $state(false);
 
-  let confirmDelete: TransactionRule | null = $state(null);
+  const confirmDelete = createConfirm<TransactionRule>();
 
   const filterLedgerOptions = $derived(ledgerScopeOptions(ledgers, allRules, { all: true }));
   const filterSourceOptions = $derived(sourceScopeOptions(allRules, { all: true }));
@@ -360,8 +361,8 @@
   }
 
   async function handleDelete() {
-    const rule = confirmDelete;
-    confirmDelete = null;
+    const rule = confirmDelete.target;
+    confirmDelete.cancel();
     if (!rule) return;
     try {
       await deleteTransactionRule(rule.id);
@@ -378,7 +379,7 @@
     return [
       { label: 'Edit', onSelect: () => startEdit(rule) },
       { label: 'Duplicate', onSelect: () => duplicate(rule) },
-      { label: 'Delete', danger: true, onSelect: () => (confirmDelete = rule) },
+      { label: 'Delete', danger: true, onSelect: () => confirmDelete.ask(rule) },
     ];
   }
 
@@ -634,13 +635,13 @@
 </Card>
 
 <ConfirmDialog
-  open={confirmDelete !== null}
+  bind:open={confirmDelete.open}
   title="Delete rule"
-  message="Are you sure you want to delete rule {confirmDelete?.id}? Transactions it matched will resolve from whatever rule is next in the pass, or fall back to Expenses:Uncategorized."
+  message="Are you sure you want to delete rule {confirmDelete.target
+    ?.id}? Transactions it matched will resolve from whatever rule is next in the pass, or fall back to Expenses:Uncategorized."
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={handleDelete}
-  onCancel={() => (confirmDelete = null)}
 />
 
 <style>

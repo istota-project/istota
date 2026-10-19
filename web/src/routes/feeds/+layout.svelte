@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
@@ -175,21 +176,23 @@
     pickSelection({ ...all, view: 'starred' });
   }
 
-  let markAllTargetTitle = $state<string | null>(null);
+  const markAllTargetTitle = createConfirm<string>();
 
   function handleMarkAllRead() {
-    markAllTargetTitle = $selectedFeedId
-      ? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
-      : $selectedCategoryId
-        ? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title ||
-          'this category'
-        : 'every feed';
+    markAllTargetTitle.ask(
+      $selectedFeedId
+        ? feeds.find((f) => f.id === $selectedFeedId)?.title || 'this feed'
+        : $selectedCategoryId
+          ? feeds.find((f) => f.category.id === $selectedCategoryId)?.category.title ||
+            'this category'
+          : 'every feed',
+    );
   }
 
   async function performMarkAllRead() {
     const scope = $selectedFeedId ? 'feed' : $selectedCategoryId ? 'category' : 'all';
     const scopeId = $selectedFeedId || $selectedCategoryId || 0;
-    markAllTargetTitle = null;
+    markAllTargetTitle.cancel();
     try {
       await markAsRead(scope, scopeId ? { id: scopeId } : undefined);
       invalidateNavUnreadCounts();
@@ -384,13 +387,12 @@
 </AppShell>
 
 <ConfirmDialog
-  open={markAllTargetTitle != null}
+  bind:open={markAllTargetTitle.open}
   title="Mark all as read"
-  message={`Are you sure you want to mark all unread entries in ${markAllTargetTitle} as read? This can't be undone.`}
+  message={`Are you sure you want to mark all unread entries in ${markAllTargetTitle.target} as read? This can't be undone.`}
   confirmLabel="Mark all read"
   confirmVariant="primary"
   onConfirm={performMarkAllRead}
-  onCancel={() => (markAllTargetTitle = null)}
 />
 
 <style>

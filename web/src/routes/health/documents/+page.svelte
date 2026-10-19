@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   /**
    * Every uploaded health document, and what it is attached to (ISSUE-423).
    *
@@ -161,14 +162,14 @@
   let attachForId = $state<number | null>(null);
   let attachType = $state<DocumentEntity>('encounter');
   let attachId = $state('');
-  let deleteTargetId = $state<number | null>(null);
+  const deleteTargetId = createConfirm<number>();
 
   const pool = $derived({ encounters, diagnoses, immunizations });
 
   const byId = $derived(new Map(documents.map((d) => [d.id, d])));
   const attachFor = $derived(attachForId === null ? null : (byId.get(attachForId) ?? null));
   const deleteTarget = $derived(
-    deleteTargetId === null ? null : (byId.get(deleteTargetId) ?? null),
+    deleteTargetId.target === null ? null : (byId.get(deleteTargetId.target) ?? null),
   );
 
   const rows = $derived(
@@ -325,7 +326,7 @@
 
   async function confirmDelete() {
     const doc = deleteTarget;
-    deleteTargetId = null;
+    deleteTargetId.cancel();
     if (!doc) return;
     await mutate(doc.id, () => deleteDocument(doc.id).then(() => {}), 'Failed to delete');
   }
@@ -358,7 +359,7 @@
         : []),
       { label: 'Download', href: doc.url, download: documentName(doc) },
       { label: 'Attach to a record', onSelect: () => openAttach(doc) },
-      { label: 'Delete', danger: true, onSelect: () => (deleteTargetId = doc.id) },
+      { label: 'Delete', danger: true, onSelect: () => deleteTargetId.ask(doc.id) },
     ];
   }
 
@@ -556,7 +557,7 @@
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={confirmDelete}
-  onCancel={() => (deleteTargetId = null)}
+  onCancel={deleteTargetId.cancel}
 />
 
 <style>

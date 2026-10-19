@@ -30,6 +30,7 @@
     TrendingUp,
     type LucideIcon,
   } from '@lucide/svelte';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import BlockEditor from './BlockEditor.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
   import { sourceKindLabel } from './settings/briefingSettings';
@@ -74,10 +75,9 @@
   let previewing = $state(false);
   let search = $state('');
   let draft = $state<BriefingBlockSave | null>(null);
-  let deleting = $state<BriefingBlock | null>(null);
+  const deleting = createConfirm<BriefingBlock>();
   let busy = $state(false);
   let error = $state('');
-  let deleteError = $state('');
   let announcement = $state('');
   const uid = $props.id();
   const filtered = $derived(
@@ -287,22 +287,17 @@
     }
   }
 
-  async function remove() {
-    if (!deleting || busy) return;
-    const id = deleting.id;
+  // A refusal rejects into the confirmation dialog, which stays open to show it.
+  async function remove(target: BriefingBlock) {
     const name = briefingName;
     const previous = blocks;
     busy = true;
-    deleteError = '';
     try {
-      if (!localDraft) await deleteBriefingBlock(id);
+      if (!localDraft) await deleteBriefingBlock(target.id);
       onChange(
         name,
-        previous.filter((block) => block.id !== id),
+        previous.filter((block) => block.id !== target.id),
       );
-      deleting = null;
-    } catch (e) {
-      deleteError = e instanceof Error ? e.message : 'Could not delete block.';
     } finally {
       busy = false;
     }
@@ -342,10 +337,7 @@
         label: 'Delete',
         disabled: busy,
         danger: true,
-        onSelect: () => {
-          deleteError = '';
-          deleting = block;
-        },
+        onSelect: () => deleting.ask(block),
       },
     ];
   }
@@ -481,27 +473,15 @@
   />
 {/if}
 
-{#if deleting}
+{#if deleting.target}
+  {@const target = deleting.target}
   <ConfirmDialog
-    open={true}
+    bind:open={deleting.open}
     title="Delete block"
-    confirmLabel={busy ? 'Deleting…' : 'Delete'}
-    confirmDisabled={busy}
-    onConfirm={() => {
-      void remove();
-    }}
-    onCancel={() => {
-      if (!busy) deleting = null;
-    }}
-  >
-    {#snippet body()}
-      <p>
-        Are you sure you want to delete the block "{deleting?.title}"? Existing editions remain
-        available.
-      </p>
-      {#if deleteError}<div role="alert" class="banner error">{deleteError}</div>{/if}
-    {/snippet}
-  </ConfirmDialog>
+    busyLabel="Deleting…"
+    message={`Are you sure you want to delete the block "${target.title}"? Existing editions remain available.`}
+    onConfirm={() => remove(target)}
+  />
 {/if}
 
 <style>

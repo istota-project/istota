@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import {
     Badge,
@@ -51,7 +52,7 @@
   let editGeo = $state('');
   let editBusy = $state(false);
 
-  let confirmDelete: string | null = $state(null);
+  const confirmDelete = createConfirm<string>();
   let autoBusy = $state(false);
 
   const classOptions = $derived(
@@ -150,8 +151,8 @@
   }
 
   async function handleDelete() {
-    const symbol = confirmDelete;
-    confirmDelete = null;
+    const symbol = confirmDelete.target;
+    confirmDelete.cancel();
     if (!symbol) return;
     try {
       await deletePortfolioClassification(symbol);
@@ -218,7 +219,7 @@
   function menu(cls: PortfolioClassification) {
     return [
       { label: 'Edit', onSelect: () => startEdit(cls) },
-      { label: 'Delete', danger: true, onSelect: () => (confirmDelete = cls.symbol) },
+      { label: 'Delete', danger: true, onSelect: () => confirmDelete.ask(cls.symbol) },
     ];
   }
 </script>
@@ -371,13 +372,12 @@
 </Card>
 
 <ConfirmDialog
-  open={confirmDelete !== null}
+  bind:open={confirmDelete.open}
   title="Delete classification"
-  message="Are you sure you want to remove the classification for {confirmDelete}? Its holdings fall back to the built-in rules (usually Unclassified) across all history."
+  message="Are you sure you want to remove the classification for {confirmDelete.target}? Its holdings fall back to the built-in rules (usually Unclassified) across all history."
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={handleDelete}
-  onCancel={() => (confirmDelete = null)}
 />
 
 <style>

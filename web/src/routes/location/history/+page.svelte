@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
@@ -90,16 +91,16 @@
     $requestNewPlace?.({ lat: cluster.lat, lon: cluster.lon, cluster });
   }
 
-  let restoreTarget: DismissedCluster | null = $state(null);
+  const restoreTarget = createConfirm<DismissedCluster>();
 
   function handleDismissedClick(d: DismissedCluster) {
-    restoreTarget = d;
+    restoreTarget.ask(d);
   }
 
   async function performRestore() {
-    if (!restoreTarget) return;
-    const id = restoreTarget.id;
-    restoreTarget = null;
+    if (!restoreTarget.target) return;
+    const id = restoreTarget.target.id;
+    restoreTarget.cancel();
     try {
       await restoreDismissedCluster(id);
       await loadDiscover();
@@ -392,13 +393,12 @@
 </div>
 
 <ConfirmDialog
-  open={restoreTarget != null}
+  bind:open={restoreTarget.open}
   title="Restore dismissed area"
   message="Are you sure you want to restore this dismissed area? Future pings here may form a cluster again."
   confirmLabel="Restore"
   confirmVariant="primary"
   onConfirm={performRestore}
-  onCancel={() => (restoreTarget = null)}
 />
 
 <style>

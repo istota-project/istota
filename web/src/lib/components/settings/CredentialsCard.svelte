@@ -28,6 +28,7 @@
     CopyButton,
   } from '$lib/components/ui';
   import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
   import CredentialFormModal from './CredentialFormModal.svelte';
   import StepUpDialog from './StepUpDialog.svelte';
@@ -45,8 +46,8 @@
   let allowHttp = $state(false);
   let omittedRooms = $state(false);
   let confirmExisting = $state(false);
-  let confirmRevoke: string | null = $state(null);
-  let confirmDelete: CredentialSummary | null = $state(null);
+  const confirmRevoke = createConfirm<string>();
+  const confirmDelete = createConfirm<CredentialSummary>();
   // Mounted per open, so the form's fields start empty every time.
   let form: { mode: 'add' | 'edit'; credential: CredentialSummary | null } | null = $state(null);
   let historyName: string | null = $state(null);
@@ -136,14 +137,12 @@
     );
   }
   function revoke() {
-    const name = confirmRevoke;
-    confirmRevoke = null;
+    const name = confirmRevoke.target;
     if (name) return mutate(() => revokeCredentialGrant(name));
   }
 
   function remove() {
-    const name = confirmDelete?.name;
-    confirmDelete = null;
+    const name = confirmDelete.target?.name;
     if (name) return mutate(() => deleteCredential(name));
   }
 
@@ -184,7 +183,7 @@
         label: 'Revoke access',
         danger: true,
         disabled: busy,
-        onSelect: () => (confirmRevoke = c.name),
+        onSelect: () => confirmRevoke.ask(c.name),
       });
     if (c.source !== 'config')
       items.push({ label: 'History', onSelect: () => (historyName = c.name) });
@@ -204,7 +203,7 @@
               : 'Remove stored copy',
         danger: true,
         disabled: busy,
-        onSelect: () => (confirmDelete = c),
+        onSelect: () => confirmDelete.ask(c),
       });
     return items;
   }
@@ -376,44 +375,50 @@
     onChanged={refresh}
   />
 {/if}
-<ConfirmDialog
-  open={confirmDelete !== null}
-  title={confirmDelete?.source === 'local'
-    ? 'Delete credential'
-    : confirmDelete?.source === 'generated'
-      ? 'Retire credential'
-      : 'Remove stored copy'}
-  message={confirmDelete?.source === 'local'
-    ? `Delete ${confirmDelete?.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`
-    : confirmDelete?.source === 'generated'
-      ? `Retire ${confirmDelete?.name}? Tasks lose it now, exported copies stay as they are. You can restore it from history until its saved versions expire. If the account still needs this password or its two-factor code, change them on the site first.`
-      : `Remove the stored copy of ${confirmDelete?.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`}
-  confirmLabel={confirmDelete?.source === 'local'
-    ? 'Delete'
-    : confirmDelete?.source === 'generated'
-      ? 'Retire'
-      : 'Remove'}
-  confirmDisabled={busy}
-  onConfirm={remove}
-  onCancel={() => (confirmDelete = null)}
-/>
+{#if confirmDelete.target}
+  {@const target = confirmDelete.target}
+  <ConfirmDialog
+    bind:open={confirmDelete.open}
+    title={target.source === 'local'
+      ? 'Delete credential'
+      : target.source === 'generated'
+        ? 'Retire credential'
+        : 'Remove stored copy'}
+    message={target.source === 'local'
+      ? `Delete ${target.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`
+      : target.source === 'generated'
+        ? `Retire ${target.name}? Tasks lose it now, exported copies stay as they are. You can restore it from history until its saved versions expire. If the account still needs this password or its two-factor code, change them on the site first.`
+        : `Remove the stored copy of ${target.name}? Tasks lose it now. You can restore it from history until its saved versions expire.`}
+    confirmLabel={target.source === 'local'
+      ? 'Delete'
+      : target.source === 'generated'
+        ? 'Retire'
+        : 'Remove'}
+    busyLabel={target.source === 'local'
+      ? 'Deleting…'
+      : target.source === 'generated'
+        ? 'Retiring…'
+        : 'Removing…'}
+    onConfirm={remove}
+  />
+{/if}
 <ConfirmDialog
   bind:open={confirmExisting}
   title="Allow all existing credentials"
   message="Allow all currently bound credentials in every room, including scheduled tasks? Credentials added later remain ungranted."
   confirmLabel="Allow all existing"
+  busyLabel="Allowing…"
   onConfirm={() => mutate(grantExistingCredentials)}
-  confirmDisabled={busy}
   confirmVariant="primary"
 />
 <ConfirmDialog
-  open={confirmRevoke !== null}
+  bind:open={confirmRevoke.open}
   title="Revoke access"
-  message="Are you sure you want to revoke access to {confirmRevoke}? No task can use it until you allow it again."
+  message="Are you sure you want to revoke access to {confirmRevoke.target}? No task can use it until you allow it again."
   confirmLabel="Revoke"
+  busyLabel="Revoking…"
   confirmVariant="danger"
   onConfirm={revoke}
-  onCancel={() => (confirmRevoke = null)}
 />
 
 <style>

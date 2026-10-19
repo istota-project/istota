@@ -28,6 +28,7 @@
   import { formatRelative } from '$lib/dateFormat';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { signInStateLabel } from '$lib/admin/signInState';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import AdminUserModal from './AdminUserModal.svelte';
 
   let view = $state<AdminUsers | null>(null);
@@ -41,8 +42,8 @@
   let editing = $state<string | null>(null);
   let formOpen = $state(false);
   let aboutCollapsed = $state(true);
-  let confirmOpen = $state(false);
-  let pending = $state<{ user: AdminUser; action: AdminUserAction } | null>(null);
+  const confirmation = createConfirm<{ user: AdminUser; action: AdminUserAction }>();
+  const pending = $derived(confirmation.target);
   const disableCopy =
     'Disable blocks email and Nextcloud sign-in and ends existing web sessions. It does not stop scheduled work.';
   const removeCopy =
@@ -130,7 +131,6 @@
     if (busy) return;
     busy = true;
     error = notice = '';
-    confirmOpen = false;
     try {
       await adminUserAction(user.user_id, action);
       notice = ['invite', 'reset'].includes(action) ? 'Link sent.' : 'Identity updated.';
@@ -143,8 +143,7 @@
   }
 
   function requestConfirmation(user: AdminUser, action: AdminUserAction) {
-    pending = { user, action };
-    confirmOpen = true;
+    confirmation.ask({ user, action });
   }
 
   const confirmationTitle = $derived(
@@ -310,7 +309,7 @@
 {/if}
 
 <ConfirmDialog
-  bind:open={confirmOpen}
+  bind:open={confirmation.open}
   title={confirmationTitle}
   message={`${pending?.user.display_name || pending?.user.user_id || ''}: ${confirmationCopy}`}
   confirmLabel={pending?.action === 'remove'
@@ -318,10 +317,12 @@
     : pending?.action === 'logout-all'
       ? 'Sign out'
       : 'Disable'}
-  confirmDisabled={busy}
-  onConfirm={() => {
-    if (pending) act(pending.user, pending.action);
-  }}
+  busyLabel={pending?.action === 'remove'
+    ? 'Removing…'
+    : pending?.action === 'logout-all'
+      ? 'Signing out…'
+      : 'Disabling…'}
+  onConfirm={() => pending && act(pending.user, pending.action)}
 />
 
 <style>

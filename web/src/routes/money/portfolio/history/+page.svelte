@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { onDestroy, untrack } from 'svelte';
@@ -70,7 +71,7 @@
   let chartCanvas: HTMLCanvasElement | undefined = $state();
   let chart: Chart | undefined;
 
-  let confirmDeleteId: number | null = $state(null);
+  const confirmDeleteId = createConfirm<number>();
   let diff: PortfolioDiff | null = $state(null);
   let diffOpen = $state(false);
 
@@ -269,8 +270,8 @@
   });
 
   async function handleDelete() {
-    const id = confirmDeleteId;
-    confirmDeleteId = null;
+    const id = confirmDeleteId.target;
+    confirmDeleteId.cancel();
     if (id == null) return;
     try {
       await deletePortfolioSnapshot(id);
@@ -308,13 +309,13 @@
       {
         label: 'Delete',
         danger: true,
-        onSelect: () => (confirmDeleteId = snapshot.id),
+        onSelect: () => confirmDeleteId.ask(snapshot.id),
       },
     ];
   }
 
   const confirmMessage = $derived.by(() => {
-    const snap = snapshots.find((s) => s.id === confirmDeleteId);
+    const snap = snapshots.find((s) => s.id === confirmDeleteId.target);
     if (!snap) return '';
     return `Are you sure you want to delete the snapshot from ${snap.exported_at.slice(0, 10)} (${snap.position_count} positions)? This permanently removes it and its positions.`;
   });
@@ -401,13 +402,12 @@
 {/if}
 
 <ConfirmDialog
-  open={confirmDeleteId !== null}
+  bind:open={confirmDeleteId.open}
   title="Delete snapshot"
   message={confirmMessage}
   confirmLabel="Delete"
   confirmVariant="danger"
   onConfirm={handleDelete}
-  onCancel={() => (confirmDeleteId = null)}
 />
 
 <!-- A diff is a list, and it borrows the record rows (table.css) so its rows

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
@@ -60,8 +61,7 @@
   // than the browser prompt it used to open — which could ask one question,
   // and reported a duplicate slug only after closing and dropping the draft.
   let addingCategory: { slug: string; title: string } | null = $state(null);
-  let confirmDelete: { kind: 'feed' | 'category'; idx: number; label: string } | null =
-    $state(null);
+  const confirmDelete = createConfirm<{ kind: 'feed' | 'category'; idx: number; label: string }>();
 
   let fileInput: HTMLInputElement | undefined = $state();
 
@@ -209,20 +209,20 @@
 
   function deleteFeed(idx: number) {
     const feed = config.feeds[idx];
-    confirmDelete = {
+    confirmDelete.ask({
       kind: 'feed',
       idx,
       label: feed.title || feed.url,
-    };
+    });
   }
 
   function deleteCategory(idx: number) {
     const cat = config.categories[idx];
-    confirmDelete = {
+    confirmDelete.ask({
       kind: 'category',
       idx,
       label: cat.title || cat.slug,
-    };
+    });
   }
 
   // No Duplicate here, unlike briefings: a feed is identified by its URL and a
@@ -240,12 +240,13 @@
   }
 
   function performDelete() {
-    if (!confirmDelete) return;
-    if (confirmDelete.kind === 'feed') {
-      config.feeds = config.feeds.filter((_, i) => i !== confirmDelete!.idx);
+    const target = confirmDelete.target;
+    if (!target) return;
+    if (target.kind === 'feed') {
+      config.feeds = config.feeds.filter((_, i) => i !== target.idx);
     } else {
-      const slug = config.categories[confirmDelete.idx]?.slug;
-      config.categories = config.categories.filter((_, i) => i !== confirmDelete!.idx);
+      const slug = config.categories[target.idx]?.slug;
+      config.categories = config.categories.filter((_, i) => i !== target.idx);
       // Detach feeds from the deleted category (don't drop the feeds).
       if (slug) {
         config.feeds = config.feeds.map((f) =>
@@ -253,7 +254,7 @@
         );
       }
     }
-    confirmDelete = null;
+    confirmDelete.cancel();
   }
 
   function startAddCategory() {
@@ -640,19 +641,18 @@
   </FormModal>
 {/if}
 
-{#if confirmDelete}
+{#if confirmDelete.target}
   <ConfirmDialog
-    open={true}
-    title={confirmDelete.kind === 'category' ? 'Delete category' : 'Delete feed'}
+    bind:open={confirmDelete.open}
+    title={confirmDelete.target.kind === 'category' ? 'Delete category' : 'Delete feed'}
     confirmLabel="Delete"
     onConfirm={performDelete}
-    onCancel={() => (confirmDelete = null)}
   >
     {#snippet body()}
       <p>
-        Are you sure you want to remove the {confirmDelete?.kind}
-        <strong>{confirmDelete?.label}</strong>?
-        {#if confirmDelete?.kind === 'category'}
+        Are you sure you want to remove the {confirmDelete.target?.kind}
+        <strong>{confirmDelete.target?.label}</strong>?
+        {#if confirmDelete.target?.kind === 'category'}
           Subscriptions in this category will keep their entries but become uncategorised.
         {/if}
         Changes apply when you save.

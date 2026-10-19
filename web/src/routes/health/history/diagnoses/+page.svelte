@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -76,7 +77,7 @@
   let formNotes = $state('');
   let saving = $state(false);
   let formError = $state('');
-  let deleteTarget: Diagnosis | null = $state(null);
+  const deleteTarget = createConfirm<Diagnosis>();
 
   async function load() {
     loading = true;
@@ -212,7 +213,7 @@
       items.push({ label: 'Reactivate', onSelect: () => void reactivate(d) });
     }
     items.push({ label: 'Documents', onSelect: () => (documentsFor = d) });
-    items.push({ label: 'Delete', danger: true, onSelect: () => (deleteTarget = d) });
+    items.push({ label: 'Delete', danger: true, onSelect: () => deleteTarget.ask(d) });
     return items;
   }
 
@@ -238,9 +239,9 @@
   }
 
   async function confirmDeletion() {
-    if (!deleteTarget) return;
-    const id = deleteTarget.id;
-    deleteTarget = null;
+    if (!deleteTarget.target) return;
+    const id = deleteTarget.target.id;
+    deleteTarget.cancel();
     try {
       await deleteDiagnosis(id);
       await load();
@@ -472,18 +473,17 @@
   </Modal>
 {/if}
 
-{#if deleteTarget}
+{#if deleteTarget.target}
   <ConfirmDialog
-    open={true}
+    bind:open={deleteTarget.open}
     title="Delete diagnosis"
     confirmLabel="Delete"
     onConfirm={confirmDeletion}
-    onCancel={() => (deleteTarget = null)}
   >
     {#snippet body()}
       <p>
-        Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? Permanently removes
-        it from your history. This cannot be undone.
+        Are you sure you want to delete <strong>{deleteTarget.target?.name}</strong>? Permanently
+        removes it from your history. This cannot be undone.
       </p>
     {/snippet}
   </ConfirmDialog>

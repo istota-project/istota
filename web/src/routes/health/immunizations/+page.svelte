@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
@@ -112,12 +113,12 @@
     }
   }
 
-  let deleteTargetId: number | null = $state(null);
+  const deleteTargetId = createConfirm<number>();
 
   async function performDeleteRow() {
-    if (deleteTargetId == null) return;
-    const id = deleteTargetId;
-    deleteTargetId = null;
+    if (deleteTargetId.target == null) return;
+    const id = deleteTargetId.target;
+    deleteTargetId.cancel();
     try {
       await deleteImmunization(id);
       await load();
@@ -385,7 +386,7 @@
                         {
                           label: 'Delete',
                           danger: true,
-                          onSelect: () => (deleteTargetId = i.id),
+                          onSelect: () => deleteTargetId.ask(i.id),
                         },
                       ]}
                     />
@@ -401,12 +402,11 @@
 {/if}
 
 <ConfirmDialog
-  open={deleteTargetId != null}
+  bind:open={deleteTargetId.open}
   title="Delete immunization"
   message="Are you sure you want to delete this immunization? This cannot be undone."
   confirmLabel="Delete"
   onConfirm={performDeleteRow}
-  onCancel={() => (deleteTargetId = null)}
 />
 
 <style>

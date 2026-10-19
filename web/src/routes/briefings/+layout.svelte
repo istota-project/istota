@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { onMount, untrack } from 'svelte';
   import { base } from '$app/paths';
@@ -101,11 +102,11 @@
   let loadingMore = $state(false);
 
   // The archived briefing pending a delete confirmation (null = no dialog).
-  let deleteTarget = $state<BriefingArchiveItem | null>(null);
+  const deleteTarget = createConfirm<BriefingArchiveItem>();
   $effect(() => {
     const request = $briefingDeleteRequest;
     if (!request) return;
-    deleteTarget = request;
+    deleteTarget.ask(request);
     briefingDeleteRequest.set(null);
   });
   $effect(() => {
@@ -122,7 +123,7 @@
     );
   }
   let deleteError = $state('');
-  let markAllTarget = $state<{ name: string; username: string } | null>(null);
+  const markAllTarget = createConfirm<{ name: string; username: string }>();
   let markingAllRead = $state(false);
   let mounted = false;
 
@@ -169,19 +170,22 @@
   );
 
   $effect(() => {
-    if (markAllTarget && (!onReader || identity.user.username !== markAllTarget.username)) {
-      markAllTarget = null;
+    if (
+      markAllTarget.target &&
+      (!onReader || identity.user.username !== markAllTarget.target.username)
+    ) {
+      markAllTarget.cancel();
     }
   });
 
   function handleMarkAllRead() {
     if (markingAllRead || !onReader) return;
-    markAllTarget = { name: $briefingFilterName, username: identity.user.username };
+    markAllTarget.ask({ name: $briefingFilterName, username: identity.user.username });
   }
 
   async function performMarkAllRead() {
-    const target = markAllTarget;
-    markAllTarget = null;
+    const target = markAllTarget.target;
+    markAllTarget.cancel();
     if (!target || markingAllRead || !onReader || identity.user.username !== target.username)
       return;
     markingAllRead = true;
@@ -414,9 +418,9 @@
   }
 
   async function performDelete() {
-    const target = deleteTarget;
+    const target = deleteTarget.target;
     if (!target) return;
-    deleteTarget = null;
+    deleteTarget.cancel();
     deleteError = '';
     try {
       await deleteBriefingArchiveItem(target.id);
@@ -724,28 +728,26 @@
   {@render children()}
 </AppShell>
 
-{#if markAllTarget}
+{#if markAllTarget.target}
   <ConfirmDialog
-    open={true}
+    bind:open={markAllTarget.open}
     title="Mark all as read"
-    message={markAllTarget.name
-      ? `Are you sure you want to mark all unread editions of ${markAllTarget.name} as read? This can't be undone.`
+    message={markAllTarget.target.name
+      ? `Are you sure you want to mark all unread editions of ${markAllTarget.target.name} as read? This can't be undone.`
       : "Are you sure you want to mark all unread briefings as read? This can't be undone."}
     confirmLabel="Mark all read"
     confirmVariant="primary"
     onConfirm={performMarkAllRead}
-    onCancel={() => (markAllTarget = null)}
   />
 {/if}
 
-{#if deleteTarget}
+{#if deleteTarget.target}
   <ConfirmDialog
-    open={true}
+    bind:open={deleteTarget.open}
     title="Delete briefing"
-    message={`Permanently remove the archived briefing "${deleteTarget.subject || deleteTarget.briefing_name}" from ${fmtDate(deleteTarget.generated_at)}? This cannot be undone.`}
+    message={`Permanently remove the archived briefing "${deleteTarget.target.subject || deleteTarget.target.briefing_name}" from ${fmtDate(deleteTarget.target.generated_at)}? This cannot be undone.`}
     confirmLabel="Delete"
     onConfirm={performDelete}
-    onCancel={() => (deleteTarget = null)}
   />
 {/if}
 

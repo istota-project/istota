@@ -9,6 +9,7 @@
     type KebabItem,
     Card,
   } from '$lib/components/ui';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import CardFormModal from './CardFormModal.svelte';
   let {
     cards,
@@ -22,7 +23,7 @@
     onError: (e: unknown) => void;
   } = $props();
   let form: { card: WalletCard | null } | null = $state(null);
-  let removing: WalletCard | null = $state(null);
+  const removing = createConfirm<WalletCard>();
   let busy = $state(false);
   function cardState(card: WalletCard) {
     const now = new Date();
@@ -41,6 +42,16 @@
       onSaved();
     } catch (e) {
       onError(e);
+    } finally {
+      busy = false;
+    }
+  }
+  // A refusal rejects into the dialog, which stays open to say so.
+  async function remove(card: WalletCard) {
+    busy = true;
+    try {
+      await removeWalletCard(card.id);
+      onSaved();
     } finally {
       busy = false;
     }
@@ -66,9 +77,7 @@
         label: 'Remove',
         danger: true,
         disabled: busy || !writable,
-        onSelect: () => {
-          removing = card;
-        },
+        onSelect: () => removing.ask(card),
       },
     ];
   }
@@ -116,19 +125,12 @@
     {onError}
   />{/if}
 <ConfirmDialog
-  open={removing !== null}
+  bind:open={removing.open}
   title="Remove card"
-  message="Remove {removing?.label}? Open purchases on this card will be cancelled."
+  message="Remove {removing.target?.label}? Open purchases on this card will be cancelled."
   confirmLabel="Remove"
-  confirmDisabled={busy}
-  onCancel={() => {
-    removing = null;
-  }}
-  onConfirm={() => {
-    const card = removing;
-    removing = null;
-    if (card) void mutate(() => removeWalletCard(card.id));
-  }}
+  busyLabel="Removing…"
+  onConfirm={() => removing.target && remove(removing.target)}
 />
 
 <style>

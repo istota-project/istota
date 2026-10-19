@@ -3,7 +3,6 @@
   import { base } from '$app/paths';
   import {
     AuthError,
-    GroupApiError,
     deleteAdminScheduledJob,
     getAdminScheduledJobs,
     setAdminScheduledJobEnabled,
@@ -20,7 +19,8 @@
     type KebabItem,
     Card,
   } from '$lib/components/ui';
-  import { StepUpDialog } from '$lib/components/settings';
+  import { ConfirmStepUpDialog } from '$lib/components/settings';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess, notifyWarning } from '$lib/stores/notices';
 
@@ -30,9 +30,8 @@
   let loadError = $state('');
   let filter = $state('');
   let busy = $state(false);
-  let disabling = $state<AdminStatsJob | null>(null);
-  let deleting = $state<AdminStatsJob | null>(null);
-  let deleteStage = $state<'confirm' | 'step-up' | null>(null);
+  const disabling = createConfirm<AdminStatsJob>();
+  const deleting = createConfirm<AdminStatsJob>();
 
   function isModuleJob(job: AdminStatsJob): boolean {
     return job.name.startsWith('_module.');
@@ -88,7 +87,6 @@
   }
 
   async function setEnabled(job: AdminStatsJob, enabled: boolean) {
-    disabling = null;
     if (busy) return;
     busy = true;
     try {
@@ -106,35 +104,15 @@
     }
   }
 
-  function startDelete(job: AdminStatsJob) {
-    deleting = job;
-    deleteStage = 'confirm';
-  }
-
-  function stopDelete() {
-    deleting = null;
-    deleteStage = null;
-  }
-
-  async function submitDelete(proof: StepUpProof) {
-    const job = deleting;
-    if (!job) return;
-    try {
-      await deleteAdminScheduledJob(job.id, job.name, proof);
-      notifySuccess(`${job.name} deleted.`);
-    } catch (e) {
-      // A refused code or password stays in the step-up dialog, which reads `reason`.
-      if (e instanceof GroupApiError && e.status === 403 && e.reason) throw e;
-      failed(e, 'The job could not be deleted.');
-    }
-    stopDelete();
-    await load();
+  async function deleteJob(job: AdminStatsJob, proof: StepUpProof) {
+    await deleteAdminScheduledJob(job.id, job.name, proof);
+    notifySuccess(`${job.name} deleted.`);
   }
 
   function rowActions(job: AdminStatsJob): KebabItem[] {
     const items: KebabItem[] = [
       stateOf(job) === 'running'
-        ? { label: 'Disable', disabled: busy, onSelect: () => (disabling = job) }
+        ? { label: 'Disable', disabled: busy, onSelect: () => disabling.ask(job) }
         : { label: 'Enable', disabled: busy, onSelect: () => setEnabled(job, true) },
     ];
     if (!isModuleJob(job))
@@ -142,7 +120,7 @@
         label: 'Delete',
         danger: true,
         disabled: busy,
-        onSelect: () => startDelete(job),
+        onSelect: () => deleting.ask(job),
       });
     return items;
   }
@@ -244,34 +222,29 @@
 </div>
 
 <ConfirmDialog
-  open={disabling !== null}
+  bind:open={disabling.open}
   title="Disable job"
-  message={disabling
-    ? `Disable ${disabling.name} for ${disabling.user_id}? It stops running until it is enabled again.`
+  message={disabling.target
+    ? `Disable ${disabling.target.name} for ${disabling.target.user_id}? It stops running until it is enabled again.`
     : ''}
   confirmLabel="Disable"
+  busyLabel="Disabling…"
   confirmVariant="primary"
-  onConfirm={() => {
-    if (disabling) void setEnabled(disabling, false);
-  }}
-  onCancel={() => (disabling = null)}
+  onConfirm={() => disabling.target && setEnabled(disabling.target, false)}
 />
 
-{#if deleting}
-  <ConfirmDialog
-    open={deleteStage === 'confirm'}
+{#if deleting.target}
+  {@const job = deleting.target}
+  <ConfirmStepUpDialog
+    bind:open={deleting.open}
     title="Delete job"
-    message={`Delete ${deleting.name} for ${deleting.user_id}? It is removed from their CRON.md and stops running. This cannot be undone.`}
-    confirmLabel="Delete"
-    confirmVariant="danger"
-    challenge={deleting.name}
-    onConfirm={() => (deleteStage = 'step-up')}
-    onCancel={stopDelete}
+    message={`Delete ${job.name} for ${job.user_id}? It is removed from their CRON.md and stops running. This cannot be undone.`}
+    challenge={job.name}
+    action="admin_cron_delete"
+    onConfirm={(proof) => deleteJob(job, proof)}
+    onFailed={(e) => failed(e, 'The job could not be deleted.')}
+    onSettled={load}
   />
-{/if}
-
-{#if deleteStage === 'step-up'}
-  <StepUpDialog action="admin_cron_delete" onConfirm={submitDelete} onCancel={stopDelete} />
 {/if}
 
 <style>

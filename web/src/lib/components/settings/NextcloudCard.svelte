@@ -12,7 +12,14 @@
     type NextcloudSharing,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { Button, Modal, Select, type SelectOption, Card, Field } from '$lib/components/ui';
+  import {
+    Button,
+    ConfirmDialog,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+  } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
 
@@ -184,7 +191,8 @@
     else confirmingDisconnect = true;
   }
 
-  async function disconnect(unshare: boolean) {
+  /** False on a refusal, which the dialog shows and stays open for. */
+  async function disconnect(unshare: boolean): Promise<boolean> {
     busy = true;
     error = '';
     info = '';
@@ -197,6 +205,7 @@
       failed = {};
       info = 'Nextcloud connection removed.';
       onDisconnected?.();
+      return true;
     } catch (e) {
       const body = (e as { body?: { still_shared?: unknown } | null }).body;
       const still = Array.isArray(body?.still_shared) ? (body.still_shared as string[]) : null;
@@ -209,6 +218,7 @@
       } else {
         disconnectError = e instanceof Error ? e.message : 'Disconnect failed';
       }
+      return false;
     } finally {
       busy = false;
     }
@@ -322,40 +332,34 @@
   {/if}
 </Card>
 
-<Modal
-  open={confirmingDisconnect}
+<ConfirmDialog
+  bind:open={confirmingDisconnect}
   title="Disconnect Nextcloud"
-  onOpenChange={(open) => {
-    if (!open) confirmingDisconnect = false;
-  }}
+  width="420px"
+  error={disconnectError}
+  secondaryLabel="Disconnect, keep sharing"
+  secondaryBusyLabel="Disconnecting…"
+  onSecondary={() => disconnect(false)}
+  confirmLabel="Disconnect and stop sharing"
+  busyLabel="Disconnecting…"
+  confirmVariant="primary"
+  onConfirm={() => disconnect(true)}
 >
-  <p class="modal-text">
-    {#if sharing}
-      Some of your calendars or address books are shared with Istota.
-    {:else}
-      Istota could not check which of your calendars and address books are shared with it.
-    {/if}
-    Stop sharing them as well?
-  </p>
-  <p class="modal-text">
-    If you keep sharing, Istota keeps access to them. You can unshare them later in the Nextcloud
-    Calendar and Contacts apps.
-  </p>
-  {#if disconnectError}
-    <div class="banner error">{disconnectError}</div>
-  {/if}
-  {#snippet footer()}
-    <Button variant="secondary" onclick={() => (confirmingDisconnect = false)} disabled={busy}>
-      Cancel
-    </Button>
-    <Button variant="secondary" onclick={() => disconnect(false)} disabled={busy}>
-      Disconnect, keep sharing
-    </Button>
-    <Button variant="primary" onclick={() => disconnect(true)} disabled={busy}>
-      Disconnect and stop sharing
-    </Button>
+  {#snippet body()}
+    <p class="modal-text">
+      {#if sharing}
+        Some of your calendars or address books are shared with Istota.
+      {:else}
+        Istota could not check which of your calendars and address books are shared with it.
+      {/if}
+      Stop sharing them as well?
+    </p>
+    <p class="modal-text">
+      If you keep sharing, Istota keeps access to them. You can unshare them later in the Nextcloud
+      Calendar and Contacts apps.
+    </p>
   {/snippet}
-</Modal>
+</ConfirmDialog>
 
 <style>
   .group h3 {

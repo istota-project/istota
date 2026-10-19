@@ -45,10 +45,9 @@
   );
 
   async function mint() {
-    // ConfirmDialog does not close itself on confirm, so its button stays
-    // live for the whole round trip. Without this guard a double-tap mints
-    // twice and the QR can end up showing the token that lost the race —
-    // which the phone would accept and then 401 on forever.
+    // Without this guard a double-tap mints twice and the QR can end up
+    // showing the token that lost the race, which the phone would accept and
+    // then 401 on forever. The dialog holds its own button while pending.
     if (minting) return;
     minting = true;
     mintError = '';
@@ -181,8 +180,8 @@
   title="Generate a new token"
   message="Are you sure? The current token stops working immediately, on every device using it. Any phone still tracking with the old one will stop sending until you rescan its code."
   confirmLabel="Generate"
+  busyLabel="Generating…"
   confirmVariant="danger"
-  confirmDisabled={minting}
   onConfirm={mint}
 />
 

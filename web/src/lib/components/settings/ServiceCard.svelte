@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { Card, ConfirmDialog, EmptyState, SecretField } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -27,12 +28,12 @@
   let saving = $state(false);
   let savedFlash = $state(false);
   let saveError = $state('');
-  let confirmingClearKey: string | null = $state(null);
+  const confirmingClearKey = createConfirm<string>();
 
   let dirty = $derived(Object.values(pending).some((v) => v && v.length > 0));
 
   let clearMessage = $derived.by(() => {
-    const field = service.fields.find((f) => f.key === confirmingClearKey);
+    const field = service.fields.find((f) => f.key === confirmingClearKey.target);
     return (
       `Are you sure you want to clear the stored ${field?.label ?? 'value'} ` +
       `for ${service.label}? The credential is deleted from the server and ` +
@@ -67,7 +68,7 @@
   }
 
   async function performClear(key: string) {
-    confirmingClearKey = null;
+    confirmingClearKey.cancel();
     saving = true;
     saveError = '';
     try {
@@ -146,7 +147,7 @@
         value={pending[f.key] ?? ''}
         disabled={saving}
         onValueChange={(v) => setFieldValue(f.key, v)}
-        onRequestClear={() => (confirmingClearKey = f.key)}
+        onRequestClear={() => confirmingClearKey.ask(f.key)}
       />
     {/each}
     {#if saveError}
@@ -160,15 +161,14 @@
   through the shared dialog like every other such action — it used to be a
   hand-rolled inline row whose confirm button was `primary`, i.e. the same
   affordance as Save. One dialog outside the loop rather than one per field:
-  `confirmingClearKey` already names the single field being cleared.
+  `confirmingClearKey.target` already names the single field being cleared.
 -->
 <ConfirmDialog
-  open={confirmingClearKey !== null}
+  bind:open={confirmingClearKey.open}
   title="Clear stored value"
   message={clearMessage}
   confirmLabel="Clear"
-  onConfirm={() => confirmingClearKey && performClear(confirmingClearKey)}
-  onCancel={() => (confirmingClearKey = null)}
+  onConfirm={() => confirmingClearKey.target && performClear(confirmingClearKey.target)}
 />
 
 <style>

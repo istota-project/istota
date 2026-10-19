@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import {
@@ -71,8 +72,7 @@
   let formOpen = $state(false);
   let editing: WorkEntryRow | null = $state(null);
 
-  let confirmOpen = $state(false);
-  let pendingDelete: WorkEntryRow | null = $state(null);
+  const pendingDelete = createConfirm<WorkEntryRow>();
 
   // The entry being invoiced on its own, and the invoiced entry whose invoice is being voided.
   let generating: WorkEntryRow | null = $state(null);
@@ -211,14 +211,12 @@
   }
 
   function askDelete(entry: WorkEntryRow) {
-    pendingDelete = entry;
-    confirmOpen = true;
+    pendingDelete.ask(entry);
   }
 
   async function handleDelete() {
-    const entry = pendingDelete;
-    confirmOpen = false;
-    pendingDelete = null;
+    const entry = pendingDelete.target;
+    pendingDelete.cancel();
     if (!entry) return;
 
     busyUid = entry.uid;
@@ -486,14 +484,13 @@
 {/if}
 
 <ConfirmDialog
-  bind:open={confirmOpen}
+  bind:open={pendingDelete.open}
   title="Delete work entry"
-  message={pendingDelete
-    ? `Are you sure you want to delete the ${pendingDelete.service_name} entry for ${pendingDelete.client_name} on ${formatDate(pendingDelete.date)}? This cannot be undone.`
+  message={pendingDelete.target
+    ? `Are you sure you want to delete the ${pendingDelete.target.service_name} entry for ${pendingDelete.target.client_name} on ${formatDate(pendingDelete.target.date)}? This cannot be undone.`
     : ''}
   confirmLabel="Delete"
   onConfirm={handleDelete}
-  onCancel={() => (pendingDelete = null)}
 />
 
 <style>

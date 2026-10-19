@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
     getSharedBlocks,
     putSharedBlock,
@@ -60,7 +61,7 @@
   let sharedError = $state('');
   let sharedSaving = $state(false);
   let sharedRunning = $state<Set<string>>(new Set());
-  let confirmSharedDelete = $state<string | null>(null);
+  const confirmSharedDelete = createConfirm<string>();
 
   const sharedKindOptions: SelectOption[] = $derived(
     sharedAllowedKinds.map((k) => ({ value: k, label: sourceKindLabel(k) })),
@@ -132,7 +133,7 @@
       },
       { label: 'Edit', onSelect: () => editShared(b) },
       { label: 'Duplicate', onSelect: () => cloneShared(b) },
-      { label: 'Delete', danger: true, onSelect: () => (confirmSharedDelete = b.name) },
+      { label: 'Delete', danger: true, onSelect: () => confirmSharedDelete.ask(b.name) },
     ];
   }
 
@@ -255,7 +256,7 @@
     } catch (e) {
       sharedError = (e as Error).message || 'Delete failed';
     } finally {
-      confirmSharedDelete = null;
+      confirmSharedDelete.cancel();
     }
   }
 
@@ -419,19 +420,19 @@
   </Modal>
 {/if}
 
-{#if confirmSharedDelete}
+{#if confirmSharedDelete.target}
   <ConfirmDialog
-    open={true}
+    bind:open={confirmSharedDelete.open}
     title="Delete shared block"
     confirmLabel="Delete"
-    onConfirm={() => confirmSharedDelete && doDeleteShared(confirmSharedDelete)}
-    onCancel={() => (confirmSharedDelete = null)}
+    onConfirm={() => confirmSharedDelete.target && doDeleteShared(confirmSharedDelete.target)}
   >
     {#snippet body()}
       <p>
-        Are you sure you want to delete the shared block <strong>{confirmSharedDelete}</strong>? The
-        last generated value stays until it goes stale. Users referencing it lose the section once
-        it expires.
+        Are you sure you want to delete the shared block <strong
+          >{confirmSharedDelete.target}</strong
+        >? The last generated value stays until it goes stale. Users referencing it lose the section
+        once it expires.
       </p>
     {/snippet}
   </ConfirmDialog>

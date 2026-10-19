@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
   import { untrack } from 'svelte';
   import { addRoomMember } from '$lib/api';
@@ -309,7 +310,7 @@
   );
   let showDeleteConfirm = $state(false);
   // A member add waiting on its confirmation, and why the last one failed.
-  let pendingAdd = $state<AddRequest | null>(null);
+  const pendingAdd = createConfirm<AddRequest>();
   let addError = $state('');
   // Bumped after a confirmed add so the members pane lists the new member.
   let membersEpoch = $state(0);
@@ -329,7 +330,7 @@
       speechModeValue = room.policy?.speech_mode ?? '';
       dispositionValue = room.policy?.disposition ?? '';
       showDeleteConfirm = false;
-      pendingAdd = null;
+      pendingAdd.cancel();
       addError = '';
     }
   });
@@ -392,7 +393,7 @@
   // Hiding it for a confirm is not a close, so it must not reach `onClose`.
   // The add confirm lives here rather than in the members pane because that
   // pane is unmounted while settings is hidden.
-  const confirming = $derived(showDeleteConfirm || pendingAdd !== null);
+  const confirming = $derived(showDeleteConfirm || pendingAdd.open);
 
   function handleOpenChange(next: boolean) {
     if (!next && !confirming) onClose();
@@ -409,12 +410,12 @@
 
   function requestAdd(request: AddRequest) {
     addError = '';
-    pendingAdd = request;
+    pendingAdd.ask(request);
   }
 
   async function confirmAdd() {
-    const request = pendingAdd;
-    pendingAdd = null;
+    const request = pendingAdd.target;
+    pendingAdd.cancel();
     if (!request) return;
     const forRoom = room.id;
     try {
@@ -739,13 +740,12 @@
 />
 
 <ConfirmDialog
-  open={pendingAdd !== null}
-  title={pendingAdd ? `Add ${pendingAdd.displayName}` : 'Add member'}
-  message={pendingAdd ? addDisclosure(pendingAdd) : ''}
+  bind:open={pendingAdd.open}
+  title={pendingAdd.target ? `Add ${pendingAdd.target.displayName}` : 'Add member'}
+  message={pendingAdd.target ? addDisclosure(pendingAdd.target) : ''}
   confirmLabel="Add and share the history"
   confirmVariant="primary"
   onConfirm={confirmAdd}
-  onCancel={() => (pendingAdd = null)}
 />
 
 <style>

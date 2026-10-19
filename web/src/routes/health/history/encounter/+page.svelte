@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -55,8 +56,7 @@
   let linkPick = $state('');
   let linking = $state(false);
   let linkError = $state('');
-  let unlinkTarget: Diagnosis | null = $state(null);
-  let confirmUnlink = $state(false);
+  const unlinkTarget = createConfirm<Diagnosis>();
 
   const CANONICAL_TYPES = [
     'visit',
@@ -178,8 +178,7 @@
       linkError = e instanceof Error ? e.message : 'Failed to unlink condition';
     } finally {
       linking = false;
-      unlinkTarget = null;
-      confirmUnlink = false;
+      unlinkTarget.cancel();
     }
   }
 
@@ -189,8 +188,7 @@
       {
         label: 'Unlink from this encounter',
         onSelect: () => {
-          unlinkTarget = d;
-          confirmUnlink = true;
+          unlinkTarget.ask(d);
         },
       },
     ];
@@ -442,13 +440,12 @@
      than the red one: it is the "did you mean that" gate a document detach
      gets, not a destructive action. -->
 <ConfirmDialog
-  bind:open={confirmUnlink}
+  bind:open={unlinkTarget.open}
   title="Unlink condition"
-  message={`Are you sure you want to unlink ${unlinkTarget?.name ?? 'this condition'} from this encounter? The condition is kept, along with its links to any other encounters.`}
+  message={`Are you sure you want to unlink ${unlinkTarget.target?.name ?? 'this condition'} from this encounter? The condition is kept, along with its links to any other encounters.`}
   confirmLabel="Unlink"
   confirmVariant="primary"
-  onConfirm={() => unlinkTarget && unlinkCondition(unlinkTarget)}
-  onCancel={() => (unlinkTarget = null)}
+  onConfirm={() => unlinkTarget.target && unlinkCondition(unlinkTarget.target)}
 />
 
 <style>

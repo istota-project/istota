@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -223,8 +224,8 @@
   // --- Header actions ---
   let groupEditor = $state<GroupBriefingEditor | null>(null);
   let duplicating = $state<{ from: DuplicateSource; exclude: string } | null>(null);
-  let confirmDelete = $state<UserBriefingRow | null>(null);
-  let confirmGroupDelete = $state<{ revision: number; title: string } | null>(null);
+  const confirmDelete = createConfirm<UserBriefingRow>();
+  const confirmGroupDelete = createConfirm<{ revision: number; title: string }>();
   let busy = $state(false);
 
   function personalDuplicateSource(row: UserBriefingRow): DuplicateSource {
@@ -295,8 +296,8 @@
   }
 
   async function performDelete() {
-    const row = confirmDelete;
-    confirmDelete = null;
+    const row = confirmDelete.target;
+    confirmDelete.cancel();
     if (!row?.id || busy) return;
     busy = true;
     try {
@@ -312,8 +313,8 @@
   }
 
   async function performGroupDelete() {
-    const target = confirmGroupDelete;
-    confirmGroupDelete = null;
+    const target = confirmGroupDelete.target;
+    confirmGroupDelete.cancel();
     if (!target || busy) return;
     busy = true;
     try {
@@ -345,7 +346,7 @@
           label: target.enabled ? 'Delete (turn off first)' : 'Delete',
           danger: true,
           disabled: busy || target.enabled,
-          onSelect: () => (confirmGroupDelete = target),
+          onSelect: () => confirmGroupDelete.ask(target),
         });
       return items;
     }
@@ -357,7 +358,7 @@
           label: 'Duplicate to a group',
           onSelect: () => (duplicating = { from: personalDuplicateSource(row), exclude: '' }),
         },
-        { label: 'Delete', danger: true, onSelect: () => (confirmDelete = row) },
+        { label: 'Delete', danger: true, onSelect: () => confirmDelete.ask(row) },
       ];
     }
     return [];
@@ -482,25 +483,23 @@
   />
 {/if}
 
-{#if confirmDelete}
+{#if confirmDelete.target}
   <ConfirmDialog
-    open={true}
+    bind:open={confirmDelete.open}
     title="Delete briefing"
-    message={`Are you sure you want to delete ${confirmDelete.title || derivedTitle(confirmDelete.name)}? Its schedule and content blocks are removed. Past editions stay in your archive.`}
+    message={`Are you sure you want to delete ${confirmDelete.target.title || derivedTitle(confirmDelete.target.name)}? Its schedule and content blocks are removed. Past editions stay in your archive.`}
     confirmLabel="Delete"
     onConfirm={performDelete}
-    onCancel={() => (confirmDelete = null)}
   />
 {/if}
 
-{#if confirmGroupDelete}
+{#if confirmGroupDelete.target}
   <ConfirmDialog
-    open={true}
+    bind:open={confirmGroupDelete.open}
     title="Delete briefing"
-    message={`Are you sure you want to delete ${confirmGroupDelete.title}? It stops for every member of ${groupTarget?.label ?? 'the group'}, and any unsaved changes are lost. Editions already published stay readable.`}
+    message={`Are you sure you want to delete ${confirmGroupDelete.target.title}? It stops for every member of ${groupTarget?.label ?? 'the group'}, and any unsaved changes are lost. Editions already published stay readable.`}
     confirmLabel="Delete"
     confirmVariant="danger"
     onConfirm={performGroupDelete}
-    onCancel={() => (confirmGroupDelete = null)}
   />
 {/if}

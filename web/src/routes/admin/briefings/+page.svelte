@@ -23,7 +23,8 @@
     type KebabItem,
     Card,
   } from '$lib/components/ui';
-  import { StepUpDialog } from '$lib/components/settings';
+  import { ConfirmStepUpDialog } from '$lib/components/settings';
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import { channelLabel, derivedTitle } from '$lib/components/briefings/settings/briefingSettings';
   import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
@@ -49,9 +50,8 @@
   let loadError = $state('');
   let filter = $state('');
   let busy = $state(false);
-  let pausing = $state<Row | null>(null);
-  let deleting = $state<Row | null>(null);
-  let deleteStage = $state<'confirm' | 'step-up' | null>(null);
+  const pausing = createConfirm<Row>();
+  const deleting = createConfirm<Row>();
 
   function stateOf(enabled: boolean, held: unknown): Row['state'] {
     if (held) return 'held';
@@ -141,7 +141,6 @@
   }
 
   async function pause(row: Row) {
-    pausing = null;
     if (busy) return;
     busy = true;
     try {
@@ -167,49 +166,27 @@
     }
   }
 
-  function startDelete(row: Row) {
-    deleting = row;
-    deleteStage = 'confirm';
-  }
-
-  function stopDelete() {
-    deleting = null;
-    deleteStage = null;
-  }
-
-  async function submitDelete(proof: StepUpProof) {
-    const row = deleting;
-    if (!row) return;
-    try {
-      await deleteAdminBriefing(row.kind, row.id, row.name, proof);
-      notifySuccess(`${row.title} deleted.`);
-    } catch (e) {
-      // A refused code or password stays in the step-up dialog, which reads `reason`.
-      if (e instanceof GroupApiError && e.status === 403 && e.reason) throw e;
-      failed(e, 'The briefing could not be deleted.');
-    }
-    stopDelete();
-    await load();
+  async function deleteBriefing(row: Row, proof: StepUpProof) {
+    await deleteAdminBriefing(row.kind, row.id, row.name, proof);
+    notifySuccess(`${row.title} deleted.`);
   }
 
   function rowActions(row: Row): KebabItem[] {
     return [
       row.state === 'held'
         ? { label: 'Resume', disabled: busy, onSelect: () => resume(row) }
-        : { label: 'Pause', disabled: busy, onSelect: () => (pausing = row) },
-      { label: 'Delete', danger: true, disabled: busy, onSelect: () => startDelete(row) },
+        : { label: 'Pause', disabled: busy, onSelect: () => pausing.ask(row) },
+      { label: 'Delete', danger: true, disabled: busy, onSelect: () => deleting.ask(row) },
     ];
   }
 
-  const deleteMessage = $derived(
-    !deleting
-      ? ''
-      : deleting.kind === 'personal'
-        ? `Delete ${deleting.title} for ${deleting.owner}? Its schedule and blocks are removed. ` +
+  function deleteMessage(row: Row): string {
+    return row.kind === 'personal'
+      ? `Delete ${row.title} for ${row.owner}? Its schedule and blocks are removed. ` +
           "Past editions stay in the owner's archive."
-        : `Delete ${deleting.title} from ${deleting.owner}? It stops running and leaves the ` +
-          "group's settings. Members keep its published editions.",
-  );
+      : `Delete ${row.title} from ${row.owner}? It stops running and leaves the ` +
+          "group's settings. Members keep its published editions.";
+  }
 </script>
 
 <div class="settings admin-page card-pane">
@@ -303,34 +280,29 @@
 </div>
 
 <ConfirmDialog
-  open={pausing !== null}
+  bind:open={pausing.open}
   title="Pause briefing"
-  message={pausing
-    ? `Pause ${pausing.title} for ${pausing.owner}? It will not run until an administrator resumes it.`
+  message={pausing.target
+    ? `Pause ${pausing.target.title} for ${pausing.target.owner}? It will not run until an administrator resumes it.`
     : ''}
   confirmLabel="Pause"
+  busyLabel="Pausing…"
   confirmVariant="primary"
-  onConfirm={() => {
-    if (pausing) void pause(pausing);
-  }}
-  onCancel={() => (pausing = null)}
+  onConfirm={() => pausing.target && pause(pausing.target)}
 />
 
-{#if deleting}
-  <ConfirmDialog
-    open={deleteStage === 'confirm'}
+{#if deleting.target}
+  {@const row = deleting.target}
+  <ConfirmStepUpDialog
+    bind:open={deleting.open}
     title="Delete briefing"
-    message={deleteMessage}
-    confirmLabel="Delete"
-    confirmVariant="danger"
-    challenge={deleting.name}
-    onConfirm={() => (deleteStage = 'step-up')}
-    onCancel={stopDelete}
+    message={deleteMessage(row)}
+    challenge={row.name}
+    action="admin_briefing_delete"
+    onConfirm={(proof) => deleteBriefing(row, proof)}
+    onFailed={(e) => failed(e, 'The briefing could not be deleted.')}
+    onSettled={load}
   />
-{/if}
-
-{#if deleteStage === 'step-up'}
-  <StepUpDialog action="admin_briefing_delete" onConfirm={submitDelete} onCancel={stopDelete} />
 {/if}
 
 <style>

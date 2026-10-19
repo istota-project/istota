@@ -156,3 +156,60 @@ it('deletes through the typed name and a step-up proof', async () => {
   await waitFor(() => expect(api.getAdminScheduledJobs).toHaveBeenCalledTimes(2));
   expect(notices.notifyError).not.toHaveBeenCalled();
 });
+
+async function deleteDigest() {
+  await fireEvent.click(await screen.findByRole('button', { name: 'Actions for bob/digest' }));
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Delete job' });
+  await fireEvent.input(within(dialog).getByLabelText('Type to confirm'), {
+    target: { value: 'digest' },
+  });
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+  const stepUp = await screen.findByRole('dialog', { name: 'Confirm sensitive action' });
+  await fireEvent.input(await within(stepUp).findByLabelText('Confirmation code'), {
+    target: { value: '123456' },
+  });
+  await fireEvent.click(within(stepUp).getByRole('button', { name: 'Confirm' }));
+  return stepUp;
+}
+
+it('keeps a refused code in the step-up dialog, and a cancel there deletes nothing', async () => {
+  api.deleteAdminScheduledJob.mockRejectedValueOnce(
+    new api.GroupApiError(403, '', 'That code was not accepted.', 'bad'),
+  );
+  render(Page);
+  const stepUp = await deleteDigest();
+  expect(await within(stepUp).findByRole('alert')).toHaveTextContent('not accepted');
+  expect(notices.notifyError).not.toHaveBeenCalled();
+  await fireEvent.click(within(stepUp).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(api.getAdminScheduledJobs).toHaveBeenCalledTimes(1);
+});
+
+it('reports any other delete failure with a notice, closes and reloads', async () => {
+  api.deleteAdminScheduledJob.mockRejectedValueOnce(
+    new api.GroupApiError(409, 'cron_md_unwritable', 'CRON.md could not be written'),
+  );
+  render(Page);
+  await deleteDigest();
+  await waitFor(() =>
+    expect(notices.notifyError).toHaveBeenCalledWith('CRON.md could not be written'),
+  );
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  await waitFor(() => expect(api.getAdminScheduledJobs).toHaveBeenCalledTimes(2));
+});
+
+it('shows progress in the disable dialog until the change lands', async () => {
+  let finish!: () => void;
+  api.setAdminScheduledJobEnabled.mockImplementationOnce(
+    () => new Promise((resolve) => (finish = () => resolve({ outcome: 'file', job: null }))),
+  );
+  render(Page);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Actions for bob/digest' }));
+  await fireEvent.click(await screen.findByRole('menuitem', { name: 'Disable' }));
+  const dialog = await screen.findByRole('dialog', { name: 'Disable job' });
+  await fireEvent.click(within(dialog).getByRole('button', { name: 'Disable' }));
+  expect(await within(dialog).findByRole('button', { name: 'Disabling…' })).toBeDisabled();
+  finish();
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+});

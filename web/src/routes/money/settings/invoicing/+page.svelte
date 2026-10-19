@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
     getBusinessSettings,
     getClients,
@@ -120,9 +121,8 @@
   let editingService: ServiceRow | null = $state(null);
   let serviceNotice = $state('');
 
-  let confirmOpen = $state(false);
   type DeleteKind = 'client' | 'entity' | 'service';
-  let pendingDelete: { kind: DeleteKind; key: string; label: string } | null = $state(null);
+  const pendingDelete = createConfirm<{ kind: DeleteKind; key: string; label: string }>();
 
   function openClientForm(client: ClientRow | null) {
     clientNotice = '';
@@ -178,8 +178,7 @@
   }
 
   function askDelete(kind: DeleteKind, key: string, label: string) {
-    pendingDelete = { kind, key, label };
-    confirmOpen = true;
+    pendingDelete.ask({ kind, key, label });
   }
 
   async function askDeleteClient(client: ClientRow) {
@@ -189,7 +188,7 @@
     // say what the deletion costs.
     try {
       const resp = await getWorkEntries({ client: client.key, status: 'all' });
-      if (pendingDelete?.key === client.key) pendingReferences = resp.entries.length;
+      if (pendingDelete.target?.key === client.key) pendingReferences = resp.entries.length;
     } catch {
       /* leave the count out of the message */
     }
@@ -209,9 +208,8 @@
   }
 
   async function handleDelete() {
-    const target = pendingDelete;
-    confirmOpen = false;
-    pendingDelete = null;
+    const target = pendingDelete.target;
+    pendingDelete.cancel();
     if (!target) return;
     if (target.kind === 'client') {
       await deleteClientNow(target.key);
@@ -234,25 +232,26 @@
   }
 
   const deleteMessage = $derived.by(() => {
-    if (!pendingDelete) return '';
-    if (pendingDelete.kind === 'client') {
-      const head = `Are you sure you want to delete ${pendingDelete.label}?`;
+    const target = pendingDelete.target;
+    if (!target) return '';
+    if (target.kind === 'client') {
+      const head = `Are you sure you want to delete ${target.label}?`;
       if (!pendingReferences) return `${head} This cannot be undone.`;
       const plural = pendingReferences === 1 ? 'entry references' : 'entries reference';
       return (
         `${head} ${pendingReferences} work ${plural} this client and will show ` +
-        `"${pendingDelete.key}" instead of a name.`
+        `"${target.key}" instead of a name.`
       );
     }
-    if (pendingDelete.kind === 'entity') {
+    if (target.kind === 'entity') {
       return (
-        `Are you sure you want to delete ${pendingDelete.label}? ` +
+        `Are you sure you want to delete ${target.label}? ` +
         'Clients that bill under it, and the default entity, are protected — ' +
         'the delete is refused rather than silently rebilling under another entity.'
       );
     }
     return (
-      `Are you sure you want to delete ${pendingDelete.label}? ` +
+      `Are you sure you want to delete ${target.label}? ` +
       'A service any work entry still names cannot be deleted, because it would ' +
       'unbill that work and shrink the totals of invoices that already went out.'
     );
@@ -520,12 +519,11 @@
 {/if}
 
 <ConfirmDialog
-  bind:open={confirmOpen}
-  title={`Delete ${pendingDelete?.kind ?? 'service'}`}
+  bind:open={pendingDelete.open}
+  title={`Delete ${pendingDelete.target?.kind ?? 'service'}`}
   message={deleteMessage}
   confirmLabel="Delete"
   onConfirm={handleDelete}
-  onCancel={() => (pendingDelete = null)}
 />
 
 <style>
