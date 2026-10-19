@@ -10,6 +10,7 @@
     refreshFeeds,
     getModuleServices,
     type FeedsConfigPayload,
+    type FeedsConfigSettings,
     type FeedsConfigFeed,
     type FeedsConfigCategory,
     type FeedsDiagnostics,
@@ -34,6 +35,8 @@
     type FeedDraft,
   } from '$lib/components/FeedSubscriptionModal.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
+  import { createDraft } from '$lib/ui/draft.svelte';
+  import { parseOptionalInt } from '$lib/ui/parse';
   import { formatDateTime } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -43,19 +46,13 @@
   let error = $state('');
   let info = $state('');
 
-  let config: FeedsConfigPayload = $state({
-    settings: {},
-    categories: [],
-    feeds: [],
-  });
+  // The loaded config is the draft the page edits, and the one save sends.
+  const draft = createDraft<FeedsConfigPayload>({ settings: {}, categories: [], feeds: [] });
+  const config = $derived(draft.value);
   let diagnostics: FeedsDiagnostics | null = $state(null);
   let feedStateByUrl: Record<string, FeedsFeedState> = $state({});
   let moduleServices: ServiceCardData[] = $state([]);
   let moduleEnabled = $state(true);
-
-  // Track whether the loaded config has been mutated (dirty flag).
-  let initialJson = $state('');
-  let dirty = $derived(JSON.stringify(config) !== initialJson);
 
   let editing: { idx: number; draft: FeedDraft } | null = $state(null);
   let adding: FeedDraft | null = $state(null);
@@ -86,10 +83,9 @@
         return;
       }
       const data = await getFeedsConfig();
-      config = data.config;
+      draft.reset(data.config);
       diagnostics = data.diagnostics;
       feedStateByUrl = Object.fromEntries(data.feed_state.map((s) => [s.url, s]));
-      initialJson = JSON.stringify(config);
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load settings';
     } finally {
@@ -117,7 +113,7 @@
       const result = await putFeedsConfig(config);
       invalidateNavUnreadCounts();
       info = `Saved (${result.sync.feeds_added} added, ${result.sync.feeds_updated} updated, ${result.sync.categories_added} new categories).`;
-      initialJson = JSON.stringify(config);
+      draft.reset();
       // Pull diagnostics back so last_poll_at etc. update
       const data = await getFeedsConfig();
       diagnostics = data.diagnostics;
@@ -129,7 +125,7 @@
     }
   }
 
-  useSettingsSave(() => (moduleEnabled ? { dirty, saving, save } : null));
+  useSettingsSave(() => (moduleEnabled ? { dirty: draft.dirty, saving, save } : null));
 
   function detectSourceType(url: string | undefined | null): string {
     if (!url) return '?';
@@ -159,14 +155,21 @@
     const out: FeedsConfigFeed = { url };
     if (draft.title.trim()) out.title = draft.title.trim();
     if (draft.category.trim()) out.category = draft.category.trim();
-    if (draft.poll_interval_minutes.trim()) {
-      const n = Number(draft.poll_interval_minutes);
-      if (!Number.isInteger(n) || n <= 0) {
-        return 'Poll interval must be a positive integer';
-      }
-      out.poll_interval_minutes = n;
-    }
+    const interval = parseOptionalInt(draft.poll_interval_minutes, { min: 1 });
+    if (interval === undefined) return 'Poll interval must be a positive integer';
+    if (interval !== null) out.poll_interval_minutes = interval;
     return out;
+  }
+
+  // A blank field unsets the setting; text that is not a whole number at or
+  // above `min` leaves it as it was.
+  function setOptionalSetting(key: keyof FeedsConfigSettings, text: string, min: number) {
+    const value = parseOptionalInt(text, { min });
+    if (value === undefined) return;
+    const next = { ...config.settings };
+    if (value === null) delete next[key];
+    else next[key] = value;
+    config.settings = next;
   }
 
   function startAdd() {
@@ -385,19 +388,12 @@
           min="1"
           value={config.settings.default_poll_interval_minutes ?? ''}
           placeholder="30"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.default_poll_interval_minutes;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n > 0) {
-                next.default_poll_interval_minutes = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'default_poll_interval_minutes',
+              (e.currentTarget as HTMLInputElement).value,
+              1,
+            )}
         />
       </Field>
       <Field
@@ -409,19 +405,12 @@
           min="0"
           value={config.settings.image_dedupe_window_days ?? ''}
           placeholder="14"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.image_dedupe_window_days;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n >= 0) {
-                next.image_dedupe_window_days = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'image_dedupe_window_days',
+              (e.currentTarget as HTMLInputElement).value,
+              0,
+            )}
         />
       </Field>
       <Field
@@ -434,19 +423,12 @@
           max="365000"
           value={config.settings.entry_retention_days ?? ''}
           placeholder="90"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.entry_retention_days;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n >= 0) {
-                next.entry_retention_days = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'entry_retention_days',
+              (e.currentTarget as HTMLInputElement).value,
+              0,
+            )}
         />
       </Field>
       <Field
@@ -459,19 +441,12 @@
           max="365000"
           value={config.settings.max_entries_per_feed ?? ''}
           placeholder="5000"
-          oninput={(e) => {
-            const v = (e.currentTarget as HTMLInputElement).value;
-            const next = { ...config.settings };
-            if (v === '') {
-              delete next.max_entries_per_feed;
-            } else {
-              const n = Number(v);
-              if (Number.isInteger(n) && n >= 0) {
-                next.max_entries_per_feed = n;
-              }
-            }
-            config.settings = next;
-          }}
+          oninput={(e) =>
+            setOptionalSetting(
+              'max_entries_per_feed',
+              (e.currentTarget as HTMLInputElement).value,
+              0,
+            )}
         />
       </Field>
     </Card>

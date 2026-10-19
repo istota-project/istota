@@ -14,7 +14,8 @@
   import ConfigSecretField from './SecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import TableEditor from './TableEditor.svelte';
-  import { displayValue, formatValue, opFor, parseList, parseNumber } from './changeSet';
+  import { displayValue, formatValue, opFor } from './changeSet';
+  import { parseList, parseNumber } from '$lib/ui/parse';
   import { credentialStatus } from './credentialStatus';
 
   interface Props {
@@ -130,7 +131,7 @@
       return;
     }
     draftText = text;
-    const parsed = parseList(text, numericList);
+    const parsed = parseList(text, { separator: '\n', numeric: numericList });
     if (parsed === null) {
       inputError = 'Every line has to be a number.';
       onOp(null, field.path);

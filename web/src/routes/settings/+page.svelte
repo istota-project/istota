@@ -4,7 +4,7 @@
   import { getCurrentUser } from '$lib/userContext';
   import { SecurityCard, SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
-  import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { formatList, parseList } from '$lib/ui/parse';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
 
@@ -158,10 +158,10 @@
         <Input
           type="text"
           disabled={isManaged(profile, 'email_addresses')}
-          value={profileListString(profile.email_addresses)}
+          value={formatList(profile.email_addresses)}
           oninput={(e) => {
             if (profile)
-              profile.email_addresses = parseListInput((e.currentTarget as HTMLInputElement).value);
+              profile.email_addresses = parseList((e.currentTarget as HTMLInputElement).value);
           }}
         />
       </Field>

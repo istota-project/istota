@@ -18,7 +18,7 @@
   import { fontSize, setFontSize, type FontSize } from '$lib/stores/fontSize';
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
-  import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { formatList, parseList } from '$lib/ui/parse';
   import { isManaged, managedBadge } from '$lib/settings/managed';
 
   const settings = getUserSettings();
@@ -165,10 +165,10 @@
         <Input
           type="text"
           disabled={isManaged(profile, 'trusted_email_senders')}
-          value={profileListString(profile.trusted_email_senders)}
+          value={formatList(profile.trusted_email_senders)}
           oninput={(e) => {
             if (profile)
-              profile.trusted_email_senders = parseListInput(
+              profile.trusted_email_senders = parseList(
                 (e.currentTarget as HTMLInputElement).value,
               );
           }}
@@ -181,12 +181,10 @@
         <Input
           type="text"
           disabled={isManaged(profile, 'quiet_email_senders')}
-          value={profileListString(profile.quiet_email_senders)}
+          value={formatList(profile.quiet_email_senders)}
           oninput={(e) => {
             if (profile)
-              profile.quiet_email_senders = parseListInput(
-                (e.currentTarget as HTMLInputElement).value,
-              );
+              profile.quiet_email_senders = parseList((e.currentTarget as HTMLInputElement).value);
           }}
         />
       </Field>
@@ -197,10 +195,10 @@
         <Input
           type="text"
           disabled={isManaged(profile, 'disabled_skills')}
-          value={profileListString(profile.disabled_skills)}
+          value={formatList(profile.disabled_skills)}
           oninput={(e) => {
             if (profile)
-              profile.disabled_skills = parseListInput((e.currentTarget as HTMLInputElement).value);
+              profile.disabled_skills = parseList((e.currentTarget as HTMLInputElement).value);
           }}
         />
       </Field>

@@ -6,8 +6,6 @@ import {
   displayValue,
   emptyDraft,
   opFor,
-  parseList,
-  parseNumber,
   retainExisting,
   withAdmins,
   withMove,
@@ -87,22 +85,6 @@ describe('displayValue', () => {
     expect(displayValue(field, { op: 'set', path: field.path, value: 9 })).toBe(9);
     expect(displayValue(field, { op: 'unset', path: field.path })).toBe(3);
     expect(displayValue(field, undefined)).toBe(5);
-  });
-});
-
-describe('parsing', () => {
-  it('reads a number by kind and refuses what is not one', () => {
-    expect(parseNumber('42', 'int')).toBe(42);
-    expect(parseNumber('4.5', 'int')).toBeNull();
-    expect(parseNumber('4.5', 'float')).toBe(4.5);
-    expect(parseNumber('', 'float')).toBeNull();
-    expect(parseNumber('abc', 'int')).toBeNull();
-  });
-
-  it('reads a list one item per line, numbers when the list held numbers', () => {
-    expect(parseList('a\n\n b \n', false)).toEqual(['a', 'b']);
-    expect(parseList('1\n2', true)).toEqual([1, 2]);
-    expect(parseList('1\nx', true)).toBeNull();
   });
 });
 

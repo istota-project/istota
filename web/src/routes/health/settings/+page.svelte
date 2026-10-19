@@ -5,6 +5,7 @@
   import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
+  import { trackChanges } from '$lib/ui/draft.svelte';
 
   let loading = $state(true);
   let saving = $state(false);
@@ -55,26 +56,15 @@
     return Number.isFinite(n) ? n : null;
   }
 
-  // Dirty tracking: compare a snapshot of the loaded form state to the
-  // current values so the Save button only lights up when there's
-  // something to save.
-  let initialJson = $state('');
-  let currentJson = $derived(
-    JSON.stringify({
-      dob: dobInput,
-      height_cm:
-        settings.display_units.height === 'ft_in'
-          ? `${heightFtInput}|${heightInInput}`
-          : heightInput,
-      sex: settings.sex,
-      units: settings.display_units,
-    }),
-  );
-  let dirty = $derived(initialJson !== '' && currentJson !== initialJson);
-
-  function snapshot(): void {
-    initialJson = currentJson;
-  }
+  // What Save would change, compared on the visible height input only: the
+  // other one is filled in on a unit toggle, and toggling back is no edit.
+  const changes = trackChanges(() => ({
+    dob: dobInput,
+    height_cm:
+      settings.display_units.height === 'ft_in' ? `${heightFtInput}|${heightInInput}` : heightInput,
+    sex: settings.sex,
+    units: settings.display_units,
+  }));
 
   async function load() {
     loading = true;
@@ -84,7 +74,7 @@
       settings = resp.settings;
       dobInput = settings.dob || '';
       syncHeightInputs(settings.height_cm);
-      snapshot();
+      changes.mark();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to load settings';
     } finally {
@@ -144,7 +134,7 @@
       settings = resp.settings;
       syncHeightInputs(settings.height_cm);
       info = 'Saved.';
-      snapshot();
+      changes.mark();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Failed to save';
     } finally {
@@ -166,7 +156,7 @@
 
   onMount(load);
 
-  useSettingsSave(() => ({ dirty, saving, save }));
+  useSettingsSave(() => ({ dirty: changes.dirty, saving, save }));
 </script>
 
 <SettingsLayout

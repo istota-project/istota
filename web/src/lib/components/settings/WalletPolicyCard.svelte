@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
-  import { Field, Input, Select, Card, Checkbox } from '$lib/components/ui';
+  import { Field, FormStack, Input, Select, Card, Checkbox } from '$lib/components/ui';
+  import { createDraft } from '$lib/ui/draft.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   let {
     policy,
@@ -23,23 +24,20 @@
       ? ''
       : (value / 10 ** exponent(start.currency)).toFixed(exponent(start.currency));
   }
-  let currency = $state(start.currency);
-  let limit = $state(amount(start.auto_limit_cents));
-  let budget = $state(amount(start.auto_budget_cents));
-  let ceiling = $state(amount(start.ceiling_cents));
-  let scheduled = $state(start.allow_scheduled);
+  const form = createDraft({
+    currency: start.currency,
+    limit: amount(start.auto_limit_cents),
+    budget: amount(start.auto_budget_cents),
+    ceiling: amount(start.ceiling_cents),
+    scheduled: start.allow_scheduled,
+  });
   let saving = $state(false);
   let error = $state('');
-  function snapshot() {
-    return JSON.stringify([currency, limit, budget, ceiling, scheduled]);
-  }
-  let initial = $state(snapshot());
-  let dirty = $derived(snapshot() !== initial);
   const currencies = [...new Set([start.currency, ...Intl.supportedValuesOf('currency')])]
     .sort()
     .map((value) => ({ value, label: value }));
   function minor(text: string) {
-    const digits = exponent(currency);
+    const digits = exponent(form.value.currency);
     if (
       !/^\d+(\.\d+)?$/.test(text) ||
       (text.split('.')[1]?.replace(/0+$/, '').length ?? 0) > digits
@@ -54,6 +52,7 @@
     if (!writable || saving) return;
     saving = true;
     error = '';
+    const { currency, limit, budget, ceiling, scheduled } = form.value;
     try {
       await saveWalletPolicy({
         currency,
@@ -62,7 +61,7 @@
         ceiling_cents: ceiling === '' ? null : minor(ceiling),
         allow_scheduled: scheduled,
       });
-      initial = snapshot();
+      form.reset();
     } catch (e) {
       error = (e as Error).message;
       if (e instanceof AuthError) onError(e);
@@ -70,43 +69,35 @@
       saving = false;
     }
   }
-  useSettingsSave(() => (writable ? { dirty, saving, save } : null));
+  useSettingsSave(() => (writable ? { dirty: form.dirty, saving, save } : null));
 </script>
 
 <Card
   title="Spending policy"
   description="Purchases above the auto limits wait for your approval. Purchases above the ceiling are refused."
 >
-  <fieldset class="policy-form" disabled={!writable || saving}>
+  <FormStack disabled={!writable || saving}>
     <Field label="Currency"
       ><Select
-        bind:value={currency}
+        bind:value={form.value.currency}
         options={currencies}
         ariaLabel="Currency"
         fullWidth
         disabled={!writable || saving}
       /></Field
     >
-    <Field label="Auto limit per purchase"><Input bind:value={limit} inputmode="decimal" /></Field>
-    <Field label="30-day auto budget"><Input bind:value={budget} inputmode="decimal" /></Field>
+    <Field label="Auto limit per purchase"
+      ><Input bind:value={form.value.limit} inputmode="decimal" /></Field
+    >
+    <Field label="30-day auto budget"
+      ><Input bind:value={form.value.budget} inputmode="decimal" /></Field
+    >
     <Field label="Ceiling per purchase" hint="Leave empty for no ceiling."
-      ><Input bind:value={ceiling} inputmode="decimal" /></Field
+      ><Input bind:value={form.value.ceiling} inputmode="decimal" /></Field
     >
     <Field label="Scheduled tasks may spend automatically" checkbox
-      ><Checkbox bind:checked={scheduled} /></Field
+      ><Checkbox bind:checked={form.value.scheduled} /></Field
     >
-  </fieldset>
+  </FormStack>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}
 </Card>
-
-<style>
-  .policy-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-    margin: 0;
-    padding: 0;
-    border: 0;
-  }
-</style>

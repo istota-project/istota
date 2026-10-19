@@ -14,6 +14,7 @@
   import { EmptyState, Card, Checkbox } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError } from '$lib/stores/notices';
+  import { trackChanges } from '$lib/ui/draft.svelte';
   import { channelLabel } from './settings/briefingSettings';
 
   // A member's own choices about group briefings: one row per group for every
@@ -24,13 +25,17 @@
     prefs: BriefingDeliveryPreferences;
   };
   type Entry = { target: BriefingTarget; group: BriefingDeliveryPreferences; rows: Row[] };
+  type Choices = [BriefingDeliveryPreferences, BriefingDeliveryPreferences[]];
   let entries = $state<Entry[]>([]);
   let loaded = $state(false);
-  let saved = $state('');
   let saving = $state(false);
   let failed = $state(false);
 
-  const snapshot = () => JSON.stringify(entries.map((e) => [e.group, e.rows.map((r) => r.prefs)]));
+  // Only the choices are compared; the group and briefing records beside them
+  // are what the page shows, not what it saves.
+  const changes = trackChanges(() =>
+    entries.map((e): Choices => [e.group, e.rows.map((r) => r.prefs)]),
+  );
   const pick = (p: BriefingDeliveryPreferences) => ({
     outbound_muted: p.outbound_muted,
     in_app_muted: p.in_app_muted,
@@ -56,7 +61,7 @@
           return { target, group: pick(group), rows };
         }),
       );
-      saved = snapshot();
+      changes.mark();
     } catch {
       failed = true;
     } finally {
@@ -65,10 +70,7 @@
   });
 
   async function save() {
-    const before = JSON.parse(saved) as [
-      BriefingDeliveryPreferences,
-      BriefingDeliveryPreferences[],
-    ][];
+    const before = changes.saved;
     saving = true;
     try {
       for (const [i, entry] of entries.entries()) {
@@ -79,7 +81,7 @@
           if (JSON.stringify(row.prefs) !== JSON.stringify(before[i]?.[1][j]))
             await saveGroupBriefingPreferences(id, row.definition.name, row.prefs);
       }
-      saved = snapshot();
+      changes.mark();
     } catch (e) {
       notifyError(e instanceof Error ? e.message : 'Could not save your delivery settings.');
     } finally {
@@ -87,7 +89,7 @@
     }
   }
 
-  useSettingsSave(() => (saved ? { dirty: snapshot() !== saved, saving, save } : null));
+  useSettingsSave(() => (loaded && !failed ? { dirty: changes.dirty, saving, save } : null));
 </script>
 
 <Card

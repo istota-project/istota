@@ -16,6 +16,7 @@
     Chip,
     ConfirmDialog,
     Field,
+    FormStack,
     Input,
     Modal,
     MultiSelect,
@@ -25,7 +26,7 @@
   } from '$lib/components/ui';
   import { formatRelative } from '$lib/dateFormat';
   import { changedProfileFields } from '$lib/profilePatch';
-  import { parseListInput, profileListString } from '$lib/settings/listInput';
+  import { formatList, parseList } from '$lib/ui/parse';
   import { ADMIN_MANAGED_BADGE, adminManagedHint } from '$lib/settings/managed';
   import { timezoneOptions } from '$lib/settings/timezones';
   import { signInStateLabel } from '$lib/admin/signInState';
@@ -326,7 +327,7 @@
     <div class="editor">
       {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
 
-      <fieldset class="editor-fields" disabled={busy}>
+      <FormStack gap={4} disabled={busy}>
         <section class="editor-section vstack" aria-labelledby="admin-user-identity">
           <h3 id="admin-user-identity" class="micro-label">Identity</h3>
           <Field label="User ID">
@@ -444,14 +445,12 @@
             error={errors.email_addresses}
           >
             <Input
-              value={profileListString(form.email_addresses)}
+              value={formatList(form.email_addresses)}
               disabled={locked('email_addresses')}
               invalid={!!errors.email_addresses}
               oninput={(e) => {
                 if (form)
-                  form.email_addresses = parseListInput(
-                    (e.currentTarget as HTMLInputElement).value,
-                  );
+                  form.email_addresses = parseList((e.currentTarget as HTMLInputElement).value);
               }}
             />
           </Field>
@@ -462,12 +461,12 @@
             error={errors.trusted_email_senders}
           >
             <Input
-              value={profileListString(form.trusted_email_senders)}
+              value={formatList(form.trusted_email_senders)}
               disabled={locked('trusted_email_senders')}
               invalid={!!errors.trusted_email_senders}
               oninput={(e) => {
                 if (form)
-                  form.trusted_email_senders = parseListInput(
+                  form.trusted_email_senders = parseList(
                     (e.currentTarget as HTMLInputElement).value,
                   );
               }}
@@ -480,14 +479,12 @@
             error={errors.quiet_email_senders}
           >
             <Input
-              value={profileListString(form.quiet_email_senders)}
+              value={formatList(form.quiet_email_senders)}
               disabled={locked('quiet_email_senders')}
               invalid={!!errors.quiet_email_senders}
               oninput={(e) => {
                 if (form)
-                  form.quiet_email_senders = parseListInput(
-                    (e.currentTarget as HTMLInputElement).value,
-                  );
+                  form.quiet_email_senders = parseList((e.currentTarget as HTMLInputElement).value);
               }}
             />
           </Field>
@@ -680,7 +677,7 @@
             </dd>
           </dl>
         </section>
-      </fieldset>
+      </FormStack>
     </div>
   {/if}
 
@@ -713,7 +710,6 @@
 
 <style>
   .editor,
-  .editor-fields,
   .login-fields {
     display: flex;
     flex-direction: column;

@@ -42,9 +42,12 @@
     type SelectOption,
     Card,
     Field,
+    FormGrid,
+    FormStack,
     Checkbox,
     TextArea,
   } from '$lib/components/ui';
+  import { trackChanges } from '$lib/ui/draft.svelte';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
@@ -107,7 +110,6 @@
   let blocks = $state<BriefingBlock[]>([]);
   let sourceKeys = $state<Record<number, string>>({});
   let draftId = 0;
-  let savedPayload = $state('');
 
   let audience = $state<BriefingAudience | null>(null);
   let resources = $state<{
@@ -165,7 +167,8 @@
       },
     };
   });
-  const dirty = $derived(!!savedPayload && JSON.stringify(payload) !== savedPayload);
+  const changes = trackChanges(() => payload);
+  const dirty = $derived(changes.dirty);
   const unsupported = $derived(
     blocks.flatMap((b) => b.sources).filter((s) => !SOURCE_KINDS.includes(s.kind)),
   );
@@ -257,7 +260,7 @@
       personalInformation = generation.contains_personal_information ?? false;
       acknowledged = generation.audience_acknowledged ?? false;
       importBlocks(generation);
-      savedPayload = JSON.stringify(payload);
+      changes.mark();
       const author = fresh.capabilities.author_briefings;
       const [aud, res, members, history] = await Promise.all([
         author ? getBriefingAudience(group, name) : Promise.resolve(null),
@@ -312,7 +315,7 @@
       const result = await saveGroupBriefing(group, payload, name);
       saved = result;
       onTitle?.(result.title || derivedTitle(name));
-      savedPayload = JSON.stringify(payload);
+      changes.mark();
       audience = await getBriefingAudience(group, name);
       briefingsRefreshNonce.update((n) => n + 1);
     } catch (e) {
@@ -553,11 +556,11 @@
           This briefing will not run until an administrator resumes it.
         </NoticeBanner>
       {/if}
-      <fieldset class="fields" disabled={busy || accessLost}>
+      <FormStack disabled={busy || accessLost}>
         <Field label="Title" hint="Shown on every edition, followed by its date.">
           <Input bind:value={title} placeholder={derivedTitle(name)} />
         </Field>
-        <div class="field-row">
+        <FormGrid min="12rem">
           <Field
             label="Schedule"
             hint="A cron expression, for example 0 7 * * 1-5 for weekdays at 07:00."
@@ -579,7 +582,7 @@
               fullWidth
             />
           </Field>
-        </div>
+        </FormGrid>
         <Field
           label="Excluded members"
           hint="Excluded members get no copies or notifications of this briefing, but can still read its editions."
@@ -606,11 +609,11 @@
         >
           <Checkbox bind:checked={enabled} disabled={held} />
         </Field>
-      </fieldset>
+      </FormStack>
     </Card>
 
     <Card title="Content">
-      <fieldset class="fields" disabled={busy || accessLost}>
+      <FormStack disabled={busy || accessLost}>
         <OptionCards
           options={[
             {
@@ -682,7 +685,7 @@
             onChange={updateBlocks}
           />
         {/key}
-      </fieldset>
+      </FormStack>
     </Card>
   {/if}
 
@@ -870,21 +873,6 @@
 {/if}
 
 <style>
-  .fields {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    border: 0;
-    padding: 0;
-    margin: 0;
-    min-width: 0;
-  }
-  .field-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr));
-    gap: var(--space-3);
-    align-items: start;
-  }
   .micro-label {
     margin: var(--space-2) 0 0;
   }

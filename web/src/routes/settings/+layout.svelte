@@ -4,7 +4,7 @@
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { getProfile, getModules, updateProfile, type UserProfile } from '$lib/api';
-  import { changedProfileFields } from '$lib/profilePatch';
+  import { createDraft } from '$lib/ui/draft.svelte';
   import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
   import { HeaderSave } from '$lib/components/settings';
   import { getCurrentUser } from '$lib/userContext';
@@ -21,14 +21,13 @@
   // Delivery share one draft and one save.
   // This layout persists across a section switch, so an unsaved edit survives
   // a visit to another section and the app-bar Save still knows about it.
-  let profile: UserProfile | null = $state(null);
+  const profileDraft = createDraft<UserProfile | null>(null);
+  const profile = $derived(profileDraft.value);
   let allModules: string[] = $state([]);
   let loading = $state(true);
   let error = $state('');
   let info = $state('');
   let profileSaving = $state(false);
-  let initialProfileJson = $state('');
-  let profileDirty = $derived(profile ? JSON.stringify(profile) !== initialProfileJson : false);
 
   /* This page needs the identity *fresh* rather than merely current — a
      Nextcloud connect made elsewhere changes `nextcloud_token` while it is open
@@ -64,8 +63,7 @@
         next.push_preview = next.push_preview ?? true;
         next.push_inbox_categories = next.push_inbox_categories ?? {};
       }
-      profile = next;
-      initialProfileJson = next ? JSON.stringify(next) : '';
+      profileDraft.reset(next);
       allModules = modResp.modules;
       error = '';
     } catch (e) {
@@ -103,7 +101,7 @@
       // sending the whole form makes an untouched field overwrite whatever set
       // it since the page loaded — which for `timezone` means an open tab
       // silently undoing a travel update and triggering another one.
-      const patch = changedProfileFields(edited, initialProfileJson);
+      const patch = profileDraft.changed(edited);
       if (Object.keys(patch).length === 0) {
         info = 'No changes to save.';
         return;
@@ -148,7 +146,7 @@
   // One save in the app bar for the profile, aggregated with whatever the open
   // section registers (a `ServiceCard`'s pending credential edits).
   useSettingsSave(() => ({
-    dirty: profileDirty,
+    dirty: profileDraft.dirty,
     saving: profileSaving,
     save: saveProfile,
   }));
