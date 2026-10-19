@@ -7,7 +7,7 @@
     type InvoiceDetailItem,
     type VoidInvoiceResponse,
   } from '$lib/money/api';
-  import { Button, Field, Input, Modal } from '$lib/components/ui';
+  import { Button, Field, Input, Modal, Checkbox } from '$lib/components/ui';
   import { formatDecimal as formatAmount } from '$lib/format';
 
   interface Props {
@@ -115,7 +115,7 @@
     </Field>
     {#if needsForce}
       <Field label="This invoice was paid. Void anyway" checkbox>
-        <input type="checkbox" bind:checked={force} />
+        <Checkbox bind:checked={force} />
       </Field>
     {/if}
   </div>

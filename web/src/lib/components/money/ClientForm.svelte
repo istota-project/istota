@@ -8,7 +8,7 @@
     type ClientInput,
     type EntityRow,
   } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption, Field } from '$lib/components/ui';
+  import { Modal, Button, Select, type SelectOption, Field, Checkbox } from '$lib/components/ui';
 
   /**
    * Create/edit form for an invoicing client.
@@ -241,7 +241,7 @@
     {/if}
 
     <Field label="Post income to ledger on payment" checkbox>
-      <input type="checkbox" bind:checked={ledgerPosting} />
+      <Checkbox bind:checked={ledgerPosting} />
     </Field>
 
     <details bind:open={advancedOpen}>

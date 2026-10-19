@@ -4,7 +4,7 @@
   import { copyText } from '$lib/clipboard';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
   import { formatDate } from '$lib/dateFormat';
-  import { Button, Field, Modal, Card } from '$lib/components/ui';
+  import { Button, Field, Modal, Card, Checkbox } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let { onExported }: { onExported?: () => void } = $props();
@@ -93,7 +93,7 @@
     checkbox
     hint="Adds a separate file that must be present to unlock the export, along with its password."
   >
-    <input type="checkbox" bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
+    <Checkbox bind:checked={useKeyfile} disabled={busy || confirming || !!password} />
   </Field>
   {#if useKeyfile}<p class="description">
       Save the key file when it downloads. You will need both it and the export password to open the

@@ -12,6 +12,7 @@
     NoticeBanner,
     PageLoading,
     Card,
+    Checkbox,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { formatDate, formatDateTime, formatRelative } from '$lib/dateFormat';
@@ -470,7 +471,13 @@
         the shared notebook.
       </p>
       {#each users as user (user.user_id)}<Field label={user.display_name} checkbox
-          ><input type="checkbox" bind:group={owners} value={user.user_id} /></Field
+          ><Checkbox
+            checked={owners.includes(user.user_id)}
+            onchange={(on) =>
+              (owners = on
+                ? [...owners, user.user_id]
+                : owners.filter((id) => id !== user.user_id))}
+          /></Field
         >{/each}
       {#if !busy && !users.length}<EmptyState size="sm">No enabled users are available.</EmptyState
         >{/if}

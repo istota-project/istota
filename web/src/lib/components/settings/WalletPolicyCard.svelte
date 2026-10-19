@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
-  import { Field, Input, Select, Card } from '$lib/components/ui';
+  import { Field, Input, Select, Card, Checkbox } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   let {
     policy,
@@ -93,7 +93,7 @@
       ><Input bind:value={ceiling} inputmode="decimal" /></Field
     >
     <Field label="Scheduled tasks may spend automatically" checkbox
-      ><input type="checkbox" bind:checked={scheduled} /></Field
+      ><Checkbox bind:checked={scheduled} /></Field
     >
   </fieldset>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}

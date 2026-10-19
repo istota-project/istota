@@ -13,6 +13,8 @@
     /** Omit it in a table cell or inside a `Field`; outside a field, pass
      *  `ariaLabel` instead. */
     label?: string | Snippet;
+    /** The accessible name. Beside a visible `label` it replaces it for a
+     *  screen reader, for a short label repeated down a list ("Excluded"). */
     ariaLabel?: string;
     /** A visible line under the label. */
     description?: string;
@@ -25,7 +27,9 @@
   }
 
   let {
-    checked = $bindable(false),
+    // No fallback: binding a field that may be undefined (an unset profile
+    // flag) to a bindable with a fallback is a Svelte runtime error.
+    checked = $bindable(),
     indeterminate = false,
     label,
     ariaLabel,
@@ -80,10 +84,10 @@
     bind:this={input}
     type="checkbox"
     class="ui-checkbox-input"
-    {checked}
+    checked={!!checked}
     {disabled}
     id={boxId}
-    aria-label={label ? undefined : ariaLabel}
+    aria-label={ariaLabel}
     aria-describedby={joinIds(
       ariaDescribedBy,
       description ? descriptionId : undefined,
@@ -141,6 +145,7 @@
   .ui-checkbox-input {
     accent-color: var(--accent);
     flex-shrink: 0;
+    cursor: pointer;
   }
 
   .ui-checkbox-input:disabled {

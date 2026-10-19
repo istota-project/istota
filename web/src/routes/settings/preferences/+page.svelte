@@ -6,6 +6,7 @@
     Select,
     type SelectOption,
     Card,
+    Checkbox,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
@@ -151,8 +152,7 @@
         badge={managedBadge(profile, 'show_nav_unread_badges')}
         hint="Show unread counts beside Chat, Briefings and Feeds."
       >
-        <input
-          type="checkbox"
+        <Checkbox
           bind:checked={profile.show_nav_unread_badges}
           disabled={isManaged(profile, 'show_nav_unread_badges')}
         />
@@ -207,21 +207,16 @@
         <Field label="Disabled modules" badge={managedBadge(profile, 'disabled_modules')}>
           <div class="module-toggles">
             {#each settings.allModules as m (m)}
-              <label class="module-chip">
-                <input
-                  type="checkbox"
-                  disabled={isManaged(profile, 'disabled_modules')}
-                  checked={(profile.disabled_modules || []).includes(m)}
-                  onchange={() => toggleDisabledModule(m)}
-                />
-                <span>{m}</span>
-              </label>
+              <Checkbox
+                class="module-chip"
+                label={m}
+                tone="muted"
+                disabled={isManaged(profile, 'disabled_modules')}
+                checked={(profile.disabled_modules || []).includes(m)}
+                onchange={() => toggleDisabledModule(m)}
+              />
             {/each}
           </div>
-          <p class="description">
-            Modules are on by default. Tick to opt out — the corresponding UI tab and scheduled jobs
-            will be hidden / paused.
-          </p>
         </Field>
       {/if}
       <Field
@@ -307,20 +302,16 @@
     gap: var(--space-2);
   }
 
-  .module-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
+  /* The pill look stays until the module list becomes a toggle group. */
+  .module-toggles :global(.module-chip) {
+    column-gap: var(--space-1);
     padding: 0.15rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    cursor: pointer;
   }
 
-  .module-chip input[type='checkbox'] {
+  .module-toggles :global(.ui-checkbox-input) {
     margin: 0;
-    width: auto;
   }
 </style>

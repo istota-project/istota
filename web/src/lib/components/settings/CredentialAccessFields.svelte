@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Field, Select } from '$lib/components/ui';
+  import { Field, Select, Checkbox } from '$lib/components/ui';
 
   /**
    * Who may use a credential: the room scope, scheduled tasks and the HTTP
@@ -52,7 +52,13 @@
       <div class="room-options">
         {#each rooms as room (room.token)}
           <Field label={room.name} checkbox>
-            <input type="checkbox" bind:group={selected} value={room.token} />
+            <Checkbox
+              checked={selected.includes(room.token)}
+              onchange={(on) =>
+                (selected = on
+                  ? [...selected, room.token]
+                  : selected.filter((token) => token !== room.token))}
+            />
           </Field>
         {/each}
       </div>
@@ -64,10 +70,10 @@
     checkbox
     hint="Allow background jobs to use this credential without a message from you in a room."
   >
-    <input type="checkbox" bind:checked={scheduled} />
+    <Checkbox bind:checked={scheduled} />
   </Field>
   <Field label="Allow HTTP (override HTTPS requirement)" checkbox>
-    <input type="checkbox" bind:checked={allowHttp} />
+    <Checkbox bind:checked={allowHttp} />
   </Field>
   <p class="caption">
     HTTP sends credentials without encryption. Turn it on only for a service you trust on a trusted

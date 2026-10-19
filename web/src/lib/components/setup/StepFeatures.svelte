@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Field } from '$lib/components/ui';
+  import { Field, Checkbox } from '$lib/components/ui';
   import {
     applyFeatureDefaults,
     BROWSER_MEMORY_WARN_MIB,
@@ -45,8 +45,6 @@
       ? `This server has ${gigabytes(memoryMib)} GB of memory. The browser uses up to 2 GB of it; you can turn it off if ${botName} runs slowly.`
       : undefined,
   );
-
-  const checked = (e: Event) => (e.currentTarget as HTMLInputElement).checked;
 </script>
 
 <div class="vstack">
@@ -59,40 +57,31 @@
     <p>Everything is on to start with. Turn off what you won't use.</p>
   {/if}
   {#each modules as { field, module } (field)}
-    <div class="feature">
-      <Field label={moduleTitle(module)} checkbox error={errors[field]}>
-        <input
-          type="checkbox"
-          checked={draft.flag(field, true)}
-          disabled={rerun}
-          onchange={(e: Event) => draft.set(field, checked(e))}
-        />
-      </Field>
-      {#if MODULE_FEATURES[module]}
-        <p class="caption">{MODULE_FEATURES[module].description}</p>
-      {/if}
-    </div>
-  {/each}
-  <div class="feature">
     <Field
-      label="Let {botName} browse the web"
+      label={moduleTitle(module)}
       checkbox
-      warning={memoryWarning}
-      error={errors.profiles}
+      description={MODULE_FEATURES[module]?.description}
+      error={errors[field]}
     >
-      <input type="checkbox" checked={browserOn} onchange={(e: Event) => setBrowser(checked(e))} />
+      <Checkbox
+        checked={draft.flag(field, true)}
+        disabled={rerun}
+        onchange={(on) => draft.set(field, on)}
+      />
     </Field>
-    <p class="caption">{botName} can open websites and read them for you.</p>
-  </div>
+  {/each}
+  <Field
+    label="Let {botName} browse the web"
+    checkbox
+    description="{botName} can open websites and read them for you."
+    warning={memoryWarning}
+    error={errors.profiles}
+  >
+    <Checkbox checked={browserOn} onchange={(on) => setBrowser(on)} />
+  </Field>
 </div>
 
 <style>
-  .feature {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
   p {
     margin: 0;
   }

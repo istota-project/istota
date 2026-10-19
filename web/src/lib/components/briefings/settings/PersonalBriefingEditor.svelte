@@ -8,7 +8,15 @@
     type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
-  import { Input, NoticeBanner, Select, type SelectOption, Card, Field } from '$lib/components/ui';
+  import {
+    Input,
+    NoticeBanner,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+    Checkbox,
+  } from '$lib/components/ui';
   import { notifyError } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
@@ -167,7 +175,7 @@
       checkbox
       hint="When off, the briefing keeps its content but does not run."
     >
-      <input type="checkbox" bind:checked={draft.enabled} disabled={held} />
+      <Checkbox bind:checked={draft.enabled} disabled={held} />
     </Field>
   </fieldset>
 </Card>

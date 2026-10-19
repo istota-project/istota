@@ -18,6 +18,7 @@
     type SelectOption,
     Card,
     Field,
+    Checkbox,
   } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
@@ -362,10 +363,10 @@
       {/if}
       <div class="sb-grid">
         <Field label="Trusted" checkbox hint="Only for injection-safe content.">
-          <input type="checkbox" bind:checked={sharedDraft.trusted} />
+          <Checkbox bind:checked={sharedDraft.trusted} />
         </Field>
         <Field label="Enabled" checkbox>
-          <input type="checkbox" bind:checked={sharedDraft.enabled} />
+          <Checkbox bind:checked={sharedDraft.enabled} />
         </Field>
       </div>
 

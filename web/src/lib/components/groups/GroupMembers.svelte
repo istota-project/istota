@@ -8,6 +8,7 @@
     ConfirmDialog,
     KebabMenu,
     Badge,
+    Checkbox,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import {
@@ -260,7 +261,7 @@
         </ul>
       </div>
       <Field label="I acknowledge access to this existing history" checkbox
-        ><input type="checkbox" bind:checked={acknowledged} /></Field
+        ><Checkbox bind:checked={acknowledged} /></Field
       >
     {/if}
     {#if error}<p class="banner error">{error}</p>

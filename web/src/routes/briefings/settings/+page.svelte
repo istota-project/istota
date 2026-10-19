@@ -33,6 +33,7 @@
     type KebabItem,
     Card,
     Field,
+    Checkbox,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -409,7 +410,7 @@
         badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
         hint="Formatted mail, so an article link stays clickable. A plain-text copy is always sent alongside it."
       >
-        <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
+        <Checkbox bind:checked={emailHtml} disabled={emailHtmlManaged} />
       </Field>
     </Card>
     <GroupDeliveryPreferences />

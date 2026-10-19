@@ -1,6 +1,6 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { Avatar, AvatarPicker, Select, Card, Field } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, Select, Card, Field, Checkbox } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { SecurityCard, SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
@@ -187,8 +187,7 @@
         badge={managedBadge(profile, 'timezone_follow_location')}
         hint="Needs the location module. Once you have settled in a new timezone for about an hour, the field above is set to it and you get a message saying so. Off by default, because it overwrites the timezone you chose. A journey in progress does not count — it waits until you have stayed somewhere."
       >
-        <input
-          type="checkbox"
+        <Checkbox
           bind:checked={profile.timezone_follow_location}
           disabled={isManaged(profile, 'timezone_follow_location')}
         />

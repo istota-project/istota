@@ -21,6 +21,7 @@
     MultiSelect,
     Select,
     type SelectOption,
+    Checkbox,
   } from '$lib/components/ui';
   import { formatRelative } from '$lib/dateFormat';
   import { changedProfileFields } from '$lib/profilePatch';
@@ -405,15 +406,14 @@
               />
             </Field>
             <Field label="Also add to email addresses" checkbox>
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={addToAddresses}
                 disabled={alreadyListed}
-                onchange={(e) => (addOverride = (e.currentTarget as HTMLInputElement).checked)}
+                onchange={(on) => (addOverride = on)}
               />
             </Field>
             <Field label="Send invitation" checkbox>
-              <input type="checkbox" bind:checked={loginInvite} />
+              <Checkbox bind:checked={loginInvite} />
             </Field>
             {#if loginNote}<p class="banner success" role="status">{loginNote}</p>{/if}
             <div class="form-actions">

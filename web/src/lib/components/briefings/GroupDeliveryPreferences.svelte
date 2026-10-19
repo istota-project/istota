@@ -11,7 +11,7 @@
     type BriefingTarget,
     type GroupBriefingDefinition,
   } from '$lib/api';
-  import { EmptyState, Card } from '$lib/components/ui';
+  import { EmptyState, Card, Checkbox } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError } from '$lib/stores/notices';
   import { channelLabel } from './settings/briefingSettings';
@@ -115,17 +115,15 @@
                 <span>All {entry.target.label} briefings</span>
               </th>
               <td class="toggle">
-                <input
-                  type="checkbox"
+                <Checkbox
                   bind:checked={entry.group.outbound_muted}
-                  aria-label={`Mute delivery of all ${entry.target.label} briefings`}
+                  ariaLabel={`Mute delivery of all ${entry.target.label} briefings`}
                 />
               </td>
               <td class="toggle">
-                <input
-                  type="checkbox"
+                <Checkbox
                   bind:checked={entry.group.in_app_muted}
-                  aria-label={`Mute notifications for all ${entry.target.label} briefings`}
+                  ariaLabel={`Mute notifications for all ${entry.target.label} briefings`}
                 />
               </td>
             </tr>
@@ -138,21 +136,19 @@
                   </span>
                 </td>
                 <td class="toggle">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={entry.group.outbound_muted || row.prefs.outbound_muted}
                     disabled={entry.group.outbound_muted}
-                    onchange={(e) => (row.prefs.outbound_muted = e.currentTarget.checked)}
-                    aria-label={`Mute delivery of ${row.definition.title || row.definition.name}`}
+                    onchange={(on) => (row.prefs.outbound_muted = on)}
+                    ariaLabel={`Mute delivery of ${row.definition.title || row.definition.name}`}
                   />
                 </td>
                 <td class="toggle">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={entry.group.in_app_muted || row.prefs.in_app_muted}
                     disabled={entry.group.in_app_muted}
-                    onchange={(e) => (row.prefs.in_app_muted = e.currentTarget.checked)}
-                    aria-label={`Mute notifications for ${row.definition.title || row.definition.name}`}
+                    onchange={(on) => (row.prefs.in_app_muted = on)}
+                    ariaLabel={`Mute notifications for ${row.definition.title || row.definition.name}`}
                   />
                 </td>
               </tr>

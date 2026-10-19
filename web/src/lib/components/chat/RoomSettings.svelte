@@ -12,7 +12,14 @@
     SpeechDisposition,
     SpeechMode,
   } from '$lib/api';
-  import { Modal, Button, ConfirmDialog, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Modal,
+    Button,
+    ConfirmDialog,
+    Select,
+    type SelectOption,
+    Checkbox,
+  } from '$lib/components/ui';
   import RoomMembers, { type AddRequest } from './RoomMembers.svelte';
   import RoomGroupLink from './RoomGroupLink.svelte';
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
@@ -494,14 +501,11 @@
 
   {#if room.email_thread}
     <div class="field">
-      <label class="check">
-        <input type="checkbox" bind:checked={listedValue} />
-        <span>Show in room list</span>
-      </label>
-      <p class="caption">
-        Email threads sit in the collapsed Email threads group, and their unread messages are not
-        counted. Only you see this.
-      </p>
+      <Checkbox
+        label="Show in room list"
+        description="Email threads sit in the collapsed Email threads group, and their unread messages are not counted. Only you see this."
+        bind:checked={listedValue}
+      />
     </div>
   {/if}
 
@@ -777,15 +781,6 @@
     flex-direction: column;
     gap: var(--space-1);
     margin-bottom: var(--space-3);
-  }
-
-  .check {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-primary);
-    cursor: pointer;
   }
 
   /* The palette row. A <fieldset> so the group has a real legend, styled back

@@ -6,7 +6,7 @@
     type KeepassImportPreview,
     type KeepassImportItem,
   } from '$lib/api';
-  import { Button, Field, Input, Card } from '$lib/components/ui';
+  import { Button, Field, Input, Card, Checkbox } from '$lib/components/ui';
 
   let { onImported }: { onImported?: () => void } = $props();
   let file: File | null = $state(null);
@@ -138,11 +138,12 @@
           {#each items as item}
             <div>
               <Field label={item.name} checkbox>
-                <input
-                  type="checkbox"
-                  value={item.name}
-                  bind:group={selected}
-                  aria-label={item.name}
+                <Checkbox
+                  checked={selected.includes(item.name)}
+                  onchange={(on) =>
+                    (selected = on
+                      ? [...selected, item.name]
+                      : selected.filter((name) => name !== item.name))}
                   disabled={busy || !['new', 'changed'].includes(item.status)}
                 />
               </Field>

@@ -42,6 +42,7 @@
     type SelectOption,
     Card,
     Field,
+    Checkbox,
   } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
@@ -604,7 +605,7 @@
           hint="When on, each scheduled run publishes an edition and sends it to members."
           warning={enabled && blocker ? blocker : undefined}
         >
-          <input type="checkbox" bind:checked={enabled} disabled={held} />
+          <Checkbox bind:checked={enabled} disabled={held} />
         </Field>
       </fieldset>
     </Card>
@@ -640,7 +641,7 @@
             checkbox
             hint="A separate step reads public pages before the edition is written. It never sees the group's notebook, files or anyone's personal sources."
           >
-            <input type="checkbox" bind:checked={researchEnabled} />
+            <Checkbox bind:checked={researchEnabled} />
           </Field>
           {#if researchEnabled}
             <Field
@@ -710,14 +711,14 @@
         checkbox
         hint="Instructions are shared with the same audience as the sources. Nothing detects personal information for you."
       >
-        <input type="checkbox" bind:checked={personalInformation} disabled={busy} />
+        <Checkbox bind:checked={personalInformation} disabled={busy} />
       </Field>
       {#if personalInformation}
         <Field
           label="I agree to share them with everyone who can read this briefing, now and later"
           checkbox
         >
-          <input type="checkbox" bind:checked={acknowledged} disabled={busy} />
+          <Checkbox bind:checked={acknowledged} disabled={busy} />
         </Field>
       {/if}
     {:else if !author}

@@ -8,7 +8,7 @@
     type EntityRow,
     type EntityInput,
   } from '$lib/money/api';
-  import { Modal, Button, Select, Field } from '$lib/components/ui';
+  import { Modal, Button, Select, Field, Checkbox } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billing entity.
@@ -268,7 +268,7 @@
     </Field>
 
     <Field label="Automatically detect invoice payments" checkbox>
-      <input type="checkbox" bind:checked={detectionEnabled} disabled={saving} />
+      <Checkbox bind:checked={detectionEnabled} disabled={saving} />
     </Field>
 
     {#if detectionEnabled}

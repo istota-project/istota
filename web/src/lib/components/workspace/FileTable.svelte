@@ -18,6 +18,7 @@
     SortHeader,
     sortAria,
     type KebabItem,
+    Checkbox,
   } from '$lib/components/ui';
   import { chatFileUrl, nextcloudFileUrl } from '$lib/api';
   import { formatBytes } from '$lib/format';
@@ -213,13 +214,13 @@
       disabled={deleting}
     />
   </div>
-  <label class="folders-toggle"
-    ><input
-      type="checkbox"
-      bind:checked={foldersFirst}
-      onchange={() => saveSetting('workspace.foldersFirst', foldersFirst)}
-    />Folders first</label
-  >
+  <Checkbox
+    class="folders-toggle"
+    label="Folders first"
+    tone="muted"
+    bind:checked={foldersFirst}
+    onchange={() => saveSetting('workspace.foldersFirst', foldersFirst)}
+  />
   <div class="mobile-sort">
     <Select
       ariaLabel="Sort files"
@@ -278,16 +279,12 @@
     <thead
       ><tr>
         <th scope="col" class="col-select"
-          ><input
-            type="checkbox"
-            aria-label="Select all visible items"
+          ><Checkbox
+            ariaLabel="Select all visible items"
             disabled={deleting || !selectable.length}
             checked={!!selectable.length && selectedEntries.length === selectable.length}
             indeterminate={selectedEntries.length > 0 && selectedEntries.length < selectable.length}
-            onchange={(event) =>
-              (selectedKeys = event.currentTarget.checked
-                ? selectable.map((entry) => entry.key)
-                : [])}
+            onchange={(on) => (selectedKeys = on ? selectable.map((entry) => entry.key) : [])}
           /></th
         >
         {#each COLUMNS as column (column.key)}
@@ -310,9 +307,8 @@
         {@const EntryIcon = fileIcon(entry.name, entry.mime_type)}
         <tr class:is-selected={selectedKeys.includes(entry.key)}>
           <td class="col-select"
-            ><input
-              type="checkbox"
-              aria-label={`Select ${entry.name}`}
+            ><Checkbox
+              ariaLabel={`Select ${entry.name}`}
               disabled={deleting || (entry.kind !== 'file' && entry.kind !== 'dir')}
               checked={selectedKeys.includes(entry.key)}
               onchange={() => toggle(entry.key)}
@@ -411,7 +407,6 @@
 <style>
   .file-controls,
   .selection-toolbar,
-  .folders-toggle,
   .mobile-sort {
     display: flex;
     align-items: center;
@@ -443,10 +438,8 @@
     min-width: 10rem;
     max-width: 24rem;
   }
-  .folders-toggle {
+  .file-controls :global(.folders-toggle) {
     white-space: nowrap;
-    gap: var(--space-2);
-    color: var(--text-muted);
   }
   .mobile-sort {
     display: none;
@@ -455,10 +448,9 @@
   .col-select + td {
     padding-inline-start: 0;
   }
-  input[type='checkbox'] {
+  .file-controls :global(.ui-checkbox-input),
+  .col-select :global(.ui-checkbox-input) {
     margin: 0;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
   .delete-errors {
     padding: var(--space-2) var(--space-3);

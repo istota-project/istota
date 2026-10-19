@@ -6,7 +6,7 @@
     quantityFieldFor,
     type WorkEntrySavePayload,
   } from '$lib/money/workEntryPayload';
-  import { Modal, Button, Field, Select, type SelectOption } from '$lib/components/ui';
+  import { Modal, Button, Field, Select, type SelectOption, Checkbox } from '$lib/components/ui';
   import { formatDecimal } from '$lib/format';
   import { localDateISO } from '$lib/dateFormat';
 
@@ -238,7 +238,7 @@
       checkbox
       hint="This entry always gets an invoice of its own, whatever the client's bundling rules say."
     >
-      <input type="checkbox" bind:checked={separate} />
+      <Checkbox bind:checked={separate} />
     </Field>
   </div>
 

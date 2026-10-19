@@ -16,6 +16,7 @@
     Badge,
     type KebabItem,
     PageLoading,
+    Checkbox,
   } from '$lib/components/ui';
   import {
     getWorkspacePins,
@@ -741,13 +742,13 @@
           />
         {/if}
         {#if place.browsable && place.kind !== 'drive'}
-          <label class="hidden-toggle"
-            ><input
-              type="checkbox"
-              bind:checked={showHidden}
-              onchange={() => saveSetting('workspace.showHidden', showHidden)}
-            />Show hidden</label
-          >
+          <Checkbox
+            class="hidden-toggle"
+            label="Show hidden"
+            tone="muted"
+            bind:checked={showHidden}
+            onchange={() => saveSetting('workspace.showHidden', showHidden)}
+          />
         {/if}
       </div>
     </div>
@@ -1008,23 +1009,20 @@
   a:hover {
     text-decoration: underline;
   }
-  .hidden-toggle {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    color: var(--text-muted);
+  .folder-toolbar :global(.hidden-toggle) {
     white-space: nowrap;
-    cursor: pointer;
   }
-  input {
+  .folder-toolbar :global(.ui-checkbox-input) {
     margin: 0;
   }
   @media (pointer: coarse) {
-    li a,
-    .hidden-toggle {
+    li a {
       min-height: var(--touch-min);
       display: inline-flex;
       align-items: center;
+    }
+    .folder-toolbar :global(.hidden-toggle) {
+      min-height: var(--touch-min);
     }
   }
 </style>

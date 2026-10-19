@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { EmptyState, Input, Card } from '$lib/components/ui';
+  import { EmptyState, Input, Card, Checkbox } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import {
@@ -153,14 +153,13 @@
                 aria-label="Type of {row.account.account_name}"
               />
             </label>
-            <label class="excluded-toggle">
-              <input
-                type="checkbox"
-                bind:checked={row.excluded}
-                aria-label="Exclude {row.account.account_name} from summaries"
-              />
-              <span>Excluded</span>
-            </label>
+            <Checkbox
+              class="excluded-toggle"
+              label="Excluded"
+              tone="muted"
+              bind:checked={row.excluded}
+              ariaLabel="Exclude {row.account.account_name} from summaries"
+            />
           </div>
         </li>
       {/each}
@@ -208,13 +207,8 @@
     min-width: 0;
   }
 
-  .excluded-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
+  .account-controls :global(.excluded-toggle) {
     min-height: var(--control-height-md);
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
     white-space: nowrap;
   }
 </style>

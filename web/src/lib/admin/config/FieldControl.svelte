@@ -1,7 +1,16 @@
 <script lang="ts">
   import { CircleDashed, Lock } from '@lucide/svelte';
   import type { AdminConfigField, ConfigOp, ConfigSecretSource } from '$lib/api';
-  import { Badge, Button, Chip, Field, Input, Select, TextArea } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    Chip,
+    Field,
+    Input,
+    Select,
+    TextArea,
+    Checkbox,
+  } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import TableEditor from './TableEditor.svelte';
@@ -185,11 +194,7 @@
     {:else if kind === 'bool'}
       <Field label={field.name} {hint} {badge} {labelMark} layout="inline" checkbox error={problem}>
         <span class="adorned beside">
-          <input
-            type="checkbox"
-            checked={shown === true}
-            onchange={(e) => emit((e.currentTarget as HTMLInputElement).checked)}
-          />
+          <Checkbox checked={shown === true} onchange={(on) => emit(on)} />
           {@render defaultMark()}
         </span>
       </Field>

@@ -9,7 +9,7 @@
     listPushCategories,
     type PushCategory,
   } from '$lib/api';
-  import { Button, EmptyState, Select, Card, Field } from '$lib/components/ui';
+  import { Button, EmptyState, Select, Card, Field, Checkbox } from '$lib/components/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
@@ -170,15 +170,14 @@
   {:else if profile}
     {#each categories as category (category.id)}
       <Field label={category.label} checkbox badge={managedBadge(profile, 'push_inbox_categories')}>
-        <input
-          type="checkbox"
+        <Checkbox
           checked={profile.push_inbox_categories?.[category.id] ?? true}
           disabled={isManaged(profile, 'push_inbox_categories')}
-          onchange={(event) => {
+          onchange={(on) => {
             if (profile) {
               profile.push_inbox_categories = {
                 ...profile.push_inbox_categories,
-                [category.id]: event.currentTarget.checked,
+                [category.id]: on,
               };
             }
           }}
@@ -257,11 +256,7 @@
       />
     </Field>
     <Field label="Show message previews" checkbox badge={managedBadge(profile, 'push_preview')}>
-      <input
-        type="checkbox"
-        bind:checked={profile.push_preview}
-        disabled={isManaged(profile, 'push_preview')}
-      />
+      <Checkbox bind:checked={profile.push_preview} disabled={isManaged(profile, 'push_preview')} />
     </Field>
     <p class="description">
       Previews send message text to Apple for display on your lock screen. Turn them off to send

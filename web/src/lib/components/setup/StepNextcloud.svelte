@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SetupCheckResult } from '$lib/api';
-  import { Button, Field, Input, NoticeBanner, OptionCards } from '$lib/components/ui';
+  import { Button, Field, Input, NoticeBanner, OptionCards, Checkbox } from '$lib/components/ui';
   import { SecretField } from '$lib/components/settings';
   import SetupCheckResultLine from './SetupCheckResult.svelte';
   import SetupMore from './SetupMore.svelte';
@@ -284,11 +284,9 @@
           <SetupCheckResultLine {result} />
           {#if talkAvailable}
             <Field label="Chat with {botName} in Nextcloud Talk" checkbox>
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={draft.flag('talk_enabled', true)}
-                onchange={(e: Event) =>
-                  draft.set('talk_enabled', (e.currentTarget as HTMLInputElement).checked)}
+                onchange={(on) => draft.set('talk_enabled', on)}
               />
             </Field>
           {/if}

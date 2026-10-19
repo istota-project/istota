@@ -19,6 +19,7 @@
     TextArea,
     type SelectOption,
     Field,
+    Checkbox,
   } from '$lib/components/ui';
   import SourceConfigFields from './SourceConfigFields.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
@@ -240,16 +241,14 @@
           <div class="source-head">
             <span class="source-kind">{sourceKindLabel(source.kind)}</span>
             {#if allowSourceDisable || source.enabled === false}
-              <label class="source-toggle">
-                <input
-                  type="checkbox"
-                  checked={source.enabled !== false}
-                  onchange={(event) => {
-                    draft.sources[index] = { ...source, enabled: event.currentTarget.checked };
-                  }}
-                />
-                Enabled
-              </label>
+              <Checkbox
+                label="Enabled"
+                tone="muted"
+                checked={source.enabled !== false}
+                onchange={(on) => {
+                  draft.sources[index] = { ...source, enabled: on };
+                }}
+              />
             {/if}
             <IconButton
               size="sm"
@@ -420,14 +419,6 @@
     min-width: 0;
     font-size: var(--text-sm);
     font-weight: var(--weight-semibold);
-  }
-  .source-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-    cursor: pointer;
   }
   .source-body {
     display: flex;

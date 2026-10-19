@@ -7,7 +7,7 @@
     updateLocalCredential,
     type CredentialSummary,
   } from '$lib/api';
-  import { Button, Field, Input, Modal } from '$lib/components/ui';
+  import { Button, Field, Input, Modal, Checkbox } from '$lib/components/ui';
   import { notifySuccess } from '$lib/stores/notices';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
   import SecretField from './SecretField.svelte';
@@ -211,7 +211,7 @@
       {#if usernameSet}
         <p class="caption">Leave empty to keep it.</p>
         <Field label="Remove username" checkbox>
-          <input type="checkbox" bind:checked={removeUsername} />
+          <Checkbox bind:checked={removeUsername} />
         </Field>
       {/if}
     </div>
@@ -230,7 +230,7 @@
       {#if editing && start?.otp_set}
         <p class="caption">Leave empty to keep two-factor.</p>
         <Field label="Remove two-factor" checkbox>
-          <input type="checkbox" bind:checked={removeOtp} />
+          <Checkbox bind:checked={removeOtp} />
         </Field>
       {/if}
     </div>
@@ -294,7 +294,7 @@
         </div>
         <div class="cred-field">
           <Field label="Tasks may read the secret" checkbox>
-            <input type="checkbox" bind:checked={revealable} />
+            <Checkbox bind:checked={revealable} />
           </Field>
           <p class="caption">Otherwise a task can only have Istota send it.</p>
         </div>

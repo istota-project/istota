@@ -12,6 +12,7 @@
     Select,
     type SelectOption,
     Field,
+    Checkbox,
   } from '$lib/components/ui';
 
   interface Props {
@@ -198,15 +199,12 @@
       <p class="caption">Disclosed fields (time and title by default):</p>
       {#each ['time', 'title', 'description', 'attendees', 'links', 'location'] as field}
         <Field label={field} checkbox
-          ><input
-            type="checkbox"
+          ><Checkbox
             checked={((config.fields as string[]) ?? ['time', 'title']).includes(field)}
-            onchange={(e) => {
+            onchange={(on) => {
               const fields = (config.fields as string[]) ?? ['time', 'title'];
               onChange({
-                fields: e.currentTarget.checked
-                  ? [...fields, field]
-                  : fields.filter((f) => f !== field),
+                fields: on ? [...fields, field] : fields.filter((f) => f !== field),
               });
             }}
           /></Field
@@ -232,10 +230,9 @@
         label="Include private-marked events"
         checkbox
         hint="Excluded by default. Including them requires explicit approval."
-        ><input
-          type="checkbox"
+        ><Checkbox
           checked={config.include_private === true}
-          onchange={(e) => onChange({ include_private: e.currentTarget.checked })}
+          onchange={(on) => onChange({ include_private: on })}
         /></Field
       >
     {/if}
@@ -368,11 +365,7 @@
       />
     </Field>
     <Field label="Unread only" checkbox>
-      <input
-        type="checkbox"
-        checked={!!config.unread_only}
-        onchange={(e) => onChange({ unread_only: (e.target as HTMLInputElement).checked })}
-      />
+      <Checkbox checked={!!config.unread_only} onchange={(on) => onChange({ unread_only: on })} />
     </Field>
   </div>
 {:else if kind === 'browse'}

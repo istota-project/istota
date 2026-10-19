@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ServarrApp } from '$lib/api';
-  import { Button, Field, Input } from '$lib/components/ui';
+  import { Button, Field, Input, Checkbox } from '$lib/components/ui';
   import ConfigSecretField from './SecretField.svelte';
   import FieldRow from './FieldRow.svelte';
   import { credentialStatus } from './credentialStatus';
@@ -50,7 +50,7 @@
       <h3 class="micro-label">{label}</h3>
       {#if editable}
         <Field label="Connected" layout="inline" checkbox>
-          <input type="checkbox" bind:checked={form[name].enabled} />
+          <Checkbox bind:checked={form[name].enabled} />
         </Field>
       {/if}
       {#if app.enabled}
