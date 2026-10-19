@@ -1,9 +1,9 @@
 /**
  * The settings row that opens the generic iOS app's own settings (0.12.0).
  *
- * It is a convenience beside the native bar's App settings control, so what
- * matters is that it appears only where the app can answer, and that a refusal
- * is reported rather than swallowed.
+ * It is a convenience beside the native bar's Device settings control, so what
+ * matters is that it appears only where the app can answer, that it names the
+ * device, and that a refusal is reported rather than swallowed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
@@ -45,6 +45,7 @@ const native = vi.hoisted(() => ({
   shellVersion: vi.fn(() => '0.12.0'),
   shellAtLeast: vi.fn(() => true),
   shellRunsServiceWorker: vi.fn(() => false),
+  deviceModel: vi.fn((): 'iPhone' | 'iPad' => 'iPhone'),
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 vi.mock('$lib/platform/native', () => native);
@@ -91,24 +92,36 @@ const person: User = {
 
 const renderPage = () => render(Harness, { component: Page, layout: SettingsLayout, user: person });
 
-const BUTTON = { name: 'App settings' };
+const BUTTON = { name: 'Device settings' };
 
 beforeEach(() => {
   vi.clearAllMocks();
   app.appConnectionAvailable.mockReturnValue(true);
   app.openAppSettings.mockResolvedValue(true);
+  native.deviceModel.mockReturnValue('iPhone');
 });
 
 afterEach(() => {
   cleanup();
 });
 
-describe('the "App settings" row', () => {
+describe('the "Device settings" row', () => {
   it('opens the native settings in the generic app', async () => {
     renderPage();
+    expect(await screen.findByText('iPhone')).toBeInTheDocument();
+    expect(
+      screen.getByText('Server, location tracking and notifications on this device.'),
+    ).toBeInTheDocument();
     (await screen.findByRole('button', BUTTON)).click();
     await waitFor(() => expect(app.openAppSettings).toHaveBeenCalledOnce());
     expect(notices.notifyError).not.toHaveBeenCalled();
+  });
+
+  it('is titled iPad on an iPad', async () => {
+    native.deviceModel.mockReturnValue('iPad');
+    renderPage();
+    expect(await screen.findByText('iPad')).toBeInTheDocument();
+    expect(screen.queryByText('iPhone')).toBeNull();
   });
 
   it('is absent in a browser and in an older app', async () => {

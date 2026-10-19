@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
+  deviceModel,
   isNativeShell,
   onKeyboardGeometry,
   shellAtLeast,
@@ -32,6 +33,31 @@ const PLAIN_SAFARI =
 
 afterEach(() => {
   setUserAgent(PLAIN_SAFARI);
+});
+
+describe('deviceModel', () => {
+  const touchPoints = (n: number) =>
+    Object.defineProperty(window.navigator, 'maxTouchPoints', { value: n, configurable: true });
+  afterEach(() => touchPoints(0));
+
+  it('names an iPhone and an iPad that say so', () => {
+    setUserAgent(`${PLAIN_SAFARI} IstotaApp/0.12.0`);
+    expect(deviceModel()).toBe('iPhone');
+    setUserAgent(
+      'Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 IstotaApp/0.12.0',
+    );
+    expect(deviceModel()).toBe('iPad');
+  });
+
+  it('takes a desktop User-Agent with a touch screen for an iPad', () => {
+    setUserAgent(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) IstotaApp/0.12.0',
+    );
+    touchPoints(5);
+    expect(deviceModel()).toBe('iPad');
+    touchPoints(0);
+    expect(deviceModel()).toBe('iPhone');
+  });
 });
 
 describe('shellVersion', () => {

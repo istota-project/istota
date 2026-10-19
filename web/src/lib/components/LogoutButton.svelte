@@ -47,7 +47,7 @@
     try {
       outcome = await signOutOfApp();
     } catch {
-      notifyError('Could not sign out here. Open App settings to sign out.');
+      notifyError('Could not sign out here. Open Device settings to sign out.');
       return;
     }
     if (outcome === 'signed-out') forgetLastUserId();

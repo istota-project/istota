@@ -55,6 +55,7 @@ vi.mock('$lib/platform/native', () => ({
   shellVersion: vi.fn(() => null),
   shellAtLeast: vi.fn(() => false),
   shellRunsServiceWorker: vi.fn(() => false),
+  deviceModel: vi.fn(() => 'iPhone'),
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 

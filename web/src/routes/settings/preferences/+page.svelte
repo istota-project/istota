@@ -2,7 +2,7 @@
   import { Button, ConfirmDialog, Field, Select, type SelectOption } from '$lib/components/ui';
   import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
-  import { shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';
+  import { deviceModel, shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
   import { notifyError } from '$lib/stores/notices';
   import { clearOfflineData } from '$lib/offline/clear';
@@ -46,6 +46,20 @@
     profile.disabled_modules = [...next];
   }
 
+  // The app's Device settings (0.12.0). A convenience: the native bar above the
+  // page opens the same screen, and is the route that works when this page
+  // cannot load. The card is titled with the device it describes.
+  const appSettingsOffered = appConnectionAvailable();
+  const device = deviceModel();
+
+  async function showAppSettings() {
+    try {
+      await openAppSettings();
+    } catch {
+      notifyError('Could not open Device settings. Use Device settings above the page instead.');
+    }
+  }
+
   // Offline storage (ISSUE-202). Shown only in a shell that installs a service
   // worker, which is what makes this more than a cache-clearing button: a
   // worker can serve a document from a build the server has deleted, and there
@@ -71,19 +85,6 @@
   // it. The other two steps are counted rather than reported: a worker that
   // was never registered and an origin with no caches are the ordinary case,
   // not a failure.
-  // The app's own settings (0.12.0). A convenience: the native bar above the
-  // page opens the same screen, and is the route that works when this page
-  // cannot load.
-  const appSettingsOffered = appConnectionAvailable();
-
-  async function showAppSettings() {
-    try {
-      await openAppSettings();
-    } catch {
-      notifyError('Could not open App settings. Use App settings above the page instead.');
-    }
-  }
-
   async function clearOfflineStorage() {
     confirmingClearOffline = false;
     clearingOffline = true;
@@ -247,11 +248,11 @@
        disappears exactly when it is needed is not an escape hatch. -->
   {#if appSettingsOffered}
     <SettingsCard
-      title="This app"
-      description="The server this app connects to, signing out, and this iPhone's location and notification permissions."
+      title={device}
+      description="Server, location tracking and notifications on this device."
     >
       <div class="card-actions">
-        <Button variant="secondary" size="sm" onclick={showAppSettings}>App settings</Button>
+        <Button variant="secondary" size="sm" onclick={showAppSettings}>Device settings</Button>
       </div>
     </SettingsCard>
   {/if}

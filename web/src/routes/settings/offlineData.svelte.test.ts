@@ -49,6 +49,7 @@ const native = vi.hoisted(() => ({
   shellVersion: vi.fn(() => '0.10.0'),
   shellAtLeast: vi.fn(() => true),
   shellRunsServiceWorker: vi.fn(() => true),
+  deviceModel: vi.fn(() => 'iPhone'),
   onKeyboardGeometry: vi.fn(() => () => {}),
 }));
 vi.mock('$lib/platform/native', () => native);
