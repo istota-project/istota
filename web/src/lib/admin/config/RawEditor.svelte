@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { Button, Field, TextArea } from '$lib/components/ui';
+  import { Button, Card, Field, TextArea } from '$lib/components/ui';
   import { SENTINEL } from './changeSet';
 
   interface Props {
@@ -33,8 +33,7 @@
   text replaces the whole file, so it and the form's field edits are never
   sent together: the page locks each while the other holds changes.
 -->
-<section class="card">
-  <header class="section-header"><h2 class="title-section">config.toml as text</h2></header>
+<Card title="config.toml as text">
   {#if !shown}
     <p class="caption">
       Edit the whole file at once: for a key the form does not show, a key inside an array of
@@ -87,7 +86,7 @@
       {/if}
     </div>
   {/if}
-</section>
+</Card>
 
 <style>
   .raw-note {

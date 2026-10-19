@@ -5,8 +5,14 @@
   // are advisory and never write the draft.
   import { onDestroy } from 'svelte';
   import { checkBriefingPath, getBriefingPathSuggestions, type EmailAccount } from '$lib/api';
-  import { AutocompleteInput, Button, Input, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import {
+    AutocompleteInput,
+    Button,
+    Input,
+    Select,
+    type SelectOption,
+    Field,
+  } from '$lib/components/ui';
 
   interface Props {
     kind: string;
@@ -133,17 +139,15 @@
 {#if kind === 'group_memory'}
   <p class="caption">This group's notebook, selected explicitly for the common edition.</p>
 {:else if kind === 'group_file'}
-  <SettingsField
-    label="Group file path"
-    hint="One text or Markdown file relative to this group's folder."
+  <Field label="Group file path" hint="One text or Markdown file relative to this group's folder."
     ><Input
       value={String(config.path ?? '')}
       oninput={(e) => onChange({ path: e.currentTarget.value })}
-    /></SettingsField
+    /></Field
   >
 {:else if kind === 'personal_file' || kind === 'personal_calendar'}
   {#if !ownerFixed}
-    <SettingsField
+    <Field
       label="Source owner"
       hint="A current member's user id. Only that member can select and approve their own resource."
       ><Input
@@ -158,12 +162,12 @@
             lookahead_days: undefined,
             include_private: undefined,
           })}
-      /></SettingsField
+      /></Field
     >
   {/if}
   {#if config.owner_id === userId}
     {#if kind === 'personal_file'}
-      <SettingsField
+      <Field
         label="Personal file"
         hint="One exact text or Markdown file relative to your folder. Its full contents may be summarized or quoted."
         ><AutocompleteInput
@@ -171,10 +175,10 @@
           options={fileOptions}
           onValueChange={(v) => onChange({ path: v })}
           ariaLabel="Personal file"
-        /></SettingsField
+        /></Field
       >
     {:else}
-      <SettingsField labelled={false} label="Personal calendar"
+      <Field labelled={false} label="Personal calendar"
         ><Select
           value={String(config.calendar_url ?? '')}
           options={calendarOptions}
@@ -189,11 +193,11 @@
             })}
           ariaLabel="Personal calendar"
           fullWidth
-        /></SettingsField
+        /></Field
       >
       <p class="caption">Disclosed fields (time and title by default):</p>
       {#each ['time', 'title', 'description', 'attendees', 'links', 'location'] as field}
-        <SettingsField label={field} checkbox
+        <Field label={field} checkbox
           ><input
             type="checkbox"
             checked={((config.fields as string[]) ?? ['time', 'title']).includes(field)}
@@ -205,26 +209,26 @@
                   : fields.filter((f) => f !== field),
               });
             }}
-          /></SettingsField
+          /></Field
         >
       {/each}
-      <SettingsField labelled={false} label="Days back"
+      <Field labelled={false} label="Days back"
         ><Select
           value={String(config.lookback_days ?? 0)}
           options={[0, 1, 7, 30].map((n) => ({ value: String(n), label: String(n) }))}
           onValueChange={(v) => onChange({ lookback_days: Number(v) })}
           ariaLabel="Days back"
-        /></SettingsField
+        /></Field
       >
-      <SettingsField labelled={false} label="Days ahead"
+      <Field labelled={false} label="Days ahead"
         ><Select
           value={String(config.lookahead_days ?? 1)}
           options={[1, 7, 14, 30].map((n) => ({ value: String(n), label: String(n) }))}
           onValueChange={(v) => onChange({ lookahead_days: Number(v) })}
           ariaLabel="Days ahead"
-        /></SettingsField
+        /></Field
       >
-      <SettingsField
+      <Field
         label="Include private-marked events"
         checkbox
         hint="Excluded by default. Including them requires explicit approval."
@@ -232,7 +236,7 @@
           type="checkbox"
           checked={config.include_private === true}
           onchange={(e) => onChange({ include_private: e.currentTarget.checked })}
-        /></SettingsField
+        /></Field
       >
     {/if}
   {:else}<p class="caption">
@@ -240,7 +244,7 @@
       to them.
     </p>{/if}
 {:else if fileKinds.includes(kind)}
-  <SettingsField
+  <Field
     label="File path"
     hint="Relative to your user folder. Use shared/… for a file shared with the bot, or istota/… for the bot's folder. Required, with no default."
   >
@@ -259,9 +263,9 @@
     {:else if pathStatus === 'missing'}<p class="caption">
         No file there yet. This source is skipped until the file exists.
       </p>{/if}
-  </SettingsField>
+  </Field>
 {:else if kind === 'email'}
-  <SettingsField label="Mode">
+  <Field label="Mode">
     <Select
       value={(config.mode as string) ?? 'shared'}
       options={EMAIL_MODE_OPTIONS}
@@ -269,9 +273,9 @@
       ariaLabel="Email mode"
       fullWidth
     />
-  </SettingsField>
+  </Field>
   {#if config.mode === 'senders'}
-    <SettingsField
+    <Field
       label="Sender filters"
       hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com"
       labelled={false}
@@ -304,9 +308,9 @@
           >Add</Button
         >
       </div>
-    </SettingsField>
+    </Field>
   {/if}
-  <SettingsField label="Lookback (hours)" hint="Leave blank to use the briefing default.">
+  <Field label="Lookback (hours)" hint="Leave blank to use the briefing default.">
     <input
       type="number"
       min="1"
@@ -314,9 +318,9 @@
       placeholder="default"
       oninput={(e) => patchNumber('lookback_hours', (e.target as HTMLInputElement).value)}
     />
-  </SettingsField>
+  </Field>
 {:else if kind === 'my_email'}
-  <SettingsField
+  <Field
     label="Account"
     warning={selectedAccount && !selectedAccount.available ? selectedAccount.reason : undefined}
   >
@@ -330,8 +334,8 @@
     {#each emailAccounts.filter((account) => !account.available && account !== selectedAccount) as account (account.id)}
       <p class="caption">{account.label}: {account.reason}</p>
     {/each}
-  </SettingsField>
-  <SettingsField label="Lookback (hours)" hint="Leave blank to read the past 24 hours.">
+  </Field>
+  <Field label="Lookback (hours)" hint="Leave blank to read the past 24 hours.">
     <input
       type="number"
       min="1"
@@ -339,9 +343,9 @@
       placeholder="24"
       oninput={(e) => patchNumber('lookback_hours', (e.target as HTMLInputElement).value)}
     />
-  </SettingsField>
+  </Field>
 {:else if kind === 'rss'}
-  <SettingsField label="Feed or category">
+  <Field label="Feed or category">
     <Select
       value={rssValue}
       options={rssOptions}
@@ -353,12 +357,12 @@
       ariaLabel="Feed or category"
       fullWidth
     />
-  </SettingsField>
+  </Field>
   {#if rssOptions.length === 0}
     <p class="caption">No feeds available — subscribe in the Feeds module first.</p>
   {/if}
   <div class="inline-fields">
-    <SettingsField label="Max entries">
+    <Field label="Max entries">
       <input
         type="number"
         min="1"
@@ -366,17 +370,17 @@
         placeholder="10"
         oninput={(e) => patchNumber('limit', (e.target as HTMLInputElement).value)}
       />
-    </SettingsField>
-    <SettingsField label="Unread only" checkbox>
+    </Field>
+    <Field label="Unread only" checkbox>
       <input
         type="checkbox"
         checked={!!config.unread_only}
         onchange={(e) => onChange({ unread_only: (e.target as HTMLInputElement).checked })}
       />
-    </SettingsField>
+    </Field>
   </div>
 {:else if kind === 'browse'}
-  <SettingsField label="Source">
+  <Field label="Source">
     <Select
       value={browseValue}
       options={browseOptions}
@@ -390,20 +394,20 @@
       ariaLabel="Browse source"
       fullWidth
     />
-  </SettingsField>
+  </Field>
   {#if !config.preset}
-    <SettingsField label="URL">
+    <Field label="URL">
       <input
         type="text"
         placeholder="https://…"
         value={(config.url as string) ?? ''}
         oninput={(e) => onChange({ url: (e.target as HTMLInputElement).value })}
       />
-    </SettingsField>
+    </Field>
   {/if}
 {:else if kind === 'markets'}
   <p class="caption">Leave blank for the default index &amp; futures set.</p>
-  <SettingsField label="Indices" hint="Comma-separated symbols, e.g. ^GSPC, ^IXIC">
+  <Field label="Indices" hint="Comma-separated symbols, e.g. ^GSPC, ^IXIC">
     <input
       type="text"
       value={((config.indices as string[]) ?? []).join(', ')}
@@ -416,8 +420,8 @@
             .filter(Boolean),
         })}
     />
-  </SettingsField>
-  <SettingsField label="Futures" hint="Comma-separated symbols.">
+  </Field>
+  <Field label="Futures" hint="Comma-separated symbols.">
     <input
       type="text"
       value={((config.futures as string[]) ?? []).join(', ')}
@@ -430,11 +434,11 @@
             .filter(Boolean),
         })}
     />
-  </SettingsField>
+  </Field>
 {:else if kind === 'calendar'}
   <p class="caption">Pulls from your connected calendars. No configuration needed.</p>
 {:else if kind === 'shared_block'}
-  <SettingsField
+  <Field
     label="Shared block"
     hint="Pre-made content generated once for everyone (world headlines, markets, curated digests). Spliced in verbatim."
   >
@@ -446,11 +450,11 @@
       ariaLabel="Shared block"
       fullWidth
     />
-  </SettingsField>
+  </Field>
   {#if sharedBlockOptions.length === 0}
     <p class="caption">No shared blocks available yet.</p>
   {/if}
-  <SettingsField label="Max age (hours)" hint="Omit stale content older than this. Blank = 24h.">
+  <Field label="Max age (hours)" hint="Omit stale content older than this. Blank = 24h.">
     <input
       type="number"
       min="1"
@@ -458,7 +462,7 @@
       placeholder="24"
       oninput={(e) => patchNumber('max_age_hours', (e.target as HTMLInputElement).value)}
     />
-  </SettingsField>
+  </Field>
 {/if}
 
 <style>

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
-  import { EmptyState, Input } from '$lib/components/ui';
+  import { EmptyState, Input, Card } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import {
@@ -109,7 +108,7 @@
   );
 </script>
 
-<SettingsCard title="Portfolio accounts ({rows.length})">
+<Card title="Portfolio accounts ({rows.length})">
   {#if loadError}
     <div class="banner error">{loadError}</div>
   {:else if loaded && rows.length === 0}
@@ -167,7 +166,7 @@
       {/each}
     </ul>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .card-hint {

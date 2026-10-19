@@ -7,8 +7,8 @@
     EmptyState,
     KebabMenu,
     type KebabItem,
+    Card,
   } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
   import CardFormModal from './CardFormModal.svelte';
   let {
     cards,
@@ -74,7 +74,7 @@
   }
 </script>
 
-<SettingsCard title="Cards">
+<Card title="Cards">
   {#snippet actions()}<Button
       variant="primary"
       size="sm"
@@ -106,7 +106,7 @@
     These limits control what Istota will fill, not what a merchant charges. Use a card with its own
     issuer-side spending limit.
   </p>
-</SettingsCard>
+</Card>
 {#if form}<CardFormModal
     card={form.card}
     onClose={() => {

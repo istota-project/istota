@@ -1,9 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { AuthError, saveWalletPolicy, type WalletPolicy, type WalletSettings } from '$lib/api';
-  import { Field, Input, Select } from '$lib/components/ui';
+  import { Field, Input, Select, Card } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
-  import SettingsCard from './SettingsCard.svelte';
   let {
     policy,
     precision,
@@ -74,7 +73,7 @@
   useSettingsSave(() => (writable ? { dirty, saving, save } : null));
 </script>
 
-<SettingsCard
+<Card
   title="Spending policy"
   description="Purchases above the auto limits wait for your approval. Purchases above the ceiling are refused."
 >
@@ -98,7 +97,7 @@
     >
   </fieldset>
   {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-</SettingsCard>
+</Card>
 
 <style>
   .policy-form {

@@ -17,7 +17,7 @@
     type ConfigResource,
     type ServarrApp,
   } from '$lib/api';
-  import { Button, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, Card, EmptyState, Input, NoticeBanner, PageLoading } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { notifyWarning } from '$lib/stores/notices';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -609,8 +609,7 @@
     </div>
 
     {#if !filter.trim()}
-      <section class="card">
-        <header class="section-header"><h2 class="title-section">Admins</h2></header>
+      <Card title="Admins">
         <AdminsEditor
           users={view.admins.users}
           candidates={view.admins.candidates ?? []}
@@ -620,15 +619,14 @@
           readOnlyReason={view.admins.read_only_reason}
           onChange={(admins) => (draft = withAdmins(draft, admins))}
         />
-      </section>
+      </Card>
 
       {#if orphanSecrets.length}
-        <section class="card">
-          <header class="section-header"><h2 class="title-section">Credentials</h2></header>
+        <Card title="Credentials">
           {#each orphanSecrets as secret (secret.name)}
             {@render standaloneSecret(secret)}
           {/each}
-        </section>
+        </Card>
       {/if}
     {/if}
 
@@ -637,8 +635,7 @@
     {/if}
 
     {#each sections as section (section.key)}
-      <section class="card config-section">
-        <header class="section-header"><h2 class="title-section">{section.label}</h2></header>
+      <Card title={section.label} class="config-section">
         {#each section.fields as field (field.key)}
           {#if field.key === 'servarr.apps' && appsForm}
             <ServarrAppsEditor
@@ -665,7 +662,7 @@
         {#each section.secrets as secret (secret.name)}
           {@render standaloneSecret(secret)}
         {/each}
-      </section>
+      </Card>
     {/each}
 
     {#if editable && !filter.trim()}
@@ -795,7 +792,7 @@
 
   /* About 470 fields in one column made phone WebKit stutter on scroll (ISSUE-788).
      Off-screen sections skip layout and paint; `auto` keeps each one's real height. */
-  .config-section {
+  .config-page :global(.config-section) {
     content-visibility: auto;
     contain-intrinsic-size: auto 40rem;
   }

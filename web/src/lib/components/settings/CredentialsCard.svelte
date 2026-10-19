@@ -24,10 +24,10 @@
     EmptyState,
     KebabMenu,
     Modal,
+    Card,
   } from '$lib/components/ui';
   import { copyText } from '$lib/clipboard';
   import type { KebabItem } from '$lib/components/ui/KebabMenu.svelte';
-  import SettingsCard from './SettingsCard.svelte';
   import CredentialAccessFields from './CredentialAccessFields.svelte';
   import CredentialFormModal from './CredentialFormModal.svelte';
   import StepUpDialog from './StepUpDialog.svelte';
@@ -210,7 +210,7 @@
   }
 </script>
 
-<SettingsCard
+<Card
   title="Credentials"
   description="A task can send a credential only to its site, and only from rooms you allow."
 >
@@ -289,7 +289,7 @@
     <Button variant="secondary" size="sm" onclick={showDeleted}>Recently deleted credentials</Button
     >
   </div>
-</SettingsCard>
+</Card>
 
 {#if form}
   <CredentialFormModal

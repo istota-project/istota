@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button, EmptyState, NoticeBanner } from '$lib/components/ui';
+  import { Button, EmptyState, NoticeBanner, Card } from '$lib/components/ui';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import TextPreview from '$lib/components/viewer/TextPreview.svelte';
-  import { SettingsCard } from '$lib/components/settings';
   import { formatBytes } from '$lib/format';
   import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import {
@@ -130,7 +129,7 @@
       >Keep the notebook concise so shared facts remain easy to find.</NoticeBanner
     >{/if}
   {#if auditWarning}<NoticeBanner variant="warn" title={auditWarning} />{/if}
-  <SettingsCard title="Notebook" description={charter}>
+  <Card title="Notebook" description={charter}>
     {#snippet status()}{#if notebook}<span class="caption">{formatBytes(notebook.bytes)}</span
         >{/if}{/snippet}
     {#snippet actions()}{#if notebook}
@@ -163,9 +162,9 @@
             >{/if}
         </p>{/if}
     {/if}
-  </SettingsCard>
+  </Card>
   {#if activityOpen}
-    <SettingsCard
+    <Card
       title="Recorded changes"
       description="Direct file edits may not appear here. These records are not restorable versions."
     >
@@ -205,7 +204,7 @@
       {:else if cursor}<div class="actions">
           <Button size="sm" onclick={() => loadActivity(true)}>Load older changes</Button>
         </div>{/if}
-    </SettingsCard>
+    </Card>
   {/if}
 </div>
 <TextFileEditor
@@ -231,7 +230,7 @@
   }
   /* Takes only spare height, so on the overview the card fills a grid row a
      taller neighbour set, and anywhere else it keeps its natural size. */
-  .notebook > :global(.card) {
+  .notebook > :global(.ui-card) {
     flex-grow: 1;
   }
   .actions {

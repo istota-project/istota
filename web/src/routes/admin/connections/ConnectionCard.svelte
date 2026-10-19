@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Component, Snippet } from 'svelte';
-  import { Badge } from '$lib/components/ui';
+  import { Badge, Card } from '$lib/components/ui';
 
   type BadgeVariant = 'success' | 'warn' | 'danger' | 'neutral' | 'info';
 
@@ -19,6 +19,8 @@
   }
 
   let { testid, title, subtitle, icon: Icon, badge, children, meta, actions }: Props = $props();
+
+  const foot = $derived(meta || actions ? footSnippet : undefined);
 </script>
 
 <!--
@@ -27,47 +29,33 @@
   The cards stack full width; the body is the grid, so a wide pane fits
   more of a card's sections side by side.
 -->
-<section class="card connection" data-testid={testid}>
-  <header class="connection-head">
+<Card {title} description={subtitle} data-testid={testid} footer={foot}>
+  {#snippet icon()}
     <span class="connection-icon" aria-hidden="true"><Icon size={18} /></span>
-    <div class="connection-title">
-      <h2 class="title-section">{title}</h2>
-      {#if subtitle}
-        <p class="caption">{subtitle}</p>
-      {/if}
-    </div>
+  {/snippet}
+  {#snippet status()}
     {#if badge}
       <Badge variant={badge.variant}>{badge.label}</Badge>
     {/if}
-  </header>
+  {/snippet}
 
   <div class="connection-body">
     {@render children()}
   </div>
+</Card>
 
-  {#if meta || actions}
-    <footer class="connection-foot">
-      <div class="connection-meta">
-        {#if meta}{@render meta()}{/if}
-      </div>
-      {#if actions}
-        <div class="connection-actions">{@render actions()}</div>
-      {/if}
-    </footer>
-  {/if}
-</section>
+{#snippet footSnippet()}
+  <div class="connection-foot">
+    <div class="connection-meta">
+      {#if meta}{@render meta()}{/if}
+    </div>
+    {#if actions}
+      <div class="connection-actions">{@render actions()}</div>
+    {/if}
+  </div>
+{/snippet}
 
 <style>
-  .connection {
-    min-width: 0;
-  }
-
-  .connection-head {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-  }
-
   .connection-icon {
     flex: none;
     display: inline-flex;
@@ -78,18 +66,6 @@
     border-radius: var(--radius-md);
     background: var(--surface-raised);
     color: var(--text-secondary);
-  }
-
-  .connection-title {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .connection-title .caption {
-    margin: 0;
   }
 
   /* The cards run full width, so the body packs its panels side by side as
@@ -142,7 +118,10 @@
     user-select: text;
   }
 
+  /* Inside the Card footer's flush-right row, taking the whole of it so the
+     meta keeps the left end. */
   .connection-foot {
+    flex: 1 1 100%;
     display: flex;
     align-items: center;
     justify-content: space-between;

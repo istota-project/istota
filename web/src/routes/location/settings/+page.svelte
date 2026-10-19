@@ -8,8 +8,8 @@
     type ServiceCard as ServiceCardData,
     type LocationSettingsInfo,
   } from '$lib/api';
-  import { ServiceCard, SettingsLayout, SettingsCard } from '$lib/components/settings';
-  import { Button, ConfirmDialog } from '$lib/components/ui';
+  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
+  import { Button, ConfirmDialog, Card } from '$lib/components/ui';
   import QrCode from '$lib/components/location/QrCode.svelte';
   import DeviceTrackerCard from '$lib/components/location/DeviceTrackerCard.svelte';
   import { encodeProvisioning, endpointFromWebhookUrl } from '$lib/location/provisioning';
@@ -127,7 +127,7 @@
     <DeviceTrackerCard />
 
     {#if info}
-      <SettingsCard
+      <Card
         title="Provision a device"
         description="Generate a token and scan it from the Istota app on the phone you want to track."
       >
@@ -162,19 +162,16 @@
           </p>
           <code class="webhook-url">{info.webhook_url}</code>
         {/if}
-      </SettingsCard>
+      </Card>
 
-      <SettingsCard
-        title="Place detection"
-        description="Read-only — these knobs are tuned instance-wide."
-      >
+      <Card title="Place detection" description="Read-only — these knobs are tuned instance-wide.">
         <dl class="kv">
           <dt>Accuracy threshold (m)</dt>
           <dd>{info.place_detection.accuracy_threshold_m}</dd>
           <dt>Visit exit (min)</dt>
           <dd>{info.place_detection.visit_exit_minutes}</dd>
         </dl>
-      </SettingsCard>
+      </Card>
     {/if}
   {/if}
 </SettingsLayout>

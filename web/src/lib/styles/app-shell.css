@@ -259,6 +259,16 @@ body:has(.app-content-fill) {
   color: var(--status-danger-fg);
 }
 
+/* While the settings frame holds nothing but the pane message, drop its own
+   padding: it is asymmetric (extra at the bottom, to keep the last card off the
+   screen edge), which would put the message a notch above the pane's centre
+   while every other section centres exactly. It lives here rather than in
+   settings.css because `.center-msg` is this app's class. Two classes, so it
+   outranks the frame's breakpoint paddings. */
+.settings:has(> .center-msg) {
+  padding: 0;
+}
+
 /* Inline loading / error states (in a card, above a rendered layout) */
 .loading,
 .error-msg {

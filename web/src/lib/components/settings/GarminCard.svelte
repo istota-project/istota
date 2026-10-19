@@ -9,9 +9,7 @@
     importGarminTracks,
     type GarminStatus,
   } from '$lib/api';
-  import { Button } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
+  import { Button, Card, Field } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -153,7 +151,7 @@
   onMount(refresh);
 </script>
 
-<SettingsCard
+<Card
   title="Garmin Connect"
   description="Connect once for both Health and Location. Sync daily summaries (sleep, stress, body battery, steps, SpO₂, HRV, VO₂ max, resting HR, body composition) into your stats, and import GPS tracks from watch-recorded runs, hikes, and walks into your location history."
 >
@@ -185,7 +183,7 @@
       <Button variant="secondary" onclick={doDisconnect} disabled={busy}>Disconnect</Button>
     </div>
   {:else if mode === 'mfa'}
-    <SettingsField label="MFA code" hint="6-digit code from your Garmin authenticator app">
+    <Field label="MFA code" hint="6-digit code from your Garmin authenticator app">
       <input
         type="text"
         inputmode="numeric"
@@ -193,7 +191,7 @@
         bind:value={mfaCodeInput}
         placeholder="000000"
       />
-    </SettingsField>
+    </Field>
     <div class="actions">
       <Button variant="primary" onclick={submitMfa} disabled={busy || !mfaCodeInput}>
         {busy ? 'Verifying…' : 'Verify'}
@@ -201,15 +199,15 @@
       <Button variant="secondary" onclick={() => (mode = 'idle')} disabled={busy}>Cancel</Button>
     </div>
   {:else}
-    <SettingsField label="Email">
+    <Field label="Email">
       <input type="email" bind:value={emailInput} autocomplete="username" />
-    </SettingsField>
-    <SettingsField
+    </Field>
+    <Field
       label="Password"
       hint="Credentials are used only during the OAuth exchange and are not stored."
     >
       <input type="password" bind:value={passwordInput} autocomplete="current-password" />
-    </SettingsField>
+    </Field>
     <div class="actions">
       <Button
         variant="primary"
@@ -227,7 +225,7 @@
   {#if info}
     <div class="banner success">{info}</div>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .status-row {

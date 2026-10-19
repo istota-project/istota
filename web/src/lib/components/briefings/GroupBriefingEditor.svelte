@@ -40,8 +40,9 @@
     Select,
     type KebabItem,
     type SelectOption,
+    Card,
+    Field,
   } from '$lib/components/ui';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
@@ -546,27 +547,27 @@
   {/if}
 
   {#if showsDefinition}
-    <SettingsCard title="Schedule and delivery">
+    <Card title="Schedule and delivery">
       {#if held}
         <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
           This briefing will not run until an administrator resumes it.
         </NoticeBanner>
       {/if}
       <fieldset class="fields" disabled={busy || accessLost}>
-        <SettingsField label="Title" hint="Shown on every edition, followed by its date.">
+        <Field label="Title" hint="Shown on every edition, followed by its date.">
           <Input bind:value={title} placeholder={derivedTitle(name)} />
-        </SettingsField>
+        </Field>
         <div class="field-row">
-          <SettingsField
+          <Field
             label="Schedule"
             hint="A cron expression, for example 0 7 * * 1-5 for weekdays at 07:00."
           >
             <Input bind:value={cron} monospace />
-          </SettingsField>
-          <SettingsField label="Timezone" hint="One schedule for everyone in the group.">
+          </Field>
+          <Field label="Timezone" hint="One schedule for everyone in the group.">
             <Input bind:value={timezone} />
-          </SettingsField>
-          <SettingsField
+          </Field>
+          <Field
             label="Delivery"
             labelled={false}
             hint="Each member receives it at their own address for this channel. Every edition is also readable in Briefings."
@@ -578,9 +579,9 @@
               ariaLabel="Delivery"
               fullWidth
             />
-          </SettingsField>
+          </Field>
         </div>
-        <SettingsField
+        <Field
           label="Excluded members"
           labelled={false}
           hint="Excluded members get no copies or notifications of this briefing, but can still read its editions."
@@ -598,19 +599,19 @@
             emptyLabel="Nobody excluded."
             ariaLabel="Excluded members"
           />
-        </SettingsField>
-        <SettingsField
+        </Field>
+        <Field
           label="Enabled"
           checkbox
           hint="When on, each scheduled run publishes an edition and sends it to members."
           warning={enabled && blocker ? blocker : undefined}
         >
           <input type="checkbox" bind:checked={enabled} disabled={held} />
-        </SettingsField>
+        </Field>
       </fieldset>
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard title="Content">
+    <Card title="Content">
       <fieldset class="fields" disabled={busy || accessLost}>
         <OptionCards
           options={[
@@ -629,28 +630,28 @@
           label="How the content is made"
         />
         {#if mode === 'prompt'}
-          <SettingsField
+          <Field
             label="Instructions"
             wide
             hint="Used to write each edition. Never sent to public research."
           >
             <textarea rows="4" bind:value={prompt}></textarea>
-          </SettingsField>
-          <SettingsField
+          </Field>
+          <Field
             label="Research the web first"
             checkbox
             hint="A separate step reads public pages before the edition is written. It never sees the group's notebook, files or anyone's personal sources."
           >
             <input type="checkbox" bind:checked={researchEnabled} />
-          </SettingsField>
+          </Field>
           {#if researchEnabled}
-            <SettingsField
+            <Field
               label="What to research"
               wide
               hint="Sent to the research step, so keep anything private out of it."
             >
               <textarea rows="3" bind:value={researchPrompt}></textarea>
-            </SettingsField>
+            </Field>
           {/if}
           <p class="micro-label">Sources (optional)</p>
         {/if}
@@ -684,10 +685,10 @@
           />
         {/key}
       </fieldset>
-    </SettingsCard>
+    </Card>
   {/if}
 
-  <SettingsCard title={author ? 'Audience and sharing' : 'Your shared sources'}>
+  <Card title={author ? 'Audience and sharing' : 'Your shared sources'}>
     {#if author && audience}
       <p class="summary">
         {#if channel === 'in_app'}
@@ -706,20 +707,20 @@
             : 'Current and future members can read past editions.'}
         </span>
       </p>
-      <SettingsField
+      <Field
         label="The instructions include personal information"
         checkbox
         hint="Instructions are shared with the same audience as the sources. Nothing detects personal information for you."
       >
         <input type="checkbox" bind:checked={personalInformation} disabled={busy} />
-      </SettingsField>
+      </Field>
       {#if personalInformation}
-        <SettingsField
+        <Field
           label="I agree to share them with everyone who can read this briefing, now and later"
           checkbox
         >
           <input type="checkbox" bind:checked={acknowledged} disabled={busy} />
-        </SettingsField>
+        </Field>
       {/if}
     {:else if !author}
       <p class="caption">
@@ -761,10 +762,10 @@
     {#if author && dirty}
       <p class="caption">Save your changes to update these numbers and approvals.</p>
     {/if}
-  </SettingsCard>
+  </Card>
 
   {#if author}
-    <SettingsCard title="Editions">
+    <Card title="Editions">
       {#snippet actions()}
         <Button
           size="sm"
@@ -810,7 +811,7 @@
       {:else}
         <EmptyState size="sm">No editions yet.</EmptyState>
       {/if}
-    </SettingsCard>
+    </Card>
   {/if}
 {/if}
 

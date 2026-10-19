@@ -8,11 +8,17 @@
     type GoogleStatus,
     type GoogleScopeLevel,
   } from '$lib/api';
-  import { Button, ConfirmDialog, EmptyState, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Button,
+    ConfirmDialog,
+    EmptyState,
+    Select,
+    type SelectOption,
+    Card,
+    Field,
+  } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
 
   interface Props {
     /** Called after a change the services list should re-read. */
@@ -179,7 +185,7 @@
   {/if}
 {/snippet}
 
-<SettingsCard
+<Card
   title="Google Workspace"
   description="Choose which Google services the bot may use, and at what level. A change takes effect the next time you connect: Google has to ask you again."
   status={statusPill}
@@ -211,7 +217,7 @@
          reader matching names across them. -->
     {#each status.offered as svc (svc.service)}
       {@const held = grantedByService.get(svc.service)}
-      <SettingsField
+      <Field
         label={svc.label}
         labelled={false}
         warning={svc.max_level === 'off' ? 'This instance does not offer this service.' : undefined}
@@ -244,7 +250,7 @@
               {/if}<code>{s}</code>{/each}
           </p>
         {/if}
-      </SettingsField>
+      </Field>
     {/each}
 
     {#if status.connected && status.unrecognized_scopes.length > 0}
@@ -299,7 +305,7 @@
   {#if info}
     <div class="banner success">{info}</div>
   {/if}
-</SettingsCard>
+</Card>
 
 <ConfirmDialog
   open={confirmingDisconnect}

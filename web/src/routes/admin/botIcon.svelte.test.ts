@@ -143,11 +143,11 @@ async function show(
 
 /** The card's own section, addressed by its heading rather than by position. */
 function card(container: HTMLElement): HTMLElement {
-  const heading = Array.from(container.querySelectorAll('section.card h2')).find(
+  const heading = Array.from(container.querySelectorAll('section.ui-card h2')).find(
     (h) => h.textContent?.trim() === 'Bot icon',
   );
   expect(heading).toBeTruthy();
-  return heading!.closest('section.card') as HTMLElement;
+  return heading!.closest('section.ui-card') as HTMLElement;
 }
 
 beforeEach(() => {

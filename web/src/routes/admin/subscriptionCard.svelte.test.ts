@@ -186,9 +186,9 @@ async function showAbsent(subscription: AdminSubscription | undefined) {
 /** The card's own section, addressed by its heading rather than by position.
  *  Null when the page drew no card at all. */
 function findCard(container: HTMLElement): HTMLElement | null {
-  const headings = Array.from(container.querySelectorAll('section.card h2'));
+  const headings = Array.from(container.querySelectorAll('section.ui-card h2'));
   const heading = headings.find((h) => h.textContent?.trim() === 'Claude Code subscription');
-  return heading ? (heading.closest('section.card') as HTMLElement) : null;
+  return heading ? (heading.closest('section.ui-card') as HTMLElement) : null;
 }
 
 function card(container: HTMLElement): HTMLElement {
@@ -264,7 +264,7 @@ describe('the subscription card — populated', () => {
     // dashes on a subscription deployment, and this is the budget it cannot
     // report. Order is the whole of what makes them read as a pair.
     const container = await show(populated());
-    const headings = Array.from(container.querySelectorAll('section.card h2')).map((h) =>
+    const headings = Array.from(container.querySelectorAll('section.ui-card h2')).map((h) =>
       h.textContent?.trim(),
     );
     const here = headings.indexOf('Claude Code subscription');

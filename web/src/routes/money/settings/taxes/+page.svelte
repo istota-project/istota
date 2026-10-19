@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard, SettingsField, SettingsLayout } from '$lib/components/settings';
-  import { Input, Select } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
+  import { Input, Select, Card, Field } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
@@ -207,8 +207,8 @@
   {loading}
   error={loadError}
 >
-  <SettingsCard title="Filing">
-    <SettingsField label="Filing status">
+  <Card title="Filing">
+    <Field label="Filing status">
       <Select
         fullWidth
         value={filingStatus}
@@ -218,9 +218,9 @@
           reloadResolved();
         }}
       />
-    </SettingsField>
+    </Field>
 
-    <SettingsField
+    <Field
       label="Tax year"
       hint="The year the estimate is for. Rates are per-year; changing this changes which set you are editing below."
     >
@@ -235,9 +235,9 @@
           }
         }}
       />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="State" warning={stateHint || undefined}>
+    <Field label="State" warning={stateHint || undefined}>
       <Select
         fullWidth
         value={stateCode}
@@ -247,8 +247,8 @@
           reloadResolved();
         }}
       />
-    </SettingsField>
-  </SettingsCard>
+    </Field>
+  </Card>
 
   {#if resolved}
     <TaxRatesCard
@@ -285,13 +285,13 @@
       />
     {/if}
 
-    <SettingsCard
+    <Card
       title="Payroll rates"
       description="Federal, year-keyed and the same for every filing status."
     >
       <RateProvenanceLine provenance={resolved.federal.provenance} {taxYear} />
       {#each PAYROLL_FIELDS as f (f.key)}
-        <SettingsField label={f.label}>
+        <Field label={f.label}>
           <Input
             type="number"
             step={f.step}
@@ -307,9 +307,9 @@
           {#if resolved.payroll?.[f.key]?.overridden}
             <p class="overridden">Your value, not the shipped one.</p>
           {/if}
-        </SettingsField>
+        </Field>
       {/each}
-    </SettingsCard>
+    </Card>
   {/if}
 
   <TaxDisclaimer />

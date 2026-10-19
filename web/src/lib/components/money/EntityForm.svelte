@@ -8,8 +8,7 @@
     type EntityRow,
     type EntityInput,
   } from '$lib/money/api';
-  import { Modal, Button, Select } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import { Modal, Button, Select, Field } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billing entity.
@@ -227,53 +226,53 @@
         <small class="caption">The key is the identity — clients reference it by name.</small>
       </div>
     {:else}
-      <SettingsField label="Key" hint="Short identifier clients point at." error={keyError}>
+      <Field label="Key" hint="Short identifier clients point at." error={keyError}>
         <input type="text" bind:value={key} placeholder="main" autocomplete="off" />
-      </SettingsField>
+      </Field>
     {/if}
 
-    <SettingsField label="Name" hint="Printed on the invoice.">
+    <Field label="Name" hint="Printed on the invoice.">
       <input type="text" bind:value={name} placeholder="Acme Studio LLC" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Email">
+    <Field label="Email">
       <input type="text" bind:value={email} placeholder="billing@example.com" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Address" wide>
+    <Field label="Address" wide>
       <textarea rows="3" bind:value={address}></textarea>
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Payment instructions" wide hint="Printed at the foot of the invoice.">
+    <Field label="Payment instructions" wide hint="Printed at the foot of the invoice.">
       <textarea rows="3" bind:value={paymentInstructions}></textarea>
-    </SettingsField>
+    </Field>
 
-    <SettingsField
+    <Field
       label="Logo path"
       hint="Relative to your accounting folder, e.g. invoices/logo.png."
       error={logoError}
     >
       <input type="text" bind:value={logo} placeholder="invoices/logo.png" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="A/R account">
+    <Field label="A/R account">
       <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Bank account">
+    <Field label="Bank account">
       <input type="text" bind:value={bankAccount} placeholder="Assets:Bank:Checking" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Currency">
+    <Field label="Currency">
       <input type="text" bind:value={currency} placeholder="USD" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Automatically detect invoice payments" checkbox>
+    <Field label="Automatically detect invoice payments" checkbox>
       <input type="checkbox" bind:checked={detectionEnabled} disabled={saving} />
-    </SettingsField>
+    </Field>
 
     {#if detectionEnabled}
-      <SettingsField label="Ledger" labelled={false} error={ledgerProblem}>
+      <Field label="Ledger" labelled={false} error={ledgerProblem}>
         <Select
           value={detectionLedger}
           onValueChange={changeLedger}
@@ -284,8 +283,8 @@
           ariaLabel="Ledger"
         />
         {#if ledgersLoading}<span class="caption" role="status">Loading ledgers…</span>{/if}
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Income account"
         labelled={false}
         error={accountProblem}
@@ -306,7 +305,7 @@
         />
         {#if accountsLoading}<span class="caption" role="status">Loading income accounts…</span
           >{/if}
-      </SettingsField>
+      </Field>
     {/if}
   </div>
 

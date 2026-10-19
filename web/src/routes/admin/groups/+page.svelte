@@ -11,10 +11,10 @@
     Badge,
     NoticeBanner,
     PageLoading,
+    Card,
   } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { formatDate, formatDateTime, formatRelative } from '$lib/dateFormat';
-  import { SettingsCard } from '$lib/components/settings';
   import GroupMembers from '$lib/components/groups/GroupMembers.svelte';
   import {
     getAdminGroups,
@@ -247,7 +247,7 @@
         their recipients. Archiving keeps the data and history, and the group ID cannot be reused.
       </p>
     </NoticeBanner>
-    <SettingsCard title="Groups">
+    <Card title="Groups">
       {#snippet actions()}<Button variant="primary" size="sm" onclick={openCreate} disabled={busy}
           >Create group</Button
         >{/snippet}
@@ -304,14 +304,14 @@
             </tbody>
           </table>
         </div>{/if}
-    </SettingsCard>
+    </Card>
     {#if detailLoading}<PageLoading label="Loading group…" />
     {:else if detailError}<div class="center-msg error">
         <p>{detailError}</p>
         <Button onclick={() => selected && select(selected)}>Reload group details</Button>
       </div>
     {:else if group}
-      <SettingsCard title={group.display_name}>
+      <Card title={group.display_name}>
         {#snippet status()}
           {#if group?.archived_at}<Badge size="sm">Archived</Badge
             >{:else if group?.needs_owner}<Badge size="sm" variant="warn">Needs owner</Badge>{/if}
@@ -354,12 +354,12 @@
             This group has no owner. Members can still use it, but nobody can manage its membership
             until you assign one.
           </p>{/if}
-      </SettingsCard>
+      </Card>
       {#if !group.archived_at}
-        <SettingsCard title="Members">
+        <Card title="Members">
           {#key group.group_id}<GroupMembers {group} administration onChanged={refresh} />{/key}
-        </SettingsCard>
-        <SettingsCard
+        </Card>
+        <Card
           title="Storage"
           description="Retry setup if the group's workspace was unavailable. Existing files are kept."
         >
@@ -375,7 +375,7 @@
           {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
               {storageErrors[group.group_id]}
             </p>{/if}
-        </SettingsCard>
+        </Card>
       {/if}
       {#if group.system_key === 'all_users'}
         <p class="caption">
@@ -383,7 +383,7 @@
           installation users.
         </p>
       {/if}
-      <SettingsCard title="Membership history">
+      <Card title="Membership history">
         {#if !group.history.length}<EmptyState size="sm">No membership history.</EmptyState>{:else}
           <div class="table-scroll">
             <table class="table table--fixed" aria-label="Membership history">
@@ -422,8 +422,8 @@
             </table>
           </div>
         {/if}
-      </SettingsCard>
-      <SettingsCard
+      </Card>
+      <Card
         title="Management events"
         description="Role changes keep the membership period intact. Each change is recorded here."
       >
@@ -449,7 +449,7 @@
               </li>
             {/each}
           </ol>{/if}
-      </SettingsCard>
+      </Card>
     {/if}
   {/if}
 </div>

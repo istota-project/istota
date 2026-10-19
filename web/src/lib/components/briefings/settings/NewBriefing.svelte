@@ -6,8 +6,15 @@
     type BriefingRoomOption,
     type BriefingTarget,
   } from '$lib/api';
-  import { Button, Input, OptionCards, Select, type OptionCard } from '$lib/components/ui';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
+  import {
+    Button,
+    Input,
+    OptionCards,
+    Select,
+    type OptionCard,
+    Card,
+    Field,
+  } from '$lib/components/ui';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError } from '$lib/stores/notices';
   import { briefingSettingsUrl, channelLabel, derivedTitle, slugify } from './briefingSettings';
@@ -129,35 +136,35 @@
   }
 </script>
 
-<SettingsCard title="Who is it for?">
+<Card title="Who is it for?">
   <OptionCards options={audienceOptions} bind:value={audience} label="Who the briefing is for" />
-</SettingsCard>
+</Card>
 
-<SettingsCard
+<Card
   title="Basics"
   description="It is created switched off, so nothing runs until you have added its content and turned it on."
 >
-  <SettingsField
+  <Field
     label="Title"
     hint="Shown on every edition, followed by its date. The briefing's name is derived from it."
   >
     <Input bind:value={title} placeholder="Morning news" />
-  </SettingsField>
+  </Field>
   <div class="field-row">
-    <SettingsField
+    <Field
       label="Schedule"
       hint="A cron expression, for example 0 7 * * 1-5 for weekdays at 07:00."
     >
       <Input bind:value={cron} monospace />
-    </SettingsField>
+    </Field>
     {#if group}
-      <SettingsField label="Timezone" hint="One schedule for everyone in the group.">
+      <Field label="Timezone" hint="One schedule for everyone in the group.">
         <Input bind:value={timezone} placeholder={deploymentTimezone} />
-      </SettingsField>
+      </Field>
     {/if}
   </div>
   {#if group}
-    <SettingsField
+    <Field
       label="Delivery"
       labelled={false}
       hint="Each member receives it at their own address for this channel. Every edition is also readable in Briefings."
@@ -169,8 +176,8 @@
         ariaLabel="Delivery"
         fullWidth
       />
-    </SettingsField>
-    <SettingsField
+    </Field>
+    <Field
       label="What should it cover?"
       hint="The instructions for each edition. You can switch to building it from blocks afterwards."
       wide
@@ -180,10 +187,10 @@
         bind:value={prompt}
         placeholder="A short morning briefing on what the team shipped and what is blocked."
       ></textarea>
-    </SettingsField>
+    </Field>
   {:else}
     <div class="field-row">
-      <SettingsField label="Delivery" labelled={false}>
+      <Field label="Delivery" labelled={false}>
         <Select
           value={personalOutput}
           options={outputs.map((o) => ({ value: o, label: channelLabel(o) }))}
@@ -191,9 +198,9 @@
           ariaLabel="Delivery"
           fullWidth
         />
-      </SettingsField>
+      </Field>
       {#if personalOutput === 'talk'}
-        <SettingsField label="Talk room" labelled={false}>
+        <Field label="Talk room" labelled={false}>
           <Select
             value={room}
             options={rooms.map((r) => ({ value: r.token, label: r.name }))}
@@ -202,7 +209,7 @@
             ariaLabel="Talk room"
             fullWidth
           />
-        </SettingsField>
+        </Field>
       {/if}
     </div>
   {/if}
@@ -218,7 +225,7 @@
       loadingLabel="Creating…">Create briefing</Button
     >
   </div>
-</SettingsCard>
+</Card>
 
 <style>
   .field-row {

@@ -1,8 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { BriefingSourceApproval } from '$lib/api';
-  import { Button, Modal, type SelectOption } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import { Button, Modal, type SelectOption, Field } from '$lib/components/ui';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { calendarDisclosure, channelLabel } from './briefingSettings';
 
@@ -95,9 +94,9 @@
       </dd>
     </dl>
     {#if !approval.approved}
-      <SettingsField label="I agree to share this on every run" checkbox>
+      <Field label="I agree to share this on every run" checkbox>
         <input type="checkbox" bind:checked={agreed} disabled={!chosen} />
-      </SettingsField>
+      </Field>
     {/if}
   </div>
   {#snippet footer()}

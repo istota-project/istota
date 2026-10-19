@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ConfigRequest, ConfigRequestStatus } from '$lib/api';
-  import { Badge, Button } from '$lib/components/ui';
+  import { Badge, Button, Card } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import DiffBlock from './DiffBlock.svelte';
 
@@ -45,8 +45,7 @@
   change brings back its config.toml through the same review as any other
   change; credentials and the admin list stay as they are now.
 -->
-<section class="card">
-  <header class="section-header"><h2 class="title-section">History</h2></header>
+<Card title="History">
   {#if error}
     <p class="form-error">{error}</p>
   {:else if requests === null}
@@ -100,7 +99,7 @@
       {/each}
     </ul>
   {/if}
-</section>
+</Card>
 
 <style>
   .history-row {

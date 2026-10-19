@@ -9,8 +9,7 @@
     listPushCategories,
     type PushCategory,
   } from '$lib/api';
-  import { Button, EmptyState, Select } from '$lib/components/ui';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
+  import { Button, EmptyState, Select, Card, Field } from '$lib/components/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
@@ -159,7 +158,7 @@
   });
 </script>
 
-<SettingsCard
+<Card
   title="Inbox notifications"
   description="Enabled categories send alerts and count toward the app badge. These choices do not change your inbox, its bell count or delivery to email and Talk."
 >
@@ -170,11 +169,7 @@
     <Button variant="secondary" size="sm" onclick={loadCategories}>Retry categories</Button>
   {:else if profile}
     {#each categories as category (category.id)}
-      <SettingsField
-        label={category.label}
-        checkbox
-        badge={managedBadge(profile, 'push_inbox_categories')}
-      >
+      <Field label={category.label} checkbox badge={managedBadge(profile, 'push_inbox_categories')}>
         <input
           type="checkbox"
           checked={profile.push_inbox_categories?.[category.id] ?? true}
@@ -188,12 +183,12 @@
             }
           }}
         />
-      </SettingsField>
+      </Field>
     {/each}
   {/if}
-</SettingsCard>
+</Card>
 
-<SettingsCard title="Push notifications">
+<Card title="Push notifications">
   {#if native}
     {#if permission === 'denied'}
       <p class="description">
@@ -245,7 +240,7 @@
     <EmptyState size="sm">No devices registered.</EmptyState>
   {/if}
   {#if profile}
-    <SettingsField
+    <Field
       label="Chat notifications"
       labelled={false}
       badge={managedBadge(profile, 'push_chat_alerts')}
@@ -261,24 +256,20 @@
           if (profile) profile.push_chat_alerts = value as 'alerts' | 'badge' | 'off';
         }}
       />
-    </SettingsField>
-    <SettingsField
-      label="Show message previews"
-      checkbox
-      badge={managedBadge(profile, 'push_preview')}
-    >
+    </Field>
+    <Field label="Show message previews" checkbox badge={managedBadge(profile, 'push_preview')}>
       <input
         type="checkbox"
         bind:checked={profile.push_preview}
         disabled={isManaged(profile, 'push_preview')}
       />
-    </SettingsField>
+    </Field>
     <p class="description">
       Previews send message text to Apple for display on your lock screen. Turn them off to send
       only a generic title, badge and link.
     </p>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .devices {

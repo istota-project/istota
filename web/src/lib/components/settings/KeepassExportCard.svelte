@@ -4,8 +4,7 @@
   import { copyText } from '$lib/clipboard';
   import { downloadBlob, generateKeyfile } from '$lib/keepass';
   import { formatDate } from '$lib/dateFormat';
-  import { Button, Field, Modal } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Button, Field, Modal, Card } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let { onExported }: { onExported?: () => void } = $props();
@@ -85,7 +84,7 @@
   }
 </script>
 
-<SettingsCard
+<Card
   title="Export credentials"
   description="Download a fresh KeePass file containing your credentials, OTP seeds and recovery codes."
 >
@@ -110,7 +109,7 @@
       onclick={start}>Export credentials</Button
     >
   </div>
-</SettingsCard>
+</Card>
 
 {#if confirming}
   <StepUpDialog

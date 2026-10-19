@@ -20,7 +20,7 @@
 
 <!--
   A plain styled text input. There was no primitive for this: the appearance
-  lived in SettingsField's descendant rules, so a control outside a settings
+  lived in Field's descendant rules, so a control outside a settings
   page had to hand-roll it, and six form components did — with the same
   declarations and three different radii.
 

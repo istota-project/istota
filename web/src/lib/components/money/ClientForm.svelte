@@ -8,8 +8,7 @@
     type ClientInput,
     type EntityRow,
   } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import { Modal, Button, Select, type SelectOption, Field } from '$lib/components/ui';
 
   /**
    * Create/edit form for an invoicing client.
@@ -196,11 +195,7 @@
         <small class="caption">The key is the identity — work entries reference it by name.</small>
       </div>
     {:else}
-      <SettingsField
-        label="Key"
-        hint="Short identifier used by work entries. Lowercase."
-        error={keyError}
-      >
+      <Field label="Key" hint="Short identifier used by work entries. Lowercase." error={keyError}>
         <input
           type="text"
           value={key}
@@ -208,63 +203,59 @@
           placeholder="acme"
           autocomplete="off"
         />
-      </SettingsField>
+      </Field>
     {/if}
 
-    <SettingsField label="Name">
+    <Field label="Name">
       <input type="text" bind:value={name} placeholder="Acme Corp" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Email">
+    <Field label="Email">
       <input type="text" bind:value={email} placeholder="ap@acme.example" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Address">
+    <Field label="Address">
       <textarea rows="3" bind:value={address}></textarea>
-    </SettingsField>
+    </Field>
 
-    <SettingsField
-      label="Terms"
-      hint="A number of days, or a label like NET 15."
-      error={termsError}
-    >
+    <Field label="Terms" hint="A number of days, or a label like NET 15." error={termsError}>
       <input type="text" bind:value={terms} placeholder="30" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Entity" hint="Which of your entities bills this client.">
+    <Field label="Entity" hint="Which of your entities bills this client.">
       <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="A/R account" hint="Blank falls back to the business default.">
+    <Field label="A/R account" hint="Blank falls back to the business default.">
       <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Schedule" warning={scheduleWarning}>
+    <Field label="Schedule" warning={scheduleWarning}>
       <Select bind:value={schedule} options={scheduleOptions} fullWidth ariaLabel="Schedule" />
-    </SettingsField>
+    </Field>
 
     {#if schedule === 'monthly'}
-      <SettingsField label="Schedule day" hint="Clamped to the last day of shorter months.">
+      <Field label="Schedule day" hint="Clamped to the last day of shorter months.">
         <input type="text" inputmode="numeric" bind:value={scheduleDay} placeholder="1" />
-      </SettingsField>
+      </Field>
     {/if}
 
-    <SettingsField label="Post income to ledger on payment" checkbox>
+    <Field label="Post income to ledger on payment" checkbox>
       <input type="checkbox" bind:checked={ledgerPosting} />
-    </SettingsField>
+    </Field>
 
     <details bind:open={advancedOpen}>
       <summary>Advanced</summary>
       <div class="vstack" style:--vstack-gap="var(--space-2)">
-        <SettingsField label="Reminder days">
+        <Field label="Reminder days">
           <input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
-        </SettingsField>
-        <SettingsField label="Notifications" hint="Where overdue notices go.">
+        </Field>
+        <Field label="Notifications" hint="Where overdue notices go.">
           <input type="text" bind:value={notifications} />
-        </SettingsField>
-        <SettingsField label="Days until overdue">
+        </Field>
+        <Field label="Days until overdue">
           <input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
-        </SettingsField>
+        </Field>
       </div>
     </details>
   </div>

@@ -12,7 +12,15 @@
     type AdminStatsUserSource,
     type AdminSubscriptionSpend,
   } from '$lib/api';
-  import { Avatar, AvatarPicker, CardGrid, Field, StatTile, PageLoading } from '$lib/components/ui';
+  import {
+    Avatar,
+    AvatarPicker,
+    Card,
+    CardGrid,
+    Field,
+    StatTile,
+    PageLoading,
+  } from '$lib/components/ui';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
@@ -341,6 +349,7 @@
   {:else if error}
     <div class="center-msg error">{error}</div>
   {:else if stats}
+    {@const live = stats}
     <!-- Rows of three rather than one column, which left most of a wide
          screen empty. Masonry was tried and read as a jumble: the cards are
          close enough in height that equal rows line up better than packed
@@ -355,34 +364,33 @@
            those questions. -->
       {@const adminCount = stats.users.filter((u) => u.is_admin).length}
       {@const jobErrors = stats.scheduler?.last_errors?.length ?? 0}
-      <section class="card installation">
-        <header class="section-header">
-          <h2 class="hstack title-section">
-            <span class="install-avatar">
-              <Avatar
-                kind="bot"
-                version={identity.user.avatars?.bot ?? null}
-                label={identity.user.bot_name || 'Istota'}
-              />
-            </span>
-            {identity.user.bot_name || 'Istota'}
-          </h2>
+      <Card title={identity.user.bot_name || 'Istota'} class="installation">
+        {#snippet icon()}
+          <span class="install-avatar">
+            <Avatar
+              kind="bot"
+              version={identity.user.avatars?.bot ?? null}
+              label={identity.user.bot_name || 'Istota'}
+            />
+          </span>
+        {/snippet}
+        {#snippet actions()}
           <span class="health">
             <span
               class="dot"
-              class:dot-ok={stats.system.scheduler_healthy && !stats.brain_status?.degraded}
-              class:dot-warn={stats.system.scheduler_healthy && stats.brain_status?.degraded}
-              class:dot-bad={!stats.system.scheduler_healthy}
+              class:dot-ok={live.system.scheduler_healthy && !live.brain_status?.degraded}
+              class:dot-warn={live.system.scheduler_healthy && live.brain_status?.degraded}
+              class:dot-bad={!live.system.scheduler_healthy}
             ></span>
-            {#if !stats.system.scheduler_healthy}
+            {#if !live.system.scheduler_healthy}
               Stale
-            {:else if stats.brain_status?.degraded}
+            {:else if live.brain_status?.degraded}
               Degraded
             {:else}
               Healthy
             {/if}
           </span>
-        </header>
+        {/snippet}
         <p class="caption">
           {#if stats.system.scheduler_healthy && stats.brain_status?.degraded}
             {#if stats.brain_status.active}
@@ -443,15 +451,12 @@
             </dd>
           {/if}
         </dl>
-      </section>
+      </Card>
 
       <!-- Models / brain backend -->
       {#if stats.models && !stats.models.error}
         {@const m = stats.models}
-        <section class="card">
-          <header class="section-header">
-            <h2 class="title-section">Models</h2>
-          </header>
+        <Card title="Models">
           <dl class="kv model-kv">
             <dt>Brain</dt>
             <dd>{brainLabel(m.brain_kind)}</dd>
@@ -498,15 +503,12 @@
               </div>
             </div>
           {/if}
-        </section>
+        </Card>
       {/if}
 
       <!-- Tasks. Fills its row when it ends up alone in it, as at two columns,
            where Users after it starts a row of its own. -->
-      <section class="card" data-fill>
-        <header class="section-header">
-          <h2 class="title-section">Task activity</h2>
-        </header>
+      <Card title="Task activity" data-fill>
         <div class="kpi-grid card-grid">
           <StatTile
             label="Interactive 24h"
@@ -571,13 +573,10 @@
             {/each}
           </div>
         {/if}
-      </section>
+      </Card>
 
       <!-- Users -->
-      <section class="card" data-width="full">
-        <header class="section-header">
-          <h2 class="title-section">Users</h2>
-        </header>
+      <Card title="Users" data-width="full">
         <div class="table-scroll">
           <table class="table table--fixed users-grid">
             <thead>
@@ -674,7 +673,7 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </Card>
 
       <!-- Claude Code subscription. Above Token usage and separate from it, which
          is the whole point of the pair: on a subscription deployment the cost
@@ -696,10 +695,7 @@
          now, as a SKIP. -->
       {#if stats.subscription && (stats.subscription.windows ?? []).length > 0}
         {@const sub = stats.subscription}
-        <section class="card">
-          <header class="section-header">
-            <h2 class="title-section">Claude Code subscription</h2>
-          </header>
+        <Card title="Claude Code subscription">
           <!-- Extra usage is a tile in this grid rather than a footer line
                under it, so the card reads as one row of meters the way the
                system banner above does. It is last because it is the one
@@ -730,7 +726,7 @@
               — reading is stale{#if sub.error}: {sub.error}{/if}
             {/if}
           </p>
-        </section>
+        </Card>
       {/if}
 
       <!-- Token usage. Per-model, per-brain and per-origin live here; per-user
@@ -740,10 +736,7 @@
       {#if stats.usage && !stats.usage.error && stats.usage.totals_30d}
         {@const u24 = stats.usage.totals_24h}
         {@const u30 = stats.usage.totals_30d}
-        <section class="card">
-          <header class="section-header">
-            <h2 class="title-section">Token usage</h2>
-          </header>
+        <Card title="Token usage">
           <div class="kpi-grid card-grid">
             <StatTile label="Tokens 24h" sub="{formatNumber(u30.total_tokens)} (30d)">
               {formatNumber(u24?.total_tokens ?? 0)}
@@ -780,28 +773,24 @@
               {/if}
             </p>
           {/if}
-        </section>
+        </Card>
       {:else if stats.usage?.error}
-        <section class="card">
-          <header class="section-header">
-            <h2 class="title-section">Token usage</h2>
-          </header>
+        <Card title="Token usage">
           <p class="usage-note caption">Usage stats unavailable: {stats.usage.error}</p>
-        </section>
+        </Card>
       {/if}
 
       <!-- Where the tokens went, one split per card so the three read as a row. -->
       {#if stats.usage && !stats.usage.error}
         {#if (stats.usage?.by_model_30d ?? []).length > 0}
-          <section class="card">
-            <header class="section-header">
-              <h2 class="title-section">Tokens by model</h2>
+          <Card title="Tokens by model">
+            {#snippet actions()}
               <span class="caption"
-                >30d{#if (stats.usage?.by_model_30d_omitted ?? 0) > 0}
-                  · top 5 of {(stats.usage?.by_model_30d ?? []).length +
-                    (stats.usage?.by_model_30d_omitted ?? 0)}{/if}</span
+                >30d{#if (live.usage?.by_model_30d_omitted ?? 0) > 0}
+                  · top 5 of {(live.usage?.by_model_30d ?? []).length +
+                    (live.usage?.by_model_30d_omitted ?? 0)}{/if}</span
               >
-            </header>
+            {/snippet}
             <div class="usage-rows">
               {#each stats.usage?.by_model_30d ?? [] as g (g.key)}
                 <div class="usage-row">
@@ -811,14 +800,13 @@
                 </div>
               {/each}
             </div>
-          </section>
+          </Card>
         {/if}
         {#if (stats.usage?.by_brain_30d ?? []).length > 0}
-          <section class="card">
-            <header class="section-header">
-              <h2 class="title-section">Tokens by brain</h2>
+          <Card title="Tokens by brain">
+            {#snippet actions()}
               <span class="caption">30d</span>
-            </header>
+            {/snippet}
             <div class="usage-rows">
               {#each stats.usage?.by_brain_30d ?? [] as g (g.key)}
                 <div class="usage-row">
@@ -828,14 +816,13 @@
                 </div>
               {/each}
             </div>
-          </section>
+          </Card>
         {/if}
         {#if (stats.usage?.by_origin_24h ?? []).length > 0}
-          <section class="card">
-            <header class="section-header">
-              <h2 class="title-section">Tokens by origin</h2>
+          <Card title="Tokens by origin">
+            {#snippet actions()}
               <span class="caption">24h</span>
-            </header>
+            {/snippet}
             <div class="usage-rows">
               {#each stats.usage?.by_origin_24h ?? [] as g (g.key)}
                 <div class="usage-row">
@@ -845,7 +832,7 @@
                 </div>
               {/each}
             </div>
-          </section>
+          </Card>
         {/if}
       {/if}
 
@@ -856,10 +843,7 @@
          upload control does not earn a section in the sidebar. It fills its
          row because the cards before it are optional: without the
          subscription card it would sit alone before Modules. -->
-      <section class="card" data-fill>
-        <header class="section-header">
-          <h2 class="title-section">Bot icon</h2>
-        </header>
+      <Card title="Bot icon" data-fill>
         <Field label="Picture" labelled={false} wide error={botIconError} warning={botIconNote}>
           <AvatarPicker
             pickLabel="Choose the bot icon"
@@ -894,14 +878,11 @@
             Talk; changing it here does not change that one.
           {/if}
         </p>
-      </section>
+      </Card>
 
       <!-- Modules -->
       {#if Object.keys(stats.modules).length > 0}
-        <section class="card" data-width="full">
-          <header class="section-header">
-            <h2 class="title-section">Modules</h2>
-          </header>
+        <Card title="Modules" data-width="full">
           <div class="module-grid card-grid">
             {#each Object.entries(stats.modules) as [name, mod] (name)}
               <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
@@ -921,7 +902,7 @@
               </div>
             {/each}
           </div>
-        </section>
+        </Card>
       {/if}
     </CardGrid>
 
@@ -934,9 +915,8 @@
 </div>
 
 <style>
-  /* Layout primitives (.settings / .card / .banner / .placeholder /
-	   .section-header) come from web/src/lib/styles/settings.css, the table
-	   from table.css.
+  /* The page frame is settings.css's `.settings`, the cards are `Card`, the
+	   table is table.css.
 	   Admin-specific bits below: KPIs, source bars, dot indicators. */
 
   /* Page metadata, not content. It sat in the app bar until the admin sidebar

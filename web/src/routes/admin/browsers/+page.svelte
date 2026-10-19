@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getAdminBrowsers, type AdminBrowsers } from '$lib/api';
-  import { Button, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Button, Card, NoticeBanner, PageLoading } from '$lib/components/ui';
 
   let report = $state<AdminBrowsers | null>(null);
   let loading = $state(true);
@@ -68,9 +68,9 @@
       </div>
     {/if}
     {#if report.instances.length === 0}
-      <section class="card"><p class="caption">No live browsers.</p></section>
+      <Card><p class="caption">No live browsers.</p></Card>
     {:else}
-      <section class="card">
+      <Card>
         <div class="table-scroll">
           <table class="table table--fixed browser-grid">
             <thead><tr><th>User</th><th>Slot</th><th>Idle</th><th>Console</th></tr></thead>
@@ -94,7 +94,7 @@
             </tbody>
           </table>
         </div>
-      </section>
+      </Card>
     {/if}
     {#if report.as_of}
       <p class="caption">As of {new Date(report.as_of).toLocaleTimeString()}</p>

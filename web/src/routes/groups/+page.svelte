@@ -10,8 +10,8 @@
     CardGrid,
     EmptyState,
     PageLoading,
+    Card,
   } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
   import { getGroups, getGroup, AuthError, type GroupSummary, type GroupDetail } from '$lib/api';
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
@@ -185,10 +185,10 @@
         {/if}
         <CardGrid masonry>
           <div class="wide" data-width="wide"><GroupNotebook groupId={detail.group_id} /></div>
-          <SettingsCard title="Members">
+          <Card title="Members">
             {#snippet status()}<span class="caption">{detail?.members.length}</span>{/snippet}
             <GroupMembers group={detail} onChanged={changed} />
-          </SettingsCard>
+          </Card>
           <GroupRooms rooms={detail.rooms} />
           {#if detail.capabilities.read_briefings}<GroupBriefings
               groupId={detail.group_id}

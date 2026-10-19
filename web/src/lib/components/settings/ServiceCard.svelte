@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ConfirmDialog, EmptyState } from '$lib/components/ui';
+  import { Card, ConfirmDialog, EmptyState } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import SecretField from './SecretField.svelte';
@@ -94,30 +94,23 @@
   useSettingsSave(() => (service.fields.length > 0 ? { dirty, saving, save: saveAll } : null));
 </script>
 
-<section class="card" data-status={service.status}>
-  <header class="section-header">
-    <div class="hstack">
-      <h2 class="title-section">{service.label}</h2>
-      <span class="status-pill status-{service.status}">
-        {statusLabel(service.status)}
-      </span>
-    </div>
-    <div class="hstack">
-      {#if service.last_updated}
-        <span class="caption">Updated {service.last_updated}</span>
-      {/if}
-      <!-- No Save button: the app bar owns it (see useSettingsSave above). The
-			     flash stays, because with one shared button it is the only thing that
-			     says *this* card is what got written. -->
-      {#if savedFlash}
-        <span class="saved-flash">Saved.</span>
-      {/if}
-    </div>
-  </header>
-
-  {#if service.hint}
-    <p class="description">{service.hint}</p>
-  {/if}
+<Card title={service.label} description={service.hint || undefined} data-status={service.status}>
+  {#snippet status()}
+    <span class="status-pill status-{service.status}">
+      {statusLabel(service.status)}
+    </span>
+  {/snippet}
+  {#snippet actions()}
+    {#if service.last_updated}
+      <span class="caption">Updated {service.last_updated}</span>
+    {/if}
+    <!-- No Save button: the app bar owns it (see useSettingsSave above). The
+		     flash stays, because with one shared button it is the only thing that
+		     says *this* card is what got written. -->
+    {#if savedFlash}
+      <span class="saved-flash">Saved.</span>
+    {/if}
+  {/snippet}
 
   {#if service.used_by && service.used_by.length > 0}
     <p class="used-by caption">
@@ -161,7 +154,7 @@
       <div class="banner error">{saveError}</div>
     {/if}
   {/if}
-</section>
+</Card>
 
 <!--
   Clearing a stored credential is destructive and irreversible, so it goes
@@ -180,9 +173,8 @@
 />
 
 <style>
-  /* Inherit shared .settings .card / .section-header / .status-pill /
-	   .meta styling — this component is meant to be used inside
-	   <div class="settings"> wrappers that already pull in settings.css. */
+  /* The status pill is settings.css's `.settings .status-pill`: this card is
+	   used inside the settings page frame. */
   .used-by {
     margin: 0;
   }

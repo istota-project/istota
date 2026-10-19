@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
   import {
     Badge,
     Button,
@@ -9,6 +8,7 @@
     Input,
     KebabMenu,
     Select,
+    Card,
   } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
@@ -390,7 +390,7 @@
   }
 </script>
 
-<SettingsCard title="Rules ({rules.length})">
+<Card title="Rules ({rules.length})">
   <!-- The banner sits above the controls rather than replacing them. A failed
        *reload* used to wipe the card to a banner, taking the scope pickers
        with it, so nothing on screen could trigger another load and only a page
@@ -649,7 +649,7 @@
       </ul>
     {/if}
   {/if}
-</SettingsCard>
+</Card>
 
 <ConfirmDialog
   open={confirmDelete !== null}

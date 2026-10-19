@@ -6,8 +6,7 @@
     type CredentialBackupSettings,
     type StepUpProof,
   } from '$lib/api';
-  import { Button, Field, Input } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Button, Field, Input, Card } from '$lib/components/ui';
   import StepUpDialog from './StepUpDialog.svelte';
 
   let settings = $state<CredentialBackupSettings | null>(null);
@@ -44,7 +43,7 @@
   }
 </script>
 
-<SettingsCard
+<Card
   title="Scheduled backup"
   description="Encrypted credential backups saved to your exports/credential-backups folder."
 >
@@ -95,7 +94,7 @@
       {/if}
     </div>
   {/if}
-</SettingsCard>
+</Card>
 {#if confirming}
   <StepUpDialog
     action="backup_recipient"

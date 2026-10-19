@@ -2,8 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { MessageSquare } from '@lucide/svelte';
-  import { CountPill, EmptyState } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { CountPill, EmptyState, Card } from '$lib/components/ui';
   import { getChatRooms, type ChatRoom, type GroupDetail } from '$lib/api';
   import { formatDateTime, formatRelative } from '$lib/dateFormat';
 
@@ -32,7 +31,7 @@
   });
 </script>
 
-<SettingsCard title="Rooms" description="Linked chat rooms you can open, most recent first.">
+<Card title="Rooms" description="Linked chat rooms you can open, most recent first.">
   {#if ordered.length}
     <ul class="rooms list-reset">
       {#each ordered as room (room.token)}
@@ -51,7 +50,7 @@
       {/each}
     </ul>
   {:else}<EmptyState size="sm">No linked rooms you can access.</EmptyState>{/if}
-</SettingsCard>
+</Card>
 
 <style>
   .rooms li {

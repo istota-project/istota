@@ -80,9 +80,9 @@
 {/snippet}
 
 <!--
-  Label + control + supplementary text, extracted from SettingsField so it is
-  usable outside a settings page. SettingsField keeps its name and API and
-  delegates here; this is also what deleted the byte-identical second copy of
+  Label + control + supplementary text, extracted from the old SettingsField so
+  it is usable outside a settings page (settings pages now use it directly);
+  this is also what deleted the byte-identical second copy of
   these rules that lived in lib/styles/settings.css.
 
   The descendant :global() rules below are what style an arbitrary control the

@@ -12,11 +12,9 @@
     type NextcloudSharing,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { Button, Modal, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Modal, Select, type SelectOption, Card, Field } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { offSiteRoutesOpenInBrowser } from '$lib/platform/nativeConnection';
-  import SettingsCard from './SettingsCard.svelte';
-  import SettingsField from './SettingsField.svelte';
 
   interface Props {
     token: NextcloudTokenStatus;
@@ -231,7 +229,7 @@
   </span>
 {/snippet}
 
-<SettingsCard
+<Card
   title="Nextcloud"
   description="When connected, messages you send from web chat appear in Nextcloud Talk under your own name, and read state syncs between web and Talk."
   status={statusPill}
@@ -263,7 +261,7 @@
             <p class="caption note">{group.empty}</p>
           {/if}
           {#each rows as c (c.id)}
-            <SettingsField
+            <Field
               label={c.name}
               labelled={false}
               warning={aboveLimit(state, c) ? "Above this instance's limit." : undefined}
@@ -277,7 +275,7 @@
                 onValueChange={(v) => setLevel(c.id, v)}
                 fullWidth
               />
-            </SettingsField>
+            </Field>
           {/each}
         </div>
       {/each}
@@ -317,7 +315,7 @@
   {#if info}
     <div class="banner success">{info}</div>
   {/if}
-</SettingsCard>
+</Card>
 
 <Modal
   open={confirmingDisconnect}

@@ -6,8 +6,7 @@
     type KeepassImportPreview,
     type KeepassImportItem,
   } from '$lib/api';
-  import { Button, Field, Input } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Button, Field, Input, Card } from '$lib/components/ui';
 
   let { onImported }: { onImported?: () => void } = $props();
   let file: File | null = $state(null);
@@ -82,7 +81,7 @@
   }
 </script>
 
-<SettingsCard
+<Card
   title="Import from KeePass"
   description="Choose entries from a KeePass file to copy into your credentials."
 >
@@ -180,7 +179,7 @@
       }}>Cancel</Button
     >
   </div>
-</SettingsCard>
+</Card>
 
 <style>
   fieldset {

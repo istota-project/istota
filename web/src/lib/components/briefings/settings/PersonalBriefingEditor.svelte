@@ -8,9 +8,8 @@
     type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
-  import { Input, NoticeBanner, Select, type SelectOption } from '$lib/components/ui';
+  import { Input, NoticeBanner, Select, type SelectOption, Card, Field } from '$lib/components/ui';
   import { notifyError } from '$lib/stores/notices';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import BlockBuilder from '../BlockBuilder.svelte';
@@ -115,27 +114,27 @@
   useSettingsSave(() => ({ dirty, saving, save }));
 </script>
 
-<SettingsCard title="Schedule and delivery">
+<Card title="Schedule and delivery">
   {#if held}
     <NoticeBanner title="Paused by an administrator" variant="warn" collapsed={false}>
       This briefing will not run until an administrator resumes it.
     </NoticeBanner>
   {/if}
   <fieldset class="fields">
-    <SettingsField
+    <Field
       label="Title"
       hint="Shown on every edition, followed by its date. Leave blank to use the name."
     >
       <Input bind:value={draft.title} placeholder={derivedTitle(name)} />
-    </SettingsField>
+    </Field>
     <div class="field-row">
-      <SettingsField
+      <Field
         label="Schedule"
         hint="A cron expression in your timezone, for example 0 7 * * 1-5 for weekdays at 07:00."
       >
         <Input bind:value={draft.cron} monospace />
-      </SettingsField>
-      <SettingsField label="Delivery" labelled={false}>
+      </Field>
+      <Field label="Delivery" labelled={false}>
         <Select
           value={draft.output}
           options={outputOptions}
@@ -143,9 +142,9 @@
           ariaLabel="Delivery"
           fullWidth
         />
-      </SettingsField>
+      </Field>
       {#if draft.output === 'talk'}
-        <SettingsField label="Talk room" labelled={false}>
+        <Field label="Talk room" labelled={false}>
           <Select
             value={draft.conversation_token}
             options={[
@@ -160,20 +159,20 @@
             ariaLabel="Talk room"
             fullWidth
           />
-        </SettingsField>
+        </Field>
       {/if}
     </div>
-    <SettingsField
+    <Field
       label="Enabled"
       checkbox
       hint="When off, the briefing keeps its content but does not run."
     >
       <input type="checkbox" bind:checked={draft.enabled} disabled={held} />
-    </SettingsField>
+    </Field>
   </fieldset>
-</SettingsCard>
+</Card>
 
-<SettingsCard
+<Card
   title="Content"
   description="Ordered blocks, each gathered from its sources and summarized or shown as is. Changes save as you make them."
 >
@@ -192,7 +191,7 @@
       onChange={onBlocksChange}
     />
   {/key}
-</SettingsCard>
+</Card>
 
 <style>
   .fields {

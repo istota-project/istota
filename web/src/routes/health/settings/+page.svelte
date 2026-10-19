@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getHealthSettings, putHealthSettings, type HealthSettings } from '$lib/api';
-  import { Select } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import { Select, Card, Field } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
 
@@ -176,12 +176,12 @@
   {error}
   {info}
 >
-  <SettingsCard title="Profile">
-    <SettingsField label="Date of birth" hint={ageYears != null ? `Age: ${ageYears}` : undefined}>
+  <Card title="Profile">
+    <Field label="Date of birth" hint={ageYears != null ? `Age: ${ageYears}` : undefined}>
       <input type="date" bind:value={dobInput} />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Height">
+    <Field label="Height">
       {#if settings.display_units.height === 'ft_in'}
         <div class="ft-in-row hstack">
           <input
@@ -209,12 +209,9 @@
           <span class="suffix muted">cm</span>
         </div>
       {/if}
-    </SettingsField>
+    </Field>
 
-    <SettingsField
-      label="Biological sex"
-      hint="Used for sex-specific reference ranges on biomarkers."
-    >
+    <Field label="Biological sex" hint="Used for sex-specific reference ranges on biomarkers.">
       <Select
         value={settings.sex ?? ''}
         options={sexOptions}
@@ -222,14 +219,14 @@
         ariaLabel="Biological sex"
         fullWidth
       />
-    </SettingsField>
-  </SettingsCard>
+    </Field>
+  </Card>
 
-  <SettingsCard
+  <Card
     title="Display preferences"
     description="All values are stored in metric. Choose how they're shown."
   >
-    <SettingsField label="Weight">
+    <Field label="Weight">
       <Select
         value={settings.display_units.weight}
         options={weightUnitOptions}
@@ -237,9 +234,9 @@
         ariaLabel="Weight unit"
         fullWidth
       />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Height">
+    <Field label="Height">
       <Select
         value={settings.display_units.height}
         options={heightUnitOptions}
@@ -247,9 +244,9 @@
         ariaLabel="Height unit"
         fullWidth
       />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Temperature">
+    <Field label="Temperature">
       <Select
         value={settings.display_units.temp}
         options={tempUnitOptions}
@@ -257,8 +254,8 @@
         ariaLabel="Temperature unit"
         fullWidth
       />
-    </SettingsField>
-  </SettingsCard>
+    </Field>
+  </Card>
 </SettingsLayout>
 
 <style>

@@ -29,7 +29,7 @@
       keyboard handling a popover already has.
 
       The trigger is rendered via `child` as a span, not the default button,
-      because SettingsField wraps its label text and its control in one
+      because Field wraps its label text and its control in one
       <label>: a <button> is a labelable element, so a button trigger sitting
       before the input in tree order would become the label's control and
       clicking the field name would focus the "?" instead of the input.

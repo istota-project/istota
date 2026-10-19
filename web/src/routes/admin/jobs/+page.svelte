@@ -18,8 +18,9 @@
     KebabMenu,
     PageLoading,
     type KebabItem,
+    Card,
   } from '$lib/components/ui';
-  import { SettingsCard, StepUpDialog } from '$lib/components/settings';
+  import { StepUpDialog } from '$lib/components/settings';
   import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess, notifyWarning } from '$lib/stores/notices';
 
@@ -214,7 +215,7 @@
       </div>
     {/snippet}
 
-    <SettingsCard
+    <Card
       title="User jobs"
       description="Jobs from each user's CRON.md. Disabling writes the change to that file, so the user can turn the job back on with !cron enable. Deleting removes it from the file."
     >
@@ -225,9 +226,9 @@
       {:else}
         <EmptyState size="sm">No user jobs yet.</EmptyState>
       {/if}
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard
+    <Card
       title="Module pollers"
       description="Jobs a module keeps for each user who has it on. They can be disabled but not deleted, since the module would create them again."
     >
@@ -238,7 +239,7 @@
       {:else}
         <EmptyState size="sm">No module pollers.</EmptyState>
       {/if}
-    </SettingsCard>
+    </Card>
   {/if}
 </div>
 

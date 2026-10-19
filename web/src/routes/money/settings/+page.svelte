@@ -1,13 +1,8 @@
 <script lang="ts">
   import { monarchLogin } from '$lib/api';
   import { getMoneyServices } from '$lib/money/settingsContext';
-  import {
-    ServiceCard,
-    SettingsLayout,
-    SettingsCard,
-    SettingsField,
-  } from '$lib/components/settings';
-  import { Button, HintPopover, Input } from '$lib/components/ui';
+  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
+  import { Button, HintPopover, Input, Card, Field } from '$lib/components/ui';
 
   const moneyServices = getMoneyServices();
 
@@ -101,7 +96,7 @@
 >
   {#each moneyServices.services as svc (svc.service)}
     {#if svc.service === 'monarch'}
-      <SettingsCard
+      <Card
         title="Connect to Monarch Money"
         description="Monarch's API requires browser session cookies. Pick the method that works for your account."
       >
@@ -122,7 +117,7 @@
               void submitLogin();
             }}
           >
-            <SettingsField label="Email">
+            <Field label="Email">
               <Input
                 type="email"
                 bind:value={loginEmail}
@@ -130,8 +125,8 @@
                 disabled={loginBusy}
                 required
               />
-            </SettingsField>
-            <SettingsField label="Password">
+            </Field>
+            <Field label="Password">
               <Input
                 type="password"
                 bind:value={loginPassword}
@@ -139,11 +134,9 @@
                 disabled={loginBusy}
                 required
               />
-            </SettingsField>
+            </Field>
             {#if loginChallenge}
-              <SettingsField
-                label={loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}
-              >
+              <Field label={loginChallenge === 'email_otp' ? 'Emailed code' : 'Authenticator code'}>
                 <Input
                   type="text"
                   inputmode="numeric"
@@ -155,9 +148,9 @@
                   placeholder="6-digit code"
                   autofocus
                 />
-              </SettingsField>
+              </Field>
             {:else}
-              <SettingsField label="MFA code" hint="Only if your account has MFA enabled.">
+              <Field label="MFA code" hint="Only if your account has MFA enabled.">
                 <Input
                   type="text"
                   inputmode="numeric"
@@ -167,7 +160,7 @@
                   disabled={loginBusy}
                   placeholder="6-digit code"
                 />
-              </SettingsField>
+              </Field>
             {/if}
             <div class="login-actions">
               <Button
@@ -227,7 +220,7 @@
         <p class="legacy-note caption">
           Cookies are the only credential we store. They last months on a trusted-device login.
         </p>
-      </SettingsCard>
+      </Card>
     {/if}
     <ServiceCard service={svc} onChanged={moneyServices.reload} />
   {/each}
@@ -238,7 +231,7 @@
      card, so `--surface-raised` against the card's own fill is the tile
      contrast — the panel around them used to be a hand-rolled card at
      card level, which put a different fill and a stronger border beside every
-     real SettingsCard on the page. */
+     real Card on the page. */
   .monarch-method {
     margin: var(--space-2) 0;
     border: 1px solid var(--border-default);

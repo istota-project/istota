@@ -1,12 +1,13 @@
-/* Shared styles for settings pages — /settings, /feeds/settings, /money/settings.
-   Pages declare a wrapper element with class="settings" and use the
-   .card / .section-header primitives below. Tables are the global `.table`
+/* The settings page frame — /settings, the module settings pages, /admin,
+   /groups and the setup frame. Pages declare a wrapper element with
+   class="settings"; the cards inside it are the `Card` component, which owns
+   its own look and needs no ancestor class. Tables are the global `.table`
    family in table.css.
 
    Form rows are NOT here: `.field` moved to ui/Field.svelte, which is also
    what styles a bare <input> a caller passes into it. A settings page reaches
-   for SettingsField / Field / Input rather than restating their declarations —
-   see settingsControls.test.ts for why. */
+   for Field / Input rather than restating their declarations — see
+   settingsControls.test.ts for why. */
 
 .settings {
   font-size: var(--text-sm);
@@ -36,9 +37,9 @@
 }
 
 /* Placement only: the type is the global `.description`. A description just
-   under a title sits a step below it; inside a card the `:where()` reset
-   further down zeroes this, since the card's gap already spaces it. Scored at
-   one class so any page rule placing its own description wins outright. */
+   under a title sits a step below it; inside a card the card's own paragraph
+   reset zeroes this, since the card's gap already spaces it. Scored at one
+   class so any page rule placing its own description wins outright. */
 .settings :where(.description) {
   margin: var(--space-1) 0 0;
 }
@@ -52,40 +53,6 @@
 .settings .dirty-badge {
   font-size: var(--text-xs);
   color: var(--status-warn-fg);
-}
-
-.settings .card {
-  background: var(--surface-card);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-card);
-  padding: var(--space-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-/* Cards own their vertical spacing; browser paragraph margins double it. */
-.settings .card :where(p, ul, ol) {
-  margin-block: 0;
-}
-
-.settings .card > .btn {
-  align-self: flex-start;
-}
-
-.settings .card h3 {
-  margin: 0;
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  font-weight: var(--weight-semibold);
-}
-
-.settings .section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
 }
 
 .settings .status-pill {
@@ -116,26 +83,10 @@
     flex-direction: column;
     align-items: stretch;
   }
-  .settings .card {
-    padding: var(--space-3);
-  }
 }
 
 @media (max-width: 640px) {
   .settings {
     padding: var(--space-3) var(--space-3) 3rem;
   }
-  .settings .card {
-    padding: var(--space-2);
-  }
-}
-
-/* While the pane holds nothing but the loading message, drop the wrapper's own
-   padding: it is asymmetric (extra at the bottom, to keep the last card off the
-   screen edge), which would put the message a notch above the pane's centre
-   while every other section centres exactly. `.center-msg` carries its own
-   padding. Last in the file so it wins over the breakpoints above, which
-   re-declare the padding shorthand. */
-.settings:has(> .center-msg) {
-  padding: 0;
 }

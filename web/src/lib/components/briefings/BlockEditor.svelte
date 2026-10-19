@@ -18,8 +18,8 @@
     Select,
     TextArea,
     type SelectOption,
+    Field,
   } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
   import SourceConfigFields from './SourceConfigFields.svelte';
   import BriefingPreview from './BriefingPreview.svelte';
   import { sourceKindLabel } from './settings/briefingSettings';
@@ -213,9 +213,9 @@
   }}
 >
   <fieldset disabled={saving} class="draft-fields">
-    <SettingsField label="Title" error={titleError}>
+    <Field label="Title" error={titleError}>
       <Input bind:value={draft.title} />
-    </SettingsField>
+    </Field>
     <section aria-label="Block sources" class="sources">
       <div class="section-head">
         <h3 class="micro-label">Sources</h3>
@@ -293,10 +293,10 @@
     <details class="advanced">
       <summary>Advanced</summary>
       <div class="advanced-fields">
-        <SettingsField label="Directive" hint="How to treat this block's sources.">
+        <Field label="Directive" hint="How to treat this block's sources.">
           <TextArea bind:value={draft.directive} rows={3} />
-        </SettingsField>
-        <SettingsField label="Render mode" labelled={false}>
+        </Field>
+        <Field label="Render mode" labelled={false}>
           <Select
             value={draft.render_mode}
             options={renderOptions}
@@ -306,8 +306,8 @@
               draft.render_mode = value;
             }}
           />
-        </SettingsField>
-        <SettingsField label="Story count">
+        </Field>
+        <Field label="Story count">
           <Input
             type="number"
             min="1"
@@ -319,13 +319,13 @@
                 event.currentTarget.value === '' ? undefined : Number(event.currentTarget.value),
               )}
           />
-        </SettingsField>
-        <SettingsField label="Tone">
+        </Field>
+        <Field label="Tone">
           <Input
             value={(draft.options.tone as string) ?? ''}
             oninput={(event) => setOption('tone', event.currentTarget.value)}
           />
-        </SettingsField>
+        </Field>
       </div>
     </details>
   </fieldset>

@@ -1,8 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { KEY_RE, KEY_HINT, type ServiceRow, type ServiceInput } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import { Modal, Button, Select, type SelectOption, Field } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billable service.
@@ -113,30 +112,30 @@
         <small class="caption">The key is the identity — work entries reference it by name.</small>
       </div>
     {:else}
-      <SettingsField label="Key" hint="Short identifier used by work entries." error={keyError}>
+      <Field label="Key" hint="Short identifier used by work entries." error={keyError}>
         <input type="text" bind:value={key} placeholder="consulting" autocomplete="off" />
-      </SettingsField>
+      </Field>
     {/if}
 
-    <SettingsField label="Display name" hint="Printed on the invoice line.">
+    <Field label="Display name" hint="Printed on the invoice line.">
       <input type="text" bind:value={displayName} placeholder="Consulting" />
-    </SettingsField>
+    </Field>
 
-    <SettingsField label="Type" warning={typeWarning}>
+    <Field label="Type" warning={typeWarning}>
       <Select bind:value={type} options={typeOptions} fullWidth ariaLabel="Service type" />
-    </SettingsField>
+    </Field>
 
     {#if type === 'other'}
       <p class="field-note caption">Rate is not used — the amount comes from each work entry.</p>
     {:else}
-      <SettingsField label={rateLabel} error={rateError}>
+      <Field label={rateLabel} error={rateError}>
         <input type="text" inputmode="decimal" bind:value={rate} placeholder="150" />
-      </SettingsField>
+      </Field>
     {/if}
 
-    <SettingsField label="Income account">
+    <Field label="Income account">
       <input type="text" bind:value={incomeAccount} placeholder="Income:Consulting" />
-    </SettingsField>
+    </Field>
   </div>
 
   {#if error}

@@ -6,8 +6,14 @@
     type BriefingTarget,
     type GroupBriefingGeneration,
   } from '$lib/api';
-  import { Button, Modal, NoticeBanner, OptionCards, type OptionCard } from '$lib/components/ui';
-  import { SettingsField } from '$lib/components/settings';
+  import {
+    Button,
+    Modal,
+    NoticeBanner,
+    OptionCards,
+    type OptionCard,
+    Field,
+  } from '$lib/components/ui';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { briefingSettingsUrl, GROUP_SOURCE_KINDS } from './briefingSettings';
 
@@ -167,13 +173,13 @@
       </NoticeBanner>
     {/if}
     {#if asPrompt && from.mode !== 'prompt'}
-      <SettingsField
+      <Field
         label="What should it cover?"
         hint="Nothing in the original can be used by a group, so the copy starts from instructions."
         wide
       >
         <textarea rows="3" bind:value={prompt}></textarea>
-      </SettingsField>
+      </Field>
     {/if}
     {#if error}<div class="banner error" role="alert">{error}</div>{/if}
   </div>

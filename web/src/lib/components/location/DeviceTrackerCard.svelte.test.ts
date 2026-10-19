@@ -227,7 +227,7 @@ describe('a pause is not a stall', () => {
 
 describe('the caption is not a control', () => {
   it('clicking the word "Tracking" does not stop the tracker', async () => {
-    // SettingsField wraps its label text and its slot in one <label>, and a
+    // Field wraps its label text and its slot in one <label>, and a
     // <button> is a labelable element — so without `labelled={false}` the
     // caption becomes the Stop button's trigger and stops background
     // location tracking on a click that looks inert.

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
-  import { Badge, EmptyState, Select } from '$lib/components/ui';
+  import { Badge, EmptyState, Select, Card } from '$lib/components/ui';
   import { getTransactionRuleCoverage, type RuleCoverageValue } from '$lib/money/api';
 
   // What recent imports actually carried, and where each value went. The list
@@ -70,7 +69,7 @@
   onMount(load);
 </script>
 
-<SettingsCard title="Recent imports">
+<Card title="Recent imports">
   {#snippet actions()}
     <Select
       bind:value={field}
@@ -114,7 +113,7 @@
       </p>
     {/if}
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .card-hint {

@@ -105,7 +105,7 @@ afterEach(() => {
 
 async function clientsCard(): Promise<HTMLElement> {
   const heading = await screen.findByText(/^Clients \(\d+\)$/);
-  return heading.closest('.card') as HTMLElement;
+  return heading.closest('.ui-card') as HTMLElement;
 }
 
 async function choose(label: string) {

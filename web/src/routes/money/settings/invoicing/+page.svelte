@@ -24,7 +24,7 @@
     type BusinessDefaults,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { SettingsLayout, SettingsCard } from '$lib/components/settings';
+  import { SettingsLayout } from '$lib/components/settings';
   import {
     Button,
     ConfirmDialog,
@@ -32,6 +32,7 @@
     KebabMenu,
     NoticeBanner,
     type KebabItem,
+    Card,
   } from '$lib/components/ui';
   import ClientForm from '$lib/components/money/ClientForm.svelte';
   import EntityForm from '$lib/components/money/EntityForm.svelte';
@@ -331,7 +332,7 @@
   description="The entities that bill, the clients they bill, the services they bill for, and the defaults an invoice is generated from."
   {loading}
 >
-  <SettingsCard title="Business defaults">
+  <Card title="Business defaults">
     {#if businessError}
       <div class="banner error">{businessError}</div>
     {:else if !defaults}
@@ -360,12 +361,12 @@
         {/if}
       </dl>
     {/if}
-  </SettingsCard>
+  </Card>
 
   <!-- Outside the `{#if defaults}` guard on purpose: a user with no
        invoicing configuration has to be able to create the first entity,
        service and client from here. -->
-  <SettingsCard title="Entities ({entities.length})">
+  <Card title="Entities ({entities.length})">
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openEntityForm(null)}>Add entity</Button>
     {/snippet}
@@ -419,9 +420,9 @@
         {/each}
       </div>
     {/if}
-  </SettingsCard>
+  </Card>
 
-  <SettingsCard title="Services ({services.length})">
+  <Card title="Services ({services.length})">
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openServiceForm(null)}>Add service</Button>
     {/snippet}
@@ -463,11 +464,11 @@
         </table>
       </div>
     {/if}
-  </SettingsCard>
+  </Card>
 
   <!-- No count while the list failed to load: it would report 0 of something
        that is not known, or a stale number from the last good load. -->
-  <SettingsCard title={clientsError ? 'Clients' : `Clients (${clients.length})`}>
+  <Card title={clientsError ? 'Clients' : `Clients (${clients.length})`}>
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openClientForm(null)}>Add client</Button>
     {/snippet}
@@ -517,7 +518,7 @@
         </table>
       </div>
     {/if}
-  </SettingsCard>
+  </Card>
 </SettingsLayout>
 
 {#if clientFormOpen}

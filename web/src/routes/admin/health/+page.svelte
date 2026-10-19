@@ -3,7 +3,7 @@
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
   import { formatDateTime } from '$lib/dateFormat';
-  import { Badge, Button, NoticeBanner, PageLoading } from '$lib/components/ui';
+  import { Badge, Button, Card, NoticeBanner, PageLoading } from '$lib/components/ui';
 
   let report = $state<DoctorReport | null>(null);
   let loading = $state(true);
@@ -164,8 +164,7 @@
     </div>
 
     {#each groups as group (group.name)}
-      <section class="card">
-        <header class="section-header"><h2 class="title-section">{group.name}</h2></header>
+      <Card title={group.name}>
         <ul class="check-list">
           {#each group.checks as check (check.name)}
             <li class="check" class:muted={check.status === 'skip'}>
@@ -180,7 +179,7 @@
             </li>
           {/each}
         </ul>
-      </section>
+      </Card>
     {/each}
   {/if}
 </div>

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
-  import { Badge, Button, Input, Select } from '$lib/components/ui';
+  import { Badge, Button, Input, Select, Card } from '$lib/components/ui';
   import {
     ApiError,
     getLedgers,
@@ -148,7 +147,7 @@
   }
 </script>
 
-<SettingsCard title="Test a transaction">
+<Card title="Test a transaction">
   <p class="card-hint caption">
     A made-up transaction run through the ordered pass, against the enabled rules in this scope —
     the same set an import is scored against, so a disabled rule is absent here as it is there.
@@ -260,7 +259,7 @@
       </div>
     {/if}
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .card-hint {

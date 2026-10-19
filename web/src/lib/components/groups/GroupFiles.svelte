@@ -2,8 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Folder } from '@lucide/svelte';
-  import { Button, EmptyState } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { Button, EmptyState, Card } from '$lib/components/ui';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { fileIcon } from '$lib/components/workspace/filePresentation';
@@ -51,7 +50,7 @@
   });
 </script>
 
-<SettingsCard title="Shared files" description="Recently changed in the group folder.">
+<Card title="Shared files" description="Recently changed in the group folder.">
   {#snippet actions()}<Button size="sm" href={filesHref}>Open in Files</Button>{/snippet}
   {#if loading}<p class="caption">Loading files…</p>
   {:else if error}<p class="banner error">{error}</p>
@@ -83,7 +82,7 @@
       {/each}
     </ul>
   {:else}<EmptyState size="sm">The group folder is empty.</EmptyState>{/if}
-</SettingsCard>
+</Card>
 
 <style>
   .files li {

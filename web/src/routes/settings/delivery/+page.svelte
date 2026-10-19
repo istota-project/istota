@@ -10,8 +10,8 @@
     webRoomOptions,
     withSurface,
   } from '$lib/deliveryDescriptor';
-  import { Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import { Select, type SelectOption, Card, Field } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
 
@@ -192,12 +192,12 @@
   info={settings.info}
 >
   {#if profile}
-    <SettingsCard title="Delivery">
+    <Card title="Delivery">
       <!-- `labelled={false}` on all four: the slot holds a Select, whose
            bits-ui trigger is a <button> and so becomes a <label>'s implicit
            control — and where a room dropdown sits beside it there are two of
            them, so the caption would act on whichever came first. -->
-      <SettingsField
+      <Field
         labelled={false}
         label="Default delivery destination"
         badge={managedBadge(profile, 'default_destination') ??
@@ -237,8 +237,8 @@
             />
           {/if}
         </div>
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         labelled={false}
         label="Questions from other users"
         hint="Where a question another user asks you through Istota reaches you. Your choice here overrides theirs. If the one you pick stops working, questions go to your default room."
@@ -257,8 +257,8 @@
             Not set up for your account: {relayDeliveryUnavailable(profile).join(', ')}.
           </p>
         {/if}
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         labelled={false}
         label="Send alerts to"
         badge={managedBadge(profile, 'routing')}
@@ -284,7 +284,7 @@
             />
           {/if}
         </div>
-      </SettingsField>
+      </Field>
       <!-- `web` is not offered here. Web chat already shows every task's tool
            calls inline in the turn itself, so a log route to `web` posts a
            second copy of what the room is displaying — and only the final
@@ -292,7 +292,7 @@
            skipped for it. The other three surfaces have no such view. An
            existing `web` log route still shows and stays editable: it falls
            through `routeOptions`' keep-the-current-value branch. -->
-      <SettingsField
+      <Field
         labelled={false}
         label="Send execution log to"
         badge={managedBadge(profile, 'routing')}
@@ -322,8 +322,8 @@
             />
           {/if}
         </div>
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
   {/if}
 </SettingsLayout>
 

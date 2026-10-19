@@ -16,8 +16,9 @@
     Select,
     type KebabItem,
     type SelectOption,
+    Card,
+    Field,
   } from '$lib/components/ui';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { sourceKindLabel, uniqueName } from './briefingSettings';
@@ -265,7 +266,7 @@
   });
 </script>
 
-<SettingsCard
+<Card
   title="Shared blocks ({sharedBlocks.length})"
   description="Structured blocks are stored verbatim with no model call. Only user-agnostic sources are allowed."
 >
@@ -316,7 +317,7 @@
       </table>
     </div>
   {/if}
-</SettingsCard>
+</Card>
 
 {#if sharedDraft}
   <Modal
@@ -330,22 +331,22 @@
     <div class="vstack">
       {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
       <div class="sb-grid">
-        <SettingsField label="Name" hint="Slug: lowercase, digits, - and _">
+        <Field label="Name" hint="Slug: lowercase, digits, - and _">
           <input
             type="text"
             placeholder="world-headlines"
             bind:value={sharedDraft.name}
             disabled={!!sharedEditingName}
           />
-        </SettingsField>
-        <SettingsField label={`Cron (${sharedBlockTimezone})`}>
+        </Field>
+        <Field label={`Cron (${sharedBlockTimezone})`}>
           <input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
-        </SettingsField>
+        </Field>
       </div>
-      <SettingsField label="Title">
+      <Field label="Title">
         <input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
-      </SettingsField>
-      <SettingsField label="Render mode">
+      </Field>
+      <Field label="Render mode">
         <Select
           value={sharedDraft.render_mode}
           options={RENDER_OPTIONS}
@@ -353,19 +354,19 @@
           ariaLabel="Render mode"
           fullWidth
         />
-      </SettingsField>
+      </Field>
       {#if sharedDraft.render_mode === 'synthesis'}
-        <SettingsField label="Directive" hint="How to synthesize the sources.">
+        <Field label="Directive" hint="How to synthesize the sources.">
           <textarea rows="2" bind:value={sharedDraft.directive}></textarea>
-        </SettingsField>
+        </Field>
       {/if}
       <div class="sb-grid">
-        <SettingsField label="Trusted" checkbox hint="Only for injection-safe content.">
+        <Field label="Trusted" checkbox hint="Only for injection-safe content.">
           <input type="checkbox" bind:checked={sharedDraft.trusted} />
-        </SettingsField>
-        <SettingsField label="Enabled" checkbox>
+        </Field>
+        <Field label="Enabled" checkbox>
           <input type="checkbox" bind:checked={sharedDraft.enabled} />
-        </SettingsField>
+        </Field>
       </div>
 
       <div class="vstack" style:--vstack-gap="var(--space-2)">
@@ -387,7 +388,7 @@
                 onclick={() => removeSharedSource(i)}>×</IconButton
               >
             </span>
-            <SettingsField label="Type">
+            <Field label="Type">
               <Select
                 value={src.kind}
                 options={sharedKindOptions}
@@ -395,7 +396,7 @@
                 ariaLabel="Source kind"
                 fullWidth
               />
-            </SettingsField>
+            </Field>
             <SourceConfigFields
               kind={src.kind}
               config={src.config}

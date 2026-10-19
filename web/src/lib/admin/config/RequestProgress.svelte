@@ -7,7 +7,7 @@
     type AdminConfigView,
     type ConfigRequest,
   } from '$lib/api';
-  import { Button } from '$lib/components/ui';
+  import { Button, Card } from '$lib/components/ui';
   import {
     NOT_PICKED_UP_MS,
     POLL_MS,
@@ -105,9 +105,7 @@
   });
 </script>
 
-<section class="card request-progress" aria-live="polite">
-  <header class="section-header"><h2 class="title-section">Change #{requestId}</h2></header>
-
+<Card title="Change #{requestId}" class="request-progress" aria-live="polite">
   {#if phase === 'lost'}
     <p class="banner danger">
       Istota has not come back three minutes after applying the change. On the host, run
@@ -164,10 +162,10 @@
       <Button variant="secondary" onclick={onDismiss}>Dismiss</Button>
     </div>
   {/if}
-</section>
+</Card>
 
 <style>
-  .request-progress p {
+  :global(.request-progress) p {
     margin: 0 0 var(--space-2);
   }
 

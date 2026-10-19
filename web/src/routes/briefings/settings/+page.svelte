@@ -26,8 +26,15 @@
     type EmailAccount,
     type UserBriefingRow,
   } from '$lib/api';
-  import { ConfirmDialog, EmptyState, KebabMenu, type KebabItem } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import {
+    ConfirmDialog,
+    EmptyState,
+    KebabMenu,
+    type KebabItem,
+    Card,
+    Field,
+  } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError } from '$lib/stores/notices';
@@ -395,16 +402,16 @@
       <a href="{base}/settings">Settings → Preferences</a> to manage schedules and content.
     </div>
   {:else if view === 'delivery'}
-    <SettingsCard title="Email" description="For every briefing delivered to you by email.">
-      <SettingsField
+    <Card title="Email" description="For every briefing delivered to you by email.">
+      <Field
         label="Send as HTML"
         checkbox
         badge={emailHtmlManaged ? MANAGED_BADGE : undefined}
         hint="Formatted mail, so an article link stays clickable. A plain-text copy is always sent alongside it."
       >
         <input type="checkbox" bind:checked={emailHtml} disabled={emailHtmlManaged} />
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
     <GroupDeliveryPreferences />
   {:else if view === 'shared'}
     {#if isAdmin}<SharedBlocksSettings {browseOptions} />{/if}

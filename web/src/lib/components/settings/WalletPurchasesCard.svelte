@@ -1,8 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { cancelWalletPurchase, type WalletPurchase, type WalletSettings } from '$lib/api';
-  import { Badge, Button, EmptyState } from '$lib/components/ui';
-  import SettingsCard from './SettingsCard.svelte';
+  import { Badge, Button, EmptyState, Card } from '$lib/components/ui';
   let {
     purchases,
     precision,
@@ -43,7 +42,7 @@
   }
 </script>
 
-<SettingsCard
+<Card
   title="Purchases"
   description="The last 50 purchases. Amounts and outcomes are reported by the task."
 >
@@ -81,7 +80,7 @@
       </li>
     {/each}
   </ul>
-</SettingsCard>
+</Card>
 
 <style>
   .purchase-row {

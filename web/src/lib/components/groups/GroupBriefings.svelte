@@ -2,8 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Newspaper } from '@lucide/svelte';
-  import { Button, EmptyState } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { Button, EmptyState, Card } from '$lib/components/ui';
   import { getGroupBriefings, type GroupBriefingDefinition } from '$lib/api';
   import { formatDateTime } from '$lib/dateFormat';
 
@@ -56,7 +55,7 @@
   });
 </script>
 
-<SettingsCard title="Briefings" description="Briefings generated once and shared with this group.">
+<Card title="Briefings" description="Briefings generated once and shared with this group.">
   {#snippet actions()}
     {#if canAuthor}<Button size="sm" href={settingsUrl()}>New briefing</Button>{/if}
   {/snippet}
@@ -81,7 +80,7 @@
       {/each}
     </ul>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .briefings li {

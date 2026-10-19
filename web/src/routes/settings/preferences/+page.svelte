@@ -1,6 +1,13 @@
 <script lang="ts">
-  import { Button, ConfirmDialog, Field, Select, type SelectOption } from '$lib/components/ui';
-  import { SettingsLayout, SettingsCard, SettingsField } from '$lib/components/settings';
+  import {
+    Button,
+    ConfirmDialog,
+    Field,
+    Select,
+    type SelectOption,
+    Card,
+  } from '$lib/components/ui';
+  import { SettingsLayout } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import { deviceModel, shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
@@ -110,11 +117,11 @@
   info={settings.info}
 >
   {#if profile}
-    <SettingsCard
+    <Card
       title="Appearance"
       description="Stored in this browser and applied immediately — no Save needed."
     >
-      <SettingsField label="Theme" hint="Also on the toggle in the header.">
+      <Field label="Theme" hint="Also on the toggle in the header.">
         <Select
           value={$theme}
           options={themeOptions}
@@ -122,8 +129,8 @@
           fullWidth
           onValueChange={(v) => setTheme(v as Theme)}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Text size"
         hint="Scales the whole interface. Small is the original, denser size; large steps it up further for easier reading."
       >
@@ -134,11 +141,11 @@
           fullWidth
           onValueChange={(v) => setFontSize(v as FontSize)}
         />
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
 
-    <SettingsCard title="Preferences" description="How Istota behaves for your account.">
-      <SettingsField
+    <Card title="Preferences" description="How Istota behaves for your account.">
+      <Field
         label="Show unread counts in navigation"
         checkbox
         badge={managedBadge(profile, 'show_nav_unread_badges')}
@@ -149,8 +156,8 @@
           bind:checked={profile.show_nav_unread_badges}
           disabled={isManaged(profile, 'show_nav_unread_badges')}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Trusted email senders (fnmatch patterns, comma-separated)"
         badge={managedBadge(profile, 'trusted_email_senders')}
       >
@@ -165,8 +172,8 @@
               );
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Quiet email senders (filed silently — no task; fnmatch patterns, comma-separated)"
         badge={managedBadge(profile, 'quiet_email_senders')}
       >
@@ -181,8 +188,8 @@
               );
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Disabled skills (comma-separated)"
         badge={managedBadge(profile, 'disabled_skills')}
       >
@@ -195,7 +202,7 @@
               profile.disabled_skills = parseListInput((e.currentTarget as HTMLInputElement).value);
           }}
         />
-      </SettingsField>
+      </Field>
       {#if settings.allModules.length > 0}
         <!-- labelled={false}: one implicit <label> would claim the first
              checkbox and leave the rest of them unlabelled. -->
@@ -223,7 +230,7 @@
           </p>
         </Field>
       {/if}
-      <SettingsField
+      <Field
         label="Email from outside, in chat"
         badge={managedBadge(profile, 'external_turn_display')}
         hint="How much of a message that arrived from an external correspondent is shown inline in the chat transcript. The turn itself always appears — this decides how much of its text comes with it."
@@ -238,8 +245,8 @@
             if (profile) profile.external_turn_display = normalizeExternalTurnDisplay(v);
           }}
         />
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
   {/if}
 
   <!-- Outside the `{#if profile}` block above, deliberately: the profile
@@ -247,18 +254,15 @@
        server, and a cache gone wrong is a reason it might not. A row that
        disappears exactly when it is needed is not an escape hatch. -->
   {#if appSettingsOffered}
-    <SettingsCard
-      title={device}
-      description="Server, location tracking and notifications on this device."
-    >
+    <Card title={device} description="Server, location tracking and notifications on this device.">
       <div class="card-actions">
         <Button variant="secondary" size="sm" onclick={showAppSettings}>Device settings</Button>
       </div>
-    </SettingsCard>
+    </Card>
   {/if}
 
   {#if offlineDataClearable}
-    <SettingsCard
+    <Card
       title="Offline data"
       description={offlineAppStored
         ? 'What this app keeps on the device so it opens and reads without a connection: the app itself, your room list, and the recent messages of the rooms you have opened.'
@@ -283,7 +287,7 @@
           {clearingOffline ? 'Clearing…' : 'Clear offline data'}
         </Button>
       </div>
-    </SettingsCard>
+    </Card>
   {/if}
 
   <ConfirmDialog

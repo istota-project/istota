@@ -21,8 +21,9 @@
     KebabMenu,
     PageLoading,
     type KebabItem,
+    Card,
   } from '$lib/components/ui';
-  import { SettingsCard, StepUpDialog } from '$lib/components/settings';
+  import { StepUpDialog } from '$lib/components/settings';
   import { channelLabel, derivedTitle } from '$lib/components/briefings/settings/briefingSettings';
   import { formatRelative } from '$lib/dateFormat';
   import { notifyError, notifySuccess } from '$lib/stores/notices';
@@ -273,7 +274,7 @@
       </div>
     {/snippet}
 
-    <SettingsCard
+    <Card
       title="Personal briefings"
       description="A paused briefing does not run, and its owner cannot turn it back on until an administrator resumes it."
     >
@@ -284,9 +285,9 @@
       {:else}
         <EmptyState size="sm">No personal briefings yet.</EmptyState>
       {/if}
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard
+    <Card
       title="Group briefings"
       description="Deleting a group briefing removes it from the group's settings. Members keep its published editions."
     >
@@ -297,7 +298,7 @@
       {:else}
         <EmptyState size="sm">No group briefings yet.</EmptyState>
       {/if}
-    </SettingsCard>
+    </Card>
   {/if}
 </div>
 

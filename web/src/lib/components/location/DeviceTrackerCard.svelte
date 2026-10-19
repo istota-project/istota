@@ -14,8 +14,7 @@
    */
   import { onMount } from 'svelte';
   import { formatDateTime, formatRelative } from '$lib/dateFormat';
-  import { SettingsCard, SettingsField } from '$lib/components/settings';
-  import { Button, Select, type SelectOption } from '$lib/components/ui';
+  import { Button, Select, type SelectOption, Card, Field } from '$lib/components/ui';
   import {
     trackerAvailable,
     scannerAvailable,
@@ -295,14 +294,14 @@
 </script>
 
 {#if !available}
-  <SettingsCard title="This device">
+  <Card title="This device">
     <p class="description">
       Background tracking is set up per device, in the Istota app. Open the app on the phone you
       want to track and come back to this page there.
     </p>
-  </SettingsCard>
+  </Card>
 {:else}
-  <SettingsCard title="This device" description="Background tracking on this phone.">
+  <Card title="This device" description="Background tracking on this phone.">
     {#snippet actions()}
       <Button variant="secondary" size="sm" onclick={refresh} disabled={busy}>Refresh</Button>
     {/snippet}
@@ -331,7 +330,7 @@
       <!-- labelled={false} because this slot holds buttons: inside a <label>
            a <button> becomes the label's implicit control, and clicking the
            caption "Tracking" would stop the tracker. -->
-      <SettingsField label="Tracking" warning={trackingWarning} labelled={false}>
+      <Field label="Tracking" warning={trackingWarning} labelled={false}>
         <div class="hstack">
           <!-- "Paused" rather than "On", because On beside an hours-old
                last-sent time is the reading that sends someone looking for a
@@ -384,9 +383,9 @@
             {/if}
           {/if}
         </div>
-      </SettingsField>
+      </Field>
 
-      <SettingsField
+      <Field
         label="Profile"
         hint={PROFILE_HINT[profileChoice]}
         warning={status.tracking ? '' : 'Applies when you start tracking.'}
@@ -400,12 +399,12 @@
           ariaLabel="Tracking profile"
           onValueChange={(v) => chooseProfile(v as TrackingProfile)}
         />
-      </SettingsField>
+      </Field>
 
       {#if canPinWifi}
         <!-- labelled={false} for the same reason as Tracking above: the slot
              holds a Select, whose bits-ui trigger is a <button>. -->
-        <SettingsField
+        <Field
           label="Wifi zone"
           hint={'While joined to this phone’s current network, report a fixed place instead of ' +
             'a measured position. Indoors a fix wanders tens of metres between readings, which ' +
@@ -422,7 +421,7 @@
             ariaLabel="Wifi zone place"
             onValueChange={chooseZone}
           />
-        </SettingsField>
+        </Field>
       {/if}
 
       <dl class="kv">
@@ -466,7 +465,7 @@
         {/if}
       </div>
     {/if}
-  </SettingsCard>
+  </Card>
 {/if}
 
 <style>

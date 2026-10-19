@@ -11,8 +11,7 @@
     type BriefingTarget,
     type GroupBriefingDefinition,
   } from '$lib/api';
-  import { EmptyState } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { EmptyState, Card } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { notifyError } from '$lib/stores/notices';
   import { channelLabel } from './settings/briefingSettings';
@@ -91,7 +90,7 @@
   useSettingsSave(() => (saved ? { dirty: snapshot() !== saved, saving, save } : null));
 </script>
 
-<SettingsCard
+<Card
   title="Group briefings"
   description="Mute the copies sent to you. You stay in the group, and every edition remains readable in Briefings."
 >
@@ -163,7 +162,7 @@
       </table>
     </div>
   {/if}
-</SettingsCard>
+</Card>
 
 <style>
   .toggle {

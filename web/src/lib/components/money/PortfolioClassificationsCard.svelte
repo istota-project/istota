@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SettingsCard } from '$lib/components/settings';
   import {
     Badge,
     Button,
@@ -9,6 +8,7 @@
     Input,
     KebabMenu,
     Select,
+    Card,
   } from '$lib/components/ui';
   import { notifyError, notifyInfo, notifySuccess } from '$lib/stores/notices';
   import {
@@ -222,7 +222,7 @@
   }
 </script>
 
-<SettingsCard title="Symbol classifications ({classifications.length})">
+<Card title="Symbol classifications ({classifications.length})">
   {#snippet actions()}
     <Button
       variant="pill"
@@ -375,7 +375,7 @@
       </ul>
     {/if}
   {/if}
-</SettingsCard>
+</Card>
 
 <ConfirmDialog
   open={confirmDelete !== null}

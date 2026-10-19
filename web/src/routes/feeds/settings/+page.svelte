@@ -26,13 +26,10 @@
     Select,
     type KebabItem,
     type SelectOption,
+    Card,
+    Field,
   } from '$lib/components/ui';
-  import {
-    ServiceCard,
-    SettingsLayout,
-    SettingsCard,
-    SettingsField,
-  } from '$lib/components/settings';
+  import { ServiceCard, SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { formatDateTime } from '$lib/dateFormat';
 
@@ -367,7 +364,7 @@
     </div>
   {:else}
     {#if diagnostics}
-      <SettingsCard title="Diagnostics">
+      <Card title="Diagnostics">
         {#snippet actions()}
           <Button variant="pill" size="sm" onclick={refreshNow} disabled={refreshing}>
             {refreshing ? 'Queueing…' : 'Refresh all now'}
@@ -395,11 +392,11 @@
             <span class="diag-label caption">last poll</span>
           </div>
         </div>
-      </SettingsCard>
+      </Card>
     {/if}
 
-    <SettingsCard title="Settings">
-      <SettingsField label="Default poll interval (minutes)">
+    <Card title="Settings">
+      <Field label="Default poll interval (minutes)">
         <input
           type="number"
           min="1"
@@ -419,8 +416,8 @@
             config.settings = next;
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Hide repeated images seen in the last (days)"
         hint="A reblog of a picture you scrolled past recently shows the post but not the image again. 0 turns it off; blank uses the default (14)."
       >
@@ -443,8 +440,8 @@
             config.settings = next;
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Keep read entries for (days)"
         hint="Counted from when an entry was added to your reader, not from when it was published. Unread and starred entries are always kept, and so is anything the feed still returns. At least 50 entries per feed are kept whatever their age, or the maximum below if you set it lower. 0 turns age pruning off; blank uses the default (90). Older entries disappear from the reader."
       >
@@ -468,8 +465,8 @@
             config.settings = next;
           }}
         />
-      </SettingsField>
-      <SettingsField
+      </Field>
+      <Field
         label="Maximum stored entries per feed"
         hint="The most recently added entries are kept. Starred entries are always kept and can put a feed above this limit. 0 turns the limit off; blank uses the default (5000). Raising it lets the next full fetch store more."
       >
@@ -493,10 +490,10 @@
             config.settings = next;
           }}
         />
-      </SettingsField>
-    </SettingsCard>
+      </Field>
+    </Card>
 
-    <SettingsCard title="Categories ({config.categories.length})">
+    <Card title="Categories ({config.categories.length})">
       {#snippet actions()}
         <Button variant="pill" size="sm" onclick={startAddCategory}>+ Add category</Button>
       {/snippet}
@@ -559,9 +556,9 @@
           </table>
         </div>
       {/if}
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard title="Subscriptions ({config.feeds.length})">
+    <Card title="Subscriptions ({config.feeds.length})">
       {#snippet actions()}
         <Button variant="pill" size="sm" onclick={startAdd}>+ Add subscription</Button>
       {/snippet}
@@ -621,9 +618,9 @@
           </table>
         </div>
       {/if}
-    </SettingsCard>
+    </Card>
 
-    <SettingsCard title="OPML">
+    <Card title="OPML">
       <p class="description">
         Import subscriptions from an OPML export, or download the current list as OPML. Legacy
         bridger URLs (<code>localhost:8900/tumblr/…</code>,
@@ -645,7 +642,7 @@
         onchange={onImport}
         hidden
       />
-    </SettingsCard>
+    </Card>
 
     {#each moduleServices as svc (svc.service)}
       <ServiceCard service={svc} onChanged={reloadServices} />
@@ -662,17 +659,17 @@
     }}
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <SettingsField label="URL">
+      <Field label="URL">
         <input
           type="text"
           placeholder="https://example.com/feed.xml | tumblr:user | arena:slug"
           bind:value={adding.url}
         />
-      </SettingsField>
-      <SettingsField label="Title (optional)">
+      </Field>
+      <Field label="Title (optional)">
         <input type="text" bind:value={adding.title} />
-      </SettingsField>
-      <SettingsField label="Category">
+      </Field>
+      <Field label="Category">
         <Select
           value={adding.category}
           options={categorySelectOptions}
@@ -682,15 +679,15 @@
           ariaLabel="Category"
           fullWidth
         />
-      </SettingsField>
-      <SettingsField label="Poll interval (minutes, optional)">
+      </Field>
+      <Field label="Poll interval (minutes, optional)">
         <input
           type="number"
           min="1"
           placeholder={String(defaultInterval())}
           bind:value={adding.poll_interval_minutes}
         />
-      </SettingsField>
+      </Field>
       {#if modalError}
         <div class="banner error">{modalError}</div>
       {/if}
@@ -711,12 +708,12 @@
     }}
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <SettingsField label="Slug">
+      <Field label="Slug">
         <input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
-      </SettingsField>
-      <SettingsField label="Title (optional)">
+      </Field>
+      <Field label="Title (optional)">
         <input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
-      </SettingsField>
+      </Field>
       {#if modalError}
         <div class="banner error">{modalError}</div>
       {/if}
@@ -737,13 +734,13 @@
     }}
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
-      <SettingsField label="URL">
+      <Field label="URL">
         <input type="text" bind:value={editing.draft.url} />
-      </SettingsField>
-      <SettingsField label="Title">
+      </Field>
+      <Field label="Title">
         <input type="text" bind:value={editing.draft.title} />
-      </SettingsField>
-      <SettingsField label="Category">
+      </Field>
+      <Field label="Category">
         <Select
           value={editing.draft.category}
           options={categorySelectOptions}
@@ -753,15 +750,15 @@
           ariaLabel="Category"
           fullWidth
         />
-      </SettingsField>
-      <SettingsField label="Poll interval (minutes)">
+      </Field>
+      <Field label="Poll interval (minutes)">
         <input
           type="number"
           min="1"
           placeholder={String(defaultInterval())}
           bind:value={editing.draft.poll_interval_minutes}
         />
-      </SettingsField>
+      </Field>
       {#if modalError}
         <div class="banner error">{modalError}</div>
       {/if}

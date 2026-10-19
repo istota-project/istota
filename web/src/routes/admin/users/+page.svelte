@@ -22,8 +22,8 @@
     NoticeBanner,
     type KebabItem,
     PageLoading,
+    Card,
   } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
   import { formatRelative } from '$lib/dateFormat';
   import UserCell from '$lib/admin/UserCell.svelte';
   import { signInStateLabel } from '$lib/admin/signInState';
@@ -187,7 +187,7 @@
         Nextcloud service credentials.
       </p>
     </NoticeBanner>
-    <SettingsCard title="Users">
+    <Card title="Users">
       {#snippet actions()}
         <Button variant="primary" size="sm" onclick={add} disabled={busy || !view?.email_enabled}
           >Add user</Button
@@ -252,9 +252,9 @@
           </table>
         </div>
       {/if}
-    </SettingsCard>
+    </Card>
     {#if view.orphans.length}
-      <SettingsCard
+      <Card
         title="Identities without profiles"
         description="These accounts cannot sign in. Restore their profiles with the operator CLI or remove their email login."
       >
@@ -272,7 +272,7 @@
             >
           </div>
         {/each}
-      </SettingsCard>
+      </Card>
     {/if}
   {/if}
 </div>

@@ -155,7 +155,7 @@ describe('GoogleWorkspaceCard', () => {
     await mount(status({ connected: true }));
     const pill = await screen.findByText('Connected');
     expect(pill).toHaveClass('status-pill');
-    expect(pill.closest('.section-header')).not.toBeNull();
+    expect(pill.closest('.ui-card-head')).not.toBeNull();
   });
 
   it('withholds the pill while the status is still loading', () => {

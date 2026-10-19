@@ -1,8 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { base } from '$app/paths';
-  import { Button } from '$lib/components/ui';
-  import { SettingsCard } from '$lib/components/settings';
+  import { Button, Card } from '$lib/components/ui';
   import SetupSteps from './SetupSteps.svelte';
   import type { SetupStepId, SetupStepList } from './setupDraft.svelte';
 
@@ -55,9 +54,9 @@
 
   {#if step}<SetupSteps current={step} {steps} />{/if}
 
-  <SettingsCard {title} {description}>
+  <Card {title} {description}>
     {@render children()}
-  </SettingsCard>
+  </Card>
 
   {#if onBack || onNext || actions}
     <footer class="setup-footer">
