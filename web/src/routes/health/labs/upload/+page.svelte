@@ -21,6 +21,7 @@
     Select,
     Input,
     PageHeader,
+    Spinner,
   } from '$lib/components/ui';
   import { localDateISO } from '$lib/dateFormat';
 
@@ -242,7 +243,7 @@
 
         {#if extracting}
           <div class="loading extracting">
-            <span class="spinner" aria-hidden="true"></span>
+            <Spinner />
             Extracting biomarkers and panel metadata from the source file…
           </div>
         {:else}

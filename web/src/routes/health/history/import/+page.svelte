@@ -19,6 +19,7 @@
     Input,
     TextArea,
     PageHeader,
+    Spinner,
   } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
@@ -165,7 +166,7 @@
   {#if extracting}
     <Card as="div" class="import-card">
       <div class="extracting muted">
-        <span class="spinner" aria-hidden="true"></span>
+        <Spinner />
         Extracting encounter from the source — this can take a few seconds.
       </div>
     </Card>

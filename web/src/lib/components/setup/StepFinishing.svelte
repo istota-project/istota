@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { NoticeBanner } from '$lib/components/ui';
+  import { NoticeBanner, Spinner } from '$lib/components/ui';
   import {
     LONG_WAIT_MS,
     POLL_INTERVAL_MS,
@@ -86,7 +86,7 @@
     <li class="hstack done"><span class="mark" aria-hidden="true">✓</span>Settings saved</li>
     <li class="hstack" class:done={ready} class:busy={!ready}>
       <span class="mark" aria-hidden="true"
-        >{#if ready}✓{:else}<span class="spinner"></span>{/if}</span
+        >{#if ready}✓{:else}<Spinner size="sm" />{/if}</span
       >{rerun ? 'Restarting' : 'Starting'}
       {botName}
     </li>
