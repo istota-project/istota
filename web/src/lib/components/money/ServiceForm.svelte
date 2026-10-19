@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { KEY_RE, KEY_HINT, type ServiceRow, type ServiceInput } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption, Field } from '$lib/components/ui';
+  import { Modal, Button, Select, type SelectOption, Field, Input } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billable service.
@@ -111,12 +111,12 @@
       </Field>
     {:else}
       <Field label="Key" hint="Short identifier used by work entries." error={keyError}>
-        <input type="text" bind:value={key} placeholder="consulting" autocomplete="off" />
+        <Input type="text" bind:value={key} placeholder="consulting" autocomplete="off" />
       </Field>
     {/if}
 
     <Field label="Display name" hint="Printed on the invoice line.">
-      <input type="text" bind:value={displayName} placeholder="Consulting" />
+      <Input type="text" bind:value={displayName} placeholder="Consulting" />
     </Field>
 
     <Field label="Type" warning={typeWarning}>
@@ -127,12 +127,12 @@
       <p class="field-note caption">Rate is not used — the amount comes from each work entry.</p>
     {:else}
       <Field label={rateLabel} error={rateError}>
-        <input type="text" inputmode="decimal" bind:value={rate} placeholder="150" />
+        <Input type="text" inputmode="decimal" bind:value={rate} placeholder="150" />
       </Field>
     {/if}
 
     <Field label="Income account">
-      <input type="text" bind:value={incomeAccount} placeholder="Income:Consulting" />
+      <Input type="text" bind:value={incomeAccount} placeholder="Income:Consulting" />
     </Field>
   </div>
 

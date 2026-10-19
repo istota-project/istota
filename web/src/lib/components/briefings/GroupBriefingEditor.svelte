@@ -43,6 +43,7 @@
     Card,
     Field,
     Checkbox,
+    TextArea,
   } from '$lib/components/ui';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
@@ -634,7 +635,7 @@
             wide
             hint="Used to write each edition. Never sent to public research."
           >
-            <textarea rows="4" bind:value={prompt}></textarea>
+            <TextArea rows={4} bind:value={prompt} />
           </Field>
           <Field
             label="Research the web first"
@@ -649,7 +650,7 @@
               wide
               hint="Sent to the research step, so keep anything private out of it."
             >
-              <textarea rows="3" bind:value={researchPrompt}></textarea>
+              <TextArea rows={3} bind:value={researchPrompt} />
             </Field>
           {/if}
           <p class="micro-label">Sources (optional)</p>

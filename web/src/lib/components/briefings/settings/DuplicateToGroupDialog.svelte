@@ -13,6 +13,7 @@
     OptionCards,
     type OptionCard,
     Field,
+    TextArea,
   } from '$lib/components/ui';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { briefingSettingsUrl, GROUP_SOURCE_KINDS } from './briefingSettings';
@@ -178,7 +179,7 @@
         hint="Nothing in the original can be used by a group, so the copy starts from instructions."
         wide
       >
-        <textarea rows="3" bind:value={prompt}></textarea>
+        <TextArea rows={3} bind:value={prompt} />
       </Field>
     {/if}
     {#if error}<div class="banner error" role="alert">{error}</div>{/if}

@@ -26,6 +26,8 @@
     type KebabItem,
     type SelectOption,
     PageLoading,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import { diagnosisStatusVariant } from '$lib/health/status';
   import { linkableConditionOptions } from '$lib/health/conditions';
@@ -258,7 +260,7 @@
     <form class="form" onsubmit={save}>
       <div class="row">
         <Field label="Date">
-          <input type="date" bind:value={form.encounter_date} required />
+          <Input type="date" bind:value={form.encounter_date} required />
         </Field>
         <Field label="Type">
           <Select
@@ -270,20 +272,20 @@
           />
         </Field>
         <Field label="Provider">
-          <input type="text" bind:value={form.provider} />
+          <Input type="text" bind:value={form.provider} />
         </Field>
         <Field label="Facility">
-          <input type="text" bind:value={form.facility} />
+          <Input type="text" bind:value={form.facility} />
         </Field>
         <Field label="Specialty">
-          <input type="text" bind:value={form.specialty} />
+          <Input type="text" bind:value={form.specialty} />
         </Field>
       </div>
       <Field label="Reason" class="full">
-        <input type="text" bind:value={form.reason} />
+        <Input type="text" bind:value={form.reason} />
       </Field>
       <Field label="Notes" class="full">
-        <textarea bind:value={form.notes} rows="5"></textarea>
+        <TextArea bind:value={form.notes} rows={5} />
       </Field>
       <div class="form-actions">
         <Button onclick={() => (editing = false)}>Cancel</Button>

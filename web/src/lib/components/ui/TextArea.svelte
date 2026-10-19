@@ -80,5 +80,6 @@
 
   .ui-textarea.dense {
     padding: var(--space-1);
+    font-size: var(--text-xs);
   }
 </style>

@@ -21,6 +21,8 @@
     Select,
     type SelectOption,
     PageLoading,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import DocumentList from '$lib/components/health/DocumentList.svelte';
 
@@ -136,13 +138,13 @@
     <form class="form vstack" onsubmit={save}>
       <div class="row">
         <Field label="Vaccine name">
-          <input type="text" bind:value={immunization.name} required />
+          <Input type="text" bind:value={immunization.name} required />
         </Field>
         <Field label="Date given">
-          <input type="date" bind:value={immunization.date_given} required />
+          <Input type="date" bind:value={immunization.date_given} required />
         </Field>
         <Field label="Product">
-          <input
+          <Input
             type="text"
             value={immunization.product_name ?? ''}
             oninput={(e) =>
@@ -150,7 +152,7 @@
           />
         </Field>
         <Field label="Manufacturer">
-          <input
+          <Input
             type="text"
             value={immunization.manufacturer ?? ''}
             oninput={(e) =>
@@ -158,7 +160,7 @@
           />
         </Field>
         <Field label="Dose label">
-          <input
+          <Input
             type="text"
             value={immunization.dose_label ?? ''}
             oninput={(e) =>
@@ -166,7 +168,7 @@
           />
         </Field>
         <Field label="Lot number">
-          <input
+          <Input
             type="text"
             value={immunization.lot_number ?? ''}
             oninput={(e) =>
@@ -185,7 +187,7 @@
           />
         </Field>
         <Field label="Site">
-          <input
+          <Input
             type="text"
             value={immunization.site ?? ''}
             oninput={(e) =>
@@ -193,7 +195,7 @@
           />
         </Field>
         <Field label="Administered by">
-          <input
+          <Input
             type="text"
             value={immunization.administered_by ?? ''}
             oninput={(e) =>
@@ -201,7 +203,7 @@
           />
         </Field>
         <Field label="Facility">
-          <input
+          <Input
             type="text"
             value={immunization.facility ?? ''}
             oninput={(e) =>
@@ -209,7 +211,7 @@
           />
         </Field>
         <Field label="CVX code">
-          <input
+          <Input
             type="text"
             value={immunization.cvx_code ?? ''}
             oninput={(e) =>
@@ -218,12 +220,12 @@
         </Field>
       </div>
       <Field label="Notes" class="full">
-        <textarea
-          rows="3"
+        <TextArea
+          rows={3}
           value={immunization.notes ?? ''}
           oninput={(e) =>
             (immunization!.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
-        ></textarea>
+        />
       </Field>
       <div class="caption">
         Source: {immunization.source}
@@ -299,21 +301,6 @@
      app-wide, which is the hazard the money report pages already hit. */
   .form :global(.field.full) {
     grid-column: 1 / -1;
-  }
-  input,
-  textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-  }
-  textarea {
-    resize: vertical;
-    font-family: inherit;
   }
   .linked {
     margin-top: 1.25rem;

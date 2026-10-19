@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getHealthSettings, putHealthSettings, type HealthSettings } from '$lib/api';
-  import { Select, Card, Field } from '$lib/components/ui';
+  import { Select, Card, Field, Input } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
   import { cmToFtIn, ftInToCm } from '$lib/health/units';
@@ -178,36 +178,33 @@
 >
   <Card title="Profile">
     <Field label="Date of birth" hint={ageYears != null ? `Age: ${ageYears}` : undefined}>
-      <input type="date" bind:value={dobInput} />
+      <Input type="date" bind:value={dobInput} />
     </Field>
 
     <Field label="Height">
       {#if settings.display_units.height === 'ft_in'}
-        <div class="ft-in-row hstack">
-          <input
+        <div class="hstack">
+          <Input
             type="number"
             step="1"
             min="0"
             bind:value={heightFtInput}
             placeholder="5"
-            aria-label="Feet"
+            suffix="ft"
+            aria-label="Height in feet"
           />
-          <span class="suffix muted">ft</span>
-          <input
+          <Input
             type="number"
             step="0.1"
             min="0"
             bind:value={heightInInput}
             placeholder="10"
-            aria-label="Inches"
+            suffix="in"
+            aria-label="Height in inches"
           />
-          <span class="suffix muted">in</span>
         </div>
       {:else}
-        <div class="cm-row hstack">
-          <input type="number" step="0.1" bind:value={heightInput} placeholder="178" />
-          <span class="suffix muted">cm</span>
-        </div>
+        <Input type="number" step="0.1" bind:value={heightInput} placeholder="178" suffix="cm" />
       {/if}
     </Field>
 
@@ -257,14 +254,3 @@
     </Field>
   </Card>
 </SettingsLayout>
-
-<style>
-  .ft-in-row input,
-  .cm-row input {
-    flex: 1;
-    min-width: 0;
-  }
-  .suffix {
-    font-size: var(--text-sm);
-  }
-</style>

@@ -8,7 +8,7 @@
     type EntityRow,
     type EntityInput,
   } from '$lib/money/api';
-  import { Modal, Button, Select, Field, Checkbox } from '$lib/components/ui';
+  import { Modal, Button, Select, Field, Checkbox, Input, TextArea } from '$lib/components/ui';
 
   /**
    * Create/edit form for a billing entity.
@@ -225,24 +225,24 @@
       </Field>
     {:else}
       <Field label="Key" hint="Short identifier clients point at." error={keyError}>
-        <input type="text" bind:value={key} placeholder="main" autocomplete="off" />
+        <Input type="text" bind:value={key} placeholder="main" autocomplete="off" />
       </Field>
     {/if}
 
     <Field label="Name" hint="Printed on the invoice.">
-      <input type="text" bind:value={name} placeholder="Acme Studio LLC" />
+      <Input type="text" bind:value={name} placeholder="Acme Studio LLC" />
     </Field>
 
     <Field label="Email">
-      <input type="text" bind:value={email} placeholder="billing@example.com" />
+      <Input type="text" bind:value={email} placeholder="billing@example.com" />
     </Field>
 
     <Field label="Address" wide>
-      <textarea rows="3" bind:value={address}></textarea>
+      <TextArea rows={3} bind:value={address} />
     </Field>
 
     <Field label="Payment instructions" wide hint="Printed at the foot of the invoice.">
-      <textarea rows="3" bind:value={paymentInstructions}></textarea>
+      <TextArea rows={3} bind:value={paymentInstructions} />
     </Field>
 
     <Field
@@ -250,19 +250,19 @@
       hint="Relative to your accounting folder, e.g. invoices/logo.png."
       error={logoError}
     >
-      <input type="text" bind:value={logo} placeholder="invoices/logo.png" />
+      <Input type="text" bind:value={logo} placeholder="invoices/logo.png" />
     </Field>
 
     <Field label="A/R account">
-      <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
+      <Input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
     </Field>
 
     <Field label="Bank account">
-      <input type="text" bind:value={bankAccount} placeholder="Assets:Bank:Checking" />
+      <Input type="text" bind:value={bankAccount} placeholder="Assets:Bank:Checking" />
     </Field>
 
     <Field label="Currency">
-      <input type="text" bind:value={currency} placeholder="USD" />
+      <Input type="text" bind:value={currency} placeholder="USD" />
     </Field>
 
     <Field label="Automatically detect invoice payments" checkbox>

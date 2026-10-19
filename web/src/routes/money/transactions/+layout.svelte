@@ -12,7 +12,8 @@
     type TransactionSelection,
   } from '$lib/money/stores/transactions';
   import { selectedLedger } from '$lib/money/stores/ledger';
-  import { Sidebar, SidebarToggle, Select } from '$lib/components/ui';
+  import { Sidebar, SidebarToggle, Select, Input } from '$lib/components/ui';
+  import { Search } from '@lucide/svelte';
 
   let { children } = $props();
 
@@ -191,9 +192,14 @@
       ariaLabel="Year"
       minChars={4}
     />
-    <input
-      type="text"
+    {#snippet searchIcon()}<Search size={14} />{/snippet}
+    <Input
+      type="search"
+      size="toolbar"
+      clearable
+      prefix={searchIcon}
       class="money-control-input"
+      aria-label="Filter transactions"
       placeholder="Filter by tag, payee..."
       value={$filterText}
       oninput={(e) => handleFilterInput(e.currentTarget.value)}

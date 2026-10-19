@@ -496,6 +496,18 @@
   </div>
 {/if}
 
+<!-- The unit picker inside the value's box, for a metric logged in more than
+     one unit. Top level, since a snippet written inside a component's tag
+     becomes that component's prop. -->
+{#snippet unitPicker()}
+  <Select
+    value={formUnit}
+    options={(LOG_UNIT_CHOICES[formMetric] ?? []).map((u) => ({ value: u, label: u }))}
+    onValueChange={(v) => (formUnit = v)}
+    ariaLabel="Unit"
+  />
+{/snippet}
+
 <Modal bind:open={modalOpen} title="Log measurement" width="26rem">
   <form onsubmit={submitEntry}>
     <Field label="Metric">
@@ -508,18 +520,14 @@
       />
     </Field>
     <Field label="Value">
-      <div class="value-row hstack">
-        <Input type="number" step="any" bind:value={formValue} required aria-label="Value" />
-        {#if LOG_UNIT_CHOICES[formMetric]}
-          <select class="unit-select" bind:value={formUnit} aria-label="Unit">
-            {#each LOG_UNIT_CHOICES[formMetric] as u}
-              <option value={u}>{u}</option>
-            {/each}
-          </select>
-        {:else}
-          <span class="unit-static muted">{METRIC_UNITS[formMetric]}</span>
-        {/if}
-      </div>
+      <Input
+        type="number"
+        step="any"
+        bind:value={formValue}
+        required
+        aria-label="Value"
+        suffix={LOG_UNIT_CHOICES[formMetric] ? unitPicker : METRIC_UNITS[formMetric]}
+      />
     </Field>
     <Field label="When">
       <Input type="datetime-local" bind:value={formDate} />
@@ -603,25 +611,6 @@
     margin-top: var(--space-1);
   }
 
-  /* :global because the value input is an <Input> now — Svelte prunes a rule
-     whose subject sits inside a component. */
-  .value-row :global(input) {
-    flex: 1;
-    min-width: 0;
-  }
-  /* The element selector takes this to (0,2,1), which beats Field's
-     `.field :global(select) { width: 100% }` deterministically rather than by
-     stylesheet order — without it the fixed-width unit picker takes the whole
-     row and collapses the value input to near-zero. */
-  .value-row select.unit-select {
-    width: auto;
-    min-width: 4.5rem;
-    flex: 0 0 auto;
-  }
-  .unit-static {
-    font-size: var(--text-sm);
-    padding: var(--space-1) 0.2rem;
-  }
   .modal-actions {
     display: flex;
     justify-content: flex-end;

@@ -14,6 +14,7 @@
     type OptionCard,
     Card,
     Field,
+    TextArea,
   } from '$lib/components/ui';
   import { briefingsRefreshNonce } from '$lib/stores/briefings';
   import { notifyError } from '$lib/stores/notices';
@@ -181,11 +182,11 @@
       hint="The instructions for each edition. You can switch to building it from blocks afterwards."
       wide
     >
-      <textarea
-        rows="4"
+      <TextArea
+        rows={4}
         bind:value={prompt}
         placeholder="A short morning briefing on what the team shipped and what is blocked."
-      ></textarea>
+      />
     </Field>
   {:else}
     <div class="field-row">

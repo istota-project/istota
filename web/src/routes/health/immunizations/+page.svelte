@@ -23,6 +23,8 @@
     Select,
     type SelectOption,
     PageLoading,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import { immunizationStatusLabel, immunizationStatusVariant } from '$lib/health/status';
   import { formatDate as formatIsoDate, localDateISO } from '$lib/dateFormat';
@@ -180,20 +182,20 @@
         />
       </Field>
       <Field label="Date">
-        <input type="date" bind:value={formDate} required />
+        <Input type="date" bind:value={formDate} required />
       </Field>
       <Field label="Product">
-        <input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
+        <Input type="text" bind:value={formProduct} placeholder="Fluzone Quadrivalent" />
       </Field>
       <Field label="Facility">
-        <input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
+        <Input type="text" bind:value={formFacility} placeholder="CVS Pharmacy" />
       </Field>
     </div>
     <details class="advanced">
       <summary>More fields</summary>
       <div class="row">
         <Field label="Lot number">
-          <input type="text" bind:value={formLot} />
+          <Input type="text" bind:value={formLot} />
         </Field>
         <Field label="Route">
           <Select
@@ -205,11 +207,11 @@
           />
         </Field>
         <Field label="Site">
-          <input type="text" bind:value={formSite} placeholder="left deltoid" />
+          <Input type="text" bind:value={formSite} placeholder="left deltoid" />
         </Field>
       </div>
       <Field label="Notes" class="full">
-        <textarea bind:value={formNotes} rows="2"></textarea>
+        <TextArea bind:value={formNotes} rows={2} />
       </Field>
     </details>
     {#if formError}
@@ -319,8 +321,9 @@
   <section class="history">
     <div class="history-head">
       <h2 class="micro-label">History</h2>
-      <input
+      <Input
         type="text"
+        size="toolbar"
         class="filter-input"
         aria-label="Filter by vaccine name"
         placeholder="Filter by vaccine name"
@@ -489,16 +492,9 @@
     gap: var(--space-3);
     margin-bottom: var(--space-2);
   }
-  .filter-input {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    line-height: var(--leading-snug);
-    font-size: var(--text-sm);
-    max-width: 240px;
+  /* Placement only: the paint is Input's toolbar size. */
+  .history-head :global(.filter-input) {
+    max-width: 15rem;
   }
 
   td.notes {
@@ -533,11 +529,8 @@
     .actions {
       flex-wrap: wrap;
     }
-    .filter-input {
-      width: 100%;
+    .history-head :global(.filter-input) {
       max-width: none;
-      min-width: 0;
-      box-sizing: border-box;
     }
   }
 

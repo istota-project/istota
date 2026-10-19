@@ -14,8 +14,8 @@ const checkbox = () => createRawSnippet(() => ({ render: () => `<input type="che
 
 describe('Field', () => {
   it('labels its control', () => {
-    render(Field, { label: 'Display name', children: input() });
-    expect(screen.getByLabelText('Display name')).toBeInTheDocument();
+    render(FieldContextHarness, { control: 'input' });
+    expect(screen.getByLabelText('Caption')).toBeInTheDocument();
   });
 
   describe('supplementary text', () => {
@@ -117,9 +117,20 @@ describe('Field context', () => {
     expect(screen.getByRole('group', { name: 'Caption' })).toBeInTheDocument();
   });
 
-  it('labels a raw input written into the slot', () => {
+  it('does not reach into a raw control: the field is a group its caption names', () => {
+    // Every control in a field is a primitive that reads the context. A raw
+    // one is left to name itself, and nothing styles it either.
     render(FieldContextHarness, { control: 'raw' });
-    expect(screen.getByLabelText('Caption').tagName).toBe('INPUT');
+    expect(screen.getByRole('group', { name: 'Caption' })).toBeInTheDocument();
+    expect(screen.queryByLabelText('Caption', { selector: 'input' })).toBeNull();
+  });
+
+  it('names and describes the input inside an adorned Input', () => {
+    render(FieldContextHarness, { control: 'adorned', description: 'Before tax' });
+    const control = screen.getByLabelText('Caption');
+    expect(control.tagName).toBe('INPUT');
+    expect(control).toHaveClass('ui-input-inner');
+    expect(control).toHaveAccessibleDescription('Before tax');
   });
 
   it('points aria-describedby at the description and the error', () => {
@@ -131,11 +142,6 @@ describe('Field context', () => {
     const control = screen.getByLabelText('Caption');
     expect(control).toHaveAccessibleDescription('Shown on your profile Too long');
     expect(control).toHaveAttribute('aria-invalid', 'true');
-  });
-
-  it('describes a raw input too', () => {
-    render(FieldContextHarness, { control: 'raw', description: 'Shown on your profile' });
-    expect(screen.getByLabelText('Caption')).toHaveAccessibleDescription('Shown on your profile');
   });
 
   it('sets aria-required without drawing a marker', () => {

@@ -364,16 +364,14 @@ select:focus-visible {
 }
 
 /* A text field's focus state: its border in --focus-field-border. The Input
-   and TextArea primitives, the full-width Select trigger that sits among them,
-   and the raw controls a Field still styles. Element-qualified so it outranks
-   a component's resting border (one class plus the scope hash) and stays
-   under `.invalid`, so a rejected value keeps its red border while focused. */
+   and TextArea primitives and the full-width Select trigger that sits among
+   them (an adorned Input draws it on its box, by :focus-within). Element-
+   qualified so it outranks a component's resting border (one class plus the
+   scope hash) and stays under `.invalid`, so a rejected value keeps its red
+   border while focused. */
 input.ui-input:focus-visible,
 textarea.ui-textarea:focus-visible,
-button.ui-select-trigger--full:focus-visible,
-.field input:where(:not([type='checkbox'], [type='radio'], .ui-input)):focus-visible,
-.field select:focus-visible,
-.field textarea:where(:not(.ui-textarea)):focus-visible {
+button.ui-select-trigger--full:focus-visible {
   border-color: var(--focus-field-border);
 }
 

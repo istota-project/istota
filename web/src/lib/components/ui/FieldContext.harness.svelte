@@ -14,7 +14,8 @@
     optional = false,
     layout = 'stacked',
   }: {
-    control: 'input' | 'textarea' | 'select' | 'multiselect' | 'checkbox' | 'raw' | 'buttons';
+    control:
+      'input' | 'adorned' | 'textarea' | 'select' | 'multiselect' | 'checkbox' | 'raw' | 'buttons';
     description?: string;
     error?: string;
     required?: boolean;
@@ -47,6 +48,8 @@
 >
   {#if control === 'input'}
     <Input bind:value />
+  {:else if control === 'adorned'}
+    <Input bind:value prefix="$" />
   {:else if control === 'textarea'}
     <TextArea bind:value />
   {:else if control === 'select'}

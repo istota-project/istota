@@ -152,7 +152,15 @@
     </Field>
 
     <Field label="Radius ({radius}m)">
-      <input class="radius" type="range" min="25" max="500" step="25" bind:value={radius} />
+      <input
+        class="radius"
+        type="range"
+        min="25"
+        max="500"
+        step="25"
+        aria-label="Radius in metres"
+        bind:value={radius}
+      />
     </Field>
 
     {#if showCoords}

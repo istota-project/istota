@@ -207,30 +207,25 @@
         layout="inline"
         error={inputError || problem}
       >
-        <span class="adorned number" class:marked={notInFile}>
-          <Input
-            type="number"
-            step={kind === 'float' ? 'any' : '1'}
-            value={draftText ??
-              (blank || shown === null || shown === undefined ? '' : String(shown))}
-            {placeholder}
-            invalid={!!inputError}
-            oninput={(e: Event) => onNumber((e.currentTarget as HTMLInputElement).value)}
-          />
-          {@render defaultMark()}
-        </span>
+        <Input
+          type="number"
+          step={kind === 'float' ? 'any' : '1'}
+          value={draftText ?? (blank || shown === null || shown === undefined ? '' : String(shown))}
+          {placeholder}
+          invalid={!!inputError}
+          suffix={notInFile ? defaultMark : undefined}
+          oninput={(e: Event) => onNumber((e.currentTarget as HTMLInputElement).value)}
+        />
       </Field>
     {:else if kind === 'str' || kind === 'path'}
       <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
-        <span class="adorned" class:marked={notInFile}>
-          <Input
-            value={blank || shown === null || shown === undefined ? '' : String(shown)}
-            {placeholder}
-            monospace={kind === 'path'}
-            oninput={(e: Event) => onText((e.currentTarget as HTMLInputElement).value)}
-          />
-          {@render defaultMark()}
-        </span>
+        <Input
+          value={blank || shown === null || shown === undefined ? '' : String(shown)}
+          {placeholder}
+          monospace={kind === 'path'}
+          suffix={notInFile ? defaultMark : undefined}
+          oninput={(e: Event) => onText((e.currentTarget as HTMLInputElement).value)}
+        />
       </Field>
     {:else if kind === 'list'}
       <Field
@@ -402,9 +397,10 @@
     gap: var(--space-1);
   }
 
-  /* The control and its "not in config.toml" mark. Inside the box for a text
-     control or a select, after it for a checkbox or chips. Carries the
-     control's own cap so the mark sits at the box's right edge. */
+  /* The control and its "not in config.toml" mark, for the controls that are
+     not an Input (a text or number Input takes the mark as its suffix). Inside
+     the box for a textarea or a select, after it for a checkbox or chips.
+     Carries the control's own cap so the mark sits at the box's right edge. */
   .adorned {
     position: relative;
     display: block;
@@ -418,12 +414,15 @@
   }
 
   .default-mark {
+    display: flex;
+    color: var(--text-dim);
+  }
+
+  .adorned .default-mark {
     position: absolute;
     top: 50%;
     right: var(--space-2);
-    display: flex;
     transform: translateY(-50%);
-    color: var(--text-dim);
   }
 
   .adorned.area .default-mark {
@@ -436,21 +435,7 @@
     right: calc(var(--space-2) + var(--space-4) + var(--space-1));
   }
 
-  /* No stepper on a number: it is typed, and arrow keys still step it. The
-     stepper took the right edge the mark sits at on every other text box. */
-  .adorned.number :global(input[type='number']) {
-    appearance: textfield;
-    -moz-appearance: textfield;
-  }
-
-  .adorned.number :global(input[type='number']::-webkit-inner-spin-button),
-  .adorned.number :global(input[type='number']::-webkit-outer-spin-button) {
-    margin: 0;
-    -webkit-appearance: none;
-  }
-
   /* Text stops short of the mark. */
-  .config-field .adorned.marked :global(input),
   .config-field .adorned.marked :global(textarea) {
     padding-right: calc(var(--space-2) + var(--space-4) + var(--space-1));
   }

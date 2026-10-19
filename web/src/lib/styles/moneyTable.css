@@ -68,25 +68,11 @@
   gap: var(--space-2);
 }
 
-/* The section filter box. Sits in a `.control-row`, so its corner and height
-   come from the tier the container sets rather than from here — that is what
-   keeps it level with the Select beside it once iOS floors its text at 16px.
-   Everything left is what makes it this control rather than a bare Input:
-   the card fill it needs against the section header, and a width floor so a
-   placeholder that long has somewhere to go. */
-.money-control-input {
-  background: var(--surface-card);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--control-radius);
-  padding: 0.2rem var(--space-2);
-  font-size: var(--text-sm);
-  font-family: inherit;
+/* The toolbar's text filter is `Input size="toolbar"`; this is its share of
+   the bar, under the tools row so it outranks the primitive's own width. */
+.money-section-tools .money-control-input {
+  width: auto;
   min-width: 12rem;
-}
-
-.money-control-input::placeholder {
-  color: var(--text-dim);
 }
 
 /* The section scroller, so it owns the bottom safe area (the shell hands it

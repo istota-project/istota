@@ -9,7 +9,7 @@
     importGarminTracks,
     type GarminStatus,
   } from '$lib/api';
-  import { Button, Card, Field } from '$lib/components/ui';
+  import { Button, Card, Field, Input } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
 
   let loading = $state(true);
@@ -184,7 +184,7 @@
     </div>
   {:else if mode === 'mfa'}
     <Field label="MFA code" hint="6-digit code from your Garmin authenticator app">
-      <input
+      <Input
         type="text"
         inputmode="numeric"
         autocomplete="one-time-code"
@@ -200,13 +200,13 @@
     </div>
   {:else}
     <Field label="Email">
-      <input type="email" bind:value={emailInput} autocomplete="username" />
+      <Input type="email" bind:value={emailInput} autocomplete="username" />
     </Field>
     <Field
       label="Password"
       hint="Credentials are used only during the OAuth exchange and are not stored."
     >
-      <input type="password" bind:value={passwordInput} autocomplete="current-password" />
+      <Input type="password" bind:value={passwordInput} autocomplete="current-password" />
     </Field>
     <div class="actions">
       <Button

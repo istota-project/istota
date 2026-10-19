@@ -10,7 +10,16 @@
     type ImmunizationRef,
     type ParsedImmunization,
   } from '$lib/api';
-  import { Badge, Button, Card, FileDropZone, Select, type SelectOption } from '$lib/components/ui';
+  import {
+    Badge,
+    Button,
+    Card,
+    FileDropZone,
+    Select,
+    type SelectOption,
+    Input,
+    TextArea,
+  } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
   type Mode = 'file' | 'paste';
@@ -179,12 +188,13 @@
         <code>"Influenza (Given 11/28/2025)"</code> are recognised and matched to a canonical vaccine
         family. Review the table before importing.
       </p>
-      <textarea
-        class="paste"
-        rows="10"
+      <TextArea
+        monospace
+        rows={10}
+        aria-label="Immunization list to import"
         bind:value={raw}
         placeholder={'INFS Pres Free 6mos-Adult (Fluzone trivalent) (influenza) (Given 11/28/2025)\nTdap (Tetanus, diphtheria, acellular pertussis) (Given 12/1/2016)\nTYDvi (Typhoid, ViCPs) (Given 10/23/2023)'}
-      ></textarea>
+      />
       <div class="actions hstack">
         <Button
           variant="primary"
@@ -263,11 +273,18 @@
                 />
               </td>
               <td>
-                <input type="date" bind:value={row.date_given} />
+                <Input
+                  type="date"
+                  dense
+                  aria-label="Row {i + 1} date given"
+                  bind:value={row.date_given}
+                />
               </td>
               <td>
-                <input
+                <Input
                   type="text"
+                  dense
+                  aria-label="Row {i + 1} product"
                   value={row.product_name || ''}
                   oninput={(e) =>
                     (row.product_name = (e.currentTarget as HTMLInputElement).value || null)}
@@ -341,23 +358,6 @@
     margin: 0;
   }
 
-  .paste {
-    width: 100%;
-    padding: var(--space-2) var(--space-3);
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-card);
-    color: var(--text-primary);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    resize: vertical;
-  }
-  /* Not a TextArea yet, so outside the shared focus rule; same border, same token. */
-  .paste:focus-visible {
-    border-color: var(--focus-field-border);
-  }
-
   .import-page :global(.import-card .actions) {
     margin-top: var(--space-1);
   }
@@ -394,14 +394,5 @@
     font-family: var(--font-mono);
     font-size: 0.78rem;
     color: var(--text-dim);
-  }
-  input {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
   }
 </style>

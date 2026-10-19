@@ -19,6 +19,8 @@
     Select,
     type SelectOption,
     PageLoading,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import {
     conditionOptionLabel,
@@ -235,7 +237,7 @@
   <form class="quick-form" onsubmit={submit}>
     <div class="row">
       <Field label="Date">
-        <input type="date" bind:value={formDate} required />
+        <Input type="date" bind:value={formDate} required />
       </Field>
       <Field label="Type">
         <Select
@@ -247,24 +249,24 @@
         />
       </Field>
       <Field label="Provider">
-        <input type="text" bind:value={formProvider} placeholder="Dr. Smith" />
+        <Input type="text" bind:value={formProvider} placeholder="Dr. Smith" />
       </Field>
       <Field label="Facility">
-        <input type="text" bind:value={formFacility} placeholder="Riverside Clinic" />
+        <Input type="text" bind:value={formFacility} placeholder="Riverside Clinic" />
       </Field>
       <Field label="Specialty">
-        <input type="text" bind:value={formSpecialty} placeholder="cardiology" />
+        <Input type="text" bind:value={formSpecialty} placeholder="cardiology" />
       </Field>
     </div>
     <Field label="Reason" class="full">
-      <input
+      <Input
         type="text"
         bind:value={formReason}
         placeholder="Chief complaint or reason for visit"
       />
     </Field>
     <Field label="Notes" class="full">
-      <textarea bind:value={formNotes} rows="3" placeholder="Findings, follow-ups, …"></textarea>
+      <TextArea bind:value={formNotes} rows={3} placeholder="Findings, follow-ups, …" />
     </Field>
 
     <div class="full conditions-field">

@@ -209,6 +209,20 @@
     padding-inline: 0;
   }
 
+  /* A number in a box carries its unit beside it, and the spin buttons would
+     sit between the value and that unit. The money taxes inputs and the
+     config editor's number field both hid them before they were Inputs. */
+  .ui-input-inner[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .ui-input-inner[type='number']::-webkit-outer-spin-button,
+  .ui-input-inner[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
   .ui-input-adorn {
     flex: none;
     display: inline-flex;
@@ -258,14 +272,17 @@
     min-height: var(--control-height-sm);
   }
 
-  /* No box until it is pointed at or focused: a table cell that edits in place. */
+  /* No box until it is pointed at or focused: a table cell that edits in
+     place, so a column of values reads as text until you reach for one. The
+     transparent border keeps the box from shifting when it appears. */
   .ghost {
     background: transparent;
     border-color: transparent;
+    padding-inline: var(--space-1);
   }
 
   .ghost:hover {
-    border-color: var(--border-default);
+    background: var(--surface-base);
   }
 
   /* The ghost's own transparency outranks the shared focus rule, so its focus
@@ -276,14 +293,19 @@
     background: var(--surface-base);
   }
 
+  /* The grid of inputs a lab panel or an import review is edited in: the
+     compact height and a step down in type, so the editors do not overpower
+     the table around them. */
   .ui-input.dense,
   .ui-input-box.dense {
     min-height: var(--control-height-sm);
+    font-size: var(--text-xs);
   }
 
   .ui-input.dense,
   .dense .ui-input-inner {
     padding-block: 0;
+    font-size: var(--text-xs);
   }
 
   .ui-input.dense {
@@ -295,6 +317,7 @@
      rises to 16px. Same floor, on the box. */
   @media (pointer: coarse) {
     .ui-input-box {
+      --text-xs: max(0.7rem, 16px);
       --text-sm: max(0.75rem, 16px);
     }
   }

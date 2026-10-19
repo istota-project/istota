@@ -84,7 +84,6 @@
   let claimed = $state<{ kind: FieldControlKind; id?: () => string | null | undefined } | null>(
     null,
   );
-  let root = $state<HTMLElement | null>(null);
 
   setFieldContext({
     controlId,
@@ -103,34 +102,6 @@
       claimed = { kind, id };
       return true;
     },
-  });
-
-  // A raw <input>, <select> or <textarea> written straight into the slot reads
-  // no context, and since the field is no longer a <label> nothing would name
-  // it. When no primitive has claimed the field and the slot holds exactly one
-  // such control, it gets the field's id and describedby here. Raw controls
-  // inside a Field are what the Input migration removes. A raw control that
-  // only appears after mount is not picked up.
-  let rawControl: HTMLElement | null = null;
-  $effect(() => {
-    const ids = describedBy;
-    const isRequired = required;
-    if (!root) return;
-    if (!rawControl) {
-      if (claimed) return;
-      const raw = root.querySelectorAll<HTMLElement>(
-        'input:not([type="hidden"]), select, textarea',
-      );
-      if (raw.length !== 1) return;
-      rawControl = raw[0];
-      if (!rawControl.id) rawControl.id = controlId;
-      const rawId = rawControl.id;
-      claimed = { kind: 'native', id: () => rawId };
-    }
-    if (ids) rawControl.setAttribute('aria-describedby', ids);
-    else rawControl.removeAttribute('aria-describedby');
-    if (isRequired) rawControl.setAttribute('aria-required', 'true');
-    else rawControl.removeAttribute('aria-required');
   });
 
   const native = $derived(claimed?.kind === 'native');
@@ -172,7 +143,6 @@
   definition. It sets tokens and no layout.
 -->
 <div
-  bind:this={root}
   class="field control-row {className}"
   class:field-wide={wide}
   class:checkbox
@@ -220,50 +190,17 @@
     color: var(--text-dim);
   }
 
-  /* The descendant rules below are inside :where(), so they weigh no more than
-     the field's own class: any class on the control outranks them, which is
-     how Input's `monospace` and `invalid` stay visible inside a field. They
-     exist for the raw controls still written inside a Field; the width cap is
-     the only part that reaches the Input and TextArea primitives too. */
-  .field :global(:where(input:not([type='checkbox']), select, textarea)) {
-    width: 100%;
+  /* A form input reads at a line's length rather than the card's width. The
+     cap is the field's, so it reaches the primitives by their own classes;
+     inside :where() it weighs no more than the field's class, and a
+     placement class on the control outranks it. Field styles nothing else
+     about a control: every control in a field is a primitive that draws
+     itself (fieldCascade.test.ts). */
+  .field :global(:where(.ui-input, .ui-input-box, .ui-textarea)) {
     max-width: 24rem;
-    min-width: 0;
-    box-sizing: border-box;
   }
 
-  .field
-    :global(
-      :where(
-        input:not([type='checkbox'], [type='range'], .ui-input),
-        select,
-        textarea:not(.ui-textarea)
-      )
-    ) {
-    background: var(--surface-base);
-    color: var(--text-primary);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: var(--space-1) var(--space-2);
-    font: inherit;
-    font-size: var(--text-sm);
-  }
-
-  /* `font: inherit` above is a shorthand and carries the body's 1.5 leading
-     with it, so an input here grew past the field tier it sits in the moment
-     iOS floored its text at 16px. Pinned beside the shorthand rather than
-     centrally for that reason. Textareas keep the inherited leading: they are
-     sized by their rows and read as prose, and they stay in the sans face
-     unless they are a TextArea with `monospace`. */
-  .field :global(:where(input:not([type='checkbox'], [type='range'], .ui-input), select)) {
-    line-height: var(--leading-tight);
-  }
-
-  .field :global(:where(textarea:not(.ui-textarea))) {
-    resize: vertical;
-  }
-
-  .field-wide :global(:where(textarea, input)) {
+  .field-wide :global(:where(.ui-input, .ui-input-box, .ui-textarea)) {
     max-width: 36rem;
   }
 
@@ -300,7 +237,7 @@
   }
 
   /* The row sizes a compact field, so its control fills it uncapped. */
-  .field-compact :global(:where(input, textarea)) {
+  .field-compact :global(:where(.ui-input, .ui-input-box, .ui-textarea)) {
     max-width: none;
   }
 

@@ -15,6 +15,8 @@
     FileDropZone,
     Select,
     type SelectOption,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import { confidenceVariant } from '$lib/health/status';
 
@@ -202,7 +204,7 @@
 
         <div class="enc-fields">
           <Field label="Date">
-            <input type="date" bind:value={row.encounter_date} />
+            <Input type="date" bind:value={row.encounter_date} />
           </Field>
           <Field label="Type">
             <Select
@@ -214,21 +216,21 @@
             />
           </Field>
           <Field label="Provider">
-            <input
+            <Input
               type="text"
               value={row.provider || ''}
               oninput={(e) => (row.provider = (e.currentTarget as HTMLInputElement).value || null)}
             />
           </Field>
           <Field label="Facility">
-            <input
+            <Input
               type="text"
               value={row.facility || ''}
               oninput={(e) => (row.facility = (e.currentTarget as HTMLInputElement).value || null)}
             />
           </Field>
           <Field label="Specialty">
-            <input
+            <Input
               type="text"
               value={row.specialty || ''}
               oninput={(e) => (row.specialty = (e.currentTarget as HTMLInputElement).value || null)}
@@ -237,7 +239,7 @@
         </div>
 
         <Field label="Reason" class="full">
-          <input
+          <Input
             type="text"
             value={row.reason || ''}
             oninput={(e) => (row.reason = (e.currentTarget as HTMLInputElement).value || null)}
@@ -245,11 +247,11 @@
         </Field>
 
         <Field label="Notes" class="full">
-          <textarea
-            rows="3"
+          <TextArea
+            rows={3}
             value={row.notes || ''}
             oninput={(e) => (row.notes = (e.currentTarget as HTMLTextAreaElement).value || null)}
-          ></textarea>
+          />
         </Field>
 
         <div class="diag-head">
@@ -273,8 +275,10 @@
                 {#each row.diagnoses as d, j (j)}
                   <tr>
                     <td>
-                      <input
+                      <Input
                         type="text"
+                        dense
+                        aria-label="Diagnosis {j + 1} name"
                         value={d.name}
                         oninput={(e) =>
                           setDiagnosisField(
@@ -286,8 +290,10 @@
                       />
                     </td>
                     <td>
-                      <input
+                      <Input
                         type="text"
+                        dense
+                        aria-label="Diagnosis {j + 1} ICD-10 code"
                         value={d.icd10 || ''}
                         oninput={(e) =>
                           setDiagnosisField(
@@ -416,23 +422,6 @@
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);
   }
-  input,
-  textarea {
-    padding: var(--space-1) var(--space-2);
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    box-sizing: border-box;
-    min-width: 0;
-  }
-  textarea {
-    resize: vertical;
-    font-family: inherit;
-  }
-
   .diag-head {
     display: flex;
     justify-content: space-between;
@@ -440,11 +429,5 @@
     margin-top: var(--space-1);
     border-top: 1px solid var(--border-subtle);
     padding-top: var(--space-3);
-  }
-
-  /* Compact inputs inside the diagnoses table — mirrors the immunization
-	   review-table sizing so the nested grid doesn't overpower the card. */
-  table input {
-    padding: var(--space-1) var(--space-2);
   }
 </style>

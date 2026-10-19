@@ -130,20 +130,23 @@ describe('controls resolve the tier channel', () => {
     expect(read('NavLink.svelte')).not.toMatch(/min-height:\s*var\(--control-height-md\)/);
   });
 
-  it.each([['Input.svelte'], ['Field.svelte']])(
-    '%s pins leading wherever it declares the font shorthand',
-    (file) => {
-      // `font: inherit` also sets line-height, pulling in the body's 1.5 — and
-      // at a specificity no weightless rule outside the component can correct.
-      // Left alone, a 16px-floored input computes taller than the tier around
-      // it and stands proud of every control beside it on touch, which is the
-      // whole defect. Anything declaring the shorthand has to pin the leading
-      // too, in the same file.
-      const css = read(file);
-      expect(css).toMatch(/font:\s*inherit/);
-      expect(css).toMatch(/line-height:\s*var\(--leading-tight\)/);
-    },
-  );
+  it('Input pins leading wherever it declares the font shorthand', () => {
+    // `font: inherit` also sets line-height, pulling in the body's 1.5 — and
+    // at a specificity no weightless rule outside the component can correct.
+    // Left alone, a 16px-floored input computes taller than the tier around
+    // it and stands proud of every control beside it on touch, which is the
+    // whole defect. Anything declaring the shorthand has to pin the leading
+    // too, in the same file.
+    const css = read('Input.svelte');
+    expect(css).toMatch(/font:\s*inherit/);
+    expect(css).toMatch(/line-height:\s*var\(--leading-tight\)/);
+  });
+
+  it('leaves the type of the control in a Field to the control', () => {
+    // Field used to draw raw controls and so carried the shorthand and its
+    // pin; with every control a primitive it sets no font at all.
+    expect(read('Field.svelte')).not.toMatch(/font:\s*inherit/);
+  });
 
   it('leaves the full-width Select trigger on the shared leading', () => {
     // It used to pin 1.5 to chase the input's inherited leading. Both now sit

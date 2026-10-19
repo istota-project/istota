@@ -8,7 +8,7 @@
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
-  import { Card, EmptyState, StatTile, PageLoading } from '$lib/components/ui';
+  import { Card, EmptyState, Field, Input, StatTile, PageLoading } from '$lib/components/ui';
   import RateProvenanceLine from '$lib/components/money/RateProvenanceLine.svelte';
   import TaxDisclaimer from '$lib/components/money/TaxDisclaimer.svelte';
   import { formatDecimal } from '$lib/format';
@@ -212,80 +212,67 @@
       <section class="input-section">
         <h2 class="title-section">Inputs</h2>
         <Card as="div" padding="sm" class="input-card">
-          <div class="input-group">
-            <label class="input-label caption" for="w2-income">W-2 income YTD</label>
-            <div class="input-field">
-              <span class="input-prefix">$</span>
-              <input id="w2-income" type="number" bind:value={w2Income} oninput={scheduleRecalc} />
-            </div>
-          </div>
+          <Field label="W-2 income YTD">
+            <Input
+              type="number"
+              bind:value={w2Income}
+              oninput={scheduleRecalc}
+              prefix="$"
+              class="num"
+            />
+          </Field>
 
-          <div class="input-group">
-            <label class="input-label caption" for="w2-fed">Federal withholding YTD</label>
-            <div class="input-field">
-              <span class="input-prefix">$</span>
-              <input
-                id="w2-fed"
-                type="number"
-                bind:value={w2FedWithholding}
-                oninput={scheduleRecalc}
-              />
-            </div>
-          </div>
+          <Field label="Federal withholding YTD">
+            <Input
+              type="number"
+              bind:value={w2FedWithholding}
+              oninput={scheduleRecalc}
+              prefix="$"
+              class="num"
+            />
+          </Field>
 
-          <div class="input-group">
-            <label class="input-label caption" for="w2-state">State withholding YTD</label>
-            <div class="input-field">
-              <span class="input-prefix">$</span>
-              <input
-                id="w2-state"
-                type="number"
-                bind:value={w2StateWithholding}
-                oninput={scheduleRecalc}
-              />
-            </div>
-          </div>
+          <Field label="State withholding YTD">
+            <Input
+              type="number"
+              bind:value={w2StateWithholding}
+              oninput={scheduleRecalc}
+              prefix="$"
+              class="num"
+            />
+          </Field>
 
-          <div class="input-group">
-            <label class="input-label caption" for="w2-months">W-2 employment months</label>
-            <div class="input-field">
-              <input
-                id="w2-months"
-                type="number"
-                min="1"
-                max="12"
-                bind:value={w2Months}
-                oninput={scheduleRecalc}
-              />
-              <span class="input-suffix caption">of 12</span>
-            </div>
-          </div>
+          <Field label="W-2 employment months">
+            <Input
+              type="number"
+              min="1"
+              max="12"
+              bind:value={w2Months}
+              oninput={scheduleRecalc}
+              suffix="of 12"
+              class="num"
+            />
+          </Field>
 
-          <div class="input-group">
-            <label class="input-label caption" for="fed-est">Federal estimated paid</label>
-            <div class="input-field">
-              <span class="input-prefix">$</span>
-              <input
-                id="fed-est"
-                type="number"
-                bind:value={fedEstimatedPaid}
-                oninput={scheduleRecalc}
-              />
-            </div>
-          </div>
+          <Field label="Federal estimated paid">
+            <Input
+              type="number"
+              bind:value={fedEstimatedPaid}
+              oninput={scheduleRecalc}
+              prefix="$"
+              class="num"
+            />
+          </Field>
 
-          <div class="input-group">
-            <label class="input-label caption" for="state-est">State estimated paid</label>
-            <div class="input-field">
-              <span class="input-prefix">$</span>
-              <input
-                id="state-est"
-                type="number"
-                bind:value={stateEstimatedPaid}
-                oninput={scheduleRecalc}
-              />
-            </div>
-          </div>
+          <Field label="State estimated paid">
+            <Input
+              type="number"
+              bind:value={stateEstimatedPaid}
+              oninput={scheduleRecalc}
+              prefix="$"
+              class="num"
+            />
+          </Field>
         </Card>
 
         <div class="input-meta caption">
@@ -624,58 +611,6 @@
   /* Inputs */
   .input-section :global(.input-card) {
     gap: var(--space-2);
-  }
-
-  .input-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-
-  .input-field {
-    display: flex;
-    align-items: center;
-    background: var(--surface-base);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-  }
-
-  .input-prefix {
-    padding: var(--space-1) 0 var(--space-1) var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--text-dim);
-  }
-
-  .input-field input {
-    flex: 1;
-    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-1);
-    background: transparent;
-    border: none;
-    color: var(--text-primary);
-    font-size: var(--text-sm);
-    font-variant-numeric: tabular-nums;
-    /* .input-field:focus-within below is the affordance for this input. */
-    outline: none;
-    min-width: 0;
-    -moz-appearance: textfield;
-    appearance: textfield;
-  }
-
-  .input-field input::-webkit-outer-spin-button,
-  .input-field input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
-
-  .input-suffix {
-    padding: var(--space-1) var(--space-2) var(--space-1) 0;
-  }
-
-  /* The border is the wrapper's, so the shared text-field focus rule cannot
-     reach it; this is that rule's colour on the box that draws the edge. */
-  .input-field:focus-within {
-    border-color: var(--focus-field-border);
   }
 
   .input-meta {

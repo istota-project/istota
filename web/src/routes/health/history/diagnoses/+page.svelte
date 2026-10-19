@@ -21,6 +21,8 @@
     type KebabItem,
     type SelectOption,
     PageLoading,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import {
     encounterOptionLabel,
@@ -276,7 +278,7 @@
     {/if}
     <div class="row">
       <Field label="Name *" class="full">
-        <input type="text" bind:value={formName} required placeholder="e.g. Hypertension" />
+        <Input type="text" bind:value={formName} required placeholder="e.g. Hypertension" />
       </Field>
       <Field label="Status">
         <Select
@@ -288,7 +290,7 @@
         />
       </Field>
       <Field label="ICD-10">
-        <input type="text" bind:value={formIcd10} placeholder="K64.0" />
+        <Input type="text" bind:value={formIcd10} placeholder="K64.0" />
       </Field>
       <Field label="Severity">
         <Select
@@ -300,11 +302,11 @@
         />
       </Field>
       <Field label="Date diagnosed">
-        <input type="date" bind:value={formDateDiagnosed} />
+        <Input type="date" bind:value={formDateDiagnosed} />
       </Field>
       {#if formStatus === 'resolved'}
         <Field label="Date resolved">
-          <input type="date" bind:value={formDateResolved} />
+          <Input type="date" bind:value={formDateResolved} />
         </Field>
       {/if}
     </div>
@@ -338,7 +340,7 @@
       />
     </div>
     <Field label="Notes" class="full">
-      <textarea bind:value={formNotes} rows="3"></textarea>
+      <TextArea bind:value={formNotes} rows={3} />
     </Field>
     {#if formError}
       <div class="banner error">{formError}</div>

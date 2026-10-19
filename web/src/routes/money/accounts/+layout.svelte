@@ -1,7 +1,8 @@
 <script lang="ts">
   import { selectedYear } from '$lib/money/stores/transactions';
   import { accountFilter } from '$lib/money/stores/accounts';
-  import { Select } from '$lib/components/ui';
+  import { Select, Input } from '$lib/components/ui';
+  import { Search } from '@lucide/svelte';
 
   let { children } = $props();
 
@@ -24,9 +25,14 @@
       ariaLabel="Year"
       minChars={4}
     />
-    <input
-      type="text"
+    {#snippet searchIcon()}<Search size={14} />{/snippet}
+    <Input
+      type="search"
+      size="toolbar"
+      clearable
+      prefix={searchIcon}
       class="money-control-input"
+      aria-label="Filter accounts"
       placeholder="Filter accounts..."
       value={$accountFilter}
       oninput={(e) => accountFilter.set(e.currentTarget.value)}

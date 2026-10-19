@@ -28,6 +28,7 @@
     type SelectOption,
     Card,
     Field,
+    Input,
   } from '$lib/components/ui';
   import { ServiceCard, SettingsLayout } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -397,7 +398,7 @@
 
     <Card title="Settings">
       <Field label="Default poll interval (minutes)">
-        <input
+        <Input
           type="number"
           min="1"
           value={config.settings.default_poll_interval_minutes ?? ''}
@@ -421,7 +422,7 @@
         label="Hide repeated images seen in the last (days)"
         hint="A reblog of a picture you scrolled past recently shows the post but not the image again. 0 turns it off; blank uses the default (14)."
       >
-        <input
+        <Input
           type="number"
           min="0"
           value={config.settings.image_dedupe_window_days ?? ''}
@@ -445,7 +446,7 @@
         label="Keep read entries for (days)"
         hint="Counted from when an entry was added to your reader, not from when it was published. Unread and starred entries are always kept, and so is anything the feed still returns. At least 50 entries per feed are kept whatever their age, or the maximum below if you set it lower. 0 turns age pruning off; blank uses the default (90). Older entries disappear from the reader."
       >
-        <input
+        <Input
           type="number"
           min="0"
           max="365000"
@@ -470,7 +471,7 @@
         label="Maximum stored entries per feed"
         hint="The most recently added entries are kept. Starred entries are always kept and can put a feed above this limit. 0 turns the limit off; blank uses the default (5000). Raising it lets the next full fetch store more."
       >
-        <input
+        <Input
           type="number"
           min="0"
           max="365000"
@@ -517,8 +518,10 @@
                 <tr>
                   <td class="col-slug"><code>{cat.slug}</code></td>
                   <td class="col-title">
-                    <input
+                    <Input
                       type="text"
+                      variant="ghost"
+                      aria-label="Title for {cat.slug}"
                       value={cat.title ?? ''}
                       placeholder={cat.slug}
                       oninput={(e) => {
@@ -660,14 +663,14 @@
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
       <Field label="URL">
-        <input
+        <Input
           type="text"
           placeholder="https://example.com/feed.xml | tumblr:user | arena:slug"
           bind:value={adding.url}
         />
       </Field>
       <Field label="Title (optional)">
-        <input type="text" bind:value={adding.title} />
+        <Input type="text" bind:value={adding.title} />
       </Field>
       <Field label="Category">
         <Select
@@ -681,7 +684,7 @@
         />
       </Field>
       <Field label="Poll interval (minutes, optional)">
-        <input
+        <Input
           type="number"
           min="1"
           placeholder={String(defaultInterval())}
@@ -709,10 +712,10 @@
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
       <Field label="Slug">
-        <input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
+        <Input type="text" placeholder="blogs" bind:value={addingCategory.slug} />
       </Field>
       <Field label="Title (optional)">
-        <input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
+        <Input type="text" placeholder={addingCategory.slug} bind:value={addingCategory.title} />
       </Field>
       {#if modalError}
         <div class="banner error">{modalError}</div>
@@ -735,10 +738,10 @@
   >
     <div class="vstack" style:--vstack-gap="var(--space-2)">
       <Field label="URL">
-        <input type="text" bind:value={editing.draft.url} />
+        <Input type="text" bind:value={editing.draft.url} />
       </Field>
       <Field label="Title">
-        <input type="text" bind:value={editing.draft.title} />
+        <Input type="text" bind:value={editing.draft.title} />
       </Field>
       <Field label="Category">
         <Select
@@ -752,7 +755,7 @@
         />
       </Field>
       <Field label="Poll interval (minutes)">
-        <input
+        <Input
           type="number"
           min="1"
           placeholder={String(defaultInterval())}
@@ -891,34 +894,6 @@
 	   column holds a pair of icon buttons, so it asks for more. */
   .col-order {
     --table-actions-width: 4.5rem;
-  }
-
-  /* A borderless cell editor, not a field: the box appears on hover/focus so a
-     row of titles reads as text until you reach for one. `Input` cannot express
-     that, so this stays hand-rolled — but it takes the tier height and the
-     leading pin, or the row's own height is set by this cell's 1.5 leading and
-     it sits taller than the IconButtons in the cells beside it. The transparent
-     border is what keeps the box from shifting when it appears. */
-  .col-title input[type='text'] {
-    width: 100%;
-    background: transparent;
-    color: var(--text-primary);
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    padding: 0.2rem var(--space-1);
-    font: inherit;
-    font-size: var(--text-sm);
-    line-height: var(--leading-tight);
-    min-height: var(--control-height-md);
-  }
-
-  .col-title input[type='text']:focus,
-  .col-title input[type='text']:hover {
-    background: var(--surface-base);
-  }
-
-  .col-title input[type='text']:focus-visible {
-    border-color: var(--focus-field-border);
   }
 
   .state {

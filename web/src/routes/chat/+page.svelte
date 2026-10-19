@@ -28,6 +28,7 @@
     Button,
     CategoryGroup,
     LoadingOctopus,
+    Input,
   } from '$lib/components/ui';
   import { isHiddenRoom } from '$lib/stores/roomOrder';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -1423,9 +1424,9 @@
       <div class="room-new">
         {#if creatingRoom}
           <!-- svelte-ignore a11y_autofocus -->
-          <input
-            class="room-input"
+          <Input
             bind:value={newRoomName}
+            aria-label="New room name"
             placeholder="Room name…"
             autofocus
             onkeydown={(e) => {
@@ -2053,17 +2054,6 @@
     color: var(--text-primary);
     border-color: var(--text-dim);
   }
-  .room-input {
-    width: 100%;
-    background: var(--surface-card);
-    border: 1px solid var(--border-default);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-  }
-
   .room-btn {
     display: flex;
     align-items: center;

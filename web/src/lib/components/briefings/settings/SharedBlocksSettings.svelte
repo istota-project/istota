@@ -19,6 +19,8 @@
     Card,
     Field,
     Checkbox,
+    Input,
+    TextArea,
   } from '$lib/components/ui';
   import { formatDateTime } from '$lib/dateFormat';
   import SourceConfigFields from '../SourceConfigFields.svelte';
@@ -333,7 +335,7 @@
       {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
       <div class="sb-grid">
         <Field label="Name" hint="Slug: lowercase, digits, - and _">
-          <input
+          <Input
             type="text"
             placeholder="world-headlines"
             bind:value={sharedDraft.name}
@@ -341,11 +343,11 @@
           />
         </Field>
         <Field label={`Cron (${sharedBlockTimezone})`}>
-          <input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
+          <Input type="text" placeholder="0 6 * * *" bind:value={sharedDraft.cron} />
         </Field>
       </div>
       <Field label="Title">
-        <input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
+        <Input type="text" placeholder="🌍 World headlines" bind:value={sharedDraft.title} />
       </Field>
       <Field label="Render mode">
         <Select
@@ -358,7 +360,7 @@
       </Field>
       {#if sharedDraft.render_mode === 'synthesis'}
         <Field label="Directive" hint="How to synthesize the sources.">
-          <textarea rows="2" bind:value={sharedDraft.directive}></textarea>
+          <TextArea rows={2} bind:value={sharedDraft.directive} />
         </Field>
       {/if}
       <div class="sb-grid">

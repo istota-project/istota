@@ -7,6 +7,7 @@
     type SelectOption,
     Card,
     Checkbox,
+    Input,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
@@ -161,7 +162,7 @@
         label="Trusted email senders (fnmatch patterns, comma-separated)"
         badge={managedBadge(profile, 'trusted_email_senders')}
       >
-        <input
+        <Input
           type="text"
           disabled={isManaged(profile, 'trusted_email_senders')}
           value={profileListString(profile.trusted_email_senders)}
@@ -177,7 +178,7 @@
         label="Quiet email senders (filed silently — no task; fnmatch patterns, comma-separated)"
         badge={managedBadge(profile, 'quiet_email_senders')}
       >
-        <input
+        <Input
           type="text"
           disabled={isManaged(profile, 'quiet_email_senders')}
           value={profileListString(profile.quiet_email_senders)}
@@ -193,7 +194,7 @@
         label="Disabled skills (comma-separated)"
         badge={managedBadge(profile, 'disabled_skills')}
       >
-        <input
+        <Input
           type="text"
           disabled={isManaged(profile, 'disabled_skills')}
           value={profileListString(profile.disabled_skills)}

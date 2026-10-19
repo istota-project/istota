@@ -100,10 +100,24 @@
     >
     {#if !start}
       <Field label="Card number" error={errors.number}
-        ><Input type="password" bind:value={number} inputmode="numeric" autocomplete="off" /></Field
+        ><Input
+          type="password"
+          revealable
+          aria-label="Card number"
+          bind:value={number}
+          inputmode="numeric"
+          autocomplete="off"
+        /></Field
       >
       <Field label="CVC" error={errors.cvc}
-        ><Input type="password" bind:value={cvc} inputmode="numeric" autocomplete="off" /></Field
+        ><Input
+          type="password"
+          revealable
+          aria-label="CVC"
+          bind:value={cvc}
+          inputmode="numeric"
+          autocomplete="off"
+        /></Field
       >
     {/if}
     <Field label="Expiry month" error={errors.exp_month}

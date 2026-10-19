@@ -7,13 +7,14 @@ import { blockAfter, readLayer, rules, styleBlocks, styleFiles } from '$lib/styl
 import FieldCascadeHarness from './FieldCascade.harness.svelte';
 
 /**
- * `Field` styles the raw controls written inside it through descendant rules.
- * Those rules used to score (0,3,1), above `Input`'s `.ui-input.mono` and
+ * `Field` used to style the raw controls written inside it through descendant
+ * rules. Those rules scored (0,3,1), above `Input`'s `.ui-input.mono` and
  * `.ui-input.invalid` at (0,3,0), so inside a field a monospace Input rendered
  * sans and an invalid one showed no red border, and every bare TextArea was
- * forced into the mono face. jsdom does not run Svelte's scoped CSS through a
- * cascade, so these tests read the compiled stylesheet instead and check the
- * selectors that decide it.
+ * forced into the mono face. Every control in a field is now a primitive that
+ * draws itself, and Field keeps only the width cap, reached by the primitives'
+ * own classes. jsdom does not run Svelte's scoped CSS through a cascade, so
+ * these tests read the compiled stylesheet instead.
  */
 
 afterEach(cleanup);
@@ -50,68 +51,61 @@ function selectorList(selector: string): string[] {
   return out;
 }
 
-/** Rules of Field's compiled sheet whose selector reaches a text control. */
-const fieldControlRules = rules(compiledCss('Field.svelte')).filter(
+const fieldRules = rules(compiledCss('Field.svelte'));
+
+/** Rules of Field's compiled sheet whose selector reaches a text control by element. */
+const fieldControlRules = fieldRules.filter(
   (r) => CONTROL.test(r.selector) && !/\[type='checkbox'\]\s*$/.test(r.selector),
 );
+
+/** The width cap: Field's rules naming a primitive's class. */
+const capRules = fieldRules.filter((r) => /\.ui-input|\.ui-textarea/.test(r.selector));
 
 /** A compiled selector with Svelte's scope classes removed, for `matches()`. */
 const unscoped = (selector: string) =>
   selector.replace(/:where\(\.svelte-[\w-]+\)/g, '').replace(/\.svelte-[\w-]+/g, '');
 
-describe("Field's descendant control rules", () => {
-  it('finds the rules it is about', () => {
-    // A parse that stops matching would pass every test below vacuously.
-    expect(fieldControlRules.length).toBeGreaterThanOrEqual(4);
+describe("Field's rules for the control in its slot", () => {
+  it('styles no control by its element', () => {
+    // A raw <input> in a field is no longer drawn by the field; it would have
+    // to be an Input. Field's own checkbox placement is the one exception.
+    expect(fieldControlRules.map((r) => r.selector)).toEqual([]);
   });
 
-  it('wraps every descendant control selector in :where()', () => {
-    // Scoped `.field` plus a weightless :where() is (0,2,0): any class on the
-    // control itself, Input's `.mono` and `.invalid` included, now outranks it.
-    for (const rule of fieldControlRules) {
+  it('finds the width cap it keeps', () => {
+    // A parse that stops matching would pass the tests below vacuously.
+    expect(capRules.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('wraps every cap selector in :where(), so a class on the control wins', () => {
+    for (const rule of capRules) {
       for (const part of selectorList(rule.selector)) {
         expect(part, rule.selector).toMatch(/^\.field[\w-]*\.svelte-[\w-]+ :where\(/);
       }
     }
   });
 
-  it('keeps the appearance off the Input and TextArea primitives', () => {
-    const appearance = fieldControlRules.filter((r) => /(^|[\s;])border:/.test(r.body));
-    expect(appearance.length).toBe(1);
-    expect(appearance[0].selector).toContain('.ui-input');
-    expect(appearance[0].selector).toContain('textarea:not(.ui-textarea)');
-  });
-
-  it('no longer forces the mono face on a textarea', () => {
-    for (const rule of fieldControlRules) {
-      expect(rule.body, rule.selector).not.toMatch(/font-family:\s*var\(--font-mono\)/);
+  it('sets nothing on a control but its width', () => {
+    for (const rule of capRules) {
+      const props = [...rule.body.matchAll(/(?:^|[;\s{])([\w-]+)\s*:/g)].map((m) => m[1]);
+      expect(props, rule.selector).toEqual(['max-width']);
     }
   });
 
-  it('matches a raw control and leaves the primitives alone, in the DOM', () => {
+  it("caps a primitive's width inside a field, adorned or not, in the DOM", () => {
     render(FieldCascadeHarness);
-    const appearance = fieldControlRules.find((r) => /(^|[\s;])border:/.test(r.body))!;
-    const selector = unscoped(appearance.selector);
-    const raw = document.querySelector<HTMLElement>('[aria-label="Raw"]')!;
+    const cap = capRules.find((r) => /max-width:\s*24rem/.test(r.body))!;
+    const selector = unscoped(cap.selector);
     const input = document.querySelector<HTMLElement>('[aria-label="Primitive"]')!;
     const area = document.querySelector<HTMLElement>('[aria-label="Area"]')!;
-    expect(raw.matches(selector)).toBe(true);
-    expect(input.matches(selector)).toBe(false);
-    expect(area.matches(selector)).toBe(false);
+    const box = document.querySelector<HTMLElement>('[aria-label="Adorned"]')!.parentElement!;
+    expect(input.matches(selector)).toBe(true);
+    expect(area.matches(selector)).toBe(true);
+    expect(box).toHaveClass('ui-input-box');
+    expect(box.matches(selector)).toBe(true);
     // What the props asked for is on the element for Input's own rules to style.
     expect(input).toHaveClass('ui-input', 'mono', 'invalid');
     expect(input).toHaveAttribute('aria-invalid', 'true');
-  });
-
-  it("still caps a primitive's width inside a field", () => {
-    // The geometry half deliberately reaches the primitives, so an Input in a
-    // form keeps the 24rem cap it always had.
-    render(FieldCascadeHarness);
-    const geometry = fieldControlRules.find(
-      (r) => /max-width:\s*24rem/.test(r.body) && !/(^|[\s;])border:/.test(r.body),
-    )!;
-    const input = document.querySelector<HTMLElement>('[aria-label="Primitive"]')!;
-    expect(input.matches(unscoped(geometry.selector))).toBe(true);
   });
 });
 
@@ -143,21 +137,12 @@ describe('the text-field focus state', () => {
     expect(focusRule).toBeDefined();
   });
 
-  it.each([
-    'input.ui-input:focus-visible',
-    'textarea.ui-textarea:focus-visible',
-    'button.ui-select-trigger--full:focus-visible',
-    '.field select:focus-visible',
-  ])('covers %s', (selector) => {
-    expect(selectors).toContain(selector);
-  });
-
-  it("covers the raw input and textarea a Field styles, but not Field's checkbox", () => {
-    const rawInput = selectors.find((s) => s.startsWith('.field input'));
-    const rawArea = selectors.find((s) => s.startsWith('.field textarea'));
-    expect(rawInput).toContain("[type='checkbox']");
-    expect(rawInput).toContain('.ui-input');
-    expect(rawArea).toContain('.ui-textarea');
+  it('covers the Input and TextArea primitives and the full-width Select trigger', () => {
+    expect(selectors).toEqual([
+      'input.ui-input:focus-visible',
+      'textarea.ui-textarea:focus-visible',
+      'button.ui-select-trigger--full:focus-visible',
+    ]);
   });
 
   it('outranks the primitives at rest and stays under .invalid', () => {

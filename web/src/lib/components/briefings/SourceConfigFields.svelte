@@ -285,7 +285,7 @@
         {/if}
       </div>
       <div class="hstack">
-        <input
+        <Input
           type="text"
           placeholder="*@example.com"
           aria-label="Add a sender pattern"
@@ -304,7 +304,7 @@
     </Field>
   {/if}
   <Field label="Lookback (hours)" hint="Leave blank to use the briefing default.">
-    <input
+    <Input
       type="number"
       min="1"
       value={(config.lookback_hours as number) ?? ''}
@@ -329,7 +329,7 @@
     {/each}
   </Field>
   <Field label="Lookback (hours)" hint="Leave blank to read the past 24 hours.">
-    <input
+    <Input
       type="number"
       min="1"
       value={(config.lookback_hours as number) ?? ''}
@@ -356,7 +356,7 @@
   {/if}
   <div class="inline-fields">
     <Field label="Max entries">
-      <input
+      <Input
         type="number"
         min="1"
         value={(config.limit as number) ?? ''}
@@ -386,7 +386,7 @@
   </Field>
   {#if !config.preset}
     <Field label="URL">
-      <input
+      <Input
         type="text"
         placeholder="https://…"
         value={(config.url as string) ?? ''}
@@ -397,7 +397,7 @@
 {:else if kind === 'markets'}
   <p class="caption">Leave blank for the default index &amp; futures set.</p>
   <Field label="Indices" hint="Comma-separated symbols, e.g. ^GSPC, ^IXIC">
-    <input
+    <Input
       type="text"
       value={((config.indices as string[]) ?? []).join(', ')}
       placeholder="default"
@@ -411,7 +411,7 @@
     />
   </Field>
   <Field label="Futures" hint="Comma-separated symbols.">
-    <input
+    <Input
       type="text"
       value={((config.futures as string[]) ?? []).join(', ')}
       placeholder="default"
@@ -444,7 +444,7 @@
     <p class="caption">No shared blocks available yet.</p>
   {/if}
   <Field label="Max age (hours)" hint="Omit stale content older than this. Blank = 24h.">
-    <input
+    <Input
       type="number"
       min="1"
       value={(config.max_age_hours as number) ?? ''}

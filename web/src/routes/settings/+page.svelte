@@ -1,6 +1,6 @@
 <script lang="ts">
   import { uploadAvatar, deleteAvatar, AVATAR_ACCEPT, AuthError } from '$lib/api';
-  import { Avatar, AvatarPicker, Select, Card, Field, Checkbox } from '$lib/components/ui';
+  import { Avatar, AvatarPicker, Select, Card, Field, Checkbox, Input } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import { SecurityCard, SettingsLayout } from '$lib/components/settings';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
@@ -145,7 +145,7 @@
         </p>
       </Field>
       <Field label="Display name" badge={managedBadge(profile, 'display_name')}>
-        <input
+        <Input
           type="text"
           bind:value={profile.display_name}
           disabled={isManaged(profile, 'display_name')}
@@ -155,7 +155,7 @@
         label="Email addresses (comma-separated)"
         badge={managedBadge(profile, 'email_addresses')}
       >
-        <input
+        <Input
           type="text"
           disabled={isManaged(profile, 'email_addresses')}
           value={profileListString(profile.email_addresses)}

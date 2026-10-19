@@ -8,7 +8,16 @@
     type ClientInput,
     type EntityRow,
   } from '$lib/money/api';
-  import { Modal, Button, Select, type SelectOption, Field, Checkbox } from '$lib/components/ui';
+  import {
+    Modal,
+    Button,
+    Select,
+    type SelectOption,
+    Field,
+    Checkbox,
+    Input,
+    TextArea,
+  } from '$lib/components/ui';
 
   /**
    * Create/edit form for an invoicing client.
@@ -194,7 +203,7 @@
       </Field>
     {:else}
       <Field label="Key" hint="Short identifier used by work entries. Lowercase." error={keyError}>
-        <input
+        <Input
           type="text"
           value={key}
           oninput={(e) => (key = normalizeClientKey(e.currentTarget.value))}
@@ -205,19 +214,19 @@
     {/if}
 
     <Field label="Name">
-      <input type="text" bind:value={name} placeholder="Acme Corp" />
+      <Input type="text" bind:value={name} placeholder="Acme Corp" />
     </Field>
 
     <Field label="Email">
-      <input type="text" bind:value={email} placeholder="ap@acme.example" />
+      <Input type="text" bind:value={email} placeholder="ap@acme.example" />
     </Field>
 
     <Field label="Address">
-      <textarea rows="3" bind:value={address}></textarea>
+      <TextArea rows={3} bind:value={address} />
     </Field>
 
     <Field label="Terms" hint="A number of days, or a label like NET 15." error={termsError}>
-      <input type="text" bind:value={terms} placeholder="30" />
+      <Input type="text" bind:value={terms} placeholder="30" />
     </Field>
 
     <Field label="Entity" hint="Which of your entities bills this client.">
@@ -225,7 +234,7 @@
     </Field>
 
     <Field label="A/R account" hint="Blank falls back to the business default.">
-      <input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
+      <Input type="text" bind:value={arAccount} placeholder="Assets:Accounts-Receivable" />
     </Field>
 
     <Field label="Schedule" warning={scheduleWarning}>
@@ -234,7 +243,7 @@
 
     {#if schedule === 'monthly'}
       <Field label="Schedule day" hint="Clamped to the last day of shorter months.">
-        <input type="text" inputmode="numeric" bind:value={scheduleDay} placeholder="1" />
+        <Input type="text" inputmode="numeric" bind:value={scheduleDay} placeholder="1" />
       </Field>
     {/if}
 
@@ -246,13 +255,13 @@
       <summary>Advanced</summary>
       <div class="vstack" style:--vstack-gap="var(--space-2)">
         <Field label="Reminder days">
-          <input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
+          <Input type="text" inputmode="numeric" bind:value={reminderDays} placeholder="3" />
         </Field>
         <Field label="Notifications" hint="Where overdue notices go.">
-          <input type="text" bind:value={notifications} />
+          <Input type="text" bind:value={notifications} />
         </Field>
         <Field label="Days until overdue">
-          <input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
+          <Input type="text" inputmode="numeric" bind:value={daysUntilOverdue} placeholder="0" />
         </Field>
       </div>
     </details>

@@ -90,9 +90,11 @@
       label="KeePass file"
       hint="Choose a .kdbx file. Preview lets you select entries before anything is imported."
     >
+      <!-- A file input is not a primitive, so it names itself. -->
       <input
         type="file"
         accept=".kdbx"
+        aria-label="KeePass file"
         disabled={busy || !!preview}
         onchange={(event) => {
           file = event.currentTarget.files?.[0] ?? null;
@@ -105,6 +107,7 @@
     >
       <input
         type="file"
+        aria-label="Source key file (optional)"
         disabled={busy || !!preview}
         onchange={(event) => {
           keyfile = event.currentTarget.files?.[0] ?? null;

@@ -26,6 +26,7 @@
     Select,
     type SelectOption,
     PageLoading,
+    Input,
   } from '$lib/components/ui';
   import { X } from '@lucide/svelte';
   import { formatDate } from '$lib/dateFormat';
@@ -228,16 +229,15 @@
         {#if editing}
           <div class="header-edit">
             <Field label="Collected">
-              <input type="date" bind:value={editDrawnAt} />
+              <Input type="date" bind:value={editDrawnAt} />
             </Field>
             <Field label="Lab">
-              <input type="text" bind:value={editLabName} placeholder="Quest, Kaiser, …" />
+              <Input type="text" bind:value={editLabName} placeholder="Quest, Kaiser, …" />
             </Field>
             <Field label="Panel type">
-              <input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
+              <Input type="text" bind:value={editPanelType} placeholder="CBC, CMP, Lipid, …" />
             </Field>
-            <label class="full-row">
-              <span>Specimen</span>
+            <Field label="Specimen" class="full-row">
               <Select
                 value={editSpecimen}
                 options={specimenOptions}
@@ -245,9 +245,8 @@
                 ariaLabel="Specimen"
                 fullWidth
               />
-            </label>
-            <label class="full-row">
-              <span>Linked encounter</span>
+            </Field>
+            <Field label="Linked encounter" class="full-row">
               <Select
                 value={editEncounterId}
                 options={encounterOptions}
@@ -255,7 +254,7 @@
                 ariaLabel="Linked encounter"
                 fullWidth
               />
-            </label>
+            </Field>
           </div>
         {:else}
           <h1 class="title-page">
@@ -313,7 +312,13 @@
                 <tr class:is-danger={b.flag}>
                   <td>
                     {#if editing}
-                      <input bind:value={b.name} placeholder="Hemoglobin" />
+                      <Input
+                        dense
+                        class="cell-input"
+                        aria-label="Marker {i + 1} name"
+                        bind:value={b.name}
+                        placeholder="Hemoglobin"
+                      />
                     {:else}
                       <a
                         class="marker-link link-quiet"
@@ -325,29 +330,48 @@
                   </td>
                   <td>
                     {#if editing}
-                      <input type="number" step="any" bind:value={b.value} />
+                      <Input
+                        type="number"
+                        step="any"
+                        dense
+                        class="cell-input"
+                        aria-label="Marker {i + 1} value"
+                        bind:value={b.value}
+                      />
                     {:else}
                       {b.value}
                     {/if}
                   </td>
                   <td>
                     {#if editing}
-                      <input bind:value={b.unit} placeholder="g/dL" />
+                      <Input
+                        dense
+                        class="cell-input"
+                        aria-label="Marker {i + 1} unit"
+                        bind:value={b.unit}
+                        placeholder="g/dL"
+                      />
                     {:else}
                       {b.unit}
                     {/if}
                   </td>
                   <td>
                     {#if editing}
-                      <input
+                      <Input
                         type="number"
                         step="any"
+                        dense
+                        class="cell-input"
+                        aria-label="Marker {i + 1} range low"
                         bind:value={b.ref_range_low}
                         placeholder="low"
                       />
-                      <input
+                      <Input
                         type="number"
                         step="any"
+                        dense
+                        class="cell-input"
+                        aria-label="Marker {i + 1} range high"
                         bind:value={b.ref_range_high}
                         placeholder="high"
                       />
@@ -451,7 +475,7 @@
     gap: var(--space-2) var(--space-3);
     max-width: 32rem;
   }
-  .header-edit .full-row {
+  .header-edit :global(.full-row) {
     grid-column: 1 / -1;
   }
   .encounter-link {
@@ -484,16 +508,9 @@
       grid-template-columns: 1fr;
     }
   }
-  .biomarker-table input {
-    width: 100%;
+  /* Placement only: the cell editors are `Input dense`. */
+  .biomarker-table :global(.cell-input) {
     max-width: 9rem;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-xs);
-    padding: 0.15rem var(--space-1);
   }
   .flag {
     display: inline-flex;

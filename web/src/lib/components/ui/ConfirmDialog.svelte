@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
+  import Input from './Input.svelte';
 
   interface Props {
     /** Whether the dialog is shown. Bindable. */
@@ -78,9 +79,7 @@
     <p class="confirm-challenge description">
       Type <code>{challenge}</code> to confirm.
     </p>
-    <input
-      class="confirm-challenge-input"
-      type="text"
+    <Input
       bind:value={typed}
       placeholder={challenge}
       autocomplete="off"
@@ -110,16 +109,5 @@
     padding: 0.05rem var(--space-1);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
-  }
-  .confirm-challenge-input {
-    width: 100%;
-    box-sizing: border-box;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-2);
-    color: var(--text-primary);
-    font: inherit;
-    font-size: var(--text-sm);
   }
 </style>
