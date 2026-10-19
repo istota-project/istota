@@ -8,13 +8,16 @@
    In source order, which is also cascade order:
      - the box-sizing reset
      - the named shared blocks: .micro-label, .caption, .muted, .description,
+       the heading base and .title-page / .title-section / .title-card,
+       the code element with .mono and .code-chip, .num,
        .spinner + @keyframes spin, .banner and its status variants
      - one global :focus-visible ring, and the text-field exception to it
      - the iOS date-input and 16px-zoom-floor fixes (see @media pointer:coarse)
      - .touch-target, the coarse-pointer hit-area overlay (24px floor;
        --touch-target-w / --touch-target-h override it at the call site)
      - .control-row (the field tier) and .content-frame (the content column)
-     - body / a base rules, .visually-hidden
+     - body / a base rules, .link-action / .link-quiet / .link-muted,
+       .visually-hidden
 
    Each block carries its own rationale below; AGENTS.md "Small shared blocks"
    is the index. Pinned by contentFrame / controlTier / touchZoom / dateInputs
@@ -76,6 +79,63 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
   max-width: 60ch;
+}
+
+/* Every heading starts at the semibold weight with no margin, so none falls
+   back to the browser's bold 700 and its em margins. Weightless, so any
+   class or page rule wins. Rendered content (`.prose`: feed entries, the
+   briefings reader, workspace markdown) keeps the browser's heading rhythm,
+   or an article's own headings would collapse onto its paragraphs. */
+:where(h1, h2, h3, h4):not(:where(.prose, .prose *)) {
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
+/* The three title steps. Typography only, like .micro-label: a page title, a
+   card title and a section title each want different space around them.
+   Nine page-title styles, three section-title weights and eight card-title
+   variants were written out before these; the card title sits a weight
+   under the section title above it. */
+.title-page {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.title-section {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.title-card {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+/* Code. The element rule gives every inline <code> the mono face a step under
+   the text around it; `.mono` is the face alone, for a path or an id that is
+   not code; `.code-chip` is the small raised chip that seven cards drew by
+   hand around a symbol, an account number or a rule value. */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.code-chip {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--surface-raised);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+/* Digits that line up: a count, a figure in a column, a value that changes
+   in place. Proportional digits make a ticking count shift its neighbours. */
+.num {
+  font-variant-numeric: tabular-nums;
 }
 
 /* An inline "working…" spinner, beside its label. Declared in three files,
@@ -520,6 +580,52 @@ a {
 }
 a:hover {
   color: var(--accent-hover);
+}
+
+/* Three link looks outside `.prose`, which owns content links.
+
+   `.link-action` is a <button> drawn as a content link, for an action that
+   sits inside a sentence ("+2 more", "Show the whole message") where a
+   bordered Button would break the line. `font: inherit` takes the line-height
+   with it, so it is pinned back beside it.
+
+   `.link-quiet` is a row or title link that reads as text until pointed at;
+   `.link-muted` is the same on the muted step, for a secondary link (a
+   source, "open in Files"). Both keep their colour on hover, where the bare
+   `a:hover` would brighten it, and show the underline instead. */
+.link-action {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+  color: var(--link);
+  cursor: pointer;
+}
+
+.link-quiet {
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.link-muted {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.link-action:hover {
+  color: var(--link);
+  text-decoration: underline;
+}
+
+.link-quiet:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
+.link-muted:hover {
+  color: var(--text-muted);
+  text-decoration: underline;
 }
 
 /* Text a screen reader reads and the page does not show. NoticeDrawer, chat

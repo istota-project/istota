@@ -120,11 +120,11 @@
     "raw-color": 4
   },
   "src/routes/health/history/diagnoses/+page.svelte": {
-    "off-scale-space": 8,
+    "off-scale-space": 7,
     "raw-color": 3
   },
   "src/routes/health/history/encounter/+page.svelte": {
-    "off-scale-space": 4
+    "off-scale-space": 3
   },
   "src/routes/health/immunizations/+page.svelte": {
     "off-scale-space": 2

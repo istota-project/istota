@@ -237,8 +237,8 @@
        this header. -->
   <div class="header">
     <div>
-      <a class="back" href="{base}/health/history">← Medical history</a>
-      <h1>Encounter</h1>
+      <a class="back link-muted" href="{base}/health/history">← Medical history</a>
+      <h1 class="title-page">Encounter</h1>
     </div>
     {#if encounter && !editing}
       <div class="actions">
@@ -349,11 +349,13 @@
         {#each diagnoses as d (d.id)}
           <li class="dx-card">
             <div class="card-head">
-              <a class="name" href="{base}/health/history/diagnoses">{d.name}</a>
+              <a class="name title-card link-quiet" href="{base}/health/history/diagnoses"
+                >{d.name}</a
+              >
               <KebabMenu items={conditionMenu(d)} ariaLabel="Condition actions" />
             </div>
             <div class="tags">
-              {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+              {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
               <Badge variant={diagnosisStatusVariant(d.status)}>{d.status}</Badge>
             </div>
             <div class="card-meta caption">
@@ -395,7 +397,7 @@
         {#each panels as p (p.id)}
           <li>
             <a href="{base}/health/labs/panel?id={p.id}">
-              <h3 class="name">{formatDate(p.drawn_at)}</h3>
+              <h3 class="name title-card">{formatDate(p.drawn_at)}</h3>
               <div class="tags">
                 <span class="count-tag">
                   {p.biomarker_count} marker{p.biomarker_count === 1 ? '' : 's'}
@@ -451,17 +453,7 @@
   .back {
     display: inline-block;
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
     margin-bottom: var(--space-1);
-  }
-  .back:hover {
-    text-decoration: underline;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   h2 {
     margin: 1.25rem 0 var(--space-2);
@@ -555,8 +547,6 @@
   }
   .card-grid .name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
     line-height: var(--leading-snug);
     min-width: 0;
     overflow-wrap: anywhere;
@@ -574,12 +564,7 @@
     flex-wrap: wrap;
   }
   .icd {
-    font-size: var(--text-xs);
     color: var(--text-muted);
-    background: var(--surface-raised);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-mono);
   }
   .count-tag {
     font-size: var(--text-xs);
@@ -630,13 +615,6 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-2);
-  }
-  .dx-card .name {
-    color: var(--text-primary);
-    text-decoration: none;
-  }
-  .dx-card .name:hover {
-    text-decoration: underline;
   }
 
   .link-row {

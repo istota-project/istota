@@ -32,7 +32,7 @@
       onclick={() => (collapsed = !collapsed)}
       aria-expanded={!collapsed}
     >
-      <span class="notice-title">{title}</span>
+      <span class="notice-title title-section">{title}</span>
       <span class="notice-toggle">{collapsed ? '▸' : '▾'}</span>
     </button>
     {#if !collapsed}
@@ -40,7 +40,7 @@
     {/if}
   {:else}
     <div class="notice-head notice-static">
-      <span class="notice-title">{title}</span>
+      <span class="notice-title title-section">{title}</span>
     </div>
   {/if}
 </section>
@@ -86,15 +86,12 @@
   }
 
   /* The banner's two type sizes are the component's, not the caller's: a title
-     at --text-base over a body at --text-sm. Both were raw literals (0.9rem /
-     0.85rem), which is what let a caller "match" the banner by writing its own
-     approximation of them — the admin standalone notice sized its whole slot in
-     0.9/0.85 and so rendered a step larger than every other banner in the app.
-     Keep them tokens, and keep them here. */
-  .notice-title {
-    font-weight: var(--weight-semibold);
-    font-size: var(--text-base);
-  }
+     at --text-base (the global .title-section on the title span) over a body
+     at --text-sm. Both were raw literals (0.9rem / 0.85rem), which is what let
+     a caller "match" the banner by writing its own approximation of them — the
+     admin standalone notice sized its whole slot in 0.9/0.85 and so rendered a
+     step larger than every other banner in the app. Keep them tokens, and keep
+     them on the component. */
 
   .notice-toggle {
     opacity: 0.6;

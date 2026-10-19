@@ -494,7 +494,7 @@
     border: none;
     cursor: pointer;
     color: var(--text-muted);
-    font-size: 1rem;
+    font-size: var(--text-lg);
     line-height: var(--leading-none);
     padding: 0;
   }

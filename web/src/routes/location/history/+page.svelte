@@ -344,24 +344,24 @@
 
     <div class="stats-bar">
       {#if pings.length > 0}
-        <span class="stat caption">{pings.length} pings</span>
+        <span class="stat caption num">{pings.length} pings</span>
       {/if}
       {#if summary && pings.length > 0}
-        <span class="stat caption">{summary.stops.length} stops</span>
-        <span class="stat caption">{summary.transit_pings} transit</span>
+        <span class="stat caption num">{summary.stops.length} stops</span>
+        <span class="stat caption num">{summary.transit_pings} transit</span>
       {/if}
       {#if showDiscover && clusters.length > 0}
-        <span class="stat caption">{clusters.length} unknown</span>
+        <span class="stat caption num">{clusters.length} unknown</span>
       {/if}
       {#if !isSingleDay}
         {@const uniquePlaces = new Set(pings.filter((p) => p.place).map((p) => p.place))}
-        <span class="stat caption">{uniquePlaces.size} places</span>
+        <span class="stat caption num">{uniquePlaces.size} places</span>
       {/if}
       {#if isSingleDay && trips.length > 0}
-        <span class="stat caption">{trips.length} trips</span>
+        <span class="stat caption num">{trips.length} trips</span>
       {/if}
       {#if elevation.range}
-        <span class="stat caption"
+        <span class="stat caption num"
           >{Math.round(elevation.range.max - elevation.range.min)} m elevation</span
         >
       {/if}

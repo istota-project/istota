@@ -610,7 +610,7 @@
     background: rgba(0, 0, 0, 0.5);
     color: #fff;
     /* design-lint-allow-end */
-    font-size: 0.8rem;
+    font-size: var(--text-sm);
     border-radius: var(--radius-sm);
     pointer-events: none;
     white-space: nowrap;

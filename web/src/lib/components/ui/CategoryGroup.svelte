@@ -57,7 +57,7 @@
       </button>
       <button class="cat-select micro-label" onclick={onSelect} type="button">
         <span class="cat-label-text">{label}</span>
-        {#if count !== undefined}<span class="cat-count caption">{count}</span>{/if}
+        {#if count !== undefined}<span class="cat-count caption num">{count}</span>{/if}
       </button>
     </div>
     {#if open}
@@ -67,7 +67,7 @@
     <button class="cat-label cat-label-button micro-label" onclick={toggle} type="button">
       <span class="caret" class:open>&#9654;</span>
       <span class="cat-label-text">{label}</span>
-      {#if count !== undefined}<span class="cat-count caption">{count}</span>{/if}
+      {#if count !== undefined}<span class="cat-count caption num">{count}</span>{/if}
     </button>
     {#if open}
       {@render children()}
@@ -75,7 +75,7 @@
   {:else}
     <div class="cat-label micro-label">
       <span class="cat-label-text">{label}</span>
-      {#if count !== undefined}<span class="cat-count caption">{count}</span>{/if}
+      {#if count !== undefined}<span class="cat-count caption num">{count}</span>{/if}
     </div>
     {@render children()}
   {/if}

@@ -54,10 +54,10 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
+  /* App-bar chrome rather than a page title, so it keeps its own size off
+     the title scale; the weight is the heading base's. */
   .header h1 {
     font-size: 1rem;
-    font-weight: var(--weight-semibold);
-    margin: 0;
     min-width: 0;
   }
 

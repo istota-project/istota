@@ -130,9 +130,9 @@
       {#each rows as row (row.account.id)}
         <li class="account-row" class:excluded={row.excluded}>
           <div class="account-head">
-            <span class="account-name">{row.account.account_name}</span>
+            <span class="account-name title-card">{row.account.account_name}</span>
             {#if row.account.account_number}
-              <code class="account-number">{row.account.account_number}</code>
+              <code class="account-number code-chip">{row.account.account_number}</code>
             {/if}
           </div>
           <div class="account-controls control-row">
@@ -202,18 +202,11 @@
   }
 
   .account-name {
-    font-size: var(--text-sm);
-    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 
   .account-number {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-dim);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .account-controls {

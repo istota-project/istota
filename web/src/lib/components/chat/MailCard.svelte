@@ -107,7 +107,7 @@
         >{i < shown.length - 1 ? ', ' : ''}{/each}
       {#if !open && list.length > SHOWN_ADDRESSES}
         {' '}<button
-          class="mail-link"
+          class="mail-link link-action"
           type="button"
           onclick={() => (expandedLists = { ...expandedLists, [label]: true })}
           >+{list.length - SHOWN_ADDRESSES} more</button
@@ -174,7 +174,7 @@
           data-testid="mail-state">{stateLabel}</span
         >
         {#if card.state === 'held' && card.notePath}
-          <a class="mail-link" href="{base}{card.notePath}" data-sveltekit-reload
+          <a class="mail-link link-action" href="{base}{card.notePath}" data-sveltekit-reload
             >Open in your private chat</a
           >
         {/if}
@@ -189,7 +189,7 @@
     {/if}
     {#if card.rest}
       <button
-        class="mail-link mail-quoted-toggle"
+        class="mail-link link-action mail-quoted-toggle"
         type="button"
         aria-expanded={quotedShown}
         onclick={() => (quotedShown = !quotedShown)}
@@ -321,16 +321,7 @@
     color: var(--text-muted);
   }
   .mail-link {
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    font: inherit;
     font-size: var(--text-xs);
-    cursor: pointer;
-  }
-  .mail-link:hover {
-    text-decoration: underline;
   }
   .mail-body {
     margin-top: var(--space-2);

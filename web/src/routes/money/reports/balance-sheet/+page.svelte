@@ -195,13 +195,13 @@
 
   .nw-label {
     font-weight: var(--weight-semibold);
-    font-size: 1rem;
+    font-size: var(--text-lg);
   }
 
   .nw-amount {
     margin-left: auto;
     font-weight: var(--weight-semibold);
-    font-size: 1rem;
+    font-size: var(--text-lg);
     font-variant-numeric: tabular-nums;
   }
 

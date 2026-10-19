@@ -114,7 +114,7 @@
       {#each connection.apps as app (app.app)}
         <li class="app" data-testid={`servarr-app-${app.app}`}>
           <div class="app-head">
-            <h3 class="app-name">{app.app}</h3>
+            <h3 class="app-name title-card">{app.app}</h3>
             {#if !app.incomplete}
               <Badge variant={checkBadge(app).variant} size="sm">{checkBadge(app).label}</Badge>
             {/if}
@@ -152,7 +152,7 @@
       {/each}
       {#each connection.missing as app (app)}
         <li class="app app-missing" data-testid={`servarr-missing-${app}`}>
-          <h3 class="app-name">{app}</h3>
+          <h3 class="app-name title-card">{app}</h3>
           <p class="caption">Not configured</p>
         </li>
       {/each}
@@ -282,8 +282,6 @@
 
   .app-name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: var(--weight-semibold);
     color: var(--text-primary);
     text-transform: capitalize;
   }

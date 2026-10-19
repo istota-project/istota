@@ -610,7 +610,7 @@
 
     {#if !filter.trim()}
       <section class="card">
-        <header class="section-header"><h2>Admins</h2></header>
+        <header class="section-header"><h2 class="title-section">Admins</h2></header>
         <AdminsEditor
           users={view.admins.users}
           candidates={view.admins.candidates ?? []}
@@ -624,7 +624,7 @@
 
       {#if orphanSecrets.length}
         <section class="card">
-          <header class="section-header"><h2>Credentials</h2></header>
+          <header class="section-header"><h2 class="title-section">Credentials</h2></header>
           {#each orphanSecrets as secret (secret.name)}
             {@render standaloneSecret(secret)}
           {/each}
@@ -638,7 +638,7 @@
 
     {#each sections as section (section.key)}
       <section class="card config-section">
-        <header class="section-header"><h2>{section.label}</h2></header>
+        <header class="section-header"><h2 class="title-section">{section.label}</h2></header>
         {#each section.fields as field (field.key)}
           {#if field.key === 'servarr.apps' && appsForm}
             <ServarrAppsEditor

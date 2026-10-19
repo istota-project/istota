@@ -36,8 +36,11 @@
   <div class="card-head">
     <!-- The whole card is not a link: the kebab lives inside it, and a
          nested interactive element inside an anchor is not addressable. -->
-    <a class="name" href={doc.url} onclick={(event) => openDocumentImage(event, doc)} title={name}
-      >{name}</a
+    <a
+      class="name title-card"
+      href={doc.url}
+      onclick={(event) => openDocumentImage(event, doc)}
+      title={name}>{name}</a
     >
     <KebabMenu items={menu} ariaLabel="Document actions" />
   </div>
@@ -74,8 +77,6 @@
 
   .name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
     color: var(--accent-blue);
     line-height: var(--leading-snug);
     text-decoration: none;

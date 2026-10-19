@@ -378,7 +378,7 @@
       <div class="entity-grid card-grid">
         {#each entities as entity (entity.key)}
           <div class="entity">
-            <div class="entity-head">
+            <div class="entity-head title-card">
               <span>{entity.name}</span>
               <span class="entity-key">
                 <code>{entity.key}</code>
@@ -613,9 +613,7 @@
     justify-content: space-between;
     align-items: baseline;
     gap: var(--space-2);
-    font-weight: var(--weight-semibold);
     color: var(--text-primary);
-    font-size: var(--text-sm);
   }
 
   .entity-key {
@@ -637,7 +635,6 @@
   .grid td.num {
     text-align: right;
     white-space: nowrap;
-    font-variant-numeric: tabular-nums;
   }
 
   .grid th.actions,

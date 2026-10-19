@@ -348,9 +348,6 @@
     margin: 0;
     overflow-wrap: anywhere;
   }
-  .briefings-grid code {
-    font-size: var(--text-xs);
-  }
   /* Briefing is the unsized column: the min-width reserves it 12rem past the
      sized ones, and adminTables.test.ts holds the sum. */
   .briefings-grid {

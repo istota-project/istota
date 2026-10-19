@@ -251,7 +251,7 @@
   }
 
   .error-line {
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--status-warn-fg);
     padding: 0.15rem 0;

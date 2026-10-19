@@ -106,7 +106,7 @@
 </script>
 
 <section class="card request-progress" aria-live="polite">
-  <header class="section-header"><h2>Change #{requestId}</h2></header>
+  <header class="section-header"><h2 class="title-section">Change #{requestId}</h2></header>
 
   {#if phase === 'lost'}
     <p class="banner danger">

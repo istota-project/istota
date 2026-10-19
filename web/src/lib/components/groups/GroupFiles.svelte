@@ -64,8 +64,10 @@
           <span class="entry-icon" aria-hidden="true"
             >{#if entry.kind === 'dir'}<Folder size={16} />{:else}<EntryIcon size={16} />{/if}</span
           >
-          {#if entry.kind === 'dir'}<a class="name" href={folderHref(entry)} title={entry.name}
-              >{entry.name}</a
+          {#if entry.kind === 'dir'}<a
+              class="name link-quiet"
+              href={folderHref(entry)}
+              title={entry.name}>{entry.name}</a
             >
           {:else if target}<button
               type="button"
@@ -123,7 +125,6 @@
     line-height: inherit;
     cursor: pointer;
   }
-  a.name:hover,
   button.name:hover {
     text-decoration: underline;
   }

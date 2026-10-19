@@ -125,7 +125,7 @@
 </script>
 
 <div class="header">
-  <h1>Import encounter</h1>
+  <h1 class="title-page">Import encounter</h1>
   <Button href="{base}/health/history">Back</Button>
 </div>
 
@@ -344,11 +344,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: var(--space-3);
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   h2 {
     margin: 0;

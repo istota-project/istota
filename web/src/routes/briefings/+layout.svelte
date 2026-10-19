@@ -696,7 +696,7 @@
                   entry.kind === 'user' ? pickItem(entry.item.id) : pickGroupEdition(entry.item)}
               >
                 <span class="archive-line">
-                  <span class="archive-subject">{row.title}</span>
+                  <span class="archive-subject title-card">{row.title}</span>
                   <time class="archive-date caption" datetime={entry.at} title={fmtDate(entry.at)}
                     >{formatRelative(entry.at)}</time
                   >
@@ -782,8 +782,6 @@
   .archive-subject {
     flex: 1;
     min-width: 0;
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

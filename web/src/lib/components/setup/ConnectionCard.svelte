@@ -22,7 +22,7 @@
 <section class="connection" aria-label={title}>
   <div class="connection-head">
     <div>
-      <h3>{title}</h3>
+      <h3 class="title-section">{title}</h3>
       <p class="caption">{description}</p>
     </div>
     {#if added}
@@ -56,9 +56,6 @@
   }
 
   h3 {
-    margin: 0;
-    font-size: var(--text-base);
-    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 

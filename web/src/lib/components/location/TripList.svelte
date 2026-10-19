@@ -40,7 +40,7 @@
         ></span>
         <div class="trip-info">
           <span class="trip-time">{formatTime(trip.start_time)} - {formatTime(trip.end_time)}</span>
-          <span class="trip-details">
+          <span class="trip-details caption">
             {formatDist(trip.distance_m)}
             {#if trip.max_speed}&middot; {formatSpeed(trip.max_speed)}{/if}
             &middot; {tripDuration(trip)}
@@ -98,11 +98,6 @@
   .trip-time {
     font-size: var(--text-xs);
     color: var(--text-primary);
-  }
-
-  .trip-details {
-    font-size: 0.65rem;
-    color: var(--text-dim);
   }
 
   .trip-activity {

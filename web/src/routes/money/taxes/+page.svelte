@@ -210,7 +210,7 @@
     <div class="tax-layout">
       <!-- Inputs -->
       <section class="input-section">
-        <h2>Inputs</h2>
+        <h2 class="title-section">Inputs</h2>
         <div class="input-card">
           <div class="input-group">
             <label class="input-label caption" for="w2-income">W-2 income YTD</label>
@@ -299,7 +299,7 @@
 
       <!-- Results -->
       <section class="results-section">
-        <h2>Estimate</h2>
+        <h2 class="title-section">Estimate</h2>
 
         <div class="summary-cards">
           <StatTile
@@ -610,9 +610,6 @@
   }
 
   section h2 {
-    font-size: var(--text-base);
-    font-weight: var(--weight-semibold);
-    color: var(--text-primary);
     margin: 0 0 var(--space-2) var(--space-1);
   }
 
@@ -797,7 +794,7 @@
 
   .info-panel summary::before {
     content: '+ ';
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
   }
 
   .info-panel[open] summary::before {
@@ -841,9 +838,11 @@
     font-size: var(--text-xs);
   }
 
+  /* In-app cross-references, so the interactive blue rather than the amber
+     of a content link (web/AGENTS.md, Color). */
   .settings-link a,
   .state-notice a {
-    color: var(--link);
+    color: var(--accent-blue);
   }
 
   /* 640px, the app's narrow breakpoint, rather than a one-off 720px. */

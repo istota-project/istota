@@ -533,7 +533,7 @@
      routes/money/+layout.svelte. */
 
   .invoices-content :global(.inv-number) {
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
     flex-shrink: 0;

@@ -287,9 +287,6 @@
   .cell-main {
     overflow-wrap: anywhere;
   }
-  .jobs-grid code {
-    font-size: var(--text-xs);
-  }
   .last-error summary {
     cursor: pointer;
   }
@@ -302,7 +299,6 @@
   }
   .num {
     text-align: right;
-    font-variant-numeric: tabular-nums;
   }
   .failing {
     color: var(--status-danger-fg);

@@ -630,7 +630,7 @@
                 <span class="rule-prio" title="Priority">{rule.priority}</span>
                 <span class="rule-desc">
                   <span class="muted">{rule.field} {rule.match_kind}</span>
-                  <code class="rule-value">{rule.match_value}</code>
+                  <code class="rule-value code-chip">{rule.match_value}</code>
                   <span class="muted">→</span>
                   <span class="rule-target">{outcomeOf(rule)}</span>
                   <span class="rule-scope muted">{scopeLabel(rule.ledger, rule.source)}</span>
@@ -755,14 +755,6 @@
     font-size: var(--text-sm);
     color: var(--text-primary);
     overflow-wrap: anywhere;
-  }
-
-  .rule-value {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .rule-target {

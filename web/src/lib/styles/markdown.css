@@ -56,8 +56,6 @@
   color: var(--text-secondary);
 }
 .markdown code {
-  font-family: ui-monospace, monospace;
-  font-size: 0.9em;
   background: #2d2d2d;
   color: #e6e6e6;
   padding: 0.05rem 0.3rem;

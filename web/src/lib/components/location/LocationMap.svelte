@@ -992,7 +992,7 @@
   :global(.maplibregl-ctrl-attrib) {
     background: color-mix(in srgb, var(--surface-base) 70%, transparent) !important;
     color: var(--text-dim) !important;
-    font-size: 0.65rem !important;
+    font-size: var(--text-xs) !important;
   }
 
   :global(.maplibregl-ctrl-attrib a) {

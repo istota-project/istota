@@ -214,7 +214,7 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Medical history</h1>
+    <h1 class="title-page">Medical history</h1>
     <div class="actions">
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Add encounter'}
@@ -404,11 +404,6 @@
     align-items: center;
     gap: var(--space-4);
     margin-bottom: var(--space-4);
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   .actions {
     display: flex;

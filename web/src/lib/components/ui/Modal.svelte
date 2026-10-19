@@ -176,7 +176,7 @@
         <div class="ui-viewer-panel">
           <header class="ui-viewer-header">
             <div class="ui-viewer-heading">
-              <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+              <Dialog.Title class="ui-modal-title title-section">{title}</Dialog.Title>
               {#if metadata}<div class="ui-viewer-metadata caption">{@render metadata()}</div>{/if}
             </div>
             {#if actions}<div class="ui-viewer-actions">{@render actions()}</div>{/if}
@@ -203,7 +203,7 @@
       {:else}
         {#if variant === 'palette'}
           <header class="ui-palette-header">
-            <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+            <Dialog.Title class="ui-modal-title title-section">{title}</Dialog.Title>
             {#if dismissible}
               <IconButton
                 label="Close"
@@ -215,7 +215,7 @@
             {/if}
           </header>
         {:else}
-          <Dialog.Title class="ui-modal-title">{title}</Dialog.Title>
+          <Dialog.Title class="ui-modal-title title-section">{title}</Dialog.Title>
         {/if}
         {#if description}<Dialog.Description class="ui-modal-description description"
             >{description}</Dialog.Description
@@ -261,8 +261,6 @@
     outline: none;
   }
   :global(.ui-modal-title) {
-    font-size: var(--text-base);
-    font-weight: var(--weight-semibold);
     margin: 0 0 var(--space-2);
     color: var(--text-primary);
   }

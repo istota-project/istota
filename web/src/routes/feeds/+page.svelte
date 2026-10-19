@@ -743,7 +743,7 @@
     background: rgb(0 0 0 / 0.7);
     color: #fff;
     /* design-lint-allow-end */
-    font-size: 0.65rem;
+    font-size: var(--text-xs);
     font-weight: var(--weight-semibold);
     letter-spacing: var(--tracking-caps);
     pointer-events: none;
@@ -841,16 +841,7 @@
   .feed-grid :global(.card-body h3) {
     margin: 0;
     padding: var(--space-2) var(--space-3) var(--space-1);
-    font-size: 0.8rem;
-    font-weight: var(--weight-semibold);
-  }
-
-  .feed-grid :global(.card-body h3 a) {
-    color: var(--text-primary);
-    text-decoration: none;
-  }
-  .feed-grid :global(.card-body h3 a:hover) {
-    text-decoration: underline;
+    font-size: var(--text-base);
   }
 
   /* Excerpt — body copy is kept in lockstep with the reader popup's

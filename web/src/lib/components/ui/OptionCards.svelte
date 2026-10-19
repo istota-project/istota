@@ -93,7 +93,7 @@
     >
       <span class="dot" aria-hidden="true"></span>
       <span class="text">
-        <span class="title"
+        <span class="title title-card"
           >{option.title}{#if option.badge}<Badge variant="info" size="sm">{option.badge}</Badge
             >{/if}</span
         >
@@ -174,8 +174,6 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
-    font-size: var(--text-sm);
-    font-weight: var(--weight-semibold);
   }
 
   .option-detail {

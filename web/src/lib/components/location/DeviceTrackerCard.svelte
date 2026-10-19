@@ -519,7 +519,7 @@
   }
 
   .tracker-id {
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     word-break: break-all;
   }

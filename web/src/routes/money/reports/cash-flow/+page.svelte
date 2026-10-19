@@ -428,7 +428,7 @@
   }
 
   .month-title {
-    font-size: 1.1rem;
+    font-size: var(--text-lg);
     font-weight: var(--weight-semibold);
     padding: var(--space-2) var(--space-3);
   }

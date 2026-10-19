@@ -156,7 +156,7 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Immunizations</h1>
+    <h1 class="title-page">Immunizations</h1>
     <div class="actions">
       <Button onclick={() => (formOpen = !formOpen)}>
         {formOpen ? 'Cancel' : '+ Log dose'}
@@ -234,7 +234,7 @@
             class="card interactive"
             href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
           >
-            <span class="name">{c.display_name}</span>
+            <span class="name title-card">{c.display_name}</span>
             <Badge variant={immunizationStatusVariant(c.status)}
               >{immunizationStatusLabel(c.status)}</Badge
             >
@@ -275,7 +275,7 @@
                 class="card interactive"
                 href="{base}/health/immunizations/vaccine?name={encodeURIComponent(c.name)}"
               >
-                <span class="name">{c.display_name}</span>
+                <span class="name title-card">{c.display_name}</span>
                 <Badge variant={immunizationStatusVariant(c.status)}
                   >{immunizationStatusLabel(c.status)}</Badge
                 >
@@ -301,7 +301,7 @@
         {#each other as c (c.name)}
           <li>
             <div class="card">
-              <span class="name">{c.display_name}</span>
+              <span class="name title-card">{c.display_name}</span>
               <Badge variant="neutral">
                 {c.dose_count} dose{c.dose_count > 1 ? 's' : ''}
               </Badge>
@@ -406,11 +406,6 @@
     align-items: center;
     margin-bottom: var(--space-4);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
-  }
   .actions {
     display: flex;
     gap: var(--space-2);
@@ -472,8 +467,6 @@
     color: var(--text-primary);
   }
   .card .name {
-    font-weight: var(--weight-medium);
-    font-size: var(--text-sm);
     line-height: var(--leading-snug);
   }
   .card-body {

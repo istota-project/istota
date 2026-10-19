@@ -281,7 +281,7 @@
   <!-- Held back while loading so the pane shows nothing but the centered
        loading message, rather than centering it in the space left under
        this header. -->
-  <a class="back" href="{base}/health/labs">← Labs</a>
+  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
 {/if}
 
 {#if loading}
@@ -291,7 +291,7 @@
 {:else if trend}
   <header class="page-header">
     <div>
-      <h1>{ref?.display_name || trend.name}</h1>
+      <h1 class="title-page">{ref?.display_name || trend.name}</h1>
       <div class="meta muted">
         {#if ref}<span class="cat">{ref.category}</span>{/if}
         {#if trend.unit}<span class="unit">{trend.unit}</span>{/if}
@@ -370,7 +370,7 @@
 
   {#if ref?.description}
     <section class="about">
-      <h2>About this marker</h2>
+      <h2 class="title-section">About this marker</h2>
       <p class="description">{ref.description}</p>
       <dl>
         <dt class="micro-label">Reference range</dt>
@@ -390,7 +390,7 @@
 
   {#if trend.points.length > 0}
     <section class="history">
-      <h2>History</h2>
+      <h2 class="title-section">History</h2>
       <table>
         <thead>
           <tr>
@@ -420,16 +420,9 @@
 <style>
   .back {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
   }
   .page-header {
     margin: var(--space-1) 0 var(--space-4);
-  }
-  h1 {
-    font-size: var(--text-xl);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   .meta {
     display: flex;
@@ -505,7 +498,7 @@
     color: var(--text-primary);
   }
   .alert-tag {
-    font-size: 10px;
+    font-size: var(--text-2xs);
     padding: 0.05rem var(--space-2);
     border-radius: var(--radius-pill);
     background: var(--surface-raised);
@@ -572,8 +565,6 @@
   }
   .about h2,
   .history h2 {
-    font-size: var(--text-base);
-    font-weight: var(--weight-medium);
     margin: 0 0 var(--space-2);
   }
   .about p {

@@ -102,9 +102,7 @@
   }
 
   h1 {
-    margin: 0;
     font-size: var(--text-xl);
-    font-weight: var(--weight-semibold);
     color: var(--text-primary);
   }
 

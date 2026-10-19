@@ -361,7 +361,7 @@
       {#each blocks as block, index (block.id)}
         <li class="block-row">
           <div class="block-content">
-            <h3>{block.title}</h3>
+            <h3 class="title-card">{block.title}</h3>
             <p class="caption">{sourceSummary(block)}</p>
             <span class="caption">{widthLabel(block)}</span>
           </div>
@@ -540,7 +540,6 @@
   }
   h3 {
     margin: 0 0 var(--space-1);
-    font-size: var(--text-sm);
   }
   p {
     margin: var(--space-1) 0;

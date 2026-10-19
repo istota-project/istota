@@ -379,7 +379,7 @@
        centring it in the space left under this header. -->
   <div class="header">
     <div>
-      <h1>Documents</h1>
+      <h1 class="title-page">Documents</h1>
       <p class="sub caption">
         <!-- Never "N on file" once the walk stopped early: the count would be
              a claim about the store rather than about what is loaded. -->
@@ -590,12 +590,6 @@
     justify-content: space-between;
     gap: var(--space-3);
     margin-bottom: var(--space-4);
-  }
-
-  h1 {
-    margin: 0;
-    font-size: var(--text-lg);
-    font-weight: var(--weight-semibold);
   }
 
   .sub {

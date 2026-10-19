@@ -216,7 +216,7 @@
           <div class="res-row">
             <span class="micro-label">Posting account</span>
             {#if resolution.posting_account}
-              <code class="res-value">{resolution.posting_account}</code>
+              <code class="res-value code-chip">{resolution.posting_account}</code>
             {:else}
               <span class="muted"
                 >no rule filled this slot — falls back to Expenses:Uncategorized</span
@@ -226,7 +226,7 @@
           <div class="res-row">
             <span class="micro-label">Contra account</span>
             {#if resolution.contra_account}
-              <code class="res-value">{resolution.contra_account}</code>
+              <code class="res-value code-chip">{resolution.contra_account}</code>
             {:else}
               <span class="muted">no rule filled this slot — falls back to the default account</span
               >
@@ -293,6 +293,14 @@
     padding-top: var(--space-3);
   }
 
+  .result h4 {
+    margin: var(--space-3) 0 var(--space-2);
+  }
+
+  .result h4:first-child {
+    margin-top: 0;
+  }
+
   .res-row {
     display: flex;
     flex-wrap: wrap;
@@ -300,14 +308,6 @@
     gap: var(--space-2);
     padding: var(--space-1) 0;
     font-size: var(--text-sm);
-  }
-
-  .res-value {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .skip-line {

@@ -305,7 +305,7 @@
               <div class="cls-form control-row">
                 <div class="ctl ctl-symbol">
                   <span class="micro-label">Symbol</span>
-                  <code class="cls-symbol">{cls.symbol}</code>
+                  <code class="cls-symbol code-chip">{cls.symbol}</code>
                 </div>
                 <div class="ctl">
                   <span class="micro-label" aria-hidden="true">Asset class</span>
@@ -356,7 +356,7 @@
               </div>
             {:else}
               <div class="cls-line">
-                <code class="cls-symbol">{cls.symbol}</code>
+                <code class="cls-symbol code-chip">{cls.symbol}</code>
                 <!-- Written without template whitespace so the line reads
                      exactly "Class · Sub · Geo" with no stray gaps. -->
                 <span class="cls-desc"
@@ -441,12 +441,7 @@
   }
 
   .cls-symbol {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-primary);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
     min-width: 3rem;
     text-align: center;
   }

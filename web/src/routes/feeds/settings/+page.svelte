@@ -633,7 +633,9 @@
         <Button onclick={() => fileInput?.click()} disabled={importing}>
           {importing ? 'Importing…' : 'Import OPML…'}
         </Button>
-        <a class="opml-link" href={exportOpmlUrl()} download="feeds.opml"> Download OPML </a>
+        <a class="opml-link link-muted" href={exportOpmlUrl()} download="feeds.opml">
+          Download OPML
+        </a>
       </div>
       <input
         bind:this={fileInput}
@@ -984,12 +986,6 @@
 
   .opml-link {
     font-size: var(--text-sm);
-    color: var(--text-muted);
-    text-decoration: underline;
-  }
-
-  .opml-link:hover {
-    color: var(--text-primary);
   }
 
   .modal-body {

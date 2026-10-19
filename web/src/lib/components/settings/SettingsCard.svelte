@@ -18,11 +18,11 @@
   <header class="section-header">
     {#if status}
       <div class="title">
-        <h2>{title}</h2>
+        <h2 class="title-section">{title}</h2>
         {@render status()}
       </div>
     {:else}
-      <h2>{title}</h2>
+      <h2 class="title-section">{title}</h2>
     {/if}
     {#if actions}
       <div class="header-actions">{@render actions()}</div>

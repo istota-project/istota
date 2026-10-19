@@ -260,8 +260,8 @@
        this header. -->
   <div class="header">
     <div>
-      <a class="back" href="{base}/health/history">← Medical history</a>
-      <h1>Conditions</h1>
+      <a class="back link-muted" href="{base}/health/history">← Medical history</a>
+      <h1 class="title-page">Conditions</h1>
     </div>
     <Button onclick={toggleForm}>
       {formOpen ? 'Cancel' : '+ Add diagnosis'}
@@ -356,12 +356,12 @@
     <!-- The kebab is a sibling of the name rather than of the whole card body,
          so it pins to the top-right corner however tall the card grows. -->
     <div class="card-head">
-      <h3 class="name">{d.name}</h3>
+      <h3 class="name title-card">{d.name}</h3>
       <KebabMenu items={diagnosisMenu(d, transition)} ariaLabel="Diagnosis actions" />
     </div>
     {#if d.icd10 || d.severity || (d.document_count ?? 0) > 0}
       <div class="tags">
-        {#if d.icd10}<span class="icd">{d.icd10}</span>{/if}
+        {#if d.icd10}<span class="icd code-chip">{d.icd10}</span>{/if}
         {#if d.severity}<span class="sev sev-{d.severity}">{d.severity}</span>{/if}
         {#if (d.document_count ?? 0) > 0}
           <button
@@ -491,17 +491,7 @@
   .back {
     display: inline-block;
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
     margin-bottom: var(--space-1);
-  }
-  .back:hover {
-    text-decoration: underline;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   h2 {
     margin: var(--space-6) 0 var(--space-2);
@@ -646,8 +636,6 @@
   }
   .name {
     margin: 0;
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
     color: var(--text-primary);
     line-height: var(--leading-snug);
     /* Long condition names wrap rather than pushing the kebab out of the
@@ -662,12 +650,7 @@
     flex-wrap: wrap;
   }
   .icd {
-    font-size: var(--text-xs);
     color: var(--text-muted);
-    background: var(--surface-raised);
-    padding: 0.05rem var(--space-2);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-mono);
   }
   .sev {
     display: inline-flex;

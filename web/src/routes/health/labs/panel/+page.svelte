@@ -224,7 +224,7 @@
   {:else if panel}
     <div class="header">
       <div class="header-meta">
-        <a href="{base}/health/labs" class="back">← Labs</a>
+        <a href="{base}/health/labs" class="back link-muted">← Labs</a>
         {#if editing}
           <div class="header-edit">
             <Field label="Collected">
@@ -258,7 +258,7 @@
             </label>
           </div>
         {:else}
-          <h1>
+          <h1 class="title-page">
             {formatDate(panel.drawn_at)}
             <span class="lab">· {panel.lab_name || 'Unknown lab'}</span>
             {#if panel.panel_type}<span class="type">· {panel.panel_type}</span>{/if}
@@ -316,7 +316,7 @@
                       <input bind:value={b.name} placeholder="Hemoglobin" />
                     {:else}
                       <a
-                        class="marker-link"
+                        class="marker-link link-quiet"
                         href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
                       >
                         {b.display_name || b.name}
@@ -430,12 +430,8 @@
   }
   .back {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
   }
   h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
     margin: var(--space-1) 0;
   }
   .lab,
@@ -498,13 +494,6 @@
     font: inherit;
     font-size: var(--text-xs);
     padding: 0.15rem var(--space-1);
-  }
-  .marker-link {
-    color: var(--text-primary);
-    text-decoration: none;
-  }
-  .marker-link:hover {
-    text-decoration: underline;
   }
   .flag-row {
     background: var(--row-danger-bg);

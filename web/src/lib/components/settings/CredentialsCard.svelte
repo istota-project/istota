@@ -254,7 +254,7 @@
       <ul class="cred-list">
         {#each data.credentials as credential (credential.name)}
           <li class="cred-row" data-testid="credential-{credential.name}">
-            <code class="cred-name">{credential.name}</code>
+            <code class="cred-name code-chip">{credential.name}</code>
             <div class="cred-main">
               {#if credential.hosts.length}
                 <span class="cred-hosts">{credential.hosts.join(', ')}</span>
@@ -432,12 +432,7 @@
   }
 
   .cred-name {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-primary);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
     flex: 0 1 9rem;
     min-width: 0;
     overflow-wrap: anywhere;

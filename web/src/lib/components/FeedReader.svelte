@@ -239,7 +239,8 @@
         {#if entry.title}
           <h1 class="reader-title">
             {#if permalink}
-              <a href={permalink} target="_blank" rel="noopener">{entry.title}</a>
+              <a class="link-quiet" href={permalink} target="_blank" rel="noopener">{entry.title}</a
+              >
             {:else}{entry.title}{/if}
           </h1>
         {/if}
@@ -361,19 +362,10 @@
   }
 
   .reader-title {
-    font-size: 1rem;
+    font-size: var(--text-lg);
     line-height: var(--leading-tight);
     margin: 0 0 var(--space-4);
     color: var(--text-primary);
-  }
-
-  .reader-title a {
-    color: inherit;
-    text-decoration: none;
-  }
-
-  .reader-title a:hover {
-    text-decoration: underline;
   }
 
   .reader-hero {
@@ -479,7 +471,7 @@
     background: rgb(0 0 0 / 0.7);
     color: #fff;
     /* design-lint-allow-end */
-    font-size: 0.65rem;
+    font-size: var(--text-xs);
     font-weight: var(--weight-semibold);
     letter-spacing: var(--tracking-caps);
   }

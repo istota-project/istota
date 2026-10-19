@@ -62,7 +62,7 @@
       ><Asterisk size="100%" strokeWidth={3.5} /></span
     >
   {:else}
-    <span class="count-pill" class:muted={tone === 'muted'} {title}>{shown}</span>
+    <span class="count-pill num" class:muted={tone === 'muted'} {title}>{shown}</span>
   {/if}
 {/if}
 

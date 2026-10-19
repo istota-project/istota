@@ -301,7 +301,7 @@
           {#if selectedPlace && (statsLoading || placeStats)}
             <div class="stats-panel">
               <div class="stats-header">
-                <span class="stats-name">{selectedPlace.name}</span>
+                <span class="stats-name title-card">{selectedPlace.name}</span>
                 <div class="stats-actions">
                   <IconButton
                     class="stats-edit touch-target"
@@ -333,21 +333,26 @@
               {:else if placeStats && placeStats.total_visits > 0}
                 <div class="stats-grid">
                   <div class="stat">
-                    <span class="stat-value">{placeStats.total_visits}</span>
+                    <span class="stat-value num">{placeStats.total_visits}</span>
                     <span class="stat-label caption"
                       >{placeStats.total_visits === 1 ? 'visit' : 'visits'}</span
                     >
                   </div>
                   <div class="stat">
-                    <span class="stat-value">{formatDuration(placeStats.avg_duration_min)}</span>
+                    <span class="stat-value num">{formatDuration(placeStats.avg_duration_min)}</span
+                    >
                     <span class="stat-label caption">avg</span>
                   </div>
                   <div class="stat">
-                    <span class="stat-value">{formatDuration(placeStats.longest_visit_min)}</span>
+                    <span class="stat-value num"
+                      >{formatDuration(placeStats.longest_visit_min)}</span
+                    >
                     <span class="stat-label caption">longest</span>
                   </div>
                   <div class="stat">
-                    <span class="stat-value">{formatDuration(placeStats.total_duration_min)}</span>
+                    <span class="stat-value num"
+                      >{formatDuration(placeStats.total_duration_min)}</span
+                    >
                     <span class="stat-label caption">total</span>
                   </div>
                 </div>
@@ -453,11 +458,6 @@
     align-items: baseline;
     justify-content: space-between;
     margin-bottom: var(--space-2);
-  }
-
-  .stats-name {
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
   }
 
   .stats-actions {

@@ -124,7 +124,7 @@
 </script>
 
 <div class="header">
-  <h1>Import immunizations</h1>
+  <h1 class="title-page">Import immunizations</h1>
   <Button href="{base}/health/immunizations">Back</Button>
 </div>
 
@@ -297,11 +297,6 @@
     align-items: center;
     margin-bottom: var(--space-3);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
-  }
   h2 {
     margin: 0;
   }
@@ -394,7 +389,6 @@
     background: var(--surface-raised);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
-    font-size: 0.85em;
   }
 
   tr.warn td {

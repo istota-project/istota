@@ -319,8 +319,6 @@
     margin-top: var(--space-4);
   }
   code {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     word-break: break-all;
   }
 </style>

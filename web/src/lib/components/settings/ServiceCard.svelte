@@ -97,7 +97,7 @@
 <section class="card" data-status={service.status}>
   <header class="section-header">
     <div class="title">
-      <h2>{service.label}</h2>
+      <h2 class="title-section">{service.label}</h2>
       <span class="status-pill status-{service.status}">
         {statusLabel(service.status)}
       </span>
@@ -191,7 +191,6 @@
     background: var(--surface-raised);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
-    font-size: 0.9em;
     color: var(--text-muted);
   }
 

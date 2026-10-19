@@ -111,7 +111,7 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>Immunization detail</h1>
+    <h1 class="title-page">Immunization detail</h1>
     <div class="actions">
       <Button href="{base}/health/immunizations">Back</Button>
       {#if immunization}
@@ -238,7 +238,7 @@
   </form>
 
   <section class="linked">
-    <h2>Proof of immunization</h2>
+    <h2 class="micro-label">Proof of immunization</h2>
     <DocumentList entityType="immunization" entityId={immunization.id} {documents} />
   </section>
 
@@ -280,11 +280,6 @@
     gap: var(--space-4);
     margin-bottom: var(--space-4);
     flex-wrap: wrap;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   .actions {
     display: flex;

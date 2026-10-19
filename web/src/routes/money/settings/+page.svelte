@@ -272,7 +272,6 @@
     background: var(--surface-base);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
-    font-size: 0.92em;
   }
 
   /* The hint trigger rides inside the <summary> so it sits beside the label

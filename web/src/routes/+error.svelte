@@ -157,6 +157,8 @@
   h1 {
     margin: 0;
     font-size: 1.35rem;
+    /* heading-weight: the error page's one large line sits under a thin-stroke
+       glyph and reads as a statement, not a page title, so it is lighter. */
     font-weight: var(--weight-medium);
     color: var(--text-primary);
   }
@@ -179,7 +181,7 @@
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
     background: var(--surface-card);
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-sm);
     line-height: var(--leading-snug);
     color: var(--text-secondary);

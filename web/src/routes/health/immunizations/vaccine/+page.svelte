@@ -75,7 +75,7 @@
        loading message, rather than centering it in the space left under
        this header. -->
   <div class="header">
-    <h1>{ref?.display_name || name}</h1>
+    <h1 class="title-page">{ref?.display_name || name}</h1>
     <Button href="{base}/health/immunizations">Back</Button>
   </div>
 {/if}
@@ -203,11 +203,6 @@
     align-items: center;
     margin-bottom: var(--space-4);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
-  }
 
   .card {
     /* The layout owns .card's box and reads its padding from this hook. A
@@ -274,7 +269,7 @@
   }
   details.explainer > summary .chev {
     color: var(--text-dim);
-    font-size: 1rem;
+    font-size: var(--text-lg);
     line-height: var(--leading-none);
     transition: transform var(--transition-fast);
   }

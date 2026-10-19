@@ -967,7 +967,7 @@
               {/if}
               {#if canExpandExternal}
                 <button
-                  class="external-toggle"
+                  class="external-toggle link-action"
                   onclick={(e) => {
                     bodyExpanded = !bodyExpanded;
                     if (e.detail > 0) e.currentTarget.blur();
@@ -1786,17 +1786,8 @@
   .external-toggle {
     flex: 0 0 auto;
     margin-left: auto;
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--link);
-    font: inherit;
     font-size: var(--text-xs);
     line-height: var(--leading-snug);
-    cursor: pointer;
-  }
-  .external-toggle:hover {
-    text-decoration: underline;
   }
   /* The one line standing in for a withheld body. Single-line and clipped: it
 	   is a preview, not a shortened message, and letting it wrap would make

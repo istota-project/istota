@@ -34,12 +34,6 @@
   flex-wrap: wrap;
 }
 
-.settings-header h1 {
-  margin: 0;
-  font-size: var(--text-lg);
-  color: var(--text-primary);
-}
-
 /* Placement only: the type is the global `.description`. A description just
    under a title sits a step below it; inside a card the `:where()` reset
    further down zeroes this, since the card's gap already spaces it. Scored at
@@ -52,7 +46,6 @@
   background: var(--surface-raised);
   padding: 0 var(--space-1);
   border-radius: var(--radius-sm);
-  font-size: 0.8em;
 }
 
 .settings .header-actions {
@@ -83,12 +76,6 @@
 
 .settings .card > .btn {
   align-self: flex-start;
-}
-
-.settings .card h2 {
-  margin: 0;
-  font-size: var(--text-base);
-  color: var(--text-primary);
 }
 
 .settings .card h3 {

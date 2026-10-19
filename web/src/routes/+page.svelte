@@ -98,50 +98,50 @@
       </section>
       {#if user.features.chat}
         <a href="{base}/chat" class="feature-card">
-          <div class="feature-title"><MessageSquare aria-hidden="true" />Chat</div>
-          <div class="feature-desc">Talk to Istota in the app</div>
+          <div class="feature-title title-section"><MessageSquare aria-hidden="true" />Chat</div>
+          <div class="feature-desc description">Talk to Istota in the app</div>
         </a>
       {/if}
       {#if user.features.workspace}
         <a href="{base}/files" class="feature-card">
-          <div class="feature-title"><FolderOpen aria-hidden="true" />Files</div>
-          <div class="feature-desc">Your files and pins</div>
+          <div class="feature-title title-section"><FolderOpen aria-hidden="true" />Files</div>
+          <div class="feature-desc description">Your files and pins</div>
         </a>
       {/if}
       {#if user.features.groups}
         <a href="{base}/groups/" class="feature-card">
-          <div class="feature-title"><Users aria-hidden="true" />Groups</div>
-          <div class="feature-desc">Notebooks, members, rooms</div>
+          <div class="feature-title title-section"><Users aria-hidden="true" />Groups</div>
+          <div class="feature-desc description">Notebooks, members, rooms</div>
         </a>
       {/if}
       {#if user.features.briefings}
         <a href="{base}/briefings" class="feature-card">
-          <div class="feature-title"><Newspaper aria-hidden="true" />Briefings</div>
-          <div class="feature-desc">Briefings and archive</div>
+          <div class="feature-title title-section"><Newspaper aria-hidden="true" />Briefings</div>
+          <div class="feature-desc description">Briefings and archive</div>
         </a>
       {/if}
       {#if user.features.feeds}
         <a href="{base}/feeds" class="feature-card">
-          <div class="feature-title"><Rss aria-hidden="true" />Feeds</div>
-          <div class="feature-desc">RSS feed reader</div>
+          <div class="feature-title title-section"><Rss aria-hidden="true" />Feeds</div>
+          <div class="feature-desc description">RSS feed reader</div>
         </a>
       {/if}
       {#if user.features.location}
         <a href="{base}/location" class="feature-card">
-          <div class="feature-title"><MapPin aria-hidden="true" />Location</div>
-          <div class="feature-desc">GPS tracking and map</div>
+          <div class="feature-title title-section"><MapPin aria-hidden="true" />Location</div>
+          <div class="feature-desc description">GPS tracking and map</div>
         </a>
       {/if}
       {#if user.features.money}
         <a href="{base}/money" class="feature-card">
-          <div class="feature-title"><Wallet aria-hidden="true" />Money</div>
-          <div class="feature-desc">Accounts and reports</div>
+          <div class="feature-title title-section"><Wallet aria-hidden="true" />Money</div>
+          <div class="feature-desc description">Accounts and reports</div>
         </a>
       {/if}
       {#if user.features.health}
         <a href="{base}/health" class="feature-card">
-          <div class="feature-title"><HeartPulse aria-hidden="true" />Health</div>
-          <div class="feature-desc">Body stats and lab results</div>
+          <div class="feature-title title-section"><HeartPulse aria-hidden="true" />Health</div>
+          <div class="feature-desc description">Body stats and lab results</div>
         </a>
       {/if}
     </div>
@@ -267,8 +267,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-weight: var(--weight-semibold);
-    font-size: 0.9rem;
     margin-bottom: var(--space-1);
     color: var(--text-primary);
   }
@@ -280,9 +278,5 @@
     width: 1.15em;
     height: 1.15em;
     color: var(--accent-amber);
-  }
-  .feature-desc {
-    font-size: 0.8rem;
-    color: var(--text-muted);
   }
 </style>

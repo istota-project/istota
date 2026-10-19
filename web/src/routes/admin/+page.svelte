@@ -357,7 +357,7 @@
       {@const jobErrors = stats.scheduler?.last_errors?.length ?? 0}
       <section class="card installation">
         <header class="section-header">
-          <h2 class="install-name">
+          <h2 class="install-name title-section">
             <span class="install-avatar">
               <Avatar
                 kind="bot"
@@ -450,7 +450,7 @@
         {@const m = stats.models}
         <section class="card">
           <header class="section-header">
-            <h2>Models</h2>
+            <h2 class="title-section">Models</h2>
           </header>
           <dl class="kv model-kv">
             <dt>Brain</dt>
@@ -505,7 +505,7 @@
            where Users after it starts a row of its own. -->
       <section class="card" data-fill>
         <header class="section-header">
-          <h2>Task activity</h2>
+          <h2 class="title-section">Task activity</h2>
         </header>
         <div class="kpi-grid card-grid">
           <StatTile
@@ -576,7 +576,7 @@
       <!-- Users -->
       <section class="card" data-width="full">
         <header class="section-header">
-          <h2>Users</h2>
+          <h2 class="title-section">Users</h2>
         </header>
         <div class="table-scroll">
           <table class="grid users-grid">
@@ -696,7 +696,7 @@
         {@const sub = stats.subscription}
         <section class="card">
           <header class="section-header">
-            <h2>Claude Code subscription</h2>
+            <h2 class="title-section">Claude Code subscription</h2>
           </header>
           <!-- Extra usage is a tile in this grid rather than a footer line
                under it, so the card reads as one row of meters the way the
@@ -740,7 +740,7 @@
         {@const u30 = stats.usage.totals_30d}
         <section class="card">
           <header class="section-header">
-            <h2>Token usage</h2>
+            <h2 class="title-section">Token usage</h2>
           </header>
           <div class="kpi-grid card-grid">
             <StatTile label="Tokens 24h" sub="{formatNumber(u30.total_tokens)} (30d)">
@@ -782,7 +782,7 @@
       {:else if stats.usage?.error}
         <section class="card">
           <header class="section-header">
-            <h2>Token usage</h2>
+            <h2 class="title-section">Token usage</h2>
           </header>
           <p class="usage-note caption">Usage stats unavailable: {stats.usage.error}</p>
         </section>
@@ -793,7 +793,7 @@
         {#if (stats.usage?.by_model_30d ?? []).length > 0}
           <section class="card">
             <header class="section-header">
-              <h2>Tokens by model</h2>
+              <h2 class="title-section">Tokens by model</h2>
               <span class="caption"
                 >30d{#if (stats.usage?.by_model_30d_omitted ?? 0) > 0}
                   · top 5 of {(stats.usage?.by_model_30d ?? []).length +
@@ -814,7 +814,7 @@
         {#if (stats.usage?.by_brain_30d ?? []).length > 0}
           <section class="card">
             <header class="section-header">
-              <h2>Tokens by brain</h2>
+              <h2 class="title-section">Tokens by brain</h2>
               <span class="caption">30d</span>
             </header>
             <div class="usage-rows">
@@ -831,7 +831,7 @@
         {#if (stats.usage?.by_origin_24h ?? []).length > 0}
           <section class="card">
             <header class="section-header">
-              <h2>Tokens by origin</h2>
+              <h2 class="title-section">Tokens by origin</h2>
               <span class="caption">24h</span>
             </header>
             <div class="usage-rows">
@@ -856,7 +856,7 @@
          subscription card it would sit alone before Modules. -->
       <section class="card" data-fill>
         <header class="section-header">
-          <h2>Bot icon</h2>
+          <h2 class="title-section">Bot icon</h2>
         </header>
         <Field label="Picture" labelled={false} wide error={botIconError} warning={botIconNote}>
           <AvatarPicker
@@ -898,12 +898,12 @@
       {#if Object.keys(stats.modules).length > 0}
         <section class="card" data-width="full">
           <header class="section-header">
-            <h2>Modules</h2>
+            <h2 class="title-section">Modules</h2>
           </header>
           <div class="module-grid card-grid">
             {#each Object.entries(stats.modules) as [name, mod] (name)}
               <div class="module-card" class:module-warn={moduleErrorCount(mod) > 0}>
-                <div class="module-name">{name}</div>
+                <div class="module-name title-section">{name}</div>
                 <dl class="module-fields">
                   {#each Object.entries(mod) as [k, v] (k)}
                     <dt>{fieldLabel(k)}</dt>
@@ -987,7 +987,6 @@
 
   .num {
     text-align: right;
-    font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
 
@@ -1227,7 +1226,6 @@
   }
 
   code {
-    font-size: var(--text-xs);
     color: var(--text-secondary);
   }
 
@@ -1247,8 +1245,6 @@
   }
 
   .module-name {
-    font-weight: var(--weight-semibold);
-    font-size: var(--text-base);
     margin-bottom: var(--space-2);
   }
 

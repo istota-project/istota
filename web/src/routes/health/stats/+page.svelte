@@ -443,9 +443,9 @@
       <button class="card interactive" onclick={() => openEntry(metric)} type="button">
         <header>
           <span class="label micro-label">{metricLabel(metric)}</span>
-          <span class="count caption">{(seriesByMetric[metric] || []).length} pts</span>
+          <span class="count caption num">{(seriesByMetric[metric] || []).length} pts</span>
         </header>
-        <div class="value">
+        <div class="value num">
           {#if v}
             {v.value}<span class="unit muted">{v.unit}</span>
           {:else}
@@ -472,14 +472,14 @@
       >
         <header>
           <span class="label micro-label">Blood Pressure</span>
-          <span class="count caption">
+          <span class="count caption num">
             {Math.max(
               (seriesByMetric.blood_pressure_systolic || []).length,
               (seriesByMetric.blood_pressure_diastolic || []).length,
             )} pts
           </span>
         </header>
-        <div class="value">
+        <div class="value num">
           {bpHeadline() || '—'}<span class="unit muted">mmHg</span>
         </div>
         <div class="chart">

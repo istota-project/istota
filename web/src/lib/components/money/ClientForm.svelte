@@ -300,7 +300,6 @@
   }
 
   .static-key code {
-    font-size: var(--text-xs);
     color: var(--text-secondary);
   }
 

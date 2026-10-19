@@ -765,8 +765,4 @@
     gap: var(--space-1);
     font-size: var(--text-sm);
   }
-
-  .mono {
-    font-family: var(--font-mono);
-  }
 </style>

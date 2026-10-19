@@ -84,7 +84,7 @@
   align-items: center;
   gap: 0.75rem;
   color: var(--text-dim);
-  font-size: 0.8rem;
+  font-size: var(--text-sm);
 }
 
 .app-nav .nav-right a {

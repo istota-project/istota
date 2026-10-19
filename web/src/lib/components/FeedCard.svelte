@@ -222,7 +222,8 @@
     {/if}
     {#if entry.title}
       <div class="card-title-overlay">
-        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+        {#if permalink}<a class="link-quiet" href={permalink}>{entry.title}</a
+          >{:else}{entry.title}{/if}
       </div>
     {/if}
     {#if entry.content}
@@ -272,7 +273,8 @@
     {/if}
     {#if entry.title}
       <div class="card-title-overlay">
-        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+        {#if permalink}<a class="link-quiet" href={permalink}>{entry.title}</a
+          >{:else}{entry.title}{/if}
       </div>
     {/if}
     {#if entry.content}
@@ -300,7 +302,8 @@
     </a>
     {#if entry.title}
       <div class="card-title-overlay">
-        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+        {#if permalink}<a class="link-quiet" href={permalink}>{entry.title}</a
+          >{:else}{entry.title}{/if}
       </div>
     {/if}
     {#if entry.content}
@@ -329,7 +332,8 @@
     {/if}
     {#if entry.title}
       <div class="card-title-overlay">
-        {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+        {#if permalink}<a class="link-quiet" href={permalink}>{entry.title}</a
+          >{:else}{entry.title}{/if}
       </div>
     {/if}
     {#if entry.content}
@@ -339,7 +343,8 @@
     <div class="card-body">
       {#if entry.title}
         <h3>
-          {#if permalink}<a href={permalink}>{entry.title}</a>{:else}{entry.title}{/if}
+          {#if permalink}<a class="link-quiet" href={permalink}>{entry.title}</a
+            >{:else}{entry.title}{/if}
         </h3>
       {/if}
       {#if entry.content}

@@ -147,7 +147,7 @@
        shows nothing but the centered message. A failed filtered load keeps
        it: the filter is the only way to change what failed. -->
   <div class="header">
-    <h1>Labs</h1>
+    <h1 class="title-page">Labs</h1>
     <div class="actions">
       <Select
         value={specimen}
@@ -313,11 +313,6 @@
     align-items: center;
     margin-bottom: var(--space-4);
   }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
-  }
   .actions {
     display: flex;
     gap: var(--space-2);
@@ -468,7 +463,7 @@
     text-overflow: ellipsis;
   }
   .marker-unit {
-    font-size: 10px;
+    font-size: var(--text-2xs);
     color: var(--text-dim);
     white-space: nowrap;
     /* Yield before the name: under a space deficit the unit collapses
@@ -480,7 +475,7 @@
     text-overflow: ellipsis;
   }
   .ref {
-    font-size: 10px;
+    font-size: var(--text-2xs);
     color: var(--text-dim);
     font-style: italic;
     font-weight: var(--weight-regular);
@@ -660,7 +655,7 @@
     }
     .drafts a > :nth-child(4) {
       grid-column: 1 / -1;
-      font-size: 11px;
+      font-size: var(--text-2xs);
     }
     .spreadsheet {
       border-radius: 0;

@@ -144,12 +144,18 @@ describe('NoticeBanner type sizes', () => {
   it('parses the component stylesheet', () => {
     // Without this every assertion below passes vacuously the moment the
     // component is restructured and the selectors stop matching.
-    expect(ruleFor('.notice-title'), 'no .notice-title rule found').toBeDefined();
+    expect(component, 'the title span lost its title class').toMatch(
+      /class="notice-title title-section"/,
+    );
     expect(ruleFor('.notice-body'), 'no .notice-body rule found').toBeDefined();
   });
 
   it('sizes the title and body from type tokens, not literals', () => {
-    expect(fontSizeOf(ruleFor('.notice-title')!.body)).toBe('var(--text-base)');
+    // The title takes the global section-title step rather than a rule of
+    // its own; the size it renders at is that class's.
+    const sectionTitle = rules(appCss).find((r) => r.selector === '.title-section');
+    expect(sectionTitle, 'no .title-section rule in the cascade').toBeDefined();
+    expect(fontSizeOf(sectionTitle!.body)).toBe('var(--text-base)');
     expect(fontSizeOf(ruleFor('.notice-body')!.body)).toBe('var(--text-sm)');
   });
 

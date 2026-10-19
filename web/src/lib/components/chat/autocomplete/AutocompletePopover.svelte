@@ -83,7 +83,7 @@
     background: var(--hover-bg);
   }
   .ac-label {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-sm);
     color: var(--text-primary);
     flex-shrink: 0;

@@ -217,7 +217,7 @@
   .webhook-url {
     display: block;
     padding: var(--space-2) var(--space-2);
-    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-family: var(--font-mono);
     word-break: break-all;
   }
 

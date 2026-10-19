@@ -556,7 +556,7 @@
      table ~1.3rem inward. The fixed slot still keeps Date from shifting
      between one- and two-digit indices. */
   .work-index {
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-dim);
     flex-shrink: 0;
@@ -610,7 +610,7 @@
 
   /* Fixed slot, so an uninvoiced row's dash keeps Status in line. */
   .work-content :global(.work-invoice) {
-    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
     white-space: nowrap;

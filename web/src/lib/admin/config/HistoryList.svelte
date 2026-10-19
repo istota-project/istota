@@ -46,7 +46,7 @@
   change; credentials and the admin list stay as they are now.
 -->
 <section class="card">
-  <header class="section-header"><h2>History</h2></header>
+  <header class="section-header"><h2 class="title-section">History</h2></header>
   {#if error}
     <p class="form-error">{error}</p>
   {:else if requests === null}

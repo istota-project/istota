@@ -95,7 +95,7 @@
       <ul class="cov-list">
         {#each ordered as row (row.value)}
           <li class="cov-row">
-            <span class="cov-value">{row.value}</span>
+            <span class="cov-value code-chip">{row.value}</span>
             <span class="cov-account muted">{row.posted_account ?? '—'}</span>
             {#if isFallthrough(row)}
               <Badge variant="warn">no rule</Badge>
@@ -141,12 +141,7 @@
   }
 
   .cov-value {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--text-primary);
-    background: var(--surface-raised);
-    padding: 0 var(--space-1);
-    border-radius: var(--radius-sm);
   }
 
   .cov-account {

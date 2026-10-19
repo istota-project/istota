@@ -546,9 +546,6 @@
     cursor: pointer;
     overflow-wrap: anywhere;
   }
-  .mono {
-    font-family: var(--font-mono);
-  }
   .col-kind,
   .col-role {
     width: 7rem;

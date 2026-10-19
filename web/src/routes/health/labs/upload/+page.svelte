@@ -169,8 +169,8 @@
 </script>
 
 <div class="page">
-  <a class="back" href="{base}/health/labs">← Labs</a>
-  <h1>Upload lab results</h1>
+  <a class="back link-muted" href="{base}/health/labs">← Labs</a>
+  <h1 class="title-page">Upload lab results</h1>
 
   {#if panelId == null}
     <div class="card">
@@ -230,7 +230,7 @@
           </div>
         {/if}
 
-        <h2>Extracted biomarkers</h2>
+        <h2 class="title-section">Extracted biomarkers</h2>
 
         {#if extracting}
           <div class="loading extracting">
@@ -336,17 +336,8 @@
   }
   .back {
     font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-decoration: none;
-  }
-  h1 {
-    font-size: var(--text-lg);
-    font-weight: var(--weight-medium);
-    margin: 0;
   }
   h2 {
-    font-size: var(--text-base);
-    font-weight: var(--weight-medium);
     margin: 0 0 var(--space-2);
   }
   .card {

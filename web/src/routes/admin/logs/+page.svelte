@@ -475,7 +475,7 @@
   </div>
 
   <div class="log-footer">
-    <span class="log-count caption">{records.length} shown</span>
+    <span class="log-count caption num">{records.length} shown</span>
     {#if records.length > 0}
       <Button variant="secondary" size="sm" onclick={copyAll}>Copy</Button>
     {/if}
@@ -544,10 +544,6 @@
   .source-meta {
     display: block;
     margin-top: var(--space-1);
-  }
-
-  .source-meta code {
-    font-family: var(--font-mono);
   }
 
   /* The reader itself: a fixed-height scroll pane rather than a growing page,
