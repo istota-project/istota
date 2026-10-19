@@ -296,86 +296,88 @@
 
     <div class="split">
       <div class="biomarker-table">
-        <table class="grid grid--dense">
-          <thead>
-            <tr>
-              <th>Marker</th>
-              <th>Value</th>
-              <th>Unit</th>
-              <th>Lab range</th>
-              <th>Flag</th>
-              {#if editing}<th></th>{/if}
-            </tr>
-          </thead>
-          <tbody>
-            {#each biomarkers as b, i (b.id)}
-              <tr class:flag-row={b.flag}>
-                <td>
-                  {#if editing}
-                    <input bind:value={b.name} placeholder="Hemoglobin" />
-                  {:else}
-                    <a
-                      class="marker-link"
-                      href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
-                    >
-                      {b.display_name || b.name}
-                    </a>
-                  {/if}
-                </td>
-                <td>
-                  {#if editing}
-                    <input type="number" step="any" bind:value={b.value} />
-                  {:else}
-                    {b.value}
-                  {/if}
-                </td>
-                <td>
-                  {#if editing}
-                    <input bind:value={b.unit} placeholder="g/dL" />
-                  {:else}
-                    {b.unit}
-                  {/if}
-                </td>
-                <td>
-                  {#if editing}
-                    <input
-                      type="number"
-                      step="any"
-                      bind:value={b.ref_range_low}
-                      placeholder="low"
-                    />
-                    <input
-                      type="number"
-                      step="any"
-                      bind:value={b.ref_range_high}
-                      placeholder="high"
-                    />
-                  {:else if b.ref_range_low != null || b.ref_range_high != null}
-                    {b.ref_range_low ?? '—'} – {b.ref_range_high ?? '—'}
-                  {:else}
-                    —
-                  {/if}
-                </td>
-                <td>
-                  {#if b.flag}<span class="flag flag-{b.flag}">{b.flag}</span>{/if}
-                </td>
-                {#if editing}
-                  <td>
-                    <IconButton
-                      class="del touch-target"
-                      size="sm"
-                      danger
-                      label="Remove biomarker"
-                      onclick={() => removeRow(i)}
-                    >
-                      <X size={13} />
-                    </IconButton>
-                  </td>
-                {/if}
+        <div class="table-scroll">
+          <table class="grid grid--dense">
+            <thead>
+              <tr>
+                <th>Marker</th>
+                <th>Value</th>
+                <th>Unit</th>
+                <th>Lab range</th>
+                <th>Flag</th>
+                {#if editing}<th></th>{/if}
               </tr>
-            {/each}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {#each biomarkers as b, i (b.id)}
+                <tr class:flag-row={b.flag}>
+                  <td>
+                    {#if editing}
+                      <input bind:value={b.name} placeholder="Hemoglobin" />
+                    {:else}
+                      <a
+                        class="marker-link"
+                        href="{base}/health/labs/marker?name={encodeURIComponent(b.name)}"
+                      >
+                        {b.display_name || b.name}
+                      </a>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if editing}
+                      <input type="number" step="any" bind:value={b.value} />
+                    {:else}
+                      {b.value}
+                    {/if}
+                  </td>
+                  <td>
+                    {#if editing}
+                      <input bind:value={b.unit} placeholder="g/dL" />
+                    {:else}
+                      {b.unit}
+                    {/if}
+                  </td>
+                  <td>
+                    {#if editing}
+                      <input
+                        type="number"
+                        step="any"
+                        bind:value={b.ref_range_low}
+                        placeholder="low"
+                      />
+                      <input
+                        type="number"
+                        step="any"
+                        bind:value={b.ref_range_high}
+                        placeholder="high"
+                      />
+                    {:else if b.ref_range_low != null || b.ref_range_high != null}
+                      {b.ref_range_low ?? '—'} – {b.ref_range_high ?? '—'}
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                  <td>
+                    {#if b.flag}<span class="flag flag-{b.flag}">{b.flag}</span>{/if}
+                  </td>
+                  {#if editing}
+                    <td>
+                      <IconButton
+                        class="del touch-target"
+                        size="sm"
+                        danger
+                        label="Remove biomarker"
+                        onclick={() => removeRow(i)}
+                      >
+                        <X size={13} />
+                      </IconButton>
+                    </td>
+                  {/if}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
         {#if editing}
           <Button onclick={addRow}>+ Add biomarker</Button>
         {/if}

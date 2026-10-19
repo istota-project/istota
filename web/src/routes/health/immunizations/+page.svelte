@@ -429,7 +429,7 @@
   }
   .quick-form .row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);
   }
   .quick-form :global(.field.full) {
@@ -491,7 +491,6 @@
     align-items: flex-start;
     gap: var(--space-2);
     width: 100%;
-    padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
   }
   .card .name {
@@ -589,7 +588,7 @@
     }
   }
 
-  @media (max-width: 639px) {
+  @media (max-width: 640px) {
     .history table.grid,
     .history tbody {
       display: block;

@@ -445,7 +445,7 @@
     gap: var(--space-2);
   }
   /* Three short choices sit side by side rather than as three tall cards. */
-  @media (min-width: 640px) {
+  @media (min-width: 641px) {
     .width-options :global(.option-cards) {
       flex-direction: row;
     }

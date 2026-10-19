@@ -553,7 +553,7 @@
               <div class="source-row">
                 <div class="source-label">
                   <span class="dot dot-source" style="background: {sourceColor(src)};"></span>
-                  {src}
+                  <span class="source-name">{src}</span>
                 </div>
                 <div class="source-bar">
                   <div
@@ -1029,7 +1029,15 @@
     gap: var(--space-1);
     min-width: 0;
     overflow: hidden;
+  }
+
+  /* The ellipsis goes on the text's own box: a flex container's anonymous text
+     item does not take text-overflow. */
+  .source-name {
+    min-width: 0;
+    overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .source-bar {

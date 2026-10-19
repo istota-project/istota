@@ -305,8 +305,8 @@
               </td>
               <td class="nowrap"><code>{b.cron}</code></td>
               <td class="col-render"><span class="render-pill">{b.render_mode}</span></td>
-              <td class="small">{b.trusted ? 'trusted' : 'untrusted'}</td>
-              <td class="small nowrap">{fmtLastRun(b.status.last_run_at)}</td>
+              <td>{b.trusted ? 'trusted' : 'untrusted'}</td>
+              <td class="nowrap">{fmtLastRun(b.status.last_run_at)}</td>
               <td class="actions">
                 <KebabMenu items={sharedMenu(b)} ariaLabel="Shared block actions" />
               </td>

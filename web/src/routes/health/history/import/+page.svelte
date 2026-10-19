@@ -194,7 +194,7 @@
         <Button size="sm" onclick={() => removeRow(i)}>Remove encounter</Button>
       </div>
 
-      <div class="grid">
+      <div class="enc-fields">
         <Field label="Date">
           <input type="date" bind:value={row.encounter_date} />
         </Field>
@@ -363,7 +363,6 @@
   }
 
   .card {
-    padding: var(--space-3) var(--space-4);
     margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;
@@ -426,7 +425,7 @@
     justify-content: space-between;
     align-items: center;
   }
-  .grid {
+  .enc-fields {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     gap: var(--space-3);

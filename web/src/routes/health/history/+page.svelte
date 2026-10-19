@@ -562,7 +562,6 @@
   }
   .card {
     display: block;
-    padding: var(--space-3) var(--space-4);
     color: var(--text-primary);
   }
   .card:hover {

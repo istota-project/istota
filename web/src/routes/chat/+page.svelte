@@ -2187,8 +2187,9 @@
 
   /* Jump-to-response: a brief pulse on the row a search result jumps to. The
 	   class is toggled on the Message component's root (data-cid anchor), so the
-	   rule is :global; it fades a soft accent wash under the row for ~2s. */
-  :global(.jump-highlight) {
+	   class is :global, held under the transcript list so it cannot leak; it
+	   fades a soft accent wash under the row for ~2s. */
+  .messages :global(.jump-highlight) {
     animation: jump-pulse 2s ease-out;
     border-radius: var(--radius-card);
   }
@@ -2201,7 +2202,7 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    :global(.jump-highlight) {
+    .messages :global(.jump-highlight) {
       animation-duration: 0.01ms;
     }
   }

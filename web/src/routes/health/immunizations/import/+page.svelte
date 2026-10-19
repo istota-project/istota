@@ -332,7 +332,6 @@
   }
 
   .card {
-    padding: var(--space-3) var(--space-4);
     margin-bottom: var(--space-3);
     display: flex;
     flex-direction: column;

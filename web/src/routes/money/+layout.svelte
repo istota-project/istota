@@ -166,7 +166,7 @@
           {/if}
           {#if errorCount > 0}
             <Collapsible.Root bind:open={errorsOpen}>
-              <Collapsible.Trigger class="error-badge">
+              <Collapsible.Trigger class="money-error-badge">
                 {errorCount} error{errorCount !== 1 ? 's' : ''}
               </Collapsible.Trigger>
             </Collapsible.Root>
@@ -229,7 +229,9 @@
 {/if}
 
 <style>
-  :global(.error-badge) {
+  /* Global because the class lands on bits-ui's trigger; the money- prefix keeps it
+     off routes/+error.svelte's own .error-badge. */
+  :global(.money-error-badge) {
     background: var(--surface-card);
     color: var(--status-danger-fg);
     border: 1px solid var(--status-danger-bg);

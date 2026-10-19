@@ -252,48 +252,52 @@
               >No biomarkers extracted yet. Add rows manually, or retry extraction.</EmptyState
             >
           {:else}
-            <table class="grid grid--dense">
-              <thead>
-                <tr>
-                  <th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th>Flag</th
-                  ><th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each extracted as b, i (b.id)}
+            <div class="table-scroll">
+              <table class="grid grid--dense">
+                <thead>
                   <tr>
-                    <td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
-                    <td><input type="number" step="any" bind:value={b.value} /></td>
-                    <td><input bind:value={b.unit} placeholder="g/dL" /></td>
-                    <td class="range-pair">
-                      <input
-                        type="number"
-                        step="any"
-                        bind:value={b.ref_range_low}
-                        placeholder="low"
-                      />
-                      <input
-                        type="number"
-                        step="any"
-                        bind:value={b.ref_range_high}
-                        placeholder="high"
-                      />
-                    </td>
-                    <td>
-                      <Select
-                        value={b.flag ?? ''}
-                        options={flagOptions}
-                        onValueChange={(v) => (b.flag = v === '' ? null : v)}
-                        ariaLabel="Flag"
-                      />
-                    </td>
-                    <td
-                      ><button class="del" type="button" onclick={() => removeRow(i)}>×</button></td
-                    >
+                    <th>Marker</th><th>Value</th><th>Unit</th><th>Range (low / high)</th><th
+                      >Flag</th
+                    ><th></th>
                   </tr>
-                {/each}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {#each extracted as b, i (b.id)}
+                    <tr>
+                      <td><input bind:value={b.name} placeholder="Hemoglobin" /></td>
+                      <td><input type="number" step="any" bind:value={b.value} /></td>
+                      <td><input bind:value={b.unit} placeholder="g/dL" /></td>
+                      <td class="range-pair">
+                        <input
+                          type="number"
+                          step="any"
+                          bind:value={b.ref_range_low}
+                          placeholder="low"
+                        />
+                        <input
+                          type="number"
+                          step="any"
+                          bind:value={b.ref_range_high}
+                          placeholder="high"
+                        />
+                      </td>
+                      <td>
+                        <Select
+                          value={b.flag ?? ''}
+                          options={flagOptions}
+                          onValueChange={(v) => (b.flag = v === '' ? null : v)}
+                          ariaLabel="Flag"
+                        />
+                      </td>
+                      <td
+                        ><button class="del" type="button" onclick={() => removeRow(i)}>×</button
+                        ></td
+                      >
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
           {/if}
 
           {#if error}<div class="banner error">{error}</div>{/if}
@@ -346,7 +350,6 @@
     margin: 0 0 var(--space-2);
   }
   .card {
-    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: var(--space-3);

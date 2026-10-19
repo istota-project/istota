@@ -239,17 +239,6 @@
       grid-template-rows: none;
     }
   }
-  /* Two tiles a row on a phone. The auto-fit wall drops to one column below
-     about 430px, where a single tile per row scrolls the module list off the
-     screen. Above 640px auto-fit already gives two or more. */
-  @media (max-width: 640px) {
-    .feature-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .feature-card {
-      padding: var(--space-4);
-    }
-  }
   .feature-card {
     display: block;
     background: var(--surface-card);
@@ -261,6 +250,18 @@
   }
   .feature-card:hover {
     background: var(--surface-raised);
+  }
+  /* Two tiles a row on a phone. The auto-fit wall drops to one column below
+     about 430px, where a single tile per row scrolls the module list off the
+     screen. Above 640px auto-fit already gives two or more. After the base
+     rules, which it overrides at equal specificity. */
+  @media (max-width: 640px) {
+    .feature-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .feature-card {
+      padding: var(--space-4);
+    }
   }
   .feature-title {
     display: flex;

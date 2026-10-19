@@ -364,7 +364,9 @@
   }
   .scroll {
     overflow: auto;
-    max-height: calc(100vh - 200px);
+    /* design-lint-allow: lib/viewport.ts writes --app-height and --kb-height at
+       runtime; this is body's own height expression, less the page chrome. */
+    max-height: calc(var(--app-height, 100dvh) - var(--kb-height, 0px) - 200px);
   }
   table {
     border-collapse: separate;
@@ -617,11 +619,12 @@
 	   across dates easier. An inset overlay lightens every cell uniformly
 	   over its own background (tinted data, opaque frozen columns, flag
 	   cells) without replacing the base colour. Hover-capable devices only,
-	   and not on the category banner rows. */
+	   and not on the category banner rows. Mixed from --text-primary so it
+	   darkens on the light theme and lightens on the dark one. */
   @media (hover: hover) {
     tbody tr:not(.cat-row):hover td,
     tbody tr:not(.cat-row):hover th {
-      box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.025);
+      box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--text-primary) 4%, transparent);
     }
   }
 
@@ -666,7 +669,8 @@
       margin: 0 -0.75rem;
     }
     .scroll {
-      max-height: calc(100vh - 160px);
+      /* design-lint-allow: runtime viewport tokens, as above. */
+      max-height: calc(var(--app-height, 100dvh) - var(--kb-height, 0px) - 160px);
     }
     /* Marker name stays pinned; the reference column scrolls away
 		   horizontally because it's secondary and would eat the narrow
