@@ -142,10 +142,10 @@
 >
   {#if step === 'filters'}
     <div class="vstack">
-      <Field label="Client" labelled={false}>
+      <Field label="Client">
         <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
       </Field>
-      <Field label="Entity" labelled={false}>
+      <Field label="Entity">
         <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
       </Field>
       <Field

@@ -15,6 +15,7 @@
   import { ChevronLeft, ChevronRight, LoaderCircle, X } from '@lucide/svelte';
   import IconButton from './IconButton.svelte';
   import { Dialog } from 'bits-ui';
+  import { setFieldContext } from './fieldContext';
 
   interface Props {
     variant?: 'default' | 'viewer' | 'palette';
@@ -60,6 +61,9 @@
     bodyPadding,
     height,
   }: Props = $props();
+
+  // A dialog opened from inside a Field is not that field's control.
+  setFieldContext(null);
 
   let bodyEl: HTMLDivElement | undefined = $state();
   const viewer = $derived(variant === 'viewer');

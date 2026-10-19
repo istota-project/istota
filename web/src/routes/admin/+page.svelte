@@ -844,7 +844,7 @@
          row because the cards before it are optional: without the
          subscription card it would sit alone before Modules. -->
       <Card title="Bot icon" data-fill>
-        <Field label="Picture" labelled={false} wide error={botIconError} warning={botIconNote}>
+        <Field label="Picture" wide error={botIconError} warning={botIconNote}>
           <AvatarPicker
             pickLabel="Choose the bot icon"
             prompt="Click the icon to choose a file, or drop or paste one here."

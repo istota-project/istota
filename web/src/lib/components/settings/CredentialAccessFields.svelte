@@ -31,7 +31,6 @@
 <div class="access-fields vstack">
   <Field
     label="Room scope"
-    labelled={false}
     hint="Choose which rooms may use this credential. Scheduled tasks are controlled separately below."
   >
     <Select

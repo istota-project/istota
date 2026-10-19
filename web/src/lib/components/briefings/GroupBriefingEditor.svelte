@@ -569,7 +569,6 @@
           </Field>
           <Field
             label="Delivery"
-            labelled={false}
             hint="Each member receives it at their own address for this channel. Every edition is also readable in Briefings."
           >
             <Select
@@ -583,7 +582,6 @@
         </div>
         <Field
           label="Excluded members"
-          labelled={false}
           hint="Excluded members get no copies or notifications of this briefing, but can still read its editions."
         >
           <MultiSelect

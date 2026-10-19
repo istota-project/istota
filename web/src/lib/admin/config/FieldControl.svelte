@@ -183,7 +183,7 @@
         onChange={(value) => onSecret(field.credential!.name, value)}
       />
     {:else if kind === 'bool'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline checkbox error={problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" checkbox error={problem}>
         <span class="adorned beside">
           <input
             type="checkbox"
@@ -194,7 +194,14 @@
         </span>
       </Field>
     {:else if kind === 'int' || kind === 'float'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={inputError || problem}>
+      <Field
+        label={field.name}
+        {hint}
+        {badge}
+        {labelMark}
+        layout="inline"
+        error={inputError || problem}
+      >
         <span class="adorned number" class:marked={notInFile}>
           <Input
             type="number"
@@ -209,7 +216,7 @@
         </span>
       </Field>
     {:else if kind === 'str' || kind === 'path'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned" class:marked={notInFile}>
           <Input
             value={blank || shown === null || shown === undefined ? '' : String(shown)}
@@ -221,7 +228,14 @@
         </span>
       </Field>
     {:else if kind === 'list'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={inputError || problem}>
+      <Field
+        label={field.name}
+        {hint}
+        {badge}
+        {labelMark}
+        layout="inline"
+        error={inputError || problem}
+      >
         <span class="adorned area" class:marked={notInFile}>
           <TextArea
             monospace
@@ -236,7 +250,7 @@
         </span>
       </Field>
     {:else if kind === 'choice'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned select">
           <Select
             value={String(shown ?? '')}
@@ -249,7 +263,7 @@
         </span>
       </Field>
     {:else if kind === 'multi_choice'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="adorned beside">
           <span class="choices">
             {#each field.multi_choices ?? [] as choice (choice)}
@@ -265,7 +279,7 @@
     {:else if kind === 'table' && !pendingUnset}
       <TableEditor {field} {op} {hint} {badge} {labelMark} {problem} {onOp} />
     {:else if kind === 'table'}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="config-value dim">Removed from config.toml.</span>
       </Field>
     {:else if shownSecret}
@@ -276,14 +290,13 @@
         {hint}
         {badge}
         labelMark={statusMark}
-        inline
+        layout="inline"
         error={problem}
-        labelled={false}
       >
         <span class="config-value dim">{field.read_only_reason || '—'}</span>
       </Field>
     {:else}
-      <Field label={field.name} {hint} {badge} {labelMark} inline error={problem} labelled={false}>
+      <Field label={field.name} {hint} {badge} {labelMark} layout="inline" error={problem}>
         <span class="config-value" class:dim={formatValue(field.value) === '—'}
           >{formatValue(field.value)}</span
         >

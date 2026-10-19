@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { getFieldContext } from './fieldContext';
+
   interface Props {
     /** Start of the range, `yyyy-mm-dd`. Bindable. */
     from: string;
@@ -38,6 +40,11 @@
   }: Props = $props();
 
   const uid = $props.id();
+
+  // Inside a Field the range is one group named by the caption; each input
+  // keeps its own From/To name.
+  const field = getFieldContext();
+  const owned = field?.claim('labelledby') ?? false;
 </script>
 
 <!--
@@ -65,7 +72,12 @@
   the native hint is suppressed while it shows, so both platforms render the
   same thing rather than one carrying a hint the other lacks.
 -->
-<div class="date-range">
+<div
+  class="date-range"
+  role={owned ? 'group' : undefined}
+  aria-labelledby={owned ? field?.labelId : undefined}
+  aria-describedby={owned ? field?.describedBy : undefined}
+>
   {#if labelled}
     <label class="date-cap caption" for="{uid}-from">{fromLabel.replace(/ date$/i, '')}</label>
   {/if}

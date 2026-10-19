@@ -83,7 +83,7 @@ function categoryFields(dialog: HTMLElement) {
 // input is a descendant of the element carrying the label text rather than a
 // sibling of it.
 function within_(dialog: HTMLElement, label: string): HTMLInputElement {
-  const field = [...dialog.querySelectorAll('label.field')].find(
+  const field = [...dialog.querySelectorAll('.field')].find(
     (l) => l.querySelector('.field-label')?.textContent?.trim() === label,
   );
   if (!field) throw new Error(`no field labelled "${label}" in the dialog`);

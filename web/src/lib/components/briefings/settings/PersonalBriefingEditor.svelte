@@ -134,7 +134,7 @@
       >
         <Input bind:value={draft.cron} monospace />
       </Field>
-      <Field label="Delivery" labelled={false}>
+      <Field label="Delivery">
         <Select
           value={draft.output}
           options={outputOptions}
@@ -144,7 +144,7 @@
         />
       </Field>
       {#if draft.output === 'talk'}
-        <Field label="Talk room" labelled={false}>
+        <Field label="Talk room">
           <Select
             value={draft.conversation_token}
             options={[

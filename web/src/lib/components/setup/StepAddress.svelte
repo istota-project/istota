@@ -230,11 +230,7 @@
                 }}
               />
             </Field>
-            <Field
-              label="Certificate between the proxy and Istota"
-              error={shown.tls_cert_source}
-              labelled={false}
-            >
+            <Field label="Certificate between the proxy and Istota" error={shown.tls_cert_source}>
               <Select
                 value={draft.text('tls_cert_source') || 'self-signed'}
                 options={PROXY_CERTIFICATES}

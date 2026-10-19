@@ -133,10 +133,10 @@
 
 <Modal bind:open title="New manual invoice" onOpenChange={handleOpenChange} width="560px">
   <div class="head">
-    <Field label="Client" labelled={false}>
+    <Field label="Client">
       <Select bind:value={client} options={clientOptions} fullWidth ariaLabel="Client" />
     </Field>
-    <Field label="Entity" labelled={false}>
+    <Field label="Entity">
       <Select bind:value={entity} options={entityOptions} fullWidth ariaLabel="Entity" />
     </Field>
   </div>
@@ -145,7 +145,7 @@
   {#each lines as line, i (line.id)}
     {@const wants = line.service ? quantityFieldFor(serviceOf(line)?.type) : 'amount'}
     <div class="line">
-      <Field label="Bill by" labelled={false}>
+      <Field label="Bill by">
         <Select
           bind:value={line.service}
           options={serviceOptions}

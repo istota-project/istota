@@ -242,7 +242,6 @@
   {#if profile}
     <Field
       label="Chat notifications"
-      labelled={false}
       badge={managedBadge(profile, 'push_chat_alerts')}
       hint="The account default for rooms without their own notification setting. Badge only counts unread messages without alerts; Off excludes them from alerts and the app badge."
     >

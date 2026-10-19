@@ -166,7 +166,6 @@
   {#if group}
     <Field
       label="Delivery"
-      labelled={false}
       hint="Each member receives it at their own address for this channel. Every edition is also readable in Briefings."
     >
       <Select
@@ -190,7 +189,7 @@
     </Field>
   {:else}
     <div class="field-row">
-      <Field label="Delivery" labelled={false}>
+      <Field label="Delivery">
         <Select
           value={personalOutput}
           options={outputs.map((o) => ({ value: o, label: channelLabel(o) }))}
@@ -200,7 +199,7 @@
         />
       </Field>
       {#if personalOutput === 'talk'}
-        <Field label="Talk room" labelled={false}>
+        <Field label="Talk room">
           <Select
             value={room}
             options={rooms.map((r) => ({ value: r.token, label: r.name }))}

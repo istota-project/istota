@@ -178,7 +178,7 @@
         /></Field
       >
     {:else}
-      <Field labelled={false} label="Personal calendar"
+      <Field label="Personal calendar"
         ><Select
           value={String(config.calendar_url ?? '')}
           options={calendarOptions}
@@ -212,7 +212,7 @@
           /></Field
         >
       {/each}
-      <Field labelled={false} label="Days back"
+      <Field label="Days back"
         ><Select
           value={String(config.lookback_days ?? 0)}
           options={[0, 1, 7, 30].map((n) => ({ value: String(n), label: String(n) }))}
@@ -220,7 +220,7 @@
           ariaLabel="Days back"
         /></Field
       >
-      <Field labelled={false} label="Days ahead"
+      <Field label="Days ahead"
         ><Select
           value={String(config.lookahead_days ?? 1)}
           options={[1, 7, 14, 30].map((n) => ({ value: String(n), label: String(n) }))}
@@ -275,11 +275,7 @@
     />
   </Field>
   {#if config.mode === 'senders'}
-    <Field
-      label="Sender filters"
-      hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com"
-      labelled={false}
-    >
+    <Field label="Sender filters" hint="fnmatch patterns, e.g. *@semafor.com or news@axios.com">
       <div class="chip-list">
         {#each senders as s (s)}
           <span class="chip">

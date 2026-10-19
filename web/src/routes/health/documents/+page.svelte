@@ -522,10 +522,7 @@
     }}
   >
     <div class="vstack">
-      <!-- `labelled={false}` on both: a Select's trigger is a <button>, so
-           inside a <label> it becomes that label's implicit control and
-           clicking the caption opens the dropdown. See web/AGENTS.md. -->
-      <Field label="Record type" labelled={false}>
+      <Field label="Record type">
         <Select
           value={attachType}
           options={entityTypes}
@@ -537,7 +534,7 @@
       <!-- `warning` rather than `hint`: a hover popover is discoverable, not
            seen, and a short pool is the reason the record you are looking for
            is not in the list. -->
-      <Field label="Record" warning={poolNotice} labelled={false}>
+      <Field label="Record" warning={poolNotice}>
         <Select
           value={attachId}
           options={attachChoices}

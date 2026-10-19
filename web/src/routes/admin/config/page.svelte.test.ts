@@ -336,7 +336,7 @@ describe('the raw editor', () => {
     });
     expect(screen.getByText('1 change')).toBeInTheDocument();
     // The form shows values only while the whole file is pending.
-    expect(screen.queryByLabelText('imap_host')).toBeNull();
+    expect(screen.queryByLabelText('imap_host', { selector: 'input' })).toBeNull();
 
     api.previewConfigChange.mockRejectedValue(
       new api.ConfigChangeError('The change cannot be read.', 400, 'invalid_change', {
@@ -458,7 +458,7 @@ describe('section navigation', () => {
     page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
     mount(configView([imapHost, ...googleFields]));
     expect(await screen.findByLabelText('Filter settings')).toHaveValue('google_workspace');
-    expect(screen.queryByLabelText('imap_host')).toBeNull();
+    expect(screen.queryByLabelText('imap_host', { selector: 'input' })).toBeNull();
     expect(screen.getByLabelText('enabled')).not.toBeChecked();
     expect(screen.getByLabelText('client_id')).toHaveValue('');
     expect(screen.getByLabelText('client_secret')).toHaveValue('');
@@ -494,7 +494,7 @@ describe('section navigation', () => {
     });
     page.url = new URL('http://localhost/istota/admin/config?section=email');
     expect(await screen.findByLabelText('imap_host')).toBeInTheDocument();
-    expect(screen.queryByLabelText('client_id')).toBeNull();
+    expect(screen.queryByLabelText('client_id', { selector: 'input' })).toBeNull();
     page.url = new URL('http://localhost/istota/admin/config?section=google_workspace');
     expect(await screen.findByLabelText('client_id')).toHaveValue('replacement-client');
     expect(screen.getByLabelText('client_secret')).toHaveValue('replacement-secret');
@@ -600,8 +600,8 @@ describe('Google configuration review', () => {
     await fireEvent.click(await screen.findByText('Read-only: changes are made on the host'));
     expect(screen.getByText('This install has no config applier.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '[google_workspace]' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('client_id')).toBeNull();
-    expect(screen.queryByLabelText('client_secret')).toBeNull();
+    expect(screen.queryByLabelText('client_id', { selector: 'input' })).toBeNull();
+    expect(screen.queryByLabelText('client_secret', { selector: 'input' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Review changes' })).toBeNull();
   });
 
@@ -618,8 +618,8 @@ describe('Google configuration review', () => {
       }
       mount(view);
       expect((await screen.findAllByText(reason)).length).toBe(4);
-      expect(screen.queryByLabelText('client_id')).toBeNull();
-      expect(screen.queryByLabelText('client_secret')).toBeNull();
+      expect(screen.queryByLabelText('client_id', { selector: 'input' })).toBeNull();
+      expect(screen.queryByLabelText('client_secret', { selector: 'input' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Clear stored client_secret' })).toBeNull();
       expect(screen.getByRole('button', { name: 'Review changes' })).toBeDisabled();
       expect(api.previewConfigChange).not.toHaveBeenCalled();
@@ -711,7 +711,7 @@ describe('credential status', () => {
       }),
     );
     expect(await screen.findByText('In config.toml')).toBeInTheDocument();
-    expect(screen.queryByLabelText('auth_token')).toBeNull();
+    expect(screen.queryByLabelText('auth_token', { selector: 'input' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Move all to secret files' })).toBeNull();
   });
 });
@@ -983,7 +983,7 @@ describe('the [servarr] apps editor', () => {
     const radarr = await block('radarr');
     expect(radarr.getByText(reason)).toBeInTheDocument();
     expect(radarr.getByText('Set')).toBeInTheDocument();
-    expect(radarr.queryByLabelText(/^API key/)).toBeNull();
+    expect(radarr.queryByLabelText(/^API key/, { selector: 'input' })).toBeNull();
   });
 
   it('is read-only with the reason when a plan manages config.toml', async () => {
@@ -991,8 +991,8 @@ describe('the [servarr] apps editor', () => {
     mountServarr({}, {}, { editor: 'readonly', read_only_reason: reason });
     const radarr = await block('radarr');
     expect(radarr.getByText('http://10.0.0.5:7878')).toBeInTheDocument();
-    expect(radarr.queryByLabelText(/^URL/)).toBeNull();
-    expect(radarr.queryByLabelText('Connected')).toBeNull();
+    expect(radarr.queryByLabelText(/^URL/, { selector: 'input' })).toBeNull();
+    expect(radarr.queryByLabelText('Connected', { selector: 'input' })).toBeNull();
     expect(screen.getAllByText(reason).length).toBeGreaterThan(0);
   });
 

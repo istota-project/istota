@@ -272,7 +272,7 @@
     </Field>
 
     {#if detectionEnabled}
-      <Field label="Ledger" labelled={false} error={ledgerProblem}>
+      <Field label="Ledger" error={ledgerProblem}>
         <Select
           value={detectionLedger}
           onValueChange={changeLedger}
@@ -286,7 +286,6 @@
       </Field>
       <Field
         label="Income account"
-        labelled={false}
         error={accountProblem}
         hint="The revenue account invoice payments are booked to."
       >

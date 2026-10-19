@@ -45,13 +45,13 @@
   other, so it goes through the review dialog rather than happening on click.
 -->
 {#if readOnlyReason}
-  <Field {label} {hint} {inline} labelMark={statusMark} labelled={false}>
+  <Field {label} {hint} layout={inline ? 'inline' : 'stacked'} labelMark={statusMark}>
     <div class="secret-state">
       <span class="muted">{readOnlyReason}</span>
     </div>
   </Field>
 {:else if pending === ''}
-  <Field {label} {hint} {inline} labelMark={statusMark} labelled={false}>
+  <Field {label} {hint} layout={inline ? 'inline' : 'stacked'} labelMark={statusMark}>
     <div class="secret-state">
       <span class="muted">Will be cleared.</span>
       <Button variant="secondary" size="sm" onclick={() => onChange(null)}>Undo</Button>

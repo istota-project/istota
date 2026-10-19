@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import Field from './Field.svelte';
+import Input from './Input.svelte';
+import FieldContextHarness from './FieldContext.harness.svelte';
 
 afterEach(cleanup);
 
@@ -13,8 +15,6 @@ const checkbox = () => createRawSnippet(() => ({ render: () => `<input type="che
 describe('Field', () => {
   it('labels its control', () => {
     render(Field, { label: 'Display name', children: input() });
-    // The implicit <label> association is the whole reason this wraps rather
-    // than sitting beside: no `for`/`id` pair to keep in sync.
     expect(screen.getByLabelText('Display name')).toBeInTheDocument();
   });
 
@@ -59,28 +59,113 @@ describe('Field', () => {
         children: checkbox(),
       });
       const field = container.querySelector('.field')!;
-      const order = [...field.children].map((el) => el.tagName.toLowerCase());
-      expect(order.indexOf('input')).toBeLessThan(order.indexOf('span'));
+      const children = [...field.children];
+      const box = children.findIndex((el) => el.tagName === 'INPUT');
+      const caption = children.findIndex((el) => el.classList.contains('field-label'));
+      expect(box).toBeGreaterThanOrEqual(0);
+      expect(box).toBeLessThan(caption);
     });
   });
 
-  describe('labelled', () => {
-    it('renders a div so several controls stay individually labellable', () => {
-      // A <label> wrapping a row of checkboxes claims only the first one, and
-      // silently leaves the rest with no accessible name. The same wrapper is
-      // what stops a <button> in the slot becoming the label's control.
-      const { container } = render(Field, {
-        label: 'Disabled modules',
-        labelled: false,
-        children: input(),
-      });
-      expect(container.querySelector('div.field')).toBeTruthy();
-      expect(container.querySelector('label.field')).toBeNull();
-    });
+  it('renders a div, never a label around its control', () => {
+    // A <label> makes its first labelable descendant its control, so a button
+    // in the slot became a second way to press it from the caption.
+    const { container } = render(Field, { label: 'Display name', children: input() });
+    expect(container.querySelector('div.field')).toBeTruthy();
+    expect(container.querySelector('label.field')).toBeNull();
+  });
+});
 
-    it('renders a label element by default', () => {
-      const { container } = render(Field, { label: 'Display name', children: input() });
-      expect(container.querySelector('label.field')).toBeTruthy();
+describe('Field context', () => {
+  it('names a text input through the caption, which is its <label for>', () => {
+    // `for` is what makes a caption click focus the input in a browser.
+    render(FieldContextHarness, { control: 'input' });
+    const control = screen.getByLabelText('Caption');
+    const caption = screen.getByText('Caption');
+    expect(control.tagName).toBe('INPUT');
+    expect(caption.tagName).toBe('LABEL');
+    expect((caption as HTMLLabelElement).htmlFor).toBe(control.id);
+  });
+
+  it('names a textarea the same way', () => {
+    render(FieldContextHarness, { control: 'textarea' });
+    expect(screen.getByLabelText('Caption').tagName).toBe('TEXTAREA');
+  });
+
+  it('names a Select trigger by aria-labelledby, and a caption click does not open it', async () => {
+    render(FieldContextHarness, { control: 'select' });
+    const trigger = screen.getByRole('button', { name: 'Caption' });
+    const caption = screen.getByText('Caption');
+    expect(caption.tagName).toBe('SPAN');
+    expect(trigger).toHaveAttribute('aria-labelledby', caption.id);
+    await fireEvent.click(caption);
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('option', { name: 'Beta' })).toBeNull();
+  });
+
+  it('names a MultiSelect group by its caption', () => {
+    render(FieldContextHarness, { control: 'multiselect' });
+    expect(screen.getByRole('group', { name: 'Caption' })).toBeInTheDocument();
+  });
+
+  it('does not press a button in the slot from the caption', async () => {
+    // The sender-chip defect: a "Sender filters" caption removed a sender.
+    render(FieldContextHarness, { control: 'buttons' });
+    await fireEvent.click(screen.getByText('Caption'));
+    expect(screen.getByTestId('removed')).toHaveTextContent('0');
+    // With no single control, the field is a group its caption names.
+    expect(screen.getByRole('group', { name: 'Caption' })).toBeInTheDocument();
+  });
+
+  it('labels a raw input written into the slot', () => {
+    render(FieldContextHarness, { control: 'raw' });
+    expect(screen.getByLabelText('Caption').tagName).toBe('INPUT');
+  });
+
+  it('points aria-describedby at the description and the error', () => {
+    render(FieldContextHarness, {
+      control: 'input',
+      description: 'Shown on your profile',
+      error: 'Too long',
     });
+    const control = screen.getByLabelText('Caption');
+    expect(control).toHaveAccessibleDescription('Shown on your profile Too long');
+    expect(control).toHaveAttribute('aria-invalid', 'true');
+  });
+
+  it('describes a raw input too', () => {
+    render(FieldContextHarness, { control: 'raw', description: 'Shown on your profile' });
+    expect(screen.getByLabelText('Caption')).toHaveAccessibleDescription('Shown on your profile');
+  });
+
+  it('sets aria-required without drawing a marker', () => {
+    render(FieldContextHarness, { control: 'input', required: true });
+    expect(screen.getByLabelText('Caption')).toHaveAttribute('aria-required', 'true');
+    expect(screen.queryByText('*')).toBeNull();
+  });
+
+  it('appends "(optional)" to the label', () => {
+    render(FieldContextHarness, { control: 'input', optional: true });
+    expect(screen.getByLabelText('Caption (optional)').tagName).toBe('INPUT');
+  });
+
+  it('draws the compact caption as a micro-label', () => {
+    render(FieldContextHarness, { control: 'input', layout: 'compact' });
+    expect(screen.getByText('Caption')).toHaveClass('micro-label');
+  });
+
+  it('labels and toggles a Checkbox from its caption', async () => {
+    render(FieldContextHarness, { control: 'checkbox' });
+    const box = screen.getByRole('checkbox', { name: 'Caption' });
+    await fireEvent.click(screen.getByText('Caption'));
+    expect(box).toBeChecked();
+    expect(screen.getByTestId('checked')).toHaveTextContent('true');
+  });
+
+  it('leaves a control outside any field alone', () => {
+    render(Input, { 'aria-label': 'Bare' });
+    const el = screen.getByLabelText('Bare');
+    expect(el).not.toHaveAttribute('id');
+    expect(el).not.toHaveAttribute('aria-describedby');
   });
 });

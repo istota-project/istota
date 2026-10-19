@@ -219,7 +219,6 @@
       {@const held = grantedByService.get(svc.service)}
       <Field
         label={svc.label}
-        labelled={false}
         warning={svc.max_level === 'off' ? 'This instance does not offer this service.' : undefined}
       >
         <div class="hstack wrap">

@@ -263,7 +263,6 @@
           {#each rows as c (c.id)}
             <Field
               label={c.name}
-              labelled={false}
               warning={aboveLimit(state, c) ? "Above this instance's limit." : undefined}
               error={failed[c.id]}
             >

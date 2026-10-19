@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { HTMLInputAttributes } from 'svelte/elements';
+  import { getFieldContext, joinIds } from './fieldContext';
 
   interface Props extends Omit<HTMLInputAttributes, 'value' | 'size'> {
     value?: string | number | null;
@@ -14,8 +15,14 @@
     type = 'text',
     invalid = false,
     monospace = false,
+    id,
+    'aria-describedby': ariaDescribedBy,
     ...rest
   }: Props = $props();
+
+  // Inside a Field the caption's `for` names this input.
+  const field = getFieldContext();
+  const owned = field?.claim('native', () => id) ?? false;
 </script>
 
 <!--
@@ -36,10 +43,13 @@
   {...rest}
   {type}
   bind:value
+  id={id ?? (owned ? field?.controlId : undefined)}
   class="ui-input"
   class:mono={monospace}
   class:invalid
-  aria-invalid={invalid || undefined}
+  aria-invalid={invalid || (owned && field?.invalid) || undefined}
+  aria-describedby={joinIds(ariaDescribedBy, owned ? field?.describedBy : undefined)}
+  aria-required={(owned && field?.required) || undefined}
 />
 
 <style>

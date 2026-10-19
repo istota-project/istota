@@ -350,7 +350,6 @@
           </Field>
           <Field
             label="Timezone (IANA)"
-            labelled={false}
             badge={badge('timezone')}
             hint={hint(
               'timezone',
@@ -494,7 +493,6 @@
           </Field>
           <Field
             label="Outbound approval"
-            labelled={false}
             badge={badge('outbound_approval')}
             hint={hint(
               'outbound_approval',
@@ -545,7 +543,6 @@
             {#if showWhatsApp}
               <Field
                 label="WhatsApp number"
-                labelled={false}
                 badge={badge('whatsapp_number')}
                 hint={hint('whatsapp_number', 'Full international form, for example +48123456789.')}
                 warning={whatsappHasIdentity && form.whatsapp_number !== detail.whatsapp.number
@@ -603,7 +600,6 @@
           {#if detail.options.modules.length}
             <Field
               label="Disabled modules"
-              labelled={false}
               badge={badge('disabled_modules')}
               hint={hint('disabled_modules', 'Modules are on by default. Pick one to turn it off.')}
               error={errors.disabled_modules}
@@ -626,7 +622,6 @@
           {#if detail.options.skills.length}
             <Field
               label="Disabled skills"
-              labelled={false}
               badge={badge('disabled_skills')}
               hint={hint('disabled_skills', 'Pick a skill to turn it off for this user.')}
               error={errors.disabled_skills}

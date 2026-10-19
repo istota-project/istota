@@ -221,14 +221,14 @@
 <Modal bind:open={memberOpen} title={target ? 'Change member role' : 'Add member'}>
   <div class="form-fields vstack">
     {#if target}<p>{target.display_name}</p>{:else}
-      <Field label="User" labelled={false}
+      <Field label="User"
         ><Select bind:value={userId} {options} ariaLabel="User" fullWidth disabled={busy} /></Field
       >
       {#if !busy && !options.length}<p class="caption">
           Every available user is already a member.
         </p>{/if}
     {/if}
-    <Field label="Role" labelled={false}
+    <Field label="Role"
       ><Select
         bind:value={role}
         options={[
@@ -242,7 +242,6 @@
     {#if target}
       <Field
         label="Replacement owner"
-        labelled={false}
         warning="If this would leave other members without an owner, choose a replacement in the same change."
         ><Select
           bind:value={replacement}
@@ -312,7 +311,6 @@
     </p>
     <Field
       label="Replacement owner"
-      labelled={false}
       warning="Choose a replacement if this would leave other members without an owner."
       ><Select
         bind:value={replacement}

@@ -49,7 +49,7 @@
     <div class="app vstack" style:--vstack-gap="var(--space-2)" data-testid={`servarr-app-${name}`}>
       <h3 class="micro-label">{label}</h3>
       {#if editable}
-        <Field label="Connected" inline checkbox>
+        <Field label="Connected" layout="inline" checkbox>
           <input type="checkbox" bind:checked={form[name].enabled} />
         </Field>
       {/if}
@@ -57,7 +57,7 @@
         {#if editable}
           <Field
             label="URL"
-            inline
+            layout="inline"
             hint={`The address Istota reaches ${label} at, from the machine it runs on.`}
             error={problems[`${name}.url`]}
             warning={problems[`${name}.url`] ? undefined : need?.message}
@@ -79,7 +79,7 @@
             </div>
           {/if}
         {:else}
-          <Field label="URL" inline labelled={false}>
+          <Field label="URL" layout="inline">
             <span class="config-value">{app.url || '—'}</span>
           </Field>
         {/if}

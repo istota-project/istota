@@ -115,7 +115,7 @@
         How Istota addresses you. User ID: <code>{profile.user_id}</code>
       </p>
 
-      <Field label="Profile picture" labelled={false} wide error={avatarError} warning={avatarNote}>
+      <Field label="Profile picture" wide error={avatarError} warning={avatarNote}>
         <AvatarPicker
           pickLabel="Choose a profile picture"
           prompt="Click the picture to choose a file, or drop or paste one here."

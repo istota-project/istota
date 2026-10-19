@@ -4,6 +4,7 @@
   import Input from './Input.svelte';
   import EmptyState from './EmptyState.svelte';
   import type { SelectOption } from './Select.svelte';
+  import { getFieldContext, setFieldContext } from './fieldContext';
 
   interface Props {
     value: string[];
@@ -25,6 +26,12 @@
     disabled = false,
     ariaLabel,
   }: Props = $props();
+
+  // The search field takes the caption by id; the Input inside it must not
+  // claim the field for itself, or bits-ui's own id on it would be replaced.
+  const field = getFieldContext();
+  const owned = field?.claim('labelledby') ?? false;
+  setFieldContext(null);
 
   let open = $state(false);
   let search = $state('');
@@ -60,7 +67,11 @@
   a search field that opens bits-ui's multiple Combobox. The popover and its
   items wear Select's `ui-select-*` classes, so the two lists look the same.
 -->
-<div class="multiselect">
+<div
+  class="multiselect"
+  role={owned ? 'group' : undefined}
+  aria-labelledby={owned ? field?.labelId : undefined}
+>
   <div class="picked" aria-live="polite">
     {#each value as item (item)}
       <span class="pick">
@@ -91,6 +102,8 @@
           oninput={(e) => (search = e.currentTarget.value)}
           onclick={() => (open = true)}
           aria-label={ariaLabel}
+          aria-labelledby={owned && !ariaLabel ? field?.labelId : undefined}
+          aria-describedby={owned ? field?.describedBy : undefined}
         >
           {#snippet child({ props })}<Input {...props} {placeholder} />{/snippet}
         </Combobox.Input>

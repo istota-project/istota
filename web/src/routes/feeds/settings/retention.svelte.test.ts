@@ -96,7 +96,7 @@ async function mountPage(settings: Settings = {}) {
 function fieldInput(label: string): HTMLInputElement {
   const caption = (l: Element) =>
     l.querySelector('.field-label')?.textContent?.trim().replace(/\?$/, '').trim();
-  const field = [...document.querySelectorAll('label.field')].find((l) => caption(l) === label);
+  const field = [...document.querySelectorAll('.field')].find((l) => caption(l) === label);
   if (!field) throw new Error(`no field captioned "${label}"`);
   const input = field.querySelector('input');
   if (!input) throw new Error(`field "${label}" has no input`);

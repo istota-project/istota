@@ -47,14 +47,8 @@
   a button carved out of the input made every clearable field a step narrower
   than the plain ones beside it. Clearing stays a button rather than "empty
   the box", because an empty box already means "leave it as it is".
-
-  `labelled` is false only while the clear button is present: a <button> is a
-  labelable element, so inside a <label> it would become the label's implicit
-  control and clicking the field's caption would clear the stored secret. With
-  no button there is nothing to steal the association, and clicking the caption
-  should focus the input as it does in every other field.
 -->
-<Field {label} {hint} {inline} {error} {labelMark} labelled={!showClear}>
+<Field {label} {hint} layout={inline ? 'inline' : 'stacked'} {error} {labelMark}>
   <div class="secret-row hstack">
     <Input
       {type}

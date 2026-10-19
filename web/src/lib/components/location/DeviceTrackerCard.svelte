@@ -327,10 +327,7 @@
         </p>
       {/if}
     {:else}
-      <!-- labelled={false} because this slot holds buttons: inside a <label>
-           a <button> becomes the label's implicit control, and clicking the
-           caption "Tracking" would stop the tracker. -->
-      <Field label="Tracking" warning={trackingWarning} labelled={false}>
+      <Field label="Tracking" warning={trackingWarning}>
         <div class="hstack">
           <!-- "Paused" rather than "On", because On beside an hours-old
                last-sent time is the reading that sends someone looking for a
@@ -389,7 +386,6 @@
         label="Profile"
         hint={PROFILE_HINT[profileChoice]}
         warning={status.tracking ? '' : 'Applies when you start tracking.'}
-        labelled={false}
       >
         <Select
           value={profileChoice}
@@ -402,8 +398,6 @@
       </Field>
 
       {#if canPinWifi}
-        <!-- labelled={false} for the same reason as Tracking above: the slot
-             holds a Select, whose bits-ui trigger is a <button>. -->
         <Field
           label="Wifi zone"
           hint={'While joined to this phone’s current network, report a fixed place instead of ' +
@@ -411,7 +405,6 @@
             'can walk you across a place boundary and back all evening; being on the network is ' +
             'better proof of being there than any one fix.'}
           warning={zoneWarning}
-          labelled={false}
         >
           <Select
             value={zoneChoice}

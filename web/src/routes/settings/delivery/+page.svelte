@@ -193,12 +193,7 @@
 >
   {#if profile}
     <Card title="Delivery">
-      <!-- `labelled={false}` on all four: the slot holds a Select, whose
-           bits-ui trigger is a <button> and so becomes a <label>'s implicit
-           control — and where a room dropdown sits beside it there are two of
-           them, so the caption would act on whichever came first. -->
       <Field
-        labelled={false}
         label="Default delivery destination"
         badge={managedBadge(profile, 'default_destination') ??
           managedBadge(profile, 'default_room')}
@@ -239,7 +234,6 @@
         </div>
       </Field>
       <Field
-        labelled={false}
         label="Questions from other users"
         hint="Where a question another user asks you through Istota reaches you. Your choice here overrides theirs. If the one you pick stops working, questions go to your default room."
       >
@@ -259,7 +253,6 @@
         {/if}
       </Field>
       <Field
-        labelled={false}
         label="Send alerts to"
         badge={managedBadge(profile, 'routing')}
         hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' and 'web' both deliver into a room, which you can pick beside them. Leave on (default) to use the default destination."
@@ -293,7 +286,6 @@
            existing `web` log route still shows and stays editable: it falls
            through `routeOptions`' keep-the-current-value branch. -->
       <Field
-        labelled={false}
         label="Send execution log to"
         badge={managedBadge(profile, 'routing')}
         hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' delivers into a conversation, which you can pick beside it; email and ntfy get a single final summary. Web chat is not offered: it already shows each task's tool calls in the turn itself. (off) disables it."

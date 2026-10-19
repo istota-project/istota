@@ -204,13 +204,7 @@
         />
       </Field>
       {#if settings.allModules.length > 0}
-        <!-- labelled={false}: one implicit <label> would claim the first
-             checkbox and leave the rest of them unlabelled. -->
-        <Field
-          label="Disabled modules"
-          labelled={false}
-          badge={managedBadge(profile, 'disabled_modules')}
-        >
+        <Field label="Disabled modules" badge={managedBadge(profile, 'disabled_modules')}>
           <div class="module-toggles">
             {#each settings.allModules as m (m)}
               <label class="module-chip">

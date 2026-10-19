@@ -498,9 +498,7 @@
 
 <Modal bind:open={modalOpen} title="Log measurement" width="26rem">
   <form onsubmit={submitEntry}>
-    <!-- labelled={false}: the row holds a number input and a unit select, so
-         one implicit label would claim the first and leave the other unnamed. -->
-    <Field label="Metric" labelled={false}>
+    <Field label="Metric">
       <Select
         value={formMetric}
         options={metricOptions}
@@ -509,7 +507,7 @@
         fullWidth
       />
     </Field>
-    <Field label="Value" labelled={false}>
+    <Field label="Value">
       <div class="value-row hstack">
         <Input type="number" step="any" bind:value={formValue} required aria-label="Value" />
         {#if LOG_UNIT_CHOICES[formMetric]}

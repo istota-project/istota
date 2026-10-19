@@ -78,7 +78,7 @@
   description="Purchases above the auto limits wait for your approval. Purchases above the ceiling are refused."
 >
   <fieldset class="policy-form" disabled={!writable || saving}>
-    <Field label="Currency" labelled={false}
+    <Field label="Currency"
       ><Select
         bind:value={currency}
         options={currencies}

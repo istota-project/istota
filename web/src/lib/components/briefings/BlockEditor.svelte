@@ -296,7 +296,7 @@
         <Field label="Directive" hint="How to treat this block's sources.">
           <TextArea bind:value={draft.directive} rows={3} />
         </Field>
-        <Field label="Render mode" labelled={false}>
+        <Field label="Render mode">
           <Select
             value={draft.render_mode}
             options={renderOptions}

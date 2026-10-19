@@ -78,7 +78,7 @@
     {/if}
   </Field>
 
-  <Field label="Brackets" labelled={false} wide>
+  <Field label="Brackets" wide>
     <BracketEditor
       value={brackets.value ?? []}
       onchange={(next) => onEdit({ brackets: next })}

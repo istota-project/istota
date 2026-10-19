@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { HTMLTextareaAttributes } from 'svelte/elements';
+  import { getFieldContext, joinIds } from './fieldContext';
 
   interface Props extends Omit<HTMLTextareaAttributes, 'value'> {
     value?: string;
@@ -15,8 +16,14 @@
     rows = 3,
     invalid = false,
     monospace = false,
+    id,
+    'aria-describedby': ariaDescribedBy,
     ...rest
   }: Props = $props();
+
+  // Inside a Field the caption's `for` names this textarea.
+  const field = getFieldContext();
+  const owned = field?.claim('native', () => id) ?? false;
 </script>
 
 <textarea
@@ -26,7 +33,10 @@
   class="ui-textarea"
   class:mono={monospace}
   class:invalid
-  aria-invalid={invalid || undefined}
+  id={id ?? (owned ? field?.controlId : undefined)}
+  aria-invalid={invalid || (owned && field?.invalid) || undefined}
+  aria-describedby={joinIds(ariaDescribedBy, owned ? field?.describedBy : undefined)}
+  aria-required={(owned && field?.required) || undefined}
 ></textarea>
 
 <style>
