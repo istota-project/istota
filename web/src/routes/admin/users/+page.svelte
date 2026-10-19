@@ -378,20 +378,19 @@
   .col-last-login {
     width: 7rem;
   }
-  /* Narrow: Last login goes and the rest tighten to what a phone has, about
-     18.5rem inside the card at 375px, so the table fits rather than scrolls. */
+  /* Narrow: Last login and Sign-in go (the user editor shows both), so the
+     table fits a phone's card rather than scrolls; the longest sign-in badge
+     needs about 8rem, which a phone does not have beside the email. */
   @container settings (max-width: 40rem) {
     .users-grid {
-      min-width: 18.5rem;
+      min-width: 15rem;
     }
-    .col-last-login {
+    .col-last-login,
+    .col-access {
       display: none;
     }
     .col-user {
-      width: 5.5rem;
-    }
-    .col-access {
-      width: 5rem;
+      width: 7rem;
     }
   }
 </style>
