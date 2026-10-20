@@ -1711,6 +1711,12 @@ def _room_host(conn, token: str, user_id: str) -> str:
     if outcome == "held_by_another":
         host = room_policy.get_policy(conn, token).host_user_id
         return f"This room's host is {host}. A host is never replaced while present."
+    if outcome == "group_managed":
+        group_id = db.get_room(conn, token).group_id
+        return (
+            f"This room's membership follows group '{group_id}'. Only an owner "
+            "of that group can host it."
+        )
     return "Only a member of this room can host it."
 
 

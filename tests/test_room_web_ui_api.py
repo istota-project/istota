@@ -223,6 +223,28 @@ class TestClaimingTheHost:
         with db.get_db(db_path) as conn:
             assert room_policy.get_policy(conn, room.token).host_user_id == "alice"
 
+    async def test_a_group_rooms_host_is_not_a_members_to_claim(self, client, db_path):
+        from istota.groups.rooms import create_group_room
+
+        with db.get_db(db_path) as conn:
+            db.create_group(conn, "team", kind="team", display_name="Team",
+                            created_by="operator")
+            db.add_group_member(conn, "team", "alice", role="owner", added_by="operator")
+            db.add_group_member(conn, "team", "bob", added_by="operator")
+        with db.get_db(db_path) as conn:
+            token = create_group_room(conn, "alice", "team", "Planning",
+                                      "req-00000001")["room"].token
+            conn.execute("UPDATE room_policy SET host_user_id = NULL WHERE room_token = ?",
+                         (token,))
+        cookies = await _login(client, "bob")
+        room_id = (await _listed(client, cookies, token))["id"]
+        resp = await client.post(f"/istota/api/chat/rooms/{room_id}/host",
+                                 cookies=cookies, headers=ORIGIN)
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == "group_managed"
+        with db.get_db(db_path) as conn:
+            assert room_policy.get_policy(conn, token).host_user_id is None
+
     async def test_someone_elses_room_is_not_found(self, client, db_path):
         room = _shared_room(db_path)
         alice = await _login(client, "alice")

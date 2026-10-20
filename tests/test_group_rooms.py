@@ -320,3 +320,388 @@ class TestAmbientMemory:
         db.end_group_membership(conn, "fam", "bob", ended_by="operator")
         token = _room(conn, "alice", group="fam", managed=True)
         assert room_scopes.task_group_ids(conn, _task(token)) == ["fam"]
+
+
+# ---------------------------------------------------------------------------
+# Transactional group rooms: creation, reconciliation and host succession,
+# through `groups.service`, on committed state and real connections.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def config(tmp_path):
+    from istota.config import Config, UserConfig
+
+    cfg = Config(db_path=tmp_path / "app.db", users={
+        name: UserConfig() for name in ("alice", "bob", "carol", "dave", "erin")
+    })
+    db.init_db(cfg.db_path)
+    return cfg
+
+
+@pytest.fixture
+def team(config):
+    """`team`: alice owns it, bob is a member. Committed; no open transaction."""
+    from istota.groups import service
+
+    with db.get_db(config.db_path) as c:
+        service.create_group(c, config, "team", actor_id="admin", is_admin=True,
+                             expected_revision=0, owners=["alice"],
+                             display_name="Team", kind="team")
+        _change(c, config, "bob", role="member", acknowledge_history=True)
+    return config
+
+
+def _revision(conn, group_id="team"):
+    return db.get_group(conn, group_id, include_archived=True)["revision"]
+
+
+def _change(conn, config, user, *, actor="alice", **kwargs):
+    from istota.groups import service
+
+    return service.change_membership(
+        conn, config, "team", user, actor_id=actor,
+        expected_revision=_revision(conn), **kwargs)
+
+
+def _leave(conn, config, user, **kwargs):
+    return _change(conn, config, user, actor=user, role=None, **kwargs)
+
+
+def _create(conn, actor="alice", name="Planning", request_id="req-00000001",
+            group_id="team"):
+    from istota.groups.rooms import create_group_room
+
+    return create_group_room(conn, actor, group_id, name, request_id)
+
+
+def _rooms_of(conn, group_id="team"):
+    return conn.execute(
+        "SELECT COUNT(*) FROM rooms WHERE group_id = ?", (group_id,),
+    ).fetchone()[0]
+
+
+def _handles(conn, token):
+    return sorted(r["user_id"] for r in conn.execute(
+        "SELECT user_id FROM web_chat_rooms WHERE token = ?", (token,)))
+
+
+def _present(conn, token):
+    return sorted(r["user_id"] for r in conn.execute(
+        "SELECT user_id FROM room_participants WHERE room_token = ? "
+        "AND surface = 'web' AND kind = 'principal' AND left_at IS NULL",
+        (token,)))
+
+
+def _host(conn, token):
+    return room_policy.get_policy(conn, token).host_user_id
+
+
+def _epochs(conn, token):
+    return conn.execute(
+        "SELECT COUNT(*) FROM room_epochs WHERE room_token = ?", (token,),
+    ).fetchone()[0]
+
+
+class TestCreateGroupRoom:
+    def test_an_owner_makes_a_room_holding_the_whole_group(self, team):
+        with db.get_db(team.db_path) as conn:
+            result = _create(conn)
+            assert not conn.in_transaction
+            token = result["room"].token
+            room = db.get_room(conn, token)
+            assert db.is_group_owned_room(room) and room.group_id == "team"
+            assert room.name == "Planning"
+            assert db.list_room_members(conn, token) == ["alice", "bob"]
+            assert _handles(conn, token) == ["alice", "bob"]
+            assert _present(conn, token) == ["alice", "bob"]
+            # The creator is the accountable host, recorded at creation.
+            assert _host(conn, token) == "alice"
+            assert result["created"] is True
+            assert result["handle"].user_id == "alice"
+            assert result["handle"].token == token
+            # A new room has no history for anyone to be kept from.
+            assert _epochs(conn, token) == 0
+
+    def test_a_replay_returns_the_same_room(self, team):
+        with db.get_db(team.db_path) as conn:
+            first = _create(conn)
+            again = _create(conn)
+            assert again["created"] is False
+            assert again["room"].token == first["room"].token
+            assert again["handle"].id == first["handle"].id
+            assert _rooms_of(conn) == 1
+
+    @pytest.mark.parametrize("kwargs", [{"name": "Other"}, {"actor": "dave"}])
+    def test_a_reused_request_id_with_other_parameters_is_a_conflict(
+        self, team, kwargs,
+    ):
+        from istota.groups.policy import GroupError
+
+        with db.get_db(team.db_path) as conn:
+            _change(conn, team, "dave", role="owner", acknowledge_history=True)
+            _create(conn)
+            with pytest.raises(GroupError) as exc:
+                _create(conn, **kwargs)
+            assert exc.value.status_code == 409
+            assert _rooms_of(conn) == 1
+
+    def test_concurrent_retries_make_one_room(self, team):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        barrier = Barrier(2)
+
+        def attempt(_):
+            with db.get_db(team.db_path) as conn:
+                barrier.wait()
+                return _create(conn)["room"].token
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tokens = list(pool.map(attempt, range(2)))
+        assert tokens[0] == tokens[1]
+        with db.get_db(team.db_path) as conn:
+            assert _rooms_of(conn) == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM group_room_requests").fetchone()[0] == 1
+
+    @pytest.mark.parametrize("actor,status", [("bob", 403), ("carol", 404)])
+    def test_only_an_owner_creates(self, team, actor, status):
+        from istota.groups.policy import GroupError
+
+        with db.get_db(team.db_path) as conn:
+            with pytest.raises(GroupError) as exc:
+                _create(conn, actor=actor)
+            assert exc.value.status_code == status
+            assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
+            assert not conn.in_transaction
+
+    def test_an_ownerless_legacy_group_appoints_an_owner_first(self, team):
+        from istota.groups.policy import GroupError
+
+        with db.get_db(team.db_path) as conn:
+            conn.execute("UPDATE group_members SET role = 'member' WHERE group_id = 'team'")
+            conn.commit()
+            with pytest.raises(GroupError) as exc:
+                _create(conn)
+            assert exc.value.status_code == 403
+
+    def test_an_archived_group_creates_nothing(self, team):
+        from istota.groups.policy import GroupError
+
+        with db.get_db(team.db_path) as conn:
+            db.archive_group(conn, "team")
+            conn.commit()
+            with pytest.raises(GroupError) as exc:
+                _create(conn)
+            assert exc.value.status_code == 404
+            assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
+
+    @pytest.mark.parametrize("name,request_id", [
+        ("", "req-00000001"), ("   ", "req-00000001"), ("x" * 201, "req-00000001"),
+        (None, "req-00000001"), ("Planning", ""), ("Planning", "short"),
+        ("Planning", "bad id with spaces"), ("Planning", None),
+    ])
+    def test_bad_input_is_refused(self, team, name, request_id):
+        from istota.groups.policy import GroupError
+
+        with db.get_db(team.db_path) as conn:
+            with pytest.raises(GroupError) as exc:
+                _create(conn, name=name, request_id=request_id)
+            assert exc.value.status_code == 422
+            assert conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0
+
+    def test_the_disclosure_names_the_groups_rooms(self, team):
+        from istota.groups import service
+
+        with db.get_db(team.db_path) as conn:
+            assert service.history_disclosure("team", conn)["rooms"] == []
+            _create(conn)
+            assert service.history_disclosure("team", conn)["rooms"] == ["Planning"]
+
+
+class TestReconciliation:
+    def test_a_new_member_joins_every_group_room_with_its_history(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            db.add_message(conn, token, role="user", body="before carol",
+                           origin_surface="web", author_user_id="alice")
+            conn.commit()
+            _change(conn, team, "carol", role="member", acknowledge_history=True)
+            assert not conn.in_transaction
+            assert db.list_room_members(conn, token) == ["alice", "bob", "carol"]
+            assert "carol" in _handles(conn, token)
+            assert "carol" in _present(conn, token)
+            # The group add acknowledged the history: no epoch splits it off.
+            assert _epochs(conn, token) == 0
+            assert group_room_access(conn, token, "carol")
+
+    def test_a_removed_member_loses_membership_presence_and_handle(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            mid = db.add_message(conn, token, role="user", body="bob was here",
+                                 origin_surface="web", author_user_id="bob")
+            conn.commit()
+            _change(conn, team, "bob", role=None)
+            assert db.list_room_members(conn, token) == ["alice"]
+            assert _handles(conn, token) == ["alice"]
+            assert _present(conn, token) == ["alice"]
+            # Their words stay in the transcript.
+            assert conn.execute(
+                "SELECT body FROM messages WHERE id = ?", (mid,),
+            ).fetchone()[0] == "bob was here"
+
+    def test_a_rejoining_member_gets_the_room_back(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            _leave(conn, team, "bob")
+            _change(conn, team, "bob", role="member", acknowledge_history=True)
+            assert db.list_room_members(conn, token) == ["alice", "bob"]
+            assert _handles(conn, token) == ["alice", "bob"]
+            assert _present(conn, token) == ["alice", "bob"]
+
+    def test_a_stale_handle_and_an_outsider_are_dropped(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            # Written around the group: an outsider on the roster, and a
+            # handle with no membership behind it.
+            db.add_web_room_member(conn, token, "erin")
+            db.ensure_web_chat_handle(conn, "erin", token, "Planning")
+            db.ensure_web_chat_handle(conn, "dave", token, "Planning")
+            conn.commit()
+            _change(conn, team, "carol", role="member", acknowledge_history=True)
+            assert db.list_room_members(conn, token) == ["alice", "bob", "carol"]
+            assert _handles(conn, token) == ["alice", "bob", "carol"]
+            assert _present(conn, token) == ["alice", "bob", "carol"]
+
+    def test_a_linked_room_keeps_its_own_roster(self, team):
+        with db.get_db(team.db_path) as conn:
+            linked = db.create_web_chat_room(conn, "alice", "Linked").token
+            db.add_web_room_member(conn, linked, "bob")
+            db.add_web_room_member(conn, linked, "erin")
+            db.set_room_group(conn, linked, "team")
+            conn.commit()
+            _change(conn, team, "bob", role=None)
+            _change(conn, team, "carol", role="member", acknowledge_history=True)
+            assert db.list_room_members(conn, linked) == ["alice", "bob", "erin"]
+
+    def test_a_failed_reconciliation_rolls_back_the_membership_change(
+        self, team, monkeypatch,
+    ):
+        from istota.groups.policy import GroupError
+
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            before = _revision(conn)
+
+            def broken(*args, **kwargs):
+                raise sqlite3.OperationalError("disk I/O error")
+
+            monkeypatch.setattr(db, "add_web_room_member", broken)
+            with pytest.raises(GroupError) as exc:
+                _change(conn, team, "carol", role="member", acknowledge_history=True)
+            assert exc.value.status_code == 503
+            assert exc.value.details.get("retryable") is True
+            assert not conn.in_transaction
+            assert _revision(conn) == before
+            assert "carol" not in db.list_group_members(conn, "team")
+            assert db.list_room_members(conn, token) == ["alice", "bob"]
+            assert conn.execute(
+                "SELECT COUNT(*) FROM group_events WHERE subject_user_id = 'carol'",
+            ).fetchone()[0] == 0
+
+    def test_an_archived_group_is_left_alone(self, team):
+        from istota.groups.rooms import reconcile_group_room_members
+
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            db.archive_group(conn, "team")
+            reconcile_group_room_members(conn, "team")
+            # Archiving suspends access; it does not empty the room.
+            assert db.list_room_members(conn, token) == ["alice", "bob"]
+            assert _handles(conn, token) == ["alice", "bob"]
+
+
+class TestHostSuccession:
+    def test_an_owner_takes_over_when_the_creator_leaves(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            # dave becomes an owner before carol: membership row order, not
+            # name order, picks the successor. bob is no owner and is passed.
+            _change(conn, team, "dave", role="owner", acknowledge_history=True)
+            _change(conn, team, "carol", role="owner", acknowledge_history=True)
+            _leave(conn, team, "alice")
+            assert _host(conn, token) == "dave"
+            assert room_policy.current_host(
+                conn, room_policy.get_policy(conn, token)) == "dave"
+            # The creator field stays history.
+            assert db.get_room(conn, token).user_id == "alice"
+
+    def test_a_promoted_member_succeeds_a_departing_last_owner(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            _change(conn, team, "alice", role=None, replacement_owner="bob")
+            assert _host(conn, token) == "bob"
+
+    def test_a_room_with_no_owner_left_is_hostless_until_one_is_appointed(self, team):
+        from istota.groups import service
+
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            # An operator demotes and removes around the last-owner rule.
+            conn.execute("UPDATE group_members SET role = 'member' "
+                         "WHERE group_id = 'team' AND user_id = 'alice'")
+            conn.commit()
+            service.change_membership(conn, team, "team", "alice", actor_id="op",
+                                      is_operator=True, role=None,
+                                      expected_revision=_revision(conn))
+            assert _host(conn, token) is None
+            service.change_membership(conn, team, "team", "bob", actor_id="op",
+                                      is_operator=True, role="owner",
+                                      expected_revision=_revision(conn))
+            assert _host(conn, token) == "bob"
+
+    def test_a_present_host_is_not_replaced(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = _create(conn)["room"].token
+            _change(conn, team, "carol", role="owner", acknowledge_history=True)
+            _change(conn, team, "bob", role=None)
+            assert _host(conn, token) == "alice"
+
+
+class TestHostClaims:
+    def _hostless(self, conn):
+        token = _create(conn)["room"].token
+        conn.execute("UPDATE room_policy SET host_user_id = NULL WHERE room_token = ?",
+                     (token,))
+        return token
+
+    def test_a_member_who_is_no_owner_cannot_claim(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = self._hostless(conn)
+            assert room_policy.claim_host(conn, token, "bob") == "group_managed"
+            assert _host(conn, token) is None
+            assert room_policy.claim_host(conn, token, "alice") == "claimed"
+
+    def test_an_outsider_on_the_roster_cannot_claim(self, team):
+        with db.get_db(team.db_path) as conn:
+            token = self._hostless(conn)
+            db.add_web_room_member(conn, token, "erin")
+            assert room_policy.claim_host(conn, token, "erin") == "group_managed"
+
+    def test_a_linked_room_member_still_claims(self, team):
+        with db.get_db(team.db_path) as conn:
+            linked = db.create_web_chat_room(conn, "alice", "Linked").token
+            db.add_web_room_member(conn, linked, "bob")
+            db.set_room_group(conn, linked, "team")
+            room_policy.ensure_policy(conn, linked)
+            room_policy.lose_host(conn, linked, "alice")
+            assert room_policy.claim_host(conn, linked, "bob") == "claimed"
+
+    def test_the_command_says_why(self, team):
+        from istota import commands
+
+        with db.get_db(team.db_path) as conn:
+            token = self._hostless(conn)
+            reply = commands._room_host(conn, token, "bob")
+            assert "owner" in reply and "team" in reply

@@ -127,7 +127,7 @@ def _detail(conn, config, actor, group_id, *, admin=False):
     else:
         result["rooms"] = [{"token": room.token, "name": room.name, "origin": room.origin}
                            for room in db.list_member_rooms(conn, actor) if room.group_id == group_id]
-    result["disclosure"] = service.history_disclosure(group_id)
+    result["disclosure"] = service.history_disclosure(group_id, conn)
     return result
 
 

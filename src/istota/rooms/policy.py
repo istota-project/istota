@@ -266,11 +266,18 @@ def claim_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> str:
     """``!room host``: a member claims a room with no host.
 
     Returns ``claimed``, ``already_host``, ``held_by_another`` (a present host
-    is never displaced) or ``not_a_member``.
+    is never displaced), ``not_a_member``, or ``group_managed`` for anyone but
+    a current owner of a group-owned room's group, whose successor host
+    `groups.rooms` appoints.
     """
     room_token = db._canonical_room_token(conn, room_token, cross_surface=False)
     if not host_present(conn, room_token, user_id):
         return "not_a_member"
+    room = db.get_room(conn, room_token)
+    if db.is_group_owned_room(room) and not (
+        room.group_id and db.is_group_owner(conn, room.group_id, user_id)
+    ):
+        return "group_managed"
     policy = ensure_policy(conn, room_token)
     if policy is None:
         return "not_a_member"

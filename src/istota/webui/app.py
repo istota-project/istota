@@ -7845,6 +7845,10 @@ def _chat_claim_host(username: str, room_id: int) -> tuple[int, dict]:
     if outcome == "held_by_another":
         payload["error"] = "this room has a host, and a present host is never replaced"
         return 409, payload
+    if outcome == "group_managed":
+        payload["error"] = "only an owner of this room's group can host it"
+        payload["reason"] = "group_managed"
+        return 409, payload
     return 200, payload
 
 
