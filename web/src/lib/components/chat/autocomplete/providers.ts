@@ -6,6 +6,7 @@
 import { fetchChatCommands, type ChatCommands, type SelectableBrain } from '$lib/api';
 import type { CompletionProvider, Suggestion } from './types';
 import { codeRanges, inCode, mentionText } from '$lib/mentions';
+import { latest } from '$lib/ui/latest';
 
 const EMPTY: ChatCommands = { commands: [], model_aliases: [], selectable_brains: [] };
 
@@ -22,9 +23,9 @@ let cataloguePromise: Promise<ChatCommands> | null = null;
  */
 let commandNames: ReadonlySet<string> = new Set();
 
-/** Bumped by every `loadCatalogue` and by `resetCommandCatalogue`, so a fetch
- *  that resolves after its session ended does not publish its names. */
-let catalogueGeneration = 0;
+/** Advanced by every `loadCatalogue` and invalidated by `resetCommandCatalogue`,
+ *  so a fetch that resolves after its session ended does not publish its names. */
+const catalogueLoads = latest();
 
 /** Every name `dispatch` will resolve to a command, lowercased: the registered
  *  names plus the hidden aliases (`inject` → `steer`, `yes` → `confirm`, …).
@@ -66,18 +67,18 @@ function commandNamesOf(c: ChatCommands): ReadonlySet<string> {
  *  hammer a down endpoint on every keystroke. */
 function loadCatalogue(): Promise<ChatCommands> {
   if (!cataloguePromise) {
-    // Which fetch this is. `resetCommandCatalogue` bumps it, so an in-flight
+    // Which fetch this is. `resetCommandCatalogue` invalidates it, so an in-flight
     // fetch started before a teardown cannot assign over the names a fetch
     // started after it already published — which would leave the routing set
     // empty for the session and queue every command, `!stop` included.
-    const gen = ++catalogueGeneration;
+    const current = catalogueLoads.next();
     cataloguePromise = fetchChatCommands()
       .catch((e) => {
         console.warn('command autocomplete: catalogue fetch failed', e);
         return EMPTY;
       })
       .then((c) => {
-        if (gen === catalogueGeneration) commandNames = commandNamesOf(c);
+        if (current()) commandNames = commandNamesOf(c);
         return c;
       });
   }
@@ -89,7 +90,7 @@ export function resetCommandCatalogue(): void {
   cataloguePromise = null;
   roomCatalogues.clear();
   commandNames = new Set();
-  catalogueGeneration++;
+  catalogueLoads.invalidate();
 }
 
 /** The command names, once the catalogue has landed — for a caller that holds

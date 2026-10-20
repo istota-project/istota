@@ -56,6 +56,7 @@
   } from '$lib/platform/nativePicker';
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
   import { debounce } from '$lib/ui/debounce';
+  import { latest } from '$lib/ui/latest';
   import type { MessageReply } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
   import { putBlob, deleteBlob, hasHeadroom, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
@@ -196,12 +197,15 @@
   let uploading = $state(0);
   let dragOver = $state(false);
   let uploadError = $state('');
-  // Bumped whenever the composer changes room. `upload` is async and appends
-  // to `attachments` with no notion of where it started, while `switchDraft`
-  // clears them synchronously and cannot see a promise in flight — so a large
-  // file picked in one room and resolved after a switch put its chip in the
-  // new room, and sending from there posted it to the wrong one.
-  let uploadEpoch = 0;
+  // Invalidated whenever the composer changes room. `upload` is async and
+  // appends to `attachments` with no notion of where it started, while
+  // `switchDraft` clears them synchronously and cannot see a promise in flight
+  // — so a large file picked in one room and resolved after a switch put its
+  // chip in the new room, and sending from there posted it to the wrong one.
+  // Uploads in one room may overlap, so a batch peeks rather than superseding
+  // the others. Not disposed on unmount: a held recording's blob is left for
+  // the next `init()` to collect, as before, rather than dropped mid-stage.
+  const uploads = latest();
   // What the server will accept, or null until /chat/config answers. See
   // refusalReason for why null means "ask the server" rather than a default.
   let limits = $state<{ maxBytes: number; maxMb: number; extensions: string[] } | null>(null);
@@ -355,19 +359,19 @@
     // they must not ride along either. Re-picking a file costs a tap; posting
     // one to the wrong room does not undo.
     //
-    // An upload still in flight cannot be reached by clearing the list, so the
-    // epoch is bumped alongside it: `upload` compares on the way out and drops
-    // a result whose room has since changed. The counter and the error are
-    // reset with it, both being the state of an upload that is no longer this
-    // room's business.
+    // An upload still in flight cannot be reached by clearing the list, so
+    // `uploads` is invalidated alongside it: `upload` compares on the way out
+    // and drops a result whose room has since changed. The counter and the
+    // error are reset with it, both being the state of an upload that is no
+    // longer this room's business.
     if (leavingRoom) {
-      uploadEpoch++;
+      uploads.invalidate();
       // A chip whose bytes are held here is the only copy of them, and the
       // clear is the last thing that knows which blobs those were: the queue
       // is what the collector reconciles against, and this file was never
       // queued. Left behind they would sit against the shared total until the
       // next `init()`, which in an installed app can be days. An upload still
-      // in flight cleans up after itself — it compares the epoch on the way
+      // in flight cleans up after itself — it checks `uploads` on the way
       // out and drops its own blob — so the two cannot both delete one.
       for (const a of attachments) if (a.pendingBlobId) void deleteBlob(a.pendingBlobId);
       attachments = [];
@@ -751,8 +755,8 @@
     // being the current one — including the counter, which `switchDraft` has
     // already reset to 0, so a stale decrement would drive it negative and
     // leave the composer permanently reporting an upload in progress.
-    const epoch = uploadEpoch;
-    const stale = () => epoch !== uploadEpoch;
+    const sameRoom = uploads.peek();
+    const stale = () => !sameRoom();
     uploadError = '';
     const items = Array.from(files).map((f) => (f instanceof File ? pickedFromFile(f) : f));
     for (const file of items) {
@@ -793,7 +797,7 @@
    * Hold a file's bytes and stage its chip, or say why we could not.
    *
    * `stale` is `upload`'s own room guard, passed in rather than recomputed:
-   * the epoch it closes over is the one captured when *this batch* started.
+   * the check it closes over is the one taken when *this batch* started.
    */
   async function stage(file: Picked, stale: () => boolean) {
     const held = await holdOffline(file);
