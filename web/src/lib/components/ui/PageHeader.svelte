@@ -70,7 +70,7 @@
     gap: var(--space-2);
   }
 
-  .description {
+  .ui-page-header .description {
     margin: 0;
   }
 

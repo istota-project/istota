@@ -62,7 +62,7 @@
     </p>
     <ul class="cards">
       {#each data.results as r, i (i)}
-        <li class="card" class:memory={isMemory(r)}>
+        <li class="result-card" class:memory={isMemory(r)}>
           <div class="hstack caption">
             <span class="icon" aria-hidden="true">
               {#if isMemory(r)}
@@ -115,7 +115,7 @@
     flex-direction: column;
     gap: var(--space-2);
   }
-  .card {
+  .result-card {
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-card);
     background: var(--surface-raised);
@@ -124,7 +124,7 @@
     flex-direction: column;
     gap: var(--space-1);
   }
-  .card.memory {
+  .result-card.memory {
     background: var(--surface-base);
   }
   /* Not the global .card-head, which is a row with a title at one end and

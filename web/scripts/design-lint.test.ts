@@ -450,10 +450,45 @@ describe('redefined-primitive', () => {
     '.table',
     '.table-scroll',
     '.divided-list',
+    '.card',
+    '.ui-card',
+    '.card-head',
+    '.kv',
+    '.micro-label',
+    '.caption',
+    '.muted',
+    '.description',
+    '.banner',
+    '.spinner',
+    '.view-btn',
+    '.list-row',
+    '.ui-list-row',
+    '.toolbar',
+    '.title-page',
+    '.title-section',
+    '.title-card',
+    '.code-chip',
   ])('flags %s', (cls) => {
     expect(rules(`<style>\n  ${cls} {\n    color: red;\n  }\n</style>`)).toContain(
       'redefined-primitive',
     );
+  });
+
+  it.each(['.card-grid', '.toolbar-actions', '.kv-row', '.banner-wrap', '.mutedish'])(
+    'leaves %s alone, a different name that starts with one',
+    (cls) => {
+      expect(rules(`<style>\n  ${cls} {\n    color: red;\n  }\n</style>`)).not.toContain(
+        'redefined-primitive',
+      );
+    },
+  );
+
+  it.each([
+    ['.ui-card', 'src/lib/components/ui/Card.svelte'],
+    ['.ui-list-row', 'src/lib/components/ui/ListRow.svelte'],
+    ['.micro-label', 'src/lib/styles/primitives.css'],
+  ])('allows %s in its owner %s', (cls, owner) => {
+    expect(rules(`.x,\n${cls} {\n  color: red;\n}\n`, owner)).not.toContain('redefined-primitive');
   });
 
   it('flags a modifier on a primitive class', () => {
@@ -507,7 +542,7 @@ describe('redefined-primitive', () => {
     expect(rules('<style>\n  .table--dense {\n    color: red;\n  }\n</style>')).not.toContain(
       'redefined-primitive',
     );
-    expect(rules('<style>\n  .card .table-scroll {\n    margin: 0;\n  }\n</style>')).not.toContain(
+    expect(rules('<style>\n  .panel .table-scroll {\n    margin: 0;\n  }\n</style>')).not.toContain(
       'redefined-primitive',
     );
   });
