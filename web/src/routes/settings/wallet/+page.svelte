@@ -8,6 +8,7 @@
     WalletPolicyCard,
     WalletPurchasesCard,
   } from '$lib/components/settings';
+  import { Alert } from '$lib/components/ui';
   const identity = getCurrentUser();
   let data: WalletSettings | null = $state(null);
   let error = $state('');
@@ -32,7 +33,7 @@
 <SettingsLayout description="Cards, spending limits and recent purchases." {loading} {error}>
   {#if data}
     {@const writable = !data.refusal}
-    {#if data.refusal}<p class="banner info">{data.refusal}</p>{/if}
+    {#if data.refusal}<Alert appearance="inline" variant="info">{data.refusal}</Alert>{/if}
     <WalletCardsCard cards={data.cards} {writable} onSaved={refresh} onError={report} />
     <WalletPolicyCard
       policy={data.policy}

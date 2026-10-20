@@ -139,13 +139,13 @@
       {/if}{/snippet}
     {#if loading}<p class="caption">Loading notebook…</p>
     {:else if error}
-      <p class="banner error">{error}</p>
-      <div class="actions">
-        <Button size="sm" onclick={loadNotebook}>Reload notebook</Button>
-        {#if user.is_admin && storageUnavailable}<Button size="sm" onclick={retryStorage}
-            >Retry storage setup</Button
-          >{/if}
-      </div>
+      <Alert appearance="inline" variant="danger" role="alert"
+        >{error}
+        {#snippet actions()}<Button size="sm" onclick={loadNotebook}>Reload notebook</Button>
+          {#if user.is_admin && storageUnavailable}<Button size="sm" onclick={retryStorage}
+              >Retry storage setup</Button
+            >{/if}{/snippet}</Alert
+      >
     {:else if notebook}
       {#if notebook.content.trim()}<div class="reading">
           <TextPreview name="GROUP.md" text={notebook.content} untrusted />
@@ -194,10 +194,12 @@
           {/each}
         </ol>
       {/if}
-      {#if activityError}<p class="banner error">{activityError}</p>
-        <div class="actions">
-          <Button size="sm" onclick={() => loadActivity()}>Retry recorded changes</Button>
-        </div>
+      {#if activityError}<Alert appearance="inline" variant="danger" role="alert"
+          >{activityError}
+          {#snippet actions()}<Button size="sm" onclick={() => loadActivity()}
+              >Retry recorded changes</Button
+            >{/snippet}</Alert
+        >
       {:else if !entries.length && !activityBusy}<EmptyState size="sm"
           >No recorded changes yet.</EmptyState
         >{/if}
@@ -236,11 +238,6 @@
      taller neighbour set, and anywhere else it keeps its natural size. */
   .notebook > :global(.ui-card) {
     flex-grow: 1;
-  }
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
   }
   /* Capped so a long notebook scrolls in its card rather than pushing every
      other card on the overview off the screen. */

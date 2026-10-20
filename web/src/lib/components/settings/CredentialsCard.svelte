@@ -16,6 +16,7 @@
     type CredentialSummary,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     Chip,
@@ -234,18 +235,19 @@
   {#if data && !data.can_add && data.add_blocked_reason}
     <p class="caption add-blocked" data-testid="add-blocked">{data.add_blocked_reason}</p>
   {/if}
-  {#if error && !editorOpen}<p class="banner error" role="alert">{error}</p>{/if}
+  {#if error && !editorOpen}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert
+    >{/if}
   {#if data}
     {#if !data.broker_enabled}
-      <p class="banner info">
+      <Alert appearance="inline" variant="info">
         Access settings are saved but not enforced until your administrator turns on the credential
         broker.
-      </p>
+      </Alert>
     {/if}
     {#if !data.sandboxed}
-      <p class="banner info">
+      <Alert appearance="inline" variant="info">
         Tasks on this deployment run without a sandbox, so credential values are not contained.
-      </p>
+      </Alert>
     {/if}
     {#if data.credentials.length === 0}
       <EmptyState>No credentials yet.</EmptyState>

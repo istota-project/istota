@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState, PageHeader } from '$lib/components/ui';
+  import { Alert, LoadState, PageHeader } from '$lib/components/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -36,10 +36,10 @@
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
   {#if info}
-    <div class="banner info">{info}</div>
+    <Alert appearance="inline" variant="info" role="status">{info}</Alert>
   {/if}
 
   <LoadState {loading}>

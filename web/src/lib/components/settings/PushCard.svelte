@@ -9,7 +9,16 @@
     listPushCategories,
     type PushCategory,
   } from '$lib/api';
-  import { Button, EmptyState, Select, Card, Field, Checkbox } from '$lib/components/ui';
+  import {
+    Alert,
+    Button,
+    EmptyState,
+    LoadState,
+    Select,
+    Card,
+    Field,
+    Checkbox,
+  } from '$lib/components/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
@@ -146,29 +155,37 @@
   title="Inbox notifications"
   description="Enabled categories send alerts and count toward the app badge. These choices do not change your inbox, its bell count or delivery to email and Talk."
 >
-  {#if categoriesLoading}
-    <p class="caption">Loading categories…</p>
-  {:else if categoriesError}
-    <p class="banner error" role="alert">{categoriesError}</p>
-    <Button variant="secondary" size="sm" onclick={loadCategories}>Retry categories</Button>
-  {:else if profile}
-    {#each categories as category (category.id)}
-      <Field label={category.label} checkbox badge={managedBadge(profile, 'push_inbox_categories')}>
-        <Checkbox
-          checked={profile.push_inbox_categories?.[category.id] ?? true}
-          disabled={isManaged(profile, 'push_inbox_categories')}
-          onchange={(on) => {
-            if (profile) {
-              profile.push_inbox_categories = {
-                ...profile.push_inbox_categories,
-                [category.id]: on,
-              };
-            }
-          }}
-        />
-      </Field>
-    {/each}
-  {/if}
+  <LoadState
+    scope="card"
+    loading={categoriesLoading}
+    loadingLabel="Loading categories…"
+    error={categoriesError}
+    onRetry={loadCategories}
+    retryLabel="Retry categories"
+  >
+    {#if profile}
+      {#each categories as category (category.id)}
+        <Field
+          label={category.label}
+          checkbox
+          badge={managedBadge(profile, 'push_inbox_categories')}
+        >
+          <Checkbox
+            checked={profile.push_inbox_categories?.[category.id] ?? true}
+            disabled={isManaged(profile, 'push_inbox_categories')}
+            onchange={(on) => {
+              if (profile) {
+                profile.push_inbox_categories = {
+                  ...profile.push_inbox_categories,
+                  [category.id]: on,
+                };
+              }
+            }}
+          />
+        </Field>
+      {/each}
+    {/if}
+  </LoadState>
 </Card>
 
 <Card title="Push notifications">
@@ -196,7 +213,7 @@
     <p class="description">Register a device from the Istota iOS app.</p>
   {/if}
   <p class="description">iOS notification settings control whether alerts appear on each device.</p>
-  {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+  {#if error}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert>{/if}
   {#if loading}
     <p class="caption">Loading devices…</p>
   {:else if devices.length}

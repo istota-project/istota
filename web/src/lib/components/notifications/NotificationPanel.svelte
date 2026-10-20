@@ -42,7 +42,7 @@
     seenPairs,
     type NotificationFilter,
   } from '$lib/stores/notifications';
-  import { EmptyState, ToggleGroup } from '$lib/components/ui';
+  import { Alert, EmptyState, ToggleGroup } from '$lib/components/ui';
   import NotificationDetail from './NotificationDetail.svelte';
   import NotificationItem from './NotificationItem.svelte';
 
@@ -155,7 +155,7 @@
       </div>
 
       {#if $notificationsError}
-        <p class="banner danger panel-msg">{$notificationsError}</p>
+        <Alert appearance="inline" variant="danger">{$notificationsError}</Alert>
       {/if}
 
       <div class="panel-list">
@@ -265,10 +265,6 @@
   .panel-list {
     display: flex;
     flex-direction: column;
-  }
-
-  .panel-msg {
-    margin: 0;
   }
 
   .panel-loading {
