@@ -945,7 +945,11 @@ def refused_managed_fields(
 
 
 def delete_profile(db_path: Path, user_id: str) -> bool:
-    """Remove a profile row, the user's avatars and their device tokens. True if a profile row went.
+    """Remove a profile row and the user's rows keyed on it. True if a profile row went.
+
+    With it go the avatars, the WhatsApp binding, device tokens, quick note
+    keys and the managed-field record, and the account leaves the system
+    groups.
 
     The avatar delete rides this function's own connection, inside the same
     transaction. A *second* connection opened here would wait out the 30s busy
