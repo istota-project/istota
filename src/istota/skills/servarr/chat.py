@@ -10,7 +10,9 @@ answer is rendered as plain text for a person rather than JSON for a model.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import sqlite3
 
 from istota.lib.untrusted import unframe_untrusted
 
@@ -34,6 +36,11 @@ KIND_WORDS = {
 _MONITOR_MODES = {mode.casefold(): mode for mode in SERIES_MONITOR_MODES}
 _APP_NAMES = {"film": "Radarr", "show": "Sonarr", "album": "Lidarr"}
 _KIND_NOUNS = {"film": "films", "show": "shows", "album": "albums"}
+_ID_FIELDS = {"film": "tmdb_id", "show": "tvdb_id", "album": "foreign_album_id"}
+
+#: The ids the user's last search in a room listed, keyed by room, so
+#: `!arr add album 2` can name a result by its number. Reserved: no task writes it.
+LAST_SEARCH_NAMESPACE = "_arr_last_search"
 
 USAGE = (
     "**Request media from the arr stack:**\n\n"
@@ -42,7 +49,8 @@ USAGE = (
     "- `!arr add show <tvdb-id> [monitor]` -- request a show; monitor is one of "
     f"{', '.join(SERIES_MONITOR_MODES)}\n"
     "- `!arr add album <musicbrainz-id>` -- request an album\n\n"
-    "Search first: each result shows the id to add it by. Adding something that is in "
+    "Search first, then add a result by its number (`!arr add album 2`) or by its id. "
+    "A number picks from your last search in this room. Adding something that is in "
     "the library but not monitored monitors it and searches for it."
 )
 
@@ -63,6 +71,13 @@ def run_command(config, user_id: str, conversation_token: str, text: str) -> str
     if kind is None:
         return f"`{words[1]}` is not a kind: use film, show or album.\n\n{USAGE}"
     rest = words[2:]
+
+    if verb == "add" and _is_result_number(rest[0]):
+        picked, refusal = _pick_result(config, user_id, conversation_token, kind, int(rest[0]))
+        if refusal:
+            return refusal
+        if picked is not None:
+            rest = [picked, *rest[1:]]
 
     if verb == "add" and _as_id(kind, rest[0]) is not None:
         if len(rest) > 2:
@@ -85,7 +100,64 @@ def run_command(config, user_id: str, conversation_token: str, text: str) -> str
     if len(query) > MAX_QUERY_CHARS:
         return f"The title is longer than {MAX_QUERY_CHARS} characters."
     argv = ["search", "--kind", kind, f"--limit={SEARCH_LIMIT}", "--", query]
-    return _call(config, user_id, conversation_token, argv, render=_render_search)
+
+    def render(args, envelope):
+        results = envelope.get("results") or []
+        if results:
+            _remember_search(config, user_id, conversation_token, kind, results)
+        return _render_search(args, envelope)
+
+    return _call(config, user_id, conversation_token, argv, render=render)
+
+
+def _is_result_number(word: str) -> bool:
+    return word.isdigit() and 1 <= int(word) <= SEARCH_LIMIT
+
+
+def _pick_result(config, user_id: str, conversation_token: str, kind: str, number: int):
+    """`(id, refusal)` for result `number` of the user's last search in this room.
+
+    `(None, None)` when no search is stored and the number can stand as an id
+    itself, which a TMDB or TVDB id can and a MusicBrainz id cannot.
+    """
+    from istota import db
+
+    stored = None
+    try:
+        with db.get_db(config.db_path) as conn:
+            row = db.kv_get(conn, user_id, LAST_SEARCH_NAMESPACE, conversation_token)
+        if row is not None:
+            stored = json.loads(row["value"])
+    except (sqlite3.Error, ValueError):
+        log.warning("!arr could not read the last search", exc_info=True)
+    ids = stored.get("ids") if isinstance(stored, dict) else None
+    if not isinstance(ids, list):
+        if ID_FLAGS[kind] != "mbid":
+            return None, None
+        return None, (f"There is no album search in this room to take result {number} "
+                      "from. Search first, or add it by its id.")
+    if stored.get("kind") != kind:
+        last = _KIND_NOUNS.get(stored.get("kind"), "something else")
+        return None, (f"Your last search here was for {last}. Search for "
+                      f"{_KIND_NOUNS[kind]} first, or add it by its id.")
+    if number > len(ids) or not ids[number - 1]:
+        return None, (f"Your last search here listed {len(ids)} "
+                      f"result{'s' if len(ids) != 1 else ''}; there is no result {number}.")
+    return str(ids[number - 1]), None
+
+
+def _remember_search(config, user_id: str, conversation_token: str, kind: str,
+                     results: list) -> None:
+    from istota import db
+
+    ids = [str(r.get(_ID_FIELDS[kind]) or "") if isinstance(r, dict) else ""
+           for r in results[:SEARCH_LIMIT]]
+    try:
+        with db.get_db(config.db_path) as conn:
+            db.kv_set(conn, user_id, LAST_SEARCH_NAMESPACE, conversation_token,
+                      json.dumps({"kind": kind, "ids": ids}))
+    except sqlite3.Error:
+        log.warning("!arr could not store the search for numbered adds", exc_info=True)
 
 
 def _as_id(kind: str, word: str):
@@ -160,7 +232,6 @@ def _search_line(kind: str, result: dict) -> str:
         head = f"**{title}**" + (f" by {artist}" if artist else "")
         if details:
             head += f" ({', '.join(details)})"
-        ident = result.get("foreign_album_id")
     else:
         details = [_year(result.get("year"))]
         seasons = result.get("season_count")
@@ -168,7 +239,7 @@ def _search_line(kind: str, result: dict) -> str:
             details.append(f"{seasons} season{'s' if seasons != 1 else ''}")
         details = [d for d in details if d]
         head = f"**{title}**" + (f" ({', '.join(details)})" if details else "")
-        ident = result.get("tmdb_id" if kind == "film" else "tvdb_id")
+    ident = result.get(_ID_FIELDS[kind])
     return f"{head} -- `{_plain(ident)}`{_library_state(result)}"
 
 
@@ -181,7 +252,7 @@ def _render_search(args: argparse.Namespace, envelope: dict) -> str:
     shown = f" (first {len(results)} of {total})" if isinstance(total, int) and total > len(results) else ""
     lines = [f"**{_KIND_NOUNS[kind].capitalize()} matching “{args.query}”**{shown}:", ""]
     lines += [f"{n}. {_search_line(kind, r)}" for n, r in enumerate(results, 1)]
-    lines += ["", f"Request one with `!arr add {kind} <id>`."]
+    lines += ["", f"Request one by its number, `!arr add {kind} 1`, or its id."]
     return "\n".join(lines)
 
 

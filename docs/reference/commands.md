@@ -47,6 +47,7 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!relay blocked` | List who you have blocked |
 | `!arr search film\|show\|album TITLE` | Look a title up in the [arr stack](../features/servarr.md#requesting-from-a-command) and list each result with the id to add it by |
 | `!arr add film\|show\|album ID [MONITOR]` | Request a film (TMDB id), show (TVDB id, optional monitor mode) or album (MusicBrainz id) with the stack's defaults |
+| `!arr add film\|show\|album N [MONITOR]` | Request result N of your last search of that kind in this room |
 
 ## Answering a held task
 

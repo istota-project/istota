@@ -35,7 +35,7 @@ class TestSearch:
         assert "1. **Paris, Texas** (1984) -- `655`\n" in text
         assert "UNTRUSTED" not in text
         assert "· in the library" in text
-        assert "`!arr add film <id>`" in text
+        assert "`!arr add film 1`" in text
 
     async def test_a_kind_alone_is_a_search(self, arr):
         arr.json("sonarr", "series/lookup", fixture("series_lookup.json"))
@@ -85,7 +85,7 @@ class TestAdd:
         text = await say(arr, "!arr add film Paris Texas")
         assert arr.sent("radarr", "movie/lookup")[0].url.params["term"] == "Paris Texas"
         assert _writes(arr) == []
-        assert "`!arr add film <id>`" in text
+        assert "`!arr add film 1`" in text
 
     async def test_something_monitored_already_changes_nothing(self, arr):
         _film_ready(arr, lookup="movie_lookup_library.json")
@@ -110,6 +110,48 @@ class TestAdd:
         text = await say(arr, "!arr add film 603")
         assert _body(arr.sent("radarr", "movie/editor")[0])["monitored"] is True
         assert "not monitored. It is monitored now" in text
+
+
+class TestAddByNumber:
+    async def test_a_number_adds_that_result_of_the_last_search(self, arr):
+        arr.json("radarr", "movie/lookup",
+                 fixture("movie_lookup_library.json") + fixture("movie_lookup_new.json"))
+        await say(arr, "!arr search film Paris")
+        _film_ready(arr)
+        text = await say(arr, "!arr add film 2")
+        assert arr.sent("radarr", "movie/lookup")[-1].url.params["term"] == "tmdb:655"
+        assert _body(arr.sent("radarr", "movie")[0])["tmdbId"] == 655
+        assert text.startswith("Requested **Paris, Texas**")
+
+    async def test_an_album_number_names_its_musicbrainz_id(self, arr):
+        arr.json("lidarr", "search", cli_tests._title_search())
+        await say(arr, "!arr search album Glass Harbour")
+        await say(arr, "!arr add album 1")
+        assert any(cli_tests.VA_ALBUM in str(r.url) for r in arr.sent("lidarr"))
+
+    async def test_an_album_number_with_no_search_here_sends_nothing(self, arr):
+        arr.json("lidarr", "search", cli_tests._title_search())
+        await say(arr, "!arr search album Glass Harbour")
+        arr.requests.clear()
+        dispatched = await dispatch(arr.config, "alice", "room2", "!arr add album 1", surface="web")
+        assert "no album search in this room" in dispatched.text
+        assert arr.requests == []
+
+    async def test_a_number_from_a_search_of_another_kind_is_refused(self, arr):
+        arr.json("radarr", "movie/lookup", fixture("movie_lookup_new.json"))
+        await say(arr, "!arr search film Paris")
+        arr.requests.clear()
+        text = await say(arr, "!arr add album 1")
+        assert "last search here was for films" in text
+        assert arr.requests == []
+
+    async def test_a_number_past_the_listing_is_refused(self, arr):
+        arr.json("radarr", "movie/lookup", fixture("movie_lookup_new.json"))
+        await say(arr, "!arr search film Paris")
+        arr.requests.clear()
+        text = await say(arr, "!arr add film 5")
+        assert "there is no result 5" in text
+        assert arr.requests == []
 
 
 class TestAccess:
