@@ -345,7 +345,7 @@ def check_mailbox(
     email.imap_timeout = math.ceil(deadline.timeout())
     try:
         with connect.open_imap(email, check_public=check_public, private_hosts=private_hosts) as mailbox:
-            mailbox.login(email.imap_user, _plain(email.imap_password))
+            mailbox.login(email.imap_user, connect.reveal_password(email.imap_password))
         lines.append(CheckLine("imap", True, f"Signed in to {email.imap_host}."))
     except ImportError as exc:
         _log_mail_failure("imap", "connect_failed", exc)
@@ -373,7 +373,7 @@ def check_mailbox(
         )
         try:
             stage = "auth"
-            server.login(email.effective_smtp_user, _plain(email.effective_smtp_password))
+            server.login(email.effective_smtp_user, connect.reveal_password(email.effective_smtp_password))
         finally:
             try:
                 server.quit()
@@ -407,11 +407,6 @@ def check_mailbox(
     return CheckResult(True, "Signed in for receiving and sending mail.", lines=lines)
 
 
-def _plain(password):
-    """A password as text at sign-in; a connected account's arrive boxed."""
-    from istota.skills._credref import SecretValue  # noqa: PLC0415
-
-    return password.reveal() if isinstance(password, SecretValue) else password
 
 
 def _mail_unreachable(host: str, reason: str, exc: BaseException, seconds: float) -> str:

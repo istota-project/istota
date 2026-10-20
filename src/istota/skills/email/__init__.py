@@ -205,15 +205,6 @@ class EmailConfig:
         return self.smtp_password or self.imap_password
 
 
-def _reveal(password) -> str:
-    """A password as text, at the moment a connection signs in.
-
-    A connected account's passwords arrive boxed in `SecretValue`, so a
-    traceback or a `repr` of the config names them rather than printing them.
-    """
-    return password.reveal() if isinstance(password, SecretValue) else password
-
-
 def _sanitize_header(value: str) -> str:
     """Strip newlines from header values to prevent injection."""
     return value.replace("\r", " ").replace("\n", " ").strip()
@@ -248,7 +239,7 @@ def imap_session(config: EmailConfig):
     way the poller will.
     """
     with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, _reveal(config.imap_password))
+        mailbox.login(config.imap_user, mail_connect.reveal_password(config.imap_password))
         yield mailbox
 
 
@@ -1093,7 +1084,7 @@ def _send_smtp(
 
     server = _open_smtp(config)
     try:
-        server.login(config.effective_smtp_user, _reveal(config.effective_smtp_password))
+        server.login(config.effective_smtp_user, mail_connect.reveal_password(config.effective_smtp_password))
         server.send_message(msg, to_addrs=to_addrs)
     except BaseException:
         # Nothing was accepted, so the caller must see this. `close()` rather

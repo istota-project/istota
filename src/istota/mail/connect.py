@@ -103,6 +103,18 @@ def _imap_timeout(config) -> int:
     return timeout if timeout and timeout > 0 else DEFAULT_IMAP_TIMEOUT
 
 
+def reveal_password(password) -> str:
+    """A password as text, at the moment a connection signs in.
+
+    A connected account's passwords arrive boxed in `SecretValue`, so a
+    traceback or a ``repr`` of the config names them rather than printing
+    them; the bot box's arrive as plain text.
+    """
+    from istota.skills._credref import SecretValue
+
+    return password.reveal() if isinstance(password, SecretValue) else password
+
+
 # --- the address check -----------------------------------------------------------
 
 

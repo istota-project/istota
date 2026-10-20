@@ -474,3 +474,22 @@ def test_the_drift_pattern_sees_what_it_guards():
     assert _CONSTRUCTOR.search("return MailBox(host, port=993)")
     assert not _CONSTRUCTOR.search("class _PinnedSMTP(smtplib.SMTP):")
     assert not _CONSTRUCTOR.search("box = _PinnedMailBox(host)")
+
+
+class TestRevealPassword:
+    """The one unboxing of a connected account's password, at sign-in."""
+
+    def test_a_boxed_password_is_opened(self):
+        from istota.skills._credref import SecretValue
+        assert connect.reveal_password(SecretValue("mail account work (IMAP)", "s3cret")) == "s3cret"
+
+    def test_a_plain_password_passes_through(self):
+        assert connect.reveal_password("bot-pass") == "bot-pass"
+
+    @pytest.mark.parametrize("module_name, helper", [
+        ("istota.skills.email", "_reveal"),
+        ("istota.webui.setup_checks", "_plain"),
+    ])
+    def test_no_caller_keeps_its_own(self, module_name, helper):
+        import importlib
+        assert not hasattr(importlib.import_module(module_name), helper)
