@@ -112,18 +112,9 @@ def delete_session_devices(conn: sqlite3.Connection, user_id: str, session_id: s
 
 def registration_authorized(config, device: dict) -> bool:
     """Recheck enrollment authority before every send; legacy rows fail closed."""
-    from istota.webui.auth import validate_session_credential
+    from istota.webui.auth import credential_still_valid
 
-    method, epoch = device.get("auth_method"), device.get("auth_epoch")
-    if method is None or epoch is None:
-        return False
-    if method == "none":
-        return config.web.has_method("none") and device["user_id"] == config.local_user_id
-    try:
-        validate_session_credential(config.db_path, device["user_id"], method, epoch, config.web)
-        return True
-    except Exception:
-        return False
+    return credential_still_valid(config, device["user_id"], device.get("auth_method"), device.get("auth_epoch"))
 
 
 def devices_for_user(conn: sqlite3.Connection, user_id: str) -> list[dict]:

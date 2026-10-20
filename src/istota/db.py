@@ -726,6 +726,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # Where relay questions from other users reach this user. '' means no
         # preference: the asker's choice, else the default room.
         "relay_delivery": "TEXT NOT NULL DEFAULT ''",
+        # Folder below My files that quick notes are written to. NULL is unset,
+        # and a create then answers `notes_folder_unset`.
+        "quick_notes_folder": "TEXT",
     })
 
     # Outbound drafts: emails the approval gate held instead of sending.
@@ -1322,6 +1325,8 @@ CREATE TABLE IF NOT EXISTS credential_task_grants (
     _migrate_notifications(conn)
     _migrate_push_tables(conn)
     _migrate_location_ingest_tokens(conn)
+    _migrate_quick_note_keys(conn)
+    _migrate_device_tokens(conn)
     _migrate_mobile_auth_requests(conn)
     _migrate_notifications_push_pending(conn)
     # Same shape: pure DDL, no marker, no transaction of its own.
@@ -9580,6 +9585,38 @@ def _migrate_location_ingest_tokens(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_location_ingest_tokens_user ON location_ingest_tokens(user_id)"
     )
+
+def _migrate_quick_note_keys(conn: sqlite3.Connection) -> None:
+    """Create the quick note idempotency table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS quick_note_keys (
+            user_id TEXT NOT NULL,
+            client_note_id TEXT NOT NULL,
+            path TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, client_note_id)
+        )
+    """)
+
+
+def _migrate_device_tokens(conn: sqlite3.Connection) -> None:
+    """Create the native-action device token table. Pure DDL, kept in step with `schema.sql`."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS device_tokens (
+            id INTEGER PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            token_tail TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            label TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at TEXT,
+            UNIQUE (user_id, device_id)
+        )
+    """)
+    _add_columns(conn, "device_tokens", {"auth_method": "TEXT", "auth_epoch": "INTEGER"})
+
 
 def _migrate_notifications_push_pending(conn: sqlite3.Connection) -> None:
     _add_columns(conn, "notifications", {"push_pending": "INTEGER NOT NULL DEFAULT 0"})

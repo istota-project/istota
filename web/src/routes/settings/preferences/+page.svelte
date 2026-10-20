@@ -12,6 +12,7 @@
     ToggleGroup,
   } from '$lib/components/ui';
   import { SettingsLayout } from '$lib/components/settings';
+  import FolderPicker from '$lib/components/FolderPicker.svelte';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import { deviceModel, shellAtLeast, shellRunsServiceWorker } from '$lib/platform/native';
   import { appConnectionAvailable, openAppSettings } from '$lib/platform/nativeConnection';
@@ -25,6 +26,7 @@
 
   const settings = getUserSettings();
   const profile = $derived(settings.profile);
+  let pickingFolder = $state(false);
 
   // Appearance. Both are client-local (localStorage, per browser), so they
   // apply on change with no Save step and no round-trip. Theme is also on the
@@ -238,6 +240,56 @@
         />
       </Field>
     </Card>
+
+    <!-- The id is the target the app's "Open settings" lands on. -->
+    <div id="quick-notes">
+      <Card
+        title="Quick notes"
+        description="Where a new note is saved: New note on the app icon, and New note in a browser."
+      >
+        <Field
+          label="Folder"
+          badge={managedBadge(profile, 'quick_notes_folder')}
+          description="A folder in My files. If it does not exist yet, the first note creates it."
+        >
+          <div class="hstack folder-row">
+            <Input
+              readonly
+              monospace
+              value={profile.quick_notes_folder ?? ''}
+              placeholder="Not set"
+              class="folder-value"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={isManaged(profile, 'quick_notes_folder')}
+              onclick={() => (pickingFolder = true)}>Choose…</Button
+            >
+            {#if profile.quick_notes_folder && !isManaged(profile, 'quick_notes_folder')}
+              <Button
+                variant="secondary"
+                size="sm"
+                ariaLabel="Clear the quick notes folder"
+                onclick={() => {
+                  if (profile) profile.quick_notes_folder = null;
+                }}>Clear</Button
+              >
+            {/if}
+          </div>
+        </Field>
+      </Card>
+    </div>
+
+    <FolderPicker
+      bind:open={pickingFolder}
+      start={profile.quick_notes_folder}
+      title="Quick notes folder"
+      description="New notes are saved in the folder you choose."
+      onPick={(path) => {
+        if (profile) profile.quick_notes_folder = path;
+      }}
+    />
   {/if}
 
   <!-- Outside the `{#if profile}` block above, deliberately: the profile
@@ -297,5 +349,10 @@
   .card-actions {
     display: flex;
     gap: var(--space-2);
+  }
+
+  .folder-row :global(.folder-value) {
+    flex: 1;
+    min-width: 0;
   }
 </style>

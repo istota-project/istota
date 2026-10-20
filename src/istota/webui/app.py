@@ -68,6 +68,7 @@ from istota.webui import auth as web_auth
 from istota.webui import auth_mail as web_auth_mail
 from istota.webui import mobile_auth
 from istota.webui.mobile_routes import read_handoff_fields
+from istota.webui.router_stubs import require_session_or_device, session_or_device as _session_or_device
 from istota.webui import shutdown as web_shutdown
 from istota.build_info import RUNNING_VERSION, build_description
 from istota.lib.filenames import filename_parts
@@ -284,6 +285,25 @@ def _may_carry_body(scope, headers) -> bool:
     return "transfer-encoding" in headers or (length is not None and length.strip() != "0")
 
 
+# The routes that depend on `router_stubs.require_session_or_device`, which
+# the guard below has to let a device token through to.
+# `tests/test_device_tokens.py` holds this equal to the routes themselves.
+DEVICE_TOKEN_ROUTES = frozenset({
+    ("POST", "/istota/api/workspace/notes"),
+    ("DELETE", "/istota/api/devices/self"),
+})
+
+
+async def _body_request_authorized(request: Request) -> bool:
+    from istota.lib.tokens import bearer_token
+
+    presented = bearer_token(request.headers.get("authorization", ""))
+    if presented is not None and (request.method, request.url.path) in DEVICE_TOKEN_ROUTES:
+        # The bearer alone, as the route will check it: never the cookie beside it.
+        return await asyncio.to_thread(_authenticate_device, presented) is not None
+    return await _stream_authorized(request)
+
+
 class _ApiBodyAuthGuard:
     """Refuse a request to the API that may carry a body and has no live session.
 
@@ -292,8 +312,9 @@ class _ApiBodyAuthGuard:
     only once all of it had arrived (ISSUE-783). This answers 401 before the
     body is read, for every route under the prefix, including ones not written
     yet. It asks the question the routes ask, through `_require_api_auth`, so
-    no-auth mode passes. Added before `SessionMiddleware` so it runs inside it
-    and sees the decoded session.
+    no-auth mode passes; on a `DEVICE_TOKEN_ROUTES` route carrying a bearer,
+    the question is the device token instead. Added before `SessionMiddleware`
+    so it runs inside it and sees the decoded session.
     """
 
     def __init__(self, inner) -> None:
@@ -302,7 +323,7 @@ class _ApiBodyAuthGuard:
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "http" and scope["path"].startswith(API_BODY_GUARD_PREFIX):
             request = Request(scope)
-            if _may_carry_body(scope, request.headers) and not await _stream_authorized(request):
+            if _may_carry_body(scope, request.headers) and not await _body_request_authorized(request):
                 await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
         await self.inner(scope, receive, send)
@@ -1159,11 +1180,14 @@ def _render_form_page(
 def _render_login_page(
     bot_name: str, mark: str, *, methods: list[str],
     login_csrf: str = "", code_csrf: str = "", error: str | None = None,
-    email_prefill: str = "", sheet: bool = False,
+    email_prefill: str = "", sheet: bool = False, next_key: str | None = None,
 ) -> str:
     body = f'<p class="form-error">{escape(error)}</p>' if error else ""
     if "nextcloud" in methods:
-        body += (f'<a class="btn" href="/istota/login?go=1">{_CLOUD_ICON}'
+        # The provider hop is a second GET /login, which starts the marker over,
+        # so the key has to ride on the link as well as in the session.
+        go = "/istota/login?go=1" + (f"&next={next_key}" if next_key else "")
+        body += (f'<a class="btn" href="{escape(go)}">{_CLOUD_ICON}'
                  'Log in with Nextcloud</a>')
     if "email" in methods:
         if "nextcloud" in methods:
@@ -1258,6 +1282,9 @@ async def _read_auth_form(request: Request):
 @auth_router.get("/login")
 async def login(request: Request):
     request.session.pop(_POST_LOGIN_KEY, None)
+    next_key = _requested_post_login_key(request)
+    if next_key is not None:
+        request.session[_POST_LOGIN_KEY] = next_key
     if request.query_params.get("go"):
         if not _config.web.has_method("nextcloud"):
             raise HTTPException(status_code=404)
@@ -1273,8 +1300,19 @@ async def login(request: Request):
         login_csrf=_csrf_token(request, "login"),
         code_csrf=_csrf_token(request, "sign-in-code-request"),
         email_prefill=email if len(email) <= 320 else "",
-        sheet=_in_app_sheet(request),
+        sheet=_in_app_sheet(request), next_key=next_key,
     ), headers=_AUTH_PAGE_HEADERS)
+
+
+def _requested_post_login_key(request: Request) -> str | None:
+    """The `?next=` key of a login entry, or ``None`` unless the table has it."""
+    key = request.query_params.get("next")
+    return key if key in _POST_LOGIN_TARGETS else None
+
+
+def _landing_after_login(request: Request) -> str:
+    """Where a password, code or link sign-in lands. Read before `_start_session` clears it."""
+    return _post_login_target(request.session.get(_POST_LOGIN_KEY))
 
 
 @auth_router.post("/login/email")
@@ -1307,9 +1345,9 @@ async def login_email(request: Request):
             logger.warning("Login profile lookup failed", exc_info=True)
             profile = None
         if profile is not None:
-            landing = await _mobile_login_target(request)
+            landing = await _mobile_login_target(request) or _landing_after_login(request)
             _start_session(request, identity.user_id, profile.display_name, "email", identity.credential_epoch)
-            return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+            return RedirectResponse(landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return await _auth_error(request, "Sign-in failed", "Email or password was not accepted.", 400)
 
@@ -1371,9 +1409,9 @@ async def _start_email_session(request: Request, result, method: str = "email") 
     if (profile is None or identity is None or identity.disabled
             or identity.email != email or identity.credential_epoch != epoch):
         return None
-    landing = await _mobile_login_target(request)
+    landing = await _mobile_login_target(request) or _landing_after_login(request)
     _start_session(request, user_id, profile.display_name, method, epoch)
-    return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+    return RedirectResponse(landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
 async def _set_password_form(request: Request, token: str, purpose: str, error: str = ""):
@@ -1834,6 +1872,9 @@ async def reset_submit(request: Request):
 # protocol-relative one, or a traversal.
 _POST_LOGIN_TARGETS = {
     "settings": "/istota/settings/connections",
+    # `/login?next=notes-new`, from the web editor whose session ran out; its
+    # draft is in the browser and comes back with the page.
+    "notes-new": "/istota/notes/new/",
 }
 _DEFAULT_POST_LOGIN_TARGET = "/istota/"
 
@@ -2031,7 +2072,7 @@ async def callback(request: Request):
     # Read before the clear, resolve through the allowlist, and consume it: a
     # marker left in place would send every later login of this session to
     # settings.
-    landing = await _mobile_login_target(request) or _post_login_target(request.session.get(_POST_LOGIN_KEY))
+    landing = await _mobile_login_target(request) or _landing_after_login(request)
     _start_session(request, username, display_name, "nextcloud", epoch)
     return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
@@ -16142,7 +16183,22 @@ _PROFILE_FIELD_SPECS: dict[str, dict] = {
     "relay_delivery":         {
         "type": "enum", "values": user_profiles.RELAY_DELIVERY_VALUES,
     },
+    # A folder below My files, walked with no link followed; '' clears it.
+    "quick_notes_folder":     {"type": "workspace_folder"},
 }
+
+
+class ProfileFieldRefused(ValueError):
+    """A profile field refusal that carries its own status and code.
+
+    The self PUT answers the other refusals with a bare 400; this one is
+    `{error, code}` with the status the field's validator chose.
+    """
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.code = code
 
 # The fields the self PUT accepts. Worker caps are in the specs above and not
 # here: a user raising their own cap was accepted until the authority table
@@ -16765,6 +16821,14 @@ def coerce_profile_field(
     if spec is None:
         raise ValueError(f"unknown profile field: {field}")
     t = spec["type"]
+    if t == "workspace_folder":
+        from istota.workspace.quick_notes import QuickNoteError, normalize_folder
+        if _config is None:
+            raise ValueError("config not loaded")
+        try:
+            return normalize_folder(_config, user_id, value)
+        except QuickNoteError as exc:
+            raise ProfileFieldRefused(exc.status, exc.code, exc.message) from None
     if t == "push_categories":
         from istota.push.preferences import validate_inbox_categories
         return validate_inbox_categories(value)
@@ -17008,6 +17072,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "external_turn_display": profile.external_turn_display or "collapsed",
         "relay_delivery": profile.relay_delivery,
         "relay_delivery_options": _relay_delivery_options(user["username"]),
+        "quick_notes_folder": profile.quick_notes_folder,
         "delivery_surfaces": _registered_delivery_surfaces(),
         "web_rooms": _user_web_rooms(user["username"]),
         # Which of this profile's own web pins are dead, asked of the server
@@ -17062,8 +17127,13 @@ async def settings_update_profile(
         if field not in _PROFILE_EDITABLE_FIELDS:
             raise HTTPException(status_code=400, detail=f"unknown field: {field}")
         try:
-            coerced[field] = coerce_profile_field(
-                field, value, user["username"], getattr(current, field, None),
+            # Off the loop: `quick_notes_folder` walks the workspace to check the folder.
+            coerced[field] = await asyncio.to_thread(
+                coerce_profile_field, field, value, user["username"], getattr(current, field, None),
+            )
+        except ProfileFieldRefused as e:
+            return JSONResponse(
+                {"error": str(e), "code": e.code, "field": field}, status_code=e.status,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -17652,17 +17722,27 @@ def _parse_location_device_mint(raw: bytes) -> tuple[str, str | None, str]:
     elif "device_id" in body:
         raise HTTPException(400, 'device_id is not accepted for kind "code"')
 
-    label = body.get("label")
-    if label is None:
-        label = ""
-    if not isinstance(label, str):
-        raise HTTPException(400, "label must be a string")
-    label = "".join(c for c in label if unicodedata.category(c) != "Cc").strip()
-    if len(label) > _LOCATION_DEVICE_LABEL_MAX:
-        raise HTTPException(400, f"label must be at most {_LOCATION_DEVICE_LABEL_MAX} characters")
-    if not label:
-        label = _LOCATION_DEVICE_DEFAULT_LABELS[kind]
+    try:
+        label = _device_label(body.get("label"), _LOCATION_DEVICE_DEFAULT_LABELS[kind])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
     return kind, device_id, label
+
+
+def _device_label(value: object, default: str) -> str:
+    """A device's display label: control characters stripped, trimmed, refused over the cap.
+
+    Shared by location ingest tokens and native-action device tokens, which
+    label the same phone. `ValueError` names the problem.
+    """
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ValueError("label must be a string")
+    label = "".join(c for c in value if unicodedata.category(c) != "Cc").strip()
+    if len(label) > _LOCATION_DEVICE_LABEL_MAX:
+        raise ValueError(f"label must be at most {_LOCATION_DEVICE_LABEL_MAX} characters")
+    return label or default
 
 
 def _location_devices_list(username: str) -> dict:
@@ -17799,6 +17879,212 @@ async def api_location_devices_delete(row_id: int, request: Request, user: dict 
     if not await asyncio.to_thread(_location_device_delete, user["username"], row_id):
         raise HTTPException(404, "device not found")
     logger.info("location: removed ingest token %d for user=%s", row_id, user["username"])
+    return {"ok": True}
+
+
+# --- device tokens for the shell's native actions ---------------------------
+#
+# A per-phone bearer scoped by capability (`istota.webui.device_tokens`). Minting
+# and listing are session routes; the token itself reaches only the two
+# routes that depend on `router_stubs.require_session_or_device`.
+
+
+def _device_error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": message, "code": code}, status_code=status)
+
+
+def _parse_device_mint(raw: bytes) -> tuple[str, str, list] | JSONResponse:
+    """Validate a mint body into `(device_id, label, scopes)`, or the 400 to answer instead."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return _device_error(400, "invalid_body", "invalid JSON")
+    if not isinstance(body, dict):
+        return _device_error(400, "invalid_body", "the body must be a JSON object")
+    unknown = sorted(set(body) - {"device_id", "label", "scopes"})
+    if unknown:
+        return _device_error(400, "invalid_body", f"unknown field: {unknown[0]}")
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not _LOCATION_DEVICE_ID.fullmatch(device_id):
+        return _device_error(400, "invalid_body", "device_id must be a UUID")
+    try:
+        label = _device_label(body.get("label"), "iPhone")
+    except ValueError as exc:
+        return _device_error(400, "invalid_body", str(exc))
+    scopes = body.get("scopes")
+    if not isinstance(scopes, list) or not scopes or not all(isinstance(s, str) for s in scopes):
+        return _device_error(400, "invalid_scopes", "scopes must be a non-empty list of names")
+    return device_id, label, scopes
+
+
+def _device_row(token) -> dict:
+    return {
+        "id": token.id,
+        "device_id": token.device_id,
+        "label": token.label,
+        "scopes": sorted(token.scopes),
+        "token_tail": token.token_tail,
+        "created_at": token.created_at,
+        "last_used_at": token.last_used_at,
+    }
+
+
+def _require_session_or_device(request: Request) -> dict:
+    """`router_stubs.session_or_device` for this app.
+
+    A Bearer header is checked as a device token and nothing else: a bad one
+    is a 401 even beside a valid session cookie, so a broken shell cannot
+    ride a web session. That path skips the origin check, since a browser
+    never attaches a bearer on its own. Without one, this is the session and
+    origin check every other mutating route makes.
+    """
+    from istota.lib.tokens import bearer_token
+
+    presented = bearer_token(request.headers.get("authorization", ""))
+    if presented is None:
+        user = _require_api_auth(request)
+        _verify_origin(request)
+        return {**user, "device_token": None}
+    token = _authenticate_device(presented)
+    if token is None:
+        raise _UnauthorizedException()
+    return {"username": token.user_id, "display_name": token.user_id, "device_token": token}
+
+
+def _authenticate_device(presented: str):
+    """The live device token for a presented bearer, or None. Logs only the tail."""
+    from istota.webui import device_tokens
+
+    if not _config:
+        return None
+    with _db.get_db(_config.db_path) as conn:
+        token = device_tokens.authenticate(conn, presented)
+    if token is None:
+        logger.info("device token ...%s refused: unknown", presented[-4:])
+        return None
+    identity = web_auth.get_identity(_config.db_path, token.user_id)
+    if identity is not None and identity.disabled:
+        logger.info("device token ...%s refused: account disabled", token.token_tail)
+        return None
+    if not web_auth.credential_still_valid(_config, token.user_id, token.auth_method, token.auth_epoch):
+        logger.info("device token ...%s refused: credential revoked", token.token_tail)
+        return None
+    return token
+
+
+def _device_list(username: str) -> list[dict]:
+    from istota.webui import device_tokens
+
+    with _db.get_db(_config.db_path) as conn:
+        return [_device_row(token) for token in device_tokens.list_tokens(conn, username)]
+
+
+def _device_mint(
+    username: str, device_id: str, label: str, scopes: list, auth: dict,
+) -> tuple[int, str] | JSONResponse:
+    from istota.webui import device_tokens
+    from istota.workspace import quick_notes
+
+    try:
+        wanted = device_tokens.validate_scopes(scopes)
+    except device_tokens.UnknownScope as exc:
+        return _device_error(400, "unknown_scope", f"unknown scope: {exc}")
+    except ValueError as exc:
+        return _device_error(400, "invalid_scopes", str(exc))
+    with _db.get_db(_config.db_path) as conn:
+        # Here rather than in `mint`, which knows nothing of profiles: a
+        # `notes` token with nowhere to put a note would fail on every send.
+        if "notes" in wanted and quick_notes.configured_folder(conn, username) is None:
+            return _device_error(409, "notes_folder_unset", "Choose a quick notes folder first.")
+        try:
+            return device_tokens.mint(
+                conn, username, device_id, label, wanted,
+                auth_method=auth["method"], auth_epoch=auth["epoch"],
+            )
+        except device_tokens.TooManyDevices:
+            return _device_error(
+                409, "too_many_devices",
+                f"This account already has {device_tokens.MAX_TOKENS_PER_USER} devices. Remove one first.",
+            )
+
+
+def _device_delete(username: str, row_id: int) -> bool:
+    from istota.webui import device_tokens
+
+    with _db.get_db(_config.db_path) as conn:
+        return device_tokens.delete_token(conn, username, row_id)
+
+
+def _device_delete_by_hash(token_hash: str) -> bool:
+    from istota.webui import device_tokens
+
+    with _db.get_db(_config.db_path) as conn:
+        return device_tokens.delete_by_hash(conn, token_hash)
+
+
+@api_router.get("/devices")
+async def api_devices_list(user: dict = Depends(_require_api_auth)):
+    """The user's device tokens. Never the token or its hash; `token_tail` tells rows apart."""
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    return {"devices": await asyncio.to_thread(_device_list, user["username"])}
+
+
+@api_router.post("/devices", status_code=201)
+async def api_devices_mint(request: Request, user: dict = Depends(_require_api_auth)):
+    """Mint or replace this device's token and return it **once**.
+
+    Replacing keeps the row and kills the old token. Every refusal comes
+    before anything is written.
+    """
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    try:
+        raw = await read_bounded_body(request, 4096)
+    except BodyError as exc:
+        return _device_error(exc.status, "invalid_body", "invalid device body")
+    parsed = _parse_device_mint(raw)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    device_id, label, scopes = parsed
+    auth = await asyncio.to_thread(_session_auth, request)
+    result = await asyncio.to_thread(_device_mint, user["username"], device_id, label, scopes, auth)
+    if isinstance(result, JSONResponse):
+        return result
+    row_id, token = result
+    granted = sorted(set(scopes))
+    logger.info("devices: minted a device token (%s) for user=%s", " ".join(granted), user["username"])
+    return {"id": row_id, "token": token, "scopes": granted}
+
+
+# Declared before `/devices/{row_id}`; the `int` type keeps them apart too.
+@api_router.delete("/devices/self")
+async def api_devices_delete_self(user: dict = Depends(require_session_or_device(None))):
+    """The shell revokes its own token, by the bearer alone.
+
+    Works with an expired web session, which is when a reset or sign-out
+    most needs it. The session path reaches this too but has no token to
+    name, so it is refused.
+    """
+    token = user["device_token"]
+    if token is None:
+        return _device_error(401, "device_token_required", "Only a device token can revoke itself.")
+    if not await asyncio.to_thread(_device_delete_by_hash, token.token_hash):
+        raise _UnauthorizedException()
+    logger.info("devices: device token %d revoked itself for user=%s", token.id, user["username"])
+    return {"ok": True}
+
+
+@api_router.delete("/devices/{row_id}")
+async def api_devices_delete(row_id: int, request: Request, user: dict = Depends(_require_api_auth)):
+    """Revoke one device's token from Settings. 404 for a row that is not the caller's."""
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not await asyncio.to_thread(_device_delete, user["username"], row_id):
+        raise HTTPException(404, "device not found")
+    logger.info("devices: revoked device token %d for user=%s", row_id, user["username"])
     return {"ok": True}
 
 
@@ -18041,6 +18327,7 @@ from istota.webui.workspace_routes import router as _workspace_router
 
 app.include_router(_workspace_router, prefix="/istota/api/workspace", tags=["workspace"])
 app.dependency_overrides[_workspace_require_auth] = _require_api_auth
+app.dependency_overrides[_session_or_device] = _require_session_or_device
 
 # Groups is core; administration never grants member content access.
 from istota.groups.routes import require_admin as _groups_require_admin
