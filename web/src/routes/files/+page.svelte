@@ -46,6 +46,11 @@
     getWorkspaceConfigFile,
     saveWorkspaceConfigFile,
     type WorkspaceConfigFile,
+    getWorkspaceTextFile,
+    saveWorkspaceTextFile,
+    TextFileConflictError,
+    TextFileInvalidError,
+    TextFileLockedError,
   } from '$lib/api';
   import TextFileEditor from '$lib/components/TextFileEditor.svelte';
   import { viewer } from '$lib/fileViewer/store.svelte';
@@ -184,6 +189,30 @@
     editorOpen = false;
     // Sizes and "not created yet" change with a save.
     void loadConfigFiles();
+  }
+  let textEditing = $state<{ path: string; name: string } | null>(null);
+  let textEditorOpen = $state(false);
+  function editTextFile(path: string, name: string) {
+    // A config file keeps its own editor, which checks it the way the daemon will.
+    const ref = [place?.view_root, path, name].filter(Boolean).join('/');
+    const configFile = configFiles.find((file) => file.view_path === ref);
+    if (configFile) return editConfigFile(configFile);
+    textEditing = { path, name };
+    textEditorOpen = true;
+  }
+  function closeTextEditor() {
+    textEditorOpen = false;
+    if (selected) void loadFolder(selected);
+  }
+  // The server's own refusal (not text, too large, a link) is what to show.
+  function describeTextFileError(e: unknown): string | null {
+    if (
+      e instanceof TextFileConflictError ||
+      e instanceof TextFileLockedError ||
+      e instanceof TextFileInvalidError
+    )
+      return null;
+    return e instanceof Error && e.message ? e.message : null;
   }
   async function saveConfigFile(name: string | number, content: string, revision: string) {
     const result = await saveWorkspaceConfigFile(String(name), content, revision);
@@ -832,6 +861,7 @@
           <FileTable
             {listing}
             onDelete={place.id === 'home' ? deleteEntries : undefined}
+            onEdit={place.id === 'home' ? editTextFile : undefined}
             onRefresh={() => loadFolder(selected!)}
             {place}
             {showHidden}
@@ -862,6 +892,28 @@
   >
     {#snippet caption()}
       Markdown. Saved in your config folder.
+    {/snippet}
+  </TextFileEditor>
+{/if}
+
+{#if textEditing}
+  {@const file = textEditing}
+  <TextFileEditor
+    bind:open={textEditorOpen}
+    fileKey={[file.path, file.name].filter(Boolean).join('/')}
+    title={file.name}
+    description={['My files', file.path].filter(Boolean).join(' / ')}
+    ariaLabel={file.name}
+    placeholder="This file is empty."
+    loadFailed="Couldn't load this file."
+    load={() => getWorkspaceTextFile(file.path, file.name)}
+    save={(_key, content, revision) =>
+      saveWorkspaceTextFile(file.path, file.name, content, revision)}
+    describeError={describeTextFileError}
+    onClose={closeTextEditor}
+  >
+    {#snippet caption()}
+      Plain text. Saved in My files.
     {/snippet}
   </TextFileEditor>
 {/if}
