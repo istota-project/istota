@@ -121,6 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stopping a task from the web, or removing its author from a group, now stops a running Claude Code task within a few seconds on the Docker stack. Before, the web container could only flag the task, and the task ran on until its current tool call finished, or to the end on the non-streaming path.
 - When briefings settings cannot load your schedules or briefing content, it now shows that with a Retry button instead of an editor filled with defaults that Save could have written over your stored schedule. A failed picker list (groups, presets, feeds, shared blocks, email accounts) or email format setting now says so with Retry rather than blanking the page or showing a guess. In Settings → Connections, a failed service list shows Retry where the list goes and no longer claims no services are available.
 - Leaving the shared blocks view while a shared block's Run now is still waiting for the daemon now ends the wait. Before, it kept polling for up to five minutes and then showed the outcome as a notice on whatever page you had moved to. The run itself still finishes in the daemon.
 - In Money → Settings → Invoicing, a failed delete of an entity or service no longer replaces the Business defaults card with an error as if the page had failed to load. It now shows as a notice and the list stays as it was. The same goes for a client. A card whose list did fail to load says so with a Retry button, rather than showing an empty list.

@@ -94,7 +94,7 @@ def signal_stopped_tasks(pids: list[int]) -> None:
 
     `signal_task_worker` signals only in the scheduler's own process; anywhere
     else (the web container) ``cancel_requested`` carries the stop, as for a
-    web cancel.
+    web cancel: the worker's process signals itself (`_task_cancel_watch`).
     """
     import signal
 

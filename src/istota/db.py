@@ -10770,6 +10770,20 @@ def is_task_cancelled(conn: sqlite3.Connection, task_id: int) -> bool:
     return bool(row and row[0])
 
 
+def get_running_worker_pid(
+    conn: sqlite3.Connection, task_id: int,
+) -> tuple[int | None, bool]:
+    """``(worker_pid, cancel_requested)`` while the task is running, else ``(None, False)``."""
+    row = conn.execute(
+        "SELECT worker_pid, cancel_requested FROM tasks "
+        "WHERE id = ? AND status = 'running'",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None, False
+    return (int(row[0]) if row[0] else None), bool(row[1])
+
+
 def update_talk_response_id(
     conn: sqlite3.Connection,
     task_id: int,
