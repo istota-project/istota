@@ -5,7 +5,7 @@ paths:
   - "src/istota/*/search.py"
   - "web/src/lib/search/**"
   - "web/src/lib/stores/search.ts"
-  - "web/src/lib/components/ui/Search*.svelte"
+  - "web/src/lib/components/search/**"
 ---
 
 # Unified web search
