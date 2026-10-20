@@ -203,6 +203,17 @@ def _require_imap_tools():
         raise ImportError("imap-tools not installed. Install with: uv sync --extra email")
 
 
+def _tls_context() -> ssl.SSLContext:
+    """The context every IMAP and SMTP connection here hands its TLS layer.
+
+    Explicit on every path because imap-tools and smtplib, given none, fall
+    back to ``ssl._create_stdlib_context``, which verifies neither the
+    certificate nor the hostname (ISSUE-798). A server with a private CA is
+    trusted through ``SSL_CERT_FILE`` / ``SSL_CERT_DIR``, which this reads.
+    """
+    return ssl.create_default_context()
+
+
 def _get_mailbox(config: EmailConfig) -> MailBox:
     """Create a MailBox connection based on config.
 
@@ -214,9 +225,15 @@ def _get_mailbox(config: EmailConfig) -> MailBox:
     timeout = config.imap_timeout if config.imap_timeout and config.imap_timeout > 0 else 30
     # Port 993 uses implicit TLS; other ports (typically 143) use STARTTLS.
     if config.imap_port == 993:
-        return MailBox(config.imap_host, port=config.imap_port, timeout=timeout)
+        return MailBox(
+            config.imap_host, port=config.imap_port, timeout=timeout,
+            ssl_context=_tls_context(),
+        )
     else:
-        return MailBoxStartTls(config.imap_host, port=config.imap_port, timeout=timeout)
+        return MailBoxStartTls(
+            config.imap_host, port=config.imap_port, timeout=timeout,
+            ssl_context=_tls_context(),
+        )
 
 
 @contextmanager
@@ -897,17 +914,20 @@ def mark_email(
     """Set/clear a flag on an email. action ∈ {read, unread, flagged}."""
     if config is None:
         raise ValueError("config is required")
+    _single_uid(email_id)
     flag_map = {
-        "read": (MailMessageFlags.SEEN, True),
-        "unread": (MailMessageFlags.SEEN, False),
-        "flagged": (MailMessageFlags.FLAGGED, True),
+        "read": (MailMessageFlags.SEEN, "+FLAGS"),
+        "unread": (MailMessageFlags.SEEN, "-FLAGS"),
+        "flagged": (MailMessageFlags.FLAGGED, "+FLAGS"),
     }
     if action not in flag_map:
         raise ValueError(f"invalid mark action '{action}' (read|unread|flagged)")
-    flag, value = flag_map[action]
+    flag, op = flag_map[action]
     with imap_session(config) as mailbox:
         mailbox.folder.set(folder)
-        mailbox.flag(email_id, flag, value)
+        # Not `mailbox.flag()`: imap-tools follows its STORE with a folder-wide
+        # EXPUNGE, removing mail another client flagged \Deleted (ISSUE-799).
+        _uid_command(mailbox, "STORE", _single_uid(email_id), op, f"({flag})")
     return True
 
 
@@ -1015,14 +1035,13 @@ def _open_smtp(config: EmailConfig, *, timeout: float = _SMTP_TIMEOUT_SECONDS):
     """A logged-out but connected SMTP session, TLS already established."""
     # Port 587 typically uses STARTTLS, port 465 uses implicit TLS
     if config.smtp_port == 465:
-        context = ssl.create_default_context()
         return smtplib.SMTP_SSL(
-            config.smtp_host, config.smtp_port, context=context,
+            config.smtp_host, config.smtp_port, context=_tls_context(),
             timeout=timeout,
         )
     server = smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=timeout)
     try:
-        server.starttls()
+        server.starttls(context=_tls_context())
     except BaseException:
         server.close()
         raise
@@ -1271,10 +1290,11 @@ def delete_email(
         raise ValueError("config is required")
 
     try:
+        uid = _single_uid(email_id)
         with imap_session(config) as mailbox:
             mailbox.folder.set(folder)
             _delete_uid_batch(
-                mailbox, [str(email_id)],
+                mailbox, [uid],
                 targeted=_supports_uid_expunge(mailbox, config),
             )
             return True
@@ -1346,6 +1366,23 @@ def _supports_uid_expunge(mailbox, config: EmailConfig) -> bool:
             host,
         )
     return False
+
+
+_SINGLE_UID = re.compile(r"[0-9]+")
+
+
+def _single_uid(email_id) -> str:
+    """``email_id`` as one UID, or ValueError.
+
+    The agent-facing verbs act on one message and check that its owner is in
+    scope by reading it. A set (``1:*``, ``5,9``) passes ``clean_uids`` but the
+    read only sees its first message, so it would reach other users' mail in a
+    shared mailbox. Digits only also keeps CRLF off imaplib's unescaped line.
+    """
+    uid = str(email_id)
+    if not _SINGLE_UID.fullmatch(uid):
+        raise ValueError(f"not a single message UID: {uid!r}")
+    return uid
 
 
 def _uid_command(mailbox, command: str, *args) -> None:
@@ -2778,8 +2815,19 @@ def _confirmation_required(verb: str, email_id: str, action_desc: str):
     }
 
 
+def _single_uid_error(email_id) -> dict | None:
+    try:
+        _single_uid(email_id)
+    except ValueError as e:
+        return {"status": "error", "error": f"{e}; give one numeric UID"}
+    return None
+
+
 def cmd_mark(args):
     """Flag an email read/unread/flagged. Gated behind --confirmed."""
+    err = _single_uid_error(args.id)
+    if err is not None:
+        return err
     if not getattr(args, "confirmed", False):
         return _confirmation_required("mark", args.id, f"marking it {args.action}")
     app_config, user_id = _scope_context()
@@ -2794,6 +2842,9 @@ def cmd_mark(args):
 
 def cmd_delete(args):
     """Delete an email. Gated behind --confirmed."""
+    err = _single_uid_error(args.id)
+    if err is not None:
+        return err
     if not getattr(args, "confirmed", False):
         return _confirmation_required("delete", args.id, "deleting it")
     app_config, user_id = _scope_context()
