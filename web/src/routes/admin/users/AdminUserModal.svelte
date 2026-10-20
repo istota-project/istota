@@ -11,6 +11,7 @@
     type AdminUserProfile,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     ToggleGroup,
@@ -316,12 +317,12 @@
   }}
 >
   {#if loadError}
-    <p class="banner error" role="alert">{loadError}</p>
+    <Alert appearance="inline" variant="danger" role="alert">{loadError}</Alert>
   {:else if !detail || !form}
     <p class="caption">Loading…</p>
   {:else}
     <div class="editor">
-      {#if banner}<p class="banner error" role="alert">{banner}</p>{/if}
+      {#if banner}<Alert appearance="inline" variant="danger" role="alert">{banner}</Alert>{/if}
 
       <FormStack gap={4} disabled={busy}>
         <section class="editor-section vstack" aria-labelledby="admin-user-identity">
@@ -413,7 +414,9 @@
             <Field label="Send invitation" checkbox>
               <Checkbox bind:checked={loginInvite} />
             </Field>
-            {#if loginNote}<p class="banner success" role="status">{loginNote}</p>{/if}
+            {#if loginNote}<Alert appearance="inline" variant="success" role="status"
+                >{loginNote}</Alert
+              >{/if}
             <div class="form-actions">
               <Button
                 variant="secondary"

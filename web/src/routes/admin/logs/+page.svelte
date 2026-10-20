@@ -12,6 +12,7 @@
     type AdminLogSource,
   } from '$lib/api';
   import {
+    Alert,
     Icon,
     Button,
     Chip,
@@ -445,15 +446,15 @@
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
 
   {#if !error && activeSource && !activeSource.available}
-    <div class="banner info">{activeSource.detail}</div>
+    <Alert appearance="inline" variant="info">{activeSource.detail}</Alert>
   {/if}
 
   <div class="log-pane" bind:this={logEl} onscroll={onScroll}>
-    <!-- A failed load is the banner above, beside the filters that caused it. -->
+    <!-- A failed load is the alert above, beside the filters that caused it. -->
     <LoadState loading={loading && records.length === 0} empty={records.length === 0 && !error}>
       {#snippet emptyState()}
         <EmptyState>

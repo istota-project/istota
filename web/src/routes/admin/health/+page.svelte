@@ -2,7 +2,9 @@
   import { onMount } from 'svelte';
   import { getAdminDoctor, type DoctorCheck, type DoctorReport } from '$lib/api';
   import { waitForDoctorRun } from '$lib/doctorRun';
+  import { notifyError } from '$lib/stores/notices';
   import {
+    Alert,
     Badge,
     Button,
     Card,
@@ -74,7 +76,6 @@
         report = next;
       });
       if (result.answered) {
-        error = '';
         if (result.deep) {
           notice = 'Deep checks included: the daemon spawned a sandbox namespace and inspected it.';
         }
@@ -82,7 +83,7 @@
         notice = 'The daemon has not answered the request yet. Check that it is running.';
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to run checks';
+      notifyError(e instanceof Error ? e.message : 'Failed to run checks');
     } finally {
       running = false;
       deepRunning = false;
@@ -93,11 +94,11 @@
 </script>
 
 <div class="settings health-page card-pane">
-  <!-- The whole-pane error is for the *initial* load only. Once a report
-       exists, a failed re-run reports inline above the toolbar: the exclusive
-       branch would otherwise unmount the report and both buttons, so a
-       transient 500 on the deep button left no way to retry short of a page
-       reload, and took the findings the operator was reading with it. -->
+  <!-- The whole-pane error is for the *initial* load only. A failed re-run is
+       a notice: the exclusive branch would otherwise unmount the report and
+       both buttons, so a transient 500 on the deep button left no way to retry
+       short of a page reload, and took the findings the operator was reading
+       with it. -->
   <LoadState
     {loading}
     error={report ? null : error}
@@ -129,12 +130,8 @@
         </p>
       </Disclosure>
 
-      {#if error}
-        <div class="banner error">{error}</div>
-      {/if}
-
       {#if notice}
-        <div class="banner info">{notice}</div>
+        <Alert appearance="inline" variant="info" role="status">{notice}</Alert>
       {/if}
 
       <p class="caption run-times">

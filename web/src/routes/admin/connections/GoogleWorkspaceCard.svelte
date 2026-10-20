@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminGoogleWorkspaceConnection } from '$lib/api';
-  import { Button } from '$lib/components/ui';
+  import { Alert, Button } from '$lib/components/ui';
   import { KeyRound } from '@lucide/svelte';
   import ConnectionCard from './ConnectionCard.svelte';
 
@@ -40,11 +40,13 @@
   {badge}
 >
   {#if connection.missing.length > 0}
-    <ul class="banner warn missing wide">
-      {#each connection.missing as field (field)}
-        <li>{MISSING[field]}</li>
-      {/each}
-    </ul>
+    <Alert appearance="inline" variant="warn" class="wide">
+      <ul class="missing">
+        {#each connection.missing as field (field)}
+          <li>{MISSING[field]}</li>
+        {/each}
+      </ul>
+    </Alert>
   {/if}
 
   <div class="panel">

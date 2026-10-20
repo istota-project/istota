@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import {
+    Alert,
     Button,
     Input,
     Field,
@@ -33,6 +34,7 @@
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { latest } from '$lib/ui/latest';
+  import { notifyError } from '$lib/stores/notices';
 
   const current = getCurrentUser();
   let groups = $state<AdminGroupSummary[]>([]);
@@ -52,7 +54,6 @@
   let owners = $state<string[]>([]);
   let users = $state<{ user_id: string; display_name: string }[]>([]);
   let storageNotes = $state<Record<string, string>>({});
-  let storageErrors = $state<Record<string, string>>({});
   let active = true;
   const details = latest();
   const selection = createUrlSelection<string>({
@@ -229,14 +230,13 @@
     if (busy || !group) return;
     const id = group.group_id;
     busy = true;
-    storageErrors[id] = '';
     try {
       const result = await retryGroupStorage(id);
       storageNotes[id] = result.storage_available
         ? 'Group storage is ready.'
         : 'Group storage is unavailable. Retry setup after restoring the workspace.';
     } catch (e) {
-      storageErrors[id] = message(e);
+      notifyError(message(e));
     } finally {
       busy = false;
     }
@@ -325,10 +325,14 @@
                 </dd>
               {/if}
             </dl>
-            {#if !group.archived_at && group.needs_owner}<p class="banner warn">
+            {#if !group.archived_at && group.needs_owner}<Alert
+                appearance="inline"
+                variant="warn"
+                class="needs-owner"
+              >
                 This group has no owner. Members can still use it, but nobody can manage its
                 membership until you assign one.
-              </p>{/if}
+              </Alert>{/if}
           </Card>
           {#if !group.archived_at}
             <Card title="Members">
@@ -344,12 +348,13 @@
                   loading={busy}
                   loadingLabel="Working…">Retry storage setup</Button
                 >{/snippet}
-              {#if storageNotes[group.group_id]}<p class="banner info" role="status">
+              {#if storageNotes[group.group_id]}<Alert
+                  appearance="inline"
+                  variant="info"
+                  role="status"
+                >
                   {storageNotes[group.group_id]}
-                </p>{/if}
-              {#if storageErrors[group.group_id]}<p class="banner error" role="alert">
-                  {storageErrors[group.group_id]}
-                </p>{/if}
+                </Alert>{/if}
             </Card>
           {/if}
           {#if group.system_key === 'all_users'}
@@ -477,8 +482,12 @@
       Are you sure you want to archive {group?.display_name}? Members will lose future access. Data
       and history are kept, and the group ID cannot be reused.
     </p>
-    {#if formError}<p class="banner error" role="alert">{formError}</p>
-      <Button onclick={reloadArchive} disabled={busy}>Reload group details</Button>{/if}
+    {#if formError}<Alert appearance="inline" variant="danger" role="alert"
+        >{formError}
+        {#snippet actions()}<Button onclick={reloadArchive} disabled={busy}
+            >Reload group details</Button
+          >{/snippet}</Alert
+      >{/if}
   {/snippet}
 </ConfirmDialog>
 
@@ -508,7 +517,7 @@
   .group-facts dd {
     overflow-wrap: anywhere;
   }
-  .group-facts + .banner {
+  .group-facts + :global(.needs-owner) {
     margin-top: var(--space-3);
   }
   .event {

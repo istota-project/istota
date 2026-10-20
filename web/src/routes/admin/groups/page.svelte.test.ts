@@ -15,6 +15,11 @@ const identity = vi.hoisted(() => ({
 }));
 vi.mock('$lib/api', () => api);
 vi.mock('$lib/userContext', () => ({ getCurrentUser: () => identity }));
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
 await fillApiDouble(api);
 const group = {
   group_id: 'team',
@@ -221,7 +226,10 @@ it('confirms archive, preserves a revision conflict and reloads before retrying'
   expect(api.archiveAdminGroup).not.toHaveBeenCalled();
   const dialog = screen.getByRole('dialog');
   await fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }));
-  await within(dialog).findByText('Group changed; reload before retrying');
+  const refusal = await within(dialog).findByRole('alert');
+  expect(refusal).toHaveTextContent('Group changed; reload before retrying');
+  // The way out of the refusal is the alert's own action.
+  expect(within(refusal).getByRole('button', { name: 'Reload group details' })).toBeTruthy();
   expect(api.archiveAdminGroup).toHaveBeenCalledWith('team', { revision: 3, confirm: true });
   api.getAdminGroup.mockResolvedValue({ ...group, revision: 4 });
   await fireEvent.click(within(dialog).getByRole('button', { name: 'Reload group details' }));
@@ -260,7 +268,12 @@ it('retains a created group when storage fails and retries setup without creatin
     new api.GroupApiError(503, 'storage_unavailable', 'Storage still unavailable'),
   );
   await fireEvent.click(screen.getByRole('button', { name: 'Retry storage setup' }));
-  await screen.findByText('Storage still unavailable');
+  // A failed retry is an action failing: a notice, while the card keeps its note.
+  await waitFor(() =>
+    expect(notices.notifyError).toHaveBeenCalledWith('Storage still unavailable'),
+  );
+  expect(screen.queryByText('Storage still unavailable')).toBeNull();
+  expect(screen.getByRole('status')).toHaveTextContent(/storage is unavailable/);
   await fireEvent.click(screen.getByRole('button', { name: 'Retry storage setup' }));
   await screen.findByText('Group storage is ready.');
   expect(api.retryGroupStorage).toHaveBeenCalledWith('team');

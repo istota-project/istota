@@ -13,6 +13,7 @@
     type AdminSubscriptionSpend,
   } from '$lib/api';
   import {
+    Alert,
     Avatar,
     AvatarPicker,
     Badge,
@@ -926,7 +927,7 @@
       </CardGrid>
 
       {#if stats.error}
-        <div class="banner error">Partial data: {stats.error}</div>
+        <Alert appearance="inline" variant="danger">Partial data: {stats.error}</Alert>
       {/if}
 
       <p class="refresh-note caption">Auto-refreshes every 60s.</p>

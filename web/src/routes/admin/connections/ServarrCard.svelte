@@ -120,7 +120,7 @@
               {/if}
             </div>
             {#if app.incomplete}
-              <p class="banner warn app-problem">{app.problem}</p>
+              <Alert appearance="inline" variant="warn" class="app-problem">{app.problem}</Alert>
             {:else}
               <dl class="kv">
                 <dt>URL</dt>
@@ -135,7 +135,7 @@
                 <dd>{keyLabel(app)}</dd>
               </dl>
               {#if app.problem}
-                <p class="banner warn app-problem">{app.problem}</p>
+                <Alert appearance="inline" variant="warn" class="app-problem">{app.problem}</Alert>
               {/if}
               {#if app.check || !app.problem}
                 <CheckResult
@@ -183,10 +183,10 @@
     {/if}
 
     {#if unanswered}
-      <p class="banner warn wide">
+      <Alert appearance="inline" variant="warn" role="status" class="wide">
         The daemon has not answered the request yet, so the results shown are from its last run.
         Check that it is running.
-      </p>
+      </Alert>
     {/if}
   {/if}
 
@@ -290,8 +290,7 @@
     text-transform: capitalize;
   }
 
-  .app-problem {
-    margin: 0;
+  .apps :global(.app-problem) {
     overflow-wrap: anywhere;
   }
 </style>

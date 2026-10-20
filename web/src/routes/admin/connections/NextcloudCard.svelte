@@ -1,8 +1,9 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import type { AdminNextcloudConnection } from '$lib/api';
-  import { Button, Timestamp } from '$lib/components/ui';
+  import { Alert, Button, Timestamp } from '$lib/components/ui';
   import { waitForDoctorRun } from '$lib/doctorRun';
+  import { notifyError } from '$lib/stores/notices';
   import { Cloud } from '@lucide/svelte';
   import CheckResult from './CheckResult.svelte';
   import ConnectionCard from './ConnectionCard.svelte';
@@ -17,7 +18,6 @@
 
   let checking = $state(false);
   let notice = $state('');
-  let error = $state('');
 
   const BADGE = {
     ok: { variant: 'success', label: 'OK' },
@@ -42,7 +42,6 @@
     if (checking) return;
     checking = true;
     notice = '';
-    error = '';
     try {
       const result = await waitForDoctorRun(false);
       if (result.answered) {
@@ -51,7 +50,7 @@
         notice = 'The daemon has not answered the request yet. Check that it is running.';
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Failed to run the check';
+      notifyError(e instanceof Error ? e.message : 'Failed to run the check');
     } finally {
       checking = false;
     }
@@ -107,11 +106,8 @@
       {/if}
     </div>
 
-    {#if error}
-      <div class="banner error wide">{error}</div>
-    {/if}
     {#if notice}
-      <div class="banner warn wide">{notice}</div>
+      <Alert appearance="inline" variant="warn" role="status" class="wide">{notice}</Alert>
     {/if}
   {:else}
     <p class="summary wide">
