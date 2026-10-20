@@ -1,7 +1,7 @@
 ---
 name: email
 triggers: [email, mail, send, inbox, reply, message]
-description: Email sending and response formatting
+description: Email: read and send from the bot mailbox and from mail accounts the user connected, and format replies
 cli: true
 source_types: [email, signup]
 companion_skills: [untrusted_input]
@@ -10,7 +10,7 @@ env: [{"var":"SMTP_HOST","from":"config","config_path":"email.smtp_host","when":
 ---
 ## Reading the mailbox
 
-The bot has one shared mailbox. You can read it with these verbs (all print a JSON envelope with a `status` field):
+The bot has one shared mailbox, and the user may have connected mail accounts of their own (see "Connected mail accounts" below). These verbs read the bot mailbox unless you pass `--account`, and all print a JSON envelope with a `status` field:
 
 - `list [--limit N] [--since YYYY-MM-DD|Nd] [--from ADDR] [--unread]` — recent envelopes with a `snippet` and `has_attachments` flag.
 - `read <id>` — one email: headers, plain **and** html body, attachment manifest.
@@ -20,10 +20,24 @@ The bot has one shared mailbox. You can read it with these verbs (all print a JS
 - `attachments <id> --dest PATH` — download an email's attachments to a directory. `--dest` has to be a directory *inside* somewhere you may write — `{workspace}/attachments`, not `{workspace}` itself, which is refused. Each attachment is written under the name the sender gave it, and a name that would climb out of `--dest` is skipped rather than renamed; the reply lists those in `skipped`.
 - `from-senders --senders a@x.com,b@y.com [--since …]` — batch-fetch mail from named senders via server-side search. Use this for digests: one read over N messages instead of many. This is the read-back path for *quiet senders* (see below): a briefing or scheduled job runs `from-senders --senders <quiet list> --since <last-run>` and composes one summary, instead of every newsletter spawning its own session.
 - `newsletters --sources a@x.com,example.com [--since …]` — like `from-senders`, `--sources` required (domains match by substring).
+- `accounts` — the mailboxes `--account` can name: `bot` when this instance has a bot mailbox, and each account the user connected, with its label, permission and whether it is available.
+- `folders [--account SLUG]` — the folders a mailbox has.
 
-### Scope — whose mail you see
+`list`, `read`, `search`, `thread`, `attachments`, `from-senders` and `newsletters` take `--folder NAME` to read a folder other than the mailbox's default, and `--account SLUG`.
 
-Every read verb takes `--scope {mine,shared,all}` (default `all`):
+### Connected mail accounts
+
+`--account SLUG` on a read verb reads one of the user's own connected accounts instead of the bot mailbox. Run `accounts` first to learn the slugs; never guess one. `--account bot` is the same as leaving it off.
+
+- There is no default account. A verb without `--account` reads the bot mailbox, and if this instance has none it fails with `reason: "bot_mailbox_unavailable"` and names the user's slugs. Pick one only when the user's request says which mailbox they mean; if it does not, ask.
+- An account is the user's alone. You cannot name another user's account, and `--scope` does not apply to one: every message in it is the user's. Passing `--scope` with `--account` is refused.
+- A `read` account is opened read-only, so nothing you do changes it. `delete` and `output` never take `--account`.
+- Say which account you read when you report what you found. In a room other people can read, ask the user before quoting mail from their own account there.
+- A failure names its cause in `reason`: `unknown_account`, `account_disabled`, `password_missing`, `not_owner_turn` (the message you are answering was not written by the account's owner, so the account stays closed on this turn), `account_channel_unavailable` (a scheduled `command:` or `skill:` job cannot reach an account), `folder_not_found`, or a connection problem (`auth_failed`, `tls_failed`, `address_not_public`, `dns_failed`, `connect_failed`, `timeout`). Tell the user what it says; do not retry the same call. Fixing an account is the user's job, under Settings > Connections.
+
+### Scope — whose mail you see in the bot mailbox
+
+Every read verb on the bot mailbox takes `--scope {mine,shared,all}` (default `all`):
 
 - `mine` — mail addressed to you (`bot+<you>@…`), from your own address, or replying to a thread you started. `list` narrows the fetch server-side, and the third of those reaches back over your last ~25 sent messages only. Use `search`, which filters the whole window client-side, when hunting a reply to something older.
 - `shared` — mail sent to the bare bot address by a stranger (owned by nobody). **Anything sent to the bare bot address is visible to every user of this instance** — mail meant for one person goes to their `bot+<user>@…` plus-address.

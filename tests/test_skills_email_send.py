@@ -352,7 +352,7 @@ class TestGatedOps:
         assert res["needs_confirmation"] is True
 
     def test_delete_refuses_without_confirmed(self, skill_env):
-        args = MagicMock(id="5", confirmed=False)
+        args = MagicMock(id="5", confirmed=False, account=None)
         res = cmd_delete(args)
         assert res["status"] == "error"
         assert res["needs_confirmation"] is True
@@ -368,7 +368,7 @@ class TestGatedOps:
 
     def test_delete_confirmed_refuses_other_users_mail(self, skill_env):
         orig = _mail("5", "x@out.com", to=["bot+dana@example.com"], message_id="<o@x>")
-        args = MagicMock(id="5", confirmed=True, scope="all")
+        args = MagicMock(id="5", confirmed=True, scope="all", account=None)
         with patch("istota.skills.email.read_email", return_value=orig), \
              patch("istota.skills.email.delete_email", return_value=True) as de:
             res = cmd_delete(args)
@@ -421,7 +421,7 @@ class TestGatedOps:
 
     @pytest.mark.parametrize("cmd", [cmd_mark, cmd_delete])
     def test_a_uid_set_is_refused_before_the_scope_check(self, cmd):
-        args = MagicMock(id="1:*", confirmed=True, action="read")
+        args = MagicMock(id="1:*", confirmed=True, action="read", account=None)
         with patch("istota.skills.email._read_scoped") as scoped:
             res = cmd(args)
         assert res["status"] == "error"

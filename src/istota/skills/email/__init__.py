@@ -32,7 +32,9 @@ from istota.sandbox.host_paths import (
     user_workspace_root,
     write_resolved,
 )
-from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.sandbox import credential_shim
+from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._credref import SecretValue
 from istota.skills._hostpath import EGRESS, WRITE, host_path
 from istota.lib.untrusted import frame_untrusted
 
@@ -185,6 +187,12 @@ class EmailConfig:
     # "tls" | "starttls"; blank infers from the port (`istota.mail.connect`).
     imap_security: str = ""
     smtp_security: str = ""
+    # A connected account's host is one a user typed: resolve, check it is
+    # public (or in `private_hosts`) and connect to the checked address.
+    check_public: bool = False
+    private_hosts: tuple[str, ...] = ()
+    # Select folders with EXAMINE, so the server refuses any change.
+    readonly: bool = False
 
     @property
     def effective_smtp_user(self) -> str:
@@ -193,6 +201,15 @@ class EmailConfig:
     @property
     def effective_smtp_password(self) -> str:
         return self.smtp_password or self.imap_password
+
+
+def _reveal(password) -> str:
+    """A password as text, at the moment a connection signs in.
+
+    A connected account's passwords arrive boxed in `SecretValue`, so a
+    traceback or a `repr` of the config names them rather than printing them.
+    """
+    return password.reveal() if isinstance(password, SecretValue) else password
 
 
 def _sanitize_header(value: str) -> str:
@@ -213,6 +230,10 @@ def _get_mailbox(config: EmailConfig) -> MailBox:
     on an infinite socket wait.
     """
     _require_imap_tools()
+    if config.check_public:
+        return mail_connect.open_imap(
+            config, check_public=True, private_hosts=config.private_hosts,
+        )
     return mail_connect.open_imap(config)
 
 
@@ -225,8 +246,16 @@ def imap_session(config: EmailConfig):
     way the poller will.
     """
     with _get_mailbox(config) as mailbox:
-        mailbox.login(config.imap_user, config.imap_password)
+        mailbox.login(config.imap_user, _reveal(config.imap_password))
         yield mailbox
+
+
+def _select(mailbox, folder: str, config: EmailConfig) -> None:
+    """Open ``folder`` for reading: EXAMINE for a read-only account, else SELECT."""
+    if config.readonly:
+        mailbox.folder.set(folder, readonly=True)
+    else:
+        mailbox.folder.set(folder)
 
 
 def _generate_message_id(domain: str) -> str:
@@ -426,7 +455,7 @@ def list_emails(
     fetch_criteria = criteria if criteria is not None else "ALL"
 
     with imap_session(config) as mailbox:
-        mailbox.folder.set(folder)
+        _select(mailbox, folder, config)
         uidvalidity = _folder_uidvalidity(mailbox, folder)
 
         if oldest_first:
@@ -464,7 +493,7 @@ def read_email(
         raise ValueError("config is required")
 
     with imap_session(config) as mailbox:
-        mailbox.folder.set(folder)
+        _select(mailbox, folder, config)
 
         # Fetch specific email by UID
         for msg in mailbox.fetch(AND(uid=email_id), mark_seen=False):
@@ -538,7 +567,7 @@ def fetch_emails_full(
 
     fetch_criteria = criteria if criteria is not None else "ALL"
     with imap_session(config) as mailbox:
-        mailbox.folder.set(folder)
+        _select(mailbox, folder, config)
         return [
             _msg_to_email(msg)
             for msg in mailbox.fetch(fetch_criteria, limit=limit, reverse=True, mark_seen=False)
@@ -596,7 +625,7 @@ def download_attachments(
     downloaded = []
     written = 0
     with imap_session(config) as mailbox:
-        mailbox.folder.set(folder)
+        _select(mailbox, folder, config)
 
         for msg in mailbox.fetch(AND(uid=email_id), mark_seen=False):
             for att in msg.attachments:
@@ -1035,7 +1064,7 @@ def _send_smtp(
 
     server = _open_smtp(config)
     try:
-        server.login(config.effective_smtp_user, config.effective_smtp_password)
+        server.login(config.effective_smtp_user, _reveal(config.effective_smtp_password))
         server.send_message(msg, to_addrs=to_addrs)
     except BaseException:
         # Nothing was accepted, so the caller must see this. `close()` rather
@@ -1087,7 +1116,7 @@ def search_emails(
         raise ValueError("search query is required")
 
     with imap_session(config) as mailbox:
-        mailbox.folder.set(folder)
+        _select(mailbox, folder, config)
 
         envelopes = []
         for msg in mailbox.fetch(criteria, limit=limit, reverse=True, mark_seen=False):
@@ -1539,6 +1568,339 @@ def _config_from_env() -> EmailConfig:
     )
 
 
+# --- Connected mail accounts ----------------------------------------------
+#
+# `--account <slug>` reads a mailbox the user connected under Settings >
+# Connections. The row is read here, scoped by `ISTOTA_USER_ID`; the password
+# comes over the invocation's private credential channel, which refuses
+# anything but this user's own account, for this skill, on a turn this user
+# wrote. There is no implicit default: a bare verb is the bot box or an error.
+
+BOT_SLUG = "bot"
+
+# The verbs' closed refusal set. `reason` in the error envelope is always one
+# of these, or of `mail_connect.ERROR_REASONS`.
+ACCOUNT_REASONS = (
+    "unknown_account", "account_disabled", "bot_mailbox_unavailable",
+    "scope_not_applicable", "permission_denied", "not_supported_for_account",
+    "password_missing", "account_channel_unavailable", "not_owner_turn",
+    "mail_accounts_disabled", "folder_not_found",
+)
+
+# The channel's refusals that are the channel's own business rather than the
+# account's (wrong skill, a malformed request, an unexpected error). The model
+# can do nothing different about any of them.
+_CHANNEL_FAULTS = frozenset({
+    "skill_not_permitted", "invalid_credential_request", "mail_account_error",
+})
+
+_MAX_FOLDER_CHARS = 254
+
+
+@dataclass
+class Account:
+    """The mailbox a verb reads: the bot box, or one the user connected."""
+    slug: str
+    label: str
+    is_bot: bool
+    permission: str            # "read" | "read_send"; the bot box is "read_send"
+    default_folder: str
+    sent_folder: str           # "" = no copy
+    from_address: str
+    from_name: str
+    config: EmailConfig
+
+
+class AccountError(Exception):
+    """A verb refused before or while reaching an account; no server text."""
+
+    def __init__(self, reason: str, message: str, account: str | None = None):
+        super().__init__(message)
+        self.reason = reason
+        self.account = account
+
+
+def _bot_box_configured() -> bool:
+    # The proxy exports the bot box's env only when `[email] enabled`.
+    return bool(os.environ.get("SMTP_HOST", ""))
+
+
+def _account_settings():
+    from ...config import load_config
+    return load_config()
+
+
+def _users_accounts(app_config, user_id: str) -> list:
+    """The user's connected accounts, or none when the feature is off."""
+    if not app_config.mail_accounts.enabled:
+        return []
+    from ... import db
+    from ...mail import accounts as mail_accounts
+    with db.get_db(app_config.db_path) as conn:
+        return mail_accounts.list_accounts(conn, user_id)
+
+
+def _slug_hint(rows) -> str:
+    slugs = [row.slug for row in rows]
+    if not slugs:
+        return "You have no connected mail accounts."
+    return "Your accounts: " + ", ".join(slugs) + "."
+
+
+def _effective_permission(row, app_config) -> str:
+    if row.permission == "read_send" and app_config.mail_accounts.allow_send:
+        return "read_send"
+    return "read"
+
+
+def _shown_slug(slug: str) -> str:
+    """``slug`` if it is one, so model input is not echoed in an error as-is."""
+    from ...mail.accounts import MailAccountError, validate_slug
+    try:
+        return validate_slug(slug)
+    except MailAccountError:
+        return "that account"
+
+
+def resolve_account(slug: str | None, *, purpose: str) -> Account:
+    """The mailbox ``--account slug`` names, or `AccountError`.
+
+    ``None`` and ``"bot"`` are the bot box. Anything else is one of the
+    user's own connected accounts, its password fetched over the private
+    channel for ``purpose`` (``read`` or ``send``).
+    """
+    if slug is None or slug == BOT_SLUG:
+        if not _bot_box_configured():
+            try:
+                rows = _users_accounts(_account_settings(), _user_id())
+                hint = _slug_hint(rows)
+            except Exception as e:  # noqa: BLE001 — the hint is a courtesy
+                logger.warning("email accounts: could not list accounts: %s", type(e).__name__)
+                hint = ""
+            raise AccountError(
+                "bot_mailbox_unavailable",
+                "This instance has no bot mailbox. Name one of your own "
+                f"accounts with --account. {hint}".strip(),
+                BOT_SLUG,
+            )
+        bot = _config_from_env()
+        return Account(
+            slug=BOT_SLUG, label="Bot mailbox", is_bot=True, permission="read_send",
+            default_folder=_DEFAULT_FOLDER, sent_folder="Sent Items",
+            from_address=bot.bot_email, from_name="", config=bot,
+        )
+
+    user_id = _user_id()
+    app_config = _account_settings()
+    shown = _shown_slug(slug)
+    if not app_config.mail_accounts.enabled:
+        raise AccountError(
+            "mail_accounts_disabled",
+            "Connected mail accounts are turned off on this instance.", shown,
+        )
+    from ... import db
+    from ...mail import accounts as mail_accounts
+    with db.get_db(app_config.db_path) as conn:
+        row = mail_accounts.get_account(conn, user_id, slug)
+        rows = mail_accounts.list_accounts(conn, user_id) if row is None else []
+    if row is None:
+        raise AccountError(
+            "unknown_account",
+            f"You have no mail account called {shown}. {_slug_hint(rows)}", shown,
+        )
+    if not row.enabled:
+        raise AccountError(
+            "account_disabled",
+            f"The {slug} account is turned off. The user can turn it back on "
+            "under Settings > Connections.", slug,
+        )
+    permission = _effective_permission(row, app_config)
+    if purpose == "send" and permission != "read_send":
+        raise AccountError(
+            "permission_denied", f"The {slug} account is read-only.", slug,
+        )
+    if not row.has_imap_password:
+        raise AccountError(
+            "password_missing",
+            f"The {slug} account has no password set. The user can set it "
+            "under Settings > Connections.", slug,
+        )
+    login = _fetch_login(row.id, slug, purpose)
+
+    imap = login["imap"]
+    smtp = login["smtp"] or {}
+    config = EmailConfig(
+        imap_host=imap["host"],
+        imap_port=imap["port"],
+        imap_user=imap["username"],
+        imap_password=SecretValue(f"mail account {slug} (IMAP)", imap["password"]),
+        smtp_host=smtp.get("host", ""),
+        smtp_port=smtp.get("port", row.smtp_port),
+        smtp_user=smtp.get("username") or None,
+        smtp_password=(SecretValue(f"mail account {slug} (SMTP)", smtp["password"])
+                       if smtp else None),
+        bot_email=row.from_address,
+        imap_security=imap["security"],
+        smtp_security=smtp.get("security", row.smtp_security),
+        check_public=True,
+        private_hosts=tuple(app_config.mail_accounts.private_hosts),
+        readonly=permission == "read",
+    )
+    return Account(
+        slug=slug, label=row.label, is_bot=False, permission=permission,
+        default_folder=row.default_folder, sent_folder=row.sent_folder,
+        from_address=row.from_address, from_name=row.from_name, config=config,
+    )
+
+
+_CHANNEL_MESSAGES = {
+    "account_channel_unavailable": (
+        "The {slug} account can only be read from a task's own skill call, "
+        "through the skill proxy. It is not reachable here."
+    ),
+    "not_owner_turn": (
+        "The {slug} account cannot be read on this turn: the message being "
+        "answered was not written by the account's owner."
+    ),
+    "unknown_account": "You have no mail account called {slug}.",
+    "mail_accounts_disabled": "Connected mail accounts are turned off on this instance.",
+    "permission_denied": "The {slug} account is read-only.",
+    "password_missing": "The {slug} account has no password set.",
+}
+
+
+def _fetch_login(account_id: int, slug: str, purpose: str) -> dict:
+    """The account's sign-in from the private channel, or `AccountError`."""
+    try:
+        return credential_shim.fetch_mail_account(
+            account_id, purpose, credential_fd=os.environ.get("ISTOTA_CRED_FD"),
+        )
+    except credential_shim.ProxyError as e:
+        reason = str(e)
+    if reason in _CHANNEL_FAULTS:
+        logger.warning("email accounts: channel refused account %s: %s", account_id, reason)
+    if reason == "account_not_found":
+        reason = "unknown_account"
+    if reason not in _CHANNEL_MESSAGES:
+        reason = "account_channel_unavailable"
+    raise AccountError(reason, _CHANNEL_MESSAGES[reason].format(slug=slug), slug)
+
+
+def _user_id() -> str:
+    user_id = os.environ.get("ISTOTA_USER_ID", "") or ""
+    if not user_id:
+        raise ValueError("ISTOTA_USER_ID is not set; cannot find your mail accounts")
+    return user_id
+
+
+def _account_arg(args) -> str | None:
+    return getattr(args, "account", None)
+
+
+def _folder_arg(args, account: Account) -> str:
+    folder = getattr(args, "folder", None)
+    if folder is None:
+        return account.default_folder
+    if (not folder.strip() or len(folder) > _MAX_FOLDER_CHARS
+            or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in folder)):
+        raise ValueError("invalid --folder: give a folder name on one line")
+    return folder
+
+
+def _reading(args) -> tuple[Account, str, str]:
+    """``(account, scope, folder)`` for a read verb.
+
+    The scope belongs to the bot box, where it decides whose share of the
+    shared mailbox is shown. On a connected account every message is the
+    user's, so an explicit ``--scope`` there is refused rather than ignored.
+    """
+    slug = _account_arg(args)
+    if slug not in (None, BOT_SLUG) and getattr(args, "scope", None) is not None:
+        raise AccountError(
+            "scope_not_applicable",
+            "--scope applies to the bot mailbox only; every message in a "
+            "connected account is yours. Drop --scope.", _shown_slug(slug),
+        )
+    account = resolve_account(slug, purpose="read")
+    args.resolved_account = account
+    return account, getattr(args, "scope", None) or "all", _folder_arg(args, account)
+
+
+def _refuse_account(args, verb: str) -> None:
+    slug = _account_arg(args)
+    if slug not in (None, BOT_SLUG):
+        raise AccountError(
+            "not_supported_for_account",
+            f"'{verb}' works on the bot mailbox only, not on a connected account.",
+            _shown_slug(slug),
+        )
+
+
+def _is_mail_error(exc: BaseException) -> bool:
+    import imaplib
+    import smtplib
+    if isinstance(exc, (mail_connect.ConnectRefused, imaplib.IMAP4.error,
+                        smtplib.SMTPException, OSError)):
+        return True
+    try:
+        from imap_tools.errors import ImapToolsError
+    except ImportError:
+        return False
+    return isinstance(exc, ImapToolsError)
+
+
+_CONNECT_MESSAGES = {
+    "dns_failed": "Could not resolve the {slug} account's server.",
+    "connect_failed": "Could not reach the {slug} account's server.",
+    "tls_failed": (
+        "The {slug} account's server did not present a valid certificate for "
+        "its name, so nothing was sent."
+    ),
+    "auth_failed": (
+        "The {slug} account's server refused the sign-in. The user can check "
+        "the username and password under Settings > Connections."
+    ),
+    "timeout": "The {slug} account's server did not answer in time.",
+}
+
+
+def _exception_envelope(exc: BaseException, args) -> dict:
+    """The error envelope for whatever a verb raised.
+
+    A connected account's server errors are reclassified and never quoted:
+    the text of a refused sign-in can carry the username, or worse. The bot
+    box keeps the message it always had.
+    """
+    if isinstance(exc, AccountError):
+        return error_envelope(str(exc), reason=exc.reason, account=exc.account)
+    account = getattr(args, "resolved_account", None)
+    if isinstance(account, Account) and not account.is_bot and _is_mail_error(exc):
+        folder_error = None
+        try:
+            from imap_tools.errors import MailboxFolderSelectError
+            folder_error = MailboxFolderSelectError
+        except ImportError:
+            pass
+        if folder_error is not None and isinstance(exc, folder_error):
+            folder = _folder_arg(args, account)
+            return error_envelope(
+                f"The {account.slug} account has no folder called {folder!r}. "
+                f"`email folders --account {account.slug}` lists what it has.",
+                reason="folder_not_found", account=account.slug,
+            )
+        reason = mail_connect.classify_error(exc)
+        if isinstance(exc, mail_connect.ConnectRefused):
+            message = str(exc)
+        else:
+            message = _CONNECT_MESSAGES.get(reason, _CONNECT_MESSAGES["connect_failed"])
+            message = message.format(slug=account.slug)
+        logger.warning(
+            "email: account %s failed: %s (%s)", account.slug, reason, type(exc).__name__,
+        )
+        return error_envelope(message, reason=reason, account=account.slug)
+    return error_envelope(str(exc))
+
+
 # --- Read scoping ---------------------------------------------------------
 #
 # The moment the skill can list/search a shared box, an unscoped read exposes
@@ -1756,46 +2118,12 @@ def _mine_criteria(app_config, email_config, user_id, conn=None):
     return terms[0] if len(terms) == 1 else OR(*terms)
 
 
-def cmd_list(args):
-    """List mailbox envelopes, scoped, with snippet + has_attachments."""
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
-
-    crit_terms: dict = {}
-    since = _parse_since(getattr(args, "since", None))
-    if since:
-        crit_terms["date_gte"] = since
-    if getattr(args, "from_addr", None):
-        crit_terms["from_"] = args.from_addr
-    if getattr(args, "unread", False):
-        crit_terms["seen"] = False
-
-    # The DB connection is opened before the fetch, not after it: the thread arm
-    # of the `mine` prefilter is built from the user's own sent message ids, so
-    # the criteria need it too, not just the ownership filter downstream.
-    with _scope_conn(app_config) as conn:
-        if conn is None and _requires_verified_ownership(args.scope):
-            return _ownership_unavailable_error()
-
-        # For --scope mine, push the ownership down to the server so the fetch
-        # window isn't dominated by other users' / stranger mail on the shared box.
-        mine_crit = (
-            _mine_criteria(app_config, email_config, user_id, conn=conn)
-            if args.scope == "mine" else None
-        )
-        if mine_crit is not None:
-            criteria = AND(mine_crit, **crit_terms) if crit_terms else mine_crit
-        else:
-            criteria = AND(**crit_terms) if crit_terms else None
-
-        envelopes = list_emails(
-            folder=_DEFAULT_FOLDER, limit=args.limit, config=email_config, criteria=criteria,
-        )
-        envelopes = _scope_filter(app_config, user_id, args.scope, conn, envelopes)
-
-    return {
-        "status": "ok",
-        "scope": args.scope,
+def _listing(account: Account, folder: str, scope: str | None, envelopes) -> dict:
+    """The envelope `list`, `search` and `from-senders` answer with."""
+    result = {"status": "ok", "account": account.slug, "folder": folder}
+    if account.is_bot:
+        result["scope"] = scope
+    result.update({
         "count": len(envelopes),
         "untrusted": True,
         "notice": _UNTRUSTED_NOTICE,
@@ -1811,13 +2139,62 @@ def cmd_list(args):
             }
             for e in envelopes
         ],
-    }
+    })
+    return result
 
 
-def _read_scoped(app_config, user_id, scope, email_config, email_id):
+def cmd_list(args):
+    """List mailbox envelopes, scoped, with snippet + has_attachments."""
+    account, scope, folder = _reading(args)
+
+    crit_terms: dict = {}
+    since = _parse_since(getattr(args, "since", None))
+    if since:
+        crit_terms["date_gte"] = since
+    if getattr(args, "from_addr", None):
+        crit_terms["from_"] = args.from_addr
+    if getattr(args, "unread", False):
+        crit_terms["seen"] = False
+
+    if not account.is_bot:
+        envelopes = list_emails(
+            folder=folder, limit=args.limit, config=account.config,
+            criteria=AND(**crit_terms) if crit_terms else None,
+        )
+        return _listing(account, folder, None, envelopes)
+
+    app_config, user_id = _scope_context()
+    email_config = account.config
+    # The DB connection is opened before the fetch, not after it: the thread arm
+    # of the `mine` prefilter is built from the user's own sent message ids, so
+    # the criteria need it too, not just the ownership filter downstream.
+    with _scope_conn(app_config) as conn:
+        if conn is None and _requires_verified_ownership(scope):
+            return _ownership_unavailable_error()
+
+        # For --scope mine, push the ownership down to the server so the fetch
+        # window isn't dominated by other users' / stranger mail on the shared box.
+        mine_crit = (
+            _mine_criteria(app_config, email_config, user_id, conn=conn)
+            if scope == "mine" else None
+        )
+        if mine_crit is not None:
+            criteria = AND(mine_crit, **crit_terms) if crit_terms else mine_crit
+        else:
+            criteria = AND(**crit_terms) if crit_terms else None
+
+        envelopes = list_emails(
+            folder=folder, limit=args.limit, config=email_config, criteria=criteria,
+        )
+        envelopes = _scope_filter(app_config, user_id, scope, conn, envelopes)
+
+    return _listing(account, folder, scope, envelopes)
+
+
+def _read_scoped(app_config, user_id, scope, email_config, email_id, folder=_DEFAULT_FOLDER):
     """Fetch one email and enforce scope. Returns (email, error_dict_or_None)."""
     try:
-        email = read_email(email_id, folder=_DEFAULT_FOLDER, config=email_config)
+        email = read_email(email_id, folder=folder, config=email_config)
     except RuntimeError:
         return None, {"status": "not_found", "id": email_id}
 
@@ -1834,15 +2211,37 @@ def _read_scoped(app_config, user_id, scope, email_config, email_id):
     return email, None
 
 
+def _read_one(account: Account, scope: str, folder: str, email_id):
+    """One message from ``account``: ``(email, None)`` or ``(None, envelope)``.
+
+    The bot box checks the message is in scope; a connected account's mail is
+    all the user's.
+    """
+    if account.is_bot:
+        app_config, user_id = _scope_context()
+        email, err = _read_scoped(
+            app_config, user_id, scope, account.config, email_id, folder=folder,
+        )
+    else:
+        try:
+            email, err = read_email(email_id, folder=folder, config=account.config), None
+        except RuntimeError:
+            email, err = None, {"status": "not_found", "id": email_id}
+    if err is not None:
+        err = {**err, "account": account.slug}
+    return email, err
+
+
 def cmd_read(args):
     """Read one email (headers, plain + html, attachment manifest), scoped."""
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
-    email, err = _read_scoped(app_config, user_id, args.scope, email_config, args.id)
+    account, scope, folder = _reading(args)
+    email, err = _read_one(account, scope, folder, args.id)
     if err is not None:
         return err
     return {
         "status": "ok",
+        "account": account.slug,
+        "folder": folder,
         "untrusted": True,
         "notice": _UNTRUSTED_NOTICE,
         "email": {
@@ -1885,34 +2284,17 @@ def cmd_signup_inbox(args):
 
 def cmd_search(args):
     """Run a raw IMAP SEARCH string, scoped. Malformed criteria errors out."""
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
+    account, scope, folder = _reading(args)
     envelopes = search_emails(
-        args.query, folder=_DEFAULT_FOLDER, limit=args.limit, config=email_config,
+        args.query, folder=folder, limit=args.limit, config=account.config,
     )
-    with _scope_conn(app_config) as conn:
-        if conn is None and _requires_verified_ownership(args.scope):
-            return _ownership_unavailable_error()
-        envelopes = _scope_filter(app_config, user_id, args.scope, conn, envelopes)
-    return {
-        "status": "ok",
-        "scope": args.scope,
-        "count": len(envelopes),
-        "untrusted": True,
-        "notice": _UNTRUSTED_NOTICE,
-        "emails": [
-            {
-                "id": e.id,
-                "subject": e.subject,
-                "from": e.sender,
-                "date": e.date,
-                "is_read": e.is_read,
-                "has_attachments": e.has_attachments,
-                "snippet": _frame_untrusted(e.snippet),
-            }
-            for e in envelopes
-        ],
-    }
+    if account.is_bot:
+        app_config, user_id = _scope_context()
+        with _scope_conn(app_config) as conn:
+            if conn is None and _requires_verified_ownership(scope):
+                return _ownership_unavailable_error()
+            envelopes = _scope_filter(app_config, user_id, scope, conn, envelopes)
+    return _listing(account, folder, scope, envelopes)
 
 
 def _thread_members(root: Email, candidates: list[Email]) -> list[Email]:
@@ -1959,29 +2341,32 @@ def _thread_members(root: Email, candidates: list[Email]) -> list[Email]:
 
 def cmd_thread(args):
     """Return a message's reply chain in order, scoped."""
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
-    root, err = _read_scoped(app_config, user_id, args.scope, email_config, args.id)
+    account, scope, folder = _reading(args)
+    root, err = _read_one(account, scope, folder, args.id)
     if err is not None:
         return err
 
     candidates = fetch_emails_full(
-        folder=_DEFAULT_FOLDER, limit=args.window, config=email_config,
+        folder=folder, limit=args.window, config=account.config,
     )
     members = _thread_members(root, candidates)
 
-    # Defensive: never surface a thread member owned by another user.
-    with _scope_conn(app_config) as conn:
-        if conn is None:
-            return _ownership_unavailable_error()
-        from istota.mail.ownership import owner_in_scope, resolve_email_owner
-        members = [
-            m for m in members
-            if owner_in_scope(resolve_email_owner(app_config, conn, m), args.scope, user_id)
-        ]
+    if account.is_bot:
+        # Defensive: never surface a thread member owned by another user.
+        app_config, user_id = _scope_context()
+        with _scope_conn(app_config) as conn:
+            if conn is None:
+                return _ownership_unavailable_error()
+            from istota.mail.ownership import owner_in_scope, resolve_email_owner
+            members = [
+                m for m in members
+                if owner_in_scope(resolve_email_owner(app_config, conn, m), scope, user_id)
+            ]
 
     return {
         "status": "ok",
+        "account": account.slug,
+        "folder": folder,
         "count": len(members),
         "untrusted": True,
         "notice": _UNTRUSTED_NOTICE,
@@ -2014,15 +2399,14 @@ def cmd_attachments(args):
     the same reason (`transport/email/inbound.py`); this is that fact made
     available to the model in the turn that asked.
     """
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
-    email, err = _read_scoped(app_config, user_id, args.scope, email_config, args.id)
+    account, scope, folder = _reading(args)
+    email, err = _read_one(account, scope, folder, args.id)
     if err is not None:
         return err
 
     dest = Path(args.dest)
     saved = download_attachments(
-        args.id, target_dir=dest, folder=_DEFAULT_FOLDER, config=email_config,
+        args.id, target_dir=dest, folder=folder, config=account.config,
     )
     # Matched on the leaf, since a kept name may carry a directory component
     # and the manifest carries the name as the sender spelled it.
@@ -2033,6 +2417,7 @@ def cmd_attachments(args):
     ]
     return {
         "status": "ok",
+        "account": account.slug,
         "id": args.id,
         "dest": str(dest),
         "count": len(saved),
@@ -2062,42 +2447,25 @@ def cmd_from_senders(args):
     instead of N harness task spawns. Uses server-side SEARCH so it never
     truncates at an arbitrary head slice.
     """
-    app_config, user_id = _scope_context()
-    email_config = _config_from_env()
     senders = _split_csv(args.senders)
     if not senders:
         return {"status": "error", "error": "--senders requires at least one address"}
     since = _parse_since(getattr(args, "since", None))
+    account, scope, folder = _reading(args)
     criteria = _senders_criteria(senders, since)
     limit = args.limit if args.limit and args.limit > 0 else None
 
     envelopes = list_emails(
-        folder=_DEFAULT_FOLDER, limit=limit, config=email_config, criteria=criteria,
+        folder=folder, limit=limit, config=account.config, criteria=criteria,
     )
-    with _scope_conn(app_config) as conn:
-        if conn is None and _requires_verified_ownership(args.scope):
-            return _ownership_unavailable_error()
-        envelopes = _scope_filter(app_config, user_id, args.scope, conn, envelopes)
+    if account.is_bot:
+        app_config, user_id = _scope_context()
+        with _scope_conn(app_config) as conn:
+            if conn is None and _requires_verified_ownership(scope):
+                return _ownership_unavailable_error()
+            envelopes = _scope_filter(app_config, user_id, scope, conn, envelopes)
 
-    return {
-        "status": "ok",
-        "scope": args.scope,
-        "count": len(envelopes),
-        "untrusted": True,
-        "notice": _UNTRUSTED_NOTICE,
-        "emails": [
-            {
-                "id": e.id,
-                "subject": e.subject,
-                "from": e.sender,
-                "date": e.date,
-                "is_read": e.is_read,
-                "has_attachments": e.has_attachments,
-                "snippet": _frame_untrusted(e.snippet),
-            }
-            for e in envelopes
-        ],
-    }
+    return _listing(account, folder, scope, envelopes)
 
 
 def cmd_newsletters(args):
@@ -2113,6 +2481,45 @@ def cmd_newsletters(args):
     return cmd_from_senders(args)
 
 
+def cmd_accounts(args):
+    """The mailboxes this user's verbs can name with ``--account``.
+
+    Labels and slugs only, never a host, a username or an address: the user
+    typed the label, and the rest is not the model's to repeat.
+    """
+    listed = []
+    if _bot_box_configured():
+        listed.append({
+            "slug": BOT_SLUG, "label": "Bot mailbox", "permission": "read_send",
+            "available": True,
+        })
+    app_config = _account_settings()
+    for row in _users_accounts(app_config, _user_id()):
+        entry = {
+            "slug": row.slug,
+            "label": row.label,
+            "permission": _effective_permission(row, app_config),
+            "has_smtp": row.smtp_host is not None,
+            "default_folder": row.default_folder,
+            "available": row.enabled and row.has_imap_password,
+        }
+        if not row.enabled:
+            entry["reason"] = "account_disabled"
+        elif not row.has_imap_password:
+            entry["reason"] = "password_missing"
+        listed.append(entry)
+    return {"status": "ok", "accounts": listed}
+
+
+def cmd_folders(args):
+    """The folders a mailbox has, for ``--folder``."""
+    account = resolve_account(_account_arg(args), purpose="read")
+    args.resolved_account = account
+    with imap_session(account.config) as mailbox:
+        names = [info.name for info in mailbox.folder.list()]
+    return {"status": "ok", "account": account.slug, "folders": names}
+
+
 def cmd_output(args):
     """Write structured email output to a deferred file for the scheduler.
 
@@ -2120,6 +2527,7 @@ def cmd_output(args):
     corruption like smart-quote substitution), it calls this command. The
     scheduler reads the file and handles delivery.
     """
+    _refuse_account(args, "output")
     task_id = os.environ.get("ISTOTA_TASK_ID", "")
     deferred_dir = os.environ.get("ISTOTA_DEFERRED_DIR", "")
     if not task_id or not deferred_dir:
@@ -2695,7 +3103,7 @@ def cmd_reply(args):
     """Reply (or reply-all) to a fetched message, threaded. Scoped."""
     app_config, user_id = _scope_context()
     email_config = _config_from_env()
-    scope = getattr(args, "scope", "all")
+    scope = getattr(args, "scope", None) or "all"
     orig, err = _read_scoped(app_config, user_id, scope, email_config, args.id)
     if err is not None:
         return err
@@ -2812,6 +3220,7 @@ def cmd_mark(args):
 
 def cmd_delete(args):
     """Delete an email. Gated behind --confirmed."""
+    _refuse_account(args, "delete")
     err = _single_uid_error(args.id)
     if err is not None:
         return err
@@ -2836,10 +3245,27 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     def _add_scope(p):
+        # Default None rather than "all", so an explicit --scope alongside a
+        # connected account can be told apart and refused.
         p.add_argument(
-            "--scope", choices=_SCOPES, default="all",
-            help="mine = your mail; shared = unowned base-box mail; all = both (default)",
+            "--scope", choices=_SCOPES, default=None,
+            help="Bot mailbox only. mine = your mail; shared = unowned base-box "
+                 "mail; all = both (default)",
         )
+
+    def _add_account(p):
+        p.add_argument(
+            "--account", default=None,
+            help="A mail account you connected (see `accounts`); default the bot mailbox",
+        )
+
+    def _add_folder(p):
+        p.add_argument("--folder", default=None, help="Folder to read; default the account's own")
+
+    def _add_reading(p):
+        _add_scope(p)
+        _add_account(p)
+        _add_folder(p)
 
     # list
     p_list = sub.add_parser("list", help="List mailbox envelopes (scoped)")
@@ -2847,12 +3273,12 @@ def build_parser():
     p_list.add_argument("--since", help="Only mail on/after this date (YYYY-MM-DD or Nd)")
     p_list.add_argument("--from", dest="from_addr", help="Only mail from this address (substring)")
     p_list.add_argument("--unread", action="store_true", help="Only unread mail")
-    _add_scope(p_list)
+    _add_reading(p_list)
 
     # read
     p_read = sub.add_parser("read", help="Read one email (headers, plain+html, attachments)")
     p_read.add_argument("id", help="Email UID")
-    _add_scope(p_read)
+    _add_reading(p_read)
 
     p_signup = sub.add_parser("signup-inbox", help="Read filed signup mail for your own credential")
     p_signup.add_argument("--slug", required=True)
@@ -2861,13 +3287,13 @@ def build_parser():
     p_search = sub.add_parser("search", help="Raw IMAP SEARCH (scoped)")
     p_search.add_argument("query", help="Raw IMAP SEARCH criteria string")
     p_search.add_argument("--limit", type=int, default=20, help="Max envelopes to return")
-    _add_scope(p_search)
+    _add_reading(p_search)
 
     # thread
     p_thread = sub.add_parser("thread", help="A message's reply chain, in order (scoped)")
     p_thread.add_argument("id", help="Email UID of any message in the thread")
     p_thread.add_argument("--window", type=int, default=200, help="How many recent messages to scan")
-    _add_scope(p_thread)
+    _add_reading(p_thread)
 
     # attachments
     p_att = sub.add_parser("attachments", help="Download an email's attachments (scoped)")
@@ -2879,21 +3305,21 @@ def build_parser():
         p_att, "--dest", mode=WRITE, required=True,
         help="Directory to save attachments into",
     )
-    _add_scope(p_att)
+    _add_reading(p_att)
 
     # from-senders
     p_fs = sub.add_parser("from-senders", help="Batch-fetch mail from named senders (server-side, scoped)")
     p_fs.add_argument("--senders", required=True, help="Comma-separated sender addresses")
     p_fs.add_argument("--since", help="Only mail on/after this date (YYYY-MM-DD or Nd)")
     p_fs.add_argument("--limit", type=int, default=0, help="Max envelopes (0 = all matching)")
-    _add_scope(p_fs)
+    _add_reading(p_fs)
 
     # newsletters
     p_nl = sub.add_parser("newsletters", help="Fetch newsletter mail from required --sources (scoped)")
     p_nl.add_argument("--sources", required=True, help="Comma-separated sender addresses or domains")
     p_nl.add_argument("--since", help="Only mail on/after this date (YYYY-MM-DD or Nd)")
     p_nl.add_argument("--limit", type=int, default=0, help="Max envelopes (0 = all matching)")
-    _add_scope(p_nl)
+    _add_reading(p_nl)
 
     # send
     p_send = sub.add_parser("send", help="Send an email")
@@ -2931,6 +3357,11 @@ def build_parser():
             p_reply.add_argument("--all", action="store_true", help="Reply to all recipients")
         _add_scope(p_reply)
 
+    sub.add_parser("accounts", help="The mailboxes --account can name")
+
+    p_folders = sub.add_parser("folders", help="The folders a mailbox has")
+    _add_account(p_folders)
+
     # mark (gated)
     p_mark = sub.add_parser("mark", help="Flag an email read/unread/flagged (requires --confirmed)")
     p_mark.add_argument("id", help="Email UID")
@@ -2941,6 +3372,7 @@ def build_parser():
     p_del = sub.add_parser("delete", help="Delete an email (requires --confirmed)")
     p_del.add_argument("id", help="Email UID")
     p_del.add_argument("--confirmed", action="store_true", help="Confirm this destructive action")
+    _add_account(p_del)
 
     # output — write email response for scheduler delivery (replaces inline JSON)
     p_output = sub.add_parser("output", help="Write email response for scheduler delivery")
@@ -2951,6 +3383,7 @@ def build_parser():
         help="Read the body from a file in your own workspace",
     )
     p_output.add_argument("--html", action="store_true", help="Send as HTML email")
+    _add_account(p_output)
 
     return parser
 
@@ -2968,6 +3401,8 @@ def main(argv=None):
         "attachments": cmd_attachments,
         "from-senders": cmd_from_senders,
         "newsletters": cmd_newsletters,
+        "accounts": cmd_accounts,
+        "folders": cmd_folders,
         "send": cmd_send,
         "reply": cmd_reply,
         "reply-all": cmd_reply,
@@ -2976,7 +3411,9 @@ def main(argv=None):
         "output": cmd_output,
     }
 
-    run_skill_cli(commands, args)
+    run_skill_cli(
+        commands, args, on_exception=lambda exc: _exception_envelope(exc, args),
+    )
 
 
 if __name__ == "__main__":
