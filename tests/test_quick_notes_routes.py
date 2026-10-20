@@ -170,6 +170,47 @@ async def test_a_failed_write_frees_the_key(client, config, home, monkeypatch):
     assert (home / "Notes/Inbox/Buy milk.md").read_text() == "Buy milk"
 
 
+async def test_a_failure_before_the_write_leaves_no_claim(client, config, home, monkeypatch):
+    real_zone = quick_notes.user_zone
+    calls = 0
+
+    def zone_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("timezone lookup failed")
+        return real_zone(*args, **kwargs)
+
+    monkeypatch.setattr(quick_notes, "user_zone", zone_once)
+    body = {"content": "Buy milk", "client_note_id": "note-key-0005"}
+    with pytest.raises(RuntimeError):
+        await client.post("/workspace/notes", json=body)
+    assert _keys(config) == []
+    response = await client.post("/workspace/notes", json=body)
+    assert response.status_code == 201
+    assert (home / "Notes/Inbox/Buy milk.md").read_text() == "Buy milk"
+
+
+@pytest.mark.parametrize("age,expected", [("-6 minutes", 201), ("-4 minutes", 409)])
+async def test_a_stale_pathless_claim_is_reclaimed(client, config, home, age, expected):
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO quick_note_keys (user_id, client_note_id, created_at)"
+            " VALUES ('alice', 'note-key-0006', datetime('now', ?))", (age,),
+        )
+    body = {"content": "Buy milk", "client_note_id": "note-key-0006"}
+    response = await client.post("/workspace/notes", json=body)
+    assert response.status_code == expected
+    if expected == 201:
+        assert _keys(config) == [{"client_note_id": "note-key-0006", "path": "Notes/Inbox/Buy milk.md"}]
+        replay = await client.post("/workspace/notes", json=body)
+        assert replay.status_code == 200
+        assert not (home / "Notes/Inbox/Buy milk (2).md").exists()
+    else:
+        assert response.json()["code"] == "in_progress"
+        assert not (home / "Notes").exists()
+
+
 async def test_keys_older_than_thirty_days_are_pruned(client, config):
     with db.get_db(config.db_path) as conn:
         conn.execute(

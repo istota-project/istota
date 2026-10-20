@@ -4,8 +4,10 @@ A note is created once, named from its first line (`derive_name`), and never
 renamed. `create` claims the client's `client_note_id` in `quick_note_keys`
 before it writes, so a retry after a lost response replays the first answer
 instead of writing a second file, and a concurrent retry is told the first one
-is still in progress. A write that fails frees the key, so the claim cannot
-strand a note.
+is still in progress. Everything that can fail before the write runs before
+the claim, and a write that fails frees the key. A claim still without a path
+after `CLAIM_STALE_AFTER` (the process died mid-create) is taken over by the
+next retry rather than answering `in_progress` until it is pruned.
 
 `save` replaces a note the web editor created, and only inside the current
 quick notes folder. It never creates a folder or a file: a note moved or
@@ -46,6 +48,8 @@ _WORD_BOUNDARY_WINDOW = 15
 FOLDER_MAX_PARTS = 8
 FOLDER_MAX_CHARS = 512
 KEY_RETENTION = "-30 days"
+# Far longer than any write takes, so only a claim whose process died is old.
+CLAIM_STALE_AFTER = "-5 minutes"
 
 _CLIENT_NOTE_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
 # Block markers at the start of a line, peeled one at a time so `> - [ ] x`
@@ -240,7 +244,9 @@ def _claim(conn: sqlite3.Connection, user_id: str, client_note_id: str | None) -
 
     None means this request holds the claim (or has no key) and must write the
     note. Committed at once, so a concurrent retry on another connection sees
-    the claim; a key still without a path is that retry's `in_progress`.
+    the claim; a key still without a path is that retry's `in_progress`,
+    unless it is stale. Taking a stale claim over is one UPDATE that renews
+    `created_at`, so of two retries racing for it only one wins.
     """
     conn.execute(
         "DELETE FROM quick_note_keys WHERE created_at < datetime('now', ?)", (KEY_RETENTION,),
@@ -251,6 +257,13 @@ def _claim(conn: sqlite3.Connection, user_id: str, client_note_id: str | None) -
             "INSERT OR IGNORE INTO quick_note_keys (user_id, client_note_id) VALUES (?, ?)",
             (user_id, client_note_id),
         ).rowcount > 0
+        if not claimed:
+            claimed = conn.execute(
+                """UPDATE quick_note_keys SET created_at = datetime('now')
+                    WHERE user_id = ? AND client_note_id = ? AND path IS NULL
+                    AND created_at < datetime('now', ?)""",
+                (user_id, client_note_id, CLAIM_STALE_AFTER),
+            ).rowcount > 0
     conn.commit()
     if claimed:
         return None
@@ -280,6 +293,8 @@ def create(
         not isinstance(client_note_id, str) or not _CLIENT_NOTE_ID.fullmatch(client_note_id)
     ):
         raise QuickNoteError(400, "invalid_client_note_id", "Invalid client_note_id.")
+    # Before the claim: nothing between the claim and the `try` below may fail.
+    stem = derive_name(content, user_zone(config, user_id, conn=conn), datetime.now(timezone.utc))
     delivered = _claim(conn, user_id, client_note_id)
     if delivered is not None:
         # Delivered before. A note deleted or moved since keeps its path and
@@ -287,7 +302,6 @@ def create(
         stored = delivered.split("/")
         return CreateResult(delivered, stored[-1], _current_revision(root, stored), False)
 
-    stem = derive_name(content, user_zone(config, user_id, conn=conn), datetime.now(timezone.utc))
     try:
         try:
             os.close(open_or_create_dirs(root, list(parts)))
