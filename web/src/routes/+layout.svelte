@@ -450,6 +450,7 @@
     stopNavUnreadPoll();
     stopPushBadge?.();
     stopPushOpen?.();
+    stopActionOpen?.();
   });
 
   function isActive(path: string): boolean {

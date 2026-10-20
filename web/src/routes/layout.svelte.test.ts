@@ -652,6 +652,25 @@ describe('native push lifecycle', () => {
     window.dispatchEvent(new Event('istotaPushOpen'));
     expect(plugin.consumePendingOpen).toHaveBeenCalledTimes(2);
   });
+  it('releases the native action open listener at unmount', async () => {
+    useAgent('IstotaApp/0.13.0');
+    const actions = {
+      consumePendingOpen: vi.fn(async () => ({ open: null })),
+      status: vi.fn(async () => ({ deviceId: 'phone', scopes: [], tokenRejected: false })),
+      provision: vi.fn(async () => {}),
+      forget: vi.fn(async () => {}),
+    };
+    vi.stubGlobal('Capacitor', { Plugins: { IstotaActions: actions } });
+    getMe.mockResolvedValue(person());
+    const mounted = render(Layout, { children });
+    await screen.findByText('Alice');
+    await waitFor(() => expect(actions.consumePendingOpen).toHaveBeenCalledTimes(1));
+    window.dispatchEvent(new Event('istotaActionOpen'));
+    expect(actions.consumePendingOpen).toHaveBeenCalledTimes(2);
+    mounted.unmount();
+    window.dispatchEvent(new Event('istotaActionOpen'));
+    expect(actions.consumePendingOpen).toHaveBeenCalledTimes(2);
+  });
   it('checks the push enrollment only after live authentication', async () => {
     const plugin = installPush();
     useAgent('IstotaApp/0.12.0');
