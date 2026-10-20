@@ -62,7 +62,6 @@
       border: none;
       border-radius: var(--radius-card);
       color: var(--text-muted);
-      touch-action: manipulation;
       /* The button box is padding around a small glyph, so both margins are
 			   negative: the leading one puts the *glyph* on the bar's left edge rather
 			   than the box, and the trailing one eats most of the bar's gap so the

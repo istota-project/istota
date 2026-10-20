@@ -110,7 +110,6 @@
   font: inherit;
   cursor: pointer;
   border-radius: var(--radius-pill);
-  touch-action: manipulation;
   transition:
     color var(--transition-fast),
     background var(--transition-fast);

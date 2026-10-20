@@ -122,9 +122,6 @@
        preference while the type around it grows. Two of the four hand-rolled
        icon buttons this replaces were missing it. */
     font: inherit;
-    /* Opts out of double-tap-to-zoom, which is what makes iOS hold a tap open
-       and then deliver it as a delayed synthesized click. */
-    touch-action: manipulation;
     transition:
       color var(--transition-fast),
       background var(--transition-fast);
