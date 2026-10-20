@@ -615,3 +615,47 @@ class TestAudienceEpochs:
                 (room,),
             ).fetchone()[0] == 0
             assert not db.front_stage_cutoff(conn, room)
+
+
+# ---------------------------------------------------------------------------
+# A group room is never anyone's private room
+# ---------------------------------------------------------------------------
+
+
+class TestAGroupRoomIsNeverPrivate:
+    """A one-member group room is still read by every future member, so
+    nothing that delivers to "the user's own room" may pick it."""
+
+    @pytest.fixture
+    def solo(self, config):
+        with db.get_db(config.db_path) as conn:
+            service.create_group(conn, config, "solo", actor_id="admin", is_admin=True,
+                                 expected_revision=0, owners=["carol"],
+                                 display_name="Solo", kind="team")
+            token = create_group_room(conn, "carol", "solo", "Plans",
+                                      "req-00000009")["room"].token
+        return token
+
+    def test_the_default_room_and_the_private_predicate_refuse_it(self, config, solo):
+        with db.get_db(config.db_path) as conn:
+            assert db.list_room_members(conn, solo) == ["carol"]
+            handle = db.default_web_room(conn, "carol")
+            assert handle is None or handle.token != solo
+            assert not db.is_private_room_of(conn, solo, "carol")
+            assert not db.is_private_room_of(conn, solo, "carol", allow_phone=True)
+
+    def test_a_private_general_is_still_minted(self, config, solo):
+        with db.get_db(config.db_path) as conn:
+            handle = db.ensure_default_web_chat_room(conn, "carol")
+            assert handle.token != solo
+            assert db.is_private_room_of(conn, handle.token, "carol")
+            assert db.default_web_room(conn, "carol").token == handle.token
+
+    def test_private_replies_and_relay_questions_skip_it(self, config, solo):
+        from istota.relay.destinations import RequestError, _room
+        from istota.rooms.private_replies import private_room_for
+
+        with db.get_db(config.db_path) as conn:
+            assert private_room_for(conn, config, "carol", solo) is None
+            with pytest.raises(RequestError):
+                _room(conn, config, "carol")

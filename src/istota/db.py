@@ -4506,7 +4506,7 @@ def _usable_as_delivery_default(
 ) -> bool:
     """Whether ``token`` may be ``user_id``'s default delivery room.
 
-    Six exclusions, each about the room being written to unprompted. Three of
+    Seven exclusions, each about the room being written to unprompted. Three of
     them are `visible_room`'s — the room exists, is not archived, and the user
     has not hidden it — and are shared with the picker. The others are the
     ones that separate an *implicit* default from a room a user may pin:
@@ -4525,10 +4525,13 @@ def _usable_as_delivery_default(
       user reads only from web and answers only by text. Any phone binding
       excludes, not only a private one: a WhatsApp group is shared and the
       arm below refuses it anyway.
+    - **A group-owned room.** Its history is read by every future member of
+      the group, so a one-member group room is not private either.
     """
     if token in channels:
         return False
-    if visible_room(conn, user_id, token) is None:
+    room = visible_room(conn, user_id, token)
+    if room is None or is_group_owned_room(room):
         return False
     if room_has_phone_binding(conn, token):
         return False
@@ -6269,10 +6272,11 @@ def is_private_room_of(
     default-room destination and the private-reply resolver. Not archived,
     members exactly ``[user_id]``, and no SMS or WhatsApp binding unless
     ``allow_phone``: a phone room is a read-only transcript in web, so only a
-    caller that sends on the phone surface itself may choose one.
+    caller that sends on the phone surface itself may choose one. Never a
+    group-owned room, whatever its headcount: every future member reads it.
     """
     room = get_room(conn, token) if token else None
-    if room is None or room.archived:
+    if room is None or room.archived or is_group_owned_room(room):
         return False
     if list_room_members(conn, room.token) != [user_id]:
         return False
