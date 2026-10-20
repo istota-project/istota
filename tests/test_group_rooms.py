@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from istota import db
-from istota.groups.rooms import group_room_access
 from istota.rooms import policy as room_policy
 from istota.rooms import scopes as room_scopes
 
@@ -186,48 +185,71 @@ class TestTheMigration:
 # ---------------------------------------------------------------------------
 
 
-class TestGroupRoomAccess:
+class TestGroupRoomAdmits:
+    """`db.group_room_admits`, the one Python spelling of the admission rule."""
+
     def test_a_current_member_reaches_a_group_owned_room(self, conn):
         token = _room(conn, "alice", "bob", group="fam", managed=True)
-        assert group_room_access(conn, token, "alice")
-        assert group_room_access(conn, token, "bob")
+        assert db.group_room_admits(conn, token, "alice")
+        assert db.group_room_admits(conn, token, "bob")
 
     def test_someone_outside_the_group_does_not(self, conn):
         token = _room(conn, "alice", "bob", group="fam", managed=True)
         # Even with a room roster row: membership follows the group.
         db.add_web_room_member(conn, token, "carol")
-        assert not group_room_access(conn, token, "carol")
+        assert not db.group_room_admits(conn, token, "carol")
 
     def test_a_removed_member_does_not(self, conn):
         token = _room(conn, "alice", "bob", group="fam", managed=True)
         db.end_group_membership(conn, "fam", "bob", ended_by="alice")
-        assert not group_room_access(conn, token, "bob")
-        assert group_room_access(conn, token, "alice")
+        assert not db.group_room_admits(conn, token, "bob")
+        assert db.group_room_admits(conn, token, "alice")
 
     def test_an_archived_group_suspends_its_rooms(self, conn):
         token = _room(conn, "alice", "bob", group="fam", managed=True)
         db.archive_group(conn, "fam")
-        assert not group_room_access(conn, token, "alice")
+        assert not db.group_room_admits(conn, token, "alice")
 
     def test_a_disabled_identity_does_not(self, conn):
         token = _room(conn, "alice", "bob", group="fam", managed=True)
         conn.execute("INSERT INTO web_auth_identities (user_id, email, disabled) "
                      "VALUES ('bob', 'bob@example.com', 1)")
-        assert not group_room_access(conn, token, "bob")
+        assert not db.group_room_admits(conn, token, "bob")
 
     def test_a_broken_group_owned_row_fails_closed(self, conn):
         token = _room(conn, "alice", "bob", group="fam", managed=True)
         conn.execute("UPDATE rooms SET group_id = NULL WHERE token = ?", (token,))
-        assert not group_room_access(conn, token, "alice")
+        assert not db.group_room_admits(conn, token, "alice")
 
-    def test_an_unknown_room_is_refused(self, conn):
-        assert not group_room_access(conn, "no-such-room", "alice")
+    def test_an_unknown_or_missing_room_is_left_to_the_roster(self, conn):
+        # The group refuses nobody it does not own; the roster refuses them.
+        assert db.group_room_admits(conn, "no-such-room", "alice")
+        assert not db.is_room_member(conn, "no-such-room", "alice")
+        assert db.group_room_admits(conn, None, "alice")
+        assert db.group_room_admits(conn, "", "alice")
 
     def test_a_linked_room_is_left_to_its_own_roster(self, conn):
         # The link filters memory; it never decides who is in the room.
         token = _room(conn, "alice", "carol", group="fam")
-        assert group_room_access(conn, token, "carol")
-        assert group_room_access(conn, _room(conn, "carol"), "carol")
+        assert db.group_room_admits(conn, token, "carol")
+        assert db.group_room_admits(conn, _room(conn, "carol"), "carol")
+
+    def test_task_delivery_delegates_to_it(self, conn):
+        from istota.groups.rooms import task_delivery_refused
+
+        token = _room(conn, "alice", "bob", group="fam", managed=True)
+        assert not task_delivery_refused(conn, _task(token, "bob"))
+        db.end_group_membership(conn, "fam", "bob", ended_by="alice")
+        assert task_delivery_refused(conn, _task(token, "bob"))
+        assert not task_delivery_refused(conn, _task(None, "bob"))
+        assert not task_delivery_refused(conn, _task(_room(conn, "bob"), "bob"))
+
+    def test_the_retired_helpers_are_gone(self):
+        # ISSUE-814: three near-copies differed on unknown and missing tokens.
+        import istota.groups.rooms as group_rooms
+
+        assert not hasattr(group_rooms, "group_room_access")
+        assert not hasattr(group_rooms, "group_room_refuses")
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +556,7 @@ class TestReconciliation:
             assert "carol" in _present(conn, token)
             # The group add acknowledged the history: no epoch splits it off.
             assert _epochs(conn, token) == 0
-            assert group_room_access(conn, token, "carol")
+            assert db.group_room_admits(conn, token, "carol")
 
     def test_a_removed_member_loses_membership_presence_and_handle(self, team):
         with db.get_db(team.db_path) as conn:

@@ -7095,17 +7095,16 @@ def _own_handle(conn, username: str, room_id: int):
     """``username``'s own `web_chat_rooms` handle for ``room_id``, or None.
 
     The handle half of the room-access resolver: the handle is theirs, and a
-    group-owned room's group still lets them in (`group_room_refuses`). A
+    group-owned room's group still lets them in (`db.group_room_admits`). A
     handle outlives a group archive, so holding one is not enough; every route
     that acts through a handle asks this rather than reading the row itself.
     """
     from istota import db
-    from istota.groups.rooms import group_room_refuses
 
     handle = db.get_web_chat_room(conn, room_id)
     if handle is None or handle.user_id != username:
         return None
-    if group_room_refuses(conn, handle.token, username):
+    if not db.group_room_admits(conn, handle.token, username):
         return None
     return handle
 

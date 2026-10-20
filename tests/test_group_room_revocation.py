@@ -28,7 +28,7 @@ import pytest
 from istota import db
 from istota.config import Config, SiteConfig, UserConfig, WebChatConfig, WebConfig
 from istota.groups import service
-from istota.groups.rooms import create_group_room, group_room_access
+from istota.groups.rooms import create_group_room
 
 try:
     import authlib  # noqa: F401
@@ -174,7 +174,7 @@ class TestTheResolverAsksTheGroup:
         with db.get_db(config.db_path) as conn:
             db.add_room_member(conn, room, "carol")
             for user in ("alice", "bob", "carol"):
-                assert db.is_room_member(conn, room, user) == group_room_access(conn, room, user)
+                assert db.is_room_member(conn, room, user) == db.group_room_admits(conn, room, user)
 
     def test_a_linked_room_of_an_archived_group_keeps_its_roster(self, config, room):
         with db.get_db(config.db_path) as conn:

@@ -38,46 +38,6 @@ DisplayName = Callable[[str], "str | None"]
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
 
 
-def _canonical_room(conn: sqlite3.Connection, room_token: str) -> db.Room | None:
-    token = db._canonical_room_token(conn, room_token, cross_surface=False)
-    return db.get_room(conn, token)
-
-
-def group_room_access(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
-    """Whether the group relationship lets ``user_id`` into this room.
-
-    For a group-owned room: a current member of its live linked group, which
-    `db.is_group_member` decides (an ended membership, an archived group and a
-    disabled identity all refuse). A group-owned row with no live group fails
-    closed. For any other room the answer is True, because the room's own
-    roster decides and the group link never does. An unknown room is False.
-
-    This is the backstop behind roster synchronization. The room-access
-    resolver asks it for every reader: `db.is_room_member` and
-    `db.list_member_rooms` carry its rule in SQL (`db.group_room_admits_sql`),
-    which is the one spelling of it.
-    """
-    room = _canonical_room(conn, room_token)
-    if room is None:
-        return False
-    return db.group_room_admits(conn, room.token, user_id)
-
-
-def group_room_refuses(conn: sqlite3.Connection, room_token: str | None, user_id: str) -> bool:
-    """Whether ``room_token`` names a group-owned room that refuses ``user_id``.
-
-    The question for a caller holding something already addressed to a room,
-    a chat handle or a task: an unknown token or an ordinary room is not
-    refused here, since its roster or the caller's own checks decide it.
-    """
-    if not room_token:
-        return False
-    room = _canonical_room(conn, room_token)
-    if room is None or not db.is_group_owned_room(room):
-        return False
-    return not db.group_room_admits(conn, room.token, user_id)
-
-
 def task_delivery_refused(conn: sqlite3.Connection, task: db.Task) -> bool:
     """Whether a task's output may no longer reach its room: the task is in a
     group-owned room and its author is no longer let in.
@@ -85,8 +45,12 @@ def task_delivery_refused(conn: sqlite3.Connection, task: db.Task) -> bool:
     Read from the live group on every call, so it holds from the commit that
     removed the author (or archived the group) whether or not the task's
     cancellation has landed yet, and a crash cannot bring delivery back.
+
+    Delegates to `db.group_room_admits`, the one Python spelling of the
+    admission rule; a task with no room, or in a room the group does not own,
+    is never refused here.
     """
-    return group_room_refuses(conn, task.conversation_token, task.user_id)
+    return not db.group_room_admits(conn, task.conversation_token, task.user_id)
 
 
 #: The task states a removal or an archive stops. A park is answered nowhere
@@ -264,7 +228,7 @@ def reconcile_group_room_members(
     goes through `db.add_web_room_member` and `db.drop_web_room_member`, so a
     membership, a present principal and a handle come and go together. An
     archived or missing group is left alone: archiving suspends its rooms
-    (`group_room_access` refuses everyone) without emptying them.
+    (`db.group_room_admits` refuses everyone) without emptying them.
 
     A removed member's unfinished tasks in the room are stopped with them
     (`stop_room_tasks`); the pids to signal after the commit ride the entry.
