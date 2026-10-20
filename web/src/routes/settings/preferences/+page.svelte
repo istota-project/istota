@@ -46,7 +46,7 @@
     profile.disabled_modules = [...next];
   }
 
-  // The app's Device settings (0.12.0). The nav menu opens the same screen, and
+  // The app's Device settings (0.12.0). Settings' Device entry opens the same screen, and
   // the app icon's quick action is the route that works when this page cannot
   // load. The card is titled with the device it describes.
   const appSettingsOffered = appConnectionAvailable();
