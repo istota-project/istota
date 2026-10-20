@@ -3346,6 +3346,40 @@ let mockLocationDeviceNextId = 2;
 const MOCK_LOCATION_DEVICE_CAP = 20;
 const MOCK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Device tokens for native actions, as `GET /devices` lists them. */
+const mockDeviceTokens: Array<{
+  id: number;
+  device_id: string;
+  label: string | null;
+  scopes: string[];
+  token_tail: string;
+  created_at: string;
+  last_used_at: string | null;
+}> = [
+  {
+    id: 1,
+    device_id: '6F9619FF-8B86-D011-B42D-00C04FC964FF',
+    label: 'iPhone',
+    scopes: ['notes'],
+    token_tail: 'q7Lm',
+    created_at: new Date(Date.now() - 3 * 86400_000).toISOString(),
+    last_used_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+  },
+];
+
+const deviceTokensHandler: MockHandler = ({ url, method }) => {
+  const path = url.split('?')[0];
+  if (path === '/istota/api/devices' && method === 'GET') return { devices: mockDeviceTokens };
+  const m = path.match(/^\/istota\/api\/devices\/(\d+)$/);
+  if (m && method === 'DELETE') {
+    const index = mockDeviceTokens.findIndex((d) => d.id === Number(m[1]));
+    if (index < 0) return { __status: 404, detail: 'device not found' };
+    mockDeviceTokens.splice(index, 1);
+    return { ok: true };
+  }
+  return undefined;
+};
+
 const locationDevicesHandler: MockHandler = ({ url, method, body }) => {
   const path = url.split('?')[0];
   if (!path.startsWith('/istota/api/location/devices')) return undefined;
@@ -7735,6 +7769,7 @@ const handlers: MockHandler[] = [
       briefing_email_html: true,
       timezone_follow_location: false,
       external_turn_display: 'collapsed',
+      quick_notes_folder: null,
       relay_delivery: '',
       relay_delivery_options: [
         { value: '', available: true },
@@ -9222,6 +9257,7 @@ const handlers: MockHandler[] = [
     };
   },
   locationDevicesHandler,
+  deviceTokensHandler,
 
   ({ url }) => (url.startsWith('/istota/api/location/current') ? mockCurrent : undefined),
 

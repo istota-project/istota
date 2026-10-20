@@ -80,6 +80,7 @@
         next.push_chat_alerts = next.push_chat_alerts ?? 'alerts';
         next.push_preview = next.push_preview ?? true;
         next.push_inbox_categories = next.push_inbox_categories ?? {};
+        next.quick_notes_folder = next.quick_notes_folder ?? null;
       }
       profileDraft.reset(next);
       allModules = modResp.modules;
@@ -115,6 +116,7 @@
         push_inbox_categories: profile.push_inbox_categories,
         external_turn_display: profile.external_turn_display || 'collapsed',
         relay_delivery: profile.relay_delivery || '',
+        quick_notes_folder: profile.quick_notes_folder ?? null,
       };
       // Send only what changed. The server writes each key it is given, so
       // sending the whole form makes an untouched field overwrite whatever set
