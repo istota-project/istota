@@ -1,6 +1,8 @@
 <script lang="ts">
   import { invalidateNotificationCounts } from '$lib/stores/notifications';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { getProfile, getModules, updateProfile, type UserProfile } from '$lib/api';
@@ -26,6 +28,11 @@
   let { children } = $props();
 
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
 
   // The profile is held here so Account, Preferences, Notifications and
   // Delivery share one draft and one save.
@@ -254,7 +261,7 @@
           active: sectionActive(section.href),
         }))}
         label="Settings sections"
-        onnavigate={() => (sidebarOpen = false)}
+        onnavigate={(item, event) => drawer.link(event, () => void goto(item.href))}
       />
       {#if appSettingsOffered}
         {#snippet deviceIcon()}<Icon icon={Smartphone} size="sm" />{/snippet}

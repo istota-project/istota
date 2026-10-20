@@ -341,9 +341,14 @@
      lengths: those are a rhythm, not a response to input. */
   --duration-fast: 0.15s;
   --duration-slow: 0.3s;
+  /* A panel leaving: long enough to be seen going, quicker than it came. */
+  --duration-exit: 0.2s;
   --ease-standard: ease;
   /* Fast out, long settle: a panel sliding in from an edge (the sidebar drawer). */
   --ease-decelerate: cubic-bezier(0.32, 0.72, 0, 1);
+  /* Its exit: starts at once and gathers speed, so the travel is spread over
+     the whole duration instead of spent in the first few frames. */
+  --ease-accelerate: cubic-bezier(0.4, 0, 1, 1);
   --transition-fast: var(--duration-fast) var(--ease-standard);
 
   /* A disabled control, drawn at reduced strength rather than recoloured, so

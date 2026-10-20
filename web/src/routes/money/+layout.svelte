@@ -8,7 +8,8 @@
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { Collapsible } from 'bits-ui';
   import { getLedgers, checkLedger, AuthError } from '$lib/money/api';
   import { forgetLastUserId } from '$lib/offline/lastUser';
@@ -32,6 +33,11 @@
   let { children } = $props();
 
   let settingsSidebarOpen = $state(false);
+  const settingsDrawer = createDrawerClose(
+    () => settingsSidebarOpen,
+    () => (settingsSidebarOpen = false),
+  );
+  onDestroy(settingsDrawer.cancel);
 
   let loading = $state(true);
   let error = $state('');
@@ -201,7 +207,7 @@
               active: settingsSectionActive(section.href),
             }))}
             label="Money settings sections"
-            onnavigate={() => (settingsSidebarOpen = false)}
+            onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
           />
         </Sidebar>
       {/if}
