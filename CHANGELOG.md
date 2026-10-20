@@ -117,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opening a menu on an iPhone no longer draws a blue outline around it.
 - A dropdown stretched to fill its row keeps its arrow at the right edge, rather than right after the selected text.
 - Tapping a chat notification in the iOS app opens the room the message came from. It used to open the chat page on whatever room was last shown, including when the app was already on that page.
 - After the iOS app is upgraded to 0.12.0 in place, tapping a notification works again. The phone's notification registration from the older app had no connection binding, so the app ignored every tap; the page now refreshes that registration on its own when notification permission is already granted.
