@@ -581,7 +581,7 @@
       {/if}
 
       {#if pageNotice}
-        <p class="banner warn" role="status">{pageNotice}</p>
+        <Alert appearance="inline" variant="warn" role="status">{pageNotice}</Alert>
       {/if}
 
       {#if requestId !== null}

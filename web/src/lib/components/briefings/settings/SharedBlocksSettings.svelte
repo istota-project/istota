@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { X } from '@lucide/svelte';
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
@@ -9,6 +10,7 @@
     type SharedBlock,
   } from '$lib/api';
   import {
+    Alert,
     Button,
     ConfirmDialog,
     EmptyState,
@@ -26,6 +28,7 @@
     Badge,
     Timestamp,
   } from '$lib/components/ui';
+  import { notifyError, notifyWarning } from '$lib/stores/notices';
   import SourceConfigFields from '../SourceConfigFields.svelte';
   import { sourceKindLabel, uniqueName } from './briefingSettings';
 
@@ -63,6 +66,12 @@
   let sharedError = $state('');
   let sharedSaving = $state(false);
   let sharedRunning = $state<Set<string>>(new Set());
+  // An outcome landing after unmount is dropped (ISSUE-803): its notice would
+  // land on whatever page the user went to, and the daemon finishes the run.
+  let active = true;
+  onMount(() => () => {
+    active = false;
+  });
   const confirmSharedDelete = createConfirm<string>();
 
   const sharedKindOptions: SelectOption[] = $derived(
@@ -215,27 +224,32 @@
     sharedRunning = new Set(sharedRunning).add(name);
     try {
       const asked = await runSharedBlock(name);
+      if (!active) return;
       const until = Date.now() + SHARED_RUN_WAIT_MS;
       while (Date.now() < until) {
         await new Promise((resolve) => setTimeout(resolve, SHARED_RUN_POLL_MS));
+        if (!active) return;
         await reloadSharedBlocks();
+        if (!active) return;
         const block = sharedBlocks.find((b) => b.name === name);
         if (!block) {
-          sharedError = `${name}: ${SHARED_RUN_OUTCOMES.not_found}`;
+          notifyWarning(`${name}: ${SHARED_RUN_OUTCOMES.not_found}`);
           return;
         }
         const answer = block.status.run_answered;
         if (answer?.id === asked.id) {
           const message = SHARED_RUN_OUTCOMES[answer.outcome];
-          if (message) sharedError = `${name}: ${message}`;
+          if (answer.outcome === 'failed') notifyError(`${name}: ${message}`);
+          else if (message) notifyWarning(`${name}: ${message}`);
           return;
         }
       }
-      sharedError =
+      notifyWarning(
         `${name}: the daemon has not answered yet. It may still be generating; ` +
-        'if this persists, check that the daemon is running.';
+          'if this persists, check that the daemon is running.',
+      );
     } catch (e) {
-      sharedError = (e as Error).message || 'Run failed';
+      if (active) notifyError((e as Error).message || 'Run failed');
     } finally {
       const next = new Set(sharedRunning);
       next.delete(name);
@@ -248,7 +262,7 @@
       await deleteSharedBlock(name);
       await reloadSharedBlocks();
     } catch (e) {
-      sharedError = (e as Error).message || 'Delete failed';
+      if (active) notifyError((e as Error).message || 'Delete failed');
     } finally {
       confirmSharedDelete.cancel();
     }
@@ -271,10 +285,6 @@
   {#snippet actions()}
     <Button size="sm" onclick={startNewShared}>New shared block</Button>
   {/snippet}
-  {#if sharedError}
-    <div class="banner error">{sharedError}</div>
-  {/if}
-
   {#if sharedBlocks.length === 0}
     <EmptyState>No shared blocks yet.</EmptyState>
   {:else}
@@ -336,7 +346,8 @@
     width="40rem"
   >
     <div class="vstack">
-      {#if sharedError}<div class="banner error">{sharedError}</div>{/if}
+      {#if sharedError}<Alert appearance="inline" variant="danger" role="alert">{sharedError}</Alert
+        >{/if}
       <div class="sb-grid">
         <Field label="Name" hint="Slug: lowercase, digits, - and _">
           <Input

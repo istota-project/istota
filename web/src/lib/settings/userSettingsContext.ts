@@ -17,6 +17,7 @@ const USER_SETTINGS = Symbol('user-settings');
 export interface UserSettingsContext {
   readonly profile: UserProfile | null;
   readonly allModules: string[];
+  readonly allSkills: string[];
   readonly loading: boolean;
   /** Page-level banners, shared so a section's message survives the save's reload. */
   error: string;

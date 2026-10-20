@@ -25,6 +25,7 @@
     type BusinessDefaults,
   } from '$lib/money/api';
   import { selectedLedger } from '$lib/money/stores/ledger';
+  import { notifyError } from '$lib/stores/notices';
   import { SettingsLayout } from '$lib/components/settings';
   import {
     Button,
@@ -32,6 +33,7 @@
     EmptyState,
     KebabMenu,
     Alert,
+    LoadState,
     type KebabItem,
     Card,
   } from '$lib/components/ui';
@@ -45,6 +47,7 @@
   let services: ServiceRow[] = $state([]);
   let defaults: BusinessDefaults | null = $state(null);
   let businessError = $state('');
+  let businessRetrying = $state(false);
 
   // Two reads of the same collection, each keeping one honest meaning:
   // `/clients` resolves the business defaults into `entity` and `ar_account`
@@ -55,6 +58,7 @@
   let clients: ClientRow[] = $state([]);
   let clientConfigs: Record<string, ClientConfigRow> = $state({});
   let clientsError = $state('');
+  let clientsRetrying = $state(false);
 
   async function loadBusiness() {
     try {
@@ -77,6 +81,18 @@
     } catch (e) {
       clientsError = e instanceof Error ? e.message : 'Failed to load clients';
     }
+  }
+
+  async function retryBusiness() {
+    businessRetrying = true;
+    await loadBusiness();
+    businessRetrying = false;
+  }
+
+  async function retryClients() {
+    clientsRetrying = true;
+    await loadClients();
+    clientsRetrying = false;
   }
 
   // The ledger effect covers the first load too — it runs on mount and again on
@@ -103,10 +119,10 @@
 
   // --- Client, entity and service editing ---
   //
-  // A refused delete (409) gets its own banner rather than being folded into
-  // the card's error: the server's reason names records the user has to go
-  // look at — the clients still pointing at an entity, or the work entries
-  // still naming a service.
+  // A refused delete (409) stays on its card: the server's reason names records
+  // the user has to go look at — the clients still pointing at an entity, or the
+  // work entries still naming a service. Any other failed delete is a notice;
+  // a card's error is its load failure only.
   let clientFormOpen = $state(false);
   let editingClient: ClientConfigRow | null = $state(null);
   let clientNotice = $state('');
@@ -201,7 +217,9 @@
       await deleteClient(key);
       await loadClients();
     } catch (e) {
-      clientNotice = e instanceof Error ? e.message : 'Failed to delete client';
+      const msg = e instanceof Error ? e.message : 'Failed to delete client';
+      if (e instanceof ApiError && e.status === 409) clientNotice = msg;
+      else notifyError(msg);
     } finally {
       busyClient = '';
     }
@@ -224,10 +242,9 @@
       await Promise.all([loadBusiness(), loadClients()]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : `Failed to delete ${target.kind}`;
-      const refused = e instanceof ApiError && e.status === 409;
-      if (target.kind === 'entity') entityNotice = msg;
+      if (!(e instanceof ApiError && e.status === 409)) notifyError(msg);
+      else if (target.kind === 'entity') entityNotice = msg;
       else serviceNotice = msg;
-      if (!refused) businessError = msg;
     }
   }
 
@@ -298,49 +315,65 @@
   {loading}
 >
   <Card title="Business defaults">
-    {#if businessError}
-      <div class="banner error">{businessError}</div>
-    {:else if !defaults}
-      <EmptyState>No invoicing configuration found.</EmptyState>
-    {:else}
-      <dl class="kv">
-        <dt>Currency</dt>
-        <dd>{defaults.currency}</dd>
-        <dt>Default entity</dt>
-        <dd>{defaults.default_entity}</dd>
-        <dt>A/R account</dt>
-        <dd><code>{defaults.default_ar_account}</code></dd>
-        <dt>Bank account</dt>
-        <dd><code>{defaults.default_bank_account}</code></dd>
-        <dt>Invoice output</dt>
-        <dd><code>{defaults.invoice_output}</code></dd>
-        <dt>Next invoice #</dt>
-        <dd>{defaults.next_invoice_number}</dd>
-        {#if defaults.days_until_overdue > 0}
-          <dt>Days until overdue</dt>
-          <dd>{defaults.days_until_overdue}</dd>
-        {/if}
-        {#if defaults.notifications}
-          <dt>Notifications</dt>
-          <dd>{defaults.notifications}</dd>
-        {/if}
-      </dl>
-    {/if}
+    <LoadState
+      scope="card"
+      loading={businessRetrying}
+      error={businessError}
+      onRetry={retryBusiness}
+      empty={!defaults}
+    >
+      {#snippet emptyState()}
+        <EmptyState>No invoicing configuration found.</EmptyState>
+      {/snippet}
+      {#if defaults}
+        <dl class="kv">
+          <dt>Currency</dt>
+          <dd>{defaults.currency}</dd>
+          <dt>Default entity</dt>
+          <dd>{defaults.default_entity}</dd>
+          <dt>A/R account</dt>
+          <dd><code>{defaults.default_ar_account}</code></dd>
+          <dt>Bank account</dt>
+          <dd><code>{defaults.default_bank_account}</code></dd>
+          <dt>Invoice output</dt>
+          <dd><code>{defaults.invoice_output}</code></dd>
+          <dt>Next invoice #</dt>
+          <dd>{defaults.next_invoice_number}</dd>
+          {#if defaults.days_until_overdue > 0}
+            <dt>Days until overdue</dt>
+            <dd>{defaults.days_until_overdue}</dd>
+          {/if}
+          {#if defaults.notifications}
+            <dt>Notifications</dt>
+            <dd>{defaults.notifications}</dd>
+          {/if}
+        </dl>
+      {/if}
+    </LoadState>
   </Card>
 
   <!-- Outside the `{#if defaults}` guard on purpose: a user with no
        invoicing configuration has to be able to create the first entity,
        service and client from here. -->
-  <Card title="Entities ({entities.length})">
+  <!-- No count while a list failed to load: it would report 0 of something
+       that is not known, or a stale number from the last good load. -->
+  <Card title={businessError ? 'Entities' : `Entities (${entities.length})`}>
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openEntityForm(null)}>Add entity</Button>
     {/snippet}
     {#if entityNotice}
       <Alert title={entityNotice} variant="warn" />
     {/if}
-    {#if entities.length === 0}
-      <EmptyState>No entities yet. Add the one that bills your clients.</EmptyState>
-    {:else}
+    <LoadState
+      scope="card"
+      loading={businessRetrying}
+      error={businessError}
+      onRetry={retryBusiness}
+      empty={entities.length === 0}
+    >
+      {#snippet emptyState()}
+        <EmptyState>No entities yet. Add the one that bills your clients.</EmptyState>
+      {/snippet}
       <div class="entity-grid card-grid">
         {#each entities as entity (entity.key)}
           <Card as="div" variant="inset" padding="sm" class="entity">
@@ -351,7 +384,7 @@
                 <KebabMenu items={entityMenu(entity)} ariaLabel="Entity actions" />
               </span>
             </div>
-            <dl class="kv compact">
+            <dl class="kv">
               {#if entity.email}
                 <dt>Email</dt>
                 <dd>{entity.email}</dd>
@@ -384,19 +417,26 @@
           </Card>
         {/each}
       </div>
-    {/if}
+    </LoadState>
   </Card>
 
-  <Card title="Services ({services.length})">
+  <Card title={businessError ? 'Services' : `Services (${services.length})`}>
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openServiceForm(null)}>Add service</Button>
     {/snippet}
     {#if serviceNotice}
       <Alert title={serviceNotice} variant="warn" />
     {/if}
-    {#if services.length === 0}
-      <EmptyState>No services yet. Add what you bill for.</EmptyState>
-    {:else}
+    <LoadState
+      scope="card"
+      loading={businessRetrying}
+      error={businessError}
+      onRetry={retryBusiness}
+      empty={services.length === 0}
+    >
+      {#snippet emptyState()}
+        <EmptyState>No services yet. Add what you bill for.</EmptyState>
+      {/snippet}
       <div class="table-scroll">
         <table class="table">
           <thead>
@@ -428,11 +468,9 @@
           </tbody>
         </table>
       </div>
-    {/if}
+    </LoadState>
   </Card>
 
-  <!-- No count while the list failed to load: it would report 0 of something
-       that is not known, or a stale number from the last good load. -->
   <Card title={clientsError ? 'Clients' : `Clients (${clients.length})`}>
     {#snippet actions()}
       <Button variant="primary" size="sm" onclick={() => openClientForm(null)}>Add client</Button>
@@ -440,11 +478,16 @@
     {#if clientNotice}
       <Alert title={clientNotice} variant="warn" />
     {/if}
-    {#if clientsError}
-      <div class="banner error">{clientsError}</div>
-    {:else if clients.length === 0}
-      <EmptyState>No clients yet. Add the first one you invoice.</EmptyState>
-    {:else}
+    <LoadState
+      scope="card"
+      loading={clientsRetrying}
+      error={clientsError}
+      onRetry={retryClients}
+      empty={clients.length === 0}
+    >
+      {#snippet emptyState()}
+        <EmptyState>No clients yet. Add the first one you invoice.</EmptyState>
+      {/snippet}
       <div class="table-scroll">
         <table class="table">
           <thead>
@@ -482,7 +525,7 @@
           </tbody>
         </table>
       </div>
-    {/if}
+    </LoadState>
   </Card>
 </SettingsLayout>
 
@@ -532,18 +575,18 @@
 	   imported by app.css). Only money-specific styling (kv, entity grid)
 	   stays. */
 
-  .kv.compact {
+  .entity-grid .kv {
     /* design-lint-allow: sub---space-1 hairline between the rows of a compact
        definition list — the ramp starts a step above what this wants */
     gap: 0.15rem var(--space-2);
     font-size: var(--text-xs);
   }
 
-  .kv dd {
+  dd {
     color: var(--text-secondary);
   }
 
-  .kv dd.pre {
+  dd.pre {
     white-space: pre-line;
   }
 

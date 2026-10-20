@@ -6,7 +6,7 @@
     type ServiceCard as ServiceCardData,
     type NextcloudTokenStatus,
   } from '$lib/api';
-  import { EmptyState } from '$lib/components/ui';
+  import { EmptyState, LoadState } from '$lib/components/ui';
   import { getCurrentUser } from '$lib/userContext';
   import {
     ServiceCard,
@@ -20,6 +20,8 @@
 
   let services: ServiceCardData[] = $state([]);
   let loading = $state(true);
+  let loaded = $state(false);
+  let refreshing = $state(false);
   let error = $state('');
   // Set by a disconnect made here, which the identity record does not learn
   // about until the next `/me`. Otherwise the record is the answer — the
@@ -30,17 +32,26 @@
   const ncToken = $derived(ncTokenOverride ?? identity.user.nextcloud_token ?? null);
 
   async function loadServices() {
+    // Cleared first so a repeated failure is a change LoadState reports again.
+    error = '';
+    refreshing = true;
     try {
       services = (await getSettingsServices()).services;
-      error = '';
+      loaded = true;
     } catch (e) {
       error = (e as Error).message || 'Failed to load services';
     } finally {
       loading = false;
+      refreshing = false;
     }
   }
 
   onMount(loadServices);
+
+  async function retryPane() {
+    loading = true;
+    await loadServices();
+  }
 
   // /settings/services already filters to connected services (no module-owned
   // monarch/feeds/overland leak through). Skip cards whose status is
@@ -59,7 +70,10 @@
   );
 </script>
 
-<SettingsLayout {loading} {error}>
+<!-- A failed list takes the pane only when there is nothing else to show. The
+     Nextcloud card draws from the identity, not from this list, so with it the
+     failure sits where the list goes and leaves that card usable (ISSUE-801). -->
+<SettingsLayout {loading} loadError={!ncToken && !loaded ? error : ''} onRetry={retryPane}>
   <p class="description intro">
     Accounts and per-service credentials for skills that need them. Values are encrypted at rest and
     never sent back to the browser — secret fields are write-only. Module-specific credentials live
@@ -76,19 +90,27 @@
     />
   {/if}
 
-  {#each activeServices as svc (svc.service)}
-    {#if svc.custom_ui && svc.service === 'garmin'}
-      <GarminCard />
-    {:else if svc.custom_ui && svc.service === 'google_workspace'}
-      <GoogleWorkspaceCard onChanged={loadServices} />
-    {:else}
-      <ServiceCard service={svc} onChanged={loadServices} />
-    {/if}
-  {/each}
+  <LoadState
+    scope="card"
+    loading={refreshing}
+    {error}
+    hasData={loaded}
+    onRetry={() => void loadServices()}
+  >
+    {#each activeServices as svc (svc.service)}
+      {#if svc.custom_ui && svc.service === 'garmin'}
+        <GarminCard />
+      {:else if svc.custom_ui && svc.service === 'google_workspace'}
+        <GoogleWorkspaceCard onChanged={loadServices} />
+      {:else}
+        <ServiceCard service={svc} onChanged={loadServices} />
+      {/if}
+    {/each}
 
-  {#if !ncToken && activeServices.length === 0}
-    <EmptyState>No connected services are available on this deployment.</EmptyState>
-  {/if}
+    {#if loaded && !ncToken && activeServices.length === 0}
+      <EmptyState>No connected services are available on this deployment.</EmptyState>
+    {/if}
+  </LoadState>
 </SettingsLayout>
 
 <style>

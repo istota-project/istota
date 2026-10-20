@@ -14341,9 +14341,23 @@ def _build_service_card(
     schema: dict,
     stored: dict[str, list[dict]],
     *,
+    username: str,
     extra: dict | None = None,
 ) -> dict:
+    from istota.credentials import store as secrets_store
+
     configured = {entry["key"] for entry in stored.get(service, [])}
+    # Only fields the schema marks ``plain`` are read back; every other stored
+    # value never leaves the server.
+    values: dict[str, str] = {}
+    for f in schema["fields"]:
+        if not f.get("plain") or f["key"] not in configured:
+            continue
+        value = secrets_store.get_secret(
+            _config.db_path, username, service, f["key"], touch=False,
+        )
+        if isinstance(value, str):
+            values[f["key"]] = value
     last_updated = max(
         (entry["updated_at"] or "" for entry in stored.get(service, [])),
         default="",
@@ -14354,6 +14368,7 @@ def _build_service_card(
         "status": _service_status(schema, configured),
         "fields": schema["fields"],
         "configured_keys": sorted(configured),
+        "values": values,
         "last_updated": last_updated,
         "used_by": list(schema.get("used_by", ())),
         # Optional prose for a service whose behaviour needs a sentence the
@@ -14396,7 +14411,7 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
                 _config.google_workspace and _config.google_workspace.enabled
             )
         cards.append(
-            _build_service_card(service, schema, stored, extra=extra)
+            _build_service_card(service, schema, stored, username=username, extra=extra)
         )
     return {"services": cards}
 
@@ -15458,6 +15473,10 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
     unless the operator has enabled the matching ``module_<name>`` flag
     via ``[experimental] features`` — they shouldn't appear in the
     settings UI on standard installs.
+
+    ``skills`` is what the "Disabled skills" picker offers: the skills this
+    user's tasks can load, with the user's own disabled ones kept in so they
+    can be turned back on (ISSUE-793).
     """
     if not _config:
         modules = _visible_modules(None)
@@ -15465,6 +15484,7 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
             "modules": modules,
             "disabled": [],
             "enabled_for_user": {m: True for m in modules},
+            "skills": [],
         }
 
     username = user["username"]
@@ -15477,7 +15497,19 @@ async def settings_modules(user: dict = Depends(_require_api_auth)) -> dict:
         "enabled_for_user": {
             m: _config.is_module_enabled(username, m) for m in modules
         },
+        "skills": await asyncio.to_thread(_settings_skill_options, _config, username),
     }
+
+
+def _settings_skill_options(config, user_id: str) -> list[str]:
+    from istota.skills._loader import load_skill_index, user_skill_names
+
+    try:
+        index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+        return user_skill_names(config, user_id, index, count_user_disabled=False)
+    except Exception:
+        logger.warning("settings: skill index unavailable", exc_info=True)
+        return []
 
 
 @api_router.get("/settings/module-services/{module}")
@@ -15512,7 +15544,7 @@ async def settings_module_services(
     enabled = _config.is_module_enabled(username, module)
     stored = secrets_store.list_user_services(_config.db_path, username)
     cards = [
-        _build_service_card(service, schema, stored)
+        _build_service_card(service, schema, stored, username=username)
         for service, schema in schemas.items()
     ]
     return {

@@ -25,6 +25,7 @@
  * static gap, traded for a layout that does not move under the user mid-typing.
  */
 import { onKeyboardGeometry, shellAtLeast, shellVersion } from './platform/native';
+import { onDocumentVisible } from './ui/visibility';
 
 const EDGES = ['top', 'bottom', 'left', 'right'] as const;
 
@@ -480,10 +481,6 @@ export function installViewportGuard(): () => void {
   const onFocusOut = () => settle('blur');
   const onSettle = () => settle();
 
-  const onVisibilityChange = () => {
-    if (document.visibilityState === 'visible') settle();
-  };
-
   // Rotation changes both viewports legitimately, so the old keyboard-free
   // reference is meaningless; drop it and let the session re-establish one.
   const onOrientationChange = () => {
@@ -498,7 +495,7 @@ export function installViewportGuard(): () => void {
   window.addEventListener('orientationchange', onOrientationChange);
   window.addEventListener('resize', onSettle);
   window.addEventListener('pageshow', onSettle);
-  document.addEventListener('visibilitychange', onVisibilityChange);
+  const offVisible = onDocumentVisible(() => settle());
   vv?.addEventListener('resize', onSettle);
   // The keyboard pans the visual viewport as well as resizing it, and on the way
   // out the pan is sometimes the only event that fires.
@@ -511,7 +508,7 @@ export function installViewportGuard(): () => void {
     window.removeEventListener('orientationchange', onOrientationChange);
     window.removeEventListener('resize', onSettle);
     window.removeEventListener('pageshow', onSettle);
-    document.removeEventListener('visibilitychange', onVisibilityChange);
+    offVisible();
     vv?.removeEventListener('resize', onSettle);
     vv?.removeEventListener('scroll', onSettle);
     probe.remove();

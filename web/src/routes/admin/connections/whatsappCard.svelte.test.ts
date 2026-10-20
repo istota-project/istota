@@ -44,6 +44,12 @@ await fillApiDouble(api, {
   whatsAppPairingStreamUrl: vi.fn(actual.whatsAppPairingStreamUrl),
 });
 
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
+
 import {
   cancelWhatsAppPairing,
   getAdminConnections,
@@ -185,6 +191,7 @@ async function mountFake(over: Partial<AdminWhatsAppConnection> = {}) {
 
 beforeEach(() => {
   installFakeEventSource();
+  notices.notifyError.mockReset();
   api.getAdminConnections.mockReset();
   api.startWhatsAppPairing.mockReset();
   api.startWhatsAppPairing.mockResolvedValue({
@@ -418,7 +425,11 @@ describe('the WhatsApp card — starting a pairing', () => {
 
     await fireEvent.click(screen.getByRole('button', { name: REPAIR }));
 
-    await waitFor(() => expect(screen.getByText(/Refused:/)).toBeInTheDocument());
+    // A refused start is a failed action: a notice, not a line on the page.
+    await waitFor(() =>
+      expect(notices.notifyError).toHaveBeenCalledWith(expect.stringMatching(/^Refused:/)),
+    );
+    expect(screen.queryByText(/Refused:/)).toBeNull();
     // The row is the authority on what happened and the link cannot have moved
     // as a result of writing a request, so the card re-reads the row alone
     // rather than the whole index.

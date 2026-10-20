@@ -212,7 +212,7 @@
     margin: 0;
   }
 
-  .card-head {
+  .step .card-head {
     align-items: center;
   }
 

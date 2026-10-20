@@ -22,7 +22,7 @@
   } from '$lib/stores/briefings';
   import GroupEdition from '$lib/components/briefings/GroupEdition.svelte';
   import BriefingEdition from '$lib/components/briefings/BriefingEdition.svelte';
-  import { Button, EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
+  import { Alert, Button, EmptyState, KebabMenu, LoadState } from '$lib/components/ui';
 
   let groupTarget = $state<BriefingTarget | null>(null);
   $effect(() => {
@@ -196,10 +196,12 @@
     <LoadState {loading} {error}>
       {#if current}
         {#if readErrorId === current.id && current.id === $selectedBriefingId && !loading}
-          <div class="banner error" role="alert">
+          <Alert appearance="inline" variant="danger" role="alert">
             Could not mark this briefing as read.
-            <Button size="sm" onclick={() => acknowledgeRead(current!.id)}>Retry</Button>
-          </div>
+            {#snippet actions()}
+              <Button size="sm" onclick={() => acknowledgeRead(current!.id)}>Retry</Button>
+            {/snippet}
+          </Alert>
         {/if}
         {#key current.id}<BriefingEdition
             edition={current}

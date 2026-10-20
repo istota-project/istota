@@ -9,7 +9,7 @@
     type ConfigProblem,
     type StepUpProof,
   } from '$lib/api';
-  import { Badge, Button, ConfirmDialog, Modal } from '$lib/components/ui';
+  import { Alert, Badge, Button, ConfirmDialog, Modal } from '$lib/components/ui';
   import { StepUpDialog } from '$lib/components/settings';
   import DiffBlock from './DiffBlock.svelte';
 
@@ -141,10 +141,10 @@
     <p class="muted">Checking the change…</p>
   {:else}
     {#if refusal}
-      <div class="banner danger" role="alert">
+      <Alert appearance="inline" variant="danger" role="alert">
         <p>{refusal}</p>
         {#each refusalErrors as error, i (i)}<p>{error}</p>{/each}
-      </div>
+      </Alert>
     {/if}
 
     {#if preview}

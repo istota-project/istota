@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { onDocumentVisible } from '$lib/ui/visibility';
+  import { latest } from '$lib/ui/latest';
   import {
     AuthError,
     listPushDevices,
@@ -9,7 +10,16 @@
     listPushCategories,
     type PushCategory,
   } from '$lib/api';
-  import { Button, EmptyState, Select, Card, Field, Checkbox } from '$lib/components/ui';
+  import {
+    Alert,
+    Button,
+    EmptyState,
+    LoadState,
+    Select,
+    Card,
+    Field,
+    Checkbox,
+  } from '$lib/components/ui';
   import { getUserSettings } from '$lib/settings/userSettingsContext';
   import { isManaged, managedBadge } from '$lib/settings/managed';
   import { getCurrentUser } from '$lib/userContext';
@@ -39,16 +49,16 @@
   let permission: PushPermission | null = $state(null);
   let registering = $state(false);
   let registrationMessage = $state('');
-  let permissionRequest = 0;
+  const permissionReads = latest();
 
   async function readPermission() {
     if (registering) return;
-    const request = ++permissionRequest;
+    const current = permissionReads.next();
     try {
       const result = await pushPermissions();
-      if (request === permissionRequest) permission = result?.permission ?? null;
+      if (current()) permission = result?.permission ?? null;
     } catch {
-      if (request !== permissionRequest) return;
+      if (!current()) return;
       error = 'Could not read notification permission. Try registering again.';
     }
   }
@@ -56,7 +66,7 @@
   async function registerDevice() {
     if (registering) return;
     registering = true;
-    permissionRequest += 1;
+    permissionReads.invalidate();
     error = '';
     registrationMessage = '';
     try {
@@ -138,7 +148,11 @@
     void loadCategories();
     if (!native) return;
     void readPermission();
-    return onDocumentVisible(() => void readPermission());
+    const offVisible = onDocumentVisible(() => void readPermission());
+    return () => {
+      offVisible();
+      permissionReads.dispose();
+    };
   });
 </script>
 
@@ -146,29 +160,37 @@
   title="Inbox notifications"
   description="Enabled categories send alerts and count toward the app badge. These choices do not change your inbox, its bell count or delivery to email and Talk."
 >
-  {#if categoriesLoading}
-    <p class="caption">Loading categories…</p>
-  {:else if categoriesError}
-    <p class="banner error" role="alert">{categoriesError}</p>
-    <Button variant="secondary" size="sm" onclick={loadCategories}>Retry categories</Button>
-  {:else if profile}
-    {#each categories as category (category.id)}
-      <Field label={category.label} checkbox badge={managedBadge(profile, 'push_inbox_categories')}>
-        <Checkbox
-          checked={profile.push_inbox_categories?.[category.id] ?? true}
-          disabled={isManaged(profile, 'push_inbox_categories')}
-          onchange={(on) => {
-            if (profile) {
-              profile.push_inbox_categories = {
-                ...profile.push_inbox_categories,
-                [category.id]: on,
-              };
-            }
-          }}
-        />
-      </Field>
-    {/each}
-  {/if}
+  <LoadState
+    scope="card"
+    loading={categoriesLoading}
+    loadingLabel="Loading categories…"
+    error={categoriesError}
+    onRetry={loadCategories}
+    retryLabel="Retry categories"
+  >
+    {#if profile}
+      {#each categories as category (category.id)}
+        <Field
+          label={category.label}
+          checkbox
+          badge={managedBadge(profile, 'push_inbox_categories')}
+        >
+          <Checkbox
+            checked={profile.push_inbox_categories?.[category.id] ?? true}
+            disabled={isManaged(profile, 'push_inbox_categories')}
+            onchange={(on) => {
+              if (profile) {
+                profile.push_inbox_categories = {
+                  ...profile.push_inbox_categories,
+                  [category.id]: on,
+                };
+              }
+            }}
+          />
+        </Field>
+      {/each}
+    {/if}
+  </LoadState>
 </Card>
 
 <Card title="Push notifications">
@@ -196,7 +218,7 @@
     <p class="description">Register a device from the Istota iOS app.</p>
   {/if}
   <p class="description">iOS notification settings control whether alerts appear on each device.</p>
-  {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+  {#if error}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert>{/if}
   {#if loading}
     <p class="caption">Loading devices…</p>
   {:else if devices.length}

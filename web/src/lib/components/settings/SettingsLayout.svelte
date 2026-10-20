@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState, PageHeader } from '$lib/components/ui';
+  import { Alert, LoadState, PageHeader } from '$lib/components/ui';
   import type { Snippet } from 'svelte';
 
   interface Props {
@@ -9,7 +9,12 @@
     title?: string;
     description?: string;
     loading?: boolean;
+    /** Feedback about the last action, above content that is still there. */
     error?: string;
+    /** The page's own data failed to load, so there is nothing to show: the
+     *  failure takes the whole pane, with Retry when `onRetry` is given. */
+    loadError?: string;
+    onRetry?: () => void;
     info?: string;
     headerActions?: Snippet;
     children: Snippet;
@@ -20,6 +25,8 @@
     description,
     loading = false,
     error = '',
+    loadError = '',
+    onRetry,
     info = '',
     headerActions,
     children,
@@ -27,22 +34,22 @@
 </script>
 
 <div class="settings">
-  <!-- Held back while loading so the pane shows nothing but the centered
-       loading message, rather than centering it in the space left under this
+  <!-- Held back while loading, and on a failed load, so the pane shows nothing
+       but the centered message, rather than centering it in the space left under this
        header. The banners below stay: they are feedback about the last action,
        and a reload should not swallow them. -->
-  {#if !loading && (title || description || headerActions)}
+  {#if !loading && !loadError && (title || description || headerActions)}
     <PageHeader title={title || undefined} {description} align="start" actions={headerActions} />
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
   {#if info}
-    <div class="banner info">{info}</div>
+    <Alert appearance="inline" variant="info" role="status">{info}</Alert>
   {/if}
 
-  <LoadState {loading}>
+  <LoadState {loading} error={loadError} {onRetry}>
     {@render children()}
   </LoadState>
 </div>

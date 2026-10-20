@@ -5,6 +5,8 @@
   // are advisory and never write the draft.
   import { onDestroy } from 'svelte';
   import { checkBriefingPath, getBriefingPathSuggestions, type EmailAccount } from '$lib/api';
+  import { debounce } from '$lib/ui/debounce';
+  import { latest } from '$lib/ui/latest';
   import {
     AutocompleteInput,
     Button,
@@ -62,8 +64,6 @@
   let pathSuggestions = $state<string[]>([]);
   let pathStatus = $state<'' | 'checking' | 'ok' | 'missing'>('');
   let pathResolved = $state('');
-  let pathSeq = 0;
-  let pathTimer: ReturnType<typeof setTimeout> | undefined;
   const fileKinds = ['todos', 'reminders', 'notes'];
   const filePlaceholder: Record<string, string> = {
     todos: 'shared/team-todo.md',
@@ -71,36 +71,39 @@
     notes: 'istota/notes/agenda.md',
   };
 
+  const pathChecks = latest();
+  const checkPath = debounce((path: string, current: () => boolean) => {
+    getBriefingPathSuggestions(path)
+      .then((response) => {
+        if (current()) pathSuggestions = response.paths;
+      })
+      .catch(() => {});
+    if (!path) return;
+    pathStatus = 'checking';
+    checkBriefingPath(path)
+      .then((response) => {
+        if (!current()) return;
+        pathStatus = response.ok ? 'ok' : 'missing';
+        pathResolved = response.resolved ?? '';
+      })
+      .catch(() => {
+        if (current()) pathStatus = '';
+      });
+  }, 150);
+
   $effect(() => {
     const fileKind = fileKinds.includes(kind);
     const path = String(config.path ?? '').trim();
-    const seq = ++pathSeq;
-    clearTimeout(pathTimer);
+    const current = pathChecks.next();
+    checkPath.cancel();
     pathStatus = '';
     pathResolved = '';
     if (!fileKind) return;
-    pathTimer = setTimeout(() => {
-      getBriefingPathSuggestions(path)
-        .then((response) => {
-          if (seq === pathSeq) pathSuggestions = response.paths;
-        })
-        .catch(() => {});
-      if (!path) return;
-      pathStatus = 'checking';
-      checkBriefingPath(path)
-        .then((response) => {
-          if (seq !== pathSeq) return;
-          pathStatus = response.ok ? 'ok' : 'missing';
-          pathResolved = response.resolved ?? '';
-        })
-        .catch(() => {
-          if (seq === pathSeq) pathStatus = '';
-        });
-    }, 150);
+    checkPath(path, current);
   });
   onDestroy(() => {
-    clearTimeout(pathTimer);
-    pathSeq += 1;
+    checkPath.cancel();
+    pathChecks.dispose();
   });
 
   const EMAIL_MODE_OPTIONS: SelectOption[] = [

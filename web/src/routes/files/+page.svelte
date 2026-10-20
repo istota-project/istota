@@ -63,6 +63,7 @@
   import { getCurrentUser } from '$lib/userContext';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
   import { loadSetting, saveSetting } from '$lib/ui/persisted';
+  import { latest } from '$lib/ui/latest';
   import PlaceList from '$lib/components/workspace/PlaceList.svelte';
   import ReachPanel from '$lib/components/workspace/ReachPanel.svelte';
   import ReachBadge from '$lib/components/workspace/ReachBadge.svelte';
@@ -313,7 +314,7 @@
   }
   async function deleteEntries(names: string[]) {
     const path = selected?.path || '';
-    const request = generation;
+    const current = folderLoads.peek();
     const deleted: string[] = [];
     const errors: string[] = [];
     for (const name of names) {
@@ -324,7 +325,7 @@
         errors.push(`${name}: ${e instanceof Error ? e.message : 'Could not delete this item.'}`);
       }
     }
-    if (active && request === generation && listing) {
+    if (current() && listing) {
       listing = {
         ...listing,
         entries: listing.entries.filter((entry) => !deleted.includes(entry.name)),
@@ -333,7 +334,7 @@
     if (active && deleted.length) void loadPins();
     return { deleted, errors };
   }
-  let generation = 0;
+  const folderLoads = latest();
   let active = true;
   const selection = createUrlSelection<Selection>({
     key: 'workspace',
@@ -431,27 +432,26 @@
   }
   async function loadMore() {
     if (moreLoading || !driveListing?.next_page_token || !selected) return;
-    const request = generation;
+    const current = folderLoads.peek();
     const folder = driveFolder(selected.path);
     moreLoading = true;
     moreError = '';
     try {
       const result = await getWorkspaceDriveListing(folder, driveListing.next_page_token);
-      if (request !== generation) return;
+      if (!current()) return;
       const seen = new Set(driveListing.items.map((item) => item.id));
       driveListing = {
         ...result,
         items: [...driveListing.items, ...result.items.filter((item) => !seen.has(item.id))],
       };
     } catch (e) {
-      if (request === generation)
-        moreError = e instanceof Error ? e.message : 'Could not load more files.';
+      if (current()) moreError = e instanceof Error ? e.message : 'Could not load more files.';
     } finally {
-      if (request === generation) moreLoading = false;
+      if (current()) moreLoading = false;
     }
   }
   async function loadFolder(value: Selection) {
-    const request = ++generation;
+    const current = folderLoads.next();
     selected = value;
     listing = null;
     driveListing = null;
@@ -465,22 +465,22 @@
     try {
       if (value.place === 'drive') {
         const result = await getWorkspaceDriveListing(driveFolder(value.path));
-        if (request !== generation) return;
+        if (!current()) return;
         driveListing = result;
       } else {
         const result = await getWorkspaceListing(value.place, value.path);
-        if (request !== generation) return;
+        if (!current()) return;
         listing = result;
         selected = { place: result.place, path: result.path };
       }
     } catch (e) {
-      if (request === generation)
+      if (current())
         listingError =
           e instanceof Error && !(e instanceof TypeError)
             ? e.message
             : 'Could not load this folder.';
     } finally {
-      if (request === generation) listingLoading = false;
+      if (current()) listingLoading = false;
     }
   }
   async function load() {
@@ -505,7 +505,7 @@
     void loadScripts();
     return () => {
       active = false;
-      generation++;
+      folderLoads.dispose();
     };
   });
 </script>

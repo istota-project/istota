@@ -8,6 +8,12 @@ import { edition } from '$lib/components/briefings/edition.fixture';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+// A failed move or duplicate is an action on a list still on screen: a notice, not a banner.
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
 await fillApiDouble(api);
 import Page from './+page.svelte';
 import Layout from '../+layout.svelte';
@@ -324,7 +330,7 @@ describe('briefing block builder', () => {
     api.putBriefingBlock.mockRejectedValueOnce(new Error('Order was not saved'));
     await mount();
     await menu('Headlines', 'Move down');
-    expect(await screen.findByRole('alert')).toHaveTextContent('Order was not saved');
+    await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('Order was not saved'));
     expect(
       within(screen.getByRole('list', { name: 'Briefing blocks' }))
         .getAllByRole('heading')
@@ -382,8 +388,10 @@ describe('briefing block builder', () => {
     });
     await mount();
     await menu('Headlines', 'Duplicate');
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'Add a source to this block before duplicating it.',
+    await waitFor(() =>
+      expect(notices.notifyError).toHaveBeenCalledWith(
+        'Add a source to this block before duplicating it.',
+      ),
     );
     expect(api.putBriefingBlock).not.toHaveBeenCalled();
     expect(
@@ -550,7 +558,7 @@ describe('briefing block builder', () => {
     api.putBriefingBlock.mockRejectedValueOnce(new Error('Copy was not saved'));
     await mount();
     await menu('Headlines', 'Duplicate');
-    expect(await screen.findByRole('alert')).toHaveTextContent('Copy was not saved');
+    await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('Copy was not saved'));
     expect(
       within(screen.getByRole('list', { name: 'Briefing blocks' })).getAllByRole('listitem'),
     ).toHaveLength(2);

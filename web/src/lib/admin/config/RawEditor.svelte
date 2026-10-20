@@ -1,6 +1,6 @@
 <script lang="ts">
   import { base } from '$app/paths';
-  import { Button, Card, Field, TextArea } from '$lib/components/ui';
+  import { Alert, Button, Card, Field, TextArea } from '$lib/components/ui';
   import { SENTINEL } from './changeSet';
 
   interface Props {
@@ -44,13 +44,13 @@
     >
     {#if lockedReason}<p class="caption raw-note">{lockedReason}</p>{/if}
   {:else}
-    {#if lockedReason}<p class="banner warn raw-note">{lockedReason}</p>{/if}
+    {#if lockedReason}<Alert appearance="inline" variant="warn">{lockedReason}</Alert>{/if}
     {#if initial === null}
-      <p class="banner warn raw-note">
+      <Alert appearance="inline" variant="warn">
         config.toml does not parse, so it cannot be changed from here. Fix it on the host with
         <code>istota-stack apply</code>, or copy back a
         <code>config.toml.bak.&lt;timestamp&gt;</code>.
-      </p>
+      </Alert>
     {/if}
     <Field label="config.toml" wide>
       <TextArea

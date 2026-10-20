@@ -5,6 +5,7 @@
 // getters re-renders when the engine updates.
 
 import type { CompletionProvider, Suggestion, TriggerMatch } from './types';
+import { latest } from '$lib/ui/latest';
 
 export interface AcceptResult {
   text: string;
@@ -55,7 +56,7 @@ export function createAutocomplete(
 
   // Non-reactive request/context bookkeeping.
   let currentMatch: TriggerMatch | null = null;
-  let requestSeq = 0; // stale-guard token for async getSuggestions
+  const suggestionLoads = latest();
   // Text at which the popover was dismissed with Escape; suppresses reopen
   // until the text actually changes.
   let suppressedText: string | null = null;
@@ -70,7 +71,7 @@ export function createAutocomplete(
     // and a result that lands after the state was cleared would reopen the
     // popover on its own — holding no match, which is worse than leaving it
     // open: `accept` returns null while `onKeydown` still eats the Enter.
-    requestSeq++;
+    suggestionLoads.invalidate();
   }
 
   function apply(list: Suggestion[]) {
@@ -98,16 +99,16 @@ export function createAutocomplete(
       match = p.match(text, caret);
       if (match) {
         currentMatch = match;
-        const seq = ++requestSeq;
+        const current = suggestionLoads.next();
         const res = p.getSuggestions(match.query);
         if (res instanceof Promise) {
           // Optimistically no change until it resolves; drop if superseded.
           res
             .then((list) => {
-              if (seq === requestSeq) apply(list);
+              if (current()) apply(list);
             })
             .catch(() => {
-              if (seq === requestSeq) reset();
+              if (current()) reset();
             });
         } else {
           apply(res);

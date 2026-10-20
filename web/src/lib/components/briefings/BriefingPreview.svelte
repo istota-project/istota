@@ -9,7 +9,7 @@
     type BriefingDocument,
     type BriefingPreviewResponse,
   } from '$lib/api';
-  import { Button, Modal, OptionCards, PageLoading } from '$lib/components/ui';
+  import { Alert, Button, Modal, OptionCards, PageLoading } from '$lib/components/ui';
   import BriefingEdition from './BriefingEdition.svelte';
 
   let {
@@ -154,12 +154,14 @@
       <PageLoading label="Loading preview…" />
     {:else}
       {#if error}
-        <div role="alert" class="banner error">{error}</div>
-        <Button
-          variant="secondary"
-          onclick={() => {
-            attempt += 1;
-          }}>Retry preview</Button
+        <Alert appearance="inline" variant="danger" role="alert"
+          >{error}
+          {#snippet actions()}<Button
+              variant="secondary"
+              onclick={() => {
+                attempt += 1;
+              }}>Retry preview</Button
+            >{/snippet}</Alert
         >
       {/if}
       {#if mode === 'web' && edition}

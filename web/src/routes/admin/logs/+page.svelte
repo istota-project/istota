@@ -12,6 +12,7 @@
     type AdminLogSource,
   } from '$lib/api';
   import {
+    Alert,
     Icon,
     Button,
     Chip,
@@ -24,6 +25,7 @@
   } from '$lib/components/ui';
   import { mergeRecords, trimBuffer } from '$lib/admin/logRecords';
   import { notifyError } from '$lib/stores/notices';
+  import { latest } from '$lib/ui/latest';
 
   const PAGE = 200;
 
@@ -143,43 +145,46 @@
     }
   }
 
-  // Monotonic request token. Two rapid Apply/Refresh/source clicks can resolve
-  // out of order, which would otherwise pair one query's records with another
-  // query's `applied` filters — or prepend an unfiltered older page onto a
-  // filtered transcript.
-  let requestSeq = 0;
+  // Two rapid Apply/Refresh/source clicks can resolve out of order, which would
+  // otherwise pair one query's records with another query's `applied` filters —
+  // or prepend an unfiltered older page onto a filtered transcript. Invalidated
+  // on unmount too, or a late page reopens the live tail on a dead page.
+  const loads = latest();
 
   async function load({ keepLive = false } = {}) {
     if (!keepLive) stopStream();
-    const seq = ++requestSeq;
+    const current = loads.next();
     loading = true;
     error = '';
     applied = currentFilters();
     try {
       const page = await getAdminLogPage(sourceId, { ...applied, limit: PAGE });
-      if (seq !== requestSeq) return;
+      if (!current()) return;
       records = page.records;
       nextBefore = page.next_before;
       tailCursor = page.tail_cursor;
       truncated = page.truncated;
       await tick();
+      if (!current()) return;
       scrollToBottom();
       if (live) startStream();
     } catch (e) {
-      if (seq !== requestSeq) return;
+      if (!current()) return;
       records = [];
       nextBefore = null;
       tailCursor = null;
       error = describeError(e);
       live = false;
     } finally {
-      if (seq === requestSeq) loading = false;
+      if (current()) loading = false;
     }
   }
 
   async function loadOlder() {
     if (!nextBefore || loadingOlder || loading) return;
-    const seq = requestSeq;
+    // Starting a request of its own is safe: the guard above means no `load`
+    // is in flight to be superseded by it, and any `load` after it supersedes it.
+    const current = loads.next();
     loadingOlder = true;
     // Capture the scroll offset, not just the height: the assignment below must
     // *overwrite* whatever the browser's own scroll anchoring did, not add to
@@ -194,7 +199,7 @@
       });
       // A filter change or source switch landed while this was in flight; its
       // records belong to a query the transcript no longer shows.
-      if (seq !== requestSeq) return;
+      if (!current()) return;
       records = [...page.records, ...records];
       nextBefore = page.next_before;
       truncated = page.truncated;
@@ -204,7 +209,7 @@
       // reader must not do while you are walking backwards through it.
       if (logEl) logEl.scrollTop = logEl.scrollHeight - prevHeight + prevTop;
     } catch (e) {
-      if (seq === requestSeq) notifyError(describeError(e), { key: 'admin-logs:older' });
+      if (current()) notifyError(describeError(e), { key: 'admin-logs:older' });
     } finally {
       loadingOlder = false;
     }
@@ -359,7 +364,10 @@
     await load();
   });
 
-  onDestroy(stopStream);
+  onDestroy(() => {
+    loads.dispose();
+    stopStream();
+  });
 </script>
 
 <div class="settings logs-page card-pane">
@@ -438,15 +446,15 @@
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
 
   {#if !error && activeSource && !activeSource.available}
-    <div class="banner info">{activeSource.detail}</div>
+    <Alert appearance="inline" variant="info">{activeSource.detail}</Alert>
   {/if}
 
   <div class="log-pane" bind:this={logEl} onscroll={onScroll}>
-    <!-- A failed load is the banner above, beside the filters that caused it. -->
+    <!-- A failed load is the alert above, beside the filters that caused it. -->
     <LoadState loading={loading && records.length === 0} empty={records.length === 0 && !error}>
       {#snippet emptyState()}
         <EmptyState>

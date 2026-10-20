@@ -623,7 +623,13 @@
     {/if}
 
     {#if room.policy && showSpeechMode}
-      <Field label="Replies" description={repliesNote}>
+      <Field
+        label="Replies"
+        description={repliesNote}
+        warning={speechModeValue === 'off'
+          ? 'The bot will answer every message anyone sends in this room.'
+          : undefined}
+      >
         <Select
           value={speechModeValue}
           options={speechModeOptions}
@@ -632,11 +638,6 @@
           disabled={!policyEditable}
           fullWidth
         />
-        {#if speechModeValue === 'off'}
-          <p class="banner warn speech-warning">
-            The bot will answer every message anyone sends in this room.
-          </p>
-        {/if}
       </Field>
     {/if}
 

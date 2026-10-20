@@ -460,6 +460,61 @@ class TestMapping:
 
 
 # --------------------------------------------------------------------------
+# every TLS path verifies the server (ISSUE-798)
+# --------------------------------------------------------------------------
+
+
+def _assert_verifying(context):
+    import ssl
+
+    assert isinstance(context, ssl.SSLContext), context
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+class TestTlsVerifiesTheServer:
+    """imap-tools and smtplib fall back to an unverified context when handed
+    none, so each path is driven down to the stdlib call that does the
+    handshake and the context it receives is read there."""
+
+    @staticmethod
+    def _cfg(**overrides):
+        fields = dict(imap_host="imap.test", imap_port=993, imap_user="u",
+                      imap_password="p", smtp_host="smtp.test", smtp_port=587)
+        fields.update(overrides)
+        return EmailConfig(**fields)
+
+    def test_implicit_tls_imap(self):
+        from istota.skills.email import _get_mailbox
+        with patch("imaplib.IMAP4_SSL") as ssl_client:
+            _get_mailbox(self._cfg(imap_port=993))
+        _, kwargs = ssl_client.call_args
+        _assert_verifying(kwargs["ssl_context"])
+
+    def test_starttls_imap(self):
+        from istota.skills.email import _get_mailbox
+        with patch("imaplib.IMAP4") as plain_client:
+            plain_client.return_value.starttls.return_value = ("OK", [b"go"])
+            _get_mailbox(self._cfg(imap_port=143))
+        (context,), _ = plain_client.return_value.starttls.call_args
+        _assert_verifying(context)
+
+    def test_starttls_smtp(self):
+        from istota.skills.email import _open_smtp
+        with patch("istota.skills.email.smtplib.SMTP") as smtp_client:
+            _open_smtp(self._cfg(smtp_port=587))
+        _, kwargs = smtp_client.return_value.starttls.call_args
+        _assert_verifying(kwargs["context"])
+
+    def test_implicit_tls_smtp(self):
+        from istota.skills.email import _open_smtp
+        with patch("istota.skills.email.smtplib.SMTP_SSL") as smtp_client:
+            _open_smtp(self._cfg(smtp_port=465))
+        _, kwargs = smtp_client.call_args
+        _assert_verifying(kwargs["context"])
+
+
+# --------------------------------------------------------------------------
 # list filters build server-side criteria
 # --------------------------------------------------------------------------
 

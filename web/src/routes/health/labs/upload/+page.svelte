@@ -14,6 +14,7 @@
     type Specimen,
   } from '$lib/api';
   import {
+    Alert,
     IconButton,
     Button,
     Card,
@@ -193,8 +194,8 @@
         </p>
       </FileDropZone>
 
-      {#if error}<div class="banner error">{error}</div>{/if}
-      {#if info}<div class="banner info">{info}</div>{/if}
+      {#if error}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert>{/if}
+      {#if info}<Alert appearance="inline" variant="info" role="status">{info}</Alert>{/if}
 
       <div class="actions">
         <Button
@@ -208,12 +209,12 @@
     </Card>
   {:else}
     {#if collision}
-      <div class="banner warn">
+      <Alert appearance="inline" variant="warn">
         A panel from {collision.lab_name || '—'} on {collision.drawn_at} already exists. This upload is
         saved separately;
         <a href="{base}/health/labs/panel?id={collision.existing_id}">view the existing one</a>
         to decide which to keep.
-      </div>
+      </Alert>
     {/if}
 
     <div class="split">
@@ -250,12 +251,12 @@
           </div>
         {:else}
           {#if warnings.length > 0}
-            <div class="banner warn">
+            <Alert appearance="inline" variant="warn">
               <strong>Heads up:</strong>
               <ul>
                 {#each warnings as w}<li>{w}</li>{/each}
               </ul>
-            </div>
+            </Alert>
           {/if}
 
           {#if extracted.length === 0}
@@ -348,7 +349,7 @@
             </div>
           {/if}
 
-          {#if error}<div class="banner error">{error}</div>{/if}
+          {#if error}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert>{/if}
 
           <div class="actions">
             <Button onclick={addRow}>+ Add row</Button>

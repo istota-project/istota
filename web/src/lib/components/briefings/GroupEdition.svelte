@@ -66,9 +66,8 @@
   });
 </script>
 
-<LoadState loading={loading && !run} error={run ? null : error}>
+<LoadState {loading} {error} hasData={!!run}>
   {#if run && definition}
-    {#if error}<div class="banner error" role="alert">{error}</div>{/if}
     <BriefingEdition
       showMetadata={false}
       edition={{

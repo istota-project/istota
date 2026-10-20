@@ -6,6 +6,7 @@
     EmailAccount,
   } from '$lib/api';
   import { deleteBriefingBlock, putBriefingBlock } from '$lib/api';
+  import { notifyError } from '$lib/stores/notices';
   import {
     Icon,
     Button,
@@ -78,7 +79,6 @@
   let draft = $state<BriefingBlockSave | null>(null);
   const deleting = createConfirm<BriefingBlock>();
   let busy = $state(false);
-  let error = $state('');
   let announcement = $state('');
   const uid = $props.id();
   const filtered = $derived(
@@ -249,7 +249,6 @@
     const ordered = [...blocks];
     [ordered[index], ordered[next]] = [ordered[next], ordered[index]];
     busy = true;
-    error = '';
     try {
       if (!localDraft)
         await putBriefingBlock({
@@ -261,7 +260,7 @@
       );
       announcement = `${block.title} moved to position ${next + 1} of ${ordered.length}`;
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Could not save block order.';
+      notifyError(e instanceof Error ? e.message : 'Could not save block order.');
     } finally {
       busy = false;
     }
@@ -270,11 +269,10 @@
   async function duplicate(block: BriefingBlock) {
     if (busy) return;
     if (block.sources.length === 0) {
-      error = 'Add a source to this block before duplicating it.';
+      notifyError('Add a source to this block before duplicating it.');
       return;
     }
     busy = true;
-    error = '';
     try {
       const name = briefingName;
       const payload = blockPayload(block, true);
@@ -282,7 +280,7 @@
       const saved = await persistBlock(payload);
       onChange(name, [...previous, saved]);
     } catch (e) {
-      error = e instanceof Error ? e.message : 'Could not duplicate block.';
+      notifyError(e instanceof Error ? e.message : 'Could not duplicate block.');
     } finally {
       busy = false;
     }
@@ -345,7 +343,6 @@
 </script>
 
 <div class="vstack">
-  {#if error}<div role="alert" class="banner error">{error}</div>{/if}
   <div role="status" aria-live="polite" class="visually-hidden">{announcement}</div>
   {#if blocks.length === 0}
     <EmptyState size="sm">No blocks yet. Add a block to start this briefing.</EmptyState>

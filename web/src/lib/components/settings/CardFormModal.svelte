@@ -7,7 +7,7 @@
     type WalletCard,
     type WalletBilling,
   } from '$lib/api';
-  import { Field, FormModal, FormStack, Input } from '$lib/components/ui';
+  import { Alert, Field, FormModal, FormStack, Input } from '$lib/components/ui';
   let {
     card = null,
     onClose,
@@ -130,6 +130,8 @@
         ><Input bind:value={billing[key as keyof WalletBilling]} autocomplete="off" /></Field
       >
     {/each}
-    {#if errors.billing}<p class="banner error" role="alert">{errors.billing}</p>{/if}
+    {#if errors.billing}<Alert appearance="inline" variant="danger" role="alert"
+        >{errors.billing}</Alert
+      >{/if}
   </FormStack>
 </FormModal>

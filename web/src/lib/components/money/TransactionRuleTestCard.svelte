@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { Badge, Button, Field, Input, Select, Card } from '$lib/components/ui';
+  import { onDestroy, onMount } from 'svelte';
+  import { Alert, Badge, Button, Field, Input, Select, Card } from '$lib/components/ui';
   import {
     ApiError,
     getLedgers,
@@ -11,6 +11,7 @@
     type TransactionRule,
   } from '$lib/money/api';
   import { KNOWN_SOURCES, ledgerScopeOptions, sourceScopeOptions } from '$lib/money/ruleScopes';
+  import { latest } from '$lib/ui/latest';
 
   // Resolve a made-up transaction against the stored rules, and show the pass
   // rather than only its answer. A resolution alone cannot say why a rule did
@@ -44,9 +45,8 @@
   let tags = $state('');
 
   let busy = $state(false);
-  // Two Runs in flight resolve in whatever order the server answers, and the
-  // slower one must not paint its result over the newer one.
-  let runSeq = 0;
+  const runs = latest();
+  onDestroy(() => runs.dispose());
   let error = $state('');
   let resolution: RuleResolution | null = $state(null);
   let trace: RuleTraceEntry[] = $state([]);
@@ -80,7 +80,7 @@
   }
 
   async function run() {
-    const mine = ++runSeq;
+    const current = runs.next();
     busy = true;
     try {
       const body = await testTransactionRule({
@@ -92,13 +92,13 @@
         notes: notes.trim(),
         tags: tagList(),
       });
-      if (mine !== runSeq) return;
+      if (!current()) return;
       resolution = body.resolution;
       trace = body.trace;
       dropped = body.dropped;
       error = '';
     } catch (e) {
-      if (mine !== runSeq) return;
+      if (!current()) return;
       resolution = null;
       trace = [];
       dropped = [];
@@ -116,7 +116,7 @@
             ? e.message
             : 'Could not run the preview';
     } finally {
-      if (mine === runSeq) busy = false;
+      if (current()) busy = false;
     }
   }
 
@@ -194,7 +194,7 @@
     </div>
 
     {#if error}
-      <div class="banner error">{error}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
     {/if}
 
     {#if resolution}
@@ -228,10 +228,10 @@
         <p class="caption">{resolution.considered} rules evaluated.</p>
 
         {#if dropped.length > 0}
-          <div class="banner warn">
+          <Alert appearance="inline" variant="warn">
             Skipped as uncompilable, so they did not run: rules {dropped.join(', ')}. Dropping a
             skip rule imports a transaction that was meant to be excluded.
-          </div>
+          </Alert>
         {/if}
 
         <h4 class="micro-label trace-head">Trace</h4>

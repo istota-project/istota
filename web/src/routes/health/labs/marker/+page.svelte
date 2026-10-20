@@ -23,7 +23,7 @@
     type BiomarkerTrend,
   } from '$lib/api';
   import { formatDate } from '$lib/dateFormat';
-  import { Badge, EmptyState, LoadState, PageHeader } from '$lib/components/ui';
+  import { Alert, Badge, EmptyState, LoadState, PageHeader } from '$lib/components/ui';
 
   Chart.register(
     LineController,
@@ -349,10 +349,10 @@
         <EmptyState>No measurements recorded for this biomarker yet.</EmptyState>
       {:else}
         {#if trend.unit_mismatch}
-          <div class="banner warn">
+          <Alert appearance="inline" variant="warn">
             Measurements use different units across panels — the chart shows raw values without
             conversion.
-          </div>
+          </Alert>
         {/if}
         <div class="chart-wrap"><canvas bind:this={chartCanvas}></canvas></div>
       {/if}

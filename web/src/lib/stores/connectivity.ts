@@ -44,6 +44,7 @@
  */
 import { get, writable, type Readable } from 'svelte/store';
 import { getChatConfig, type SendFailure } from '$lib/api';
+import { onDocumentVisible } from '$lib/ui/visibility';
 
 /**
  * How long a probe may run before it counts as a gap.
@@ -83,7 +84,7 @@ let backoffStep = 0;
 let inFlight: Promise<boolean> | null = null;
 let offlineHandler: (() => void) | null = null;
 let onlineHandler: (() => void) | null = null;
-let visibilityHandler: (() => void) | null = null;
+let offVisible: (() => void) | null = null;
 
 function cancelSchedule(): void {
   if (timer !== null) clearTimeout(timer);
@@ -232,12 +233,7 @@ export function startConnectivity(): () => void {
   window.addEventListener('offline', offlineHandler);
   window.addEventListener('online', onlineHandler);
 
-  if (typeof document !== 'undefined') {
-    visibilityHandler = () => {
-      if (document.visibilityState === 'visible') probeNow();
-    };
-    document.addEventListener('visibilitychange', visibilityHandler);
-  }
+  offVisible = onDocumentVisible(() => probeNow());
 
   // A page loaded with the interface already down — the case the whole feature
   // exists for — has no event coming to tell it so.
@@ -263,10 +259,8 @@ function stopConnectivity(): void {
   inFlight = null;
   if (offlineHandler) window.removeEventListener('offline', offlineHandler);
   if (onlineHandler) window.removeEventListener('online', onlineHandler);
-  if (visibilityHandler && typeof document !== 'undefined') {
-    document.removeEventListener('visibilitychange', visibilityHandler);
-  }
+  offVisible?.();
   offlineHandler = null;
   onlineHandler = null;
-  visibilityHandler = null;
+  offVisible = null;
 }

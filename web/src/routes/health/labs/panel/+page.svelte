@@ -18,6 +18,7 @@
     type Specimen,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     ConfirmDialog,
@@ -289,8 +290,9 @@
         </div>
       </div>
 
-      {#if info}<div class="banner info">{info}</div>{/if}
-      {#if error && panel}<div class="banner error">{error}</div>{/if}
+      {#if info}<Alert appearance="inline" variant="info" role="status">{info}</Alert>{/if}
+      {#if error && panel}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert
+        >{/if}
 
       <div class="split">
         <div class="biomarker-table">

@@ -46,24 +46,12 @@ class ConfigFile:
 def overlay_skill_names(config: "Config", user_id: str) -> list[str]:
     """The skills this user can use and may write an overlay for, sorted."""
     from istota.skills._loader import (
-        effective_disabled_skills, load_skill_index, overlay_denylisted,
+        load_skill_index, overlay_denylisted, user_skill_names,
     )
 
     index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
-    disabled = effective_disabled_skills(config, user_id, index)
-    is_admin = config.is_admin(user_id)
-    features = frozenset(config.experimental.features)
-    names = []
-    for name in sorted(index):
-        meta = index[name]
-        if overlay_denylisted(name) or name in disabled:
-            continue
-        if meta.admin_only and not is_admin:
-            continue
-        if meta.experimental and f"skill_{name}" not in features:
-            continue
-        names.append(name)
-    return names
+    usable = user_skill_names(config, user_id, index, count_user_disabled=True)
+    return [name for name in usable if not overlay_denylisted(name)]
 
 
 def lookup(

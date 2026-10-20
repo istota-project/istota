@@ -9,6 +9,7 @@
     type GoogleScopeLevel,
   } from '$lib/api';
   import {
+    Alert,
     Badge,
     Button,
     ConfirmDialog,
@@ -200,15 +201,15 @@
   {:else}
     {#if status.connected}
       {#if status.missing_scopes.length > 0}
-        <div class="banner warn">
+        <Alert appearance="inline" variant="warn">
           Your grant is narrower than what this instance now asks for. Reconnect to apply the
           current selection; until then some Google actions will fail.
-        </div>
+        </Alert>
       {:else if status.extra_scopes.length > 0}
-        <div class="banner info">
+        <Alert appearance="inline" variant="info">
           Your grant is wider than the current selection. Reconnect to narrow it, or remove access
           from your Google account settings.
-        </div>
+        </Alert>
       {/if}
     {/if}
 
@@ -306,10 +307,10 @@
   {/if}
 
   {#if error}
-    <div class="banner error">{error}</div>
+    <Alert appearance="inline" variant="danger" role="alert">{error}</Alert>
   {/if}
   {#if info}
-    <div class="banner success">{info}</div>
+    <Alert appearance="inline" variant="success" role="status">{info}</Alert>
   {/if}
 </Card>
 

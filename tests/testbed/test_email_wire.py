@@ -26,6 +26,8 @@ assumed:
 from __future__ import annotations
 
 import logging
+import ssl
+import time
 
 import pytest
 
@@ -35,8 +37,10 @@ from istota.mail.support import normalize_subject
 from istota.skills.email import (
     EmailConfig,
     _get_mailbox,
+    _open_smtp,
     _server_capabilities,
     _supports_uid_expunge,
+    mark_email,
     reply_to_email,
 )
 from testbed.services import mail
@@ -46,6 +50,31 @@ from .conftest import USER_ADDRESS, USER_ID, USER_TAG_ADDRESS
 pytestmark = pytest.mark.testbed
 
 STRANGER = "stranger@ext.test"
+
+
+def _wire_email_config(wire) -> EmailConfig:
+    """The skill's own config for the bot mailbox, on the STARTTLS pair."""
+    return EmailConfig(
+        imap_host=wire.server.host,
+        imap_port=wire.server.imap_starttls_port,
+        imap_user=mail.BOT_ADDRESS,
+        imap_password=mail.MAIL_PASSWORD,
+        smtp_host=wire.server.host,
+        smtp_port=wire.server.smtp_starttls_port,
+    )
+
+
+def _wait_for_uids(wire, *, above: int, count: int, timeout: float = 15.0) -> list[int]:
+    """The first `count` UIDs above `above`, once that many have been delivered."""
+    deadline = time.monotonic() + timeout
+    while True:
+        with wire.inbox() as inbox:
+            found = [uid for uid in inbox.uids() if uid > above]
+        if len(found) >= count:
+            return found[:count]
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"expected {count} new messages, found {found}")
+        time.sleep(0.5)
 
 
 def _row_for(rows: list[dict], subject: str) -> dict:
@@ -782,6 +811,46 @@ class TestWireBehaviourAMockCannotReach:
         )
         assert supported is False
         assert "UIDPLUS" not in live
+
+    def test_mark_leaves_mail_another_client_flagged_deleted(self, wire):
+        """ISSUE-799. imap-tools' `flag()` follows its STORE with a plain
+        `EXPUNGE`, which removes every `\\Deleted` message in the folder. Here
+        another client has flagged B and not expunged it yet; marking A read
+        must not take B with it."""
+        email_config = _wire_email_config(wire)
+        with wire.inbox() as inbox:
+            before = inbox.latest_uid()
+        wire.send(from_addr=STRANGER, subject="mark target")
+        wire.send(from_addr=STRANGER, subject="flagged elsewhere")
+        uid_a, uid_b = _wait_for_uids(wire, above=before, count=2)
+
+        with _get_mailbox(email_config) as other_client:
+            other_client.login(email_config.imap_user, email_config.imap_password)
+            typ, _ = other_client.client.uid(
+                "STORE", str(uid_b), "+FLAGS", r"(\Deleted)"
+            )
+            assert typ == "OK"
+
+        mark_email(str(uid_a), "read", config=email_config)
+
+        with wire.inbox() as inbox:
+            assert uid_b in inbox.uids(), "mark expunged a message it was not given"
+            assert uid_a in inbox.uids()
+
+    @pytest.mark.parametrize("opener", ["imap", "smtp"])
+    def test_an_untrusted_certificate_is_refused(self, wire, monkeypatch, tmp_path, opener):
+        """ISSUE-798. The mail server's certificate is self-signed and trusted
+        only through `SSL_CERT_FILE`. Withdraw that and the STARTTLS handshake
+        has to fail: before the fix both paths handed the TLS layer no context,
+        got an unverified one, and signed in regardless."""
+        email_config = _wire_email_config(wire)
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+        with pytest.raises(ssl.SSLCertVerificationError):
+            if opener == "imap":
+                _get_mailbox(email_config)
+            else:
+                _open_smtp(email_config, timeout=10)
 
     def test_a_message_with_no_text_plain_part_still_becomes_a_task(self, wire):
         """HTML-only mail is real and common. The body reaches the prompt as the

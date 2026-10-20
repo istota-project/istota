@@ -5,6 +5,11 @@ const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
 await fillApiDouble(api);
 vi.mock('$app/paths', () => ({ base: '/istota' }));
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
 import Page from './+page.svelte';
 
 const rows = [
@@ -146,7 +151,11 @@ it('names disable and removal effects and sends links through the API', async ()
   expect(screen.queryByRole('menuitem', { name: 'Send sign-in link' })).toBeNull();
   await fireEvent.click(await screen.findByRole('menuitem', { name: 'Send password reset' }));
   await waitFor(() => expect(api.adminUserAction).toHaveBeenCalledWith('bob', 'reset'));
-  expect(await screen.findByRole('alert')).toHaveTextContent('could not be sent');
+  // A failed action is a notice; the table it was taken from stays as it was.
+  await waitFor(() =>
+    expect(notices.notifyError).toHaveBeenCalledWith('The reset link could not be sent.'),
+  );
+  expect(screen.queryByText(/could not be sent/)).toBeNull();
 });
 
 it('keeps a create error and the entered email in the dialog', async () => {

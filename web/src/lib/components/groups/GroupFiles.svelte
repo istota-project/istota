@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { Folder } from '@lucide/svelte';
-  import { Icon, Button, EmptyState, Card, Timestamp } from '$lib/components/ui';
+  import { Icon, Button, EmptyState, Card, LoadState, Timestamp } from '$lib/components/ui';
   import { getWorkspaceListing, getWorkspacePlaces, type WorkspaceEntry } from '$lib/api';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { fileIcon } from '$lib/components/workspace/filePresentation';
@@ -51,9 +51,8 @@
 
 <Card title="Shared files" description="Recently changed in the group folder.">
   {#snippet actions()}<Button size="sm" href={filesHref}>Open in Files</Button>{/snippet}
-  {#if loading}<p class="caption">Loading files…</p>
-  {:else if error}<p class="banner error">{error}</p>
-  {:else if entries.length}
+  <LoadState scope="card" {loading} loadingLabel="Loading files…" {error} empty={!entries.length}>
+    {#snippet emptyState()}<EmptyState size="sm">The group folder is empty.</EmptyState>{/snippet}
     <ul class="files list-reset">
       {#each entries as entry (entry.name)}
         {@const target = entry.kind === 'file' ? ref(entry) : null}
@@ -81,7 +80,7 @@
         </li>
       {/each}
     </ul>
-  {:else}<EmptyState size="sm">The group folder is empty.</EmptyState>{/if}
+  </LoadState>
 </Card>
 
 <style>

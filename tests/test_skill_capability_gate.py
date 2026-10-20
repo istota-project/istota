@@ -12,12 +12,13 @@ special-case (which was duplicated in the executor and the skills CLI).
 
 from pathlib import Path
 
-from istota.config import BrowserConfig, DevboxConfig
+from istota.config import BrowserConfig, DevboxConfig, ExperimentalConfig
 from istota.skills._loader import (
     _parse_frontmatter,
     capability_disabled_skills,
     effective_disabled_skills,
     load_skill_index,
+    user_skill_names,
 )
 from istota.skills._types import SkillMeta
 
@@ -196,6 +197,50 @@ class TestEffectiveDisabledSkills:
         config = make_config()
         disabled = effective_disabled_skills(config, "nobody", self._index())
         assert "browse" in disabled  # capability gate still applies
+
+
+class TestUserSkillNames:
+    """The skills a user's tasks can load, for the Preferences picker and the overlay list."""
+
+    def _index(self):
+        return {
+            "browse": SkillMeta(name="browse", description="", requires_capability=["browser"]),
+            "notes": SkillMeta(name="notes", description=""),
+            "calendar": SkillMeta(name="calendar", description=""),
+            "tasks": SkillMeta(name="tasks", description="", admin_only=True),
+            "lab": SkillMeta(name="lab", description="", experimental=True),
+            "off": SkillMeta(name="off", description=""),
+        }
+
+    def test_leaves_out_what_does_nothing_for_a_member(self, make_config, make_user_config):
+        config = make_config(
+            disabled_skills=["off"],
+            users={"alice": make_user_config(), "bob": make_user_config()},
+            admin_users={"bob"},
+        )
+        names = user_skill_names(config, "alice", self._index(), count_user_disabled=True)
+        assert names == ["calendar", "notes"]
+
+    def test_admin_and_enabled_experimental_are_offered(self, make_config, make_user_config):
+        config = make_config(
+            users={"alice": make_user_config(), "bob": make_user_config()},
+            admin_users={"alice"},
+            experimental=ExperimentalConfig(features=["skill_lab"]),
+        )
+        names = user_skill_names(config, "alice", self._index(), count_user_disabled=True)
+        assert names == ["calendar", "lab", "notes", "off", "tasks"]
+
+    def test_the_users_own_disabled_list_is_kept_for_the_picker(self, make_config, make_user_config):
+        config = make_config(
+            disabled_skills=["off"],
+            users={"alice": make_user_config(disabled_skills=["calendar", "off"])},
+        )
+        index = self._index()
+        assert "calendar" not in user_skill_names(config, "alice", index, count_user_disabled=True)
+        picker = user_skill_names(config, "alice", index, count_user_disabled=False)
+        assert "calendar" in picker
+        # Still off for the instance, so turning it back on would do nothing.
+        assert "off" not in picker
 
 
 class TestRealBundledSkills:

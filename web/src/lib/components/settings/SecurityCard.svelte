@@ -1,7 +1,7 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { AuthError, changePassword, type UserAuth } from '$lib/api';
-  import { Button, Input, Card, Field, FormStack } from '$lib/components/ui';
+  import { Alert, Button, Input, Card, Field, FormStack } from '$lib/components/ui';
 
   let { auth, onSignedOut }: { auth?: UserAuth; onSignedOut: () => void } = $props();
   let currentPassword = $state('');
@@ -9,13 +9,15 @@
   let confirmPassword = $state('');
   let busy = $state(false);
   let error = $state('');
+  let mismatch = $state('');
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (busy) return;
     error = '';
+    mismatch = '';
     if (newPassword !== confirmPassword) {
-      error = 'Passwords must match.';
+      mismatch = 'Passwords must match.';
       return;
     }
     busy = true;
@@ -55,7 +57,7 @@
         <Field label="New password">
           <Input type="password" autocomplete="new-password" bind:value={newPassword} required />
         </Field>
-        <Field label="Confirm new password">
+        <Field label="Confirm new password" error={mismatch}>
           <Input
             type="password"
             autocomplete="new-password"
@@ -63,7 +65,7 @@
             required
           />
         </Field>
-        {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+        {#if error}<Alert appearance="inline" variant="danger" role="alert">{error}</Alert>{/if}
         <div class="actions hstack wrap">
           <Button
             type="submit"

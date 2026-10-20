@@ -55,6 +55,8 @@
     type Picked,
   } from '$lib/platform/nativePicker';
   import { readDraft, readDraftReply, writeDraft } from '$lib/stores/drafts';
+  import { debounce } from '$lib/ui/debounce';
+  import { latest } from '$lib/ui/latest';
   import type { MessageReply } from '$lib/stores/segments';
   import { online } from '$lib/stores/connectivity';
   import { putBlob, deleteBlob, hasHeadroom, MAX_PENDING_BLOB_BYTES } from '$lib/offline/db';
@@ -195,12 +197,15 @@
   let uploading = $state(0);
   let dragOver = $state(false);
   let uploadError = $state('');
-  // Bumped whenever the composer changes room. `upload` is async and appends
-  // to `attachments` with no notion of where it started, while `switchDraft`
-  // clears them synchronously and cannot see a promise in flight — so a large
-  // file picked in one room and resolved after a switch put its chip in the
-  // new room, and sending from there posted it to the wrong one.
-  let uploadEpoch = 0;
+  // Invalidated whenever the composer changes room. `upload` is async and
+  // appends to `attachments` with no notion of where it started, while
+  // `switchDraft` clears them synchronously and cannot see a promise in flight
+  // — so a large file picked in one room and resolved after a switch put its
+  // chip in the new room, and sending from there posted it to the wrong one.
+  // Uploads in one room may overlap, so a batch peeks rather than superseding
+  // the others. Not disposed on unmount: a held recording's blob is left for
+  // the next `init()` to collect, as before, rather than dropped mid-stage.
+  const uploads = latest();
   // What the server will accept, or null until /chat/config answers. See
   // refusalReason for why null means "ask the server" rather than a default.
   let limits = $state<{ maxBytes: number; maxMb: number; extensions: string[] } | null>(null);
@@ -234,7 +239,7 @@
   // not answered yet" from "the room went away under us", which look identical
   // from the prop alone and want opposite treatment — see switchDraft.
   let hasHadDraftKey = false;
-  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const saveDraftSoon = debounce(flushDraft, DRAFT_SAVE_DEBOUNCE_MS);
   // Messages handed to `onSend` whose backend ack has not arrived, by draft
   // key. Until an ack lands, that key's emptied field is not a cleared draft —
   // the text went to the server and the stored copy is what a reload would
@@ -255,8 +260,7 @@
 
   /** Write the field down now, cancelling any pending debounced write. */
   function flushDraft() {
-    clearTimeout(saveTimer);
-    saveTimer = undefined;
+    saveDraftSoon.cancel();
     if (!activeDraftKey) return;
     // Hold the submitted text through the ack. Every departure flushes — a
     // room switch, an unmount, `pagehide` — so without this the draft the
@@ -321,8 +325,7 @@
 
   function scheduleDraftSave() {
     if (!activeDraftKey) return;
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(flushDraft, DRAFT_SAVE_DEBOUNCE_MS);
+    saveDraftSoon();
   }
 
   function setText(next: string) {
@@ -356,19 +359,19 @@
     // they must not ride along either. Re-picking a file costs a tap; posting
     // one to the wrong room does not undo.
     //
-    // An upload still in flight cannot be reached by clearing the list, so the
-    // epoch is bumped alongside it: `upload` compares on the way out and drops
-    // a result whose room has since changed. The counter and the error are
-    // reset with it, both being the state of an upload that is no longer this
-    // room's business.
+    // An upload still in flight cannot be reached by clearing the list, so
+    // `uploads` is invalidated alongside it: `upload` compares on the way out
+    // and drops a result whose room has since changed. The counter and the
+    // error are reset with it, both being the state of an upload that is no
+    // longer this room's business.
     if (leavingRoom) {
-      uploadEpoch++;
+      uploads.invalidate();
       // A chip whose bytes are held here is the only copy of them, and the
       // clear is the last thing that knows which blobs those were: the queue
       // is what the collector reconciles against, and this file was never
       // queued. Left behind they would sit against the shared total until the
       // next `init()`, which in an installed app can be days. An upload still
-      // in flight cleans up after itself — it compares the epoch on the way
+      // in flight cleans up after itself — it checks `uploads` on the way
       // out and drops its own blob — so the two cannot both delete one.
       for (const a of attachments) if (a.pendingBlobId) void deleteBlob(a.pendingBlobId);
       attachments = [];
@@ -752,8 +755,8 @@
     // being the current one — including the counter, which `switchDraft` has
     // already reset to 0, so a stale decrement would drive it negative and
     // leave the composer permanently reporting an upload in progress.
-    const epoch = uploadEpoch;
-    const stale = () => epoch !== uploadEpoch;
+    const sameRoom = uploads.peek();
+    const stale = () => !sameRoom();
     uploadError = '';
     const items = Array.from(files).map((f) => (f instanceof File ? pickedFromFile(f) : f));
     for (const file of items) {
@@ -794,7 +797,7 @@
    * Hold a file's bytes and stage its chip, or say why we could not.
    *
    * `stale` is `upload`'s own room guard, passed in rather than recomputed:
-   * the epoch it closes over is the one captured when *this batch* started.
+   * the check it closes over is the one taken when *this batch* started.
    */
   async function stage(file: Picked, stale: () => boolean) {
     const held = await holdOffline(file);
@@ -855,11 +858,10 @@
     //
     // Written rather than merely left alone: a submit inside the debounce
     // window would otherwise leave nothing stored at all, or a stale prefix of
-    // what was sent. Cancelling the timer first stops that write landing after
-    // this one and clearing it back out.
+    // what was sent. Cancelling the pending save first stops that write landing
+    // after this one and clearing it back out.
     if (activeDraftKey) {
-      clearTimeout(saveTimer);
-      saveTimer = undefined;
+      saveDraftSoon.cancel();
       const held = unsettledSends.get(activeDraftKey);
       if (held !== undefined) {
         // A second send is open in this room: since ISSUE-300 a `!command`

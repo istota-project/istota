@@ -7,7 +7,7 @@
     type AdminConfigView,
     type ConfigRequest,
   } from '$lib/api';
-  import { Button, Card, Spinner } from '$lib/components/ui';
+  import { Alert, Button, Card, Spinner } from '$lib/components/ui';
   import {
     NOT_PICKED_UP_MS,
     POLL_MS,
@@ -107,21 +107,21 @@
 
 <Card title="Change #{requestId}" class="request-progress" aria-live="polite">
   {#if phase === 'lost'}
-    <p class="banner danger">
+    <Alert appearance="inline" variant="danger">
       Istota has not come back three minutes after applying the change. On the host, run
       <code>istota-stack apply</code> with an earlier plan, or copy
       <code>config/config.toml.bak.&lt;timestamp&gt;</code> back as uid 10001 and run
       <code>istota-stack up</code>. The change's history is kept for when the web returns.
-    </p>
+    </Alert>
   {:else if phase === 'restarting'}
     <p><Spinner /> Applied. Waiting for Istota to restart…</p>
   {:else if !request || request.status === 'pending'}
     <p><Spinner /> Waiting for the host…</p>
     {#if notPickedUp}
-      <p class="banner warn">
+      <Alert appearance="inline" variant="warn">
         The host has not picked this up after two minutes. The config applier may not be running on
         the host; you can cancel the change while it is waiting.
-      </p>
+      </Alert>
     {/if}
     {#if request}
       <div class="form-actions">
@@ -136,17 +136,23 @@
   {:else if request.status === 'building'}
     <p><Spinner /> Building the image this change needs…</p>
   {:else if request.status === 'applied'}
-    <p class="banner success">Applied. Istota restarted with the new configuration.</p>
+    <Alert appearance="inline" variant="success"
+      >Applied. Istota restarted with the new configuration.</Alert
+    >
   {:else if request.status === 'unchanged'}
-    <p class="banner info">The host found nothing to change; nothing was restarted.</p>
+    <Alert appearance="inline" variant="info"
+      >The host found nothing to change; nothing was restarted.</Alert
+    >
   {:else if request.status === 'cancelled'}
-    <p class="banner info">Cancelled. Nothing was changed.</p>
+    <Alert appearance="inline" variant="info">Cancelled. Nothing was changed.</Alert>
   {:else if request.status === 'refused'}
-    <p class="banner danger">The host refused the change. Nothing was written.</p>
+    <Alert appearance="inline" variant="danger"
+      >The host refused the change. Nothing was written.</Alert
+    >
   {:else if request.status === 'failed'}
-    <p class="banner danger">
+    <Alert appearance="inline" variant="danger">
       The change failed part way. Istota was restarted so that what runs matches what was written.
-    </p>
+    </Alert>
   {/if}
 
   {#if unreachable && phase === 'following'}

@@ -28,6 +28,7 @@
   import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';
   import { notifyError } from '$lib/stores/notices';
   import { isEditableTarget } from '$lib/ui/editableTarget';
+  import { latest } from '$lib/ui/latest';
   import { createUrlSelection } from '$lib/navigation/urlSelection.svelte';
 
   const getScrollRoot = getShellScrollRoot();
@@ -40,7 +41,7 @@
   let loadingMore = $state(false);
   let error = $state('');
   let hasMore = $state(true);
-  let loadGeneration = 0;
+  const entryLoads = latest();
 
   // Watch for unseen toggle — reload with/without server-side status filter
   let prevSu = false;
@@ -125,11 +126,11 @@
   // An older search hit stays outside the paged list and its filters.
   let detachedEntry: FeedEntry | null = $state(null);
   let entryReady = $state(false);
-  let entryGeneration = 0;
+  const detachedLoads = latest();
   let destroyed = false;
   type EntrySelection = { id: number | null };
   async function applyEntry({ id }: EntrySelection) {
-    const generation = ++entryGeneration;
+    const current = detachedLoads.next();
     detachedEntry = null;
     readerIndex = null;
     if (id === null) return;
@@ -140,9 +141,9 @@
     }
     try {
       const entry = await getFeedEntry(id);
-      if (generation === entryGeneration) detachedEntry = entry;
+      if (current()) detachedEntry = entry;
     } catch {
-      if (generation === entryGeneration) notifyError("Couldn't open that feed entry.");
+      if (current()) notifyError("Couldn't open that feed entry.");
     }
   }
   const entrySel = createUrlSelection<EntrySelection>({
@@ -228,28 +229,28 @@
   }
 
   async function loadEntries(feedId: number) {
-    const generation = ++loadGeneration;
+    const current = entryLoads.next();
     loadingMore = false;
     loading = true;
     error = '';
     try {
       const data = await loadPage({ offset: 0, feedId });
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       entries = data.entries;
       total = data.total;
       hasMore = entries.length < total;
     } catch {
-      if (generation === loadGeneration) error = 'Failed to load feeds';
+      if (current()) error = 'Failed to load feeds';
     } finally {
-      if (generation === loadGeneration) loading = false;
+      if (current()) loading = false;
     }
     // A stale response must not scroll the new selection.
-    if (generation === loadGeneration) getScrollRoot?.()?.scrollTo(0, 0);
+    if (current()) getScrollRoot?.()?.scrollTo(0, 0);
   }
 
   async function loadMore() {
     if (loading || loadingMore || !hasMore) return;
-    const generation = loadGeneration;
+    const current = entryLoads.peek();
     loadingMore = true;
     try {
       // Under the unread filter, offset is unstable: cards get marked read
@@ -272,7 +273,7 @@
       }
 
       const data = await loadPage(opts);
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       if (data.entries.length === 0) {
         hasMore = false;
       } else {
@@ -289,12 +290,12 @@
         }
       }
     } catch {
-      if (generation !== loadGeneration) return;
+      if (!current()) return;
       notifyError('Failed to load more feeds.');
       // Keep Next retryable, but do not immediately ask again for a failed page.
       return false;
     } finally {
-      if (generation === loadGeneration) loadingMore = false;
+      if (current()) loadingMore = false;
     }
   }
 
@@ -321,8 +322,8 @@
 
   onDestroy(() => {
     destroyed = true;
-    loadGeneration++;
-    entryGeneration++;
+    entryLoads.dispose();
+    detachedLoads.dispose();
     if (flushTimer) clearTimeout(flushTimer);
     if (flushMaxTimer) clearTimeout(flushMaxTimer);
     flushPending();

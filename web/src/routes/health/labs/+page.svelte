@@ -13,7 +13,9 @@
     type CsvImportSummary,
     type HealthPanel,
   } from '$lib/api';
+  import { notifyError } from '$lib/stores/notices';
   import {
+    Alert,
     Badge,
     Button,
     EmptyState,
@@ -50,12 +52,11 @@
     if (!f) return;
     csvImporting = true;
     csvSummary = null;
-    error = '';
     try {
       csvSummary = await importHealthCsv(f);
       await load();
     } catch (e) {
-      error = e instanceof Error ? e.message : 'CSV import failed';
+      notifyError(e instanceof Error ? e.message : 'CSV import failed');
     } finally {
       csvImporting = false;
       if (csvInput) csvInput.value = '';
@@ -180,7 +181,7 @@
 {/if}
 
 {#if csvSummary}
-  <div class="banner info">
+  <Alert appearance="inline" variant="info" role="status">
     {#if csvSummary.panels_created > 0}
       Added {csvSummary.panels_created} panel{csvSummary.panels_created === 1 ? '' : 's'}
       ({csvSummary.biomarkers_created} biomarkers).
@@ -207,7 +208,7 @@
         </ul>
       </Disclosure>
     {/if}
-  </div>
+  </Alert>
 {/if}
 
 <LoadState {loading} {error} empty={!!matrix && matrix.panels.length === 0 && drafts.length === 0}>

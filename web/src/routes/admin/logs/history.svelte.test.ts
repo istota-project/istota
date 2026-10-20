@@ -82,3 +82,40 @@ describe('log source history', () => {
     expect(__history.entries).toHaveLength(1);
   });
 });
+
+describe('a load that outlives the page', () => {
+  it('does not open the live tail after unmount', async () => {
+    const opened = vi.fn();
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        constructor(url: string) {
+          opened(url);
+        }
+        addEventListener() {}
+        close() {}
+      },
+    );
+    try {
+      const { unmount } = render(Page);
+      await waitFor(() => expect(getAdminLogPage).toHaveBeenCalledTimes(1));
+      await fireEvent.click(await screen.findByRole('button', { name: 'Follow' }));
+
+      let finish!: (value: Awaited<ReturnType<typeof getAdminLogPage>>) => void;
+      vi.mocked(getAdminLogPage).mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      expect(getAdminLogPage).toHaveBeenCalledTimes(2);
+      unmount();
+      finish({ records: [], next_before: null, tail_cursor: 'app.log:10', truncated: false });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await tick();
+      expect(opened).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

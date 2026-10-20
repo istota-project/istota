@@ -1,10 +1,14 @@
 <script lang="ts">
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import {
+    Alert,
     Badge,
+    Button,
     Card,
     ConfirmDialog,
     EmptyState,
+    Field,
+    Input,
     SecretField,
     type BadgeVariant,
   } from '$lib/components/ui';
@@ -44,7 +48,15 @@
   let saveError = $state('');
   const confirmingClearKey = createConfirm<string>();
 
-  let dirty = $derived(Object.values(pending).some((v) => v && v.length > 0));
+  // A plain field (a setting, not a secret) comes back with its stored value
+  // and is shown prefilled; retyping that same value is not a change.
+  function changedEntries(): [string, string][] {
+    return Object.entries(pending).filter(
+      ([key, v]) => v && v.length > 0 && v !== service.values?.[key],
+    );
+  }
+
+  let dirty = $derived(changedEntries().length > 0);
 
   let clearMessage = $derived.by(() => {
     const field = service.fields.find((f) => f.key === confirmingClearKey.target);
@@ -60,7 +72,7 @@
   }
 
   async function saveAll() {
-    const entries = Object.entries(pending).filter(([, v]) => v && v.length > 0);
+    const entries = changedEntries();
     if (entries.length === 0) return;
     saving = true;
     saveError = '';
@@ -154,18 +166,46 @@
       with the ownership it enforced.
     -->
     {#each service.fields as f (f.key)}
-      <SecretField
-        label={f.label}
-        type={f.type}
-        configured={service.configured_keys.includes(f.key)}
-        value={pending[f.key] ?? ''}
-        disabled={saving}
-        onValueChange={(v) => setFieldValue(f.key, v)}
-        onRequestClear={() => confirmingClearKey.ask(f.key)}
-      />
+      {#if f.plain}
+        {@const configured = service.configured_keys.includes(f.key)}
+        <Field label={f.label}>
+          <div class="plain-row hstack">
+            <Input
+              type={f.type}
+              value={pending[f.key] ?? service.values?.[f.key] ?? ''}
+              disabled={saving}
+              placeholder="Enter value"
+              aria-label={configured ? f.label : undefined}
+              oninput={(e: Event) =>
+                setFieldValue(f.key, (e.currentTarget as HTMLInputElement).value)}
+            />
+            {#if configured}
+              <Button
+                variant="secondary"
+                size="sm"
+                class="plain-clear-btn"
+                ariaLabel="Clear stored {f.label}"
+                title="Clear stored value"
+                disabled={saving}
+                onclick={() => confirmingClearKey.ask(f.key)}>Clear</Button
+              >
+            {/if}
+          </div>
+        </Field>
+      {:else}
+        <SecretField
+          label={f.label}
+          type={f.type}
+          configured={service.configured_keys.includes(f.key)}
+          value={pending[f.key] ?? ''}
+          disabled={saving}
+          onValueChange={(v) => setFieldValue(f.key, v)}
+          onRequestClear={() => confirmingClearKey.ask(f.key)}
+        />
+      {/if}
     {/each}
     {#if saveError}
-      <div class="banner error">{saveError}</div>
+      <Alert appearance="inline" variant="danger" role="alert">{saveError}</Alert>
     {/if}
   {/if}
 </Card>
@@ -195,6 +235,16 @@
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
     color: var(--text-muted);
+  }
+
+  /* Same widths as SecretField's row, so a plain field lines up with the
+     credential fields beside it. */
+  .plain-row > :global(.ui-input) {
+    flex: 0 1 24rem;
+  }
+
+  .plain-row > :global(.plain-clear-btn) {
+    flex: none;
   }
 
   .saved-flash {

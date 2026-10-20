@@ -19,6 +19,11 @@ await fillApiDouble(api);
 
 const doctorRun = vi.hoisted(() => ({ waitForDoctorRun: vi.fn() }));
 vi.mock('$lib/doctorRun', () => doctorRun);
+const notices = vi.hoisted(() => ({ notifyError: vi.fn() }));
+vi.mock('$lib/stores/notices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('$lib/stores/notices')>()),
+  notifyError: notices.notifyError,
+}));
 vi.mock('$app/paths', () => ({ base: '/istota' }));
 
 import Page from './+page.svelte';
@@ -58,6 +63,7 @@ async function mount(over: Partial<AdminNextcloudConnection> = {}) {
 beforeEach(() => {
   api.getAdminConnections.mockReset();
   doctorRun.waitForDoctorRun.mockReset();
+  notices.notifyError.mockReset();
 });
 
 afterEach(() => {
@@ -193,10 +199,21 @@ describe('Check now', () => {
     expect(api.getAdminConnections).toHaveBeenCalledTimes(1);
   });
 
-  it('reports a failed request on the card', async () => {
+  it('reports a failed request as a notice, not on the card', async () => {
+    // A failed request is an action failing, so it goes to the notice drawer
+    // the way the servarr card's does; the card keeps its last result.
     doctorRun.waitForDoctorRun.mockRejectedValue(new Error('API error: 403'));
     const card = await mount();
     await fireEvent.click(within(card).getByRole('button', { name: 'Check now' }));
-    await waitFor(() => expect(within(card).getByText(/API error: 403/)).toBeTruthy());
+    await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('API error: 403'));
+    expect(within(card).queryByText(/API error: 403/)).toBeNull();
+  });
+
+  it('says the daemon has not answered as a status line', async () => {
+    doctorRun.waitForDoctorRun.mockResolvedValue({ answered: false, deep: false, report: null });
+    const card = await mount();
+    await fireEvent.click(within(card).getByRole('button', { name: 'Check now' }));
+    const line = await within(card).findByRole('status');
+    expect(line.textContent).toMatch(/has not answered the request yet/);
   });
 });

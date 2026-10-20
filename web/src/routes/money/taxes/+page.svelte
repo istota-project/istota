@@ -9,6 +9,7 @@
   import { selectedLedger } from '$lib/money/stores/ledger';
   import { base } from '$app/paths';
   import {
+    Alert,
     Card,
     EmptyState,
     Field,
@@ -202,12 +203,12 @@
       {/if}
 
       {#if stateNotice}
-        <div class="banner info state-notice">
+        <Alert appearance="inline" variant="info" class="state-notice">
           {stateNotice}
           {#if data.state_unavailable_reason === 'no_brackets'}
             <a href="{base}/money/settings/taxes">Add them</a>
           {/if}
-        </div>
+        </Alert>
       {/if}
 
       <div class="tax-layout">
@@ -697,7 +698,7 @@
     line-height: var(--leading-normal);
   }
 
-  .state-notice {
+  .tax-content :global(.state-notice) {
     margin-bottom: var(--space-3);
   }
 
@@ -728,7 +729,7 @@
   /* In-app cross-references, so the interactive blue rather than the amber
      of a content link (web/AGENTS.md, Color). */
   .settings-link a,
-  .state-notice a {
+  .tax-content :global(.state-notice a) {
     color: var(--accent-blue);
   }
 

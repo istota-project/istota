@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LoadState } from '$lib/components/ui';
+  import { Alert, LoadState } from '$lib/components/ui';
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { getModuleServices, type ServiceCard as ServiceCardData } from '$lib/api';
@@ -43,10 +43,10 @@
 <LoadState {loading} {error}>
   {#if !moduleEnabled}
     <div class="settings">
-      <div class="banner info">
+      <Alert appearance="inline" variant="info">
         Money module is disabled. Enable it in
         <a href="{base}/settings">Settings → Preferences</a> to manage Monarch credentials and invoicing.
-      </div>
+      </Alert>
     </div>
   {:else}
     {@render children()}

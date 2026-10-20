@@ -1,5 +1,6 @@
 import { pushAvailable, setBadge } from '$lib/platform/nativePush';
 import { notificationCounts } from './notifications';
+import { onDocumentVisible } from '$lib/ui/visibility';
 
 /** Subscribe after authentication; an absent total is unknown, never zero. */
 export function startPushBadgeSync(): () => void {
@@ -40,12 +41,11 @@ export function startPushBadgeSync(): () => void {
   });
   // APNs can change the icon while suspended. Wait for the poll's fresh answer
   // before reasserting it, even when it equals our last successful write.
-  const onVisible = () => {
-    if (document.visibilityState === 'visible') last = undefined;
-  };
-  document.addEventListener('visibilitychange', onVisible);
+  const offVisible = onDocumentVisible(() => {
+    last = undefined;
+  });
   return () => {
-    document.removeEventListener('visibilitychange', onVisible);
+    offVisible();
     stopped = true;
     unsubscribe();
     if (timer !== undefined) clearTimeout(timer);

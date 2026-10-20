@@ -3433,7 +3433,7 @@ const locationDevicesHandler: MockHandler = ({ url, method, body }) => {
 interface ServiceSchema {
   service: string;
   label: string;
-  fields: { key: string; label: string; type: string }[];
+  fields: { key: string; label: string; type: string; plain?: boolean }[];
   used_by?: string[];
   oauth?: boolean;
   custom_ui?: boolean;
@@ -3467,8 +3467,8 @@ const _CONNECTED_SCHEMAS: ServiceSchema[] = [
     label: 'ntfy push',
     used_by: ['heartbeat', 'scheduler'],
     fields: [
-      { key: 'server_url', label: 'Server URL', type: 'url' },
-      { key: 'topic', label: 'Default topic', type: 'text' },
+      { key: 'server_url', label: 'Server URL', type: 'url', plain: true },
+      { key: 'topic', label: 'Default topic', type: 'text', plain: true },
       { key: 'token', label: 'Access token (optional)', type: 'password' },
       { key: 'username', label: 'Username (optional)', type: 'text' },
       { key: 'password', label: 'Password (optional)', type: 'password' },
@@ -3727,7 +3727,11 @@ function buildServiceCard(s: ServiceSchema) {
   } else if (required.some((k) => configured_keys.includes(k))) {
     status = 'partial';
   }
-  return { ...s, status, configured_keys, last_updated: null };
+  const values: Record<string, string> = {};
+  for (const f of s.fields) {
+    if (f.plain && stored[f.key]) values[f.key] = stored[f.key];
+  }
+  return { ...s, status, configured_keys, values, last_updated: null };
 }
 
 function mockSettingsServices(): { services: unknown[] } {
@@ -3742,6 +3746,7 @@ function mockModulesResponse() {
     modules: MODULE_NAMES,
     disabled: [...mockDisabledModules],
     enabled_for_user: Object.fromEntries(MODULE_NAMES.map((m) => [m, !mockDisabledModules.has(m)])),
+    skills: ['calendar', 'developer', 'email', 'files', 'notes', 'whisper'],
   };
 }
 
