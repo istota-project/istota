@@ -171,7 +171,13 @@
     z-index: var(--z-popover);
     box-shadow: var(--shadow-md);
     min-width: 9rem;
-    /* Focused on open by bits-ui; the roving highlight is the affordance. */
+  }
+  /* Focused on open by bits-ui; the roving highlight is the affordance. The
+     :focus-visible in the selector outranks the global ring, which otherwise
+     wins on stylesheet order. iOS WebKit counts a tap-opened menu's focus as
+     focus-visible. */
+  :global(.ui-menu-content:focus-visible),
+  :global(.ui-menu-item:focus-visible) {
     outline: none;
   }
 
@@ -185,7 +191,6 @@
     text-decoration: none;
     border-radius: var(--radius-sm);
     cursor: pointer;
-    outline: none;
     user-select: none;
     white-space: nowrap;
   }
