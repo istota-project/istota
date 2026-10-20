@@ -71,7 +71,7 @@ Chat is the one part of the web UI built to work without a server to talk to. Ev
 Hovering a message (or tapping it, on a touch screen) reveals a row of actions under it: **copy**, **star**, **reply**, **delete**.
 
 - **Copy** puts the whole message on the clipboard as its original markdown — headings, lists and fenced code come across ready to paste, and the activity chips and tool traces are left out. It is unavailable while a reply is still being written, since half an answer is not an answer.
-- **Star** marks the message so it shows up in the Starred view. Unlike copy it works mid-reply, because it marks the message rather than its text. A starred message keeps its star visible without hovering.
+- **Star** marks the message so it shows up in the Starred view, which shows how many messages are starred across your rooms. Unlike copy it works mid-reply, because it marks the message rather than its text. A starred message keeps its star visible without hovering.
 - **Reply** answers one specific message rather than the room in general — see below. It is absent in the aggregate views (All / Unread), which have no composer for a staged reply to go to.
 - **Delete** asks first, then removes the message for good — from the room, from the aggregate views, and from the conversation the bot remembers. In a room that is also open in Nextcloud Talk the confirmation says so, and the message is removed there too where the server allows it. A turn that is still running can't be deleted until it finishes.
 
