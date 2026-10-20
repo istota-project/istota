@@ -274,7 +274,18 @@
     // no connection reads nothing, which is the right answer when nobody is
     // signed in.
     forgetLastUserId();
-    window.location.href = `${base}/login`;
+    window.location.href = `${base}/login${postLoginQuery()}`;
+  }
+
+  /**
+   * The `?next=` key that brings the user back to this page after signing in.
+   * The server holds the table of keys; a page is listed here only when it
+   * can pick up where it left off (the note editor restores its draft).
+   */
+  function postLoginQuery(): string {
+    const path = page.url.pathname;
+    if (path === `${base}/notes/new` || path === `${base}/notes/new/`) return '?next=notes-new';
+    return '';
   }
 
   async function loadUser(): Promise<boolean> {
@@ -611,6 +622,7 @@
           isActive('/health') ||
           isActive('/briefings') ||
           isActive('/admin') ||
+          isActive('/notes') ||
           isActive('/settings')}
       >
         {@render children()}

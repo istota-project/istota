@@ -337,6 +337,32 @@ describe('the root layout with a server that answered', () => {
     expect(readUser).not.toHaveBeenCalled();
     expect(screen.queryByText('Alice')).toBeNull();
   });
+
+  describe('where an expired session sends the browser', () => {
+    const original = Object.getOwnPropertyDescriptor(window, 'location')!;
+    let target: { href: string };
+
+    beforeEach(() => {
+      target = { href: '' };
+      Object.defineProperty(window, 'location', { value: target, configurable: true });
+    });
+    afterEach(() => Object.defineProperty(window, 'location', original));
+
+    it.each([
+      ['/notes/new/', '/login?next=notes-new'],
+      ['/notes/new', '/login?next=notes-new'],
+      ['/chat/', '/login'],
+      ['/notes/newer/', '/login'],
+    ])('from %s to %s', async (path, login) => {
+      page.url = new URL(`http://localhost${path}`);
+      const { AuthError } = await import('$lib/api');
+      getMe.mockRejectedValue(new AuthError());
+
+      render(Layout, { children });
+
+      await waitFor(() => expect(target.href).toBe(login));
+    });
+  });
 });
 
 describe('global search shortcuts', () => {
