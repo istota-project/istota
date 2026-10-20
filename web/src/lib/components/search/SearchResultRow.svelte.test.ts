@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/svelte';
 import { afterEach, expect, it, vi } from 'vitest';
-import { SearchResultRow } from '$lib/components/ui';
+import { SearchResultRow } from '$lib/components/search';
 import type { SearchHit } from '$lib/api';
 
 afterEach(() => vi.useRealTimers());

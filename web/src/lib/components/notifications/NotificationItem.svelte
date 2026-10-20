@@ -1,6 +1,5 @@
 <script lang="ts">
-  import StatusDot from './StatusDot.svelte';
-  import Timestamp from './Timestamp.svelte';
+  import { Button, StatusDot, Timestamp } from '$lib/components/ui';
   /**
    * One row in the notification panel.
    *
@@ -24,7 +23,6 @@
     type NotificationAction,
     type ResolvedNotification,
   } from '$lib/api';
-  import Button from './Button.svelte';
 
   interface Props {
     item: ResolvedNotification;

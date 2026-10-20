@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import NavLink from './NavLink.svelte';
+  import NavLink from './internal/NavLink.svelte';
   import Select from './Select.svelte';
 
   export interface NavItem {

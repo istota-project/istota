@@ -48,10 +48,10 @@
   "src/lib/components/ui/KebabMenu.svelte": {
     "off-scale-space": 1
   },
-  "src/lib/components/ui/NavLink.svelte": {
+  "src/lib/components/ui/internal/NavLink.svelte": {
     "off-scale-space": 1
   },
-  "src/lib/components/ui/NoticeDrawer.svelte": {
+  "src/lib/components/ui/internal/NoticeDrawer.svelte": {
     "off-scale-space": 2
   },
   "src/lib/components/ui/Select.svelte": {

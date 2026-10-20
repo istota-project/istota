@@ -6,7 +6,6 @@ export { default as CategoryGroup } from './CategoryGroup.svelte';
 export { default as ListRow } from './ListRow.svelte';
 export { default as SidebarNav } from './SidebarNav.svelte';
 export type { SidebarNavItem } from './SidebarNav.svelte';
-export { default as NavLink } from './NavLink.svelte';
 export { default as HeaderNav } from './HeaderNav.svelte';
 export type { NavItem } from './HeaderNav.svelte';
 export { default as Avatar } from './Avatar.svelte';
@@ -52,20 +51,9 @@ export { default as Alert } from './Alert.svelte';
 export { default as HintPopover } from './HintPopover.svelte';
 export { default as EmptyState } from './EmptyState.svelte';
 export { default as CardGrid } from './CardGrid.svelte';
-// The notification inbox. All five are exported rather than kept as siblings:
-// `NoticeDrawer` is the one deliberate absence from this barrel, for a reason
-// specific to it (a second mount is two live regions for one notice), and that
-// reason does not apply here.
 export { default as CountPill } from './CountPill.svelte';
-export { default as NotificationBell } from './NotificationBell.svelte';
-export { default as NotificationPanel } from './NotificationPanel.svelte';
-export { default as NotificationItem } from './NotificationItem.svelte';
-export { default as NotificationDetail } from './NotificationDetail.svelte';
 export type { SelectOption } from './Select.svelte';
 export type { KebabItem } from './KebabMenu.svelte';
-export { default as SearchButton } from './SearchButton.svelte';
-export { default as SearchDialog } from './SearchDialog.svelte';
-export { default as SearchResultRow } from './SearchResultRow.svelte';
 // The pane's loading state and the one fixed loader it raises (ISSUE-752).
 export { default as PageLoading } from './PageLoading.svelte';
 export { default as PageLoader } from './PageLoader.svelte';
@@ -80,4 +68,3 @@ export { default as Meter } from './Meter.svelte';
 export { default as Spinner } from './Spinner.svelte';
 export { default as Disclosure } from './Disclosure.svelte';
 export type { MeterSegment } from './Meter.svelte';
-export { default as LoadingOctopus } from './LoadingOctopus.svelte';

@@ -63,7 +63,15 @@ const NATIVE_DIALOG_DECL = /\bfunction\s+(?:confirm|alert|prompt)\b/;
 const SNIPPET_NAME = /\{(?:#snippet|@render)\s+[\w$]+/g;
 // Default-import only. A *named* import from a component file (getShellScrollRoot
 // from AppShell.svelte) is by definition something the barrel does not re-export.
-const DEEP_IMPORT = /^\s*import\s+[A-Za-z]\w*\s+from '\$lib\/components\/ui\/[A-Za-z]+\.svelte'/;
+// Three folders keep a barrel: the primitives, and the inbox and search, which
+// left `ui/` as product code and kept one each.
+const DEEP_IMPORT =
+  /^\s*import\s+[A-Za-z]\w*\s+from '(\$lib\/components\/(?:ui|notifications|search))\/[A-Za-z]+\.svelte'/;
+
+function deepImport(line) {
+  const found = DEEP_IMPORT.exec(line);
+  return found ? [`'${found[1]}'`] : null;
+}
 const MONEY_GLOBAL = /:global\(\.money-/;
 const ALLOW_LINE = /design-lint-allow\b/;
 const ALLOW_FILE = /design-lint-allow-file\b/;
@@ -207,8 +215,8 @@ export const RULES = [
   },
   {
     id: 'deep-import',
-    test: DEEP_IMPORT,
-    hint: "import from the barrel: '$lib/components/ui'",
+    match: (line) => deepImport(line),
+    hint: 'import from this barrel, not the component file',
   },
   {
     id: 'stray-money-global',

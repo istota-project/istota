@@ -31,9 +31,9 @@
     Alert,
     Button,
     CategoryGroup,
-    LoadingOctopus,
     Input,
   } from '$lib/components/ui';
+  import LoadingOctopus from '$lib/components/chat/LoadingOctopus.svelte';
   import { isHiddenRoom } from '$lib/stores/roomOrder';
   import { viewer } from '$lib/fileViewer/store.svelte';
   import { roomColorVar } from '$lib/roomColors';

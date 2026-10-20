@@ -6,7 +6,8 @@
 //   theme-override     a hand-written :root[data-theme='light'] rule outside app.css
 //   native-dialog      confirm / alert / prompt, bare or on window, instead of
 //                      Modal or ConfirmDialog
-//   deep-import        a ui primitive imported by file path instead of the barrel
+//   deep-import        a component imported by file path instead of its barrel
+//                      (ui, notifications, search)
 //   stray-money-global a .money-* shell class defined outside routes/money/+layout.svelte
 //   off-scale-breakpoint  an @media width that is not one of the three steps
 //                      (max-width 640/768/1023px, min-width 641/769/1024px),

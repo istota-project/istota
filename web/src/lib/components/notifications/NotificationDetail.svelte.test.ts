@@ -111,7 +111,7 @@ describe('untrusted content', () => {
       'NotificationItem.svelte',
       'NotificationPanel.svelte',
       'NotificationBell.svelte',
-      'CountPill.svelte',
+      '../ui/CountPill.svelte',
     ]) {
       expect(strip(readFileSync(resolve(here, file), 'utf8'))).not.toMatch(/\{@html/);
     }

@@ -8,17 +8,9 @@
   import { Menu as MenuIcon, Sun, Moon } from '@lucide/svelte';
   import { getMe, AuthError, type User } from '$lib/api';
   import LogoutButton from '$lib/components/LogoutButton.svelte';
-  import {
-    Icon,
-    CountPill,
-    Menu,
-    NotificationBell,
-    SearchButton,
-    SearchDialog,
-    LoadState,
-    PageLoader,
-    type MenuItem,
-  } from '$lib/components/ui';
+  import { Icon, CountPill, Menu, LoadState, PageLoader, type MenuItem } from '$lib/components/ui';
+  import { NotificationBell } from '$lib/components/notifications';
+  import { SearchButton, SearchDialog } from '$lib/components/search';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import { clearNotices } from '$lib/stores/notices';
   import { navUnreadCounts, startNavUnreadPoll, stopNavUnreadPoll } from '$lib/stores/navUnread';

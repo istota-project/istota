@@ -1,8 +1,7 @@
 <script lang="ts">
   import type { SearchHit } from '$lib/api';
   import { segments } from '$lib/search/highlight';
-  import Timestamp from './Timestamp.svelte';
-  import Badge from './Badge.svelte';
+  import { Badge, Timestamp } from '$lib/components/ui';
   let {
     hit,
     id,

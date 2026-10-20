@@ -1,5 +1,4 @@
 <script lang="ts">
-  import Icon from './Icon.svelte';
   /**
    * The app nav's notification control: a `.nav-icon-btn` carrying a bell and
    * the open count, opening `NotificationPanel`.
@@ -22,7 +21,7 @@
    */
   import { Bell } from '@lucide/svelte';
   import { notificationCounts } from '$lib/stores/notifications';
-  import CountPill from './CountPill.svelte';
+  import { CountPill, Icon } from '$lib/components/ui';
   import NotificationPanel from './NotificationPanel.svelte';
 
   const open = $derived($notificationCounts.open);

@@ -228,6 +228,27 @@ describe('deep-import', () => {
     expect(rules("import { Button } from '$lib/components/ui';")).not.toContain('deep-import');
   });
 
+  it.each(['notifications/NotificationBell', 'search/SearchDialog'])(
+    'flags a default import past the %s barrel and names it',
+    (path) => {
+      const found = lint(`import X from '$lib/components/${path}.svelte';`).filter(
+        (v) => v.rule === 'deep-import',
+      );
+      expect(found).toHaveLength(1);
+      expect(found[0].hint).toContain(`'$lib/components/${path.split('/')[0]}'`);
+    },
+  );
+
+  it.each(['notifications', 'search'])('allows the %s barrel', (folder) => {
+    expect(rules(`import { X } from '$lib/components/${folder}';`)).not.toContain('deep-import');
+  });
+
+  it('leaves a component folder with no barrel alone', () => {
+    expect(
+      rules("import LoadingOctopus from '$lib/components/chat/LoadingOctopus.svelte';"),
+    ).not.toContain('deep-import');
+  });
+
   it('allows a named import the barrel does not re-export', () => {
     expect(
       rules("import { getShellScrollRoot } from '$lib/components/ui/AppShell.svelte';"),

@@ -5,12 +5,8 @@
   import { createSearch } from '$lib/stores/search';
   import { hrefFor } from '$lib/search/links';
   import { viewer } from '$lib/fileViewer/store.svelte';
-  import Modal from './Modal.svelte';
-  import Input from './Input.svelte';
-  import Select from './Select.svelte';
-  import Button from './Button.svelte';
+  import { Button, Input, LoadMore, Modal, Select } from '$lib/components/ui';
   import SearchResultRow from './SearchResultRow.svelte';
-  import LoadMore from './LoadMore.svelte';
 
   let {
     open = $bindable(false),

@@ -409,7 +409,7 @@ describe('the phone sheet', () => {
   // `process.cwd()`-relative, matching `lib/styles/cascade.ts` -- vitest runs
   // from `web/`, and `import.meta.url` is not a file URL under vite.
   const source = readFileSync(
-    join(process.cwd(), 'src/lib/components/ui/NotificationPanel.svelte'),
+    join(process.cwd(), 'src/lib/components/notifications/NotificationPanel.svelte'),
     'utf-8',
   );
 

@@ -24,8 +24,7 @@
     type NotificationAction,
     type ResolvedNotification,
   } from '$lib/api';
-  import Button from './Button.svelte';
-  import Modal from './Modal.svelte';
+  import { Button, Modal } from '$lib/components/ui';
 
   interface Props {
     item: ResolvedNotification | null;

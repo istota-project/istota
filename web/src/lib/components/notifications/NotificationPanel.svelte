@@ -42,8 +42,7 @@
     seenPairs,
     type NotificationFilter,
   } from '$lib/stores/notifications';
-  import ToggleGroup from './ToggleGroup.svelte';
-  import EmptyState from './EmptyState.svelte';
+  import { EmptyState, ToggleGroup } from '$lib/components/ui';
   import NotificationDetail from './NotificationDetail.svelte';
   import NotificationItem from './NotificationItem.svelte';
 

@@ -90,7 +90,7 @@ describe('migrated touch targets', () => {
   it.each([
     ['lib/components/ui/SidebarToggle.svelte', '.sidebar-toggle', '2.5rem', '2.75rem'],
     [
-      'lib/components/ui/NoticeDrawer.svelte',
+      'lib/components/ui/internal/NoticeDrawer.svelte',
       '.notice-dismiss',
       'var(--touch-comfort)',
       'var(--touch-comfort)',
@@ -128,9 +128,9 @@ describe('migrated touch targets', () => {
 
   it.each([
     ['lib/components/ui/SidebarToggle.svelte', 'sidebar-toggle'],
-    ['lib/components/ui/NoticeDrawer.svelte', 'notice-dismiss'],
+    ['lib/components/ui/internal/NoticeDrawer.svelte', 'notice-dismiss'],
     ['lib/components/chat/Message.svelte', 'turn-action'],
-    ['lib/components/ui/NotificationBell.svelte', 'nav-icon-btn'],
+    ['lib/components/notifications/NotificationBell.svelte', 'nav-icon-btn'],
     ['lib/components/LogoutButton.svelte', 'nav-icon-btn'],
     ['routes/+layout.svelte', 'nav-icon-btn'],
   ])('opts every %s %s call site into the primitive', (file, control) => {
