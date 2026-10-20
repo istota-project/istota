@@ -25,18 +25,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 it('consumes once when mount and a warm event race, then removes its listener', async () => {
-  pending = { kind: 'chat', room_id: 12 };
-  stop = startPushOpenHandling();
+  pending = { kind: 'chat', room_token: 'room-one', room_id: 12 };
+  const navigate = vi.fn();
+  stop = startPushOpenHandling(navigate);
   window.dispatchEvent(
-    new CustomEvent('istotaPushOpen', { detail: { kind: 'chat', room_id: 99 } }),
+    new CustomEvent('istotaPushOpen', { detail: { kind: 'chat', room_token: 'room-two' } }),
   );
-  await vi.waitFor(() => expect(goto).toHaveBeenCalledTimes(1));
-  expect(goto).toHaveBeenCalledWith('/istota/chat?room=12');
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
   stop();
-  pending = { kind: 'chat', room_id: 13 };
+  pending = { kind: 'chat', room_token: 'room-three' };
   window.dispatchEvent(new Event('istotaPushOpen'));
   await Promise.resolve();
-  expect(goto).toHaveBeenCalledTimes(1);
+  expect(navigate).toHaveBeenCalledTimes(1);
+});
+it('opens a chat tap through the room deep link, by token and not the numeric handle', async () => {
+  // The chat page reads `room=` as a token; the deep link also loads a fresh room list.
+  pending = { kind: 'chat', room_token: 'abc_D-9', room_id: 12 };
+  const navigate = vi.fn();
+  stop = startPushOpenHandling(navigate);
+  await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith('/istota/chat/r/abc_D-9'));
+  expect(goto).not.toHaveBeenCalled();
+});
+it.each([
+  ['no token', { kind: 'chat', room_id: 12 }],
+  ['a token with a path separator', { kind: 'chat', room_token: 'rm_x/t/5' }],
+  ['an empty token', { kind: 'chat', room_token: '' }],
+  ['a token that is not a string', { kind: 'chat', room_token: 7 }],
+])('falls back to the chat page for %s', async (_label, open) => {
+  pending = open;
+  const navigate = vi.fn();
+  stop = startPushOpenHandling(navigate);
+  await vi.waitFor(() => expect(goto).toHaveBeenCalledWith('/istota/chat'));
+  expect(navigate).not.toHaveBeenCalled();
 });
 it.each([
   'https://evil.example/chat',
@@ -76,7 +96,7 @@ it('does not navigate after teardown while consume is pending', async () => {
   });
   stop = startPushOpenHandling();
   stop();
-  resolve({ open: { kind: 'chat', room_id: 12 } });
+  resolve({ open: { kind: 'chat', room_token: 'room-one' } });
   await Promise.resolve();
   await Promise.resolve();
   expect(goto).not.toHaveBeenCalled();
