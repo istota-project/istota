@@ -62,6 +62,7 @@
     {@render fields()}
   </FormModal>
 {/if}
+<button type="button" onclick={() => (open = true)}>Reopen</button>
 <output data-testid="open">{open}</output>
 <output data-testid="name">{name}</output>
 <output data-testid="kind">{kind}</output>

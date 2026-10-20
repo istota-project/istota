@@ -127,6 +127,20 @@ describe('FormModal', () => {
     expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue('Draft');
   });
 
+  it('clears the last refusal when the dialog is reopened', async () => {
+    const onSubmit = vi.fn(async () => {
+      throw new Error('That name is taken.');
+    });
+    render(Harness, { onSubmit });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByRole('alert');
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.getByTestId('open')).toHaveTextContent('false'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
+    await waitFor(() => expect(screen.getByTestId('open')).toHaveTextContent('true'));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('stays open without a message when onSubmit resolves false', async () => {
     render(Harness, { onSubmit: async () => false });
     await fireEvent.click(screen.getByRole('button', { name: 'Save' }));

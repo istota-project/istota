@@ -196,7 +196,11 @@
         />
       </Field>
       {#if settings.allModules.length > 0}
-        <Field label="Disabled modules" badge={managedBadge(profile, 'disabled_modules')}>
+        <Field
+          label="Disabled modules"
+          badge={managedBadge(profile, 'disabled_modules')}
+          hint="Modules are on by default. Select one to turn it off: its tab is hidden and its scheduled jobs pause."
+        >
           <ToggleGroup
             type="multiple"
             label="Disabled modules"

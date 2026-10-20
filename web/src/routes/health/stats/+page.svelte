@@ -496,6 +496,7 @@
   title="Log measurement"
   width="26rem"
   onSubmit={submitEntry}
+  canSubmit={formValue !== null && formValue !== ''}
   onCancel={() => (modalOpen = false)}
 >
   <div class="vstack">

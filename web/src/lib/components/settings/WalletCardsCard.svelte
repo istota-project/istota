@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { updateWalletCard, removeWalletCard, type WalletCard } from '$lib/api';
+  import { AuthError, updateWalletCard, removeWalletCard, type WalletCard } from '$lib/api';
   import {
     Badge,
     Button,
@@ -46,12 +46,20 @@
       busy = false;
     }
   }
-  // A refusal rejects into the dialog, which stays open to say so.
+  // A refusal rejects into the dialog, which stays open to say so; an expired
+  // session goes to onError, the one place that ends it.
   async function remove(card: WalletCard) {
+    if (busy || !writable) return;
     busy = true;
     try {
       await removeWalletCard(card.id);
       onSaved();
+    } catch (e) {
+      if (e instanceof AuthError) {
+        onError(e);
+        return;
+      }
+      throw e;
     } finally {
       busy = false;
     }

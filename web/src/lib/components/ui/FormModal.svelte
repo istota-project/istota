@@ -60,6 +60,11 @@
   const pending = $derived(busy || submitting);
   const shownError = $derived(failure || error);
 
+  // A dialog kept mounted between uses must not reopen on the last refusal.
+  $effect(() => {
+    if (open) failure = '';
+  });
+
   async function submit() {
     if (pending || !canSubmit) return;
     failure = '';
