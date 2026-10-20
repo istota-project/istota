@@ -4,8 +4,10 @@ import { join, relative, resolve } from 'node:path';
 import { readCascade } from '$lib/styles/cascade';
 
 /**
- * `NoticeBanner` has two type sizes and they belong to the component: the title
- * at `--text-base`, the body at `--text-sm`.
+ * A bordered `Alert` has two type sizes and they belong to the component: the
+ * title at `--text-base`, the body at `--text-sm`. An inline one has one, the
+ * `.banner` box's. (The bordered look was `NoticeBanner` until it and `.banner`
+ * were merged into `Alert`.)
  *
  * Both used to be raw literals (`0.9rem` / `0.85rem`), which is subtler than it
  * looks. A caller cannot read a literal it can only see rendered, so a caller
@@ -27,7 +29,7 @@ import { readCascade } from '$lib/styles/cascade';
 
 const SRC = resolve(process.cwd(), 'src');
 const appCss = readCascade();
-const componentPath = join(SRC, 'lib/components/ui/NoticeBanner.svelte');
+const componentPath = join(SRC, 'lib/components/ui/Alert.svelte');
 const component = readFileSync(componentPath, 'utf8');
 
 const stripComments = (source: string): string => source.replace(/\/\*[\s\S]*?\*\//g, '');
@@ -99,13 +101,16 @@ function svelteFiles(dir: string): string[] {
 interface CallSite {
   /** Path relative to src/, for readable failure messages. */
   name: string;
-  /** Classes used on markup inside a `<NoticeBanner>…</NoticeBanner>` slot. */
+  /** Classes used on markup inside an `<Alert>…</Alert>` slot. */
   slotClasses: string[];
   rules: Rule[];
 }
 
+/** The tags whose slot content the rule covers. */
+const TAGS = ['Alert', 'NoticeBanner'];
+
 /**
- * Call sites that pass slot content. A self-closing `<NoticeBanner … />` is
+ * Call sites that pass slot content. A self-closing `<Alert … />` is
  * dropped first: left in, the lazy pair match would run from it to the *next*
  * file's-worth of markup and swallow everything up to a later closing tag,
  * inventing slot classes the banner never contained.
@@ -115,13 +120,15 @@ function callSites(): CallSite[] {
   for (const path of svelteFiles(SRC)) {
     if (path === componentPath) continue;
     const source = readFileSync(path, 'utf8');
-    if (!source.includes('<NoticeBanner')) continue;
-
-    const paired = source.replace(/<NoticeBanner\b[^>]*\/>/g, '');
     const slotClasses = new Set<string>();
-    for (const block of paired.matchAll(/<NoticeBanner\b[^>]*>([\s\S]*?)<\/NoticeBanner>/g)) {
-      for (const attr of block[1].matchAll(/class="([^"]*)"/g)) {
-        for (const cls of attr[1].split(/\s+/).filter(Boolean)) slotClasses.add(cls);
+    for (const tag of TAGS) {
+      if (!source.includes(`<${tag}`)) continue;
+      const paired = source.replace(new RegExp(`<${tag}\\b[^>]*\\/>`, 'g'), '');
+      const pairs = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g');
+      for (const block of paired.matchAll(pairs)) {
+        for (const attr of block[1].matchAll(/class="([^"]*)"/g)) {
+          for (const cls of attr[1].split(/\s+/).filter(Boolean)) slotClasses.add(cls);
+        }
       }
     }
     if (slotClasses.size === 0) continue;
@@ -137,17 +144,18 @@ function callSites(): CallSite[] {
 
 const sites = callSites();
 
-describe('NoticeBanner type sizes', () => {
+describe('Alert type sizes', () => {
   const componentRules = rules(styleBlock(component));
   const ruleFor = (selector: string) => componentRules.find((r) => r.selector === selector);
+  const BODY = '.ui-alert-bordered .ui-alert-body';
 
   it('parses the component stylesheet', () => {
     // Without this every assertion below passes vacuously the moment the
     // component is restructured and the selectors stop matching.
-    expect(component, 'the title span lost its title class').toMatch(
-      /class="notice-title title-section"/,
+    expect(component, 'the bordered title lost its title class').toMatch(
+      /'ui-alert-title title-section'/,
     );
-    expect(ruleFor('.notice-body'), 'no .notice-body rule found').toBeDefined();
+    expect(ruleFor(BODY), `no ${BODY} rule found`).toBeDefined();
   });
 
   it('sizes the title and body from type tokens, not literals', () => {
@@ -156,7 +164,7 @@ describe('NoticeBanner type sizes', () => {
     const sectionTitle = rules(appCss).find((r) => r.selector === '.title-section');
     expect(sectionTitle, 'no .title-section rule in the cascade').toBeDefined();
     expect(fontSizeOf(sectionTitle!.body)).toBe('var(--text-base)');
-    expect(fontSizeOf(ruleFor('.notice-body')!.body)).toBe('var(--text-sm)');
+    expect(fontSizeOf(ruleFor(BODY)!.body)).toBe('var(--text-sm)');
   });
 
   it('puts the title above the body on the scale', () => {
@@ -176,7 +184,7 @@ describe('NoticeBanner type sizes', () => {
   });
 });
 
-describe('NoticeBanner call sites', () => {
+describe('Alert call sites', () => {
   it('finds the slot-bearing call sites', () => {
     // The pair match is the fragile half of this file: an attribute carrying a
     // `>` would end the opening tag early and drop the site silently. If this
@@ -199,7 +207,7 @@ describe('NoticeBanner call sites', () => {
         expect(
           fontSizeOf(rule.body),
           `${site.name}: \`${rule.selector}\` sizes text inside the banner slot — ` +
-            'the banner body is one size everywhere, set in NoticeBanner.svelte',
+            'the alert body is one size everywhere, set in Alert.svelte',
         ).toBeUndefined();
       }
     });

@@ -116,8 +116,8 @@ describe('banners', () => {
       'config.toml: 1 problem to fix first, 1 credential in plain text, 1 warning, ' +
       'managed by ansible, comments are not kept';
     expect(await screen.findByText(title)).toBeInTheDocument();
-    expect(document.querySelectorAll('.notice-banner')).toHaveLength(1);
-    expect(document.querySelector('.notice-banner')).toHaveClass('notice-danger');
+    expect(document.querySelectorAll('.ui-alert-bordered')).toHaveLength(1);
+    expect(document.querySelector('.ui-alert-bordered')).toHaveClass('alert-danger');
     expect(screen.queryByText('config.toml is managed by ansible')).toBeNull();
     expect(screen.getByText('Move to secret file')).toBeInTheDocument();
     expect(screen.getByText('Remove')).toBeInTheDocument();
@@ -126,7 +126,7 @@ describe('banners', () => {
   it('starts collapsed when the comments are all it has to say', async () => {
     mount(configView([imapHost], { has_comments: true }));
     const title = await screen.findByText('config.toml: comments are not kept');
-    expect(title.closest('.notice-banner')).toHaveClass('notice-info');
+    expect(title.closest('.ui-alert-bordered')).toHaveClass('alert-info');
     expect(screen.queryByText(/Istota's own layout/)).toBeNull();
     await fireEvent.click(title);
     expect(screen.getByText(/Istota's own layout/)).toBeInTheDocument();
