@@ -13,7 +13,8 @@
    * and cleared only once the server has confirmed the current text and the
    * user pressed Done. An expired session goes to the login page with
    * `?next=notes-new` (the layout's `expireSession`), and the draft brings the
-   * text back on return.
+   * text back on return. The draft names its owner, and is not restored for
+   * anyone else: whoever signs in next on this device may be another account.
    */
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
@@ -40,6 +41,7 @@
   const CLIENT_NOTE_ID = /^[A-Za-z0-9-]{8,64}$/;
 
   interface Draft {
+    owner: string;
     text: string;
     clientNoteId: string;
     path: string | null;
@@ -62,9 +64,11 @@
     const raw = loadSetting<unknown>(DRAFT_KEY, null);
     if (!raw || typeof raw !== 'object') return null;
     const d = raw as Record<string, unknown>;
+    if (d.owner !== identity.user.username) return null;
     if (typeof d.text !== 'string') return null;
     if (typeof d.clientNoteId !== 'string' || !CLIENT_NOTE_ID.test(d.clientNoteId)) return null;
     return {
+      owner: d.owner,
       text: d.text,
       clientNoteId: d.clientNoteId,
       path: typeof d.path === 'string' && d.path ? d.path : null,
@@ -118,7 +122,13 @@
   );
 
   function writeDraft() {
-    saveSetting<Draft>(DRAFT_KEY, { text, clientNoteId, path, revision });
+    saveSetting<Draft>(DRAFT_KEY, {
+      owner: identity.user.username,
+      text,
+      clientNoteId,
+      path,
+      revision,
+    });
   }
 
   const idle = debounce(() => void save(), IDLE_MS);

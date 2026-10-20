@@ -78,7 +78,12 @@ async function type(text: string) {
   await fireEvent.input(editor(), { target: { value: text } });
 }
 
-function draft(): { text: string; clientNoteId: string; path: string | null } | null {
+function draft(): {
+  text: string;
+  clientNoteId: string;
+  path: string | null;
+  owner?: string;
+} | null {
   const raw = localStorage.getItem(DRAFT_KEY);
   return raw === null ? null : JSON.parse(raw);
 }
@@ -193,6 +198,33 @@ describe('/notes/new', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await screen.findByText(/Saved as/);
     expect(api.createQuickNote).toHaveBeenCalledWith('Buy milk', minted);
+  });
+
+  it("does not restore another account's draft after a sign-in as someone else", async () => {
+    const bobs = {
+      text: 'Bob private text',
+      clientNoteId: 'bob-key-0001',
+      path: null,
+      revision: null,
+    };
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...bobs, owner: 'bob' }));
+    mount();
+    expect(editor().value).toBe('');
+    await type('Buy milk');
+    expect(draft()).toMatchObject({ text: 'Buy milk', owner: 'alice' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await screen.findByText(/Saved as/);
+    expect(api.createQuickNote).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.createQuickNote).mock.calls[0][1]).not.toBe('bob-key-0001');
+  });
+
+  it('does not restore a draft that names no owner', async () => {
+    localStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({ text: 'Whose?', clientNoteId: 'old-key-0001', path: null, revision: null }),
+    );
+    mount();
+    expect(editor().value).toBe('');
   });
 
   it('says the note changed elsewhere on a conflict, and keeps the text', async () => {
