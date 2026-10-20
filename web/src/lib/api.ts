@@ -1994,37 +1994,65 @@ export async function getLocationSettingsInfo(): Promise<LocationSettingsInfo> {
   return apiFetch<LocationSettingsInfo>('/location/settings-info');
 }
 
-export interface GeneratedIngestToken {
-  ok: boolean;
-  /** Returned once and never again — the secret is write-only from here on. */
+/** One token that can post to `/webhooks/location`. Never the token itself. */
+export interface LocationDevice {
+  id: number;
+  /** `app`: minted by the tracker card for its own phone. `code`: shown as a QR code or URL. */
+  kind: 'app' | 'code';
+  /** The tracker's device UUID for an `app` row; null for a `code` row. */
+  device_id: string | null;
+  label: string;
+  token_tail: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface LocationDevicesResponse {
+  devices: LocationDevice[];
+  /** Whether the shared token from before per-device tokens still exists. */
+  legacy_token: boolean;
+}
+
+export type CreateLocationDeviceRequest =
+  { kind: 'app'; device_id: string; label?: string } | { kind: 'code'; label?: string };
+
+export interface CreatedLocationDevice {
+  id: number;
+  /** Returned once and never again; the server keeps only its hash. */
   token: string;
+  /** `webhook_url` without its query string, for a tracker that sends a Bearer header. */
+  endpoint: string;
   webhook_url: string;
 }
 
+export function listLocationDevices(): Promise<LocationDevicesResponse> {
+  return apiFetch('/location/devices');
+}
+
 /**
- * Mint a location ingest token, rotating any existing one.
+ * Mint an ingest token for one device. Touches no other device's token.
  *
- * The only call in this file whose response carries a secret. The token has to
- * reach a phone, and the alternative is the user transcribing 43 random
- * characters; the page renders it as a QR and never asks for it again.
+ * The only call in this file whose response carries a location token: it has
+ * to reach a tracker or a QR code. A 400 or 409 refusal is all message, and
+ * `apiFetch` throws with the server's `detail` as the error text.
  */
-export async function generateIngestToken(): Promise<GeneratedIngestToken> {
-  // Not apiFetch: this endpoint's refusal is a 409 whose *message* is the
-  // whole point ("the location module is off for this user, so an ingest
-  // token would not be accepted"). apiFetch discards the body and throws
-  // "API error: 409", which tells the user nothing they can act on.
-  const resp = await fetch(`${base}/api/settings/secrets/overland/ingest_token/generate`, {
+export function createLocationDevice(
+  req: CreateLocationDeviceRequest,
+): Promise<CreatedLocationDevice> {
+  return apiFetch('/location/devices', {
     method: 'POST',
-    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
   });
-  if (!resp.ok) {
-    const detail = await resp
-      .json()
-      .then((body: { detail?: unknown }) => (typeof body?.detail === 'string' ? body.detail : ''))
-      .catch(() => '');
-    throw new Error(detail || `Could not generate a token (HTTP ${resp.status}).`);
-  }
-  return resp.json();
+}
+
+export function deleteLocationDevice(id: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/location/devices/${id}`, { method: 'DELETE' });
+}
+
+/** Remove the shared token from before per-device tokens. */
+export function deleteLegacyIngestToken(): Promise<{ ok: boolean }> {
+  return apiFetch('/location/devices/legacy', { method: 'DELETE' });
 }
 
 // The basemap spec embeds the calling user's stored CARTO key in the tile URL,

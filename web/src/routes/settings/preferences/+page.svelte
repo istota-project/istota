@@ -48,9 +48,9 @@
     { value: 'hidden', label: 'Sender and subject only' },
   ];
 
-  // The app's Device settings (0.12.0). A convenience: the native bar above the
-  // page opens the same screen, and is the route that works when this page
-  // cannot load. The card is titled with the device it describes.
+  // The app's Device settings (0.12.0). Settings' Device entry opens the same screen, and
+  // the app icon's quick action is the route that works when this page cannot
+  // load. The card is titled with the device it describes.
   const appSettingsOffered = appConnectionAvailable();
   const device = deviceModel();
 
@@ -58,7 +58,9 @@
     try {
       await openAppSettings();
     } catch {
-      notifyError('Could not open Device settings. Use Device settings above the page instead.');
+      notifyError(
+        'Could not open Device settings. Long-press the Istota icon and choose Device settings.',
+      );
     }
   }
 

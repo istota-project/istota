@@ -24,15 +24,15 @@ function initialTheme(): Theme {
 export const theme = writable<Theme>(initialTheme());
 
 /**
- * Mobile browser chrome color per theme. Mirrors `--surface-base` in app.css
+ * Mobile browser chrome color per theme. Mirrors `--surface-card` in app.css
  * and the seed values in the pre-paint script in app.html — keep all three in
  * step.
  */
 // design-lint-allow-begin: this IS the token's value, not a use of it — the
 // browser chrome meta tag takes a literal and cannot read a CSS variable.
 const CHROME_COLOR: Record<Theme, string> = {
-  dark: '#111111',
-  light: '#ffffff',
+  dark: '#1a1a1a',
+  light: '#f4f4f5',
 };
 // design-lint-allow-end
 

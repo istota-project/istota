@@ -28,6 +28,7 @@ import sqlite3
 import stat
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field as _dc_field, replace as _dc_replace
@@ -889,6 +890,23 @@ footer a {
   border-bottom: 1px solid var(--border-default);
 }
 footer a:hover { color: var(--accent-amber); border-bottom-color: var(--accent-amber); }
+/* Inside the iOS app's sign-in sheet, which brings its own header and host
+   line: the form starts at the top with no card around it, so it reads as part
+   of the sheet rather than a web page floating in it. */
+body.in-app-sheet {
+  min-height: 0;
+  justify-content: flex-start;
+  padding: 1.5rem 1.25rem 2rem;
+  background-image: none;
+}
+.in-app-sheet .card {
+  max-width: 24rem;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+.in-app-sheet .mark { height: 2.75rem; margin-bottom: 0.75rem; }
 @media (prefers-reduced-motion: reduce) {
   .btn { transition: none; }
   .btn:hover { transform: none; }
@@ -1107,24 +1125,33 @@ def _release_password_request(email: str, ip: str | None, admitted_at: float) ->
             times.remove(admitted_at)
 
 
-def _render_form_page(bot_name: str, headline: str, body: str, mark: str, head: str = "") -> str:
+def _render_form_page(
+    bot_name: str, headline: str, body: str, mark: str, head: str = "", *, sheet: bool = False,
+) -> str:
     """Shared auth card. Body is rendered HTML; scalar callers escape fields.
 
     Unauthenticated, so it names no version: an exact version tells a visitor
     which advisories apply (ISSUE-569). `/admin` carries it instead.
+
+    `sheet` is the iOS app's sign-in sheet (see `_in_app_sheet`): the sheet has
+    its own chrome showing the host, so the page drops its card, glow and footer.
     """
     name = escape(bot_name)
+    body_class = ' class="in-app-sheet"' if sheet else ""
+    footer = "" if sheet else (
+        f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
+        'rel="noopener">Istota</a></footer>'
+    )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<title>{escape(headline)} &middot; {name}</title>'
         '<link rel="icon" href="/istota/favicon.png">'
         f'<script>{_LOGIN_PAGE_THEME_SCRIPT}</script>'
-        f'<style>{_LOGIN_PAGE_CSS}</style>{head}</head><body>'
+        f'<style>{_LOGIN_PAGE_CSS}</style>{head}</head>'
+        f'<body{body_class}>'
         f'<main class="card">{mark}<h1>{name}</h1>'
-        f'<p class="tagline">{escape(headline)}</p>{body}</main>'
-        f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
-        'rel="noopener">Istota</a></footer>'
+        f'<p class="tagline">{escape(headline)}</p>{body}</main>{footer}'
         f'<script>{_LOGIN_PAGE_KEYBOARD_SCRIPT}</script></body></html>'
     )
 
@@ -1132,7 +1159,7 @@ def _render_form_page(bot_name: str, headline: str, body: str, mark: str, head: 
 def _render_login_page(
     bot_name: str, mark: str, *, methods: list[str],
     login_csrf: str = "", code_csrf: str = "", error: str | None = None,
-    email_prefill: str = "",
+    email_prefill: str = "", sheet: bool = False,
 ) -> str:
     body = f'<p class="form-error">{escape(error)}</p>' if error else ""
     if "nextcloud" in methods:
@@ -1178,21 +1205,21 @@ def _render_login_page(
         )
     if "local_code" in methods and not {"nextcloud", "email"} & set(methods):
         body += '<p class="tagline">Open Istota from the app on this Mac to sign in.</p>'
-    return _render_form_page(bot_name, "Sign in to continue", body, mark)
+    return _render_form_page(bot_name, "Sign in to continue", body, mark, sheet=sheet)
 
 
 def _render_login_error_page(
-    bot_name: str, headline: str, detail: str, mark: str,
+    bot_name: str, headline: str, detail: str, mark: str, *, sheet: bool = False,
 ) -> str:
     body = (f'<p class="tagline">{escape(detail)}</p>'
             '<a class="btn" href="/istota/login">Try signing in again</a>')
-    return _render_form_page(bot_name, headline, body, mark)
+    return _render_form_page(bot_name, headline, body, mark, sheet=sheet)
 
 
-async def _auth_error(headline: str, detail: str, status_code: int) -> HTMLResponse:
+async def _auth_error(request: Request, headline: str, detail: str, status_code: int) -> HTMLResponse:
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(
-        _render_login_error_page(_config.bot_name, headline, detail, mark),
+        _render_login_error_page(_config.bot_name, headline, detail, mark, sheet=_in_app_sheet(request)),
         status_code=status_code, headers=_AUTH_PAGE_HEADERS,
     )
 
@@ -1214,8 +1241,8 @@ async def _read_auth_form(request: Request):
         raw = await read_bounded_body(request, _AUTH_FORM_BODY_LIMIT)
     except BodyError as exc:
         if exc.status == 413:
-            return None, await _auth_error("This form is too large", "Reload and try again.", 413)
-        return None, await _auth_error("This form was interrupted", "Reload and try again.", 400)
+            return None, await _auth_error(request, "This form is too large", "Reload and try again.", 413)
+        return None, await _auth_error(request, "This form was interrupted", "Reload and try again.", 400)
     replayed = False
 
     async def receive():
@@ -1246,6 +1273,7 @@ async def login(request: Request):
         login_csrf=_csrf_token(request, "login"),
         code_csrf=_csrf_token(request, "sign-in-code-request"),
         email_prefill=email if len(email) <= 320 else "",
+        sheet=_in_app_sheet(request),
     ), headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1258,7 +1286,7 @@ async def login_email(request: Request):
     if refused is not None:
         return refused
     if not _check_csrf(request, "login", form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
+        return await _auth_error(request, "This form expired", "Reload and try again.", 403)
     email = form.get("email", "")
     password = form.get("password", "")
     status, identity = "bad", None
@@ -1283,7 +1311,7 @@ async def login_email(request: Request):
             _start_session(request, identity.user_id, profile.display_name, "email", identity.credential_epoch)
             return RedirectResponse(landing or "/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
-    return await _auth_error("Sign-in failed", "Email or password was not accepted.", 400)
+    return await _auth_error(request, "Sign-in failed", "Email or password was not accepted.", 400)
 
 
 async def _run_password_work(function, *args, **kwargs):
@@ -1302,16 +1330,18 @@ async def _run_password_work(function, *args, **kwargs):
     return await asyncio.shield(work)
 
 
-async def _auth_form(headline: str, body: str, status_code: int = 200, head: str = "") -> HTMLResponse:
+async def _auth_form(
+    request: Request, headline: str, body: str, status_code: int = 200, head: str = "",
+) -> HTMLResponse:
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(
-        _render_form_page(_config.bot_name, headline, body, mark, head),
+        _render_form_page(_config.bot_name, headline, body, mark, head, sheet=_in_app_sheet(request)),
         status_code=status_code, headers=_AUTH_PAGE_HEADERS,
     )
 
 
-async def _invalid_auth_link() -> HTMLResponse:
-    return await _auth_error("This link is invalid", "It may have expired or already been used. Request a new link.", 400)
+async def _invalid_auth_link(request: Request) -> HTMLResponse:
+    return await _auth_error(request, "This link is invalid", "It may have expired or already been used. Request a new link.", 400)
 
 
 async def _peek_auth_link(token: object):
@@ -1359,11 +1389,23 @@ async def _set_password_form(request: Request, token: str, purpose: str, error: 
         '<input id="confirm-password" type="password" name="confirm_password" autocomplete="new-password" required>'
         '<button class="btn" type="submit">Set password and sign in</button></form>'
     )
-    return await _auth_form(headline, body, 400 if error else 200)
+    return await _auth_form(request, headline, body, 400 if error else 200)
 
 
 _MOBILE_LOGIN_KEY = "mobile_login_request"
 _MOBILE_ROOT = "/istota/auth/mobile"
+
+
+def _in_app_sheet(request: Request) -> bool:
+    """Whether this sign-in page is inside the iOS app's sign-in sheet.
+
+    The sheet is the system browser, so the User-Agent cannot say. The flow can:
+    the app's attempt is parked in the session until sign-in finishes, and its
+    own pages live under the mobile root. Presentation only; nothing trusts it.
+    """
+    if request.url.path.startswith(_MOBILE_ROOT + "/"):
+        return True
+    return "session" in request.scope and _MOBILE_LOGIN_KEY in request.session
 
 
 def _start_session(request: Request, user_id: str, display_name: str, method: str, epoch: int) -> None:
@@ -1435,7 +1477,7 @@ async def mobile_authorize_page(request: Request, request_id: str):
         '<p class="tagline">Approve only if you started this sign-in in the app. '
         'To cancel, close this sign-in window.</p>'
     )
-    return await _auth_form("Connect the Istota app", body)
+    return await _auth_form(request, "Connect the Istota app", body)
 
 
 @auth_router.post("/auth/mobile/authorize/{request_id}")
@@ -1481,7 +1523,7 @@ async def mobile_exchange(request: Request):
 
 @auth_router.get("/auth/mobile/complete")
 async def mobile_complete(request: Request):
-    return await _auth_form("Return to the Istota app", '<p>Your sign-in has been received.</p>')
+    return await _auth_form(request, "Return to the Istota app", '<p>Your sign-in has been received.</p>')
 
 
 @auth_router.get("/auth/set-password")
@@ -1491,7 +1533,7 @@ async def set_password_page(request: Request):
     token = request.query_params.get("token", "")
     record = await _peek_auth_link(token)
     if record is None:
-        return await _invalid_auth_link()
+        return await _invalid_auth_link(request)
     return await _set_password_form(request, token, record.purpose)
 
 
@@ -1505,9 +1547,9 @@ async def set_password_submit(request: Request):
     token = form.get("token", "")
     record = await _peek_auth_link(token)
     if record is None:
-        return await _invalid_auth_link()
+        return await _invalid_auth_link(request)
     if not _check_csrf(request, "set-password", form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
+        return await _auth_error(request, "This form expired", "Reload and try again.", 403)
     password = form.get("password", "")
     if not isinstance(password, str) or password != form.get("confirm_password"):
         return await _set_password_form(request, token, record.purpose, "Passwords must match.")
@@ -1521,9 +1563,9 @@ async def set_password_submit(request: Request):
         )
     except Exception:
         logger.warning("Auth link password update failed")
-        return await _invalid_auth_link()
+        return await _invalid_auth_link(request)
     response = await _start_email_session(request, result) if result is not None else None
-    return response or await _invalid_auth_link()
+    return response or await _invalid_auth_link(request)
 
 
 # Email sign-in by code (ISSUE-574). The browser that asks holds a secret in its
@@ -1553,7 +1595,7 @@ async def _sign_in_code_form(request: Request, error: str = "", status_code: int
         '<button class="btn btn-primary" type="submit">Sign in</button></form>'
         '<a class="recovery" href="/istota/login">Use a different address or send a new code</a>'
     )
-    return await _auth_form("Check your email", body, status_code)
+    return await _auth_form(request, "Check your email", body, status_code)
 
 
 def _send_sign_in_code(config, request_id: str):
@@ -1586,15 +1628,15 @@ async def sign_in_code_request(request: Request):
     if refused is not None:
         return refused
     if not _check_csrf(request, "sign-in-code-request", form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
+        return await _auth_error(request, "This form expired", "Reload and try again.", 403)
     email = form.get("email", "")
     if not isinstance(email, str) or not email.strip() or len(email) > 320:
-        return await _auth_error("Sign-in failed", "Enter a valid email address.", 400)
+        return await _auth_error(request, "Sign-in failed", "Enter a valid email address.", 400)
     email = web_auth.normalize_email(email)
     policy = web_auth.policy_from_config(_config)
     # Address-blind: the same gate as a password attempt, before any database work.
     if not _admit_password_request(email, _client_ip(request), policy):
-        return await _auth_error("Too many attempts", "Wait a few minutes and try again.", 429)
+        return await _auth_error(request, "Too many attempts", "Wait a few minutes and try again.", 429)
     # One secret per browser, so a repeat request past the mail budget leaves
     # the code already sent working rather than stranding the user.
     previous = _pending_sign_in(request)
@@ -1603,7 +1645,7 @@ async def sign_in_code_request(request: Request):
         request_id = await asyncio.to_thread(web_auth.start_sign_in, _config.db_path, policy, email, secret)
     except Exception:
         logger.warning("Sign-in request could not be recorded")
-        return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+        return await _auth_error(request, "Sign-in is unavailable", "Try again in a moment.", 503)
     request.session[_SIGN_IN_SESSION_KEY] = {"secret": secret}
     response = await _sign_in_code_form(request)
     response.background = BackgroundTask(_send_sign_in_code, _config, request_id)
@@ -1627,7 +1669,7 @@ async def sign_in_code_submit(request: Request):
     if refused is not None:
         return refused
     if not _check_csrf(request, "sign-in-code", form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
+        return await _auth_error(request, "This form expired", "Reload and try again.", 403)
     pending = _pending_sign_in(request)
     code = form.get("code", "")
     status, result = "dead", None
@@ -1638,7 +1680,7 @@ async def sign_in_code_submit(request: Request):
             )
         except Exception:
             logger.warning("Sign-in code redemption failed")
-            return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+            return await _auth_error(request, "Sign-in is unavailable", "Try again in a moment.", 503)
     if status == "ok":
         response = await _start_email_session(request, result)
         if response is not None:
@@ -1646,7 +1688,7 @@ async def sign_in_code_submit(request: Request):
     elif status == "bad":
         return await _sign_in_code_form(request, "That code was not accepted. Check it and try again.", 400)
     request.session.pop(_SIGN_IN_SESSION_KEY, None)
-    return await _auth_error(
+    return await _auth_error(request, 
         "This code has expired",
         "It may have been used, replaced by a newer one, or mistyped too many times. Request a new code.", 400,
     )
@@ -1686,7 +1728,7 @@ async def local_login_page(request: Request):
         '<button class="btn btn-primary" type="submit">Sign in</button></form>'
         f'<script>{_LOCAL_LOGIN_SCRIPT}</script>'
     )
-    return await _auth_form("Signing in on this Mac", body, head=_LOCAL_LOGIN_HANDOFF)
+    return await _auth_form(request, "Signing in on this Mac", body, head=_LOCAL_LOGIN_HANDOFF)
 
 
 @auth_router.post("/auth/local")
@@ -1697,14 +1739,14 @@ async def local_login_submit(request: Request):
     if refused is not None:
         return refused
     if not _check_csrf(request, "local-login", form.get("csrf_token")):
-        return await _auth_error("This form expired", "Open Istota from the app again.", 403)
+        return await _auth_error(request, "This form expired", "Open Istota from the app again.", 403)
     try:
         result = await asyncio.to_thread(web_auth.consume_local_login, _config.db_path, form.get("code"))
     except Exception:
         logger.warning("Local login code redemption failed")
-        return await _auth_error("Sign-in is unavailable", "Try again in a moment.", 503)
+        return await _auth_error(request, "Sign-in is unavailable", "Try again in a moment.", 503)
     response = await _start_email_session(request, result, "local_code") if result is not None else None
-    return response or await _auth_error(
+    return response or await _auth_error(request, 
         "This login code has expired",
         "A login code works once, for a minute. Open Istota from the app again.", 400,
     )
@@ -1754,7 +1796,7 @@ async def reset_page(request: Request):
         '<input id="reset-email" type="email" name="email" autocomplete="email" required>'
         '<button class="btn" type="submit">Send password reset link</button></form>'
     )
-    return await _auth_form("Reset your password", body)
+    return await _auth_form(request, "Reset your password", body)
 
 
 @auth_router.post("/auth/reset")
@@ -1765,8 +1807,8 @@ async def reset_submit(request: Request):
     if refused is not None:
         return refused
     if not _check_csrf(request, "reset", form.get("csrf_token")):
-        return await _auth_error("This form expired", "Reload and try again.", 403)
-    response = await _auth_form(
+        return await _auth_error(request, "This form expired", "Reload and try again.", 403)
+    response = await _auth_form(request, 
         "Check your email",
         '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
         '<a class="btn" href="/istota/login">Back to sign in</a>',
@@ -1856,7 +1898,7 @@ async def callback(request: Request):
         )
         return HTMLResponse(
             _render_login_error_page(
-                _bot_name, headline, detail, mark,
+                _bot_name, headline, detail, mark, sheet=_in_app_sheet(request),
             ),
             status_code=status, headers=_AUTH_PAGE_HEADERS,
         )
@@ -15433,87 +15475,12 @@ def _signal_ingest_reload_if_needed(service: str, key: str) -> None:
     ingest_signal.signal_reload(_config.db_path)
 
 
-@api_router.post("/settings/secrets/overland/ingest_token/generate")
-async def settings_generate_ingest_token(
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Mint a fresh location ingest token and return it **once**.
-
-    The only endpoint that puts a secret in a response body. That is the
-    point: the token has to reach a phone, and the alternative is the user
-    transcribing 43 random characters by hand. Returning it here lets the
-    settings page render it as a QR the device scans, after which it is
-    write-only like every other secret — no read path exists.
-
-    Generating rotates: any previous token stops working immediately. That
-    is the revocation mechanism, and with one token per user it also
-    revokes the user's other devices, which is why the UI has to say so.
-    """
-    import secrets as _secrets
-
-    from istota.credentials import store as secrets_store
-    from fastapi import HTTPException
-
-    if not _config:
-        raise HTTPException(status_code=503, detail="config not loaded")
-
-    if not _user_has_location(user["username"]):
-        # The receiver only builds a token map for users with the module on,
-        # so a token issued here would be refused on first use. A 409 that
-        # says why beats a token that silently never works.
-        raise HTTPException(
-            status_code=409,
-            detail="The location module is off for this user, so an ingest "
-                   "token would not be accepted. Enable it in Settings first.",
-        )
-
-    if not _config.site.hostname:
-        # Checked before minting, not after: rotating the user's token and
-        # then refusing would cut off their working devices for nothing.
-        #
-        # With no hostname the URL below is *relative*, which the QR payload's
-        # decoder rejects for not being https — so the phone reports "not an
-        # Istota provisioning code" and blames the code rather than the
-        # missing config. A tracker cannot post to a relative URL either, so
-        # there is no token worth issuing here. Hits a checkout running
-        # `istota serve`, where hostname is routinely blank.
-        raise HTTPException(
-            status_code=409,
-            detail="This deployment has no public hostname configured, so the "
-                   "webhook URL a device posts to cannot be built. Set "
-                   "[site] hostname and try again.",
-        )
-
-    token = _secrets.token_urlsafe(32)
-    try:
-        secrets_store.set_secret(
-            _config.db_path, user["username"], "overland", "ingest_token", token,
-        )
-    except secrets_store.SecretKeyMissingError:
-        raise HTTPException(
-            status_code=503,
-            detail="ISTOTA_SECRET_KEY is not set; cannot store secrets.",
-        )
-
-    _signal_ingest_reload_if_needed("overland", "ingest_token")
-
-    logger.info(
-        "settings: generated location ingest token for user=%s", user["username"],
-    )
-    return {
-        "ok": True,
-        "token": token,
-        "webhook_url": _location_webhook_url(token),
-    }
-
-
 def _location_webhook_url(token: str = "<token>") -> str:
     """The ingest URL a device posts to.
 
-    Shared by the generate endpoint (which fills in the real token so the
-    QR carries a working URL) and ``/location/settings-info`` (which leaves
-    the placeholder, since it must never echo a stored token).
+    Shared by the device mint (which fills in the real token so the QR
+    carries a working URL) and ``/location/settings-info`` (which leaves the
+    placeholder, since it must never echo a stored token).
     """
     hostname = _config.site.hostname if _config else ""
     if not hostname:
@@ -15669,6 +15636,8 @@ async def settings_delete_secret(
         )
 
     deleted = secrets_store.delete_secret(_config.db_path, user["username"], service, key)
+    if deleted:
+        _signal_ingest_reload_if_needed(service, key)
     return {"ok": True, "deleted": deleted}
 
 
@@ -17194,6 +17163,188 @@ async def api_location_settings_info(user: dict = Depends(_require_api_auth)):
             "visit_exit_minutes": loc.visit_exit_minutes,
         },
     }
+
+
+# What `GLManager` sends: `[[NSUUID UUID] UUIDString]`, any case.
+_LOCATION_DEVICE_ID = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_LOCATION_DEVICE_LABEL_MAX = 64
+_LOCATION_DEVICE_DEFAULT_LABELS = {"app": "iPhone", "code": "QR code"}
+
+
+def _parse_location_device_mint(raw: bytes) -> tuple[str, str | None, str]:
+    """Validate a mint body into `(kind, device_id, label)`, or raise a 400 naming the field."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise HTTPException(400, "invalid JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "the body must be a JSON object")
+    unknown = sorted(set(body) - {"kind", "device_id", "label"})
+    if unknown:
+        raise HTTPException(400, f"unknown field: {unknown[0]}")
+
+    kind = body.get("kind")
+    if not isinstance(kind, str) or kind not in _LOCATION_DEVICE_DEFAULT_LABELS:
+        raise HTTPException(400, 'kind must be "app" or "code"')
+
+    device_id = None
+    if kind == "app":
+        device_id = body.get("device_id")
+        if not isinstance(device_id, str) or not _LOCATION_DEVICE_ID.fullmatch(device_id):
+            raise HTTPException(400, "device_id must be a UUID")
+    elif "device_id" in body:
+        raise HTTPException(400, 'device_id is not accepted for kind "code"')
+
+    label = body.get("label")
+    if label is None:
+        label = ""
+    if not isinstance(label, str):
+        raise HTTPException(400, "label must be a string")
+    label = "".join(c for c in label if unicodedata.category(c) != "Cc").strip()
+    if len(label) > _LOCATION_DEVICE_LABEL_MAX:
+        raise HTTPException(400, f"label must be at most {_LOCATION_DEVICE_LABEL_MAX} characters")
+    if not label:
+        label = _LOCATION_DEVICE_DEFAULT_LABELS[kind]
+    return kind, device_id, label
+
+
+def _location_devices_list(username: str) -> dict:
+    from istota import db
+    from istota.credentials import store as secrets_store
+    from istota.location import ingest_tokens
+
+    with db.get_db(_config.db_path) as conn:
+        devices = ingest_tokens.list_tokens(conn, username)
+        # `list_user_services` reads key names only: no decrypt, no `last_accessed_at` bump.
+        services = secrets_store.list_user_services(_config.db_path, username, connection=conn)
+    legacy = any(entry["key"] == "ingest_token" for entry in services.get("overland", []))
+    return {"devices": devices, "legacy_token": legacy}
+
+
+def _location_device_mint(username: str, kind: str, device_id: str | None, label: str) -> tuple[int, str]:
+    from istota import db
+    from istota.location import ingest_signal, ingest_tokens
+
+    with db.get_db(_config.db_path) as conn:
+        result = ingest_tokens.mint(conn, username, kind, device_id, label)
+    # After the commit, so the receiver's reload sees the new row.
+    ingest_signal.signal_reload(_config.db_path)
+    return result
+
+
+def _location_device_delete(username: str, row_id: int) -> bool:
+    from istota import db
+    from istota.location import ingest_signal, ingest_tokens
+
+    with db.get_db(_config.db_path) as conn:
+        deleted = ingest_tokens.delete_token(conn, username, row_id)
+    if deleted:
+        ingest_signal.signal_reload(_config.db_path)
+    return deleted
+
+
+def _location_legacy_token_delete(username: str) -> bool:
+    from istota.credentials import store as secrets_store
+
+    deleted = secrets_store.delete_secret(_config.db_path, username, "overland", "ingest_token")
+    if deleted:
+        _signal_ingest_reload_if_needed("overland", "ingest_token")
+    return deleted
+
+
+@api_router.get("/location/devices")
+async def api_location_devices_list(user: dict = Depends(_require_api_auth)):
+    """Every token that can post to `/webhooks/location` for this user.
+
+    Never the token or its hash: `token_tail` is what tells rows apart.
+    `legacy_token` says whether the shared `overland` / `ingest_token` secret
+    from before per-device tokens still exists.
+    """
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    return await asyncio.to_thread(_location_devices_list, user["username"])
+
+
+@api_router.post("/location/devices", status_code=201)
+async def api_location_devices_mint(request: Request, user: dict = Depends(_require_api_auth)):
+    """Mint an ingest token for one device and return it **once**.
+
+    The one place a location token appears in a response body: it has to
+    reach a tracker or a QR code. Minting never touches another device's
+    token. Every refusal comes before anything is written.
+    """
+    from istota.location import ingest_tokens
+
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not _user_has_location(user["username"]):
+        # The receiver builds its token map only for users with the module
+        # on, so a token minted here would be refused on first use.
+        raise HTTPException(
+            409,
+            "The location module is off for this user, so an ingest "
+            "token would not be accepted. Enable it in Settings first.",
+        )
+    if not _config.site.hostname:
+        # With no hostname the webhook URL is relative: the QR decoder rejects
+        # it for not being https, and a tracker cannot post to it. Reachable
+        # only on a no-auth install, where `_verify_origin` does not check.
+        raise HTTPException(
+            409,
+            "This deployment has no public hostname configured, so the "
+            "webhook URL a device posts to cannot be built. Set "
+            "[site] hostname and try again.",
+        )
+    try:
+        raw = await read_bounded_body(request, 4096)
+    except BodyError as exc:
+        raise HTTPException(exc.status, "invalid device body") from None
+    kind, device_id, label = _parse_location_device_mint(raw)
+    try:
+        row_id, token = await asyncio.to_thread(
+            _location_device_mint, user["username"], kind, device_id, label,
+        )
+    except ingest_tokens.TooManyDevices:
+        raise HTTPException(
+            409,
+            f"This account already has {ingest_tokens.MAX_TOKENS_PER_USER} devices. Remove one first.",
+        ) from None
+    webhook_url = _location_webhook_url(token)
+    logger.info("location: minted a %s ingest token for user=%s", kind, user["username"])
+    return {
+        "id": row_id,
+        "token": token,
+        "endpoint": webhook_url.split("?", 1)[0],
+        "webhook_url": webhook_url,
+    }
+
+
+# Declared before `/location/devices/{row_id}`; the `int` type keeps them apart too.
+@api_router.delete("/location/devices/legacy")
+async def api_location_devices_delete_legacy(request: Request, user: dict = Depends(_require_api_auth)):
+    """Remove the shared ingest token from before per-device tokens."""
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not await asyncio.to_thread(_location_legacy_token_delete, user["username"]):
+        raise HTTPException(404, "no shared token")
+    logger.info("location: removed the shared ingest token for user=%s", user["username"])
+    return {"ok": True}
+
+
+@api_router.delete("/location/devices/{row_id}")
+async def api_location_devices_delete(row_id: int, request: Request, user: dict = Depends(_require_api_auth)):
+    """Remove one device's token. 404 for a row that is not the caller's."""
+    _verify_origin(request)
+    if not _config:
+        raise HTTPException(503, "config not loaded")
+    if not await asyncio.to_thread(_location_device_delete, user["username"], row_id):
+        raise HTTPException(404, "device not found")
+    logger.info("location: removed ingest token %d for user=%s", row_id, user["username"])
+    return {"ok": True}
 
 
 @api_router.get("/location/current")

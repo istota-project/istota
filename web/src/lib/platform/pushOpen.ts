@@ -4,8 +4,16 @@ import { isSafeActionPath, isServerActionPath } from '$lib/api';
 import { consumePendingOpen, onPushOpen, pushAvailable, type PushOpen } from './nativePush';
 
 function openPath(open: PushOpen): string {
-  if (open.kind === 'chat' && Number.isSafeInteger(open.room_id) && open.room_id! > 0) {
-    return `/chat?room=${open.room_id}`;
+  // The server deep link checks membership and lands on a fresh room list, which a
+  // warm page may lack when the push gave the room its first web handle.
+  if (
+    open.kind === 'chat' &&
+    typeof open.room_token === 'string' &&
+    open.room_token !== '' &&
+    !open.room_token.includes('/')
+  ) {
+    const path = `/chat/r/${open.room_token}`;
+    if (isSafeActionPath(path)) return path;
   }
   if (
     open.kind === 'notification' &&

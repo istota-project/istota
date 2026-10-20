@@ -686,7 +686,7 @@ See [Google Workspace](../features/google-workspace.md) for setup instructions.
 
 ## `[site]`
 
-`hostname` is load-bearing beyond OAuth2 and the origin check: minting a location ingest token refuses with a 409 while it is unset, because the webhook URL it assembles would be a relative path and the phone's QR decoder accepts only `https://`. An install with no hostname, such as `istota serve` on a Mac, therefore cannot provision a device by QR.
+`hostname` is load-bearing beyond OAuth2 and the origin check: minting a location ingest token refuses with a 409 while it is unset, because the webhook URL it assembles would be a relative path and the phone's QR decoder accepts only `https://`. An install with no hostname, such as `istota serve` on a Mac, therefore cannot add a device, by QR code or from the iOS app's one-tap button.
 
 The deployment's public DNS name.
 

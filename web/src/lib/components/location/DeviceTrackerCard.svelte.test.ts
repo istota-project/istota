@@ -12,10 +12,19 @@ import type { Place } from '$lib/api';
  * component tree that reaches for `$lib/api` still gets the real module.
  */
 const placesMock = vi.fn();
+const createDeviceMock = vi.fn();
 vi.mock('$lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('$lib/api')>()),
   getLocationPlaces: () => placesMock(),
+  createLocationDevice: (...args: unknown[]) => createDeviceMock(...args),
 }));
+
+const MINTED = {
+  id: 7,
+  token: 'minted-token',
+  endpoint: 'https://example.invalid/webhooks/location',
+  webhook_url: 'https://example.invalid/webhooks/location?token=minted-token',
+};
 
 const PLACES: Place[] = [
   { id: 1, name: 'Home', lat: 52.23, lon: 21.01, radius_meters: 100, category: 'home' },
@@ -75,6 +84,8 @@ beforeEach(() => {
   delete (globalThis as Record<string, unknown>).Capacitor;
   placesMock.mockReset();
   placesMock.mockResolvedValue({ places: PLACES });
+  createDeviceMock.mockReset();
+  createDeviceMock.mockResolvedValue(MINTED);
 });
 
 afterEach(async () => {
@@ -330,11 +341,13 @@ describe('failure handling', () => {
 });
 
 describe('provisioning', () => {
-  it('offers a scan when the device has no token yet', async () => {
+  it('offers one-tap setup and a scan when the device has no token yet', async () => {
     installShell({ configured: false });
     render(DeviceTrackerCard);
     await settle();
-    expect(screen.getByText('Scan provisioning code')).toBeTruthy();
+    expect(screen.getByText(/location tracking is off on this phone/i)).toBeTruthy();
+    expect(screen.getByText('Turn on location tracking')).toBeTruthy();
+    expect(screen.getByText('Scan a code instead')).toBeTruthy();
     expect(screen.queryByText('Send now')).toBeNull();
   });
 
@@ -344,9 +357,10 @@ describe('provisioning', () => {
     qr.scan.mockResolvedValue({ value: encodeProvisioning(provisioning) });
     render(DeviceTrackerCard);
     await settle();
-    await fireEvent.click(screen.getByText('Scan provisioning code'));
+    await fireEvent.click(screen.getByText('Scan a code instead'));
     await settle();
     expect(tracker.configure).toHaveBeenCalledWith(provisioning);
+    expect(createDeviceMock).not.toHaveBeenCalled();
   });
 
   it('says so when the code is not one of ours', async () => {
@@ -354,7 +368,7 @@ describe('provisioning', () => {
     qr.scan.mockResolvedValue({ value: 'https://example.com/an-unrelated-qr' });
     render(DeviceTrackerCard);
     await settle();
-    await fireEvent.click(screen.getByText('Scan provisioning code'));
+    await fireEvent.click(screen.getByText('Scan a code instead'));
     await settle();
     expect(tracker.configure).not.toHaveBeenCalled();
     expect(screen.getByText(/not an istota provisioning code/i)).toBeTruthy();
@@ -366,17 +380,240 @@ describe('provisioning', () => {
     qr.scan.mockResolvedValue({ value: null });
     render(DeviceTrackerCard);
     await settle();
-    await fireEvent.click(screen.getByText('Scan provisioning code'));
+    await fireEvent.click(screen.getByText('Scan a code instead'));
     await settle();
     expect(screen.queryByText(/not an istota provisioning code/i)).toBeNull();
   });
 
-  it('tells an older shell to update instead of showing a dead Scan button', async () => {
+  it('still offers one-tap setup on a shell that cannot scan', async () => {
+    // 0.6.0 has the tracker and no scanner. Before one-tap setup that shell
+    // could only be told to update; now it needs no code at all.
     installShell({ configured: false }, false);
     render(DeviceTrackerCard);
     await settle();
-    expect(screen.queryByText('Scan provisioning code')).toBeNull();
-    expect(screen.getByText(/update it from testflight/i)).toBeTruthy();
+    expect(screen.queryByText('Scan a code instead')).toBeNull();
+    expect(screen.getByText('Turn on location tracking')).toBeTruthy();
+  });
+});
+
+/**
+ * One-tap setup: mint a token for this phone, configure the tracker with it,
+ * get permission, start.
+ *
+ * `status` answers in sequence, because the flow is driven by what the device
+ * reports between steps: unconfigured before the mint, configured afterwards,
+ * and authorization leaving `notDetermined` only once the user answers.
+ */
+describe('turning tracking on', () => {
+  const UNCONFIGURED: Partial<TrackerStatus> = {
+    configured: false,
+    tracking: false,
+    authorization: 'notDetermined',
+    deviceId: '6F1C0D2A-1B2C-4D3E-8F90-0A1B2C3D4E5F',
+  };
+
+  /** Status answers in order: the mount read, then each read after it. The last repeats. */
+  function statusSequence(
+    tracker: ReturnType<typeof installShell>['tracker'],
+    ...answers: Partial<TrackerStatus>[]
+  ) {
+    const full = answers.map((a) => ({ ...STATUS, ...UNCONFIGURED, ...a }));
+    let i = 0;
+    tracker.status.mockImplementation(async () => full[Math.min(i++, full.length - 1)]);
+  }
+
+  async function tapEnable() {
+    await fireEvent.click(screen.getByText('Turn on location tracking'));
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('mints a token for this phone and starts at once when already allowed', async () => {
+    const { tracker } = installShell(UNCONFIGURED);
+    statusSequence(tracker, {}, { configured: true, authorization: 'always' });
+    tracker.start.mockResolvedValue({ ...STATUS, tracking: true, authorization: 'always' });
+    const onDeviceAdded = vi.fn();
+    render(DeviceTrackerCard, { onDeviceAdded });
+    await settle();
+    await tapEnable();
+    await settle();
+    expect(createDeviceMock).toHaveBeenCalledWith({
+      kind: 'app',
+      device_id: UNCONFIGURED.deviceId,
+      label: 'iPhone',
+    });
+    // The endpoint without a query string and the token apart: the tracker
+    // sends it as a Bearer header, so the app path never puts it in a URL.
+    expect(tracker.configure).toHaveBeenCalledWith({
+      endpoint: MINTED.endpoint,
+      token: MINTED.token,
+    });
+    expect(tracker.requestPermissions).not.toHaveBeenCalled();
+    expect(tracker.start).toHaveBeenCalledWith({ profile: 'detailed' });
+    expect(onDeviceAdded).toHaveBeenCalled();
+    expect(screen.getByText('Tracking is on.')).toBeTruthy();
+  });
+
+  it('asks for permission, polls for the answer, and starts once granted', async () => {
+    vi.useFakeTimers();
+    const { tracker } = installShell(UNCONFIGURED);
+    statusSequence(
+      tracker,
+      {},
+      { configured: true },
+      { configured: true },
+      { configured: true },
+      { configured: true, authorization: 'whenInUse' },
+    );
+    tracker.start.mockResolvedValue({ ...STATUS, tracking: true, authorization: 'whenInUse' });
+    render(DeviceTrackerCard);
+    await vi.advanceTimersByTimeAsync(0);
+    await tapEnable();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tracker.requestPermissions).toHaveBeenCalledTimes(1);
+    expect(tracker.start).not.toHaveBeenCalled();
+    // Two polls still see notDetermined, the third sees the answer.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(tracker.start).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(tracker.start).toHaveBeenCalledWith({ profile: 'detailed' });
+    expect(screen.getByText(/tracking is on\. ios will ask again later/i)).toBeTruthy();
+  });
+
+  it('gives up after a minute and leaves the tracker configured and stopped', async () => {
+    vi.useFakeTimers();
+    const { tracker } = installShell(UNCONFIGURED);
+    statusSequence(tracker, {}, { configured: true });
+    render(DeviceTrackerCard);
+    await vi.advanceTimersByTimeAsync(0);
+    await tapEnable();
+    await vi.advanceTimersByTimeAsync(0);
+    const readsAfterPrompt = tracker.status.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(tracker.start).not.toHaveBeenCalled();
+    // About one read a second, and none once the minute is up.
+    const polls = tracker.status.mock.calls.length - readsAfterPrompt;
+    expect(polls).toBeGreaterThanOrEqual(59);
+    expect(polls).toBeLessThanOrEqual(62);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(tracker.status.mock.calls.length - readsAfterPrompt).toBe(polls);
+    // The card's own permission controls take over.
+    expect(screen.getByText('Allow location')).toBeTruthy();
+    expect(screen.getByText(/has not been granted yet/i)).toBeTruthy();
+  });
+
+  it('stops polling when the card is destroyed', async () => {
+    vi.useFakeTimers();
+    const { tracker } = installShell(UNCONFIGURED);
+    statusSequence(tracker, {}, { configured: true });
+    const { unmount } = render(DeviceTrackerCard);
+    await vi.advanceTimersByTimeAsync(0);
+    await tapEnable();
+    await vi.advanceTimersByTimeAsync(2000);
+    const readsAtUnmount = tracker.status.mock.calls.length;
+    unmount();
+    await vi.advanceTimersByTimeAsync(60_000);
+    // At most the one read `run()` makes as the cancelled action ends.
+    expect(tracker.status.mock.calls.length - readsAtUnmount).toBeLessThanOrEqual(1);
+    expect(tracker.start).not.toHaveBeenCalled();
+  });
+
+  it('does not prompt when access is denied', async () => {
+    const { tracker } = installShell(UNCONFIGURED);
+    statusSequence(tracker, {}, { configured: true, authorization: 'denied' });
+    render(DeviceTrackerCard);
+    await settle();
+    await tapEnable();
+    await settle();
+    expect(tracker.configure).toHaveBeenCalled();
+    expect(tracker.requestPermissions).not.toHaveBeenCalled();
+    expect(tracker.start).not.toHaveBeenCalled();
+    expect(screen.getByText('Open iOS Settings')).toBeTruthy();
+  });
+
+  it('shows a refused mint and leaves the tracker alone', async () => {
+    const { tracker } = installShell(UNCONFIGURED);
+    createDeviceMock.mockRejectedValue(
+      new Error('This account already has 20 devices. Remove one first.'),
+    );
+    render(DeviceTrackerCard);
+    await settle();
+    await tapEnable();
+    await settle();
+    expect(screen.getByText('This account already has 20 devices. Remove one first.')).toBeTruthy();
+    expect(tracker.configure).not.toHaveBeenCalled();
+    expect(tracker.start).not.toHaveBeenCalled();
+  });
+
+  it('shows the plugin message when the token is for another address', async () => {
+    const { tracker } = installShell(UNCONFIGURED);
+    const message =
+      'This code is for a different server or address than the one this app is connected to.';
+    tracker.configure.mockRejectedValue(
+      Object.assign(new Error(message), { code: 'WRONG_SERVER' }),
+    );
+    const onDeviceAdded = vi.fn();
+    render(DeviceTrackerCard, { onDeviceAdded });
+    await settle();
+    await tapEnable();
+    await settle();
+    expect(screen.getByText(message)).toBeTruthy();
+    expect(tracker.start).not.toHaveBeenCalled();
+    // The row was minted before configure refused, so the list still shows it.
+    expect(onDeviceAdded).toHaveBeenCalled();
+  });
+
+  it('says in plain words that the tracker could not store its credentials', async () => {
+    const { tracker } = installShell(UNCONFIGURED);
+    tracker.configure.mockRejectedValue(
+      Object.assign(new Error('SecItemAdd failed: -34018'), { code: 'STORE_FAILED' }),
+    );
+    render(DeviceTrackerCard);
+    await settle();
+    await tapEnable();
+    await settle();
+    expect(screen.getByText('The tracker could not save its credentials. Try again.')).toBeTruthy();
+    expect(screen.queryByText(/SecItemAdd/)).toBeNull();
+  });
+});
+
+describe('a rejected token', () => {
+  it('offers to set the phone up again, without touching tracking', async () => {
+    const { tracker } = installShell({
+      tracking: true,
+      // GLManager's wording for a 401 or 403.
+      lastError: 'HTTP 403 — token rejected, re-provision this device',
+    });
+    const onDeviceAdded = vi.fn();
+    render(DeviceTrackerCard, { onDeviceAdded });
+    await settle();
+    expect(screen.getByText(/no longer accepts this phone's token/i)).toBeTruthy();
+    // Rescan stays beside Send now.
+    expect(screen.getByText('Rescan code')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Set up again'));
+    await settle();
+    expect(createDeviceMock).toHaveBeenCalledWith({
+      kind: 'app',
+      device_id: STATUS.deviceId,
+      label: 'iPhone',
+    });
+    expect(tracker.configure).toHaveBeenCalledWith({
+      endpoint: MINTED.endpoint,
+      token: MINTED.token,
+    });
+    expect(onDeviceAdded).toHaveBeenCalled();
+    expect(tracker.start).not.toHaveBeenCalled();
+    expect(tracker.stop).not.toHaveBeenCalled();
+    expect(tracker.requestPermissions).not.toHaveBeenCalled();
+  });
+
+  it('is not offered for any other error', async () => {
+    installShell({ lastError: 'The request timed out.' });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(screen.queryByText('Set up again')).toBeNull();
   });
 });
 

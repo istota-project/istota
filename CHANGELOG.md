@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- In the Istota iOS app (0.6.0 and later), Location settings has a "Turn on location tracking" button that sets up this phone in one tap: it creates a token for the phone, configures the tracker, asks for location permission and starts tracking. No QR code or second screen is needed, and if the server later refuses the phone's token the card offers "Set up again".
+- Location settings lists every device that can send locations, with when it was added and when it last sent, and each can be removed on its own. Every device now has its own ingest token, stored only as a hash, so setting up or removing one device never affects another.
+- In the iOS app, Settings has a Device section that opens the app's own settings, where you can change server, disconnect and see which account you are signed in as. The app no longer shows its own bar above the page, so this is how to get there from a loaded page; long-pressing the app icon also offers Device settings.
 - In the generic iOS app (0.12.0), Log out hands over to the app, which asks once and then stops location tracking, removes the notification enrollment and clears the app's website data. Settings → Preferences has a card named for the device (iPhone or iPad) with a Device settings button, Nextcloud Reconnect and Google Connect open in the browser because those sign-ins leave the site, and the app no longer gets the offline service worker, which it cannot run. Browsers and older iOS apps are unchanged.
 
 - Notification registrations from the generic iOS app name the app's server connection, and alerts repeat it, so the app ignores a tapped alert from a server it has disconnected from. Registrations and alerts for older iOS apps are unchanged.
@@ -79,6 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- "Generate token" on Location settings is now "Create code", which adds a new device token instead of replacing the account's only one, and the generate API route is removed. The account's existing shared token keeps working through the upgrade and appears in the device list until you remove it.
+- Signing in from the iOS app shows a plain sign-in form at the top of the sign-in sheet, without the card, background glow and footer of the browser sign-in page. Signing in from a browser looks the same as before.
+- A phone browser's toolbar now takes the color of the web UI's top navigation bar instead of the page background, so the two read as one header in light and dark themes. The iOS app takes its status bar contrast from the same color.
 - The web dashboard shows two module tiles per row on a phone instead of one, so the whole list fits on screen. The tile descriptions are shorter so they stay at two lines.
 - On a wide screen, every web dashboard tile is now as tall as the welcome card's row. Before, the tile beside the welcome card was taller than the tiles below it. Narrower layouts keep their shorter tiles.
 - Images and location maps in web chat are drawn at one size, the same however tall the window is, and keep their shape on a phone. Before, an image's size followed the window's height and a map stretched across the whole chat column.
@@ -110,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tapping a chat notification in the iOS app opens the room the message came from. It used to open the chat page on whatever room was last shown, including when the app was already on that page.
+- After the iOS app is upgraded to 0.12.0 in place, tapping a notification works again. The phone's notification registration from the older app had no connection binding, so the app ignored every tap; the page now refreshes that registration on its own when notification permission is already granted.
 - Health forms west of UTC no longer pre-fill tomorrow's date in the evening, a briefing's "Sender filters" caption no longer removes the first sender when clicked, and pressing Enter on a place's category dropdown or radius slider no longer saves the place. An empty Feeds list now says so instead of showing a blank grid and "0 / 0".
 - The bloodwork table now highlights the row under the pointer on the light theme too, and its biomarker review tables scroll sideways on a phone instead of overflowing. The diagnoses table on a history import lays out as a table again, and long names in the chat autocomplete, the location place list and the admin source breakdown now end in an ellipsis instead of running past their column.
 - A text field now shows when it has focus: its border turns blue as you click or tab into it, where before nothing changed. Fields meant for paths, tokens and keys (setup, the admin user editor, the config editor) are drawn in the monospace face again, and a rejected value shows its red border inside a form. Note and prompt boxes in forms are now in the regular face rather than monospace.
