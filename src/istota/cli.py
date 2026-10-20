@@ -1347,6 +1347,21 @@ def cmd_mail_account_remove(args):
     print(f"STATE: {'removed' if removed else 'noop'}")
 
 
+def cmd_mail_account_test(args):
+    """The Settings page's connection test, run in this process. Exit 1 on failure."""
+    from istota.mail import account_tests
+
+    config = _mail_account_context(args)
+    with db.get_db(config.db_path) as conn:
+        account = _mail_account_or_exit(conn, args)
+    result = account_tests.run_test(config, args.user, account.id)
+    for line in result["lines"]:
+        print(f"  {line['step']}: {'ok' if line['ok'] else 'failed'}: {line['message']}")
+    print(f"RESULT: {'ok' if result['ok'] else 'failed'}")
+    if not result["ok"]:
+        sys.exit(1)
+
+
 def _cmd_secret_file(config, args) -> None:
     """Import or export credentials at the operator's terminal."""
     import getpass
@@ -5651,6 +5666,12 @@ def main():
     )
     ma_remove.add_argument("user")
     ma_remove.add_argument("slug")
+    ma_test = mail_account_subparsers.add_parser(
+        "test", allow_abbrev=False,
+        help="Sign in to an account's IMAP (and SMTP when it may send); sends nothing",
+    )
+    ma_test.add_argument("user")
+    ma_test.add_argument("slug")
 
     # email
     email_parser = subparsers.add_parser("email", help="Email management")
@@ -6312,6 +6333,7 @@ def main():
             "set-password": cmd_mail_account_set_password,
             "clear-password": cmd_mail_account_clear_password,
             "remove": cmd_mail_account_remove,
+            "test": cmd_mail_account_test,
         }
         mail_account_commands[args.mail_account_action](args)
     elif args.command == "experimental":

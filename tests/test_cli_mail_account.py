@@ -197,3 +197,41 @@ def test_remove_deletes_secrets_and_discards_drafts(config, invoke):
 
     code, out, _ = invoke("remove", "alice", "work")
     assert code == 0 and "STATE: noop" in out
+
+
+def test_test_signs_in_through_the_shared_check_and_prints_no_password(config, invoke, monkeypatch):
+    from istota.mail import connect
+
+    logins = []
+
+    class Mailbox:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def login(self, user, password):
+            logins.append((user, password))
+
+    monkeypatch.setattr(connect, "open_imap", lambda email, **kw: Mailbox())
+    config.mail_accounts.private_hosts = ["imap.example.com"]
+    invoke(*ENSURE)
+    invoke("set-password", "alice", "work", "--imap", stdin=PASSWORD)
+
+    code, out, err = invoke("test", "alice", "work")
+    assert code == 0, err
+    assert "imap: ok: Signed in to imap.example.com." in out and "RESULT: ok" in out
+    assert logins == [("alice@example.com", PASSWORD)]
+    assert PASSWORD not in out and PASSWORD not in err
+
+
+def test_test_fails_plainly_without_a_password_and_on_an_unknown_slug(config, invoke):
+    invoke(*ENSURE)
+    code, out, _ = invoke("test", "alice", "work")
+    assert code == 1
+    assert "account: failed: No password is stored for this account." in out
+    assert "RESULT: failed" in out
+
+    code, _, err = invoke("test", "alice", "nope")
+    assert code == 1 and "no mail account 'nope'" in err
