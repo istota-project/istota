@@ -87,7 +87,7 @@ istota-skill calendar delete --calendar "https://..." --uid "event-uid-here"
 
 **`--calendar` takes one of the user's own calendars**, as listed in the prompt. A calendar another user shared with the bot is refused as `Calendar not found`, the same answer as one that does not exist.
 
-The listed calendars are the ones the user has shared with the bot's Nextcloud account (`CALDAV_USERNAME`). To add another, or to give the bot write access to one listed as read-only, the user shares it from Settings > Connections or from the Nextcloud Calendar app.
+The listed calendars are the ones the user has shared with the bot's account (`CALDAV_USERNAME`). To add another, or to give the bot write access to one listed as read-only, the user shares it from Settings > Connections or from their calendar app.
 
 **Always pass `--tz` with the user's timezone** (from prompt metadata) to ensure correct date boundaries.
 

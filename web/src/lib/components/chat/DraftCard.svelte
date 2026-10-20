@@ -112,8 +112,13 @@
   // has instead of guessing a character count that is wrong at one of them.
   // The full text is one click away and is what `Send` and `Edit` operate on.
   const peek = $derived(body.replace(/\s+/g, ' ').trim());
+  // A draft held from a connected mail account names it; the bot box's do not.
   const summaryLine = $derived(
-    [recipients.join(', ') || '(none)', draft.subject || '(no subject)'].join(' · '),
+    [
+      ...(draft.from_line ? [`From ${draft.from_line}`] : []),
+      recipients.join(', ') || '(none)',
+      draft.subject || '(no subject)',
+    ].join(' · '),
   );
 
   // A stub carries no body, so the card cannot render what is being approved.
@@ -245,6 +250,10 @@
     </div>
 
     <dl class="draft-fields kv">
+      {#if draft.from_line}
+        <dt>From</dt>
+        <dd>{draft.from_line}</dd>
+      {/if}
       <dt>To</dt>
       <dd>{recipients.join(', ') || '(none)'}</dd>
       <dt>Subject</dt>

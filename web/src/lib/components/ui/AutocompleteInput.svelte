@@ -34,6 +34,8 @@
     filter?: (options: string[], query: string) => string[];
     /** Fired on every edit and when a suggestion is chosen. */
     onValueChange?: (value: string) => void;
+    /** Fired only when a suggestion is chosen from the menu, never on typing. */
+    onSelect?: (value: string) => void;
     /** Fired on blur — the hook for validation. */
     onCommit?: (value: string) => void;
   }
@@ -50,6 +52,7 @@
     limit = 50,
     filter,
     onValueChange,
+    onSelect,
     onCommit,
   }: Props = $props();
 
@@ -99,6 +102,7 @@
   function choose(v: string) {
     emit(v);
     closeMenu();
+    onSelect?.(v);
     inputEl?.focus();
   }
 

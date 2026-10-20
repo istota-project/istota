@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import type { AdminNextcloudConnection } from '$lib/api';
   import { Alert, Button, Timestamp } from '$lib/components/ui';
@@ -18,6 +19,9 @@
 
   let checking = $state(false);
   let notice = $state('');
+  // Leaving ends a check's wait (ISSUE-807); the daemon still finishes the run.
+  const unmounted = new AbortController();
+  onMount(() => () => unmounted.abort());
 
   const BADGE = {
     ok: { variant: 'success', label: 'OK' },
@@ -43,7 +47,8 @@
     checking = true;
     notice = '';
     try {
-      const result = await waitForDoctorRun(false);
+      const result = await waitForDoctorRun(false, { signal: unmounted.signal });
+      if (result.cancelled) return;
       if (result.answered) {
         await onchecked();
       } else {

@@ -2,7 +2,8 @@
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { latest } from '$lib/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -50,6 +51,11 @@
 
   let feeds: Feed[] = $derived($feedsList);
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
 
   let onSettings = $derived(page.url.pathname.startsWith(`${base}/feeds/settings`));
 
@@ -140,12 +146,13 @@
   }
 
   function pickSelection(selection: FeedSelection) {
-    sidebarOpen = false;
-    if (onSettings) goto(readerUrl(selection));
-    else {
-      selectionReady = true;
-      feedSel.push(selection);
-    }
+    drawer.run(() => {
+      if (onSettings) goto(readerUrl(selection));
+      else {
+        selectionReady = true;
+        feedSel.push(selection);
+      }
+    });
   }
 
   let groupedFeeds = $derived.by(() => {

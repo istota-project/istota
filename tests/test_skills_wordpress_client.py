@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 
 import httpx
 import pytest
@@ -390,6 +391,6 @@ def test_the_default_resolver_is_the_system_one(monkeypatch):
         seen.append((host, port))
         return [(None, None, None, "", (PUBLIC_IP, port))]
 
-    monkeypatch.setattr(client_module.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     assert client_module.resolve_host("wp.example.test", 443) == [PUBLIC_IP]
     assert seen == [("wp.example.test", 443)]

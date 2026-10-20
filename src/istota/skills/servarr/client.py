@@ -39,7 +39,6 @@ import ipaddress
 import json
 import logging
 import re
-import socket
 import time
 from typing import Callable
 from urllib.parse import urlsplit
@@ -48,7 +47,8 @@ import httpx
 
 from istota import __version__
 from istota.lib.untrusted import frame_untrusted
-from istota.sandbox.net_guard import ip_is_public
+from istota.sandbox import net_guard
+from istota.sandbox.net_guard import ip_is_public, resolve_host
 from istota.skills._cli import error_envelope
 
 from .apps import APPS
@@ -147,27 +147,13 @@ def mbid(value) -> str:
     return text
 
 
-def resolve_host(host: str, port: int) -> list[str]:
-    """Every address `host` resolves to, in resolver order; empty on failure."""
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except (socket.gaierror, OSError, UnicodeError):
-        return []
-    seen: list[str] = []
-    for info in infos:
-        address = info[4][0]
-        if address not in seen:
-            seen.append(address)
-    return seen
-
-
 def _default_port(scheme: str) -> int:
     return 443 if scheme == "https" else 80
 
 
 def private_set(hosts) -> frozenset:
     """``[servarr] private_hosts`` as the exact, lowercased names guard 2 matches."""
-    return frozenset(str(h).strip().lower().rstrip(".") for h in (hosts or ()) if str(h).strip())
+    return net_guard.host_set(hosts)
 
 
 def url_problem(base_url: str) -> str:
@@ -188,7 +174,7 @@ def url_problem(base_url: str) -> str:
 
 def plain_http_refused(scheme: str, host: str, private: frozenset) -> bool:
     """Plain HTTP goes only to a host the operator listed in `private_hosts`."""
-    return scheme == "http" and host.lower().rstrip(".") not in private
+    return scheme == "http" and net_guard.normal_host(host) not in private
 
 
 def config_problem(app: str, base_url: str, private_hosts) -> str:
@@ -205,7 +191,7 @@ def config_problem(app: str, base_url: str, private_hosts) -> str:
     if plain_http_refused(parts.scheme.lower(), parts.hostname, private):
         return (f"[servarr.apps.{app}] url is plain HTTP to {parts.hostname}, which is not "
                 f"in [servarr] private_hosts")
-    host = parts.hostname.lower().rstrip(".")
+    host = net_guard.normal_host(parts.hostname)
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -282,7 +268,7 @@ class ArrClient:
                 parts.path.rstrip("/"))
 
     def _checked_addresses(self, scheme: str, host: str, port: int) -> list[str]:
-        name = host.lower().rstrip(".")
+        name = net_guard.normal_host(host)
         listed = name in self._private
         if plain_http_refused(scheme, name, self._private):
             raise self._error(
@@ -291,29 +277,21 @@ class ArrClient:
                 f"nothing was sent.",
                 "host_refused",
             )
-        try:
-            addresses = [ipaddress.ip_address(name)]
-        except ValueError:
-            addresses = []
-            for raw in self._resolve(host, port):
-                try:
-                    addresses.append(ipaddress.ip_address(raw.split("%", 1)[0]))
-                except ValueError:
-                    continue
+        addresses = net_guard.host_addresses(host, port, resolve=self._resolve)
         if not addresses:
             failure = self._error(f"Could not resolve {name} for {self.app}; nothing was sent.",
                                   "connection_failed")
             self._failure = failure
             raise failure
         if not listed:
-            for address in addresses:
-                if not ip_is_public(address):
-                    raise self._error(
-                        f"{name} resolves to a private or reserved address ({address}). Only "
-                        f"a host the operator lists in [servarr] private_hosts may; nothing "
-                        f"was sent.",
-                        "host_refused",
-                    )
+            address = net_guard.first_non_public(addresses)
+            if address is not None:
+                raise self._error(
+                    f"{name} resolves to a private or reserved address ({address}). Only "
+                    f"a host the operator lists in [servarr] private_hosts may; nothing "
+                    f"was sent.",
+                    "host_refused",
+                )
         return [str(a) for a in addresses]
 
     # -- guard 6: the deadline -----------------------------------------------

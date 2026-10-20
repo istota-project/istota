@@ -123,19 +123,16 @@ def test_prune_ignores_a_retired_config_seed(install):
     assert user_briefings.get_briefing(install[1], "alice", "morning") is None
 
 
-@pytest.mark.parametrize("seed", ["default_briefings"])
-def test_prune_refuses_config_seed_and_names_controlling_declaration(install, seed):
+def test_prune_ignores_default_briefings(install):
+    # `[[default_briefings]]` is migration input only and never seeds a
+    # personal schedule, so it cannot bring back a row a prune removes.
     schedule(install)
     definition = {"name": "morning", "cron": "0 7 * * *", "output": "email"}
-    raw = {"db_path": str(install[1])}
-    raw[seed] = {"alice": {"briefings": [definition]}} if seed == "users" else [definition]
-    install[0].write_text(toml_write.dumps(raw))
-    with pytest.raises(engine.ExecutionError, match="briefing_seed_conflict") as exc:
-        preview(install, [], prune=True)
-    assert exc.value.path == (["config", "users", "alice", "briefings", 0] if seed == "users" else ["config", "default_briefings", 0])
-    if seed == "default_briefings":
-        context, operations = preview(install, [], profile={"default_briefings": False}, prune=True)
-        assert engine.execute_plan(operations, context).exit_code == 2
+    install[0].write_text(toml_write.dumps(
+        {"db_path": str(install[1]), "default_briefings": [definition]}))
+    context, operations = preview(install, [], prune=True)
+    assert engine.execute_plan(operations, context).exit_code == 2
+    assert user_briefings.get_briefing(install[1], "alice", "morning") is None
 
 
 @pytest.mark.parametrize("declaration", [
@@ -485,7 +482,7 @@ def test_explicit_talk_destination_updates_without_redundant_token(install, outp
         preview(install, declaration)
 
 
-@pytest.mark.parametrize("source", ["config", "defaults", "legacy", "disabled_legacy"])
+@pytest.mark.parametrize("source", ["config", "legacy", "disabled_legacy"])
 def test_empty_content_refuses_pending_seed_before_profile_write(install, source):
     config, database = install
     definition = {"name": "morning", "cron": "0 7 * * *", "output": "email",
@@ -493,8 +490,6 @@ def test_empty_content_refuses_pending_seed_before_profile_write(install, source
     document = {"db_path": str(database)}
     if source == "config":
         document["users"] = {"alice": {"briefings": [definition]}}
-    elif source == "defaults":
-        document["default_briefings"] = [definition]
     else:
         schedule(install, components={"calendar": True}, enabled=source != "disabled_legacy")
     config.write_text(toml_write.dumps(document))

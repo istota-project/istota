@@ -93,4 +93,21 @@ describe('LoadState, card scope', () => {
     expect(banner).toHaveAttribute('role', 'alert');
     expect(container.querySelector('.center-msg')).toBeNull();
   });
+
+  it('draws the failure without a live region when told not to announce it', async () => {
+    const onRetry = vi.fn();
+    const { container } = render(Harness, {
+      loading: false,
+      error: 'No rules',
+      scope: 'card',
+      announce: false,
+      onRetry,
+    });
+    const banner = container.querySelector('.ui-alert-inline.banner.danger');
+    expect(banner).toHaveTextContent('No rules');
+    expect(banner).not.toHaveAttribute('role');
+    expect(screen.queryByRole('alert')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
 });

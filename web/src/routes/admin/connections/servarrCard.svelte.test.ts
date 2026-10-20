@@ -215,7 +215,9 @@ describe('Check now', () => {
     const card = await mount();
     const button = within(card).getByRole('button', { name: 'Check now' });
     await fireEvent.click(button);
-    expect(doctorRun.waitForDoctorRun).toHaveBeenCalledWith(false);
+    expect(doctorRun.waitForDoctorRun).toHaveBeenCalledWith(false, {
+      signal: expect.any(AbortSignal),
+    });
 
     api.getAdminConnections.mockResolvedValue({
       connections: [connection({ apps: [app({ check: check({ detail: 'after' }) })] })],
@@ -241,5 +243,21 @@ describe('Check now', () => {
     const card = await mount();
     await fireEvent.click(within(card).getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(notices.notifyError).toHaveBeenCalledWith('API error: 403'));
+  });
+
+  it('ends the wait when the page goes, and reloads nothing', async () => {
+    let finish!: (v: unknown) => void;
+    doctorRun.waitForDoctorRun.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    const card = await mount();
+    await fireEvent.click(within(card).getByRole('button', { name: 'Check now' }));
+    const { signal } = doctorRun.waitForDoctorRun.mock.calls[0][1];
+    expect(signal.aborted).toBe(false);
+    cleanup();
+    expect(signal.aborted).toBe(true);
+    // `answered` as well, so a card that ignored `cancelled` would reload.
+    finish({ answered: true, cancelled: true, deep: false, report: null });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(api.getAdminConnections).toHaveBeenCalledTimes(1);
+    expect(notices.notifyError).not.toHaveBeenCalled();
   });
 });

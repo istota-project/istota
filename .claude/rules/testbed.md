@@ -47,7 +47,7 @@ A profile is a named shape plus the services it runs plus any extra config. `Sta
 | `network` | lean | model, gitlab | parity rows 2 and 3: the network sandbox on, the forge stub allowlisted and the model endpoint not |
 | `notify` | lean | model, ntfy | a push leaving the container with its headers intact |
 | `feeds` | lean | model, feeds | the poller against real HTTP, with `ISTOTA_FEEDS_ENABLED` in `Profile.config` |
-| `mail` | lean | model, mail | the deployed email round trip, no Nextcloud |
+| `mail` | lean | model, mail | the deployed email round trip, no Nextcloud; a user's connected mail account (Maddy's third mailbox, `me@personal.test`, with `mail` in `[mail_accounts] private_hosts`) |
 | `signaling` | lean | model, signaling | the Talk signaling wire protocol against a real HPB |
 | `browser` | lean | model, signaling | parity row 17: the `browser` and `signaling` compose profiles booted from the shipped file |
 | `email` | lean | model, mail, ntfy | the email suite: `confirm_sender_match = "verify"`, the default `untrusted` outbound floor |

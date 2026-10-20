@@ -549,6 +549,28 @@ def validate_briefing_document(document: object) -> dict:
     return {"version": 1, "title": document["title"], "blocks": blocks}
 
 
+MY_EMAIL_FIXED_ACCOUNTS = ("bot", "google")
+_MY_EMAIL_IMAP_RE = re.compile(r"imap:([1-9][0-9]{0,17})")
+
+
+def parse_my_email_account(value: object) -> str | int:
+    """A ``my_email`` source's ``account``: ``"bot"``, ``"google"``, or a mail account id.
+
+    ``imap:<id>`` names one of the user's connected mail accounts; whether the
+    id is theirs is checked against the framework DB, not here. A missing
+    account is the bot address. Raises ``ValueError`` for anything else.
+    """
+    if value is None or value == "":
+        return "bot"
+    if value in MY_EMAIL_FIXED_ACCOUNTS:
+        return value
+    if isinstance(value, str):
+        match = _MY_EMAIL_IMAP_RE.fullmatch(value)
+        if match:
+            return int(match.group(1))
+    raise ValueError("my_email account must be bot, google or imap:<id>")
+
+
 def normalize_block_payload(payload: object) -> dict:
     """Validate a block patch and optional complete source list before writes."""
     if not isinstance(payload, dict):
@@ -599,6 +621,8 @@ def normalize_block_payload(payload: object) -> dict:
             config = raw.get("config", {})
             if not isinstance(config, dict):
                 raise ValueError("source config must be an object")
+            if raw["kind"] == "my_email":
+                parse_my_email_account(config.get("account"))
             enabled = raw.get("enabled", True)
             if not isinstance(enabled, bool):
                 raise ValueError("source enabled must be a boolean")

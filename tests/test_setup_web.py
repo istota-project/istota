@@ -950,6 +950,66 @@ class TestTheEmailCheck:
         assert "secure connection" in result.message
         assert smtp.logins == []
 
+    def test_an_untrusted_certificate_is_refused_before_signing_in(self, tmp_path, monkeypatch):
+        from testbed.certs import generate_self_signed
+        from tests.support.mail_stub import ImapStub
+
+        cert, key = generate_self_signed(tmp_path / "tls", sans=("127.0.0.1",))
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap:
+            result = setup_checks.check_email(_email_config(imap.port, 1), seconds=5)
+        assert result.ok is False
+        assert "secure connection" in result.message
+        assert imap.logins == []
+
+
+class TestTheMailboxCheck:
+    """`check_mailbox`: the same check over a skill `EmailConfig`, for an
+    account a user connects, where the host is theirs to type."""
+
+    @staticmethod
+    def _email(imap_port, smtp_port, *, host="127.0.0.1"):
+        from istota.skills.email import EmailConfig
+
+        return EmailConfig(imap_host=host, imap_port=imap_port, imap_user="ada",
+                           imap_password=SENTINEL, smtp_host=host, smtp_port=smtp_port)
+
+    def test_without_smtp_only_imap_is_tried(self, tls_pair):
+        from tests.support.mail_stub import ImapStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap:
+            result = setup_checks.check_mailbox(self._email(imap.port, 1), smtp=False, seconds=5)
+        assert result.ok is True, result.to_json()
+        assert [line.key for line in result.lines] == ["imap"]
+        assert imap.logins == [("ada", True)]
+
+    def test_a_private_address_is_refused_for_a_checked_host(self, tls_pair):
+        from tests.support.mail_stub import ImapStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap:
+            result = setup_checks.check_mailbox(
+                self._email(imap.port, 1), check_public=True, seconds=5,
+            )
+        body = json.dumps(result.to_json())
+        assert result.ok is False
+        assert "private network" in result.message
+        assert imap.commands == [] and SENTINEL not in body
+
+    def test_a_listed_private_host_is_reached(self, tls_pair):
+        from tests.support.mail_stub import ImapStub, SmtpStub
+
+        cert, key = tls_pair
+        with ImapStub(cert=cert, key=key, username="ada", password=SENTINEL) as imap, \
+                SmtpStub(cert=cert, key=key, username="ada", password=SENTINEL) as smtp:
+            result = setup_checks.check_mailbox(
+                self._email(imap.port, smtp.port), check_public=True,
+                private_hosts=["127.0.0.1"], seconds=5,
+            )
+        assert result.ok is True, result.to_json()
+        assert imap.logins == [("ada", True)] and smtp.logins == [("ada", True)]
+
 
 class TestConfigFromDocument:
     def test_it_maps_what_the_setup_would_write(self):

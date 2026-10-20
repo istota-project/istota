@@ -410,6 +410,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
             " WHERE status = 'pending' AND moves_json IS NOT NULL"
             " AND base_digest NOT LIKE 'moves:%'"
         )
+        # The UPDATE opened a write transaction; holding it through the ALTERs
+        # below would block a concurrent init_db on the lock rather than let
+        # add_columns see the race, and tolerate_errors would swallow that.
+        conn.commit()
     # A password step-up where the install cannot mail. Every older row was
     # a mailed code, which the constant default says.
     _add_columns(conn, "web_auth_step_ups", {"method": "TEXT NOT NULL DEFAULT 'email'"})
@@ -775,6 +779,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # as an unreachable arm rather than as a relaxation. Pinned by
     # `tests/test_guarded_column_migrations.py::TestTheOneSiteThatDoesNotTolerate`.
     sqlite_util.add_columns(conn, "outbound_drafts", {"reply_to": "TEXT"})
+    # `account_id` (the connected mail account a held send goes out through)
+    # is strict for the same reason: `hold` writes it and release reads it on
+    # every draft, so a swallowed lock would stop all held mail, not one field.
+    sqlite_util.add_columns(conn, "outbound_drafts", {"account_id": "INTEGER"})
 
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the

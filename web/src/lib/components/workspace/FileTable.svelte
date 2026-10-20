@@ -418,8 +418,11 @@
     gap: var(--space-3);
   }
   /* Inset like a bar but not ruled: the folder bar above draws the rule. */
+  /* No shrink: in the drop zone's fixed-height column a wrapped toolbar was
+     squeezed back to one row, and its second row drew over the count. */
   .file-controls,
   .selection-toolbar {
+    flex-shrink: 0;
     padding: var(--space-2) var(--space-3);
     font-size: var(--text-sm);
   }
@@ -451,10 +454,6 @@
   .col-select + th,
   .col-select + td {
     padding-inline-start: 0;
-  }
-  .file-controls :global(.ui-checkbox-input),
-  .col-select :global(.ui-checkbox-input) {
-    margin: 0;
   }
   .delete-errors {
     padding: var(--space-2) var(--space-3);

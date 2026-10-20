@@ -2,7 +2,8 @@
   import { createConfirm } from '$lib/ui/confirm.svelte';
   import { latest } from '$lib/ui/latest';
   import { invalidateNavUnreadCounts } from '$lib/stores/navUnread';
-  import { onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { base } from '$app/paths';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
@@ -105,6 +106,11 @@
   let names = $state<string[]>([]);
   let offset = $state(0);
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
   let loadingMore = $state(false);
 
   // The archived briefing pending a delete confirmation (null = no dialog).
@@ -144,7 +150,11 @@
   // The settings sidebar: every briefing the caller can open, under its audience,
   // then the two settings sections that are not one briefing.
   let settingsSidebarOpen = $state(false);
-  const closeSettingsSidebar = () => (settingsSidebarOpen = false);
+  const settingsDrawer = createDrawerClose(
+    () => settingsSidebarOpen,
+    () => (settingsSidebarOpen = false),
+  );
+  onDestroy(settingsDrawer.cancel);
   let personalBriefings = $state<UserBriefingRow[]>([]);
   let groupBriefings = $state<Record<string, GroupBriefingDefinition[]>>({});
   const settingsParams = $derived(onSettings ? page.url.searchParams : new URLSearchParams());
@@ -369,14 +379,14 @@
   }
 
   function pickItem(id: number) {
-    sidebarOpen = false;
     const selection = { id, name: $briefingFilterName };
-    if (onSettings) goto(readerUrl(selection));
-    else briefingSel.push(selection);
+    drawer.run(() => {
+      if (onSettings) goto(readerUrl(selection));
+      else briefingSel.push(selection);
+    });
   }
 
   function pickGroupEdition(item: GroupEditionSummary) {
-    sidebarOpen = false;
     const selection = {
       id: null,
       name: $briefingFilterName,
@@ -384,8 +394,10 @@
       briefing: item.briefing_name,
       run: item.run_id,
     };
-    if (onSettings) goto(readerUrl(selection));
-    else briefingSel.push(selection);
+    drawer.run(() => {
+      if (onSettings) goto(readerUrl(selection));
+      else briefingSel.push(selection);
+    });
   }
 
   const groupLoads = latest();
@@ -617,7 +629,7 @@
             ]}
             label="New briefing"
             divider
-            onnavigate={closeSettingsSidebar}
+            onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
           />
           <CategoryGroup label="Just me" count={personalBriefings.length}>
             <SidebarNav
@@ -629,7 +641,7 @@
               }))}
               label="Just me"
               divider
-              onnavigate={closeSettingsSidebar}
+              onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
             />
           </CategoryGroup>
           {#each targets as target (target.group_id)}
@@ -648,7 +660,8 @@
                   })}
                   label={target.label}
                   divider
-                  onnavigate={closeSettingsSidebar}
+                  onnavigate={(item, event) =>
+                    settingsDrawer.link(event, () => void goto(item.href))}
                 />
               </CategoryGroup>
             {/if}
@@ -673,7 +686,7 @@
                 : []),
             ]}
             label="Briefing settings"
-            onnavigate={closeSettingsSidebar}
+            onnavigate={(item, event) => settingsDrawer.link(event, () => void goto(item.href))}
           />
         </div>
       </Sidebar>

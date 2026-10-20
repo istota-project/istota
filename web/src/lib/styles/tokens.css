@@ -68,6 +68,9 @@
 	   card, chip or link-tile. Defined in both themes so a hover affordance does
 	   not silently vanish on white. */
   --border-hover: #555;
+  /* An empty checkbox's edge: 3:1 against every surface, which a control
+     needs and --border-hover is not. */
+  --control-border-strong: #737373;
 
   /* Interactive */
   --accent: #e0e0e0;
@@ -249,6 +252,10 @@
   --touch-min: 24px;
   --touch-comfort: 44px;
 
+  /* The Checkbox box. Fixed rather than 1em, so a checkbox reads the same in a
+     dense table and in a settings form; primitives.css raises it on touch. */
+  --checkbox-size: 1.125rem;
+
   /* The corner a control resolves. The root value is the app-bar shape, so a
 	   component adopting this channel changes nothing outside a .control-row;
 	   there the field tier squares it off to match the input beside it. Text
@@ -341,9 +348,14 @@
      lengths: those are a rhythm, not a response to input. */
   --duration-fast: 0.15s;
   --duration-slow: 0.3s;
+  /* A panel leaving: long enough to be seen going, quicker than it came. */
+  --duration-exit: 0.2s;
   --ease-standard: ease;
   /* Fast out, long settle: a panel sliding in from an edge (the sidebar drawer). */
   --ease-decelerate: cubic-bezier(0.32, 0.72, 0, 1);
+  /* Its exit: starts at once and gathers speed, so the travel is spread over
+     the whole duration instead of spent in the first few frames. */
+  --ease-accelerate: cubic-bezier(0.4, 0, 1, 1);
   --transition-fast: var(--duration-fast) var(--ease-standard);
 
   /* A disabled control, drawn at reduced strength rather than recoloured, so
@@ -443,6 +455,7 @@
   --border-default: #d4d4d8;
   --border-subtle: #e4e4e7;
   --border-hover: #a1a1aa;
+  --control-border-strong: #82828a;
 
   /* Interactive */
   --accent: #1a1a1a;

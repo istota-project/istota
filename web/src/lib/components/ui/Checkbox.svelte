@@ -74,16 +74,16 @@
 </script>
 
 <!--
-  A native checkbox, so focus, forced colours and the keyboard stay the
-  platform's. The fill is `--accent`, which the file table and the files page
-  already used; everything else was the user agent's blue.
+  A native checkbox, so focus and the keyboard stay the platform's, drawn by
+  us so it is one size and one shape everywhere. Forced colours get the
+  platform's box back.
 -->
 {#snippet box()}
   <input
     {...rest}
     bind:this={input}
     type="checkbox"
-    class="ui-checkbox-input"
+    class="ui-checkbox-input touch-target"
     checked={!!checked}
     {disabled}
     id={boxId}
@@ -142,13 +142,95 @@
     grid-column: 2;
   }
 
+  /* The fill and the mark take the primary button's pair. The mark is the
+     ::after (the shared .touch-target overlay owns ::before). */
   .ui-checkbox-input {
-    accent-color: var(--accent);
+    appearance: none;
+    display: inline-grid;
+    place-content: center;
     flex-shrink: 0;
+    width: var(--checkbox-size);
+    height: var(--checkbox-size);
+    margin: 0;
+    /* Off the baseline, which the mark's shape would otherwise move: the
+       select-all dash grew the file table's header by two pixels. */
+    vertical-align: middle;
+    border: 1.5px solid var(--control-border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-base);
     cursor: pointer;
+    transition:
+      background-color var(--transition-fast),
+      border-color var(--transition-fast);
+  }
+
+  .ui-checkbox-input::after {
+    content: '';
+    box-sizing: content-box;
+    width: calc(var(--checkbox-size) * 0.22);
+    height: calc(var(--checkbox-size) * 0.46);
+    border: solid var(--surface-base);
+    border-width: 0 2px 2px 0;
+    transform: translateY(-12%) rotate(45deg) scale(0);
+    transition: transform var(--transition-fast);
+  }
+
+  .ui-checkbox-input:hover:not(:disabled) {
+    border-color: var(--text-secondary);
+  }
+
+  .ui-checkbox-input:is(:checked, :indeterminate) {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  .ui-checkbox-input:is(:checked, :indeterminate):hover:not(:disabled) {
+    border-color: var(--accent-hover);
+    background: var(--accent-hover);
+  }
+
+  .ui-checkbox-input:checked::after {
+    transform: translateY(-12%) rotate(45deg) scale(1);
+  }
+
+  .ui-checkbox-input:indeterminate::after {
+    width: calc(var(--checkbox-size) * 0.5);
+    height: 0;
+    border-width: 0 0 2px;
+    transform: none;
+  }
+
+  .ui-checkbox-input[aria-invalid='true'] {
+    border-color: var(--status-danger-fg);
   }
 
   .ui-checkbox-input:disabled {
     cursor: not-allowed;
+    opacity: var(--disabled-opacity);
+  }
+
+  /* Bare in a table cell, the box gets the comfortable size as its target. */
+  @media (pointer: coarse) {
+    .ui-checkbox-input {
+      --touch-target-w: var(--touch-comfort);
+      --touch-target-h: var(--touch-comfort);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ui-checkbox-input,
+    .ui-checkbox-input::after {
+      transition: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .ui-checkbox-input {
+      appearance: auto;
+    }
+
+    .ui-checkbox-input::after {
+      content: none;
+    }
   }
 </style>

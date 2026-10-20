@@ -59,6 +59,11 @@ describe('Checkbox', () => {
     expect(screen.getByText('Show hidden').closest('.ui-checkbox')).toHaveClass('muted');
   });
 
+  it('carries the shared touch target, so a bare box in a table cell is easy to hit', () => {
+    render(Checkbox, { ariaLabel: 'Select row' });
+    expect(screen.getByRole('checkbox')).toHaveClass('ui-checkbox-input', 'touch-target');
+  });
+
   it('is disabled when asked', () => {
     render(Checkbox, { label: 'Enabled', disabled: true });
     expect(screen.getByRole('checkbox')).toBeDisabled();

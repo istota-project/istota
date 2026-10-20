@@ -505,6 +505,7 @@ input[type='week']::-webkit-date-and-time-value {
 	   field. `max()` so a raised browser base size still wins. */
   :root {
     --control-height-lg: max(1.75rem, 32px);
+    --checkbox-size: 1.375rem;
   }
 }
 

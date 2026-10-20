@@ -1,7 +1,10 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { page } from '$app/state';
+  import { onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
   import { AppShell, ShellHeader, Sidebar, SidebarNav, SidebarToggle } from '$lib/components/ui';
+  import { createDrawerClose } from '$lib/ui/drawerClose';
   import { HeaderSave } from '$lib/components/settings';
   import {
     Activity,
@@ -37,6 +40,11 @@
   ];
 
   let sidebarOpen = $state(false);
+  const drawer = createDrawerClose(
+    () => sidebarOpen,
+    () => (sidebarOpen = false),
+  );
+  onDestroy(drawer.cancel);
 
   // `/admin` is a prefix of every sub-route, so the root entry matches exactly
   // rather than by prefix — otherwise Status stays lit on every page.
@@ -83,7 +91,7 @@
       <SidebarNav
         items={navItems}
         label="Admin sections"
-        onnavigate={() => (sidebarOpen = false)}
+        onnavigate={(item, event) => drawer.link(event, () => void goto(item.href))}
       />
     </Sidebar>
   {/snippet}

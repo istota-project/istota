@@ -364,11 +364,14 @@
     {#if entityNotice}
       <Alert title={entityNotice} variant="warn" />
     {/if}
+    <!-- announce={false} here and on Services: Business defaults already
+         announces the failure of the request all three cards share. -->
     <LoadState
       scope="card"
       loading={businessRetrying}
       error={businessError}
       onRetry={retryBusiness}
+      announce={false}
       empty={entities.length === 0}
     >
       {#snippet emptyState()}
@@ -432,6 +435,7 @@
       loading={businessRetrying}
       error={businessError}
       onRetry={retryBusiness}
+      announce={false}
       empty={services.length === 0}
     >
       {#snippet emptyState()}
