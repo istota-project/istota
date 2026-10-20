@@ -1965,6 +1965,8 @@ export interface ModulesResponse {
   modules: string[];
   disabled: string[];
   enabled_for_user: Record<string, boolean>;
+  /** What the Disabled skills picker offers: the skills this user's tasks can load. */
+  skills: string[];
 }
 
 export async function getModules(): Promise<ModulesResponse> {

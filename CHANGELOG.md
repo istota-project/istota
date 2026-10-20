@@ -82,6 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Settings → Preferences picks disabled skills from a searchable list instead of a comma-separated text field, so a misspelled name can no longer be saved. The list holds only the skills your account can use, and a skill you turned off earlier that is no longer offered stays selected.
 - Admin → Groups picks a group from a dropdown instead of a table. Choosing another group swaps the details in place, keeping the current ones on screen until the next group has loaded, where the page used to blank and redraw as if reloading.
 - "Generate token" on Location settings is now "Create code", which adds a new device token instead of replacing the account's only one, and the generate API route is removed. The account's existing shared token keeps working through the upgrade and appears in the device list until you remove it.
 - Signing in from the iOS app shows a plain sign-in form at the top of the sign-in sheet, without the card, background glow and footer of the browser sign-in page. Signing in from a browser looks the same as before.

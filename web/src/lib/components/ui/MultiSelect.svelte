@@ -39,6 +39,9 @@
   let anchor = $state<HTMLElement | null>(null);
 
   const labels = $derived(new Map(options.map((o) => [o.value, o.label])));
+  // A stored list can repeat a name (an older free-text field saved one), and
+  // the chips are keyed by value, so a repeat would throw during render.
+  const picks = $derived([...new Set(value)]);
   /** A disabled option that is picked stays picked: no remove button. */
   const locked = $derived(new Set(options.filter((o) => o.disabled).map((o) => o.value)));
   const filtered = $derived.by(() => {
@@ -48,6 +51,7 @@
   });
 
   function change(next: string[]) {
+    next = [...new Set(next)];
     value = next;
     onValueChange?.(next);
     // bits-ui writes the picked label into the input; this field is a search, so empty it.
@@ -74,7 +78,7 @@
   aria-labelledby={owned ? field?.labelId : undefined}
 >
   <div class="picked" aria-live="polite">
-    {#each value as item (item)}
+    {#each picks as item (item)}
       <span class="pick">
         <span class="pick-label">{labels.get(item) ?? item}</span>
         {#if !disabled && !locked.has(item)}<button
@@ -91,7 +95,7 @@
   {#if !disabled}
     <Combobox.Root
       type="multiple"
-      {value}
+      value={picks}
       onValueChange={change}
       bind:open
       onOpenChange={(next) => {

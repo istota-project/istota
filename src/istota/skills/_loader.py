@@ -358,6 +358,7 @@ def effective_disabled_skills(
     skill_index: dict[str, SkillMeta],
     *,
     withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+    include_user: bool = True,
 ) -> set[str]:
     """The full disabled set for a task: instance-wide + per-user + capability gate.
 
@@ -369,10 +370,13 @@ def effective_disabled_skills(
     and the ``skills`` CLI both call so their view of "disabled" can't drift;
     the CLI passes its task's (`skills.skills._room_withheld`). ``config`` is
     duck-typed (no import) to avoid a config→loader cycle.
+
+    ``include_user=False`` leaves the user's own list out, for the picker that
+    edits that list (:func:`user_skill_names`).
     """
     disabled = set(config.disabled_skills)
     user_config = config.get_user(user_id)
-    if user_config:
+    if user_config and include_user:
         disabled |= set(user_config.disabled_skills)
     disabled |= capability_disabled_skills(skill_index, config.available_capabilities())
     if "contacts" in skill_index and not config.carddav_url:
@@ -387,6 +391,40 @@ def effective_disabled_skills(
             disabled.add("contacts")
     disabled |= set(withheld_scopes) & set(skill_index)
     return disabled
+
+
+def user_skill_names(
+    config,
+    user_id: str,
+    skill_index: dict[str, SkillMeta],
+    *,
+    count_user_disabled: bool,
+) -> list[str]:
+    """The skills this user's tasks can load, sorted.
+
+    Leaves out ``admin_only`` skills for a non-admin, experimental skills whose
+    ``skill_<name>`` flag is unset, and everything in
+    :func:`effective_disabled_skills`. With ``count_user_disabled=False`` the
+    user's own ``disabled_skills`` stay in, so the Settings picker that edits
+    that list can still offer them. Dependencies are not checked: that imports
+    each skill's packages, which the web process should not pay for.
+    """
+    disabled = effective_disabled_skills(
+        config, user_id, skill_index, include_user=count_user_disabled,
+    )
+    is_admin = config.is_admin(user_id)
+    features = frozenset(config.experimental.features)
+    names = []
+    for name in sorted(skill_index):
+        meta = skill_index[name]
+        if name in disabled:
+            continue
+        if meta.admin_only and not is_admin:
+            continue
+        if meta.experimental and f"skill_{name}" not in features:
+            continue
+        names.append(name)
+    return names
 
 
 def get_skill_availability(meta: SkillMeta) -> tuple[str, str | None]:
