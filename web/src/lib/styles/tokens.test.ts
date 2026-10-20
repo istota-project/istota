@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { readLayer } from './cascade';
+import { layerPaths, readLayer } from './cascade';
 import { ROOM_COLORS } from '../roomColors';
 import { describe, expect, it } from 'vitest';
 
@@ -9,22 +9,53 @@ import { describe, expect, it } from 'vitest';
 // Read from the project root: vitest serves this file over a vite-style URL, so
 // import.meta.url is not a file: URL here.
 
-// The token layer specifically: this file asks what :root declares, and the
-// other layers declare no tokens.
-const APP_CSS = readLayer('tokens');
+// The two token layers: tokens.css, the reusable half, and app-tokens.css, the
+// product's own. Parity is a property of the pair, since the app sheet adds to
+// both theme blocks; the other layers declare no tokens.
+const REUSABLE = readLayer('tokens');
+const PRODUCT = readLayer('app-tokens');
 
-/** The declarations inside one top-level block, by selector. */
-function block(selector: string): Record<string, string> {
-  const start = APP_CSS.indexOf(`${selector} {`);
-  if (start === -1) throw new Error(`no ${selector} block in app.css`);
-  const end = APP_CSS.indexOf('\n}', start);
-  const body = APP_CSS.slice(start, end);
+/** The declarations inside one top-level block of one sheet, by selector. */
+function declarations(css: string, selector: string): Record<string, string> {
+  const start = css.indexOf(`${selector} {`);
+  if (start === -1) throw new Error(`no ${selector} block`);
+  const end = css.indexOf('\n}', start);
+  const body = css.slice(start, end);
   const out: Record<string, string> = {};
   for (const [, name, value] of body.matchAll(/^\s*(--[\w-]+)\s*:\s*([^;]+);/gm)) {
     out[name] = value.trim();
   }
   return out;
 }
+
+/** One theme block across both token sheets. */
+function block(selector: string): Record<string, string> {
+  return { ...declarations(REUSABLE, selector), ...declarations(PRODUCT, selector) };
+}
+
+describe('the token split', () => {
+  // The product tokens left tokens.css so the reusable sheet names no product
+  // surface. A token declared in both would make which value wins depend on
+  // import order, which is exactly what a token layer must never decide.
+  it('declares no token in both sheets', () => {
+    for (const selector of [':root', ":root[data-theme='light']"]) {
+      const reusable = declarations(REUSABLE, selector);
+      const shared = Object.keys(declarations(PRODUCT, selector)).filter((n) => n in reusable);
+      expect(shared, selector).toEqual([]);
+    }
+  });
+
+  it('keeps the product prefixes out of the reusable sheet', () => {
+    const product =
+      /^\s*--(chat-|room-color-|category-|scrim-pill-|accent-whatsapp|sigil-filter|unread-mark-size|setup-max|app-bar-height|field-label-width|card-pane-max)/m;
+    expect(REUSABLE).not.toMatch(product);
+  });
+
+  it('loads the app sheet straight after tokens.css', () => {
+    const order = layerPaths().map((path) => path.split('/').pop());
+    expect(order.indexOf('app-tokens.css')).toBe(order.indexOf('tokens.css') + 1);
+  });
+});
 
 const dark = block(':root');
 const light = block(":root[data-theme='light']");

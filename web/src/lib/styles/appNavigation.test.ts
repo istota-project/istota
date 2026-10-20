@@ -27,7 +27,7 @@ it('keeps the app nav padding the same at every width', () => {
 });
 
 it('gives the app nav and the page bar one shared height', () => {
-  expect(readLayer('tokens')).toMatch(/--app-bar-height:\s*[\d.]+rem;/);
+  expect(readLayer('app-tokens')).toMatch(/--app-bar-height:\s*[\d.]+rem;/);
   const nav = blockAfter(stripComments(readLayer('app-shell')), '.app-nav {') ?? '';
   expect(nav).toMatch(/min-height:\s*calc\(var\(--app-bar-height\) \+ var\(--safe-top\)\);/);
   expect(nav).toMatch(/padding:\s*0 0\.75rem;/);

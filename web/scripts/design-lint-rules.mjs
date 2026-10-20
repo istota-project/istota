@@ -15,6 +15,7 @@
 export const STYLE_LAYERS = [
   'src/app.css',
   'src/lib/styles/tokens.css',
+  'src/lib/styles/app-tokens.css',
   'src/lib/styles/primitives.css',
   'src/lib/styles/app-shell.css',
   'src/lib/styles/markdown.css',

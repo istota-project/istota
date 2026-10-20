@@ -16,6 +16,7 @@
    ties that CSS resolves by document order resolve the other way. */
 
 @import './lib/styles/tokens.css';
+@import './lib/styles/app-tokens.css';
 
 @import './lib/styles/settings.css';
 @import './lib/styles/cards.css';

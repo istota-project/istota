@@ -225,7 +225,7 @@ describe('citation quote block', () => {
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const activityTraceSource = readFileSync(resolve(here, 'ActivityTrace.svelte'), 'utf8');
-const tokens = readFileSync(resolve(here, '../../styles/tokens.css'), 'utf8');
+const tokens = readFileSync(resolve(here, '../../styles/app-tokens.css'), 'utf8');
 
 const styleOpen = source.indexOf('>', source.indexOf('<style'));
 const css = source
