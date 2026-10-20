@@ -4,6 +4,7 @@ import asyncio
 import errno
 import json
 import logging
+import sqlite3
 from dataclasses import asdict
 from pathlib import PurePosixPath
 from urllib.parse import quote, urlencode
@@ -445,6 +446,23 @@ def _quick_note_refusal(exc: QuickNoteError) -> JSONResponse:
     return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
 
 
+# `_filesystem_error`'s statuses, given the stable code every quick note answer carries.
+_NOTE_WRITE_CODES = {
+    404: "invalid_folder", 409: "too_many_names", 413: "too_large",
+    503: "unreachable", 507: "storage_full",
+}
+
+
+def _note_write_error(config, exc: ListingError | OSError) -> JSONResponse:
+    response = _filesystem_error(config, exc, "home", write=True)
+    body = json.loads(response.body)
+    if isinstance(exc, FileExistsError) or getattr(exc, "errno", None) == errno.EEXIST:
+        code = "exists"
+    else:
+        code = _NOTE_WRITE_CODES.get(response.status_code, "write_failed")
+    return JSONResponse({**body, "code": code}, status_code=response.status_code)
+
+
 async def _note_body(request: Request):
     """The decoded JSON body, or the refusal to answer instead."""
     try:
@@ -488,8 +506,12 @@ async def api_workspace_note_create(
         result = await asyncio.to_thread(write)
     except QuickNoteError as exc:
         return _quick_note_refusal(exc)
+    except sqlite3.OperationalError:
+        logger.warning("Quick note create: database busy", exc_info=True)
+        return JSONResponse({"error": "Could not save the note right now. Try again.", "code": "busy"},
+                            status_code=503)
     except (ListingError, OSError) as exc:
-        return _filesystem_error(config, exc, "home", write=True)
+        return _note_write_error(config, exc)
     return JSONResponse(asdict(result), status_code=201 if result.created else 200)
 
 
@@ -516,7 +538,7 @@ async def api_workspace_note_save(
     except QuickNoteError as exc:
         return _quick_note_refusal(exc)
     except OSError as exc:
-        return _filesystem_error(config, exc, "home", write=True)
+        return _note_write_error(config, exc)
     if outcome.status == "ok":
         return {"revision": outcome.revision}
     if outcome.status == "read_refused":

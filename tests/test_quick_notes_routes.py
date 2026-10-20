@@ -211,6 +211,32 @@ async def test_a_stale_pathless_claim_is_reclaimed(client, config, home, age, ex
         assert not (home / "Notes").exists()
 
 
+async def test_the_collision_limit_is_a_409_with_a_code(client, config, home):
+    folder = home / FOLDER
+    folder.mkdir(parents=True)
+    (folder / "Buy milk.md").write_text("x")
+    for n in range(2, 101):
+        (folder / f"Buy milk ({n}).md").write_text("x")
+    body = {"content": "Buy milk", "client_note_id": "note-key-0007"}
+    response = await client.post("/workspace/notes", json=body)
+    assert response.status_code == 409
+    assert response.json()["code"] == "too_many_names"
+    assert _keys(config) == []
+
+
+async def test_a_locked_database_is_a_503_with_a_code(client, config, home, monkeypatch):
+    import sqlite3
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(quick_notes, "_claim", locked)
+    response = await client.post("/workspace/notes", json={"content": "Buy milk"})
+    assert response.status_code == 503
+    assert response.json()["code"] == "busy"
+    assert not (home / "Notes").exists()
+
+
 async def test_keys_older_than_thirty_days_are_pruned(client, config):
     with db.get_db(config.db_path) as conn:
         conn.execute(
