@@ -113,6 +113,15 @@ def record_answered(config: "Config", request: dict, outcome: str) -> None:
         logger.warning("shared_block_run_answer_unwritten name=%s err=%s", name, exc)
 
 
+def forget(conn, name: str) -> None:
+    """Drop a block's pending request and last answer, on the caller's
+    connection, so a block made again under the name starts with neither."""
+    from istota import db
+
+    for prefix in (_REQUEST_PREFIX, _ANSWERED_PREFIX):
+        db.shared_kv_delete(conn, RUN_NAMESPACE, prefix + name)
+
+
 def run_state(conn, name: str) -> dict:
     """The pending request and the last answer for one block, each or None."""
     from istota import db

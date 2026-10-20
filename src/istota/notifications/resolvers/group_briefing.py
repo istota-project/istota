@@ -51,11 +51,11 @@ def sync_approvals(conn, config, definition):
 
 def close_approvals(conn, definition_id):
     """Close every source request for a deleted definition, in its transaction."""
-    from istota.notifications.store import resolve_by_object
+    from istota.notifications.resolvers._common import resolve_for
     users = conn.execute("SELECT DISTINCT user_id FROM notifications WHERE source=? AND object_type='group_source' "
                          "AND object_id=? AND state='open'", (SOURCE, str(definition_id))).fetchall()
     for row in users:
-        resolve_by_object(conn, row["user_id"], SOURCE, "group_source", str(definition_id), by="briefing_deleted")
+        resolve_for(conn, row["user_id"], SOURCE, "group_source", definition_id, by="briefing_deleted")
 
 
 def close_for_member(conn, group_id, user_id):

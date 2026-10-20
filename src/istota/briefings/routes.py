@@ -22,7 +22,9 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
@@ -535,13 +537,33 @@ def get_feed_options(
 # Shared briefing blocks (admin-editable; admin-shared-briefing-blocks spec)
 # ---------------------------------------------------------------------------
 
-def _shared_block_status(conn, name: str) -> dict:
+def _shared_last_run_utc(value: str | None, tz_name: str) -> str | None:
+    """The scheduler's naive last-run stamp, which is wall-clock time in the
+    shared-block timezone, as ISO UTC: the clock ``run_answered.at`` is on."""
+    if not value:
+        return None
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001 - the scheduler falls back the same way
+        tz = ZoneInfo("UTC")
+    try:
+        stamped = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=tz)
+    return stamped.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _shared_block_status(conn, name: str, tz_name: str) -> dict:
     """Per-block runtime status: last generation, current shared_kv preview,
     and any Run now request with the daemon's last answer to one."""
     from istota import db as fdb
     from istota.briefings import shared_block_runs
 
-    last_run_at = fdb.get_briefing_shared_block_last_run(conn, name)
+    last_run_at = _shared_last_run_utc(
+        fdb.get_briefing_shared_block_last_run(conn, name), tz_name,
+    )
     val = fdb.shared_kv_get(conn, SHARED_BLOCK_NAMESPACE, name)
     preview = None
     updated_at = None
@@ -597,7 +619,10 @@ def list_shared_blocks(
     cfg = _app_config(request)
     with fdb.get_db(cfg.db_path) as conn:
         rows = fdb.list_shared_block_configs(conn)
-        blocks = [_map_shared_block(r, _shared_block_status(conn, r.name)) for r in rows]
+        tz_name = (cfg.briefings.shared_block_timezone or "").strip() or "UTC"
+        blocks = [
+            _map_shared_block(r, _shared_block_status(conn, r.name, tz_name)) for r in rows
+        ]
     return {
         "shared_blocks": blocks,
         "allowed_source_kinds": sorted(ALLOWED_SHARED_SOURCE_KINDS),
@@ -627,7 +652,8 @@ def put_shared_block(
     cfg = _app_config(request)
     with fdb.get_db(cfg.db_path) as conn:
         row = fdb.upsert_shared_block_config(conn, **fields)
-        status = _shared_block_status(conn, row.name)
+        tz_name = (cfg.briefings.shared_block_timezone or "").strip() or "UTC"
+        status = _shared_block_status(conn, row.name, tz_name)
     return {"status": "ok", "shared_block": _map_shared_block(row, status)}
 
 
@@ -646,10 +672,13 @@ def delete_shared_block(
     ``?delete_value=true`` for a hard removal.
     """
     from istota import db as fdb
+    from istota.briefings import shared_block_runs
 
     cfg = _app_config(request)
     with fdb.get_db(cfg.db_path) as conn:
         removed = fdb.delete_shared_block_config(conn, name)
+        if removed:
+            shared_block_runs.forget(conn, name)
         if delete_value:
             fdb.shared_kv_delete(conn, SHARED_BLOCK_NAMESPACE, name)
     if not removed:
