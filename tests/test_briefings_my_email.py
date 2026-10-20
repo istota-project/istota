@@ -311,3 +311,290 @@ class TestPersonalOnly:
         monkeypatch.setattr("istota.skills.email.list_emails", lambda **kw: captured.update(kw) or [])
         resolve_source("my_email", {}, _ctx(cfg, conn))
         assert "bot+alice@example.com" in str(captured["criteria"])
+
+
+# ---------------------------------------------------------------------------
+# Connected mail accounts (imap:<id>)
+# ---------------------------------------------------------------------------
+
+
+WORK_SECRET = "work-pass-7d1e"
+BOB_SECRET = "bob-pass-52aa"
+
+
+@pytest.fixture
+def mail_accounts(cfg, conn, monkeypatch):
+    """Alice's ``work`` (password set), ``spare`` (no password) and ``old``
+    (turned off), and bob's ``home``. Ids by slug."""
+    from istota.mail import accounts
+
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    work, _ = accounts.ensure_account(
+        conn, "alice", slug="work", label="Work", imap_host="imap.work.example",
+        imap_username="alice@work.example", default_folder="Inbox/Main",
+    )
+    spare, _ = accounts.ensure_account(
+        conn, "alice", slug="spare", label="Spare", imap_host="imap.spare.example",
+        imap_username="alice@spare.example",
+    )
+    old, _ = accounts.ensure_account(
+        conn, "alice", slug="old", label="Old", imap_host="imap.old.example",
+        imap_username="alice@old.example", enabled=False,
+    )
+    home, _ = accounts.ensure_account(
+        conn, "bob", slug="home", label="Home", imap_host="imap.bob.example",
+        imap_username="bob@bob.example",
+    )
+    conn.commit()
+    accounts.set_password(conn, "alice", work.id, "imap", WORK_SECRET)
+    accounts.set_password(conn, "alice", old.id, "imap", "old-pass")
+    accounts.set_password(conn, "bob", home.id, "imap", BOB_SECRET)
+    conn.commit()
+    return {"work": work.id, "spare": spare.id, "old": old.id, "home": home.id}
+
+
+@pytest.fixture
+def fake_imap(monkeypatch):
+    """Every `mail.connect.open_imap` call recorded, answered by one fake mailbox."""
+    from unittest.mock import MagicMock
+
+    calls = []
+    mailbox = MagicMock()
+    mailbox.__enter__ = MagicMock(return_value=mailbox)
+    mailbox.__exit__ = MagicMock(return_value=False)
+    mailbox.fetch.return_value = []
+    mailbox.client.untagged_responses = {"UIDVALIDITY": [b"9"]}
+
+    def open_imap(config, **kwargs):
+        calls.append((config, kwargs))
+        return mailbox
+
+    monkeypatch.setattr("istota.mail.connect.open_imap", open_imap)
+    return {"calls": calls, "mailbox": mailbox}
+
+
+class TestImapAccountListing:
+    def test_lists_the_users_own_enabled_accounts_only(self, cfg, conn, mail_accounts):
+        from istota.briefings.sources.my_email import list_accounts
+
+        accounts = {a["id"]: a for a in list_accounts(cfg, conn, "alice")}
+        work = accounts[f"imap:{mail_accounts['work']}"]
+        assert work["label"] == "Work"
+        assert work["address"] == "alice@work.example"
+        assert work["available"] is True
+        assert work["reason"] == ""
+        spare = accounts[f"imap:{mail_accounts['spare']}"]
+        assert spare["available"] is False
+        assert spare["reason"]
+        assert f"imap:{mail_accounts['old']}" not in accounts
+        assert f"imap:{mail_accounts['home']}" not in accounts
+        assert {"bot", "google"} <= set(accounts)
+
+    def test_nothing_in_the_listing_is_a_password_or_host(self, cfg, conn, mail_accounts):
+        from istota.briefings.sources.my_email import list_accounts
+
+        text = json.dumps(list_accounts(cfg, conn, "alice"))
+        assert WORK_SECRET not in text
+        assert "imap.work.example" not in text
+
+    def test_every_account_is_unavailable_when_mail_accounts_are_off(self, cfg, conn, mail_accounts):
+        from istota.briefings.sources.my_email import list_accounts
+
+        cfg.mail_accounts.enabled = False
+        imap = [a for a in list_accounts(cfg, conn, "alice") if a["id"].startswith("imap:")]
+        assert imap
+        assert all(a["available"] is False and a["reason"] for a in imap)
+
+    def test_route_lists_only_the_signed_in_users_accounts(self, cfg, conn, mail_accounts):
+        from istota.briefings.routes import require_auth, router, verify_origin
+
+        app = FastAPI()
+        app.include_router(router, prefix="/istota/api/briefings")
+        app.state.istota_config = cfg
+        app.dependency_overrides[require_auth] = lambda: {"username": "bob"}
+        app.dependency_overrides[verify_origin] = lambda: None
+        ids = [a["id"] for a in TestClient(app).get("/istota/api/briefings/email-accounts").json()["accounts"]]
+        assert f"imap:{mail_accounts['home']}" in ids
+        assert f"imap:{mail_accounts['work']}" not in ids
+
+
+class TestImapAccountRead:
+    def test_reads_the_default_folder_read_only_with_the_accounts_login(
+        self, cfg, conn, mail_accounts, fake_imap, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "istota.skills.email._scope_filter",
+            lambda *a, **kw: pytest.fail("a connected account has no ownership filter"),
+        )
+        gs = resolve_source("my_email", {"account": f"imap:{mail_accounts['work']}"}, _ctx(cfg, conn))
+
+        assert gs.ok is False  # the fake mailbox is empty
+        assert "no email" in gs.provenance
+        config, kwargs = fake_imap["calls"][0]
+        assert config.imap_host == "imap.work.example"
+        assert config.readonly is True
+        assert kwargs["check_public"] is True
+        mailbox = fake_imap["mailbox"]
+        mailbox.login.assert_called_once_with("alice@work.example", WORK_SECRET)
+        mailbox.folder.set.assert_called_once_with("Inbox/Main", readonly=True)
+        assert mailbox.fetch.call_args.kwargs["mark_seen"] is False
+
+    def test_items_are_untrusted_and_windowed(self, cfg, conn, mail_accounts, monkeypatch):
+        captured = {}
+        fresh = _Env("7", "dana@example.net", subject="Contract")
+        stale = _Env("8", "dana@example.net", subject="Old", date=datetime(2026, 10, 13, 9, 0, tzinfo=timezone.utc))
+
+        def fake_list(**kw):
+            captured["list"] = kw
+            return [fresh, stale]
+
+        def fake_full(**kw):
+            captured["full"] = kw
+            return [_Full("7", "Please sign by Friday.")]
+
+        monkeypatch.setattr("istota.skills.email.list_emails", fake_list)
+        monkeypatch.setattr("istota.skills.email.fetch_emails_full", fake_full)
+
+        gs = resolve_source(
+            "my_email", {"account": f"imap:{mail_accounts['work']}", "lookback_hours": 24}, _ctx(cfg, conn),
+        )
+
+        assert gs.ok is True
+        assert gs.untrusted is True
+        assert [item["subject"] for item in gs.items] == ["Contract"]
+        assert "sign by Friday" in gs.items[0]["body"]
+        assert captured["list"]["folder"] == "Inbox/Main"
+        assert captured["list"]["config"].readonly is True
+        assert "SINCE" in str(captured["list"]["criteria"])
+        assert captured["full"]["folder"] == "Inbox/Main"
+
+    @pytest.mark.parametrize("which", ["home", "old", "spare", "deleted"])
+    def test_an_account_that_does_not_resolve_is_the_unavailable_source(
+        self, cfg, conn, mail_accounts, fake_imap, which,
+    ):
+        account_id = 99999 if which == "deleted" else mail_accounts[which]
+        gs = resolve_source("my_email", {"account": f"imap:{account_id}"}, _ctx(cfg, conn))
+        assert gs.ok is False
+        assert gs.items == []
+        assert gs.provenance == "(mail account unavailable)"
+        assert fake_imap["calls"] == []
+
+    def test_a_deleted_account_reads_unavailable(self, cfg, conn, mail_accounts, fake_imap):
+        from istota.mail import accounts
+
+        accounts.delete_account(conn, "alice", mail_accounts["work"])
+        conn.commit()
+        gs = resolve_source("my_email", {"account": f"imap:{mail_accounts['work']}"}, _ctx(cfg, conn))
+        assert gs.provenance == "(mail account unavailable)"
+        assert fake_imap["calls"] == []
+
+    def test_mail_accounts_off_reads_unavailable(self, cfg, conn, mail_accounts, fake_imap):
+        cfg.mail_accounts.enabled = False
+        gs = resolve_source("my_email", {"account": f"imap:{mail_accounts['work']}"}, _ctx(cfg, conn))
+        assert gs.provenance == "(mail account unavailable)"
+        assert fake_imap["calls"] == []
+
+    def test_a_failed_read_names_no_server_text(self, cfg, conn, mail_accounts, fake_imap):
+        fake_imap["mailbox"].login.side_effect = RuntimeError(f"denied for alice@work.example {WORK_SECRET}")
+        gs = resolve_source("my_email", {"account": f"imap:{mail_accounts['work']}"}, _ctx(cfg, conn))
+        assert gs.ok is False
+        assert "alice@work.example" not in gs.provenance
+        assert WORK_SECRET not in gs.provenance
+
+    @pytest.mark.parametrize("account", ["imap:", "imap:abc", "imap:-1", "imap:1x", "IMAP:1"])
+    def test_a_malformed_account_is_unknown(self, cfg, conn, fake_imap, account):
+        gs = resolve_source("my_email", {"account": account}, _ctx(cfg, conn))
+        assert gs.ok is False
+        assert fake_imap["calls"] == []
+
+
+class TestImapAccountSave:
+    @pytest.mark.parametrize("account", ["bot", "google", "imap:12", None])
+    def test_the_validator_accepts_the_three_shapes(self, account):
+        config = {} if account is None else {"account": account}
+        block = models.normalize_block_payload({
+            "briefing_name": "morning", "title": "Inbox",
+            "sources": [{"kind": "my_email", "config": config}],
+        })
+        assert block["sources"][0]["config"] == config
+
+    @pytest.mark.parametrize("account", ["someone", "imap:", "imap:abc", "imap:0", 12, "imap:12 "])
+    def test_the_validator_refuses_anything_else(self, account):
+        with pytest.raises(ValueError):
+            models.normalize_block_payload({
+                "briefing_name": "morning", "title": "Inbox",
+                "sources": [{"kind": "my_email", "config": {"account": account}}],
+            })
+
+    def _client(self, cfg, tmp_path):
+        from istota.briefings import db as bdb
+        from istota.briefings.routes import get_user_context, require_auth, router, verify_origin
+        from istota.briefings.workspace import synthesize_briefings_context
+
+        bctx = synthesize_briefings_context("alice", tmp_path / "briefings")
+        bctx.ensure_dirs()
+        bdb.init_db(bctx.db_path)
+        app = FastAPI()
+        app.include_router(router, prefix="/istota/api/briefings")
+        app.state.istota_config = cfg
+        app.dependency_overrides[require_auth] = lambda: {"username": "alice"}
+        app.dependency_overrides[get_user_context] = lambda: bctx
+        app.dependency_overrides[verify_origin] = lambda: None
+        return TestClient(app), bctx
+
+    def _block(self, account):
+        return {
+            "briefing_name": "morning", "title": "Inbox",
+            "sources": [{"kind": "my_email", "config": {"account": account}}],
+        }
+
+    def _stored_accounts(self, bctx):
+        from istota.briefings import db as bdb
+
+        with bdb.connect(bctx.db_path) as bconn:
+            rows = bconn.execute(
+                "SELECT config FROM briefing_block_sources WHERE kind = 'my_email'"
+            ).fetchall()
+        return [json.loads(row[0]).get("account") for row in rows]
+
+    def test_save_accepts_the_users_own_account(self, cfg, mail_accounts, tmp_path):
+        client, bctx = self._client(cfg, tmp_path)
+        own = f"imap:{mail_accounts['work']}"
+        response = client.put("/istota/api/briefings/blocks", json=self._block(own))
+        assert response.status_code == 200
+        assert self._stored_accounts(bctx) == [own]
+
+    @pytest.mark.parametrize("which", ["home", "deleted"])
+    def test_save_refuses_an_account_that_is_not_the_users(self, cfg, mail_accounts, tmp_path, which):
+        client, bctx = self._client(cfg, tmp_path)
+        account_id = 99999 if which == "deleted" else mail_accounts[which]
+        response = client.put("/istota/api/briefings/blocks", json=self._block(f"imap:{account_id}"))
+        assert response.status_code == 400
+        assert self._stored_accounts(bctx) == []
+
+    def test_a_source_added_alone_is_checked_too(self, cfg, mail_accounts, tmp_path):
+        client, bctx = self._client(cfg, tmp_path)
+        made = client.put("/istota/api/briefings/blocks", json=self._block("bot")).json()["block"]
+        foreign = {"block_id": made["id"], "kind": "my_email", "config": {"account": f"imap:{mail_accounts['home']}"}}
+        assert client.put("/istota/api/briefings/sources", json=foreign).status_code == 400
+        source_id = made["sources"][0]["id"]
+        update = {"id": source_id, "config": {"account": f"imap:{mail_accounts['home']}"}}
+        assert client.put("/istota/api/briefings/sources", json=update).status_code == 400
+        assert self._stored_accounts(bctx) == ["bot"]
+
+    def test_a_stale_account_left_unchanged_does_not_block_other_edits(self, cfg, conn, mail_accounts, tmp_path):
+        from istota.mail import accounts
+
+        client, bctx = self._client(cfg, tmp_path)
+        own = f"imap:{mail_accounts['work']}"
+        made = client.put("/istota/api/briefings/blocks", json=self._block(own)).json()["block"]
+        accounts.delete_account(conn, "alice", mail_accounts["work"])
+        conn.commit()
+        edit = {
+            "id": made["id"], "title": "Work inbox",
+            "sources": [{"id": made["sources"][0]["id"], "kind": "my_email", "config": {"account": own}}],
+        }
+        assert client.put("/istota/api/briefings/blocks", json=edit).status_code == 200
+        # A new source naming the deleted account is still refused.
+        fresh = {"id": made["id"], "sources": [{"kind": "my_email", "config": {"account": own}}]}
+        assert client.put("/istota/api/briefings/blocks", json=fresh).status_code == 400

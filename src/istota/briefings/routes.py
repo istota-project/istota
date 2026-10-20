@@ -369,6 +369,7 @@ def put_block(
                 bdb.reorder_blocks(conn, name.strip(), ordered)
                 conn.commit()
                 return {"status": "ok", "reordered": len(ordered)}
+            _check_block_mail_accounts(request, conn, ctx.user_id, payload)
             block = bdb.save_block_definition(conn, payload=payload)
             conn.commit()
         except LookupError:
@@ -376,6 +377,41 @@ def put_block(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
     return {"status": "ok", "block": _map_block(block)}
+
+
+def _check_mail_account(request: Request, user_id: str, kind: str, config, *, stored=None) -> None:
+    """400 unless a ``my_email`` source names an account ``user_id`` may pick.
+
+    ``stored`` is the source's saved config; an account left as it was passes.
+    """
+    if kind != "my_email" or not isinstance(config, dict):
+        return
+    from istota.briefings.sources.my_email import account_refusal
+
+    stored_account = stored.get("account") if isinstance(stored, dict) else None
+    refusal = account_refusal(
+        _app_config(request), user_id, config.get("account"), stored=stored_account,
+    )
+    if refusal:
+        raise HTTPException(400, refusal)
+
+
+def _check_block_mail_accounts(request: Request, conn, user_id: str, payload: dict) -> None:
+    raw_sources = payload.get("sources")
+    if not isinstance(raw_sources, list):
+        return
+    saved = {}
+    block_id = payload.get("id")
+    if type(block_id) is int:
+        block = bdb.get_block(conn, block_id)
+        if block is not None:
+            saved = {source.id: source for source in block.sources}
+    for raw in raw_sources:
+        if not isinstance(raw, dict):
+            continue
+        current = saved.get(raw.get("id"))
+        stored = current.config if current is not None and current.kind == "my_email" else None
+        _check_mail_account(request, user_id, raw.get("kind"), raw.get("config", {}), stored=stored)
 
 
 @router.delete("/blocks/{block_id}")
@@ -404,6 +440,11 @@ def put_source(
     """
     with bdb.connect(ctx.db_path) as conn:
         if payload.get("id"):
+            current = bdb.get_source(conn, int(payload["id"]))
+            if current is not None and payload.get("config") is not None:
+                _check_mail_account(
+                    request, ctx.user_id, current.kind, payload["config"], stored=current.config,
+                )
             bdb.update_source(
                 conn, int(payload["id"]),
                 config=payload.get("config"),
@@ -418,6 +459,7 @@ def put_source(
             raise HTTPException(400, "block_id and a valid kind required")
         if not bdb.get_block(conn, int(block_id), with_sources=False):
             raise HTTPException(404, "block not found")
+        _check_mail_account(request, ctx.user_id, kind, payload.get("config") or {})
         source_id = bdb.add_source(
             conn, block_id=int(block_id), kind=kind,
             config=payload.get("config") or {},
@@ -650,7 +692,8 @@ def get_email_accounts(
     """The signed-in user's mail accounts a ``my_email`` source can read.
 
     Always the bot plus-address; Gmail too when Google Workspace is on, marked
-    unavailable until the user grants Gmail access.
+    unavailable until the user grants Gmail access; then each of the user's
+    enabled connected mail accounts as ``imap:<id>``.
     """
     from istota import db as fdb
     from istota.briefings.sources.my_email import list_accounts

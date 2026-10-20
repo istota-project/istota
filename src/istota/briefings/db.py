@@ -314,6 +314,13 @@ def delete_briefing_definitions(conn: sqlite3.Connection, briefing_name: str) ->
         delete_block(conn, block.id)
 
 
+def get_source(conn: sqlite3.Connection, source_id: int) -> BlockSource | None:
+    row = conn.execute(
+        "SELECT * FROM briefing_block_sources WHERE id = ?", (source_id,)
+    ).fetchone()
+    return _row_to_source(row) if row else None
+
+
 def get_block(
     conn: sqlite3.Connection, block_id: int, *, with_sources: bool = True,
 ) -> BriefingBlock | None:
