@@ -28,7 +28,7 @@ from istota.webui.router_stubs import require_auth, require_session_or_device, v
 from istota.workspace.listing import ListingError, list_dir, list_file
 from istota.workspace.places import list_places, place_anchor
 from istota.workspace.reach import deployment_notes, place_reach
-from istota.workspace import config_files, quick_notes, scripts, text_files
+from istota.workspace import config_files, editable, quick_notes, scripts, text_files
 from istota.workspace.quick_notes import QuickNoteError
 from istota.workspace.writes import delete_entry, make_folder, write_new_file
 
@@ -546,6 +546,74 @@ async def api_workspace_note_save(
         return JSONResponse({"error": message, "code": outcome.reason or "unreadable"}, status_code=status)
     status, message = _SAVE_REFUSALS[outcome.status]
     return JSONResponse({"error": message, "code": outcome.status}, status_code=status)
+
+
+def _edit_refusal(config, exc):
+    if not isinstance(exc, editable.EditRefused):
+        return _filesystem_error(config, exc, "home", write=False)
+    payload = {"error": exc.message, "code": exc.code}
+    if exc.code == "too_large":
+        payload["max_bytes"] = editable.MAX_BYTES
+    return JSONResponse(payload, status_code=exc.status)
+
+
+@router.get("/files")
+async def api_workspace_text_file(
+    request: Request, place: str, path: str, name: str, user: dict = Depends(require_auth),
+):
+    """One text file in My files, for the Workspace editor (ISSUE-734)."""
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    parts = [part for part in path.split("/") if part]
+
+    def query():
+        root = _home_root(config, user["username"], place)
+        return editable.read(config, user["username"], root, parts, name)
+
+    try:
+        text = await asyncio.to_thread(query)
+    except (ListingError, OSError) as exc:
+        return _edit_refusal(config, exc)
+    return JSONResponse(
+        {"content": text, "revision": text_files.revision(text), "exists": bool(text.strip())},
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@router.put("/files")
+async def api_workspace_text_file_save(
+    request: Request, user: dict = Depends(require_auth), _csrf: None = Depends(verify_origin),
+):
+    config = getattr(request.app.state, "istota_config", None)
+    if config is None:
+        return JSONResponse({"error": "config unavailable"}, status_code=503)
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    keys = ("place", "path", "name", "content", "revision")
+    if not isinstance(body, dict) or any(not isinstance(body.get(key), str) for key in keys):
+        return JSONResponse({"error": "place, path, name, content and revision are required"}, status_code=400)
+    parts = [part for part in body["path"].split("/") if part]
+
+    def write():
+        root = _home_root(config, user["username"], body["place"])
+        return editable.save(
+            config, user["username"], root, parts, body["name"], body["content"], body["revision"],
+        )
+
+    try:
+        outcome = await asyncio.to_thread(write)
+    except (ListingError, OSError) as exc:
+        return _edit_refusal(config, exc)
+    if outcome.status == "ok":
+        return {"revision": outcome.revision}
+    status, message = _SAVE_REFUSALS[outcome.status]
+    payload = {"error": message, "code": outcome.status}
+    if outcome.status == "too_large":
+        payload["max_bytes"] = editable.MAX_BYTES
+    return JSONResponse(payload, status_code=status)
 
 
 @router.delete("/files")

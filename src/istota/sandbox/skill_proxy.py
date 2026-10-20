@@ -322,6 +322,36 @@ def _default_trusted_roots() -> frozenset[int]:
     return frozenset()
 
 
+# Far above `scheduler.max_subtask_depth`; a chain this long is refused.
+_TURN_CHAIN_LIMIT = 64
+
+
+def _owners_own_turn(conn, task_id: int, user_id: str) -> bool:
+    """Whether ``task_id`` answers a turn ``user_id`` wrote, ancestors included.
+
+    A subtask gets its parent's user id and room token but no `messages` row,
+    so a correspondent's turn would pass a check of the task's own row alone.
+    The walk follows ``parent_task_id`` to the root; a missing row, a cycle or
+    a chain past the limit is not the owner's turn.
+    """
+    from istota import db
+    from istota.rooms.scopes import written_by_someone_else
+
+    seen: set[int] = set()
+    current = task_id
+    while current is not None:
+        if current in seen or len(seen) >= _TURN_CHAIN_LIMIT:
+            return False
+        seen.add(current)
+        task = db.get_task(conn, current)
+        if (task is None or task.user_id != user_id
+                or task.guest_participant_id is not None
+                or written_by_someone_else(conn, task)):
+            return False
+        current = task.parent_task_id
+    return True
+
+
 class SkillProxy:
     """Unix socket server that proxies skill CLI commands with credentials.
 
@@ -568,6 +598,10 @@ class SkillProxy:
                 self._send_response(conn, {"ok": False, "reason": "wallet_channel_unavailable"})
                 return
 
+            if req_type == "mail_account":
+                self._send_response(conn, {"ok": False, "reason": "account_channel_unavailable"})
+                return
+
             if req_type == "credential":
                 name = request.get("name", "")
                 # Scope check: if allowed_credentials is set, only return
@@ -755,7 +789,7 @@ class SkillProxy:
                     self.authorize_pid(pid)
 
                 try:
-                    with self._credential_channel(skill_timeout) as credential_fd, \
+                    with self._credential_channel(skill_timeout, skill) as credential_fd, \
                             peer_process.reporting_pid(_register) as preexec:
                         merged_env["ISTOTA_CRED_FD"] = str(credential_fd)
                         result = subprocess.run(
@@ -797,12 +831,17 @@ class SkillProxy:
                 pass
 
     @contextmanager
-    def _credential_channel(self, timeout: int):
-        """A private endpoint owned by one skill invocation, never a task."""
+    def _credential_channel(self, timeout: int, skill: str | None = None):
+        """A private endpoint owned by one skill invocation, never a task.
+
+        ``skill`` is the skill this proxy is about to spawn, never a name from
+        a request; the channel serves a ``mail_account`` only to ``email``.
+        """
         server, child = socket.socketpair()
         server.settimeout(timeout + CONNECTION_SLACK_SECONDS)
         worker = threading.Thread(
-            target=self._serve_credential_channel, args=(server,), daemon=True,
+            target=self._serve_credential_channel, args=(server,),
+            kwargs={"skill": skill}, daemon=True,
             name="skill-credential-fd",
         )
         try:
@@ -820,7 +859,7 @@ class SkillProxy:
                 worker.join()
             server.close()
 
-    def _serve_credential_channel(self, conn: socket.socket) -> None:
+    def _serve_credential_channel(self, conn: socket.socket, skill: str | None = None) -> None:
         """Only credential reads, with server-owned skill provenance."""
         try:
             with conn.makefile("rb") as reader:
@@ -838,7 +877,8 @@ class SkillProxy:
                         return
                     req_type = request.get("type") if isinstance(request, dict) else None
                     if req_type not in ("vault_credential", "vault_entry", "vault_otp", "wallet_card",
-                                        "vault_recovery_target", "vault_recovery_set", "vault_secret_capture", "vault_recovery_fill"):
+                                        "mail_account", "vault_recovery_target", "vault_recovery_set",
+                                        "vault_secret_capture", "vault_recovery_fill"):
                         self._send_response(conn, {
                             "error": "Private channel accepts credential reads only",
                             "reason": "invalid_credential_request",
@@ -854,6 +894,8 @@ class SkillProxy:
                         self._serve_vault_recovery_set(conn, request)
                     elif req_type == "wallet_card":
                         self._serve_wallet_card(conn, request)
+                    elif req_type == "mail_account":
+                        self._serve_mail_account(conn, request, skill)
                     elif req_type == "vault_otp":
                         self._serve_vault_otp(conn, request)
                     elif req_type == "vault_entry":
@@ -895,6 +937,73 @@ class SkillProxy:
             return
         # Commit before sending: a disconnected reader still spends this fill.
         self._send_response(conn, {"fields": grant.fields, "bound_hosts": grant.bound_hosts})
+
+    def _serve_mail_account(self, conn: socket.socket, request: dict, skill: str | None) -> None:
+        """One connected mail account's sign-in, for one purpose, to ``email``.
+
+        Answered for ``self.user_id`` and ``self.task_id``; the request
+        contributes only the id and the purpose. Not charged against the vault
+        fetch budget: a mail account is not a vault entry, and the read is
+        bounded by the account's owner, the skill and the turn instead.
+        """
+        account_id = request.get("account_id")
+        purpose = request.get("purpose")
+        logged_id = account_id if type(account_id) is int else None
+        logged_purpose = purpose if purpose in ("read", "send") else None
+
+        def refuse(reason: str) -> None:
+            logger.info(
+                "mail_account refused task_id=%s account_id=%s purpose=%s reason=%s",
+                self.task_id, logged_id, logged_purpose, reason,
+            )
+            self._send_response(conn, {"ok": False, "reason": reason})
+
+        if skill != "email":
+            refuse("skill_not_permitted")
+            return
+        if type(account_id) is not int or not 0 < account_id <= 2**63 - 1:
+            refuse("account_not_found")
+            return
+        if purpose not in ("read", "send"):
+            refuse("invalid_credential_request")
+            return
+        if self.config is None or not self.user_id or self.task_id is None:
+            refuse("account_channel_unavailable")
+            return
+        settings = self.config.mail_accounts
+        if not settings.enabled:
+            refuse("mail_accounts_disabled")
+            return
+        from istota import db
+        from istota.mail import accounts
+
+        try:
+            with db.get_db(self.config.db_path) as database:
+                # A correspondent's mail on an email thread room runs as the
+                # host at full reach; it must not reach the host's other boxes.
+                someone_else = not _owners_own_turn(database, self.task_id, self.user_id)
+            if someone_else:
+                refuse("not_owner_turn")
+                return
+            resolved = accounts.resolve_for_daemon(
+                self.config.db_path, self.user_id, account_id,
+                purpose=purpose, settings=settings,
+            )
+        except Exception as exc:
+            logger.error(
+                "mail_account failed task_id=%s account_id=%s purpose=%s exception=%s",
+                self.task_id, account_id, purpose, type(exc).__name__,
+            )
+            self._send_response(conn, {"ok": False, "reason": "mail_account_error"})
+            return
+        if isinstance(resolved, accounts.Unresolved):
+            refuse(resolved.reason)
+            return
+        logger.info(
+            "mail_account served task_id=%s account_id=%s purpose=%s",
+            self.task_id, account_id, purpose,
+        )
+        self._send_response(conn, accounts.login_blocks(resolved))
 
     def _spend_vault_fetch(
         self, private: bool, request_type: str, name: str,

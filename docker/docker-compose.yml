@@ -316,12 +316,17 @@ services:
       - ./nginx/istota-ingress.sh:/docker-entrypoint.d/15-istota-ingress.sh:ro
       - ${CERTS_DIR:-./nginx/certs}:/etc/nginx/certs:ro
       - ${ACME_WEBROOT:-./nginx/acme}:/var/www/acme:ro
+      # host.env's SITE_DIR, which istota-stack passes only when it overlaps
+      # nothing the stack writes (#804). Mounted here alone: a public directory
+      # the agent could write to is the egress channel ISSUE-194 removed.
+      - ${ISTOTA_SITE_DIR:-./nginx/no-site}:/srv/site:ro
     env_file:
       - path: ${ISTOTA_HOST_ENV:-./host.env}
         required: false
     environment:
       WEB_PORT: ${WEB_PORT:-8766}
       NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-512M}
+      ISTOTA_SITE: ${ISTOTA_SITE_DIR:+1}
     restart: unless-stopped
     logging: *logging
 

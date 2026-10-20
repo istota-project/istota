@@ -49,6 +49,7 @@ NEWEST_COLUMNS = [
     ("config_change_requests", "moves_json"),
     ("user_profiles", "quick_notes_folder"),
     ("device_tokens", "auth_epoch"),
+    ("outbound_drafts", "account_id"),
 ]
 
 

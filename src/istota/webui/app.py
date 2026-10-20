@@ -4510,15 +4510,22 @@ def _task_owner(task_id: int) -> str | None:
         return task.user_id if task else None
 
 
-def _task_delivery_refused(task_id: int) -> bool:
-    """`groups.rooms.task_delivery_refused` for a task id: its group-owned
-    room no longer lets its author in, so nothing more of it is served."""
+def _task_delivery_refused(task_id: int, username: str | None = None) -> bool:
+    """`groups.rooms.task_delivery_refused` for a task id, and for ``username``
+    when given: its group-owned room no longer lets its author in, or does not
+    let ``username`` in, so nothing more of it is served to them. An admin is
+    no group member by being one (ISSUE-811)."""
     from istota import db
     from istota.groups.rooms import task_delivery_refused
 
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
-        return task is not None and task_delivery_refused(conn, task)
+        if task is None:
+            return False
+        if task_delivery_refused(conn, task):
+            return True
+        return username is not None and not db.group_room_admits(
+            conn, task.conversation_token, username)
 
 
 def _load_task_events(task_id: int, since_seq: int) -> list[dict]:
@@ -4595,16 +4602,21 @@ def _synthetic_terminal_events(task_id: int, after_seq: int) -> list[dict]:
     return frames
 
 
-async def _authorize_task_access(task_id: int, user: dict) -> None:
+async def _authorize_task_access(
+    task_id: int, user: dict, *, caller_in_room: bool = True,
+) -> None:
     """404 if the task is unknown, 403 if it isn't the caller's (admins exempt).
 
     A task its group-owned room has stopped delivering (its author left the
     group, or the group was archived) is unknown to everyone, the admin
-    exemption included.
+    exemption included. With ``caller_in_room`` (every route but cancel) so is
+    one in a group room the caller is not in; cancel passes False to keep the
+    operator's reach `!stop` has.
     """
     from fastapi import HTTPException
     owner = await asyncio.to_thread(_task_owner, task_id)
-    if owner is None or await asyncio.to_thread(_task_delivery_refused, task_id):
+    reader = user["username"] if caller_in_room else None
+    if owner is None or await asyncio.to_thread(_task_delivery_refused, task_id, reader):
         raise HTTPException(status_code=404, detail="task not found")
     if owner != user["username"] and not _user_is_web_admin(user["username"]):
         raise HTTPException(status_code=403, detail="not your task")
@@ -4657,7 +4669,7 @@ async def chat_task_stream(
                 return
             # Every batch, not only at connect: a removal mid-task stops the
             # stream at the next read, whether or not the cancel has landed.
-            if await asyncio.to_thread(_task_delivery_refused, task_id):
+            if await asyncio.to_thread(_task_delivery_refused, task_id, user["username"]):
                 return
             events = await asyncio.to_thread(_load_task_events, task_id, last)
             for ev in events:
@@ -7136,17 +7148,16 @@ def _own_handle(conn, username: str, room_id: int):
     """``username``'s own `web_chat_rooms` handle for ``room_id``, or None.
 
     The handle half of the room-access resolver: the handle is theirs, and a
-    group-owned room's group still lets them in (`group_room_refuses`). A
+    group-owned room's group still lets them in (`db.group_room_admits`). A
     handle outlives a group archive, so holding one is not enough; every route
     that acts through a handle asks this rather than reading the row itself.
     """
     from istota import db
-    from istota.groups.rooms import group_room_refuses
 
     handle = db.get_web_chat_room(conn, room_id)
     if handle is None or handle.user_id != username:
         return None
-    if group_room_refuses(conn, handle.token, username):
+    if not db.group_room_admits(conn, handle.token, username):
         return None
     return handle
 
@@ -12398,6 +12409,9 @@ def _draft_dict(draft, actions: list[str]) -> dict:
         "html": draft.html,
         "attachments": [PurePath(p).name for p in draft.attachments],
         "hold_reason": draft.hold_reason,
+        # "Label (address)" for a draft held from a connected mail account,
+        # None for the bot box.
+        "from_line": draft.from_line,
         "created_at": _iso_utc(draft.created_at),
         "actions_taken": actions,
     }
@@ -12919,7 +12933,7 @@ async def chat_cancel_task(
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ):
-    await _authorize_task_access(task_id, user)
+    await _authorize_task_access(task_id, user, caller_in_room=False)
     phone = await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
     if phone is not None:
         return _read_only_refusal(phone)
@@ -15068,6 +15082,305 @@ async def settings_wallet_policy(request: Request, user: dict = Depends(_require
 async def settings_wallet_purchase_cancel(ident: str, request: Request, user: dict = Depends(_require_api_auth),
                                           _csrf: None = Depends(_verify_origin)):
     return await _write_wallet(request, user["username"], "cancel", ident)
+
+
+# --- Connected mail accounts ---------------------------------------------------
+# Bodies are parsed by hand: a declared body parameter's 422 echoes the input,
+# which holds a password. Refusals are `{detail, field, reason}` and never
+# carry a submitted value.
+
+_MAIL_ACCOUNT_BODY_LIMIT = 16 * 1024
+_MAIL_ACCOUNT_FIELDS = {
+    "slug": str, "label": str, "permission": str, "imap_host": str, "imap_port": int,
+    "imap_security": str, "imap_username": str, "default_folder": str,
+    "from_address": str, "from_name": str, "sent_folder": str, "enabled": bool,
+}
+# The body's nested `smtp` object, mapped onto the store's flat fields.
+_MAIL_ACCOUNT_SMTP_FIELDS = {
+    "host": ("smtp_host", str), "port": ("smtp_port", int),
+    "security": ("smtp_security", str), "same_login": ("smtp_same_login", bool),
+    "username": ("smtp_username", str),
+}
+_MAIL_ACCOUNT_FIELD_NAMES = {store: f"smtp.{key}" for key, (store, _) in _MAIL_ACCOUNT_SMTP_FIELDS.items()}
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+class _MailAccountRefusal(Exception):
+    def __init__(self, status: int, detail: str, field: str | None = None,
+                 reason: str | None = None, extra: dict | None = None) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+        self.field = field
+        self.reason = reason
+        self.extra = extra or {}
+
+    def response(self) -> JSONResponse:
+        body = {"detail": self.detail, "field": self.field, **self.extra}
+        if self.reason:
+            body["reason"] = self.reason
+        headers = dict(_NO_STORE)
+        if "retry_after" in self.extra:
+            headers["Retry-After"] = str(self.extra["retry_after"])
+        return JSONResponse(body, status_code=self.status, headers=headers)
+
+
+def _mail_account_dict(account) -> dict:
+    smtp = None
+    if account.smtp_host is not None:
+        smtp = {"host": account.smtp_host, "port": account.smtp_port,
+                "security": account.smtp_security, "same_login": account.smtp_same_login,
+                "username": account.smtp_username}
+    return {
+        "id": account.id, "slug": account.slug, "label": account.label,
+        "permission": account.permission, "imap_host": account.imap_host,
+        "imap_port": account.imap_port, "imap_security": account.imap_security,
+        "imap_username": account.imap_username, "default_folder": account.default_folder,
+        "smtp": smtp, "from_address": account.from_address, "from_name": account.from_name,
+        "sent_folder": account.sent_folder, "enabled": account.enabled,
+        "imap_password_set": account.has_imap_password,
+        "smtp_password_set": account.has_smtp_password,
+        "pending_drafts": account.pending_drafts, "updated_at": account.updated_at,
+    }
+
+
+def _typed(value, expected: type, field: str):
+    if type(value) is not expected:
+        raise _MailAccountRefusal(400, "Invalid field type", field)
+    return value
+
+
+def _parse_mail_account_body(raw: bytes, *, create: bool) -> tuple[dict, dict]:
+    """Store fields and the passwords to write, from a create or update body.
+
+    A password that is absent or null keeps the stored one; a string replaces
+    it. ``smtp: null`` removes sending.
+    """
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise _MailAccountRefusal(400, "The request body is not JSON") from None
+    if not isinstance(body, dict):
+        raise _MailAccountRefusal(400, "The request body must be an object")
+    known = set(_MAIL_ACCOUNT_FIELDS) | {"smtp", "imap_password", "smtp_password"}
+    if body.keys() - known:
+        raise _MailAccountRefusal(400, "Unknown field")
+    fields: dict = {}
+    for key, expected in _MAIL_ACCOUNT_FIELDS.items():
+        if key in body:
+            fields[key] = _typed(body[key], expected, key)
+    if "smtp" in body:
+        smtp = body["smtp"]
+        if smtp is None:
+            fields["smtp_host"] = None
+        elif isinstance(smtp, dict):
+            if smtp.keys() - _MAIL_ACCOUNT_SMTP_FIELDS.keys():
+                raise _MailAccountRefusal(400, "Unknown field", "smtp")
+            for key, (store_name, expected) in _MAIL_ACCOUNT_SMTP_FIELDS.items():
+                if key in smtp:
+                    fields[store_name] = _typed(smtp[key], expected, f"smtp.{key}")
+        else:
+            raise _MailAccountRefusal(400, "Invalid field type", "smtp")
+    passwords: dict = {}
+    for which in ("imap", "smtp"):
+        key = f"{which}_password"
+        value = body.get(key)
+        if value is None:
+            continue
+        passwords[which] = _typed(value, str, key)
+    if create and not passwords.get("imap"):
+        raise _MailAccountRefusal(400, "This field is required", "imap_password")
+    return fields, passwords
+
+
+def _mail_account_change(user_id: str, operation: str, account_id: int | None,
+                         fields: dict, passwords: dict) -> dict:
+    """One create, update or delete, row and secrets in one transaction."""
+    from istota import db
+    from istota.mail import accounts
+
+    settings = _config.mail_accounts
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if operation == "create":
+            slug = accounts.validate_slug(fields.pop("slug", None))
+            if accounts.get_account(conn, user_id, slug) is not None:
+                raise accounts.MailAccountError(
+                    "slug_taken", "You already have an account with that slug", field="slug",
+                )
+            account, _ = accounts.ensure_account(
+                conn, user_id, slug=slug, max_accounts=settings.max_per_user, **fields,
+            )
+        else:
+            account = accounts.get_account_by_id(conn, user_id, account_id)
+            if account is None:
+                raise _MailAccountRefusal(404, "Mail account not found")
+            if operation == "delete":
+                # The count is read before the delete, in the same transaction.
+                accounts.delete_account(conn, user_id, account.id, by="web")
+                logger.info("mail_account_web action=delete user=%s account_id=%s drafts=%s",
+                            user_id, account.id, account.pending_drafts)
+                return {"deleted": True, "drafts_discarded": account.pending_drafts}
+            if fields:
+                account = accounts.update_account(conn, user_id, account.id, **fields)
+        for which in ("imap", "smtp"):
+            if which in passwords:
+                accounts.set_password(conn, user_id, account.id, which, passwords[which])
+        account = accounts.get_account_by_id(conn, user_id, account.id)
+    logger.info("mail_account_web action=%s user=%s account_id=%s", operation, user_id, account.id)
+    return {"account": _mail_account_dict(account)}
+
+
+def _mail_account_id(ident: str) -> int:
+    # Parsed by hand: a framework validation error can echo the path segment.
+    if not ident.isascii() or not ident.isdigit() or len(ident) > 18:
+        raise _MailAccountRefusal(404, "Mail account not found")
+    return int(ident)
+
+
+async def _mail_accounts_gate(user_id: str, *, write: bool) -> None:
+    if _config is None or not _config.db_path:
+        raise _MailAccountRefusal(503, "Config not loaded")
+    if not _config.mail_accounts.enabled:
+        raise _MailAccountRefusal(404, "Not found")
+    if write:
+        refusal = await asyncio.to_thread(_web_vault_refusal, user_id)
+        if refusal:
+            raise _MailAccountRefusal(403, refusal)
+
+
+async def _write_mail_account(request: Request, user_id: str, operation: str,
+                              ident: str | None = None):
+    from istota.credentials.store import SecretKeyMissingError, SecretKeyTooWeakError
+    from istota.mail.accounts import MailAccountError
+
+    try:
+        await _mail_accounts_gate(user_id, write=True)
+        account_id = _mail_account_id(ident) if ident is not None else None
+        fields, passwords = {}, {}
+        if operation in ("create", "update"):
+            try:
+                raw = await read_bounded_body(request, _MAIL_ACCOUNT_BODY_LIMIT)
+            except BodyError as exc:
+                raise _MailAccountRefusal(exc.status, exc.message) from None
+            fields, passwords = _parse_mail_account_body(raw, create=operation == "create")
+        result = await asyncio.to_thread(
+            _mail_account_change, user_id, operation, account_id, fields, passwords,
+        )
+        return JSONResponse(result, headers=_NO_STORE)
+    except _MailAccountRefusal as exc:
+        return exc.response()
+    except MailAccountError as exc:
+        status = {"slug_taken": 409, "not_found": 404}.get(exc.reason, 400)
+        field = _MAIL_ACCOUNT_FIELD_NAMES.get(exc.field, exc.field) if exc.field else None
+        return _MailAccountRefusal(status, str(exc), field, exc.reason).response()
+    except (SecretKeyMissingError, SecretKeyTooWeakError):
+        return _MailAccountRefusal(503, "The credential store is not configured.").response()
+    except Exception as exc:
+        logger.error("mail account write failed: %s", type(exc).__name__)
+        return _MailAccountRefusal(500, "The mail account could not be updated").response()
+
+
+def _mail_accounts_listing(user_id: str) -> dict:
+    from istota import db
+    from istota.mail import accounts
+
+    settings = _config.mail_accounts
+    with db.get_db(_config.db_path) as conn:
+        rows = accounts.list_accounts(conn, user_id)
+    return {
+        "enabled": True, "allow_send": settings.allow_send,
+        "max_per_user": settings.max_per_user, "refusal": _web_vault_refusal(user_id),
+        "accounts": [_mail_account_dict(account) for account in rows],
+    }
+
+
+@api_router.get("/settings/mail-accounts")
+async def settings_mail_accounts(user: dict = Depends(_require_api_auth)):
+    try:
+        await _mail_accounts_gate(user["username"], write=False)
+        return JSONResponse(await asyncio.to_thread(_mail_accounts_listing, user["username"]),
+                            headers=_NO_STORE)
+    except _MailAccountRefusal as exc:
+        return exc.response()
+    except Exception as exc:
+        logger.error("mail account read failed: %s", type(exc).__name__)
+        return _MailAccountRefusal(500, "The mail accounts could not be loaded").response()
+
+
+@api_router.post("/settings/mail-accounts")
+async def settings_mail_account_create(request: Request, user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    return await _write_mail_account(request, user["username"], "create")
+
+
+@api_router.patch("/settings/mail-accounts/{ident}")
+async def settings_mail_account_update(ident: str, request: Request,
+                                       user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    return await _write_mail_account(request, user["username"], "update", ident)
+
+
+@api_router.delete("/settings/mail-accounts/{ident}")
+async def settings_mail_account_delete(ident: str, request: Request,
+                                       user: dict = Depends(_require_api_auth),
+                                       _csrf: None = Depends(_verify_origin)):
+    return await _write_mail_account(request, user["username"], "delete", ident)
+
+
+def _request_mail_account_test(user_id: str, account_id: int) -> str:
+    from istota import db
+    from istota.mail import account_tests, accounts
+
+    with db.get_db(_config.db_path) as conn:
+        if accounts.get_account_by_id(conn, user_id, account_id) is None:
+            raise _MailAccountRefusal(404, "Mail account not found")
+    return account_tests.request_test(_config, user_id, account_id)
+
+
+@api_router.post("/settings/mail-accounts/{ident}/test")
+async def settings_mail_account_test(ident: str, user: dict = Depends(_require_api_auth),
+                                     _csrf: None = Depends(_verify_origin)):
+    """Leave a connection test for the daemon, which signs in; 202 with its id."""
+    from istota.mail import account_tests
+
+    try:
+        await _mail_accounts_gate(user["username"], write=True)
+        account_id = _mail_account_id(ident)
+        request_id = await asyncio.to_thread(
+            _request_mail_account_test, user["username"], account_id,
+        )
+        return JSONResponse({"request_id": request_id}, status_code=202, headers=_NO_STORE)
+    except _MailAccountRefusal as exc:
+        return exc.response()
+    except account_tests.TooManyRequests:
+        return _MailAccountRefusal(429, "A test is already waiting for an answer").response()
+    except account_tests.RateLimited as exc:
+        return _MailAccountRefusal(
+            429, "Too many tests in the past hour", extra={"retry_after": exc.retry_after},
+        ).response()
+    except Exception as exc:
+        logger.error("mail account test request failed: %s", type(exc).__name__)
+        return _MailAccountRefusal(500, "The test could not be requested").response()
+
+
+@api_router.get("/settings/mail-accounts/test-requests/{request_id}")
+async def settings_mail_account_test_state(request_id: str,
+                                           user: dict = Depends(_require_api_auth)):
+    """A test's state; another user's id, or one already read, is `unknown`."""
+    from istota.mail import account_tests
+
+    try:
+        await _mail_accounts_gate(user["username"], write=False)
+        state = await asyncio.to_thread(
+            account_tests.read_answer, _config, user["username"], request_id,
+        )
+        return JSONResponse(state, headers=_NO_STORE)
+    except _MailAccountRefusal as exc:
+        return exc.response()
+    except Exception as exc:
+        logger.error("mail account test read failed: %s", type(exc).__name__)
+        return _MailAccountRefusal(500, "The test could not be read").response()
 
 
 @api_router.get("/settings/credentials")

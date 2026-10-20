@@ -4603,6 +4603,8 @@ export interface OutboundDraft {
   bcc?: string[];
   attachments?: string[];
   hold_reason?: string;
+  /** "Label (address)" for a draft held from a connected mail account; null for the bot box. */
+  from_line?: string | null;
   created_at?: string | null;
   /** What else the task that composed this draft did, as rendered strings. */
   actions_taken?: string[];
@@ -5369,9 +5371,12 @@ export async function runSharedBlock(name: string): Promise<{ id: string }> {
   return apiFetch(`/briefings/shared-blocks/${encodeURIComponent(name)}/run`, { method: 'POST' });
 }
 
-/** A mail account a `my_email` briefing source can read: the user's bot address, or Gmail. */
+/**
+ * A mail account a `my_email` briefing source can read: the user's bot address,
+ * Gmail, or one of their connected mail accounts (`imap:<id>`).
+ */
 export interface EmailAccount {
-  id: 'bot' | 'google';
+  id: 'bot' | 'google' | `imap:${number}`;
   label: string;
   address: string | null;
   available: boolean;
@@ -5869,6 +5874,111 @@ export function saveWalletPolicy(policy: WalletPolicy): Promise<{ ok: boolean }>
 }
 export function cancelWalletPurchase(id: number): Promise<{ ok: boolean }> {
   return apiFetch(`/settings/wallet/purchases/${id}/cancel`, { method: 'POST' });
+}
+
+export type MailSecurity = 'tls' | 'starttls';
+export interface MailAccountSmtp {
+  host: string;
+  port: number;
+  security: MailSecurity;
+  /** Sign in to SMTP with the IMAP username and password. */
+  same_login: boolean;
+  username: string;
+}
+/** A mailbox the user connected. Passwords never come back, only whether one is stored. */
+export interface MailAccount {
+  id: number;
+  slug: string;
+  label: string;
+  permission: 'read' | 'read_send';
+  imap_host: string;
+  imap_port: number;
+  imap_security: MailSecurity;
+  imap_username: string;
+  default_folder: string;
+  smtp: MailAccountSmtp | null;
+  from_address: string;
+  from_name: string;
+  sent_folder: string;
+  enabled: boolean;
+  imap_password_set: boolean;
+  smtp_password_set: boolean;
+  pending_drafts: number;
+  updated_at: string | null;
+}
+export interface MailAccountsSettings {
+  enabled: boolean;
+  allow_send: boolean;
+  max_per_user: number;
+  /** Why writes are refused on this deployment (the vault isolation gate), else null. */
+  refusal: string | null;
+  accounts: MailAccount[];
+}
+/** A create or edit body. A password left out or null keeps the stored one; `smtp: null` removes sending. */
+export type MailAccountInput = Partial<
+  Pick<
+    MailAccount,
+    | 'slug'
+    | 'label'
+    | 'permission'
+    | 'imap_host'
+    | 'imap_port'
+    | 'imap_security'
+    | 'imap_username'
+    | 'default_folder'
+    | 'from_address'
+    | 'from_name'
+    | 'sent_folder'
+    | 'enabled'
+  >
+> & {
+  smtp?: MailAccountSmtp | null;
+  imap_password?: string | null;
+  smtp_password?: string | null;
+};
+export interface MailAccountTestResult {
+  ok: boolean;
+  message: string;
+  lines: { step: string; ok: boolean; message: string }[];
+}
+export type MailAccountTestState =
+  | { status: 'pending' }
+  | { status: 'answered'; result: MailAccountTestResult }
+  | { status: 'unknown' };
+
+/** 404 when the operator has switched connected mail accounts off. */
+export function getMailAccounts(): Promise<MailAccountsSettings> {
+  return apiFetch('/settings/mail-accounts');
+}
+export function createMailAccount(input: MailAccountInput): Promise<{ account: MailAccount }> {
+  return apiFetch('/settings/mail-accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+export function updateMailAccount(
+  id: number,
+  input: MailAccountInput,
+): Promise<{ account: MailAccount }> {
+  return apiFetch(`/settings/mail-accounts/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+export function deleteMailAccount(
+  id: number,
+): Promise<{ deleted: boolean; drafts_discarded: number }> {
+  return apiFetch(`/settings/mail-accounts/${id}`, { method: 'DELETE' });
+}
+/** Leaves a connection test for the daemon; poll `getMailAccountTest` with the id. */
+export function requestMailAccountTest(id: number): Promise<{ request_id: string }> {
+  return apiFetch(`/settings/mail-accounts/${id}/test`, { method: 'POST' });
+}
+/** An answered test is removed once read, so a second read of it is `unknown`. */
+export function getMailAccountTest(requestId: string): Promise<MailAccountTestState> {
+  return apiFetch(`/settings/mail-accounts/test-requests/${encodeURIComponent(requestId)}`);
 }
 
 export interface KeepassImportItem {
@@ -6401,16 +6511,43 @@ export function getWorkspaceConfigFile(name: string): Promise<WorkspaceConfigFil
 }
 /** `applies: 'next_sync'` on a CRON.md save: the scheduler picks the jobs up
  * at its next CRON.md sync, not at once. */
-export async function saveWorkspaceConfigFile(
+export function saveWorkspaceConfigFile(
   name: string,
   content: string,
   revision: string,
 ): Promise<{ revision: string; applies?: 'next_sync' }> {
-  const resp = await fetch(`${base}/api${configFilePath(name)}`, {
+  return putTextFile(configFilePath(name), { content, revision });
+}
+
+/** Files above this size open in the viewer only; the server holds the same cap. */
+export const WORKSPACE_TEXT_EDIT_MAX_BYTES = 1_048_576;
+
+/** A text file in My files. The server refuses anything that is not text by
+ * its bytes (415), a link (422) and the bot's config folder (403). */
+export function getWorkspaceTextFile(
+  path: string,
+  name: string,
+): Promise<WorkspaceConfigFileContent> {
+  return apiFetch(`/workspace/files?${new URLSearchParams({ place: 'home', path, name })}`);
+}
+export function saveWorkspaceTextFile(
+  path: string,
+  name: string,
+  content: string,
+  revision: string,
+): Promise<{ revision: string }> {
+  return putTextFile('/workspace/files', { place: 'home', path, name, content, revision });
+}
+
+async function putTextFile<T extends { revision: string }>(
+  path: string,
+  payload: Record<string, string>,
+): Promise<T> {
+  const resp = await fetch(`${base}/api${path}`, {
     method: 'PUT',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content, revision }),
+    body: JSON.stringify(payload),
   });
   if (resp.status === 401) throw new AuthError();
   if (resp.ok) return resp.json();

@@ -68,6 +68,9 @@
 	   card, chip or link-tile. Defined in both themes so a hover affordance does
 	   not silently vanish on white. */
   --border-hover: #555;
+  /* An empty checkbox's edge: 3:1 against every surface, which a control
+     needs and --border-hover is not. */
+  --control-border-strong: #737373;
 
   /* Interactive */
   --accent: #e0e0e0;
@@ -248,6 +251,10 @@
   /* Touch target floor and the comfort size for reported controls. */
   --touch-min: 24px;
   --touch-comfort: 44px;
+
+  /* The Checkbox box. Fixed rather than 1em, so a checkbox reads the same in a
+     dense table and in a settings form; primitives.css raises it on touch. */
+  --checkbox-size: 1.125rem;
 
   /* The corner a control resolves. The root value is the app-bar shape, so a
 	   component adopting this channel changes nothing outside a .control-row;
@@ -448,6 +455,7 @@
   --border-default: #d4d4d8;
   --border-subtle: #e4e4e7;
   --border-hover: #a1a1aa;
+  --control-border-strong: #82828a;
 
   /* Interactive */
   --accent: #1a1a1a;

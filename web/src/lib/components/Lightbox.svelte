@@ -530,7 +530,6 @@
     justify-content: flex-end;
     gap: var(--space-2);
     cursor: default;
-    touch-action: manipulation;
   }
 
   .lightbox {

@@ -28,7 +28,7 @@ import pytest
 from istota import db
 from istota.config import Config, SiteConfig, UserConfig, WebChatConfig, WebConfig
 from istota.groups import service
-from istota.groups.rooms import create_group_room, group_room_access
+from istota.groups.rooms import create_group_room
 
 try:
     import authlib  # noqa: F401
@@ -174,7 +174,7 @@ class TestTheResolverAsksTheGroup:
         with db.get_db(config.db_path) as conn:
             db.add_room_member(conn, room, "carol")
             for user in ("alice", "bob", "carol"):
-                assert db.is_room_member(conn, room, user) == group_room_access(conn, room, user)
+                assert db.is_room_member(conn, room, user) == db.group_room_admits(conn, room, user)
 
     def test_a_linked_room_of_an_archived_group_keeps_its_roster(self, config, room):
         with db.get_db(config.db_path) as conn:
@@ -584,6 +584,54 @@ class TestDeliveryRefusal:
         assert "the group's private plan" not in json.dumps([e["payload"] for e in events])
         assert "result" not in [e["kind"] for e in events]
 
+    def test_a_removal_after_the_first_check_still_stores_nothing(self, config, room):
+        # The removal commits after the post-run check has passed and before
+        # the completion transaction stores the answer (ISSUE-813).
+        from istota import scheduler
+
+        task_id = _task(config, room, "bob")
+        real_plan = scheduler.resolve_delivery_plan
+
+        def plan_after_removal(*args, **kwargs):
+            _remove(config)
+            return real_plan(*args, **kwargs)
+
+        with patch("istota.scheduler.resolve_delivery_plan", side_effect=plan_after_removal):
+            (ran, success), brain = _run(config, _brain("the group's private plan"))
+        assert ran == task_id and not success
+        assert brain.called
+        assert _task_row(config, task_id)["status"] == "cancelled"
+        with db.get_db(config.db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE task_id = ? AND role = 'assistant'",
+                (task_id,),
+            ).fetchone()[0] == 0
+            events = db.get_task_events(conn, task_id, 0)
+        assert "the group's private plan" not in json.dumps([e["payload"] for e in events])
+
+    def test_memory_indexing_runs_after_the_completion_transaction(self, config, room):
+        # `index_conversation` commits its connection. Run inside the
+        # completion transaction, it ended the transaction the delivery check
+        # holds, and a removal could commit before the rows stored after it.
+        from istota.memory import search
+
+        task_id = _task(config, room, "alice")
+        real_index = search.index_conversation
+        seen = []
+
+        def index_after_store(conn, *args, **kwargs):
+            with db.get_db(config.db_path) as other:
+                seen.append(other.execute(
+                    "SELECT COUNT(*) FROM messages WHERE task_id = ? AND role = 'assistant'",
+                    (task_id,),
+                ).fetchone()[0])
+            return real_index(conn, *args, **kwargs)
+
+        with patch("istota.memory.search.index_conversation", side_effect=index_after_store):
+            (ran, success), _ = _run(config, _brain("noted"))
+        assert ran == task_id and success
+        assert seen and all(count == 1 for count in seen)
+
     def test_a_task_whose_author_left_does_not_run(self, config, room):
         task_id = _task(config, room, "bob")
         with db.get_db(config.db_path) as conn:
@@ -706,6 +754,85 @@ class TestARemovedMemberCannotReachBack:
             reply = await commands.cmd_more(ctx)
         assert "the private plan" not in str(reply)
         assert "group" in str(reply)
+
+
+class TestAnAdminOutsideTheGroup:
+    """Being an admin grants no group membership (ISSUE-811): the actor must be
+    let into the group room as well as the task's author."""
+
+    @pytest.mark.parametrize("resume", [False, True])
+    def test_retry_and_resume_are_refused(self, config, room, resume):
+        from istota import commands
+
+        config.admin_users = {"carol"}
+        task_id = _task(config, room, "bob", status="failed")
+        with db.get_db(config.db_path) as conn:
+            before = db.count_room_messages(conn, room)
+            tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            outcome = commands.retry_task(conn, config, "carol", db.get_task(conn, task_id),
+                                          resume=resume, surface="web")
+            assert isinstance(outcome, str)
+            assert "you are not a member" in outcome
+            assert db.count_room_messages(conn, room) == before
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
+
+    async def test_more_does_not_show_the_trace(self, config, room):
+        from istota import commands
+
+        config.admin_users = {"carol"}
+        trace = json.dumps([{"type": "text", "text": "the private plan"}])
+        task_id = _task(config, room, "bob", status="failed", execution_trace=trace)
+        with db.get_db(config.db_path) as conn:
+            own = db.create_web_chat_room(conn, "carol", "Mine").token
+            ctx = commands.CommandContext(
+                config=config, conn=conn, user_id="carol", conversation_token=own,
+                surface="web", args=f"#{task_id}",
+            )
+            reply = await commands.cmd_more(ctx)
+        assert "the private plan" not in str(reply)
+        assert "you are not a member" in str(reply)
+
+    @_needs_web
+    async def test_the_web_task_routes_refuse(self, client, config, room):
+        config.admin_users = {"carol", "alice"}
+        task_id = _task(config, room, "bob", status="failed")
+        with db.get_db(config.db_path) as conn:
+            before = db.count_room_messages(conn, room)
+            tasks_before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        carol = await _login(client, "carol")
+        assert (await client.get(f"/istota/api/chat/tasks/{task_id}/events",
+                                 cookies=carol)).status_code == 404
+        retry = await client.post(f"/istota/api/chat/tasks/{task_id}/retry",
+                                  cookies=carol, headers=ORIGIN, json={"mode": "retry"})
+        assert retry.status_code == 404
+        with db.get_db(config.db_path) as conn:
+            assert db.count_room_messages(conn, room) == before
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == tasks_before
+        alice = await _login(client, "alice")
+        assert (await client.get(f"/istota/api/chat/tasks/{task_id}/events",
+                                 cookies=alice)).status_code == 200
+
+    @_needs_web
+    async def test_an_admin_outside_the_group_can_still_stop_a_task(self, client, config, room):
+        """Cancel keeps the operator's reach `!stop` has: stopping writes nothing
+        into the room."""
+        config.admin_users = {"carol"}
+        task_id = _task(config, room, "bob", status="running")
+        carol = await _login(client, "carol")
+        resp = await client.post(f"/istota/api/chat/tasks/{task_id}/cancel",
+                                 cookies=carol, headers=ORIGIN)
+        assert resp.status_code == 200
+        assert _task_row(config, task_id)["cancel_requested"] == 1
+
+    def test_an_admin_in_the_group_can_still_retry(self, config, room):
+        from istota import commands
+
+        config.admin_users = {"alice"}
+        task_id = _task(config, room, "bob", status="failed")
+        with db.get_db(config.db_path) as conn:
+            outcome = commands.retry_task(conn, config, "alice", db.get_task(conn, task_id),
+                                          surface="web")
+            assert isinstance(outcome, commands.RetryOutcome)
 
 
 class TestALostHostIsSucceeded:

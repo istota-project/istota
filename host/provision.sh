@@ -50,6 +50,9 @@
 #                        made, whose images are a release's: a setup or
 #                        check-image adds what they lack as local layers rather
 #                        than rebuilding them. Empty on a server
+#   SITE_DIR             a directory of static files nginx serves read-only at /,
+#                        in place of the redirect to the web UI; istota-stack
+#                        refuses one that overlaps a directory the stack writes
 set -euo pipefail
 # The checkout it clones is what the images are built from: under a hardened
 # umask (027) it would be root-only, and out of uid 10001's reach in them.

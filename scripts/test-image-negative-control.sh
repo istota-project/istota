@@ -45,6 +45,7 @@
 #   scripts/test-image-negative-control.sh web-setup
 #   scripts/test-image-negative-control.sh devbox
 #   scripts/test-image-negative-control.sh document-render
+#   scripts/test-image-negative-control.sh group-rooms
 #
 # The second form runs only the third half, the daemon container's run
 # contract (the one-deployment-shape spec's parity rows 1, 2, 3, 4, 5, 6, 8,
@@ -64,7 +65,9 @@
 # setup code. The sixth runs only the devbox half, for a change that touches
 # nothing else. The seventh runs the browser image's document render against
 # the built share-map bundle with its `istotaRender` registration removed
-# (needs `web/build-render`).
+# (needs `web/build-render`). The eighth runs the group-owned-rooms upgrade
+# witness against two broken migrations, one that converts linked rooms and
+# one whose column differs from schema.sql's.
 #
 # No arrays anywhere: macOS ships bash 3.2, where `"${empty[@]}"` under `set -u`
 # is fatal, and this script's whole audience is a developer machine.
@@ -103,7 +106,43 @@ if [ "$platform" = "document-render" ]; then
     only_document_render=1
     platform=""
 fi
+only_group_rooms=""
+if [ "$platform" = "group-rooms" ]; then
+    only_group_rooms=1
+    platform=""
+fi
 control_tag="istota-test/no-forge:control"
+
+# The istota image the tier builds for this tree. The tier's own tag scheme is
+# the authority: reproducing it in shell would be a second copy of a rule that
+# already exists, and taking the newest `istota-test/istota` instead picks up
+# whatever a sibling worktree built last.
+tier_istota_tag() {
+    ISTOTA_TEST_PLATFORM="$platform" uv run python -c '
+import sys
+# The repo root, not `tests/`: `tests.image.conftest` reads `resolve_platform`
+# from the rootdir conftest by relative import, and a flat `image.conftest`
+# would be a top-level package with nothing above it to import from.
+sys.path.insert(0, ".")
+from tests.image.conftest import _tag_for, ISTOTA_DOCKERFILE, resolve_platform
+
+
+class _Config:
+    def getoption(self, name):
+        return None
+
+
+print(_tag_for(ISTOTA_DOCKERFILE, resolve_platform(_Config()), "istota"))
+'
+}
+
+# Exit 2 with the build hint when the tier has not built this tree's image.
+require_tier_istota_image() {
+    if ! docker image inspect "$1" >/dev/null 2>&1; then
+        echo "[control] ${1} is not built yet — run \`uv run pytest -m image -n0\` first." >&2
+        exit 2
+    fi
+}
 
 # --------------------------------------------------------------------------
 # The run-contract half. Defined first so the second form can run it alone;
@@ -344,12 +383,8 @@ secrets_half() {
 RENDERED_TESTS="tests/image/test_upgrade.py::TestTheNewEntrypointKeepsARenderedConfig"
 
 rendered_config_half() {
-    # The newest image the tier built; `docker images` lists newest first.
-    rendered_base="$(docker images --format '{{.Repository}}:{{.Tag}}' istota-test/istota | head -1)"
-    if [ -z "$rendered_base" ]; then
-        echo "[control] no istota-test/istota image yet — run \`uv run pytest -m image -n0\` first." >&2
-        exit 2
-    fi
+    rendered_base="$(tier_istota_tag)"
+    require_tier_istota_image "$rendered_base"
     echo
     echo "[control] rendered-config: an entrypoint that rewrites the operator's config (base ${rendered_base})"
     docker build -q -f docker/test/Dockerfile.rewrites-config \
@@ -368,6 +403,47 @@ rendered_config_half() {
     fi
     rm -f "$rendered_out"
     echo "[control] OK: rendered-config turned the rewrite witness red and the daemon still started."
+}
+
+# --------------------------------------------------------------------------
+# The group-owned-rooms migration over a retained database (#816). Each
+# control breaks one half of it, and must turn that half's witness red and
+# leave the other green, which tells a broken migration from a fixture that
+# never got as far as reading the database.
+
+GROUP_ROOMS_TESTS="tests/image/test_upgrade.py::TestGroupOwnedRoomsUpgrade"
+
+run_group_rooms_control() {
+    group_name="$1"
+    group_red="$2"
+    group_green="$3"
+    group_base="$(tier_istota_tag)"
+    require_tier_istota_image "$group_base"
+    echo
+    echo "[control] group-rooms/${group_name} (base ${group_base})"
+    docker build -q -f "docker/test/Dockerfile.group-rooms-${group_name}" \
+        --build-arg "BASE=$group_base" -t "istota-test/group-rooms-${group_name}:control" docker/test >/dev/null
+    group_out="$(mktemp)"
+    set +e
+    ISTOTA_IMAGE_TAG="istota-test/group-rooms-${group_name}:control" ISTOTA_UPGRADE_SHAPES=volume \
+        ISTOTA_UPGRADE_FROM="$(grep -v '^#' scripts/upgrade-floor | grep -v '^$' | head -1)" \
+        uv run pytest -m image -n0 -q --no-header -p no:randomly "$GROUP_ROOMS_TESTS" 2>&1 | tee "$group_out"
+    set -e
+    if ! grep -Fq "FAILED ${GROUP_ROOMS_TESTS}::${group_red}" "$group_out" \
+        || ! grep -Fq "1 failed, 2 passed" "$group_out"; then
+        rm -f "$group_out"
+        echo "[control] FAILED: group-rooms/${group_name} did not turn exactly ${group_red} red."
+        exit 1
+    fi
+    rm -f "$group_out"
+    echo "[control] OK: group-rooms/${group_name} turned ${group_red} red and left ${group_green} green."
+}
+
+group_rooms_half() {
+    run_group_rooms_control converted \
+        test_no_linked_room_is_converted test_an_upgraded_database_matches_a_fresh_one
+    run_group_rooms_control drifted \
+        test_an_upgraded_database_matches_a_fresh_one test_no_linked_room_is_converted
 }
 
 # --------------------------------------------------------------------------
@@ -465,6 +541,10 @@ if [ -n "$only_rendered_config" ]; then
     rendered_config_half
     exit 0
 fi
+if [ -n "$only_group_rooms" ]; then
+    group_rooms_half
+    exit 0
+fi
 if [ -n "$only_secrets" ]; then
     secrets_half
     exit 0
@@ -475,26 +555,7 @@ if [ -n "$only_web_setup" ]; then
 fi
 
 istota_half() {
-# The tier's own tag scheme is the authority. Reproducing it in shell would be a
-# second copy of a rule that already exists, and it would drift.
-base_tag="$(
-    ISTOTA_TEST_PLATFORM="$platform" uv run python -c '
-import sys
-# The repo root, not `tests/`: `tests.image.conftest` reads `resolve_platform`
-# from the rootdir conftest by relative import, and a flat `image.conftest`
-# would be a top-level package with nothing above it to import from.
-sys.path.insert(0, ".")
-from tests.image.conftest import _tag_for, ISTOTA_DOCKERFILE, resolve_platform
-
-
-class _Config:
-    def getoption(self, name):
-        return None
-
-
-print(_tag_for(ISTOTA_DOCKERFILE, resolve_platform(_Config()), "istota"))
-'
-)"
+base_tag="$(tier_istota_tag)"
 
 echo "[control] base image: $base_tag"
 if ! docker image inspect "$base_tag" >/dev/null 2>&1; then
@@ -832,6 +893,7 @@ if [ -z "$platform" ] && [ -z "$only_devbox" ]; then
     run_contract_half
     secrets_half
     rendered_config_half
+    group_rooms_half
     web_setup_half
     document_render_half
 fi

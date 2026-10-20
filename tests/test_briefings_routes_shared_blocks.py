@@ -181,6 +181,47 @@ class TestRunNow:
         assert status["run_answered"]["outcome"] == "regenerated"
         assert status["has_content"] is True
 
+    def test_last_run_is_reported_in_utc_from_the_shared_block_timezone(self, tmp_path):
+        # The scheduler stamps last_run_at as naive wall-clock time in the
+        # shared-block timezone; the listing must put it on the same UTC clock
+        # as run_answered.at, or the two times in one cell disagree (ISSUE-808).
+        app = _make_app(tmp_path)
+        cfg = app.state.istota_config
+        cfg.briefings.shared_block_timezone = "America/New_York"
+        c = TestClient(app)
+        c.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "mk", "cron": "0 6 * * *",
+                  "sources": [{"kind": "markets", "config": {}}]},
+        )
+        with db.get_db(cfg.db_path) as conn:
+            db.set_briefing_shared_block_last_run(conn, "mk", "2026-10-11T06:00:00")
+        status = c.get("/istota/api/briefings/shared-blocks").json()["shared_blocks"][0]["status"]
+        assert status["last_run_at"] == "2026-10-11T10:00:00Z"
+
+    def test_deleting_a_block_forgets_its_run_now(self, client):
+        from istota.briefings import shared_block_runs
+
+        cfg = client.app.state.istota_config
+        client.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "mk", "cron": "0 6 * * *",
+                  "sources": [{"kind": "markets", "config": {}}]},
+        )
+        asked = client.post("/istota/api/briefings/shared-blocks/mk/run").json()
+        shared_block_runs.record_answered(cfg, {"id": asked["id"], "name": "mk"}, "failed")
+        client.post("/istota/api/briefings/shared-blocks/mk/run")
+        client.delete("/istota/api/briefings/shared-blocks/mk")
+        # A block made again under the same name starts with no Run now history.
+        client.put(
+            "/istota/api/briefings/shared-blocks",
+            json={"name": "mk", "cron": "0 6 * * *",
+                  "sources": [{"kind": "markets", "config": {}}]},
+        )
+        status = client.get("/istota/api/briefings/shared-blocks").json()["shared_blocks"][0]["status"]
+        assert status["run_answered"] is None
+        assert status["run_pending"] is None
+
     def test_run_missing_404(self, client):
         assert client.post("/istota/api/briefings/shared-blocks/nope/run").status_code == 404
 

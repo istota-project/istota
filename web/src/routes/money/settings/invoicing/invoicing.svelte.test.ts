@@ -270,14 +270,19 @@ async function deleteFrom(card: HTMLElement, menuLabel: string) {
 }
 
 describe('the entity and service cards on Invoicing', () => {
-  it('shows a failed load in each card with a Retry, not an empty list', async () => {
+  it('shows a failed load in each card with a Retry, announced once', async () => {
     businessFails = true;
     render(Page);
     for (const title of [/^Business defaults$/, /^Entities$/, /^Services$/]) {
       const card = await cardTitled(title);
-      expect(await within(card).findByRole('alert')).toHaveTextContent('ledger unreadable');
+      const failure = await within(card).findByText('ledger unreadable');
+      expect(failure.closest('.banner.danger')).not.toBeNull();
       expect(within(card).getByRole('button', { name: 'Retry' })).toBeTruthy();
     }
+    // One request failed, so a screen reader hears it once, from the first card.
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    const defaults = await cardTitled(/^Business defaults$/);
+    expect(within(defaults).getByRole('alert')).toHaveTextContent('ledger unreadable');
     expect(screen.queryByText(/No entities yet/)).toBeNull();
     expect(screen.queryByText(/No services yet/)).toBeNull();
 

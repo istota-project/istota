@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import type { AdminServarrApp, AdminServarrConnection } from '$lib/api';
   import { Badge, Button, Card, EmptyState, Alert, Timestamp } from '$lib/components/ui';
@@ -18,6 +19,9 @@
 
   let checking = $state(false);
   let unanswered = $state(false);
+  // Leaving ends a check's wait (ISSUE-807); the daemon still finishes the run.
+  const unmounted = new AbortController();
+  onMount(() => () => unmounted.abort());
 
   /** The card shows status; `[servarr]` is edited in Configuration. */
   const configureHref = `${base}/admin/config?section=servarr`;
@@ -72,7 +76,8 @@
     checking = true;
     unanswered = false;
     try {
-      const result = await waitForDoctorRun(false);
+      const result = await waitForDoctorRun(false, { signal: unmounted.signal });
+      if (result.cancelled) return;
       if (result.answered) {
         await onchecked();
       } else {

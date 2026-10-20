@@ -16,6 +16,11 @@ def database(tmp_path):
     return path
 
 
+def test_current_schema_is_fully_classified(database):
+    with sqlite3.connect(database) as conn:
+        room_relocate.check_inventory(conn)
+
+
 def legacy(conn, token="old-talk", origin="talk"):
     db.register_room(conn, token, "alice", origin=origin, name="Example")
     db.add_room_binding(conn, token, origin, token)
@@ -95,6 +100,22 @@ def test_migrate_preserves_multiplayer_state_and_native_refs(database):
     after = snapshot(database)
     assert room_relocate.migrate_database(database) == 0
     assert snapshot(database) == after
+
+
+def test_migration_leaves_device_credentials_alone(database):
+    # ISSUE-817: an APNs token or an ingest credential that happens to equal a
+    # legacy room token is still a credential, never a room reference.
+    with db.get_db(database) as conn:
+        old = legacy(conn)
+        conn.execute("""INSERT INTO push_devices(user_id,token,environment,created_at,updated_at)
+            VALUES ('alice',?,'production','2026-01-01','2026-01-01')""", (old,))
+        conn.execute("""INSERT INTO location_ingest_tokens(user_id,token_hash,token_tail,kind,label,created_at)
+            VALUES ('alice',?,?,'code','Phone','2026-01-01')""", (old, old))
+    assert room_relocate.migrate_database(database) == 0
+    with db.get_db(database) as conn:
+        assert db.get_room(conn, old) is None
+        assert conn.execute("SELECT token FROM push_devices").fetchone()[0] == old
+        assert tuple(conn.execute("SELECT token_hash,token_tail FROM location_ingest_tokens").fetchone()) == (old, old)
 
 
 def test_migrate_rewrites_private_reply_tags(database):

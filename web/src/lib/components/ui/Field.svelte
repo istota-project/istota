@@ -226,10 +226,6 @@
     color: var(--text-primary);
   }
 
-  .field.checkbox :global(input[type='checkbox']) {
-    width: auto;
-  }
-
   /* The money `.ctl`: a dense field that grows from 9rem in a wrapping row. */
   .field-compact {
     gap: var(--space-1);
@@ -293,9 +289,7 @@
     /* Centred in the control-height band the top-aligned row gives it. */
     .field.inline :global(input[type='checkbox']) {
       justify-self: start;
-      margin: calc((var(--control-height-lg) - 1em) / 2) 0 0;
-      width: 1em;
-      height: 1em;
+      margin-top: calc((var(--control-height-lg) - var(--checkbox-size)) / 2);
     }
   }
 

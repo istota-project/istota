@@ -1,0 +1,14 @@
+# Negative control for tests/image/test_upgrade.py::TestGroupOwnedRoomsUpgrade:
+# the real image with a migration whose column is not the one schema.sql
+# declares (nullable). An added column still takes its default on every
+# existing row, so only `test_an_upgraded_database_matches_a_fresh_one` may go red.
+ARG BASE
+FROM ${BASE}
+RUN /app/.venv/bin/python - <<'PY'
+import pathlib
+path = pathlib.Path("/app/src/istota/db.py")
+old = """{"membership_source": "TEXT NOT NULL DEFAULT 'room'"}"""
+text = path.read_text()
+assert text.count(old) == 1, "the migration this control breaks has moved"
+path.write_text(text.replace(old, """{"membership_source": "TEXT DEFAULT 'room'"}"""))
+PY

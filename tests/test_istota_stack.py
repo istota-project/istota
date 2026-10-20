@@ -2150,6 +2150,101 @@ class TestTheMount:
                 "${" + workspace_marker.REQUIRED_ENV + ":-}"), name
 
 
+class TestTheOperatorSite:
+    """host.env's SITE_DIR: a hand-maintained static site nginx serves at `/`
+    (#804). It reaches compose only when nothing the agent can write is inside
+    it or around it, since a publicly served directory the agent could write to
+    is the egress channel ISSUE-194 removed."""
+
+    def _site(self, fx, value: str | None) -> subprocess.CompletedProcess:
+        text = "INGRESS=local\n" + ("" if value is None else f"SITE_DIR={value}\n")
+        (fx.stack / "host.env").write_text(text)
+        return _source(fx, 'docker() { echo "site=${ISTOTA_SITE_DIR:-unset}"; }; compose ps')
+
+    def _refused(self, result: subprocess.CompletedProcess) -> None:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "site=unset"
+        assert "WARNING: SITE_DIR" in result.stderr
+
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_unset_passes_nothing(self, fx, value):
+        result = self._site(fx, value)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "site=unset"
+        assert "SITE_DIR" not in result.stderr
+
+    def test_a_site_in_dot_env_is_never_reached(self, fx):
+        """compose reads .env too, and the environment outranks it only when
+        the variable is set: an unset one would let .env name the mount."""
+        (fx.stack / ".env").write_text(
+            fx.env_text() + f"ISTOTA_SITE_DIR={fx.root / 'mount'}\n")
+        (fx.stack / "host.env").write_text("INGRESS=local\n")
+        result = _source(fx, 'docker() { echo "site=${ISTOTA_SITE_DIR-unset}"; }; compose ps')
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "site="
+
+    def test_a_site_inside_dockers_root_is_refused(self, fx):
+        """The named volumes (the browser profile, the devboxes) are there."""
+        docker_root = fx.root / "docker-root"
+        site = docker_root / "volumes"
+        site.mkdir(parents=True)
+        stub = fx.root / "bin" / "docker"
+        stub.write_text(stub.read_text().replace(
+            'args=" $* "\n',
+            f'args=" $* "\ncase "$args" in *" info -f "*) echo "{docker_root}"; exit 0 ;; esac\n', 1))
+        self._refused(self._site(fx, str(docker_root)))
+        self._refused(self._site(fx, str(site)))
+
+    def test_a_directory_of_its_own_is_passed_resolved(self, fx):
+        site = fx.root / "site"
+        site.mkdir()
+        (fx.root / "site-link").symlink_to(site)
+        result = self._site(fx, str(fx.root / "site-link"))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"site={site.resolve()}"
+
+    def test_a_site_beside_the_stacks_own_directories_is_passed(self, fx):
+        site = fx.stack / "site"
+        site.mkdir()
+        result = self._site(fx, str(site))
+        assert result.stdout.strip() == f"site={site.resolve()}"
+
+    @pytest.mark.parametrize("inside", ["mount", "data", "config", "secrets", "requests", "src"])
+    def test_a_site_inside_a_directory_the_containers_write_is_refused(self, fx, inside):
+        parent = fx.root / "mount" if inside == "mount" else fx.stack / inside
+        site = parent / "Users" / "alice" / "site"
+        site.mkdir(parents=True)
+        self._refused(self._site(fx, str(site)))
+
+    def test_a_site_holding_the_stack_is_refused(self, fx):
+        self._refused(self._site(fx, str(fx.stack)))
+        self._refused(self._site(fx, str(fx.root)))
+
+    def test_a_symlink_into_the_mount_is_refused(self, fx):
+        target = fx.root / "mount" / "public"
+        target.mkdir(parents=True)
+        (fx.root / "innocent").symlink_to(target)
+        self._refused(self._site(fx, str(fx.root / "innocent")))
+
+    @pytest.mark.parametrize("value", ["relative/site", "/nonexistent/site"])
+    def test_a_path_that_is_not_an_absolute_directory_is_refused(self, fx, value):
+        self._refused(self._site(fx, value))
+
+    def test_compose_mounts_it_read_only_on_nginx_alone(self):
+        import yaml
+
+        services = yaml.safe_load((REPO / "docker" / "docker-compose.yml").read_text())["services"]
+        nginx = services["nginx"]
+        assert "${ISTOTA_SITE_DIR:-./nginx/no-site}:/srv/site:ro" in nginx["volumes"]
+        assert nginx["environment"]["ISTOTA_SITE"] == "${ISTOTA_SITE_DIR:+1}"
+        assert (REPO / "docker" / "nginx" / "no-site").is_dir()
+        for name, service in services.items():
+            if name == "nginx":
+                continue
+            assert "ISTOTA_SITE_DIR" not in json.dumps(service), name
+            assert "/srv/site" not in json.dumps(service), name
+
+
 class TestRootNeverReadsWhatUid10001Can:
     """Root on the VM must not act on a file uid 10001 can write or replace.
 

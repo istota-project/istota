@@ -121,6 +121,71 @@ describe('briefings settings first load', () => {
     await waitFor(() => expect(screen.queryByText(/browse presets/)).toBeNull());
   });
 
+  // ISSUE-809: a failed feed list is not an empty one, so the block editor must
+  // not tell the user to subscribe to a feed they may already have.
+  describe('when the feed list fails', () => {
+    const rssBlock = {
+      id: 5,
+      briefing_name: 'morning',
+      position: 0,
+      title: 'News',
+      directive: '',
+      render_mode: 'synthesis',
+      options: {},
+      sources: [{ id: 9, position: 0, kind: 'rss', config: {}, enabled: true }],
+    };
+    const rssConfig = {
+      briefings: [{ name: 'morning', blocks: [rssBlock] }],
+      schedule_names: ['morning'],
+      source_kinds: ['rss'],
+      structured_kinds: [],
+      block_templates: [
+        {
+          id: 'news',
+          label: 'Feed digest',
+          description: 'Your feeds, summarized.',
+          block: {
+            title: 'News',
+            directive: '',
+            render_mode: 'synthesis',
+            options: {},
+            sources: [{ kind: 'rss' }],
+          },
+        },
+      ],
+    };
+
+    function renderWithFailedFeeds(url: string) {
+      vi.mocked(api.getBriefingConfig).mockResolvedValueOnce(rssConfig as never);
+      vi.mocked(api.getFeedOptions).mockRejectedValueOnce(new Error('down'));
+      page.url = new URL(url);
+      render(Harness, { component: Page, user: person });
+    }
+
+    it('says the feeds could not be loaded in an open block editor', async () => {
+      renderWithFailedFeeds('http://localhost/istota/briefings/settings?name=morning&block=5');
+
+      await screen.findByText(/Could not load feeds/);
+      await screen.findByRole('heading', { name: 'Edit block' });
+      expect(screen.queryByText(/subscribe/i)).toBeNull();
+      expect(screen.getByText('Feeds could not be loaded.')).toBeTruthy();
+      expect(
+        screen.getByText('Feeds could not be loaded, so a feed source cannot be added.'),
+      ).toBeTruthy();
+    });
+
+    it('gives a feed preset the load failure as its reason', async () => {
+      renderWithFailedFeeds('http://localhost/istota/briefings/settings?name=morning');
+
+      await screen.findByText(/Could not load feeds/);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Add block' }));
+      const preset = await screen.findByRole('button', { name: 'Feed digest' });
+      expect((preset as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryByText(/subscribe/i)).toBeNull();
+      expect(within(preset).getByText('Feeds could not be loaded.')).toBeTruthy();
+    });
+  });
+
   it('shows a failed profile load in the Email card instead of a guessed toggle', async () => {
     page.url = new URL('http://localhost/istota/briefings/settings?view=delivery');
     vi.mocked(api.getProfile).mockRejectedValueOnce(new Error('Profile unavailable'));
