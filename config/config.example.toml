@@ -1211,6 +1211,20 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # max_upload_mb = 25              # largest file one media upload may send
 
 # ============================================================================
+# Connected mail accounts (docs/features/email.md)
+# ============================================================================
+# Users connect their own IMAP (and optionally SMTP) mailboxes in Settings >
+# Connections or with `istota mail-account`. Separate from [email], which is
+# the bot's own mailbox.
+# [mail_accounts]
+# enabled = true                  # off: rows kept, every account unreachable
+# allow_send = true               # off: every account behaves as read-only
+# max_per_user = 10
+# private_hosts = []              # exact host names a user account may reach
+#                                 #   on a private address; every other host
+#                                 #   must resolve to a public one
+
+# ============================================================================
 # Servarr skill: Sonarr, Radarr, Lidarr and Prowlarr (docs/features/servarr.md)
 # ============================================================================
 # One install-wide connection per app. Admins get every verb; users listed in

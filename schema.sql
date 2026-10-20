@@ -766,6 +766,10 @@ CREATE TABLE IF NOT EXISTS outbound_drafts (
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT,
     nagged_at     TEXT,                  -- stale-draft notification sent; NULL = not yet
+    -- The user's connected mail account the send goes out through
+    -- (`mail_accounts.id`); NULL = the bot box. Not a foreign key: release
+    -- re-reads the account by (user_id, id) and refuses one that is gone.
+    account_id    INTEGER,
     -- Decorative: `PRAGMA foreign_keys` is never enabled on this database, and
     -- `cleanup_old_tasks` prunes tasks at `task_retention_days` (7) while a
     -- draft is designed to outlive that, so `task_id` is *expected* to dangle.
@@ -782,6 +786,41 @@ CREATE INDEX IF NOT EXISTS idx_outbound_drafts_room
 -- is a full scan that grows forever, since resolved rows are never pruned.
 CREATE INDEX IF NOT EXISTS idx_outbound_drafts_stale
     ON outbound_drafts(status, nagged_at, created_at);
+
+-- Mail accounts a user connected: their own IMAP mailbox, and optionally its
+-- SMTP for sending. Metadata only; the passwords are `secrets` rows under
+-- service 'mail_account', keys '{id}.imap_password' / '{id}.smtp_password',
+-- keyed on the id so a slug rename keeps them. `mail/accounts.py` is the only
+-- writer of either.
+CREATE TABLE IF NOT EXISTS mail_accounts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          TEXT NOT NULL,
+    slug             TEXT NOT NULL,
+    label            TEXT NOT NULL DEFAULT '',
+    permission       TEXT NOT NULL DEFAULT 'read'
+                     CHECK (permission IN ('read', 'read_send')),
+    imap_host        TEXT NOT NULL,
+    imap_port        INTEGER NOT NULL DEFAULT 993,
+    imap_security    TEXT NOT NULL DEFAULT 'tls'
+                     CHECK (imap_security IN ('tls', 'starttls')),
+    imap_username    TEXT NOT NULL,
+    default_folder   TEXT NOT NULL DEFAULT 'INBOX',
+    smtp_host        TEXT,                       -- NULL = no sending configured
+    smtp_port        INTEGER NOT NULL DEFAULT 587,
+    smtp_security    TEXT NOT NULL DEFAULT 'starttls'
+                     CHECK (smtp_security IN ('tls', 'starttls')),
+    smtp_same_login  INTEGER NOT NULL DEFAULT 1,
+    smtp_username    TEXT NOT NULL DEFAULT '',   -- used when smtp_same_login = 0
+    from_address     TEXT NOT NULL DEFAULT '',
+    from_name        TEXT NOT NULL DEFAULT '',
+    sent_folder      TEXT NOT NULL DEFAULT '',   -- '' = no copy
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, slug),
+    CHECK (permission = 'read' OR (smtp_host IS NOT NULL AND from_address != ''))
+);
+CREATE INDEX IF NOT EXISTS idx_mail_accounts_user ON mail_accounts(user_id);
 
 -- Note: Per-user location data (location_pings, places, visits,
 -- dismissed_clusters, location_state) lives in per-user

@@ -47,6 +47,7 @@ NEWEST_COLUMNS = [
     ("web_chat_rooms", "listed"),
     ("web_auth_step_ups", "method"),
     ("config_change_requests", "moves_json"),
+    ("outbound_drafts", "account_id"),
 ]
 
 

@@ -775,6 +775,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # as an unreachable arm rather than as a relaxation. Pinned by
     # `tests/test_guarded_column_migrations.py::TestTheOneSiteThatDoesNotTolerate`.
     sqlite_util.add_columns(conn, "outbound_drafts", {"reply_to": "TEXT"})
+    # `account_id` (the connected mail account a held send goes out through)
+    # is strict for the same reason: `hold` writes it and release reads it on
+    # every draft, so a swallowed lock would stop all held mail, not one field.
+    sqlite_util.add_columns(conn, "outbound_drafts", {"account_id": "INTEGER"})
 
     # Briefing configs: real `output` delivery column (retire-legacy-briefing-
     # components spec). Previously smuggled into components JSON under the
