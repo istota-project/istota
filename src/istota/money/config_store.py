@@ -296,14 +296,11 @@ def init_db(db_path: Path | str) -> None:
         # implicit BEGIN gave the same order only because its first statement
         # happened to be a write; this keeps it if a read ever goes first.
         conn.execute("BEGIN IMMEDIATE")
-        company_columns = {row[1] for row in conn.execute("PRAGMA table_info(invoicing_companies)")}
-        for name, definition in (
-            ("payment_detection_enabled", "INTEGER NOT NULL DEFAULT 0"),
-            ("payment_detection_ledger", "TEXT NOT NULL DEFAULT ''"),
-            ("payment_detection_income_account", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            if name not in company_columns:
-                conn.execute(f"ALTER TABLE invoicing_companies ADD COLUMN {name} {definition}")
+        sqlite_util.add_columns(conn, "invoicing_companies", {
+            "payment_detection_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "payment_detection_ledger": "TEXT NOT NULL DEFAULT ''",
+            "payment_detection_income_account": "TEXT NOT NULL DEFAULT ''",
+        })
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", SCHEMA_VERSION),

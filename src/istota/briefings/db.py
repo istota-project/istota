@@ -115,14 +115,15 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 
 
 def _migrate_v2(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(briefing_archive)")}
-    if "document_json" not in columns:
-        conn.execute("ALTER TABLE briefing_archive ADD COLUMN document_json TEXT")
+    sqlite_util.add_columns(conn, "briefing_archive", {"document_json": "TEXT"})
 
 
 def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
-    conn.execute("ALTER TABLE briefing_archive ADD COLUMN read_at TEXT")
-    conn.execute("UPDATE briefing_archive SET read_at = ?", (_now_iso(),))
+    # Only the connection that added the column backfills it: a rival that won
+    # the ALTER has already marked the archive read, and may since have
+    # recorded a real read_at this would overwrite.
+    if sqlite_util.add_columns(conn, "briefing_archive", {"read_at": "TEXT"}):
+        conn.execute("UPDATE briefing_archive SET read_at = ?", (_now_iso(),))
 
 
 _MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
