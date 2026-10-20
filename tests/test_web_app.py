@@ -2682,6 +2682,26 @@ class TestSettingsEndpoints:
         body = resp.text
         assert "secret-sid-x" not in body
 
+    async def test_plain_fields_return_their_values(self, tmp_path, client, app):
+        """ntfy's server URL and topic are settings, not secrets, so the card
+        shows them; the token stored beside them stays write-only."""
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        from istota.credentials import store as secrets_store
+        secrets_store.set_secret(self._db_path, "alice", "ntfy", "server_url", "https://push.example.com")
+        secrets_store.set_secret(self._db_path, "alice", "ntfy", "topic", "alerts-x")
+        secrets_store.set_secret(self._db_path, "alice", "ntfy", "token", "tk-secret-x")
+        cookies = await self._login_alice(client, app)
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        assert "tk-secret-x" not in resp.text
+        ntfy = {s["service"]: s for s in resp.json()["services"]}["ntfy"]
+        assert ntfy["values"] == {
+            "server_url": "https://push.example.com",
+            "topic": "alerts-x",
+        }
+        karakeep = {s["service"]: s for s in resp.json()["services"]}["karakeep"]
+        assert karakeep["values"] == {}
+
     async def test_set_secret_persists(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)

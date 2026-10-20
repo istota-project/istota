@@ -97,6 +97,29 @@ describe('an ordinary service card', () => {
     expect(get(settingsSave)).not.toBeNull();
   });
 
+  it('shows a plain field prefilled and keeps a credential write-only', () => {
+    render(ServiceCard, {
+      service: card({
+        service: 'ntfy',
+        label: 'ntfy push',
+        fields: [
+          { key: 'topic', label: 'Default topic', type: 'text', plain: true },
+          { key: 'token', label: 'Access token', type: 'password' },
+        ],
+        configured_keys: ['topic', 'token'],
+        values: { topic: 'alerts' },
+      }),
+    });
+
+    const inputs = [...document.querySelectorAll('input')] as HTMLInputElement[];
+    expect(inputs.map((i) => i.type)).toEqual(['text', 'password']);
+    expect(inputs[0].value).toBe('alerts');
+    expect(inputs[1].value).toBe('');
+    // A prefilled value is not an edit, so nothing is waiting to save.
+    expect(get(settingsSave)?.dirty).toBe(false);
+    expect(screen.getAllByTitle('Clear stored value').length).toBe(2);
+  });
+
   it('claims nothing when it has no writable fields', () => {
     // The surviving reason a card withdraws from the shared Save button: a
     // service with no fields of its own. Without this the assertions above pass

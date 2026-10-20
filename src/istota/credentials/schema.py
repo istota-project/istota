@@ -17,6 +17,10 @@ There are two flavors:
   appear on the matching per-module settings page and are gated by
   ``Config.is_module_enabled``.
 
+A field marked ``plain: True`` is a setting stored beside the credentials
+rather than a credential (ntfy's server URL and topic). The settings UI
+returns and shows its stored value; every other field stays write-only.
+
 The dicts below carry UI-only metadata (``label``, ``fields[].type``)
 alongside structural info (``fields[].key``, ``used_by``). Pure-data
 consumers (CLI validation, secrets-store import) only care about the
@@ -80,9 +84,10 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
             # server_url defaults to https://ntfy.sh when unset — only
             # operators of self-hosted servers need to fill it in. Marking
             # it optional means topic-only users see "configured" rather
-            # than "partial" in the settings UI.
-            {"key": "server_url", "label": "Server URL",   "type": "url",      "optional": True},
-            {"key": "topic",      "label": "Default topic", "type": "text"},
+            # than "partial" in the settings UI. ``plain``: a setting, not a
+            # secret, so the settings card shows the stored value.
+            {"key": "server_url", "label": "Server URL",   "type": "url",      "optional": True, "plain": True},
+            {"key": "topic",      "label": "Default topic", "type": "text",    "plain": True},
             {"key": "token",      "label": "Access token (optional)", "type": "password"},
             {"key": "username",   "label": "Username (optional)",     "type": "text"},
             {"key": "password",   "label": "Password (optional)",     "type": "password"},
